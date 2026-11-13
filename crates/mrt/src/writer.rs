@@ -66,7 +66,8 @@ pub(crate) fn prepare_output_dir(config: &MrtWriterConfig) -> std::io::Result<()
 /// descriptor must be owned by the effective UID and not group- or
 /// world-writable. Retention deletes the oldest names here, so another user
 /// who could plant newer-named files could make it delete real dumps.
-/// `config.ancestor_check`, when set, then vets the directories above it. A
+/// `config.ancestor_check`, when set, then vets the directories above the
+/// opened descriptor, so the proof covers the directory written into. A
 /// group- or other-readable directory is only warned about; it is an
 /// operator-chosen path that may be shared, so it is never chmodded. Dump
 /// files themselves are 0600.
@@ -124,7 +125,7 @@ fn open_output_dir(config: &MrtWriterConfig) -> std::io::Result<OutputDir> {
         ));
     }
     if let Some(check) = config.ancestor_check {
-        check(&path)?;
+        check(&path, &file)?;
     }
     if mode & 0o077 != 0
         && WARNED_READABLE_DIRS
@@ -210,20 +211,26 @@ fn prune_old_dumps(
 
 /// Sync MRT data before atomic rename, then sync its parent directory.
 ///
-/// Returns the final file path on success.
+/// Returns the final file path and the published file's size in bytes. The
+/// size comes from the written file's descriptor, so it describes the dump
+/// published even if the directory's path changes afterward.
 ///
 /// # Errors
 ///
 /// Returns an error if prefix validation, directory creation, staging, syncing or renaming fails.
 /// A parent-directory sync error occurs after the final file is published;
 /// retrying after that error can produce a second dump.
-pub fn write_dump(config: &MrtWriterConfig, data: &[u8]) -> std::io::Result<PathBuf> {
+pub fn write_dump(config: &MrtWriterConfig, data: &[u8]) -> std::io::Result<(PathBuf, u64)> {
     let dir = open_output_dir(config)?;
     publish(&dir, config, data)
 }
 
 /// Publish one dump into the pinned directory, then apply retention there.
-fn publish(dir: &OutputDir, config: &MrtWriterConfig, data: &[u8]) -> std::io::Result<PathBuf> {
+fn publish(
+    dir: &OutputDir,
+    config: &MrtWriterConfig,
+    data: &[u8],
+) -> std::io::Result<(PathBuf, u64)> {
     let now = Utc::now();
     let timestamp = now.format("%Y%m%d.%H%M%S");
     let nanos = now.timestamp_subsec_nanos();
@@ -234,7 +241,7 @@ fn publish(dir: &OutputDir, config: &MrtWriterConfig, data: &[u8]) -> std::io::R
 
     debug!(path = %final_path.display(), bytes = data.len(), "writing MRT dump");
 
-    write_atomic(&dir.file, &tmp_name, &filename, data, config.compress)?;
+    let size = write_atomic(&dir.file, &tmp_name, &filename, data, config.compress)?;
 
     info!(
         path = %final_path.display(),
@@ -255,23 +262,24 @@ fn publish(dir: &OutputDir, config: &MrtWriterConfig, data: &[u8]) -> std::io::R
         );
     }
 
-    Ok(final_path)
+    Ok((final_path, size))
 }
 
+/// Stage, sync and rename one dump; returns its size from the descriptor.
 fn write_atomic(
     directory: &File,
     tmp_name: &str,
     final_name: &str,
     data: &[u8],
     compress: bool,
-) -> std::io::Result<()> {
+) -> std::io::Result<u64> {
     let mut file = File::from(openat(
         directory,
         tmp_name,
         OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
         Mode::from_bits_truncate(0o600),
     )?);
-    let result = (|| -> std::io::Result<()> {
+    let result = (|| -> std::io::Result<u64> {
         if compress {
             let mut encoder =
                 flate2::write::GzEncoder::new(&mut file, flate2::Compression::default());
@@ -281,19 +289,21 @@ fn write_atomic(
             file.write_all(data)?;
         }
         file.sync_all()?;
+        let size = file.metadata()?.len();
         renameat(directory, tmp_name, directory, final_name)?;
-        Ok(())
+        Ok(size)
     })();
     if result.is_err() {
         let _ = unlinkat(directory, tmp_name, UnlinkatFlags::NoRemoveDir);
     }
-    result?;
+    let size = result?;
     directory.sync_all().map_err(|error| {
         std::io::Error::new(
             error.kind(),
             format!("MRT dump published but parent directory sync failed: {error}"),
         )
-    })
+    })?;
+    Ok(size)
 }
 
 /// A test directory the writer accepts under any umask: tempfile creates
@@ -370,7 +380,7 @@ mod tests {
         };
 
         let data = b"hello mrt";
-        let path = write_dump(&config, data).unwrap();
+        let path = write_dump(&config, data).unwrap().0;
         assert!(path.exists());
         assert!(path.to_string_lossy().ends_with(".mrt"));
 
@@ -391,12 +401,13 @@ mod tests {
         };
 
         let data = b"hello mrt compressed";
-        let path = write_dump(&config, data).unwrap();
+        let (path, size) = write_dump(&config, data).unwrap();
         assert!(path.exists());
         assert!(path.to_string_lossy().ends_with(".mrt.gz"));
 
-        // Decompress and verify
+        // Decompress and verify; the reported size is the compressed file's.
         let compressed = std::fs::read(&path).unwrap();
+        assert_eq!(size, u64::try_from(compressed.len()).unwrap());
         let mut decoder = flate2::read::GzDecoder::new(&compressed[..]);
         let mut decompressed = Vec::new();
         decoder.read_to_end(&mut decompressed).unwrap();
@@ -415,7 +426,7 @@ mod tests {
             ancestor_check: None,
         };
 
-        let path = write_dump(&config, &[]).unwrap();
+        let path = write_dump(&config, &[]).unwrap().0;
         assert!(path.exists());
         assert_eq!(std::fs::read(&path).unwrap().len(), 0);
     }
@@ -481,7 +492,7 @@ mod tests {
             ancestor_check: None,
         };
 
-        let path = write_dump(&config, b"test").unwrap();
+        let path = write_dump(&config, b"test").unwrap().0;
         assert!(path.exists());
         assert!(nested.exists());
     }
@@ -498,10 +509,10 @@ mod tests {
             ancestor_check: None,
         };
 
-        let first = write_dump(&config, b"first").unwrap();
+        let first = write_dump(&config, b"first").unwrap().0;
         // Ensure different timestamp component on coarse clocks.
         std::thread::sleep(std::time::Duration::from_millis(1));
-        let second = write_dump(&config, b"second").unwrap();
+        let second = write_dump(&config, b"second").unwrap().0;
 
         assert_ne!(first, second);
         assert!(first.exists());
@@ -566,7 +577,7 @@ mod tests {
                 compress,
                 ..retaining(&output_dir, 10)
             };
-            let path = write_dump(&config, b"routes").unwrap();
+            let path = write_dump(&config, b"routes").unwrap().0;
             assert_eq!(mode_of(&path), 0o600, "{}", path.display());
         }
         assert_eq!(mode_of(&parent), 0o700);
@@ -632,7 +643,7 @@ mod tests {
         std::fs::rename(&output_dir, &moved).unwrap();
         std::os::unix::fs::symlink(&other, &output_dir).unwrap();
 
-        let published = publish(&pinned, &config, b"dump").unwrap();
+        let published = publish(&pinned, &config, b"dump").unwrap().0;
         let name = published.file_name().unwrap().to_str().unwrap().to_string();
         assert_eq!(file_names(&moved), vec![name]);
         assert_eq!(file_names(&other), vec![decoy]);
@@ -640,7 +651,7 @@ mod tests {
 
     #[test]
     fn ancestor_check_failure_fails_the_dump_before_publishing() {
-        fn refuse(_: &Path) -> std::io::Result<()> {
+        fn refuse(_: &Path, _: &File) -> std::io::Result<()> {
             Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 "replaceable ancestor",
@@ -667,7 +678,7 @@ mod tests {
                 compress: index % 2 == 1,
                 ..retaining(dir.path(), keep)
             };
-            published.push(write_dump(&config, b"dump").unwrap());
+            published.push(write_dump(&config, b"dump").unwrap().0);
         }
         let expected: Vec<String> = published[2..]
             .iter()
@@ -712,7 +723,7 @@ mod tests {
 
         let config = retaining(dir.path(), 1);
         write_dump(&config, b"first").unwrap();
-        let newest = write_dump(&config, b"second").unwrap();
+        let newest = write_dump(&config, b"second").unwrap().0;
 
         let mut expected: Vec<String> = unrelated.to_vec();
         expected.push(format!("rib.{stamp}.mrt"));

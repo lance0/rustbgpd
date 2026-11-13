@@ -183,17 +183,13 @@ impl MrtManager {
         .map_err(|e| DumpError::at("encode", format!("encode error: {e}")))?;
 
         let config = self.config.clone();
-        tokio::task::spawn_blocking(move || {
-            let path = writer::write_dump(&config, &data)?;
-            let bytes_written = std::fs::metadata(&path)?.len();
-            Ok::<_, std::io::Error>((path, bytes_written))
-        })
-        .await
-        .map_err(|e| DumpError::at("write", format!("join error: {e}")))?
-        .map_err(|e| {
-            error!(error = %e, "MRT dump write failed");
-            DumpError::at("write", format!("write error: {e}"))
-        })
+        tokio::task::spawn_blocking(move || writer::write_dump(&config, &data))
+            .await
+            .map_err(|e| DumpError::at("write", format!("join error: {e}")))?
+            .map_err(|e| {
+                error!(error = %e, "MRT dump write failed");
+                DumpError::at("write", format!("write error: {e}"))
+            })
     }
 
     async fn query_snapshot(
@@ -417,6 +413,69 @@ mod tests {
             metric_sample(&metrics, "mrt_last_dump_success_timestamp_seconds", None) >= before,
             "success timestamp must be stamped"
         );
+        assert_eq!(
+            metric_sample(&metrics, "mrt_dump_bytes_written_total", None),
+            on_disk
+        );
+        assert_eq!(metric_sample(&metrics, "mrt_dump_failures_total", None), 0);
+
+        rib_handler.await.unwrap();
+        drop(trigger_tx);
+        handle.await.unwrap();
+    }
+
+    /// The published size comes from the written file's descriptor: a dump
+    /// whose directory is renamed after it was pinned still publishes, so it
+    /// is reported as a success with the published file's size, not as a
+    /// failed lookup of the old path.
+    #[tokio::test(start_paused = true)]
+    async fn dump_size_survives_the_output_dir_moving_after_the_pin() {
+        static CHECKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        /// The first call is the preflight; the second runs after the
+        /// dump's own pin, and moves the directory away.
+        fn move_after_pin(path: &std::path::Path, _: &std::fs::File) -> std::io::Result<()> {
+            if CHECKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+                std::fs::rename(path, path.with_file_name("moved"))?;
+            }
+            Ok(())
+        }
+        let dir = private_tempdir();
+        let config = MrtWriterConfig {
+            ancestor_check: Some(move_after_pin),
+            ..test_config(dir.path().join("dumps"))
+        };
+        let (rib_tx, mut rib_rx) = mpsc::channel(16);
+        let (trigger_tx, trigger_rx) = mpsc::channel(16);
+        let metrics = BgpMetrics::new();
+        let manager = MrtManager::new(
+            config,
+            rib_tx,
+            trigger_rx,
+            Ipv4Addr::LOCALHOST,
+            metrics.clone(),
+        );
+        let handle = tokio::spawn(manager.run());
+        let rib_handler = tokio::spawn(async move {
+            if let Some(RibUpdate::QueryMrtSnapshot { reply }) = rib_rx.recv().await {
+                let _ = reply.send(MrtSnapshotData {
+                    peers: vec![],
+                    routes: vec![],
+                    evpn_routes: vec![],
+                });
+            }
+        });
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        trigger_tx.send(reply_tx).await.unwrap();
+        let path = tokio::time::timeout(Duration::from_secs(5), reply_rx)
+            .await
+            .expect("timeout waiting for MRT dump reply")
+            .expect("reply channel closed")
+            .expect("a dump published into the pinned directory must succeed");
+        assert!(!path.exists(), "the configured spelling moved away");
+        let published = dir.path().join("moved").join(path.file_name().unwrap());
+        let on_disk = i64::try_from(std::fs::metadata(&published).unwrap().len()).unwrap();
+        assert!(on_disk > 0);
         assert_eq!(
             metric_sample(&metrics, "mrt_dump_bytes_written_total", None),
             on_disk
