@@ -5054,6 +5054,37 @@ catch-up burst.
 When MRT is not configured, no timer or manager task is spawned — zero
 overhead.
 
+### What one dump shows
+
+A dump is read from the live table in bounded steps of about 4,096 routes,
+with ordinary route processing between the steps, so a dump never holds up
+UPDATE handling for the length of the table. It is therefore not one instant
+of the whole table:
+
+- **Each unicast prefix is one instant.** All neighbors' paths for a prefix
+  are read in the same step, so every `RIB_IPV4_UNICAST` / `RIB_IPV6_UNICAST`
+  record is the set of paths that existed together at one moment.
+- **Different prefixes are different instants.** Two records can be read
+  seconds apart on a large table. Do not conclude from one file that two
+  prefixes were, or were not, announced at the same time.
+- **A route that does not change during the dump appears exactly once.** A
+  route announced, replaced or withdrawn while the dump runs appears at most
+  once, in a form it really had (the old one or the new one), or not at all.
+- **The record timestamp is when the walk began.** Every route in the file
+  was read at or after it; the file name carries the time the file was
+  published.
+- **The peer table is complete.** The `PEER_INDEX_TABLE` is written first but
+  built last, from the neighbors seen in each step. A neighbor that goes down
+  mid-dump keeps its entry and the routes already read, with the ASN and BGP
+  identifier it had then; one that comes up mid-dump is listed and
+  contributes the prefixes the walk had not yet passed.
+- **EVPN** routes (`RIB_GENERIC`) are read a block of one neighbor's table at
+  a time, each route once, with the same per-route guarantees.
+
+A dump abandoned partway (a canceled `TriggerMrtDump`, or shutdown) publishes
+no file. The routes are still gathered in memory before the file is encoded
+and written, so the memory a dump needs is unchanged.
+
 See [ADR-0044](../adr/0044-mrt-dump-export.md) for design details.
 
 ---

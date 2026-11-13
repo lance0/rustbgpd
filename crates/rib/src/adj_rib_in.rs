@@ -1095,6 +1095,22 @@ impl AdjRibIn {
         self.routes.iter()
     }
 
+    /// Unicast routes grouped by prefix, in [`Prefix`] order, for the
+    /// prefixes strictly after `after`.
+    pub(crate) fn iter_prefix_groups_after(
+        &self,
+        after: Option<Prefix>,
+    ) -> impl Iterator<Item = (Prefix, impl Iterator<Item = &Route>)> {
+        let routes = &self.routes;
+        self.prefix_index
+            .iter_from(after)
+            .skip_while(move |(prefix, _)| Some(*prefix) == after)
+            .map(move |(prefix, ids)| {
+                let paths = ids.iter().filter_map(move |(_, handle)| routes.get(handle));
+                (prefix, paths)
+            })
+    }
+
     /// Every allocated unicast slot, vacancies included, so a checkpointed
     /// walk can yield between holes of a sparse table.
     pub(crate) fn iter_slots(&self) -> impl Iterator<Item = Option<&Route>> {
@@ -1848,6 +1864,17 @@ impl AdjRibIn {
     /// Iterate over all EVPN routes in this Adj-RIB-In.
     pub fn iter_evpn(&self) -> impl Iterator<Item = &EvpnRibRoute> {
         self.evpn_routes.values()
+    }
+
+    /// The EVPN routes of each hash shard of this table: one shard until
+    /// the table splits, and a route never changes shard after that.
+    pub(crate) fn iter_evpn_shards(
+        &self,
+    ) -> impl Iterator<Item = impl ExactSizeIterator<Item = &EvpnRibRoute> + Clone> {
+        self.evpn_routes
+            .shards()
+            .iter()
+            .map(|shard| shard.iter().map(|(_, route)| route))
     }
 
     /// Return the number of EVPN routes stored.

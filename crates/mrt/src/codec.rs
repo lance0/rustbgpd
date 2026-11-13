@@ -3502,22 +3502,10 @@ mod tests {
     /// snapshot. The neighbor's session has ended under graceful restart:
     /// resolving its address in the encoder would file the retained routes
     /// under the new address.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one scenario keeps its registrations and assertions together"
-    )]
     #[tokio::test]
     async fn a_snapshot_encoded_after_a_rebind_keeps_the_endpoint_it_was_built_with() {
         use rustbgpd_rib::update::RibUpdate;
-        use tokio::sync::{mpsc, oneshot};
-
-        async fn snapshot(tx: &mpsc::Sender<RibUpdate>) -> rustbgpd_rib::MrtSnapshotData {
-            let (reply, rx) = oneshot::channel();
-            tx.send(RibUpdate::QueryMrtSnapshot { reply })
-                .await
-                .unwrap();
-            rx.await.unwrap()
-        }
+        use tokio::sync::mpsc;
 
         let (tx, rx) = mpsc::channel(16);
         let manager = rustbgpd_rib::RibManager::new(
@@ -3582,7 +3570,7 @@ mod tests {
         })
         .await
         .unwrap();
-        let before = snapshot(&tx).await;
+        let before = rib_snapshot(&tx).await;
         assert_eq!(before.routes.len(), 1);
         assert!(before.routes[0].is_stale);
 
@@ -3592,7 +3580,7 @@ mod tests {
         })
         .await
         .unwrap();
-        assert!(snapshot(&tx).await.routes.is_empty(), "rebind purges");
+        assert!(rib_snapshot(&tx).await.routes.is_empty(), "rebind purges");
         assert_eq!(peer.addr(), "fe80::b".parse::<IpAddr>().unwrap());
 
         let bytes = encode_snapshot(
@@ -3611,6 +3599,260 @@ mod tests {
             .map(|entry| entry.unwrap().peer.peer_addr)
             .collect();
         assert_eq!(sources, [old]);
+
+        drop(tx);
+        actor.await.unwrap();
+    }
+
+    /// Gather one chunked snapshot from a running RIB actor, calling
+    /// `after_first` once, between its first and second turns.
+    async fn rib_snapshot_with<F: Future<Output = ()>>(
+        tx: &tokio::sync::mpsc::Sender<rustbgpd_rib::update::RibUpdate>,
+        after_first: impl FnOnce() -> F,
+    ) -> (rustbgpd_rib::MrtSnapshotData, usize) {
+        let mut after_first = Some(after_first);
+        let mut snapshot = rustbgpd_rib::MrtSnapshotAssembler::default();
+        let mut cursor = None;
+        let mut turns = 0;
+        loop {
+            let (reply, chunk) = tokio::sync::oneshot::channel();
+            tx.send(rustbgpd_rib::update::RibUpdate::QueryMrtSnapshotChunk { cursor, reply })
+                .await
+                .unwrap();
+            cursor = snapshot.push(chunk.await.unwrap());
+            turns += 1;
+            if cursor.is_none() {
+                return (snapshot.finish(), turns);
+            }
+            if let Some(after_first) = after_first.take() {
+                after_first().await;
+            }
+        }
+    }
+
+    async fn rib_snapshot(
+        tx: &tokio::sync::mpsc::Sender<rustbgpd_rib::update::RibUpdate>,
+    ) -> rustbgpd_rib::MrtSnapshotData {
+        rib_snapshot_with(tx, || async {}).await.0
+    }
+
+    /// Register a session for `peer` and store `routes` and `evpn` from it.
+    async fn rib_session(
+        tx: &tokio::sync::mpsc::Sender<rustbgpd_rib::update::RibUpdate>,
+        peer: PeerId,
+        peer_asn: u32,
+        routes: Vec<Route>,
+        evpn: Vec<EvpnRibRoute>,
+    ) {
+        use rustbgpd_rib::update::RibUpdate;
+        let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::channel(1);
+        tx.send(RibUpdate::PeerUp {
+            supersedes: None,
+            peer,
+            session_id: 1,
+            peer_asn,
+            peer_router_id: Ipv4Addr::new(10, 0, 0, 1),
+            outbound_tx,
+            export_policy: None,
+            sendable_families: vec![],
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        })
+        .await
+        .unwrap();
+        tx.send(RibUpdate::RoutesReceived {
+            session_id: 1,
+            peer,
+            announced: routes,
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: evpn,
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        })
+        .await
+        .unwrap();
+    }
+
+    fn chunk_test_routes(addr: IpAddr, v4: u32, v6: u32) -> Vec<Route> {
+        let v4 = (0..v4)
+            .map(|n| Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(0x0b00_0000 + (n << 8)), 24)));
+        let v6 = (0..v6).map(|n| {
+            let addr = Ipv6Addr::from((0x2001_0db8_u128 << 96) | (u128::from(n) << 64));
+            Prefix::V6(Ipv6Prefix::new(addr, 64))
+        });
+        v4.chain(v6)
+            .map(|prefix| {
+                let next_hop = match prefix {
+                    Prefix::V4(_) => addr,
+                    Prefix::V6(_) => "2001:db8::1".parse().unwrap(),
+                };
+                make_route(prefix, addr, next_hop)
+            })
+            .collect()
+    }
+
+    /// A quiescent table gathered over several RIB turns encodes to exactly
+    /// the bytes of the routes that were stored, both unicast families and
+    /// EVPN, and the repository's reader decodes every entry.
+    #[tokio::test]
+    async fn a_chunked_snapshot_of_a_quiescent_table_is_byte_identical_and_complete() {
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        let manager = rustbgpd_rib::RibManager::new(
+            rx,
+            tokio::sync::mpsc::channel(1).1,
+            None,
+            None,
+            rustbgpd_telemetry::BgpMetrics::new(),
+        );
+        let actor = tokio::spawn(manager.run());
+
+        let mut expected_peers = Vec::new();
+        let mut expected_routes = Vec::new();
+        let mut expected_evpn = Vec::new();
+        for (index, asn) in [(1u8, 65_001u32), (2, 65_002), (3, 65_003)] {
+            let addr = IpAddr::V4(Ipv4Addr::new(10, 88, 0, index));
+            let peer = PeerId::from_addr(addr);
+            let routes = chunk_test_routes(addr, 3_000, 1_500);
+            let evpn = if index == 1 {
+                vec![make_evpn_macip(addr, addr), make_evpn_ipprefix(addr, addr)]
+            } else {
+                vec![]
+            };
+            expected_peers.push(MrtPeerEntry {
+                peer,
+                peer_addr: addr,
+                interface: None,
+                peer_bgp_id: Ipv4Addr::new(10, 0, 0, 1),
+                peer_asn: asn,
+            });
+            expected_routes.extend(routes.iter().cloned());
+            expected_evpn.extend(evpn.iter().cloned());
+            rib_session(&tx, peer, asn, routes, evpn).await;
+        }
+
+        let (snapshot, turns) = rib_snapshot_with(&tx, || async {}).await;
+        assert!(
+            turns >= 4,
+            "the table must span several turns, took {turns}"
+        );
+        let collector = Ipv4Addr::new(10, 255, 0, 1);
+        let chunked = encode_snapshot_with_allocation_diagnostics(
+            collector,
+            &snapshot.peers,
+            &snapshot.routes,
+            &snapshot.evpn_routes,
+            1,
+            7,
+        )
+        .unwrap()
+        .0;
+        let direct = encode_snapshot_with_allocation_diagnostics(
+            collector,
+            &expected_peers,
+            &expected_routes,
+            &expected_evpn,
+            1,
+            7,
+        )
+        .unwrap()
+        .0;
+        assert!(chunked == direct, "chunked snapshot bytes differ");
+
+        let mut reader = crate::reader::SnapshotReader::new(&chunked).unwrap();
+        assert_eq!(reader.peers().len(), 3);
+        let mut decoded = HashSet::new();
+        for entry in reader.by_ref() {
+            let entry = entry.unwrap();
+            let nlri = match entry.nlri {
+                crate::reader::SnapshotNlri::Unicast(prefix) => format!("{prefix:?}"),
+                crate::reader::SnapshotNlri::Generic { nlri, .. } => format!("{nlri:?}"),
+            };
+            assert!(
+                decoded.insert((entry.peer.peer_addr, nlri)),
+                "duplicate entry"
+            );
+        }
+        assert_eq!(decoded.len(), expected_routes.len() + expected_evpn.len());
+
+        drop(tx);
+        actor.await.unwrap();
+    }
+
+    /// The `PEER_INDEX_TABLE` is built after the last RIB turn, from the
+    /// neighbors each turn captured. A neighbor that leaves mid-dump keeps
+    /// the entry for the rows already read, and one that joins mid-dump gets
+    /// an entry for the rows read after it joined: every RIB entry's peer
+    /// index resolves, with the session's ASN.
+    #[tokio::test]
+    async fn peers_that_leave_or_join_mid_dump_keep_every_peer_index_valid() {
+        use rustbgpd_rib::update::RibUpdate;
+
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        let manager = rustbgpd_rib::RibManager::new(
+            rx,
+            tokio::sync::mpsc::channel(1).1,
+            None,
+            None,
+            rustbgpd_telemetry::BgpMetrics::new(),
+        );
+        let actor = tokio::spawn(manager.run());
+        let addr = |index: u8| IpAddr::V4(Ipv4Addr::new(10, 89, 0, index));
+        let (leaver, stayer, joiner) = (addr(1), addr(2), addr(3));
+        for (addr, asn) in [(leaver, 65_001), (stayer, 65_002)] {
+            let routes = chunk_test_routes(addr, 3_000, 0);
+            rib_session(&tx, PeerId::from_addr(addr), asn, routes, vec![]).await;
+        }
+
+        let (snapshot, _) = rib_snapshot_with(&tx, || async {
+            tx.send(RibUpdate::PeerDown {
+                peer: PeerId::from_addr(leaver),
+                session_id: 1,
+            })
+            .await
+            .unwrap();
+            let routes = chunk_test_routes(joiner, 3_000, 0);
+            rib_session(&tx, PeerId::from_addr(joiner), 65_003, routes, vec![]).await;
+        })
+        .await;
+
+        let bytes = encode_snapshot(
+            Ipv4Addr::new(10, 255, 0, 1),
+            &snapshot.peers,
+            &snapshot.routes,
+            &snapshot.evpn_routes,
+            1,
+        )
+        .unwrap();
+        let mut reader = crate::reader::SnapshotReader::new(&bytes).unwrap();
+        let mut table: Vec<_> = reader
+            .peers()
+            .iter()
+            .map(|peer| (peer.peer_addr, peer.peer_asn))
+            .collect();
+        table.sort_unstable();
+        assert_eq!(
+            table,
+            [(leaver, 65_001), (stayer, 65_002), (joiner, 65_003)]
+        );
+        let mut rows = std::collections::HashMap::<IpAddr, usize>::new();
+        for entry in reader.by_ref() {
+            let entry = entry.unwrap();
+            *rows.entry(entry.peer.peer_addr).or_default() += 1;
+        }
+        // The first turn reads 2,048 prefixes from both neighbors present.
+        let first_turn = rustbgpd_rib::update::MRT_SNAPSHOT_CHUNK_ROWS / 2;
+        assert_eq!(rows[&stayer], 3_000);
+        assert_eq!(rows[&leaver], first_turn);
+        assert_eq!(rows[&joiner], 3_000 - first_turn);
 
         drop(tx);
         actor.await.unwrap();

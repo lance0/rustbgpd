@@ -12,7 +12,9 @@ use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
 
 use crate::codec;
-use crate::types::{MrtSnapshotData, MrtWriterConfig};
+use rustbgpd_rib::{MrtSnapshotAssembler, MrtSnapshotCursor};
+
+use crate::types::{MrtSnapshotChunk, MrtSnapshotData, MrtWriterConfig};
 use crate::writer;
 
 fn periodic_interval(period: Duration) -> tokio::time::Interval {
@@ -165,13 +167,15 @@ impl MrtManager {
                 )
             })?;
 
-        let snapshot = self.query_snapshot(cancel).await?;
-
+        // The record timestamp is the start of the walk: every route in the
+        // file was read at or after it.
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
         let ts32 = u32::try_from(timestamp).unwrap_or(u32::MAX);
+
+        let snapshot = self.query_snapshot(cancel).await?;
 
         let data = codec::encode_snapshot(
             self.local_bgp_id,
@@ -192,12 +196,34 @@ impl MrtManager {
             })
     }
 
+    /// Gather the snapshot one bounded RIB turn at a time. The RIB actor
+    /// serves other work between the chunks, and a cancellation stops the
+    /// walk at the next chunk.
     async fn query_snapshot(
         &self,
         mut cancel: Option<&mut oneshot::Sender<Result<PathBuf, String>>>,
     ) -> Result<MrtSnapshotData, DumpError> {
+        let mut snapshot = MrtSnapshotAssembler::default();
+        let mut cursor = None;
+        loop {
+            let chunk = self.query_chunk(cursor, cancel.as_deref_mut()).await?;
+            cursor = snapshot.push(chunk);
+            if cursor.is_none() {
+                return Ok(snapshot.finish());
+            }
+        }
+    }
+
+    async fn query_chunk(
+        &self,
+        cursor: Option<MrtSnapshotCursor>,
+        mut cancel: Option<&mut oneshot::Sender<Result<PathBuf, String>>>,
+    ) -> Result<MrtSnapshotChunk, DumpError> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let query = RibUpdate::QueryMrtSnapshot { reply: reply_tx };
+        let query = RibUpdate::QueryMrtSnapshotChunk {
+            cursor,
+            reply: reply_tx,
+        };
         let closed = |e| DumpError::at("snapshot", format!("RIB channel closed: {e}"));
         let dropped = |e| DumpError::at("snapshot", format!("RIB reply dropped: {e}"));
 
@@ -372,8 +398,8 @@ mod tests {
 
         // Spawn a task to reply to the RIB query
         let rib_handler = tokio::spawn(async move {
-            if let Some(RibUpdate::QueryMrtSnapshot { reply }) = rib_rx.recv().await {
-                let _ = reply.send(MrtSnapshotData {
+            if let Some(RibUpdate::QueryMrtSnapshotChunk { reply, .. }) = rib_rx.recv().await {
+                let _ = reply.send(MrtSnapshotChunk {
                     peers: vec![MrtPeerEntry {
                         peer: rustbgpd_rib::PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(
                             10, 0, 0, 1,
@@ -385,6 +411,7 @@ mod tests {
                     }],
                     routes: vec![],
                     evpn_routes: vec![],
+                    next: None,
                 });
             }
         });
@@ -456,11 +483,12 @@ mod tests {
         );
         let handle = tokio::spawn(manager.run());
         let rib_handler = tokio::spawn(async move {
-            if let Some(RibUpdate::QueryMrtSnapshot { reply }) = rib_rx.recv().await {
-                let _ = reply.send(MrtSnapshotData {
+            if let Some(RibUpdate::QueryMrtSnapshotChunk { reply, .. }) = rib_rx.recv().await {
+                let _ = reply.send(MrtSnapshotChunk {
                     peers: vec![],
                     routes: vec![],
                     evpn_routes: vec![],
+                    next: None,
                 });
             }
         });
@@ -516,12 +544,13 @@ mod tests {
         let rib_handler = tokio::spawn(async move {
             let mut snapshots = 0usize;
             while let Some(update) = rib_rx.recv().await {
-                if let RibUpdate::QueryMrtSnapshot { reply } = update {
+                if let RibUpdate::QueryMrtSnapshotChunk { reply, .. } = update {
                     snapshots += 1;
-                    let _ = reply.send(MrtSnapshotData {
+                    let _ = reply.send(MrtSnapshotChunk {
                         peers: vec![],
                         routes: vec![],
                         evpn_routes: vec![],
+                        next: None,
                     });
                 }
             }
@@ -614,8 +643,9 @@ mod tests {
 
         let (reply_tx, reply_rx) = oneshot::channel();
         trigger_tx.send(reply_tx).await.unwrap();
-        let RibUpdate::QueryMrtSnapshot {
+        let RibUpdate::QueryMrtSnapshotChunk {
             reply: snapshot_reply,
+            ..
         } = tokio::time::timeout(Duration::from_secs(2), rib_rx.recv())
             .await
             .expect("manager did not query the RIB")
@@ -663,7 +693,8 @@ mod tests {
         let (rib_tx, rib_rx) = mpsc::channel(1);
         let (filler_reply, _filler_receiver) = oneshot::channel();
         rib_tx
-            .send(RibUpdate::QueryMrtSnapshot {
+            .send(RibUpdate::QueryMrtSnapshotChunk {
+                cursor: None,
                 reply: filler_reply,
             })
             .await
@@ -704,5 +735,154 @@ mod tests {
             0,
             "canceled dump must not publish a file"
         );
+    }
+
+    type Trigger = mpsc::Sender<oneshot::Sender<Result<PathBuf, String>>>;
+
+    /// A manager whose RIB queries arrive on the returned receiver, and a
+    /// real, empty RIB actor to answer them. An empty table still takes two
+    /// turns (unicast, then EVPN), so the first reply carries a real cursor.
+    fn manager_with_proxied_rib(
+        output_dir: PathBuf,
+        metrics: &BgpMetrics,
+    ) -> (
+        Trigger,
+        mpsc::Receiver<RibUpdate>,
+        mpsc::Sender<RibUpdate>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (rib_tx, rib_rx) = mpsc::channel(16);
+        let (trigger_tx, trigger_rx) = mpsc::channel(16);
+        let manager = MrtManager::new(
+            test_config(output_dir),
+            rib_tx,
+            trigger_rx,
+            Ipv4Addr::LOCALHOST,
+            metrics.clone(),
+        );
+        let handle = tokio::spawn(manager.run());
+        let (actor_tx, actor_rx) = mpsc::channel(16);
+        let actor = rustbgpd_rib::RibManager::new(
+            actor_rx,
+            mpsc::channel(1).1,
+            None,
+            None,
+            BgpMetrics::new(),
+        );
+        tokio::spawn(actor.run());
+        (trigger_tx, rib_rx, actor_tx, handle)
+    }
+
+    /// The RIB actor going away between two chunks (daemon shutdown) fails
+    /// the dump at the `snapshot` stage; the partial copy is never encoded
+    /// or published.
+    #[tokio::test(start_paused = true)]
+    async fn rib_loss_between_chunks_fails_the_dump_without_a_file() {
+        let dir = private_tempdir();
+        let metrics = BgpMetrics::new();
+        let (trigger_tx, mut rib_rx, actor_tx, handle) =
+            manager_with_proxied_rib(dir.path().to_path_buf(), &metrics);
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        trigger_tx.send(reply_tx).await.unwrap();
+        let first = rib_rx.recv().await.expect("first chunk query");
+        actor_tx.send(first).await.unwrap();
+        let second = rib_rx.recv().await.expect("second chunk query");
+        assert!(matches!(
+            second,
+            RibUpdate::QueryMrtSnapshotChunk {
+                cursor: Some(_),
+                ..
+            }
+        ));
+        drop(second);
+
+        let error = reply_rx.await.unwrap().expect_err("partial snapshot");
+        assert!(error.contains("RIB reply dropped"), "{error}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        assert_eq!(
+            metric_sample(
+                &metrics,
+                "mrt_dump_failures_total",
+                Some(("stage", "snapshot"))
+            ),
+            1
+        );
+        drop(trigger_tx);
+        handle.await.unwrap();
+    }
+
+    /// A caller that goes away between two chunks stops the walk: the
+    /// manager drops the chunk it was waiting on and publishes nothing.
+    #[tokio::test(start_paused = true)]
+    async fn cancellation_between_chunks_stops_the_walk_without_a_file() {
+        let dir = private_tempdir();
+        let metrics = BgpMetrics::new();
+        let (trigger_tx, mut rib_rx, actor_tx, handle) =
+            manager_with_proxied_rib(dir.path().to_path_buf(), &metrics);
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        trigger_tx.send(reply_tx).await.unwrap();
+        let first = rib_rx.recv().await.expect("first chunk query");
+        actor_tx.send(first).await.unwrap();
+        let Some(RibUpdate::QueryMrtSnapshotChunk {
+            reply: second_reply,
+            ..
+        }) = rib_rx.recv().await
+        else {
+            panic!("second chunk query");
+        };
+
+        drop(reply_rx);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !second_reply.is_closed() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("manager kept walking after caller cancellation");
+        drop(trigger_tx);
+        handle.await.unwrap();
+        assert!(rib_rx.recv().await.is_none(), "a canceled walk asked again");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        assert_eq!(metric_sample(&metrics, "mrt_dump_failures_total", None), 0);
+    }
+
+    /// Ticks that come due while a dump is in flight start one dump when it
+    /// ends, not one per missed tick, and never a second walk alongside it.
+    #[tokio::test(start_paused = true)]
+    async fn ticks_due_during_a_dump_start_one_dump_after_it() {
+        let dir = private_tempdir();
+        let (rib_tx, mut rib_rx) = mpsc::channel(16);
+        let (trigger_tx, trigger_rx) = mpsc::channel(16);
+        let manager = MrtManager::new(
+            MrtWriterConfig {
+                dump_interval: 10,
+                ..test_config(dir.path().to_path_buf())
+            },
+            rib_tx,
+            trigger_rx,
+            Ipv4Addr::LOCALHOST,
+            BgpMetrics::new(),
+        );
+        let start = tokio::time::Instant::now();
+        let handle = tokio::spawn(manager.run());
+
+        let mut queried_at = Vec::new();
+        while queried_at.len() < 3 {
+            let Some(RibUpdate::QueryMrtSnapshotChunk { reply, .. }) = rib_rx.recv().await else {
+                panic!("RIB query");
+            };
+            queried_at.push(start.elapsed().as_secs());
+            if queried_at.len() == 1 {
+                // The first walk outlasts the ticks at 20 s and 30 s.
+                tokio::time::sleep(Duration::from_secs(25)).await;
+                assert!(rib_rx.is_empty(), "a second walk started alongside");
+            }
+            let _ = reply.send(MrtSnapshotChunk::default());
+        }
+        assert_eq!(queried_at, [10, 35, 40]);
+        drop(trigger_tx);
+        handle.await.unwrap();
     }
 }
