@@ -18,8 +18,9 @@ class HookOnceTest(unittest.TestCase):
         self.repo = self.tmp / "repo"
         self.count = self.tmp / "count"
         self.counter = self.tmp / "counter.sh"
-        # Appends one line per invocation and exits with the given status.
-        self.counter.write_text('echo run >>"$1"\nexit "$2"\n')
+        # Appends one line per invocation, runs HOOK_TEST_ACTION (outside the
+        # key) in the repository, and exits with the given status.
+        self.counter.write_text('echo run >>"$1"\neval "${HOOK_TEST_ACTION:-}"\nexit "$2"\n')
         self.env = {
             **os.environ,
             "GIT_CONFIG_GLOBAL": os.devnull,
@@ -29,7 +30,10 @@ class HookOnceTest(unittest.TestCase):
             "GIT_COMMITTER_NAME": "test",
             "GIT_COMMITTER_EMAIL": "test@example.invalid",
         }
-        self.env.pop("HOOK_ONCE_DISABLE", None)
+        for var in ("HOOK_ONCE_DISABLE", "ORACLE_STRICT", "PROPTEST_CASES", "BLESS",
+                    "RPOL_LEX_GOLDEN_BLESS", "RPOL_DECISION_GOLDEN_BLESS",
+                    "REGENERATE_BGPKIT_FIXTURES"):
+            self.env.pop(var, None)
         self.repo.mkdir()
         self.git("init", "-q")
         (self.repo / "lib.rs").write_text("fn main() {}\n")
@@ -145,6 +149,53 @@ class HookOnceTest(unittest.TestCase):
         self.hook()
         self.assertEqual(self.runs(), 2)
         self.assertEqual(self.stamps(), [stamp])
+
+    def test_command_that_modifies_a_tracked_file_records_nothing(self):
+        changed = self.hook(HOOK_TEST_ACTION="echo blessed >lib.rs")
+        self.assertEqual(changed.returncode, 0)
+        self.assertIn("changed during the run", changed.stdout)
+        self.assertEqual(self.stamps(), [])
+        self.git("checkout", "--", "lib.rs")
+        self.assertNotIn("skipping", self.hook().stdout)
+        self.assertEqual(self.runs(), 2)
+
+    def test_command_that_moves_head_records_nothing(self):
+        start = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.repo, env=self.env,
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        moved = self.hook(
+            HOOK_TEST_ACTION="echo next >lib.rs; git commit -qam next",
+        )
+        self.assertEqual(moved.returncode, 0)
+        self.assertIn("changed during the run", moved.stdout)
+        self.assertEqual(self.stamps(), [])
+        self.git("reset", "-q", "--hard", start)
+        self.assertNotIn("skipping", self.hook().stdout)
+        self.assertEqual(self.runs(), 2)
+
+    def test_keyed_environment_is_part_of_the_key(self):
+        self.hook()
+        self.hook(ORACLE_STRICT="1")
+        self.hook(PROPTEST_CASES="1000")
+        self.assertEqual(self.runs(), 3)
+        self.assertIn("skipping", self.hook(PROPTEST_CASES="1000").stdout)
+        self.hook(PROPTEST_CASES="2000")
+        self.assertEqual(self.runs(), 4)
+        self.assertIn("skipping", self.hook().stdout)
+        self.assertEqual(self.runs(), 4)
+
+    def test_blessing_mode_bypasses_the_cache(self):
+        for var in ("BLESS", "RPOL_LEX_GOLDEN_BLESS"):
+            with self.subTest(var=var):
+                blessed = self.hook(**{var: "1"})
+                self.assertIn(f"{var} is set; running clippy without the pass cache",
+                              blessed.stdout)
+                self.assertEqual(self.stamps(), [])
+        self.hook()
+        self.assertEqual(len(self.stamps()), 1)
+        self.assertNotIn("skipping", self.hook(BLESS="1").stdout)
+        self.assertEqual(self.runs(), 4)
 
     def test_usage_error(self):
         result = subprocess.run(

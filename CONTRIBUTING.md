@@ -364,7 +364,10 @@ records each pass under the clone's Git directory, keyed by the check, its
 command, the committed tree, and the Rust toolchain, so a re-push or a second
 worktree at the same commit does not run them again; the hook prints one line
 saying so. A working tree with uncommitted or untracked files always runs the
-checks and records nothing. Run `HOOK_ONCE_DISABLE=1 git push` to force them.
+checks and records nothing. Variables that change what the tests check, such as
+`ORACLE_STRICT` and `PROPTEST_CASES`, are part of the key, and a fixture-blessing
+variable such as `BLESS` bypasses the cache. Run `HOOK_ONCE_DISABLE=1 git push`
+to force the checks.
 
 Set it up once:
 
