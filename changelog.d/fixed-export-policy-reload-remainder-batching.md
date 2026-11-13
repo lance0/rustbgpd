@@ -10,6 +10,6 @@
   SIGHUP generation replays its prior chains the same way. A peer whose
   export change is its own still takes one RIB command.
   **Operator-visible:** for those grouped peers the Route Refresh that
-  follows an import-policy change is now sent after the group's RIB batch,
-  not between peers, and the `authoritative_batch_phase` log line appears
+  follows an import-policy change is now sent once the group's RIB batches
+  have committed, not between peers, and the `authoritative_batch_phase` log line appears
   once per group during the remainder walk.

@@ -1177,10 +1177,10 @@ async fn export_only_snapshot_remainder_failure_restores_remainder_then_cohort()
         rib_task.await.unwrap(),
         // The remainder pair shares one export pair, so its RIB step is
         // deferred past both session legs and was never sent: the session
-        // failure comes first. The RIB still holds the acknowledged member's
-        // prior chain, so its rollback sends no RIB step; the member whose
-        // session apply failed is restored, as is the committed cohort.
-        vec![remainder_failing, second, first],
+        // failure comes first. Both members are restored all the same: a
+        // member can register with the RIB during the walk, and that
+        // registration installs the candidate chain its session holds.
+        vec![remainder_failing, remainder_first, second, first],
         "authoritative self-heal completes newest-first before cohort rollback"
     );
 }
@@ -2108,25 +2108,184 @@ async fn batched_remainder_pair_defers_route_refresh_past_its_rib_batch() {
     );
 }
 
-/// Drive one rollback whose RIB restore is paced: three peers with their own
-/// export changes are applied, the fourth's session apply fails, and the RIB
-/// stub acknowledges every member of the rollback batch as `Deferred`, then
-/// restores one member per paced command, 50 s each, reporting one member as
-/// departed. With `stall_at`, that paced command (counted from 1) is never
-/// answered. Returns the snapshot result, the elapsed time, the RIB commands
-/// seen and each peer's `pending_export_apply`.
+/// Two shared pairs in the remainder, the second pair's batch failing. The
+/// first pair's Route Refreshes are sent as soon as that pair commits, before
+/// the second pair's batch, and the rollback restores every remainder member
+/// of both pairs, then the cohort.
+#[tokio::test]
 #[expect(
     clippy::too_many_lines,
-    reason = "one fixture holds the paced RIB stub, the failing fleet and what both rollback tests read back"
+    reason = "one fixture holds the recording RIB stub, three partitions and the rollback order proof"
 )]
-async fn paced_policy_rollback(
-    stall_at: Option<usize>,
-) -> (
-    Result<Vec<rustbgpd_api::peer_types::ResolvedPeerPolicy>, String>,
-    Duration,
-    Vec<(&'static str, Vec<IpAddr>)>,
-    Vec<bool>,
-) {
+async fn second_remainder_pair_failure_restores_both_pairs_after_first_pair_refreshes() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let peer = |last| IpAddr::V4(Ipv4Addr::new(10, 36, 7, last));
+    let cohort = [peer(1), peer(2), peer(3)];
+    let pair_b = [peer(4), peer(5)];
+    let pair_c = [peer(6), peer(7)];
+    let counters = pair_b.map(|_| Arc::new(FakePeerCounters::default()));
+    let refreshes = {
+        let counters = counters.clone();
+        move || {
+            counters
+                .iter()
+                .map(|counters| counters.route_refresh.load(Ordering::SeqCst))
+                .collect::<Vec<_>>()
+        }
+    };
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(32);
+    let rib_task = tokio::spawn(async move {
+        let mut seen: Vec<(&'static str, Vec<IpAddr>, Vec<u32>)> = Vec::new();
+        let addrs = |replacements: &[rustbgpd_rib::PeerExportPolicyReplacement]| {
+            replacements
+                .iter()
+                .map(|replacement| replacement.peer.addr())
+                .collect::<Vec<_>>()
+        };
+        while let Some(update) = rib_rx.recv().await {
+            match update {
+                RibUpdate::ReplacePeerExportPolicies { reply, .. } => {
+                    let _ = reply.send(Ok(rustbgpd_rib::ExportPolicyCohortOutcome::Committed));
+                }
+                RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+                    replacements,
+                    reply,
+                } => {
+                    let members = addrs(&replacements);
+                    let fails = members == pair_c;
+                    seen.push(("batch", members, refreshes()));
+                    let _ = reply.send(if fails {
+                        Err(rustbgpd_rib::RibCommandError::internal(
+                            "second pair refused",
+                        ))
+                    } else {
+                        Ok(Vec::new())
+                    });
+                }
+                RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                    replacements,
+                    reply,
+                } => {
+                    seen.push(("restore", addrs(&replacements), Vec::new()));
+                    let _ = reply.send(Ok(replacements
+                        .iter()
+                        .rev()
+                        .map(
+                            |replacement| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
+                                peer: replacement.peer,
+                            },
+                        )
+                        .collect()));
+                }
+                _ => {}
+            }
+        }
+        seen
+    });
+    let (_command_tx, command_rx) = mpsc::channel(16);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let installs = Arc::new(AtomicUsize::new(0));
+    for address in cohort.into_iter().chain(pair_c) {
+        insert_test_managed_peer(
+            &mut manager,
+            address,
+            established_export_policy_test_session(address, Arc::clone(&installs), None),
+            false,
+        );
+    }
+    for (address, counters) in pair_b.into_iter().zip(&counters) {
+        insert_test_managed_peer(
+            &mut manager,
+            address,
+            acking_counted_policy_handle(address, Arc::clone(counters)),
+            false,
+        );
+    }
+    let import_next = validation_policy_chain(ImportValidationDependency::Rpki);
+    let target = |address: IpAddr| ResolvedPeerPolicy {
+        address,
+        interface: None,
+        import_policy: pair_b.contains(&address).then(|| import_next.clone()),
+        export_policy: Some(distinct_deny_policy_chain(if cohort.contains(&address) {
+            0
+        } else if pair_b.contains(&address) {
+            1
+        } else {
+            2
+        })),
+    };
+    let all: Vec<IpAddr> = cohort.into_iter().chain(pair_b).chain(pair_c).collect();
+    let result = manager
+        .apply_resolved_policy_snapshot(all.iter().copied().map(target).collect())
+        .await;
+    assert!(
+        result.as_ref().is_err_and(|error| {
+            error.contains("second pair refused")
+                && error.contains("already-applied peers restored")
+                && error.contains("committed cohort restored")
+        }),
+        "{result:?}"
+    );
+    for &address in &all {
+        let state = manager.peers.get(&key(address)).unwrap();
+        assert!(state.export_policy.is_none() && state.import_policy.is_none());
+        assert!(!state.pending_refresh && !state.pending_export_apply);
+        manager.delete_peer(key(address), false).await.unwrap();
+    }
+    drop(manager);
+    assert_eq!(
+        rib_task.await.unwrap(),
+        vec![
+            ("batch", pair_b.to_vec(), vec![0, 0]),
+            // The first pair's refreshes went out before the second batch.
+            ("batch", pair_c.to_vec(), vec![1, 1]),
+            // Every remainder member is restored, whichever batch failed.
+            (
+                "restore",
+                pair_b.into_iter().chain(pair_c).collect(),
+                Vec::new()
+            ),
+            ("restore", cohort.to_vec(), Vec::new()),
+        ]
+    );
+}
+
+type RollbackCommands = Arc<std::sync::Mutex<Vec<(&'static str, Vec<IpAddr>)>>>;
+
+/// What a paced rollback fixture run leaves to read back.
+struct PacedRollback {
+    result: Result<Vec<rustbgpd_api::peer_types::ResolvedPeerPolicy>, String>,
+    elapsed: Duration,
+    /// RIB restore commands seen so far; the stub keeps running.
+    commands: RollbackCommands,
+    /// Each peer's `pending_export_apply` when the snapshot returned.
+    pending: Vec<bool>,
+    /// Releases the paced command `stall_at` held.
+    release: Arc<tokio::sync::Notify>,
+}
+
+/// Drive one rollback whose RIB restore is paced: three peers with their own
+/// export changes are applied, the fourth's session apply fails, and the RIB
+/// stub acknowledges every member of a rollback batch as `Deferred`, then
+/// restores one member per paced command, 50 s each, reporting one member as
+/// departed. With `stall_at`, that paced command (counted from 1) is held
+/// until `release`. With `distinct_priors`, every peer returns to a prior
+/// chain of its own; otherwise all four return to one.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one fixture holds the paced RIB stub, the failing fleet and what the rollback tests read back"
+)]
+async fn paced_policy_rollback(stall_at: Option<usize>, distinct_priors: bool) -> PacedRollback {
     use rustbgpd_api::peer_types::ResolvedPeerPolicy;
 
     let peers: Vec<IpAddr> = (1..=4)
@@ -2136,9 +2295,10 @@ async fn paced_policy_rollback(
     let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(32);
     let commands = Arc::new(std::sync::Mutex::new(Vec::new()));
     let seen = Arc::clone(&commands);
-    let rib_task = tokio::spawn(async move {
+    let release = Arc::new(tokio::sync::Notify::new());
+    let released = Arc::clone(&release);
+    tokio::spawn(async move {
         let mut paced = 0;
-        let mut held = Vec::new();
         let addrs = |replacements: &[rustbgpd_rib::PeerExportPolicyReplacement]| {
             replacements
                 .iter()
@@ -2173,17 +2333,15 @@ async fn paced_policy_rollback(
                     paced += 1;
                     seen.lock().unwrap().push(("paced", addrs(&replacements)));
                     if stall_at == Some(paced) {
-                        held.push(reply);
-                        continue;
+                        released.notified().await;
                     }
                     tokio::time::sleep(Duration::from_secs(50)).await;
                     // One member restored per command; a departed member is
                     // skipped without costing the command its one.
-                    let mut offered = replacements.iter().map(|replacement| replacement.peer);
                     let mut skipped = Vec::new();
                     let mut applied = 0;
                     let mut pending = Vec::new();
-                    for peer in offered.by_ref() {
+                    for peer in replacements.iter().map(|replacement| replacement.peer) {
                         if peer.addr() == departed {
                             skipped.push(peer);
                         } else if applied == 0 {
@@ -2227,6 +2385,10 @@ async fn paced_policy_rollback(
             ),
             false,
         );
+        if distinct_priors {
+            manager.peers.get_mut(&key(address)).unwrap().export_policy =
+                Some(distinct_deny_policy_chain(10 + index));
+        }
     }
     let started = tokio::time::Instant::now();
     let result = manager
@@ -2257,10 +2419,17 @@ async fn paced_policy_rollback(
     for &address in &peers {
         manager.delete_peer(key(address), false).await.unwrap();
     }
-    drop(manager);
-    rib_task.abort();
-    let commands = commands.lock().unwrap().clone();
-    (result, elapsed, commands, pending)
+    PacedRollback {
+        result,
+        elapsed,
+        commands,
+        pending,
+        release,
+    }
+}
+
+fn rollback_peer(last: u8) -> IpAddr {
+    IpAddr::V4(Ipv4Addr::new(10, 39, 6, last))
 }
 
 /// A rollback whose restore keeps completing RIB commands is not cut off on
@@ -2270,54 +2439,104 @@ async fn paced_policy_rollback(
 /// mid-restore is skipped and acknowledged, not waited on.
 #[tokio::test(start_paused = true)]
 async fn paced_policy_rollback_completes_past_the_rollback_budget() {
-    let (result, elapsed, commands, pending) = paced_policy_rollback(None).await;
-    let peer = |last| IpAddr::V4(Ipv4Addr::new(10, 39, 6, last));
+    let run = paced_policy_rollback(None, false).await;
     assert!(
-        result.as_ref().is_err_and(|error| {
+        run.result.as_ref().is_err_and(|error| {
             error.contains("already-applied peers restored") && !error.contains("also failed")
         }),
-        "a progressing restore must end as an exact compensation: {result:?}"
+        "a progressing restore must end as an exact compensation: {:?}",
+        run.result
     );
     assert!(
-        elapsed >= Duration::from_secs(150) && elapsed > RIB_BATCH_REPLY_TIMEOUT,
-        "the restore ran {elapsed:?}"
+        run.elapsed >= Duration::from_secs(150) && run.elapsed > RIB_BATCH_REPLY_TIMEOUT,
+        "the restore ran {:?}",
+        run.elapsed
     );
     assert_eq!(
-        commands,
+        *run.commands.lock().unwrap(),
         vec![
             // The four members return to one prior chain: one batch, supplied
             // in forward order and executed newest first.
-            ("batch", vec![peer(1), peer(2), peer(3), peer(4)]),
-            ("paced", vec![peer(4)]),
-            ("paced", vec![peer(3), peer(2)]),
-            ("paced", vec![peer(1)]),
+            (
+                "batch",
+                vec![
+                    rollback_peer(1),
+                    rollback_peer(2),
+                    rollback_peer(3),
+                    rollback_peer(4)
+                ]
+            ),
+            ("paced", vec![rollback_peer(4)]),
+            ("paced", vec![rollback_peer(3), rollback_peer(2)]),
+            ("paced", vec![rollback_peer(1)]),
         ],
         "deferred members are restored newest first, each command offering at most twice the previous command's restored members"
     );
     assert_eq!(
-        pending,
+        run.pending,
         vec![false; 4],
         "no retry intent after an exact restore"
     );
 }
 
+/// Members returning to prior chains of their own are restored one prior
+/// chain at a time, newest first: each chain's batch, then the paced command
+/// for the member that batch deferred, before the next chain's batch. Every
+/// member's receipt maps back to its own plan, so the rollback is exact; the
+/// departed member's `NotFound` is accepted.
+#[tokio::test(start_paused = true)]
+async fn paced_policy_rollback_walks_each_prior_chain_in_turn() {
+    let run = paced_policy_rollback(None, true).await;
+    assert!(
+        run.result.as_ref().is_err_and(|error| {
+            error.contains("already-applied peers restored") && !error.contains("also failed")
+        }),
+        "{:?}",
+        run.result
+    );
+    let expected: Vec<(&'static str, Vec<IpAddr>)> = [4, 3, 2, 1]
+        .into_iter()
+        .flat_map(|last| {
+            [
+                ("batch", vec![rollback_peer(last)]),
+                ("paced", vec![rollback_peer(last)]),
+            ]
+        })
+        .collect();
+    assert_eq!(*run.commands.lock().unwrap(), expected);
+    assert_eq!(run.pending, vec![false; 4]);
+}
+
 /// A restore that stops completing commands is a stall: the wait expires
 /// `RIB_BATCH_REPLY_TIMEOUT` after the last completed command, the retry
-/// intent stays armed and the rollback is reported unproven.
+/// intent stays armed and the rollback is reported unproven. The restore is
+/// not abandoned with the wait: once the RIB answers again, the detached
+/// task sends the remaining restore commands.
 #[tokio::test(start_paused = true)]
 async fn stalled_paced_policy_rollback_times_out_after_its_last_completed_command() {
-    let (result, elapsed, _commands, pending) = paced_policy_rollback(Some(2)).await;
+    let run = paced_policy_rollback(Some(2), false).await;
     assert!(
-        result
+        run.result
             .as_ref()
             .is_err_and(|error| error.contains("policy_rollback_batch_timeout")),
-        "{result:?}"
+        "{:?}",
+        run.result
     );
-    // One paced command completed at 50 s; the second never answers.
+    // One paced command completed at 50 s; the second is held.
     let expected = Duration::from_secs(50) + RIB_BATCH_REPLY_TIMEOUT;
     assert!(
-        elapsed >= expected && elapsed < expected + Duration::from_secs(1),
-        "the stall must be measured from the last completed command: {elapsed:?}"
+        run.elapsed >= expected && run.elapsed < expected + Duration::from_secs(1),
+        "the stall must be measured from the last completed command: {:?}",
+        run.elapsed
     );
-    assert_eq!(pending, vec![true; 4], "retry intent stays armed");
+    assert_eq!(run.pending, vec![true; 4], "retry intent stays armed");
+    let before = run.commands.lock().unwrap().len();
+    assert_eq!(before, 3, "the batch and two paced commands");
+    run.release.notify_one();
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    assert_eq!(
+        run.commands.lock().unwrap().last(),
+        Some(&("paced", vec![rollback_peer(1)])),
+        "the detached restore must keep going after its caller's wait ended"
+    );
 }

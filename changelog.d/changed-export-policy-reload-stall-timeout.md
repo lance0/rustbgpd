@@ -12,9 +12,15 @@
   **Operator-visible:** a large reload of per-neighbor export policies now
   takes as long as its work needs, about one full-table pass per such peer,
   and holds configuration changes and peer lifecycle commands for that time;
-  the 30-minute settlement budget is the outer bound. Errors that named the
-  `shared policy-walk budget` for the batched and paced steps now name the
-  `policy-walk stall timeout`. Two log lines report a long walk:
-  `authoritative policy walk started` and `authoritative policy walk in
-  progress`, every ten seconds. See
+  inbound connections, BFD state changes and a first SIGTERM wait as well.
+  The 30-minute settlement budget is the outer bound: a walk that reaches
+  it, at roughly 1,200 such peers at a full table, is fenced and the daemon
+  exits 70. `rbgp reload` still gives up after its `--timeout` (600 seconds
+  by default) although the reload may commit later. This walk's timeout
+  errors no longer say `shared policy-walk budget`: the batched and paced
+  steps name the `policy-walk stall timeout` and the per-peer step the
+  `policy-walk budget`. Log lines report a long walk: `authoritative policy walk
+  started`, then `authoritative policy walk in progress` or `paced
+  export-policy walk in progress` about every ten seconds, as units
+  complete. See
   [Configuration reload](../docs/reference/operations.md#configuration-reload-sighup).

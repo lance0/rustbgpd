@@ -874,6 +874,10 @@ pub struct PeerManager {
     /// config reconciliation until explicit enable or one configured restart
     /// attempt reaches its deadline; a failed attempt remains latched down.
     max_prefix_latches: HashMap<PeerKey, MaxPrefixLatch>,
+    /// Session-task crashes per neighbor, owned by the manager for the same
+    /// reason: they outlive each session, and a latched entry keeps the
+    /// neighbor disabled until explicit enable.
+    session_crashes: HashMap<PeerKey, notifications::SessionCrashes>,
     /// Neighbors admitted at an address another neighbor holds while every
     /// BMP collector is set to `on_identity_conflict = "exclude"`: their
     /// sessions report nothing to BMP. Kept until the neighbor's peer goes.
@@ -1956,6 +1960,7 @@ impl PeerManager {
             deferred_rib: DeferredRibUpdates::default(),
             dampening_control_failed: false,
             max_prefix_latches: HashMap::new(),
+            session_crashes: HashMap::new(),
             bmp_excluded: BTreeSet::new(),
             next_max_prefix_restart_deadline: None,
             next_max_prefix_latch_generation: 1,

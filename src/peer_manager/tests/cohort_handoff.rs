@@ -3367,7 +3367,11 @@ async fn paced_handoff_walk_is_bounded_by_a_stall_timeout() {
         answer_restore(&mut rib_rx, &peers).await;
     };
     let started = tokio::time::Instant::now();
-    let (result, ()) = tokio::join!(apply, drive_rib);
+    let apply = async {
+        let result = apply.await;
+        (result, started.elapsed())
+    };
+    let ((result, applied_after), ()) = tokio::join!(apply, drive_rib);
     assert!(
         result
             .as_ref()
@@ -3376,9 +3380,9 @@ async fn paced_handoff_walk_is_bounded_by_a_stall_timeout() {
         "{result:?}"
     );
     assert!(
-        started.elapsed() >= Duration::from_secs(210) + RIB_BATCH_REPLY_TIMEOUT,
-        "the stall is measured from the last completed command: {:?}",
-        started.elapsed()
+        applied_after >= Duration::from_secs(210) + RIB_BATCH_REPLY_TIMEOUT
+            && applied_after < Duration::from_secs(212) + RIB_BATCH_REPLY_TIMEOUT,
+        "the walk ends one stall timeout after the last completed command, then waits for the restore the stub answers a second later: {applied_after:?}"
     );
     for peer in peers {
         assert!(

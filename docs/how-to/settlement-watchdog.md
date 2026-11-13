@@ -260,7 +260,13 @@ values are derived from them:
   with timeout auto-revert of the same generation completing within
   69.5 seconds. Thirty minutes is roughly 8× the worst measured
   legitimate settlement — an owner that reaches the budget is wedged,
-  not slow.
+  not slow. One owner is the exception: an export-policy reload that
+  changes per-neighbor export policies walks its peers at about one
+  full-table RIB pass each and is no longer rolled back on elapsed time,
+  so a reload of roughly 1,200 such neighbors at a full table (600 when it
+  fails late and is restored) can reach the budget while still making
+  progress. See
+  [Configuration reload](../reference/operations.md#configuration-reload-sighup).
 - **The budget is non-resettable** because a resettable budget is
   defeated by exactly the failure it exists to catch: a livelocked
   owner that keeps emitting signs of life without ever settling would

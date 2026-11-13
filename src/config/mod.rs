@@ -2628,7 +2628,7 @@ fn config_field_impact(field: &str) -> Option<(ConfigFieldImpact, &'static str)>
 /// sides and render `<changed>` — the values are never exposed.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct FieldChange {
-    pub field: &'static str,
+    pub field: std::borrow::Cow<'static, str>,
     pub old: serde_json::Value,
     pub new: serde_json::Value,
     pub impact: Option<ConfigFieldImpact>,
@@ -2645,7 +2645,7 @@ impl FieldChange {
             None => (None, None),
         };
         Self {
-            field,
+            field: field.into(),
             old: json_config_value(old),
             new: json_config_value(new),
             impact,
@@ -2664,7 +2664,7 @@ impl FieldChange {
             None => (None, None),
         };
         Self {
-            field,
+            field: field.into(),
             old: serde_json::Value::Null,
             new: serde_json::Value::Null,
             impact,
@@ -2708,7 +2708,18 @@ fn json_config_value<T: serde::Serialize>(value: &T) -> serde_json::Value {
 fn render_json_config_value(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::Null => "(unset)".to_string(),
-        serde_json::Value::String(s) => s.clone(),
+        // Escape control characters so a value cannot split an output or
+        // log line.
+        serde_json::Value::String(s) => s
+            .chars()
+            .flat_map(|c| {
+                let escaped = c.is_control().then(|| c.escape_default());
+                escaped
+                    .into_iter()
+                    .flatten()
+                    .chain((!c.is_control()).then_some(c))
+            })
+            .collect(),
         other => other.to_string(),
     }
 }
@@ -3073,13 +3084,18 @@ pub struct ConfigDiff {
     /// instead because it affects the startup-only reconciler spawn
     /// gate.
     pub honor_blackhole_changed: bool,
+    /// `[global]` changed in a restart-required field; `global_changes` names
+    /// each one.
     pub global_changed: bool,
+    /// One entry per restart-required `[global]` field edit, with its old and
+    /// new value. The SIGHUP reload ERROR uses the same comparator.
+    pub global_changes: Vec<FieldChange>,
     /// Root epoch raw/effective/source tuple changed.
     pub config_epoch_changed: bool,
     pub config_epoch: Option<Rfc8212EpochChange>,
-    /// `[global] ebgp_requires_policy` changed. Already covered by the coarse
-    /// `global_changed` restart bucket; tracked separately so receipts can name
-    /// the field instead of only the section. ADR-0112 requires the RFC 8212
+    /// `[global] ebgp_requires_policy` changed. Reported here rather than in
+    /// the `global_changed` restart bucket, so receipts name the RFC 8212
+    /// posture with its raw/effective/source tuple. ADR-0112 requires the RFC 8212
     /// enforcement mode to be named explicitly, because the running mode stays
     /// at its startup value while the on-disk candidate reads differently.
     pub ebgp_requires_policy_changed: bool,
@@ -4841,6 +4857,11 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
             .unsupported_sections
             .push("[global].honor_blackhole".to_string());
     }
+    if diff.dynamic_neighbor_limit_changed {
+        class
+            .unsupported_sections
+            .push("[global].dynamic_neighbor_limit (apply via SIGHUP reload)".to_string());
+    }
     if diff.evpn_runtime_change_class.is_reload_applied() {
         class
             .unsupported_sections
@@ -4854,6 +4875,14 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
 
     if diff.global_changed {
         class.restart_required_sections.push("[global]".to_string());
+        // Names only: the list holds section tokens that clients join and
+        // split. Values are in `global_changes` and the diff text.
+        class.restart_required_sections.extend(
+            diff.global_changes
+                .iter()
+                .filter(|change| change.field != "[global]")
+                .map(|change| format!("[global].{}", change.field)),
+        );
     }
     if diff.config_epoch_changed {
         class
@@ -5136,6 +5165,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
         "evpn_runtime_change_class": diff.evpn_runtime_change_class,
         "config_epoch": &diff.config_epoch,
         "ebgp_requires_policy": &diff.ebgp_requires_policy,
+        "global_changes": &diff.global_changes,
         "summary": {
             "neighbors_added": diff.neighbors.added.len(),
             "neighbors_changed": diff.neighbors.changed.len(),
@@ -5571,6 +5601,11 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
         }
         for section in &restart_sections {
             let _ = writeln!(out, "  {} {section} changed", style.restart_marker);
+            if *section == "[global]" {
+                for change in &diff.global_changes {
+                    let _ = writeln!(out, "      {}", change.render());
+                }
+            }
         }
         out.push('\n');
     }
@@ -5792,6 +5827,7 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
     let mut interface_new = reload_new.clone();
     pin_unreconciled_daemon_runtime_fields(&mut interface_new, old);
     pin_rfc8212_posture_startup_only(&mut interface_new, old);
+    let global_changes = global_restart_required_changes(&old.global, &new.global);
     let mut diff = ConfigDiff {
         neighbors,
         effective_neighbor_impact,
@@ -5802,7 +5838,8 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
             != new.global.honor_graceful_shutdown,
         honor_blackhole_changed: old.global.honor_blackhole != new.global.honor_blackhole
             && !blackhole_fib_discard_changed,
-        global_changed: global_restart_required_changed(old, new),
+        global_changed: !global_changes.is_empty(),
+        global_changes,
         config_epoch_changed: config_epoch.is_some(),
         config_epoch,
         ebgp_requires_policy_changed: ebgp_requires_policy.is_some(),
@@ -6669,26 +6706,88 @@ fn collect_neighbor_set_refs_from_statements(
     );
 }
 
-fn global_restart_required_changed(old: &Config, new: &Config) -> bool {
-    let old_global = old.global.clone();
-    let mut new_global = new.global.clone();
+/// The restart-required `[global]` edits between two configs, one entry per
+/// changed leaf field (`router_id`, `telemetry.log_format`), sorted by dotted
+/// path. The SIGHUP reload ERROR and the config diff both use this one
+/// comparator, so they name the same fields.
+///
+/// Fields that a diff or reload reports on their own terms are left out:
+/// the receiver honor knobs and `dynamic_neighbor_limit` are hot-applied;
+/// the BLACKHOLE FIB discard knobs (and `honor_blackhole` as part of that
+/// startup gate) are reported through `blackhole_fib_discard_changed`;
+/// `ebgp_requires_policy` belongs to the RFC 8212 posture tuple that
+/// `pin_rfc8212_posture_startup_only` pins and `ebgp_requires_policy_changed`
+/// names.
+pub(crate) fn global_restart_required_changes(old: &Global, new: &Global) -> Vec<FieldChange> {
+    let mut new = new.clone();
+    new.honor_graceful_shutdown = old.honor_graceful_shutdown;
+    new.honor_blackhole = old.honor_blackhole;
+    new.install_blackhole_discard = old.install_blackhole_discard;
+    new.allow_blackhole_broad_prefixes = old.allow_blackhole_broad_prefixes;
+    new.blackhole_discard_max_active = old.blackhole_discard_max_active;
+    new.blackhole_discard_install_rate_per_minute = old.blackhole_discard_install_rate_per_minute;
+    new.blackhole_discard_install_burst = old.blackhole_discard_install_burst;
+    new.dynamic_neighbor_limit = old.dynamic_neighbor_limit;
+    new.ebgp_requires_policy = old.ebgp_requires_policy;
+    if *old == new {
+        return Vec::new();
+    }
+    global_leaf_changes(&json_config_value(old), &json_config_value(&new))
+}
 
-    // These knobs have explicit reload behavior and must not make the
-    // coarse `[global] changed` restart bucket fire by themselves.
-    // `honor_blackhole` becomes restart-required only as part of the
-    // BLACKHOLE FIB actor's startup gate, reported separately through
-    // `blackhole_fib_discard_changed`.
-    new_global.honor_graceful_shutdown = old_global.honor_graceful_shutdown;
-    new_global.honor_blackhole = old_global.honor_blackhole;
-    new_global.install_blackhole_discard = old_global.install_blackhole_discard;
-    new_global.allow_blackhole_broad_prefixes = old_global.allow_blackhole_broad_prefixes;
-    new_global.blackhole_discard_max_active = old_global.blackhole_discard_max_active;
-    new_global.blackhole_discard_install_rate_per_minute =
-        old_global.blackhole_discard_install_rate_per_minute;
-    new_global.blackhole_discard_install_burst = old_global.blackhole_discard_install_burst;
-    new_global.dynamic_neighbor_limit = old_global.dynamic_neighbor_limit;
+/// Field changes for two serialized `[global]` values whose structs differ.
+/// If the leaf walk names nothing (a field the serializer skips, or a
+/// serialization failure), one summarized `[global]` entry keeps the
+/// restart-required report from disappearing.
+fn global_leaf_changes(old: &serde_json::Value, new: &serde_json::Value) -> Vec<FieldChange> {
+    let mut changes = Vec::new();
+    push_leaf_field_changes(&mut changes, "", old, new);
+    if changes.is_empty() {
+        changes.push(FieldChange {
+            impact: Some(ConfigFieldImpact::RestartRequired),
+            ..FieldChange::summarized("[global]")
+        });
+    }
+    changes
+}
 
-    old_global != new_global
+/// Append one `FieldChange` per differing leaf of two serialized config
+/// values, naming each by its dotted TOML path. Tables recurse; any other
+/// value (including arrays and a table that appears or disappears) is one leaf.
+fn push_leaf_field_changes(
+    changes: &mut Vec<FieldChange>,
+    path: &str,
+    old: &serde_json::Value,
+    new: &serde_json::Value,
+) {
+    if old == new {
+        return;
+    }
+    if let (serde_json::Value::Object(old_map), serde_json::Value::Object(new_map)) = (old, new) {
+        let keys: BTreeSet<&String> = old_map.keys().chain(new_map.keys()).collect();
+        for key in keys {
+            let child = if path.is_empty() {
+                key.clone()
+            } else {
+                format!("{path}.{key}")
+            };
+            push_leaf_field_changes(
+                changes,
+                &child,
+                old_map.get(key).unwrap_or(&serde_json::Value::Null),
+                new_map.get(key).unwrap_or(&serde_json::Value::Null),
+            );
+        }
+        return;
+    }
+    changes.push(FieldChange {
+        field: path.to_string().into(),
+        old: old.clone(),
+        new: new.clone(),
+        impact: Some(ConfigFieldImpact::RestartRequired),
+        annotation: None,
+        values_summarized: false,
+    });
 }
 
 /// Network address of a `[[dynamic_neighbors]]` prefix, used only to resolve a

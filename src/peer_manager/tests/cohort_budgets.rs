@@ -1424,3 +1424,95 @@ async fn operator_reads_are_served_while_the_rollback_rib_reply_is_held() {
 async fn operator_reads_report_a_failed_session_restore_while_rollback_is_held() {
     assert_operator_reads_during_rollback(true).await;
 }
+
+/// The RFC 8212 preflight's presence proof must not anchor the remainder
+/// walk's stall budget. A down eBGP neighbor with an import-presence change
+/// makes the preflight query the RIB at the start; the cohort's transition
+/// then takes 130 s. The remainder's first RIB command comes after that and
+/// completes at once, so the reload commits.
+///
+/// LOAD-BEARING: handing the preflight the transaction's forward budget
+/// leaves it expired when the remainder starts, and the reload rolls back
+/// although every unit completed.
+#[tokio::test(start_paused = true)]
+async fn rfc8212_preflight_does_not_anchor_the_remainder_walk_budget() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let peer = |last| IpAddr::V4(Ipv4Addr::new(10, 41, 5, last));
+    let cohort = [peer(1), peer(2)];
+    let single = peer(3);
+    let down = peer(4);
+    let (mut manager, mut rib_rx) = rfc8212_status_manager();
+    let rib_task = tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            match update {
+                RibUpdate::QueryPeerRetainedStale { reply, .. } => {
+                    let _ = reply.send(0);
+                }
+                RibUpdate::ReplacePeerExportPolicies { reply, .. } => {
+                    tokio::time::sleep(RIB_BATCH_REPLY_TIMEOUT + Duration::from_secs(10)).await;
+                    let _ = reply.send(Ok(rustbgpd_rib::ExportPolicyCohortOutcome::Committed));
+                }
+                RibUpdate::ReplacePeerExportPolicy { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+                RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                    replacements,
+                    reply,
+                } => {
+                    let _ = reply.send(Ok(replacements
+                        .iter()
+                        .rev()
+                        .map(
+                            |replacement| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
+                                peer: replacement.peer,
+                            },
+                        )
+                        .collect()));
+                }
+                _ => {}
+            }
+        }
+    });
+    for address in cohort.into_iter().chain([single]) {
+        insert_test_managed_peer(
+            &mut manager,
+            address,
+            acking_policy_handle(address, SessionState::Established),
+            false,
+        );
+    }
+    insert_test_managed_peer(
+        &mut manager,
+        down,
+        acking_policy_handle(down, SessionState::Idle),
+        false,
+    );
+    manager.peers.get_mut(&key(down)).unwrap().import_policy = Some(
+        crate::config::reserved_rfc8212_deny_chain(crate::config::RFC8212_MISSING_IMPORT_POLICY),
+    );
+    let export = |address, chain| ResolvedPeerPolicy {
+        address,
+        interface: None,
+        import_policy: None,
+        export_policy: Some(distinct_deny_policy_chain(chain)),
+    };
+    let result = manager
+        .apply_resolved_policy_snapshot(vec![
+            export(cohort[0], 0),
+            export(cohort[1], 0),
+            export(single, 1),
+            ResolvedPeerPolicy {
+                address: down,
+                interface: None,
+                import_policy: Some(deny_policy_chain()),
+                export_policy: None,
+            },
+        ])
+        .await;
+    assert!(
+        result.is_ok(),
+        "every unit completed, so the reload must commit: {result:?}"
+    );
+    rib_task.abort();
+}
