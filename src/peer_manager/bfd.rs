@@ -646,7 +646,7 @@ impl PeerManager {
         self.retry_bfd_commands_of(events, false);
     }
 
-    /// [`Self::retry_bfd_commands`] against this manager's own event queue.
+    /// The retry turn, deferring to this manager's own queued state changes.
     /// With `down_only`, a `Start` retry is left for a later turn.
     fn retry_own_bfd_commands(&mut self, down_only: bool) {
         let events = self.take_bfd_state_change_rx();
