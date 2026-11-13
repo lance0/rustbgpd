@@ -20,9 +20,14 @@ in a request handler, says nothing about whether routing state is correct.
 
 ADR-0022 rejected an in-place restart for its complexity: backoff, re-binding
 the port, and state recovery. In the code as it stands the cost is small.
-The gRPC server holds no state of its own: every service is built from
-cloneable handles to the actors, and `serve` spawns nothing that outlives it.
-The metrics/readiness server is stateless as well.
+Every gRPC service is built from cloneable handles to the actors, so a new
+run of `serve` needs nothing rebuilt. The one piece of state `serve` used to
+create for itself, the streamed config-plan state (issued plan tokens and
+the one-at-a-time plan admission), now belongs to the daemon and is shared
+by every run. `serve` does start tasks that can outlive a run: tonic runs
+each accepted connection in its own task, and the dataplane event poller is
+detached. Decision 6 depends on the first of these. The metrics/readiness
+server is stateless.
 
 ## Decision
 
@@ -66,20 +71,28 @@ server in place and keeps restarting it for as long as it takes.
    refused; the Unix socket path absent, since the ending run removes it and
    the restart creates it again; and, if another process binds the TCP port
    meanwhile, restarts that fail and are retried at most 10 seconds apart
-   with `/readyz` red until the port is free.
+   with `/readyz` red until the port is free. A listener configured with
+   port 0 gets a new port on each restart.
 
 5. **Readiness.** While the gRPC server is down, `/readyz` answers 503
    `not ready: gRPC server is restarting`: the mutation path is unavailable.
-   It clears when the restarted server reports every listener started. The
+   The core actors are asked first, so an actor that stops answering while
+   the server is down is still reported as the actor failure. Readiness
+   turns red when the ending run has finished draining, about 2 seconds
+   after its listeners stopped accepting and longer for a saturated TLS
+   listener; that delay is accepted. It clears when the restarted server
+   reports every listener started. The
    metrics/readiness server cannot report its own absence; while it is down
    the signal is the failed probe or scrape, and the counter afterwards.
    Liveness, the systemd watchdog and `READY=1` follow the core actors and do
    not treat a restarting management server as a failure.
 
 6. **In-flight requests.** A gRPC run that ends stops accepting. Connections
-   it already accepted are told to finish and a request in flight on one
-   runs to its own answer; a caller whose connection dies gets a transport
-   error. Owned runtime-config mutations are shielded from their caller
+   it already accepted take no new requests, and a request in flight on one
+   runs to its own answer. That includes a server-streaming RPC such as
+   `WatchEvents`: it keeps streaming after the restart until its client or
+   its source ends. A caller whose connection dies gets a transport error.
+   A run that panics is restarted like one that returns. Owned runtime-config mutations are shielded from their caller
    ([ADR-0080](0080-cancellation-shielded-runtime-applies.md)) and settle or
    fence under the settlement watchdog
    ([ADR-0127](0127-config-transaction-settlement-watchdog.md)) regardless.

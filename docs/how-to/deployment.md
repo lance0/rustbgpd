@@ -1111,7 +1111,8 @@ terminationGracePeriodSeconds: 1920   # ordinary stops; same as docker --stop-ti
 
 **Readiness** uses `/readyz` with the Kubernetes defaults: a 10 s period, a
 1 s timeout and three failures. `/readyz` answers `200 ready` when the
-PeerManager and RIB actors both respond within one 200 ms deadline. It means
+PeerManager and RIB actors both respond within one 200 ms deadline and the
+gRPC server is not in the middle of an in-place restart. It means
 the control plane is up and admitting work. It does not mean the daemon has
 converged, received any routes, or established any peers; a daemon with zero
 Established peers can be ready.

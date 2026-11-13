@@ -1321,8 +1321,12 @@ marks a restart whose listeners are all up.
 
 While the server is down, `/readyz` answers `503 not ready: gRPC server is
 restarting`, because the mutation path is unavailable; it returns to `200`
-when the restarted listeners are up. `/livez`, the systemd watchdog and
-`READY=1` are not affected. The shipped `BgpManagementServerCrashed` rule
+when the restarted listeners are up. The core actors are asked first, so a
+PeerManager or RIB that stops answering in that state is still reported as
+its own failure. `/readyz` turns red once the run that ended has finished
+draining: about 2 s after its listeners stopped accepting, and up to 10 s
+more for a saturated TLS listener (see below). `/livez`, the systemd
+watchdog and `READY=1` are not affected. The shipped `BgpManagementServerCrashed` rule
 fires on any increase of the counter.
 
 The gRPC sockets are not held across a restart. During the gap the TCP ports
@@ -1330,15 +1334,21 @@ are unbound and the Unix socket path is absent: the run that ended removes
 it and the restart creates it again. If another process binds a configured
 TCP port in that gap, each restart fails with the bind error in
 `startup_error` and is retried, at most 10 seconds apart, until the port is
-free; `/readyz` stays 503 meanwhile.
+free; `/readyz` stays 503 meanwhile. The same holds if a second daemon
+instance starts listening on the Unix socket path: the restart refuses to
+replace a live socket and retries, and `rbgp` over that path reaches the
+other process until it is gone. A listener configured with port 0 binds a
+new ephemeral port on each restart, logged as `bound_addr`.
 
 What clients see:
 
 - New connections are refused during the gap. Clients reconnect to the same
   configured addresses.
-- Connections that were open when the listener failed are told to finish. A
-  request in flight on one runs to its own answer. New requests need a new
-  connection.
+- Connections that were open when the listener failed take no new requests;
+  new requests need a new connection. A request in flight on one runs to its
+  own answer. An open server-streaming RPC such as `WatchEvents` is such a
+  request: it keeps streaming after the restart, until its client
+  disconnects or its source ends.
 - A caller whose connection is lost gets a transport error. A runtime-config
   mutation that had begun still runs to settlement (see
   [the settlement watchdog](../how-to/settlement-watchdog.md)); read the
@@ -1943,7 +1953,7 @@ The telemetry HTTP listener exposes these read-only paths:
 |------|---------|---------|
 | `/metrics` | `200` Prometheus text exposition | `500` if metrics encoding fails; `503` when the scrape's wait for the render exceeds 5 s (the render itself keeps running), or at once when 56 scrapes are already in flight (waiting, rendering or writing). Scrapes alone cannot fill the 64-connection budget, so `/livez` and `/readyz` stay reachable while a render is stuck |
 | `/livez` | `200 ok` once the listener accepts connections | No actor checks. While all 64 connections are in use, the listener closes connections that have not sent their request line within 250 ms of being accepted, oldest first, so idle or slow-sending clients cannot keep `/livez` and `/readyz` waiting for a connection |
-| `/readyz` | `200 ready` when PeerManager and RIB respond within 200 ms total | `503 not ready: <reason>` |
+| `/readyz` | `200 ready` when PeerManager and RIB respond within 200 ms total and the gRPC server is not being restarted | `503 not ready: <reason>`; `gRPC server is restarting` between an unexpected gRPC server exit and its restart |
 | `/dp-readyz` (opt-in alpha) | `200 dataplane workers ready` after each configured FIB/EVPN worker has completed an initial attempt and continues making progress | `404` when disabled; `503` when not configured, starting, unavailable, closed, or stale |
 
 The listener runs on its own thread with a single-threaded runtime, separate
