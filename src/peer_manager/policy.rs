@@ -2317,8 +2317,14 @@ impl PeerManager {
             // (`update_import_policy`), but do NOT fire `soft_reset_in` here —
             // the Route Refresh is deferred until after the cohort RIB commit
             // (see the deferred-refresh phase below for the correctness
-            // argument).
-            if import_changed {
+            // argument). A member whose task exit the walk holds owes no
+            // session step at all.
+            let held = self.adopt_policies_of_held_task_exit(
+                peer_key,
+                target.import_policy.as_ref(),
+                target.export_policy.as_ref(),
+            );
+            if import_changed && !held {
                 let import_commands = self
                     .peers
                     .get(peer_key)
@@ -2383,15 +2389,18 @@ impl PeerManager {
                 .expect("cohort peer existed before export hot-apply")
                 .handle()
                 .commands_sender();
-            let apply_result = self
-                .hot_apply_session_policy(
+            let apply_result = if held {
+                Ok(())
+            } else {
+                self.hot_apply_session_policy(
                     rustbgpd_transport::PeerHandle::update_export_policy_via(
                         commands,
                         target.export_policy.clone(),
                     ),
                     "update_export_policy",
                 )
-                .await;
+                .await
+            };
             if let Err(error) = apply_result {
                 if prestaged {
                     self.discard_prepared_export_destination(targets[0]).await;
@@ -2660,6 +2669,11 @@ impl PeerManager {
         let deferred_refresh_started = Instant::now();
         for (index, (target, peer_key)) in targets.iter().zip(&peer_keys).enumerate() {
             if import_deltas[index]
+                && !self.adopt_policies_of_held_task_exit(
+                    peer_key,
+                    target.import_policy.as_ref(),
+                    target.export_policy.as_ref(),
+                )
                 && let Err(failure) = self
                     .dispatch_deferred_refresh(
                         peer_key,
@@ -4499,6 +4513,34 @@ impl PeerManager {
         result
     }
 
+    /// Whether the walk that owns the actor holds the end of `peer_key`'s
+    /// session task. If it does, no session is left to install a chain or
+    /// to refresh, and the peer is retired when the walk ends, its RIB state
+    /// going with its `PeerDown`: the peer takes `import_policy` and
+    /// `export_policy` as a known-down peer does and owes nothing. Every session step of a walk, per-peer or
+    /// cohort, forward or rollback, asks this first.
+    fn adopt_policies_of_held_task_exit(
+        &mut self,
+        peer_key: &PeerKey,
+        import_policy: Option<&PolicyChain>,
+        export_policy: Option<&PolicyChain>,
+    ) -> bool {
+        if !self.owned_walk_holds_task_exit(peer_key) {
+            return false;
+        }
+        let Some(managed) = self.peers.get_mut(peer_key) else {
+            return false;
+        };
+        managed.import_policy = import_policy.cloned();
+        managed.export_policy = export_policy.cloned();
+        managed.import_install_unknown = false;
+        managed.export_install_unknown = false;
+        managed.pending_refresh = false;
+        managed.pending_export_apply = false;
+        managed.policy_known_down = true;
+        true
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "runtime policy application keeps ordered import and export transitions together"
@@ -4521,6 +4563,14 @@ impl PeerManager {
         use std::fmt::Write as _;
         let address = peer_key.address;
 
+        if self.adopt_policies_of_held_task_exit(
+            &peer_key,
+            import_policy.as_ref(),
+            export_policy.as_ref(),
+        ) {
+            return Ok(());
+        }
+
         // ADR-0112: the last gate before this peer is touched. Every live chain
         // apply funnels through here — the snapshot transaction, `hot_update_peer`
         // for a neighbor or peer-group field edit, and the honor-knob fan-outs —
@@ -4529,23 +4579,6 @@ impl PeerManager {
         // that flapped in between. Rollback applies are exempt: restoring a prior
         // chain is best-effort by contract and must never be blocked by the state
         // that made the forward apply fail.
-        // The walk holds the end of this peer's session task: no session is
-        // left to install a chain or to refresh, and the peer is retired
-        // when the walk ends, its RIB state going with its `PeerDown`. It
-        // carries the chains as a known-down peer does and owes nothing.
-        if self.owned_walk_holds_task_exit(&peer_key)
-            && let Some(managed) = self.peers.get_mut(&peer_key)
-        {
-            managed.import_policy = import_policy;
-            managed.export_policy = export_policy;
-            managed.import_install_unknown = false;
-            managed.export_install_unknown = false;
-            managed.pending_refresh = false;
-            managed.pending_export_apply = false;
-            managed.policy_known_down = true;
-            return Ok(());
-        }
-
         let rfc8212_fatal_transition = matches!(refresh_failure, RefreshFailureHandling::Fatal)
             && self.rfc8212_import_presence_transition(&peer_key, import_policy.as_ref());
         // True only for the Established case: that peer's `AdjRibIn` holds

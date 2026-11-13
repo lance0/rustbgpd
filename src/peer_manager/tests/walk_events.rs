@@ -959,6 +959,142 @@ async fn events_between_cohort_setup_members_keep_every_member() {
     assert_eq!(rib.await.unwrap(), Some(true));
 }
 
+/// E-4 in a cohort: a dynamic member's session task ends and the walk holds
+/// its retirement. The cohort treats the member as the per-peer walk does:
+/// it carries the chains and owes no session step and no Route Refresh. A
+/// task that ends after its setup step, followed by a refused transition,
+/// is restored exactly; a walk that reaches the member after its task ended
+/// commits, with or without an import change.
+///
+/// LOAD-BEARING: the cohort's session steps go to the ended task, so the
+/// setup (or the deferred refresh) fails and the walk rolls back.
+#[tokio::test(start_paused = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one test holds the crashing session, the scripted RIB and every outcome"
+)]
+async fn dynamic_cohort_member_task_exit_owes_no_session_step() {
+    for (fail_later, import_changes) in [(true, false), (false, false), (false, true)] {
+        let Lab {
+            mut mgr,
+            mut rib_rx,
+            peers,
+            ..
+        } = lab(2);
+        let dynamic = IpAddr::V4(Ipv4Addr::new(10, 42, 9, 1));
+        let dynamic_session = 50;
+        let (crash, crashed) = oneshot::channel();
+        let exited = Arc::new(AtomicBool::new(false));
+        let exit = SessionTaskExitNotice::new(
+            Some(mgr.session_notify_tx.clone()),
+            SessionIdentity::primary(dynamic_session),
+            dynamic,
+        );
+        insert_test_dynamic_managed_peer(
+            &mut mgr,
+            dynamic,
+            dynamic_session,
+            walk_session(
+                dynamic,
+                Arc::default(),
+                Some((exit, crashed, Arc::clone(&exited))),
+            ),
+            true,
+            IpAddr::V4(Ipv4Addr::new(10, 42, 9, 0)),
+            24,
+            "dynamic",
+        );
+        // Rollback: the dynamic member is set up first, its task ends during
+        // the refused transition, and the restore, newest first, reaches it
+        // after a seam. Forward: its task ends during the prestage, and the
+        // seam after the first member's setup holds it.
+        let order = if fail_later {
+            [dynamic, peers[0], peers[1]]
+        } else {
+            [peers[0], dynamic, peers[1]]
+        };
+        let rib = tokio::spawn(async move {
+            let mut crash = Some(crash);
+            while let Some(update) = rib_rx.recv().await {
+                let crash_here = match &update {
+                    RibUpdate::PrepareExportPolicyDestination { .. } => !fail_later,
+                    RibUpdate::ReplacePeerExportPolicies { .. } => fail_later,
+                    _ => false,
+                };
+                if crash_here {
+                    // The exit notice is queued before the command's reply.
+                    crash.take().unwrap().send(()).unwrap();
+                    set(&exited).await;
+                }
+                match update {
+                    RibUpdate::ReplacePeerExportPolicies { reply, .. } if fail_later => {
+                        let _ = reply.send(Err("refused".to_string()));
+                    }
+                    update => answer(update),
+                }
+            }
+        });
+        let chain = Some(deny_policy_chain());
+        let import = import_changes.then(deny_policy_chain);
+        let targets = order
+            .into_iter()
+            .map(|address| ResolvedPeerPolicy {
+                address,
+                interface: None,
+                import_policy: import.clone(),
+                export_policy: chain.clone(),
+            })
+            .collect();
+        let started = tokio::time::Instant::now();
+        let result = mgr
+            .apply_resolved_policy_snapshot_classified(targets, true)
+            .await;
+        let variant = format!("fail_later={fail_later} import_changes={import_changes}");
+        assert!(
+            started.elapsed() < PEER_POLICY_UPDATE_TIMEOUT,
+            "{variant}: the walk waited {:?} on the ended session",
+            started.elapsed()
+        );
+        let (export, import) = if fail_later {
+            let failure = result.expect_err("the transition is refused");
+            assert_eq!(
+                failure.kind,
+                PolicySnapshotFailureKind::FullyCompensated,
+                "{variant}: {} ({})",
+                failure.message(),
+                failure.code.as_str()
+            );
+            (None, None)
+        } else {
+            assert!(
+                result.is_ok(),
+                "{variant}: {:?}",
+                result.err().map(|failure| failure.message().to_owned())
+            );
+            (chain, import)
+        };
+        let managed = &mgr.peers[&key(dynamic)];
+        assert_eq!(managed.export_policy, export, "{variant}");
+        assert_eq!(managed.import_policy, import, "{variant}");
+        assert!(
+            !managed.pending_refresh,
+            "{variant}: the member owes nothing"
+        );
+
+        let held = mgr
+            .session_notify_rx
+            .try_recv()
+            .expect("the held notification is back on the channel");
+        mgr.handle_session_notification(held).await;
+        assert!(
+            !mgr.peers.contains_key(&key(dynamic)),
+            "{variant}: retired after the walk"
+        );
+        drop(mgr);
+        rib.await.unwrap();
+    }
+}
+
 /// E-3, rollback: a session task that ends while the walk waits for its
 /// detached RIB restore is replaced when the restore next completes a
 /// command. The replacement starts on the chain the rollback's session legs
