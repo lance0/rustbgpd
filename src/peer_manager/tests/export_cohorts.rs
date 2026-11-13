@@ -1868,11 +1868,11 @@ async fn export_only_snapshot_reasserts_prior_import_after_remainder_ack_loss() 
 
 /// The stable remainder's work is counted in RIB commands: every export pair
 /// shared by two or more Established remainder peers costs one authoritative
-/// batch, and a peer whose pair is its own is a batch of one. The batches
-/// follow every session leg, one export pair at a time in the order each
-/// pair first appears. Each RIB command here takes 35 s, so the remainder
-/// (two pairs of two and one single) is three commands and 105 s; one
-/// command per member would be five.
+/// batch, and a peer whose pair is its own is a batch of one. Each batch
+/// follows its own pair's session legs, one export pair at a time in the
+/// order each pair first appears. Each RIB command here takes 35 s, so the
+/// remainder (two pairs of two and one single) is three commands and 105 s;
+/// one command per member would be five.
 #[tokio::test(start_paused = true)]
 #[expect(
     clippy::too_many_lines,

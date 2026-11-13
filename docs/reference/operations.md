@@ -969,9 +969,11 @@ run in the order in which the first peer of each pair appears in the
 change. Each step does three things before the next one starts: the peers'
 sessions take their new import and export policies, the RIB commits the
 step's export change, and a Route Refresh is sent to each of its peers whose
-import policy changed. A peer with retry state from an earlier failed
-change, or whose change adds or removes its import policy under
-`ebgp_requires_policy`, is a step of its own.
+import policy changed. Each of these peers is a step of its own: a peer with
+retry state from an earlier failed change, a peer whose export policy does
+not change (an import-only change), a peer whose change adds or removes its
+import policy under `ebgp_requires_policy`, and every peer of a change that
+names the same peer twice.
 
 A peer the change has not reached yet runs its old policies on its session
 and in the RIB. Inside its own step a peer is briefly in a mixed state.
@@ -987,13 +989,15 @@ it reached were touched, and only those are restored.
 
 Elapsed time does not roll
 the change back. Neither the forward walk nor a rollback has a total deadline;
-each is bounded by a two-minute stall timeout, measured from the last RIB
-command that completed, inside the 30-minute settlement budget described in
-[the settlement watchdog guide](../how-to/settlement-watchdog.md). A change
-is rolled back when a peer refuses or fails its step, or when the RIB
-completes no command for two minutes; a rollback that stalls the same way
-fences. The log reports a walk over more than one peer with `authoritative
-policy walk started`, then a progress line about every ten seconds, as units
+each is bounded by a two-minute stall timeout, measured from the last piece of
+work it completed, inside the 30-minute settlement budget described in
+[the settlement watchdog guide](../how-to/settlement-watchdog.md). For the
+forward walk that is one peer's session policy change (or the whole change of
+a peer that is a step of its own), one RIB command, or the Route Refreshes of
+one step; for a rollback it is one RIB command. A change is rolled back when
+a peer refuses or fails its step, or when the walk completes nothing for two
+minutes; a rollback that stalls the same way fences. The log reports a walk
+over more than one peer with `authoritative policy walk started`, then a progress line about every ten seconds, as units
 complete (`authoritative policy walk in progress`, or `paced export-policy
 walk in progress` inside a batch), and the `reload generation phase timing`
 line when it ends; a rollback logs `policy rollback: restoring export
