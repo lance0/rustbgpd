@@ -1809,6 +1809,27 @@ async fn policy_rollback_registers_every_rib_restore_before_refresh_and_lifecycl
             reply.send(Ok(Vec::new())).unwrap();
         }
 
+        // The 160 restores go back newest first in batches of at most 100:
+        // the first is registered ahead of every refresh and lifecycle
+        // command; the restore task sends the second only after the first
+        // reply, so it may arrive between them.
+        let restore_receipts = |batch: &[IpAddr]| {
+            batch
+                .iter()
+                .rev()
+                .map(
+                    |&peer| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
+                        peer: PeerId::from_addr(peer),
+                    },
+                )
+                .collect::<Vec<_>>()
+        };
+        let restore_addrs = |replacements: &[rustbgpd_rib::PeerExportPolicyReplacement]| {
+            replacements
+                .iter()
+                .map(|replacement| replacement.peer.addr())
+                .collect::<Vec<_>>()
+        };
         let RibUpdate::RestorePeerExportPoliciesAuthoritatively {
             replacements,
             reply,
@@ -1816,16 +1837,11 @@ async fn policy_rollback_registers_every_rib_restore_before_refresh_and_lifecycl
         else {
             panic!("expected exact rollback RIB batch");
         };
-        assert_eq!(
-            replacements
-                .iter()
-                .map(|replacement| replacement.peer.addr())
-                .collect::<Vec<_>>(),
-            peers
-        );
-        let restores = peers.iter().rev().copied().collect::<Vec<_>>();
+        assert_eq!(restore_addrs(&replacements), peers[60..]);
         let later_tx = lifecycle_tx.clone();
-        let recreated = PeerId::from_addr(peers[0]);
+        // A peer of the first restore batch, which is registered ahead of
+        // this later lifecycle work.
+        let recreated = PeerId::from_addr(peers[100]);
         let lifecycle_task = tokio::spawn(async move {
             later_tx
                 .send(RibUpdate::PeerDeleted {
@@ -1859,40 +1875,42 @@ async fn policy_rollback_registers_every_rib_restore_before_refresh_and_lifecycl
                 .await
                 .unwrap();
         });
-        reply
-            .send(Ok(restores
-                .iter()
-                .copied()
-                .map(
-                    |peer| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
-                        peer: PeerId::from_addr(peer),
-                    },
-                )
-                .collect()))
-            .unwrap();
+        reply.send(Ok(restore_receipts(&peers[60..]))).unwrap();
 
         let mut refresh_markers = 0;
         let mut saw_delete = false;
         let mut saw_recreate = false;
-        while refresh_markers < peers.len() - 1 || !saw_delete || !saw_recreate {
+        let mut saw_second_batch = false;
+        while refresh_markers < peers.len() - 1 || !saw_delete || !saw_recreate || !saw_second_batch
+        {
             match rib_rx.recv().await.unwrap() {
+                RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                    replacements,
+                    reply,
+                } => {
+                    assert!(!saw_second_batch, "two restore batches, not three");
+                    assert_eq!(restore_addrs(&replacements), peers[..60]);
+                    reply.send(Ok(restore_receipts(&peers[..60]))).unwrap();
+                    saw_second_batch = true;
+                }
                 RibUpdate::QueryLocRibCount { reply } => {
-                    // LOAD-BEARING: moving Route Refresh ahead of aggregate
-                    // registration lets this marker overtake a restore.
+                    // LOAD-BEARING: moving Route Refresh ahead of the
+                    // restore's registration lets a marker overtake the
+                    // first restore batch.
                     refresh_markers += 1;
                     reply.send(0).unwrap();
                 }
                 RibUpdate::PeerDeleted { peer, .. } => {
                     // LOAD-BEARING: removing reverse-order pre-registration
                     // lets this later delete overtake an unregistered restore.
-                    assert_eq!(peer, PeerId::from_addr(peers[0]));
+                    assert_eq!(peer, PeerId::from_addr(peers[100]));
                     saw_delete = true;
                 }
                 RibUpdate::PeerUp {
                     peer, session_id, ..
                 } => {
                     assert!(saw_delete);
-                    assert_eq!(peer, PeerId::from_addr(peers[0]));
+                    assert_eq!(peer, PeerId::from_addr(peers[100]));
                     assert_eq!(session_id, 99);
                     saw_recreate = true;
                 }

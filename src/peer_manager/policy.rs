@@ -198,10 +198,16 @@ struct CapturedResolvedPolicy {
     /// `pending_refresh` armed (`RefreshFailureHandling::BestEffortRearm`) —
     /// that is unfinished convergence debt, not a rejected desired change.
     ///
-    /// It is false only when the forward failed *before* any refresh was
-    /// attempted (session hot-apply bail, RIB failure, a peer that stopped
-    /// reporting Established). `AdjRibIn` provably never left the prior policy
-    /// there, so rollback restores the captured prior pending state
+    /// It is false when no Route Refresh was attempted under the candidate
+    /// import chain: the forward failed before the peer's refresh step
+    /// (session hot-apply bail, RIB failure, a peer that stopped reporting
+    /// Established), or the peer is planned into a batched unit whose
+    /// refreshes had not run. No family was re-requested under the candidate
+    /// chain, so the routes the peer sent before its session took that chain
+    /// are still held as the prior policy accepted them. An UPDATE that
+    /// arrived after the session took the candidate import chain was
+    /// evaluated under it; this flag does not account for those routes.
+    /// Rollback restores the captured prior pending state
     /// (`RefreshFailureHandling::BestEffortRestorePrior`). After such an exact,
     /// fully-unwound rollback, retry intent is structural: the caller's
     /// configuration never advanced, so the next reload re-derives the same
@@ -609,9 +615,10 @@ const RESTORE_PROGRESS_LOG_INTERVAL: std::time::Duration = std::time::Duration::
 /// abandons it: the task owns every send and every reply to the end.
 ///
 /// `replacements` are the captured priors in forward order; the restore runs
-/// newest first. Members returning to the same prior chain go back as one
-/// `RestorePeerExportPoliciesAuthoritatively` batch, which restores shared
-/// cohorts in its one turn and acknowledges each residual member as
+/// newest first. Members returning to the same prior chain go back in
+/// `RestorePeerExportPoliciesAuthoritatively` batches of at most
+/// `PAIR_BATCH_MEMBERS`, as the forward walk sends them; a batch restores
+/// shared cohorts in its turn and acknowledges each residual member as
 /// `Deferred`. Those are then restored by `RestorePacedExportPolicies`
 /// commands before the next batch. Every command is sent only after the
 /// previous reply, so other RIB work runs between them and no turn grows
@@ -674,7 +681,13 @@ async fn restore_export_policies_in_rib(
     // The paced walk's estimate and window carry across batches: each command
     // offers at most twice the members the previous one restored.
     let (mut cost, mut window) = (None, 1_usize);
-    for shape in &shapes {
+    // A prior chain larger than `PAIR_BATCH_MEMBERS` goes back in several
+    // batches, newest members first, so no one restore turn grows with the
+    // pair: the bound the forward walk keeps for the same reason.
+    for shape in shapes
+        .iter()
+        .flat_map(|shape| shape.chunks(PAIR_BATCH_MEMBERS))
+    {
         // The RIB executes a batch in reverse supplied order.
         let batch = shape
             .iter()

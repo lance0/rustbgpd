@@ -5,10 +5,11 @@
   deadline in total, so at a full table a reload changing roughly 80 or more
   peers with per-neighbor export policies was rolled back although every
   step was succeeding, and every peer was then resynced a second time. The
-  two-minute bound is now a stall timeout measured from the last RIB command
-  that completed: a reload that keeps making progress commits, and one is
-  rolled back only when a peer refuses or fails its step or the RIB
-  completes no command for two minutes.
+  two-minute bound is now a stall timeout measured from the walk's last
+  completed piece of work (one peer's session policy change, one RIB command,
+  or the Route Refreshes of one step): a reload that keeps making progress
+  commits, and one is rolled back only when a peer refuses or fails its step
+  or the walk completes nothing for two minutes.
   **Operator-visible:** a large reload of per-neighbor export policies now
   takes as long as its work needs, about one full-table pass per such peer,
   and holds configuration changes and peer lifecycle commands for that time;

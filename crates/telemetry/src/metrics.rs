@@ -345,6 +345,20 @@ const OUTBOUND_PREFIX_LIMIT_ACTOR_OPERATIONS: [&str; 2] = ["apply", "recovery"];
 /// `server` label of `bgp_management_server_crashes_total` for the
 /// metrics/readiness HTTP server.
 const MANAGEMENT_SERVER_METRICS: &str = "metrics";
+/// The same label for the gRPC server.
+const MANAGEMENT_SERVER_GRPC: &str = "grpc";
+/// `task` label of `bgp_rpki_task_restarts_total` for the VRP manager.
+pub const RPKI_TASK_VRP_MANAGER: &str = "vrp_manager";
+/// The same label for the VRP table forwarder.
+pub const RPKI_TASK_VRP_FORWARDER: &str = "vrp_forwarder";
+/// The same label for the ASPA table forwarder.
+pub const RPKI_TASK_ASPA_FORWARDER: &str = "aspa_forwarder";
+/// Every `task` label of `bgp_rpki_task_restarts_total`.
+pub const RPKI_TASKS: [&str; 3] = [
+    RPKI_TASK_VRP_MANAGER,
+    RPKI_TASK_VRP_FORWARDER,
+    RPKI_TASK_ASPA_FORWARDER,
+];
 
 /// Closed labels for RIB ingest components. Distribution can serve readiness
 /// internally; these component durations do not bound readiness latency.
@@ -830,6 +844,9 @@ struct BgpMetricsInner {
     rpki_cache_effective_expire_seconds: IntGaugeVec,
     rpki_cache_end_of_data_ready: IntGaugeVec,
     rpki_cache_connected: IntGaugeVec,
+    rpki_rtr_client_restarts: IntCounterVec,
+    rpki_cache_resync_pending: IntGaugeVec,
+    rpki_task_restarts: IntCounterVec,
     rpki_cache_end_of_data_accepted_at: Arc<Mutex<BTreeMap<String, Instant>>>,
 
     // ── ASPA ───────────────────────────────────────────────────
@@ -2011,12 +2028,13 @@ impl BgpMetrics {
         let management_server_crashes = IntCounterVec::new(
             Opts::new(
                 "bgp_management_server_crashes_total",
-                "Unexpected exits and failed starts of a management server, by server: metrics (the /metrics, /readyz and /livez HTTP server). The daemon restarts the server in place unless it is shutting down.",
+                "Unexpected exits and failed starts of a management server, by server: metrics (the /metrics, /readyz and /livez HTTP server) or grpc (the gRPC server, all listeners). The daemon restarts the server in place unless it is shutting down.",
             ),
             &["server"],
         )
         .expect("valid metric definition");
         management_server_crashes.with_label_values(&[MANAGEMENT_SERVER_METRICS]);
+        management_server_crashes.with_label_values(&[MANAGEMENT_SERVER_GRPC]);
 
         let rib_outbound_prefix_limit_actor_duration_seconds = HistogramVec::new(
             HistogramOpts::new(
@@ -2073,7 +2091,7 @@ impl BgpMetrics {
         let rib_readiness_query_wait_seconds = HistogramVec::new(
             HistogramOpts::new(
                 "bgp_rib_readiness_query_wait_seconds",
-                "Wall-clock delay from admission to the dedicated RIB readiness lane until actor service, partitioned by the serving seam: `actor_loop` includes ordinary drains and in-pass ingest servicing; `policy_transition_fence` is the synchronous replacement checkpoint; `selection_release` is the synchronous selection-deferral release checkpoint; `peer_teardown` collects source keys and recomputes/distributes their removal. Observed even if the caller has timed out, but not if canceled before admission or never served. Excludes admission wait, prior peer-manager work, and reply delivery.",
+                "Wall-clock delay from admission to the dedicated RIB readiness lane until actor service, partitioned by the serving seam: `actor_loop` includes ordinary drains, in-pass ingest servicing, and the registration, regroup and outbound-teardown units that run with no policy transition; `policy_transition_fence` is the synchronous replacement checkpoint; `selection_release` is the synchronous selection-deferral release checkpoint; `peer_teardown` collects source keys and recomputes/distributes their removal. Observed even if the caller has timed out, but not if canceled before admission or never served. Excludes admission wait, prior peer-manager work, and reply delivery.",
             )
             .buckets(RIB_ACTOR_DURATION_BUCKETS.to_vec()),
             &["seam"],
@@ -2622,6 +2640,36 @@ impl BgpMetrics {
             &["cache"],
         )
         .expect("valid metric definition");
+
+        let rpki_rtr_client_restarts = IntCounterVec::new(
+            Opts::new(
+                "bgp_rpki_rtr_client_restarts_total",
+                "Times the RTR client of this configured cache panicked and restarted its session; each restart is handled as an ordinary session loss: the contribution is retained until the effective expire and the client reconnects after the retry interval with a Reset Query",
+            ),
+            &["cache"],
+        )
+        .expect("valid metric definition");
+
+        let rpki_cache_resync_pending = IntGaugeVec::new(
+            Opts::new(
+                "bgp_rpki_cache_resync_pending",
+                "Whether the VRP manager is waiting for a full table from this configured cache after losing one of its updates to a recovered panic (1 waiting, 0 not); while 1 the cache's last applied VRPs and ASPAs stay in use, unrefreshed, until that data's own expiry, and its serial deltas are dropped",
+            ),
+            &["cache"],
+        )
+        .expect("valid metric definition");
+
+        let rpki_task_restarts = IntCounterVec::new(
+            Opts::new(
+                "bgp_rpki_task_restarts_total",
+                "Panics the RPKI VRP manager (vrp_manager) or a validation-table forwarder (vrp_forwarder, aspa_forwarder) recovered from in place; BGP sessions are not affected and the validation tables in use are kept",
+            ),
+            &["task"],
+        )
+        .expect("valid metric definition");
+        for task in RPKI_TASKS {
+            rpki_task_restarts.with_label_values(&[task]);
+        }
 
         let rpki_cache_end_of_data_accepted_at = Arc::new(Mutex::new(BTreeMap::new()));
 
@@ -3789,6 +3837,15 @@ impl BgpMetrics {
             .register(Box::new(rpki_cache_connected.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(rpki_rtr_client_restarts.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(rpki_cache_resync_pending.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(rpki_task_restarts.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(RpkiCacheEndOfDataAgeCollector::new(Arc::clone(
                 &rpki_cache_end_of_data_accepted_at,
             ))))
@@ -4187,6 +4244,9 @@ impl BgpMetrics {
             rpki_cache_effective_expire_seconds,
             rpki_cache_end_of_data_ready,
             rpki_cache_connected,
+            rpki_rtr_client_restarts,
+            rpki_cache_resync_pending,
+            rpki_task_restarts,
             rpki_cache_end_of_data_accepted_at,
             aspa_records,
             validation_import_refreshes,
@@ -6163,6 +6223,15 @@ impl BgpMetrics {
             .inc();
     }
 
+    /// Record one crash of the gRPC server: an unexpected exit of a run, or a
+    /// restart whose listeners could not start.
+    pub fn record_grpc_server_crash(&self) {
+        self.0
+            .management_server_crashes
+            .with_label_values(&[MANAGEMENT_SERVER_GRPC])
+            .inc();
+    }
+
     /// Publish whether the latest RIB sample was a stalled readiness answer.
     pub fn set_rib_stalled(&self, stalled: bool) {
         self.0.rib_stalled.set(i64::from(stalled));
@@ -6702,6 +6771,35 @@ impl BgpMetrics {
             .rpki_cache_connected
             .with_label_values(&[cache])
             .set(i64::from(connected));
+    }
+
+    /// Create one cache's RTR client restart counter at zero, so the series
+    /// exists before the first restart.
+    pub fn seed_rpki_rtr_client_restarts(&self, cache: &str) {
+        let _ = self.0.rpki_rtr_client_restarts.with_label_values(&[cache]);
+    }
+
+    /// Count one restart of a cache's RTR client after a panic.
+    pub fn record_rpki_rtr_client_restart(&self, cache: &str) {
+        self.0
+            .rpki_rtr_client_restarts
+            .with_label_values(&[cache])
+            .inc();
+    }
+
+    /// Set whether the VRP manager is waiting for a full table from one
+    /// configured cache after losing one of its updates.
+    pub fn set_rpki_cache_resync_pending(&self, cache: &str, pending: bool) {
+        self.0
+            .rpki_cache_resync_pending
+            .with_label_values(&[cache])
+            .set(i64::from(pending));
+    }
+
+    /// Count one panic an RPKI task recovered from. `task` is one of
+    /// [`RPKI_TASKS`].
+    pub fn record_rpki_task_restart(&self, task: &'static str) {
+        self.0.rpki_task_restarts.with_label_values(&[task]).inc();
     }
 
     /// Record the monotonic instant of one cache's last accepted End of Data
@@ -8714,6 +8812,37 @@ mod tests {
     }
 
     #[test]
+    fn rpki_task_restarts_are_seeded_at_zero_and_resync_pending_is_per_cache() {
+        let m = BgpMetrics::new();
+        let seeded = gather_text(&m);
+        for task in RPKI_TASKS {
+            let line = format!("bgp_rpki_task_restarts_total{{task=\"{task}\"}} 0");
+            assert!(seeded.contains(&line), "missing {line}");
+        }
+        m.record_rpki_task_restart(RPKI_TASK_VRP_MANAGER);
+        m.set_rpki_cache_resync_pending("192.0.2.10:3323", true);
+        m.set_rpki_cache_resync_pending("192.0.2.11:3323", false);
+        let text = gather_text(&m);
+        assert!(text.contains("bgp_rpki_task_restarts_total{task=\"vrp_manager\"} 1"));
+        assert!(text.contains("bgp_rpki_task_restarts_total{task=\"vrp_forwarder\"} 0"));
+        assert!(text.contains("bgp_rpki_cache_resync_pending{cache=\"192.0.2.10:3323\"} 1"));
+        assert!(text.contains("bgp_rpki_cache_resync_pending{cache=\"192.0.2.11:3323\"} 0"));
+    }
+
+    #[test]
+    fn rpki_rtr_client_restarts_are_seeded_at_zero_and_counted_per_cache() {
+        let m = BgpMetrics::new();
+        m.seed_rpki_rtr_client_restarts("192.0.2.10:3323");
+        m.seed_rpki_rtr_client_restarts("192.0.2.11:3323");
+        let seeded = gather_text(&m);
+        assert!(seeded.contains("bgp_rpki_rtr_client_restarts_total{cache=\"192.0.2.10:3323\"} 0"));
+        m.record_rpki_rtr_client_restart("192.0.2.10:3323");
+        let text = gather_text(&m);
+        assert!(text.contains("bgp_rpki_rtr_client_restarts_total{cache=\"192.0.2.10:3323\"} 1"));
+        assert!(text.contains("bgp_rpki_rtr_client_restarts_total{cache=\"192.0.2.11:3323\"} 0"));
+    }
+
+    #[test]
     fn rpki_cache_end_of_data_age_advances_resets_and_is_removed() {
         const CACHE: &str = "192.0.2.10:3323";
         let age = |m: &BgpMetrics| -> Option<i64> {
@@ -9458,9 +9587,14 @@ mod tests {
     fn management_server_crashes_export_at_zero_and_count() {
         let m = BgpMetrics::new();
         let row = "\nbgp_management_server_crashes_total{server=\"metrics\"} ";
+        let grpc = "\nbgp_management_server_crashes_total{server=\"grpc\"} ";
         assert!(gather_text(&m).contains(&format!("{row}0\n")));
+        assert!(gather_text(&m).contains(&format!("{grpc}0\n")));
         m.record_metrics_server_crash();
         assert!(gather_text(&m).contains(&format!("{row}1\n")));
+        assert!(gather_text(&m).contains(&format!("{grpc}0\n")));
+        m.record_grpc_server_crash();
+        assert!(gather_text(&m).contains(&format!("{grpc}1\n")));
     }
 
     #[test]

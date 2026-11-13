@@ -883,7 +883,6 @@ fn operations_key_log_table_covers_supervised_failures() {
         .0;
 
     for (handle, diagnostic) in [
-        ("grpc_handle", "gRPC server exited unexpectedly"),
         ("rib_handle", "RIB manager exited unexpectedly"),
         (
             "bgp_listener_handle",
@@ -934,6 +933,29 @@ fn operations_key_log_table_covers_supervised_failures() {
         );
     }
 
+    // The gRPC server is restarted in place: its supervisor ending may not
+    // enter coordinated shutdown, and holds readiness red.
+    let grpc_arm = production
+        .split_once("            result = &mut grpc_handle, if !grpc_exited => {")
+        .expect("the gRPC supervisor arm must stay guarded against a second poll")
+        .1
+        .split_once("\n            }")
+        .unwrap()
+        .0;
+    assert!(!grpc_arm.contains("component_failed"), "{grpc_arm}");
+    assert!(!grpc_arm.contains("break"), "{grpc_arm}");
+    assert!(grpc_arm.contains("daemon_gate.set_grpc_server_down(true);"));
+    for row in [
+        "| `gRPC server exited unexpectedly; restarting it in place` | ERROR | ",
+        "| `gRPC supervisor exited unexpectedly; the gRPC API stays down until the daemon restarts` | ERROR | ",
+    ] {
+        assert!(
+            key_log_table.lines().any(|line| line.starts_with(row)),
+            "missing operations row {row:?}"
+        );
+    }
+    assert!(!key_log_table.contains("| `gRPC server exited unexpectedly` |"));
+
     // The metrics/readiness server is restarted in place: neither it nor its
     // supervisor ending may enter coordinated shutdown.
     let metrics_arm = production
@@ -967,33 +989,250 @@ fn operations_key_log_table_covers_supervised_failures() {
     assert!(key_log_table.lines().any(|line| line == expected_row));
 }
 
+/// Port of the first `127.0.0.1` listener the daemon logged on a line that
+/// `wanted` accepts.
+fn wait_for_logged_port(daemon: &mut Daemon, wanted: impl Fn(&str) -> bool) -> u16 {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while Instant::now() < deadline {
+        let logs = daemon.logs();
+        if let Some(port) = logs
+            .lines()
+            .filter(|line| wanted(line))
+            .filter_map(|line| {
+                let rest = line.split(r#""addr":"127.0.0.1:"#).nth(1)?;
+                rest.split('"').next()?.parse().ok()
+            })
+            .find(|port| *port != 0)
+        {
+            return port;
+        }
+        if let Ok(Some(status)) = daemon.child.try_wait() {
+            panic!("rustbgpd exited before binding: {status}\n{logs}");
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("rustbgpd never logged the listener\n{}", daemon.logs());
+}
+
+/// Accept the daemon's next RTR connection, failing if the daemon exits.
+fn accept_rtr(listener: &TcpListener, daemon: &mut Daemon) -> TcpStream {
+    listener.set_nonblocking(true).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(30)))
+                    .unwrap();
+                return stream;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => panic!("accept RTR connection: {error}"),
+        }
+        if let Ok(Some(status)) = daemon.child.try_wait() {
+            panic!(
+                "rustbgpd exited instead of connecting to the cache: {status}\n{}",
+                daemon.logs()
+            );
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!("no RTR connection from rustbgpd\n{}", daemon.logs());
+}
+
+fn read_rtr_pdu(stream: &mut TcpStream) -> rustbgpd_rpki::rtr_codec::RtrPdu {
+    let mut frame = vec![0; 8];
+    stream.read_exact(&mut frame).expect("read RTR header");
+    let total = u32::from_be_bytes([frame[4], frame[5], frame[6], frame[7]]) as usize;
+    frame.resize(total, 0);
+    stream.read_exact(&mut frame[8..]).expect("read RTR body");
+    rustbgpd_rpki::rtr_codec::RtrPdu::decode(&frame)
+        .expect("decode RTR PDU")
+        .0
+}
+
+/// Answer a query with a one-VRP full table at `serial`.
+fn write_rtr_full_table(stream: &mut TcpStream, serial: u32) {
+    use rustbgpd_rpki::rtr_codec::{RTR_VERSION_2, RtrPdu};
+    let mut frame = Vec::new();
+    for pdu in [
+        RtrPdu::CacheResponse { session_id: 7 },
+        RtrPdu::Ipv4Prefix {
+            flags: 1,
+            prefix_len: 24,
+            max_len: 24,
+            prefix: "203.0.113.0".parse().unwrap(),
+            asn: 65001,
+        },
+        RtrPdu::EndOfData {
+            session_id: 7,
+            serial,
+            refresh: 3600,
+            retry: 1,
+            expire: 7200,
+        },
+    ] {
+        pdu.encode_with_version(&mut frame, RTR_VERSION_2).unwrap();
+    }
+    stream.write_all(&frame).expect("write RTR full table");
+}
+
+/// The peer has neither closed the connection nor sent anything for a
+/// moment. For BGP, anything pending must not be a NOTIFICATION.
+fn assert_connection_stays_open(stream: &mut TcpStream, bgp: bool, logs: &str) {
+    stream
+        .set_read_timeout(Some(Duration::from_millis(300)))
+        .unwrap();
+    loop {
+        match stream.peek(&mut [0; 1]) {
+            Ok(0) => panic!("rustbgpd closed the connection\n{logs}"),
+            Ok(_) if bgp => {
+                let message = read_bgp_message(stream);
+                assert!(
+                    !matches!(message, Message::Notification(_)),
+                    "unexpected {message:?}\n{logs}"
+                );
+            }
+            Ok(_) => panic!("unexpected data on an idle RTR session\n{logs}"),
+            Err(error) => {
+                assert!(
+                    matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ),
+                    "connection failed: {error}\n{logs}"
+                );
+                return;
+            }
+        }
+    }
+}
+
+fn scrape_metrics(port: u16) -> String {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect metrics");
+    stream
+        .write_all(b"GET /metrics HTTP/1.0\r\nHost: metrics\r\nConnection: close\r\n\r\n")
+        .expect("write metrics request");
+    let mut body = String::new();
+    stream.read_to_string(&mut body).expect("read metrics");
+    body
+}
+
+/// A panic in one cache's RTR client restarts that client's session and
+/// nothing else: the daemon, an Established BGP session and the other
+/// cache's RTR session carry on, the restart is counted for that cache only,
+/// and the client comes back with a Reset Query. An ordinary reconnect would
+/// have resumed with a Serial Query.
 #[test]
-fn rpki_client_panic_uses_common_shutdown_and_exits_nonzero() {
+fn rpki_client_panic_restarts_that_client_and_leaves_bgp_and_other_caches_up() {
+    use rustbgpd_rpki::rtr_codec::RtrPdu;
+
     let temp = private_tempdir();
-    let config_path = write_rpki_fault_config(temp.path());
+    let panicking_cache = TcpListener::bind("127.0.0.1:0").expect("bind first RTR cache");
+    let other_cache = TcpListener::bind("127.0.0.1:0").expect("bind second RTR cache");
+    let panicking_addr = panicking_cache.local_addr().unwrap();
+    let other_addr = other_cache.local_addr().unwrap();
+    let config_path =
+        write_config_with_metrics(temp.path(), DAEMON_CHOOSES, DAEMON_CHOOSES, Some(0));
+    let config = std::fs::read_to_string(&config_path)
+        .expect("read test config")
+        .replace(
+            "listen_port = 0",
+            "listen_port = 0\nlisten_addresses = [\"127.0.0.1\"]",
+        );
+    std::fs::write(
+        &config_path,
+        format!(
+            "{config}\n[[neighbors]]\naddress = \"127.0.0.1\"\nremote_asn = 65020\n\
+             graceful_restart = false\n[rpki]\n[[rpki.cache_servers]]\n\
+             address = \"{panicking_addr}\"\nretry_interval = 1\n[[rpki.cache_servers]]\n\
+             address = \"{other_addr}\"\n"
+        ),
+    )
+    .expect("write RTR restart config");
     let mut daemon = spawn_daemon_with_env(
         temp.path(),
         &config_path,
         Some(("RUSTBGPD_TEST_RPKI_TASK_EXIT", "rtr_client_panic")),
     );
-    let status = daemon.wait_within(Duration::from_secs(30));
-    let logs = daemon.logs();
 
-    assert_eq!(
-        status.code(),
-        Some(1),
-        "RPKI task panic must exit 1\n{logs}"
-    );
+    // Both clients synchronize.
+    let mut first_session = accept_rtr(&panicking_cache, &mut daemon);
+    assert_eq!(read_rtr_pdu(&mut first_session), RtrPdu::ResetQuery);
+    write_rtr_full_table(&mut first_session, 100);
+    let mut other_session = accept_rtr(&other_cache, &mut daemon);
+    assert_eq!(read_rtr_pdu(&mut other_session), RtrPdu::ResetQuery);
+    write_rtr_full_table(&mut other_session, 100);
+
+    // A BGP session reaches Established.
+    let is_metrics = |line: &str| line.contains("metrics server listening");
+    let metrics_port = wait_for_logged_port(&mut daemon, is_metrics);
+    let bgp_port = wait_for_logged_port(&mut daemon, |line| !is_metrics(line));
+    let mut bgp = TcpStream::connect(("127.0.0.1", bgp_port)).expect("connect BGP peer");
+    bgp.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    let open = Message::Open(OpenMessage {
+        version: 4,
+        my_as: 65020,
+        hold_time: 90,
+        bgp_identifier: "10.0.0.2".parse().unwrap(),
+        capabilities: vec![],
+    });
+    bgp.write_all(&encode_message(&open).expect("encode OPEN"))
+        .expect("write OPEN");
+    assert!(matches!(read_bgp_message(&mut bgp), Message::Open(_)));
+    bgp.write_all(&encode_message(&Message::Keepalive).unwrap())
+        .expect("write KEEPALIVE");
+    while !matches!(read_bgp_message(&mut bgp), Message::Keepalive) {}
+
+    let cache_label = |addr: std::net::SocketAddr| format!("{{cache=\"{addr}\"}}");
+    let before = scrape_metrics(metrics_port);
+    for addr in [panicking_addr, other_addr] {
+        let seeded = format!("bgp_rpki_rtr_client_restarts_total{} 0", cache_label(addr));
+        assert!(before.contains(&seeded), "missing {seeded}\n{before}");
+    }
+
+    // The first cache drops its session; the client's next connection
+    // attempt panics, and the attempt after that reaches the cache.
+    drop(first_session);
+    let mut second_session = accept_rtr(&panicking_cache, &mut daemon);
+    assert_eq!(read_rtr_pdu(&mut second_session), RtrPdu::ResetQuery);
+    write_rtr_full_table(&mut second_session, 101);
+
+    let logs = daemon.logs();
     for message in [
         "injected RTR client task panic",
-        "RPKI subsystem task exited unexpectedly",
-        "initiating shutdown due to RPKI subsystem task failure",
-        "initiating coordinated shutdown",
-        "rustbgpd exiting",
+        "RTR client panicked; restarting its session with the held data retained",
     ] {
         assert!(logs.contains(message), "missing {message:?}\n{logs}");
     }
-    assert_one_rpki_failure_receipt(&logs, "RtrClient");
+    for absent in [
+        "RPKI subsystem task exited unexpectedly",
+        "initiating coordinated shutdown",
+    ] {
+        assert!(!logs.contains(absent), "unexpected {absent:?}\n{logs}");
+    }
+    assert_connection_stays_open(&mut bgp, true, &logs);
+    assert_connection_stays_open(&mut other_session, false, &logs);
+    assert!(
+        matches!(daemon.child.try_wait(), Ok(None)),
+        "rustbgpd must keep running\n{logs}"
+    );
+
+    let after = scrape_metrics(metrics_port);
+    for expected in [
+        format!(
+            "bgp_rpki_rtr_client_restarts_total{} 1",
+            cache_label(panicking_addr)
+        ),
+        format!(
+            "bgp_rpki_rtr_client_restarts_total{} 0",
+            cache_label(other_addr)
+        ),
+        format!("bgp_rpki_cache_connected{} 1", cache_label(other_addr)),
+    ] {
+        assert!(after.contains(&expected), "missing {expected}\n{after}");
+    }
 
     let reports = std::fs::read_dir(temp.path().join("runtime/crash"))
         .expect("panic report directory")
@@ -1002,6 +1241,219 @@ fn rpki_client_panic_uses_common_shutdown_and_exits_nonzero() {
         .collect::<Vec<_>>();
     assert_eq!(reports.len(), 1, "one durable panic report: {reports:?}");
     assert!(reports[0].contains("injected RTR client task panic"));
+}
+
+/// A daemon with `fault` injected into its RPKI subsystem, one synchronized
+/// RTR session per cache and an Established BGP session.
+struct RpkiFaultDaemon {
+    _temp: tempfile::TempDir,
+    daemon: Daemon,
+    caches: Vec<std::net::SocketAddr>,
+    rtr: Vec<TcpStream>,
+    bgp: TcpStream,
+    metrics_port: u16,
+}
+
+impl RpkiFaultDaemon {
+    /// The caches synchronize in order, each with the one-VRP table at
+    /// serial 100 whose End of Data sets a 1 s retry interval.
+    fn start(fault: &str, caches: usize) -> Self {
+        use rustbgpd_rpki::rtr_codec::RtrPdu;
+
+        let temp = private_tempdir();
+        let listeners: Vec<_> = (0..caches)
+            .map(|_| TcpListener::bind("127.0.0.1:0").expect("bind RTR cache"))
+            .collect();
+        let caches: Vec<_> = listeners
+            .iter()
+            .map(|listener| listener.local_addr().unwrap())
+            .collect();
+        let config_path =
+            write_config_with_metrics(temp.path(), DAEMON_CHOOSES, DAEMON_CHOOSES, Some(0));
+        let mut config = std::fs::read_to_string(&config_path)
+            .expect("read test config")
+            .replace(
+                "listen_port = 0",
+                "listen_port = 0\nlisten_addresses = [\"127.0.0.1\"]",
+            );
+        config.push_str(
+            "\n[[neighbors]]\naddress = \"127.0.0.1\"\nremote_asn = 65020\n\
+             graceful_restart = false\n[rpki]\n",
+        );
+        for cache in &caches {
+            config.push_str(&format!("[[rpki.cache_servers]]\naddress = \"{cache}\"\n"));
+        }
+        std::fs::write(&config_path, config).expect("write RPKI fault config");
+        let mut daemon = spawn_daemon_with_env(
+            temp.path(),
+            &config_path,
+            Some(("RUSTBGPD_TEST_RPKI_TASK_EXIT", fault)),
+        );
+        let is_metrics = |line: &str| line.contains("metrics server listening");
+        let metrics_port = wait_for_logged_port(&mut daemon, is_metrics);
+        // One cache at a time, each applied before the next answers, so the
+        // manager accepts their End of Data in this order whatever the load.
+        let rtr = listeners
+            .iter()
+            .zip(&caches)
+            .map(|(listener, cache)| {
+                let mut session = accept_rtr(listener, &mut daemon);
+                assert_eq!(read_rtr_pdu(&mut session), RtrPdu::ResetQuery);
+                write_rtr_full_table(&mut session, 100);
+                let ready = format!("bgp_rpki_cache_end_of_data_ready{{cache=\"{cache}\"}} 1");
+                wait_for_metric_row(&mut daemon, metrics_port, &ready);
+                session
+            })
+            .collect();
+        let bgp_port = wait_for_logged_port(&mut daemon, |line| !is_metrics(line));
+        Self {
+            _temp: temp,
+            daemon,
+            caches,
+            rtr,
+            bgp: establish_bgp(bgp_port),
+            metrics_port,
+        }
+    }
+
+    fn wait_for_metric(&mut self, row: &str) -> String {
+        wait_for_metric_row(&mut self.daemon, self.metrics_port, row)
+    }
+
+    fn cache_row(&self, metric: &str, cache: usize, value: u8) -> String {
+        format!("{metric}{{cache=\"{}\"}} {value}", self.caches[cache])
+    }
+
+    /// The daemon runs, the BGP session is up and nothing fatal was logged.
+    fn assert_routing_untouched(&mut self) {
+        let logs = self.daemon.logs();
+        for absent in [
+            "RPKI subsystem task exited unexpectedly",
+            "initiating coordinated shutdown",
+        ] {
+            assert!(!logs.contains(absent), "unexpected {absent:?}\n{logs}");
+        }
+        assert_connection_stays_open(&mut self.bgp, true, &logs);
+        assert!(
+            matches!(self.daemon.child.try_wait(), Ok(None)),
+            "rustbgpd must keep running\n{logs}"
+        );
+    }
+
+    /// SIGTERM ends the daemon with exit code 0.
+    fn assert_clean_stop(mut self) {
+        let sigterm = Command::new("kill")
+            .args(["-TERM", &self.daemon.child.id().to_string()])
+            .status()
+            .expect("send SIGTERM");
+        assert!(sigterm.success(), "kill -TERM failed: {sigterm}");
+        let status = self.daemon.wait_within(Duration::from_secs(120));
+        let logs = self.daemon.logs();
+        assert_eq!(status.code(), Some(0), "SIGTERM must exit 0\n{logs}");
+    }
+}
+
+/// A panic raised while the VRP manager handles one cache's update, here
+/// in its End of Data observer, ends neither the daemon nor BGP nor either
+/// RTR session. The update was already applied, so the tables stay, no cache
+/// becomes resync pending and no Reset Query is sent; the panic is counted.
+/// The crate's tests cover a panic before the update is applied, which
+/// leaves the previous data in use and asks that cache for a full table.
+#[test]
+fn rpki_manager_update_panic_keeps_bgp_up_and_the_tables_in_use() {
+    // The second accepted End of Data, the second cache's, panics.
+    let mut f = RpkiFaultDaemon::start("vrp_manager_update_panic", 2);
+    let after = f.wait_for_metric("bgp_rpki_task_restarts_total{task=\"vrp_manager\"} 1");
+    for expected in [
+        f.cache_row("bgp_rpki_cache_resync_pending", 0, 0),
+        f.cache_row("bgp_rpki_cache_resync_pending", 1, 0),
+        f.cache_row("bgp_rpki_cache_end_of_data_ready", 1, 1),
+        "bgp_rpki_vrp_count{afi=\"ipv4\"} 1".to_string(),
+        "bgp_rpki_task_restarts_total{task=\"vrp_forwarder\"} 0".to_string(),
+        "bgp_rpki_task_restarts_total{task=\"aspa_forwarder\"} 0".to_string(),
+    ] {
+        assert!(after.contains(&expected), "missing {expected}\n{after}");
+    }
+
+    let logs = f.daemon.logs();
+    for message in [
+        "injected VRP manager update panic",
+        "VRP manager panicked handling a message; continuing with its state as before it",
+    ] {
+        assert!(logs.contains(message), "missing {message:?}\n{logs}");
+    }
+    f.assert_routing_untouched();
+    for session in &mut f.rtr {
+        assert_connection_stays_open(session, false, &logs);
+    }
+    f.assert_clean_stop();
+}
+
+/// A panic in the VRP table forwarder ends neither the daemon nor BGP nor
+/// the RTR session: the forwarder forwards the table it was handling again,
+/// so the RIB ends up with both VRPs.
+#[test]
+fn rpki_forwarder_panic_keeps_bgp_up_and_forwards_the_table_again() {
+    use rustbgpd_rpki::rtr_codec::{RTR_VERSION_2, RtrPdu};
+
+    // The second table the forwarder handles panics it.
+    let mut f = RpkiFaultDaemon::start("vrp_forwarder_panic", 1);
+    f.wait_for_metric("bgp_rpki_vrp_count{afi=\"ipv4\"} 1");
+    let mut frame = Vec::new();
+    RtrPdu::SerialNotify {
+        session_id: 7,
+        serial: 101,
+    }
+    .encode_with_version(&mut frame, RTR_VERSION_2)
+    .unwrap();
+    f.rtr[0].write_all(&frame).expect("write Serial Notify");
+    assert_eq!(
+        read_rtr_pdu(&mut f.rtr[0]),
+        RtrPdu::SerialQuery {
+            session_id: 7,
+            serial: 100
+        }
+    );
+    frame.clear();
+    for pdu in [
+        RtrPdu::CacheResponse { session_id: 7 },
+        RtrPdu::Ipv4Prefix {
+            flags: 1,
+            prefix_len: 24,
+            max_len: 24,
+            prefix: "198.51.100.0".parse().unwrap(),
+            asn: 65001,
+        },
+        RtrPdu::EndOfData {
+            session_id: 7,
+            serial: 101,
+            refresh: 3600,
+            retry: 1,
+            expire: 7200,
+        },
+    ] {
+        pdu.encode_with_version(&mut frame, RTR_VERSION_2).unwrap();
+    }
+    f.rtr[0].write_all(&frame).expect("write RTR delta");
+
+    f.wait_for_metric("bgp_rpki_vrp_count{afi=\"ipv4\"} 2");
+    let after = f.wait_for_metric("bgp_rpki_task_restarts_total{task=\"vrp_forwarder\"} 1");
+    for expected in [
+        f.cache_row("bgp_rpki_cache_resync_pending", 0, 0),
+        "bgp_rpki_task_restarts_total{task=\"vrp_manager\"} 0".to_string(),
+    ] {
+        assert!(after.contains(&expected), "missing {expected}\n{after}");
+    }
+    let logs = f.daemon.logs();
+    for message in [
+        "injected VRP forwarder panic",
+        "validation-table forwarder panicked; forwarding the latest table again in full",
+    ] {
+        assert!(logs.contains(message), "missing {message:?}\n{logs}");
+    }
+    f.assert_routing_untouched();
+    assert_connection_stays_open(&mut f.rtr[0], false, &logs);
+    f.assert_clean_stop();
 }
 
 #[test]
@@ -1017,7 +1469,13 @@ fn rpki_manager_panic_is_attributed_and_exits_nonzero() {
     let logs = daemon.logs();
     assert_eq!(status.code(), Some(1), "manager panic must exit 1\n{logs}");
     assert_one_rpki_failure_receipt(&logs, "VrpManager");
-    assert!(logs.contains("initiating coordinated shutdown"), "{logs}");
+    for message in [
+        "initiating shutdown due to RPKI subsystem task failure",
+        "initiating coordinated shutdown",
+        "rustbgpd exiting",
+    ] {
+        assert!(logs.contains(message), "missing {message:?}\n{logs}");
+    }
 
     let reports = std::fs::read_dir(temp.path().join("runtime/crash"))
         .expect("panic report directory")
@@ -1298,10 +1756,31 @@ fn shutdown_rpc_with_active_watch_cleans_up_uds() {
     );
 }
 
+/// The TCP port in the most recent `bound_addr` the daemon logged. A
+/// restarted gRPC server binds its configured address again, and these tests
+/// configure port 0.
+fn latest_bound_grpc_port(daemon: &Daemon) -> u16 {
+    daemon
+        .logs()
+        .rsplit("\"bound_addr\":\"")
+        .next()
+        .and_then(|rest| rest.split('"').next())
+        .and_then(|addr| addr.rsplit(':').next()?.parse().ok())
+        .expect("a logged gRPC TCP bound_addr")
+}
+
+/// A gRPC listener whose socket becomes unusable ends the gRPC server, and
+/// the daemon restarts that server in place instead of shutting down. An open
+/// watch stream holds the failed listener for its whole 1 s drain grace. The
+/// BGP session established before the fault stays up until the SIGTERM sent
+/// at the end; the crash is counted, `/readyz` answers 200 again, and both
+/// the UDS and the re-bound TCP listener serve.
 #[test]
-fn grpc_listener_accept_end_with_active_watch_fail_stops_within_grace() {
+fn grpc_listener_exit_restarts_in_place_and_keeps_bgp_sessions_established() {
     let temp = private_tempdir();
-    let config_path = write_config(temp.path(), DAEMON_CHOOSES, DAEMON_CHOOSES);
+    let config_path =
+        write_config_with_metrics(temp.path(), DAEMON_CHOOSES, DAEMON_CHOOSES, Some(0));
+    add_loopback_neighbor(&config_path);
     // Connection 1 is the watch; connection 2 makes the listener unusable.
     let mut daemon = spawn_daemon_with_env(
         temp.path(),
@@ -1319,14 +1798,26 @@ fn grpc_listener_accept_end_with_active_watch_fail_stops_within_grace() {
         );
         thread::sleep(Duration::from_millis(100));
     }
+    let metrics_port = wait_for_logged_port_with_message(&mut daemon, "metrics server listening");
+    let mut peer = establish_bgp(wait_for_logged_port_with_message(
+        &mut daemon,
+        "BGP listener bound",
+    ));
+    let established = "bgp_peer_session_established{interface=\"\",peer=\"127.0.0.1\"} 1\n";
+    let before = wait_for_metric_row(&mut daemon, metrics_port, established);
+    assert!(
+        before.contains("bgp_management_server_crashes_total{server=\"grpc\"} 0\n"),
+        "the gRPC crash counter must be exported at 0\n{before}"
+    );
 
+    let token_file = temp.path().join("grpc-token");
     let tcp_addr = format!("http://127.0.0.1:{grpc_port}");
     let watch_stdout = temp.path().join("rbgp-watch.stdout.log");
     let watch_stderr = temp.path().join("rbgp-watch.stderr.log");
     let mut watcher = Daemon {
         child: rbgp_command(&tcp_addr)
             .arg("--token-file")
-            .arg(temp.path().join("grpc-token"))
+            .arg(&token_file)
             .arg("watch")
             .stdout(Stdio::from(
                 std::fs::File::create(&watch_stdout).expect("watcher stdout log"),
@@ -1341,32 +1832,88 @@ fn grpc_listener_accept_end_with_active_watch_fail_stops_within_grace() {
     };
     let uds_addr = format!("unix://{}", socket_path.display());
     wait_for_route_watcher_subscriber(&mut daemon, &mut watcher, &uds_addr);
-
     assert!(
         matches!(watcher.child.try_wait(), Ok(None)),
         "{}",
         watcher.logs()
     );
+
     let trigger = TcpStream::connect(("127.0.0.1", grpc_port)).expect("second gRPC TCP connection");
-    let triggered = Instant::now();
-    let status = daemon.wait_within(Duration::from_secs(30));
-    let elapsed = triggered.elapsed();
+
+    // The metrics/readiness server is a separate server and reports the crash.
+    let after = wait_for_metric_row(
+        &mut daemon,
+        metrics_port,
+        "bgp_management_server_crashes_total{server=\"grpc\"} 1\n",
+    );
     drop(trigger);
+    assert!(
+        after.contains(established),
+        "the session must stay Established\n{after}"
+    );
+    // Readiness is red from the exit until the restarted listeners are up.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let readyz = http_get(metrics_port, "/readyz").expect("/readyz after the gRPC crash");
+        if readyz.starts_with("HTTP/1.1 200 OK") {
+            break;
+        }
+        assert!(
+            readyz.ends_with("not ready: gRPC server is restarting\n"),
+            "{readyz}"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "/readyz stayed red\n{}",
+            daemon.logs()
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
     let logs = daemon.logs();
     for message in [
         "injected gRPC TCP listener shutdown",
         "listener socket unusable; stopping its accept loop",
         "stopped accepting and its open connections did not close within 1000 ms",
         "gRPC listener exited unexpectedly",
-        "gRPC server exited unexpectedly",
-        "rustbgpd exiting",
+        "gRPC server exited unexpectedly; restarting it in place",
+        "gRPC server restarted",
     ] {
         assert!(logs.contains(message), "missing {message:?}\n{logs}");
     }
-    assert_eq!(status.code(), Some(1), "{logs}");
+    assert!(!logs.contains("initiating coordinated shutdown"), "{logs}");
+
+    // Both listeners serve again: the UDS at its path, TCP at the address
+    // the restart bound.
+    rbgp_ok(&daemon, &uds_addr, &["health"]);
+    let restarted_tcp = format!("http://127.0.0.1:{}", latest_bound_grpc_port(&daemon));
+    rbgp_ok(
+        &daemon,
+        &restarted_tcp,
+        &["--token-file", token_file.to_str().unwrap(), "global"],
+    );
+
+    let sigterm = Command::new("kill")
+        .args(["-TERM", &daemon.child.id().to_string()])
+        .status()
+        .expect("send SIGTERM");
+    assert!(sigterm.success(), "kill -TERM failed: {sigterm}");
+    // The first NOTIFICATION on the original connection is the requested stop.
+    observe_administrative_shutdown(&mut peer);
+    let status = daemon.wait_within(Duration::from_secs(120));
+    let logs = daemon.logs();
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "a restarted gRPC server must not fail the later stop\n{logs}"
+    );
+    assert_eq!(
+        logs.matches("gRPC server exited unexpectedly").count(),
+        1,
+        "{logs}"
+    );
     assert!(
-        elapsed < Duration::from_secs(15),
-        "fail-stop took {elapsed:?}\n{logs}"
+        !socket_path.exists(),
+        "the restarted gRPC UDS socket survived coordinated shutdown\n{logs}"
     );
 }
 
@@ -1584,15 +2131,17 @@ fn help_and_man_distinguish_bgp_bind_modes_and_supervised_exits() {
     };
     let help = output("--help");
     assert!(help.contains("legacy BGP mode bound neither family; an explicit listen_addresses"));
-    assert!(help.contains("endpoint failed to bind; configured metrics/readiness bind failure;"));
-    assert!(help.contains("or unexpected RIB manager, peer manager, RPKI subsystem,"));
-    assert!(help.contains("gRPC server, BGP listener task, BGP accept-forwarding task,"));
-    assert!(help.contains("or injection lease expiry task exit)"));
+    assert!(help.contains("endpoint failed to bind; a configured gRPC or metrics/readiness"));
+    assert!(help.contains("listener failed to start; or unexpected RIB manager, peer manager,"));
+    assert!(help.contains("RPKI subsystem, BGP listener task, BGP accept-forwarding task, or"));
+    assert!(help.contains("injection lease expiry task exit)"));
     assert!(!help.contains("metrics/readiness server"));
+    assert!(!help.contains("gRPC server"));
     let man = output("--man");
     assert!(man.contains("legacy BGP listen mode could bind\nneither family; explicit\n.B listen_addresses\nmode could not bind every configured endpoint"));
-    assert!(man.contains("the RIB manager, peer manager, RPKI subsystem,\ngRPC server, BGP listener task, BGP accept-forwarding task, or injection\nlease expiry task exited unexpectedly"));
+    assert!(man.contains("a configured gRPC or\nmetrics/readiness listener failed to start; or the RIB manager, peer manager,\nRPKI subsystem, BGP listener task, BGP accept-forwarding task, or injection\nlease expiry task exited unexpectedly"));
     assert!(!man.contains("metrics/readiness\nserver"));
+    assert!(!man.contains("gRPC server"));
 }
 
 #[test]
