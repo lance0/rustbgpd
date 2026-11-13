@@ -3,6 +3,15 @@
 This changelog covers the independently published `rustbgpd-fsm` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
+## Unreleased
+
+- A `ConnectRetryTimerExpires` in Connect, a dial that got no answer, now
+  increments the connect-retry counter, so the next `ConnectRetry` interval
+  doubles from `connect_retry_secs` up to the 300 s cap instead of repeating
+  the base interval. RFC 4271 §8.2.2 does not count this event; refused
+  dials already backed off. `ManualStart` still resets the counter. No
+  public API changes.
+
 ## 0.15.0 - 2026-11-08
 
 - Unexpected BGP messages in OpenSent, OpenConfirm and Established now

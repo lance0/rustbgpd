@@ -3228,27 +3228,35 @@ records for a later outage.
    daemon is waiting out the deferred reconnect that follows an unplanned
    teardown. Each consecutive NOTIFICATION teardown (sent or received,
    including an OPEN exchange that ends in one, such as an ASN mismatch or
-   a repeated hold-timer expiry) doubles that wait, starting from
+   a repeated hold-timer expiry), and each time the peer drops TCP without a
+   NOTIFICATION in `OpenConfirm` or `Established`, doubles that wait, starting from
    `connect_retry_secs` (default 5 s) and capped at 300 s. The wait is also
    `reconnect_in_seconds` in the JSON output and in `NeighborState`. The API
    field is absent on older daemons, while JSON omits it when absent or zero.
-   The wait covers both directions. From the second consecutive NOTIFICATION
-   teardown, an inbound connection from the neighbor during the wait is
+   The wait covers both directions for NOTIFICATION teardowns. From the
+   second NOTIFICATION teardown in the streak, an inbound connection from the neighbor during the wait is
    closed without an OPEN and counted as
    `bgp_inbound_connections_dropped_total{reason="notification_backoff"}`,
    with a throttled log line naming the streak and the remaining wait; a
    pending collision candidate is dropped instead of promoted. After the
    first teardown an inbound connection is still accepted at once, and the
    session that replaces the waiting one keeps its streak, so a neighbor that
-   always reconnects to us escalates the same way.
+   always reconnects to us escalates the same way. TCP drops lengthen the
+   wait but never hold inbound connections, so a neighbor we cannot dial, or
+   one restarting with graceful restart, is not refused.
    The streak clears after the session stays Established for five minutes, on
    `rbgp neighbor <addr> enable` while the session is in Idle, or on an
-   administrative reset. TCP misses
-   in `Connect` or `Active` keep the fast initial retries followed by the
-   existing exponential curve; a TCP loss after `Established` uses the
-   configured fixed Idle interval. Neither advances the NOTIFICATION streak.
+   administrative reset. In `Connect` or `Active`, a refused dial gets two
+   1 s retries and then the same doubling curve; a dial that gets no answer
+   doubles the interval from `connect_retry_secs` on each miss, up to 300 s.
+   A dial that times out first (the 30 s connect timeout or the kernel's SYN
+   retries) waits for the rest of that interval, so the curve is not cut
+   short.
+   These dial misses do not advance the reconnect streak. Every retry wait is
+   jittered down by up to 25% (RFC 4271 §10), so the reported wait can be
+   shorter than the doubled value.
    A max-prefix shutdown stays latched until an explicit enable. There is no
-   configuration knob for the NOTIFICATION curve.
+   configuration knob for these curves or the jitter.
 
 2. **Check logs for the peer:**
    ```bash
