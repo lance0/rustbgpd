@@ -2938,6 +2938,12 @@ Prometheus metrics. Day\-to\-day inspection and runtime changes go
 through the
 .BR rbgp (1)
 CLI.
+.PP
+The daemon runs in the foreground, writes no pidfile and logs to
+stdout; run it under a supervisor such as systemd. The first persisted
+runtime change (a gRPC mutation or config transaction) rewrites
+\fICONFIG_PATH\fR in canonical form, without comments, so the daemon
+user needs write access to the file and its directory.
 .SH ARGUMENTS
 .TP
 \fICONFIG_PATH\fR
@@ -3046,11 +3052,19 @@ also a candidate or current config that could not be loaded, or a
 diff that could not be serialized.
 .TP
 .B 70
-Internal error.
+Settlement fail\-stop: a running daemon could not prove that a runtime
+config change settled and stopped itself. Restart it to recover; see
+docs/how\-to/settlement\-watchdog.md. For
+.B \-\-init\-config
+or
+.BR \-\-migrate\-config :
+an internal error.
 .SH SIGNALS
 .TP
 \fBSIGHUP\fR
-Reload the configuration file and hot\-apply the changes.
+Reload the configuration file and hot\-apply the changes. A SIGHUP
+that arrives during startup is held until the reload handler is
+installed, then runs one reload.
 .TP
 \fBSIGTERM\fR
 Shut down gracefully.
@@ -3064,6 +3078,26 @@ Default configuration file.
         version = env!("CARGO_PKG_VERSION"),
         profiles = crate::config::profiles::PROFILE_NAMES.join(", ")
     )
+}
+
+/// Block SIGHUP from the start of daemon boot until `run` installs its
+/// handler: the default action terminates the process, so a HUP from config
+/// management during config load or logging init would kill the daemon. A
+/// HUP sent meanwhile stays pending and runs one reload once `run` unblocks
+/// it. Threads started in the window, the tokio runtime's included, inherit
+/// the block and keep it; the main thread drives `run` through `block_on`
+/// for the daemon's whole life and receives every SIGHUP after the unblock.
+fn hold_sighup_until_handler() {
+    set_sighup_mask(nix::sys::signal::SigmaskHow::SIG_BLOCK);
+}
+
+fn set_sighup_mask(how: nix::sys::signal::SigmaskHow) {
+    let mut set = nix::sys::signal::SigSet::empty();
+    set.add(nix::sys::signal::Signal::SIGHUP);
+    if let Err(error) = nix::sys::signal::pthread_sigmask(how, Some(&set), None) {
+        eprintln!("error: cannot change the SIGHUP signal mask: {error}");
+        process::exit(1);
+    }
 }
 
 #[expect(
@@ -3118,6 +3152,12 @@ fn main() -> ExitCode {
                --man                 Print the man page (roff) to stdout and exit\n  \
                --version             Print version and exit\n  \
                --help                Print this help message\n\n\
+             Runtime:\n  \
+               Runs in the foreground with no pidfile and logs to stdout; run it under\n  \
+               a supervisor such as systemd. The first persisted runtime change (a gRPC\n  \
+               mutation or config transaction) rewrites CONFIG_PATH in canonical form,\n  \
+               without comments, so the daemon user needs write access to the file\n  \
+               and its directory.\n\n\
              Exit status:\n  \
                0  Success. For --check: the config is valid; without --strict this\n     \
                   includes a valid config that was warned about\n  \
@@ -3133,7 +3173,10 @@ fn main() -> ExitCode {
                   For --diff: also a config that could not be loaded\n  \
                   --release-core-isolation exits 0 only when no owned link is left\n     \
                   down, and 1 otherwise\n  \
-               70 Internal error",
+               70 Settlement fail-stop: a running daemon could not prove that a\n     \
+                  runtime config change settled and stopped itself. Restart it to\n     \
+                  recover; see docs/how-to/settlement-watchdog.md. For\n     \
+                  --init-config or --migrate-config: an internal error",
                     env!("CARGO_PKG_VERSION"),
                     crate::config::profiles::PROFILE_NAMES.join(", ")
                 )
@@ -3360,6 +3403,7 @@ fn main() -> ExitCode {
     // and diff modes remain read-only and therefore do not inspect or consume
     // pending commit-confirm state.
     let launch_identity = if !check_only && diff_path.is_none() {
+        hold_sighup_until_handler();
         let identity = confirm_journal::v3::LaunchIdentity::resolve(Path::new(&config_path))
             .unwrap_or_else(|error| {
                 eprintln!(
@@ -3595,8 +3639,18 @@ fn main() -> ExitCode {
     // Pin the route receive-stamp epoch before any session can capture an
     // instant, so no stamp saturates to the epoch.
     rustbgpd_rib::route::ReceivedAt::init_epoch();
+    // Debug-build test seam: a SIGHUP sent here lands in the startup window
+    // that `hold_sighup_until_handler` covers.
+    #[cfg(debug_assertions)]
+    if std::env::var_os("RUSTBGPD_TEST_SIGHUP_BEFORE_RUN").is_some() {
+        nix::sys::signal::kill(nix::unistd::getpid(), nix::sys::signal::Signal::SIGHUP)
+            .expect("send the test SIGHUP");
+    }
     let worker_threads = resolve_worker_threads(config.global.worker_threads);
     info!(worker_threads, "initializing tokio runtime");
+    // ponytail: workers inherit the blocked SIGHUP for life; an on_thread_start
+    // unblock would race `run`'s handler registration (workers launch in
+    // build()), so it waits until the daemon spawns a child that needs SIGHUP.
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(worker_threads)
         .enable_all()
@@ -4695,6 +4749,7 @@ async fn run<T>(
         .unwrap_or_else(|e| fatal_startup_error("failed to register SIGTERM handler", e));
     let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
         .unwrap_or_else(|e| fatal_startup_error("failed to register SIGHUP handler", e));
+    set_sighup_mask(nix::sys::signal::SigmaskHow::SIG_UNBLOCK);
     let test_bgp_ingress_exit = resolve_test_bgp_ingress_exit();
     let test_initial_peer_rejection_at = resolve_test_initial_peer_rejection_at();
     let test_peer_manager_panic = resolve_test_peer_manager_panic();
@@ -7231,6 +7286,7 @@ async fn run<T>(
     let sd_notify = sd_notify::SdNotify::from_env();
     if !initial_peer_boot_failed {
         sd_notify.ready();
+        info!("rustbgpd ready: gRPC listeners bound, peer roster installed, BGP ingress active");
         sd_notify.spawn_watchdog(metrics.clone(), move |deadline| {
             let probe = core_probe.clone();
             async move { sd_notify::core_actors_live(&probe, deadline).await }

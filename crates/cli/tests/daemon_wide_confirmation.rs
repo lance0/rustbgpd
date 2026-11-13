@@ -119,7 +119,7 @@ fn gshut_requires_an_explicit_scope_before_transport() {
         vec!["gshut", "--yes"],
     ] {
         let output = rbgp(&absent, &args);
-        // A connection attempt would report the absent socket; exit 2
+        // A connection attempt would report the absent socket; exit 64
         // without it proves the all-peers toggle never reached transport.
         assert_eq!(output.status.code(), Some(64), "{args:?}: {output:?}");
         let error = stderr(&output);

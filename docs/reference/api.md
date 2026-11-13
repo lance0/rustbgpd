@@ -5319,7 +5319,7 @@ An absent authoritative ASPA table returns `FAILED_PRECONDITION` from both
 methods; an authoritative empty table still runs the verifier, so structural
 invalidity is not hidden as `UNKNOWN`. Malformed or oversized requests return
 `INVALID_ARGUMENT` before table lookup. Successful diagnostic verdicts,
-including `invalid`, produce CLI exit 0; malformed CLI input exits 2 before
+including `invalid`, produce CLI exit 0; malformed CLI input exits 64 before
 connecting, and operational RPC failures exit 1.
 
 The CLI accepts whitespace-separated decimal ASNs and `{ASN ASN}` sets in a

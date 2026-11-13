@@ -44,6 +44,10 @@ struct Daemon {
 
 impl Daemon {
     fn spawn(config: &Path, log_path: PathBuf, holds: bool) -> Self {
+        Self::spawn_with_env(config, log_path, holds, &[])
+    }
+
+    fn spawn_with_env(config: &Path, log_path: PathBuf, holds: bool, env: &[(&str, &str)]) -> Self {
         let stderr = File::create(&log_path).expect("create daemon log");
         let stdout = stderr.try_clone().expect("clone daemon log handle");
         let mut command = Command::new(env!("CARGO_BIN_EXE_rustbgpd"));
@@ -52,7 +56,9 @@ impl Daemon {
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr))
             .env_remove("RUSTBGPD_TEST_SIGHUP_READ_HOLD")
-            .env_remove("RUSTBGPD_TEST_SIGHUP_SETTLED_HOLD");
+            .env_remove("RUSTBGPD_TEST_SIGHUP_SETTLED_HOLD")
+            .env_remove("RUSTBGPD_TEST_SIGHUP_BEFORE_RUN")
+            .envs(env.iter().copied());
         let mut bind = |variable: &str, extension: &str| {
             holds.then(|| {
                 let path = log_path.with_extension(extension);
@@ -333,6 +339,10 @@ struct Fixture {
 
 impl Fixture {
     fn start(holds: bool) -> Self {
+        Self::start_with_env(holds, &[])
+    }
+
+    fn start_with_env(holds: bool, env: &[(&str, &str)]) -> Self {
         let dir = RetainOnPanic::new(tempfile::tempdir().expect("create test dir"));
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let runtime_dir = dir.path().join("runtime");
@@ -342,7 +352,8 @@ impl Fixture {
         let base = base_config(&runtime_dir);
         std::fs::write(&config_path, &base).unwrap();
         let grpc_addr = format!("unix://{}", runtime_dir.join("grpc.sock").display());
-        let daemon = Daemon::spawn(&config_path, dir.path().join("daemon.log"), holds);
+        let daemon =
+            Daemon::spawn_with_env(&config_path, dir.path().join("daemon.log"), holds, env);
         let mut fixture = Self {
             dir,
             config_path,
@@ -487,6 +498,33 @@ fn several_sighups_during_one_reload_fold_into_one_follow_up() {
 )]
 fn follow_up_runs_after_a_rejected_reload_and_rbgp_reload_waits_for_it() {
     exercise(false, 1, true);
+}
+
+/// Load-bearing: without the boot-time SIGHUP block, the HUP the daemon sends
+/// itself after config load and logging init takes the default action and
+/// the fixture never serves. With it, the held signal runs one reload.
+/// Readiness is logged once.
+#[test]
+#[cfg_attr(
+    not(debug_assertions),
+    ignore = "needs the debug-build early-SIGHUP seam"
+)]
+fn sighup_during_startup_is_held_until_the_handler_and_runs_one_reload() {
+    let mut fixture = Fixture::start_with_env(false, &[("RUSTBGPD_TEST_SIGHUP_BEFORE_RUN", "1")]);
+    wait_for_outcome_count(&mut fixture.daemon, fixture.metrics, "complete", 1);
+    let log = fixture.daemon.log();
+    assert_eq!(fixture.daemon.log_count("rustbgpd ready:"), 1, "{log}");
+
+    request_shutdown(&fixture.grpc_addr);
+    let status = fixture.daemon.wait_for_exit();
+    assert!(status.success(), "{status}\n{}", fixture.daemon.log());
+    // Counted after exit, so a second reload queued behind shutdown shows.
+    assert_eq!(
+        fixture.daemon.log_count("SIGHUP received"),
+        1,
+        "{}",
+        fixture.daemon.log()
+    );
 }
 
 /// The turn after a settlement has both a due follow-up and a pending

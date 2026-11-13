@@ -200,8 +200,11 @@ pub enum RouteAspaState {
 //   `--from-file` spelling.
 // - `-j`/`--json` purity: JSON goes to stdout and carries the
 //   complete result. A command where `-j` provably has no effect
-//   (`metrics`, `top`) warns once on stderr instead of silently
-//   ignoring it.
+//   (`json_no_effect`) warns once on stderr instead of silently
+//   ignoring it. One exception to completeness: `evpn instances -j` keeps
+//   its established array shape, so the response-level host-wide L2
+//   apply-failure count appears only in human output, the gRPC response
+//   and the `evpn_current_apply_failures{vni="unscoped"}` metric.
 // - Empty results: JSON list output prints `[]` (or `{}` for
 //   objects), never nothing; human list output prints a one-line
 //   empty state ("No ... recorded/configured").
@@ -4426,6 +4429,33 @@ fn validate_json_version(cli: &Cli) -> Result<(), CliError> {
     }
 }
 
+/// The commands `-j` provably does not change, with what they print instead;
+/// `run` warns once on stderr for these rather than ignoring the flag.
+fn json_no_effect(command: &Command) -> Option<&'static str> {
+    match command {
+        Command::Metrics => Some("`metrics`; output is always Prometheus text"),
+        Command::Top { .. } => Some("`top`; it is an interactive TUI"),
+        Command::Completions { .. } => Some("`completions`; output is a shell script"),
+        Command::Man => Some("`man`; output is a roff man page"),
+        Command::Policy {
+            action: PolicyAction::Fmt { .. },
+        } => Some("`policy fmt`; output is formatted policy source"),
+        Command::Diff {
+            action:
+                DiffAction::Snapshot {
+                    action: SnapshotAction::FromMrt { .. },
+                },
+        } => Some("`diff snapshot from-mrt`; output is always an NDJSON snapshot"),
+        Command::Diff {
+            action:
+                DiffAction::Snapshot {
+                    action: SnapshotAction::FromBmp { .. },
+                },
+        } => Some("`diff snapshot from-bmp`; output is always an NDJSON snapshot"),
+        _ => None,
+    }
+}
+
 async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
     validate_json_version(&cli)?;
     validate_json_lines(&cli)?;
@@ -4436,6 +4466,11 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
     )?;
     if cli.json_version.is_some() {
         output::enable_versioned_json();
+    }
+    if cli.json
+        && let Some(target) = json_no_effect(&cli.command)
+    {
+        eprintln!("warning: --json has no effect on {target}");
     }
 
     // Shell completions don't need a gRPC connection.
@@ -5917,14 +5952,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
 
         Command::Health { liveness } => commands::control::health(connection, json, liveness).await,
         Command::Doctor { .. } => unreachable!("handled before connect"),
-        Command::Metrics => {
-            if json {
-                eprintln!(
-                    "warning: --json has no effect on `metrics`; output is always Prometheus text"
-                );
-            }
-            commands::control::metrics(connection).await
-        }
+        Command::Metrics => commands::control::metrics(connection).await,
         Command::Shutdown { reason, .. } => {
             commands::control::shutdown(connection, reason, json).await
         }
@@ -5937,12 +5965,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
         Command::Gshut {
             neighbor, clear, ..
         } => commands::neighbor::set_graceful_shutdown(connection, neighbor, !clear, json).await,
-        Command::Top { interval } => {
-            if json {
-                eprintln!("warning: --json has no effect on `top`; it is an interactive TUI");
-            }
-            tui::run(connection, interval, cli.no_color).await
-        }
+        Command::Top { interval } => tui::run(connection, interval, cli.no_color).await,
         Command::Policy { action } => match action {
             PolicyAction::Check { .. } | PolicyAction::Fmt { .. } => {
                 unreachable!("handled before connect")

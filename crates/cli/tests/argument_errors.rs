@@ -104,6 +104,29 @@ fn help_and_man_distinguish_parsing_from_argument_validation() {
     }
 }
 
+/// Load-bearing: restoring "usage error (exit `2`)" in operations.md or
+/// "malformed CLI input exits 2" in api.md fails this. `rustbgpd --check
+/// --strict` and other daemon modes really do exit 2 and are not matched.
+#[test]
+fn reference_docs_give_rbgp_usage_errors_exit_64() {
+    for (name, text) in [
+        (
+            "operations",
+            include_str!("../../../docs/reference/operations.md"),
+        ),
+        ("api", include_str!("../../../docs/reference/api.md")),
+    ] {
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        for stale in [
+            "usage error (exit `2`)",
+            "usage error (exit 2)",
+            "malformed CLI input exits 2",
+        ] {
+            assert!(!text.contains(stale), "{name}.md still says {stale:?}");
+        }
+    }
+}
+
 /// A script gating on `config diff`/`plan` (2 = changes present) or `doctor`
 /// (2 = red checks) must never read a renamed flag or a missing argument as
 /// that outcome.
@@ -190,4 +213,86 @@ fn top_needs_a_terminal_on_stdin_and_stdout_before_transport() {
         );
         drop(pty.master);
     }
+}
+
+/// Load-bearing: deleting any `json_no_effect` arm, or warning a second
+/// time in dispatch, changes the stderr comparison below.
+#[test]
+fn json_no_op_commands_warn_once_and_keep_stdout_and_exit() {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let directory = tempfile::tempdir().unwrap();
+    let address = format!("unix://{}/absent.sock", directory.path().display());
+    let policy = "policy p {\n    term t { accept }\n}\n";
+    let empty = directory.path().join("empty.capture");
+    std::fs::write(&empty, b"").unwrap();
+    let empty = empty.to_str().unwrap();
+    let run_with = |json: bool, args: &[&str], stdin: &str| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_rbgp"))
+            .args(["--addr", &address, "--no-color"])
+            .args(json.then_some("-j"))
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run rbgp");
+        let mut input = child.stdin.take().unwrap();
+        // A command that never reads stdin may exit first; EPIPE is fine.
+        let _ = input.write_all(stdin.as_bytes());
+        drop(input);
+        child.wait_with_output().unwrap()
+    };
+    for (args, stdin, target) in [
+        (vec!["metrics"], "", "`metrics`"),
+        (vec!["top"], "", "`top`"),
+        (vec!["completions", "bash"], "", "`completions`"),
+        (vec!["man"], "", "`man`"),
+        (vec!["policy", "fmt", "-"], policy, "`policy fmt`"),
+        (
+            vec![
+                "diff",
+                "snapshot",
+                "from-mrt",
+                empty,
+                "--view",
+                "adj-rib-out-capture",
+                "--neighbor",
+                "192.0.2.1",
+                "--neighbor-asn",
+                "65001",
+            ],
+            "",
+            "`diff snapshot from-mrt`",
+        ),
+        (
+            vec!["diff", "snapshot", "from-bmp", empty],
+            "",
+            "`diff snapshot from-bmp`",
+        ),
+    ] {
+        let plain = run_with(false, &args, stdin);
+        let json = run_with(true, &args, stdin);
+        assert_eq!(json.status.code(), plain.status.code(), "{args:?}");
+        assert_eq!(json.stdout, plain.stdout, "{args:?}");
+        let plain_error = String::from_utf8(plain.stderr).unwrap();
+        let json_error = String::from_utf8(json.stderr).unwrap();
+        assert!(!plain_error.contains("--json has no effect"), "{args:?}");
+        assert_eq!(
+            json_error.matches("--json has no effect").count(),
+            1,
+            "{args:?}: {json_error}"
+        );
+        let warning = format!("warning: --json has no effect on {target}");
+        let rest = json_error
+            .strip_prefix(&warning)
+            .and_then(|rest| rest.split_once('\n'))
+            .unwrap_or_else(|| panic!("{args:?}: {json_error}"))
+            .1;
+        assert_eq!(rest, plain_error, "{args:?}");
+    }
+    // A command that `-j` does change prints no warning.
+    let output = run_with(true, &["neighbor"], "");
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("has no effect"));
 }

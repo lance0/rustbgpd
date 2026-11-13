@@ -96,7 +96,22 @@ impl From<tonic::Status> for CliError {
             tonic::Code::DataLoss => "data loss",
             tonic::Code::Internal | tonic::Code::Unknown | tonic::Code::Ok => "daemon error",
         };
-        CliError::Rpc(format!("{prefix}: {}", s.message()))
+        let message = s.message();
+        // EACCES / EROFS. The write hint needs an identified write, most
+        // often config persistence under ProtectSystem=strict; a read (an
+        // unreadable `.rpol` during `config plan`) gets the neutral one.
+        if message.contains("(os error 13)") || message.contains("(os error 30)") {
+            let hint =
+                if message.contains("config persistence") || message.contains("failed to write") {
+                    "the daemon's user cannot write that path; chown it to that user, \
+                 or add its directory to the systemd unit's ReadWritePaths="
+                } else {
+                    "the daemon's user cannot access that path; check its ownership \
+                 and mode, and the systemd unit's filesystem protections"
+                };
+            return CliError::Rpc(format!("{prefix}: {message}\n  hint: {hint}"));
+        }
+        CliError::Rpc(format!("{prefix}: {message}"))
     }
 }
 
@@ -185,6 +200,48 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "precondition failed: config persistence failed: failed to write /var/lib/rustbgpd/config.toml: No such file or directory (os error 2)"
+        );
+    }
+
+    /// Load-bearing: deleting the errno check drops the hint; ENOENT above
+    /// shows it stays specific to EACCES and EROFS.
+    #[test]
+    fn unwritable_persistence_path_adds_one_ownership_hint() {
+        let hint = "\n  hint: the daemon's user cannot write that path; chown it to that user, \
+                    or add its directory to the systemd unit's ReadWritePaths=";
+        for (status, expected) in [
+            (
+                Status::failed_precondition(
+                    "config persistence failed: failed to write /etc/rustbgpd/config.toml: Permission denied (os error 13)",
+                ),
+                "precondition failed: config persistence failed: failed to write /etc/rustbgpd/config.toml: Permission denied (os error 13)",
+            ),
+            (
+                Status::internal(
+                    "config persistence commit failed: Read-only file system (os error 30)",
+                ),
+                "daemon error: config persistence commit failed: Read-only file system (os error 30)",
+            ),
+        ] {
+            let rendered = CliError::from(status).to_string();
+            assert_eq!(rendered, format!("{expected}{hint}"));
+            assert_eq!(rendered.matches("hint:").count(), 1);
+        }
+    }
+
+    /// Load-bearing: keying the write hint on the errno alone sends a read
+    /// failure to `ReadWritePaths=`, which cannot fix it.
+    #[test]
+    fn unreadable_path_gets_the_neutral_access_hint() {
+        let rendered = CliError::from(Status::failed_precondition(
+            "failed to read /etc/rustbgpd/policy.rpol: Permission denied (os error 13)",
+        ))
+        .to_string();
+        assert_eq!(
+            rendered,
+            "precondition failed: failed to read /etc/rustbgpd/policy.rpol: Permission denied (os error 13)\n  \
+             hint: the daemon's user cannot access that path; check its ownership \
+             and mode, and the systemd unit's filesystem protections"
         );
     }
 

@@ -746,7 +746,9 @@ running reload read the file is still applied, and a rejected reload's
 candidate can be fixed and picked up by the follow-up. Signals already queued
 when a reload starts are served by that reload and do not schedule another.
 Coordinated shutdown takes precedence: it discards a pending follow-up instead
-of starting it and logs a warning.
+of starting it and logs a warning. A SIGHUP sent during startup, before the
+reload handler is installed, is held rather than terminating the daemon, and
+runs one reload once startup reaches the signal loop.
 
 What happens:
 
@@ -4569,7 +4571,7 @@ subcommand to drop a chain.
 
 A global chain change applies to every neighbor without its own chain and is
 persisted. Select the scope with `--global` or `--neighbor`; omitting both is
-a usage error (exit `2`) and changes nothing. When stdin and stdout are both
+a usage error (exit `64`) and changes nothing. When stdin and stdout are both
 terminals, a global change names the endpoint and asks `[y/N]` first;
 `-y`/`--yes` skips the prompt, and non-interactive runs never prompt. A
 declined prompt exits `1` without changing anything.
@@ -4614,7 +4616,7 @@ rbgp gshut --all --clear
 
 An all-peers change asks `[y/N]` first when stdin and stdout are both
 terminals; `-y`/`--yes` skips it. `rbgp gshut` without `--all` or
-`--neighbor` is a usage error (exit `2`) and changes nothing.
+`--neighbor` is a usage error (exit `64`) and changes nothing.
 
 The toggle is **operator-runtime state**, not config — it lives on
 the `ManagedPeer` desired-state record, mirrors to the live session,
