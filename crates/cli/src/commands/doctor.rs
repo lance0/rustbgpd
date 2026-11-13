@@ -4533,6 +4533,7 @@ async fn run_with_deadlines(
                                 discovery_state: output::discovery_state_label(n),
                                 state: output::format_state_with_stale(n.state, n.stale)
                                     .to_string(),
+                                admin_state: output::admin_state_label(n),
                                 stale: n.stale,
                                 slow_peer: n.slow_peer,
                                 uptime_seconds: n.uptime_seconds,
@@ -5106,6 +5107,7 @@ mod tests {
                 learned_peer_address: String::new(),
                 discovery_state: None,
                 state: "Active".to_string(),
+                admin_state: None,
                 stale: false,
                 slow_peer: false,
                 uptime_seconds: 0,

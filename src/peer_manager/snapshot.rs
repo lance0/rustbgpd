@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 
 use rustbgpd_api::peer_types::{
-    DynamicRangeTarget, PeerInfo, PeerKey, Rfc8212PolicyStatus, WarmCheckpointCapture,
-    WarmCheckpointSession,
+    AdminDownReason, DynamicRangeTarget, PeerInfo, PeerKey, Rfc8212PolicyStatus,
+    WarmCheckpointCapture, WarmCheckpointSession,
 };
 use rustbgpd_bmp::{BmpEvent, BmpPeerInfo, BmpPeerType};
 use rustbgpd_fsm::SessionState;
@@ -208,6 +208,26 @@ pub(super) fn build_peer_info(
 pub(super) type RemoteAsnModes =
     std::collections::HashMap<(String, Option<String>), rustbgpd_api::peer_types::RemoteAsnMode>;
 
+/// The owner holding a disabled peer down. A max-prefix latch, which the
+/// manager keeps outside this state, overrides it in
+/// [`apply_max_prefix_latch`].
+fn admin_down_reason(managed: &ManagedPeerState) -> Option<AdminDownReason> {
+    if managed.enabled {
+        None
+    } else if managed
+        .transport_config
+        .dampening_admission
+        .as_ref()
+        .is_some_and(|admission| admission.capacity_failure().is_some())
+    {
+        Some(AdminDownReason::DampeningCapacity)
+    } else if managed.admin_down.is_some() {
+        Some(AdminDownReason::ConfigAdminDown)
+    } else {
+        Some(AdminDownReason::Operator)
+    }
+}
+
 fn manager_peer_info(
     peer: &PeerKey,
     managed: &ManagedPeerState,
@@ -228,6 +248,7 @@ fn manager_peer_info(
         peer_group: managed.peer_group.clone(),
         state: SessionState::Idle,
         enabled: managed.enabled,
+        admin_down_reason: admin_down_reason(managed),
         graceful_shutdown_advertise_intent: managed.advertise_graceful_shutdown,
         prefix_count: 0,
         rejected_routes_retained: None,
@@ -333,6 +354,11 @@ pub(super) fn unbound_interface_only_info(
         peer_group: resolved.peer_group.clone(),
         state: SessionState::Idle,
         enabled,
+        admin_down_reason: (!enabled).then_some(if resolved.admin_down.is_some() {
+            AdminDownReason::ConfigAdminDown
+        } else {
+            AdminDownReason::Operator
+        }),
         graceful_shutdown_advertise_intent: false,
         prefix_count: 0,
         rejected_routes_retained: None,
@@ -459,6 +485,9 @@ pub(super) fn apply_max_prefix_latch(
     deadline: Option<tokio::time::Instant>,
 ) {
     error.clone_into(&mut info.last_error);
+    if !info.enabled {
+        info.admin_down_reason = Some(AdminDownReason::MaxPrefixLatched);
+    }
     info.max_prefix_action = if deadline.is_some() {
         "restart"
     } else {

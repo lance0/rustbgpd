@@ -1255,6 +1255,29 @@ the peer's OPEN, as the configuration's `remote_asn = <number>`,
   is session state: `NegotiatedSessionState.remote_asn`, present while the
   session is Established.
 
+### Administrative state
+
+`NeighborState.admin_state` says whether the daemon is holding a neighbor down
+and which owner did:
+
+- `ENABLED`: not held down; the session connects or accepts as configured.
+- `OPERATOR_DISABLED`: a runtime `DisableNeighbor` (`rbgp neighbor <addr>
+  disable`). `EnableNeighbor` clears it.
+- `CONFIG_ADMIN_DOWN`: the neighbor's configured `admin_down`.
+- `MAX_PREFIX_LATCHED`: a max-prefix shutdown latch. `EnableNeighbor`, or the
+  single automatic attempt that `max_prefix_restart_seconds` arms, clears it.
+  An explicit disable keeps the latch.
+- `DAMPENING_CAPACITY`: the neighbor's route-flap dampening source exceeded the
+  dampening capacity. `EnableNeighbor` clears it.
+- `UNSPECIFIED`: an older daemon that does not report it.
+
+A held-down neighbor reports `state` `IDLE` and is not trying to connect.
+Disabling a session sends a Cease without replacing `last_error`, so for every
+owner except `MAX_PREFIX_LATCHED` that field is the failure from before the
+hold, not its cause; for a latch it is the max-prefix breach. The
+`bgp_peer_admin_enabled` and `bgp_max_prefix_latched` gauges carry the same
+state.
+
 ### Interface-only neighbors
 
 An interface-only neighbor

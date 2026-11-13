@@ -1441,6 +1441,7 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
             tcp_ao_rotation_error: String::new(),
             slow_peer: false,
             bmp_identity_excluded: false,
+            admin_state: server_proto::NeighborAdminState::Enabled.into(),
             rfc8212_import_policy: crate::proto::Rfc8212PolicyStatus::NotRequired.into(),
             rfc8212_export_policy: crate::proto::Rfc8212PolicyStatus::NotRequired.into(),
             graceful_shutdown_advertise_intent: Some(true),

@@ -15,11 +15,11 @@ use crate::authz::AuthTier;
 use crate::health_probe::DaemonGate;
 use crate::owner_publication::dispatch_configured_owner_publication;
 use crate::peer_types::{
-    ConfigEvent, ConfiguredOwnerPublicationOperation, DynamicRangeError, EnqueuedOperatorQuery,
-    NeighborCreateAddPath, NeighborDiscoveryState, OutboundRefreshError, OwnedNeighborMutation,
-    OwnedNeighborMutationError, OwnedNeighborMutationOutcome, PeerInfo, PeerKey,
-    PeerLifecycleError, PeerManagerCommand, PeerManagerOperatorQuery, PresenceAwareNeighborCreate,
-    RemoteAsnMode, Rfc8212PolicyStatus,
+    AdminDownReason, ConfigEvent, ConfiguredOwnerPublicationOperation, DynamicRangeError,
+    EnqueuedOperatorQuery, NeighborCreateAddPath, NeighborDiscoveryState, OutboundRefreshError,
+    OwnedNeighborMutation, OwnedNeighborMutationError, OwnedNeighborMutationOutcome, PeerInfo,
+    PeerKey, PeerLifecycleError, PeerManagerCommand, PeerManagerOperatorQuery,
+    PresenceAwareNeighborCreate, RemoteAsnMode, Rfc8212PolicyStatus,
 };
 use crate::proto;
 use crate::runtime_config_settlement::{
@@ -999,6 +999,20 @@ fn discovery_state_to_proto(state: NeighborDiscoveryState) -> proto::NeighborDis
     }
 }
 
+/// A disabled peer reports its owner; a disabled row without one (never
+/// built by the peer manager) reads as an operator disable.
+fn admin_state_to_proto(info: &PeerInfo) -> proto::NeighborAdminState {
+    if info.enabled {
+        return proto::NeighborAdminState::Enabled;
+    }
+    match info.admin_down_reason.unwrap_or(AdminDownReason::Operator) {
+        AdminDownReason::Operator => proto::NeighborAdminState::OperatorDisabled,
+        AdminDownReason::ConfigAdminDown => proto::NeighborAdminState::ConfigAdminDown,
+        AdminDownReason::MaxPrefixLatched => proto::NeighborAdminState::MaxPrefixLatched,
+        AdminDownReason::DampeningCapacity => proto::NeighborAdminState::DampeningCapacity,
+    }
+}
+
 #[expect(
     clippy::too_many_lines,
     clippy::items_after_statements,
@@ -1297,6 +1311,7 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         tcp_ao_rotation_error: info.tcp_ao_rotation.last_error.clone().unwrap_or_default(),
         slow_peer: info.slow_peer,
         bmp_identity_excluded: info.bmp_identity_excluded,
+        admin_state: admin_state_to_proto(info).into(),
         graceful_shutdown_advertise_intent: Some(info.graceful_shutdown_advertise_intent),
         max_prefix_action: info.max_prefix_action.clone(),
         max_prefix_restart_remaining_millis: info.max_prefix_restart_remaining_millis,
@@ -5765,6 +5780,40 @@ mod tests {
         assert_eq!(state.config.unwrap().max_prefix_restart_seconds, Some(30));
         assert_eq!(state.max_prefix_action, "restart");
         assert_eq!(state.max_prefix_restart_remaining_millis, Some(12_345));
+    }
+
+    /// Load-bearing: each hold-down owner maps to its own value, and an
+    /// enabled peer reports ENABLED, never the UNSPECIFIED an older daemon
+    /// sends.
+    #[test]
+    fn peer_info_to_proto_reports_admin_state_owner() {
+        use crate::peer_types::AdminDownReason;
+        use proto::NeighborAdminState as Admin;
+        let mut info = peer_info("10.0.0.2".parse().unwrap());
+        assert_eq!(peer_info_to_proto(&info).admin_state(), Admin::Enabled);
+        info.enabled = false;
+        info.state = rustbgpd_fsm::SessionState::Idle;
+        for (reason, expected) in [
+            (Some(AdminDownReason::Operator), Admin::OperatorDisabled),
+            (None, Admin::OperatorDisabled),
+            (
+                Some(AdminDownReason::ConfigAdminDown),
+                Admin::ConfigAdminDown,
+            ),
+            (
+                Some(AdminDownReason::MaxPrefixLatched),
+                Admin::MaxPrefixLatched,
+            ),
+            (
+                Some(AdminDownReason::DampeningCapacity),
+                Admin::DampeningCapacity,
+            ),
+        ] {
+            info.admin_down_reason = reason;
+            let state = peer_info_to_proto(&info);
+            assert_eq!(state.admin_state(), expected, "{reason:?}");
+            assert_eq!(state.state(), proto::SessionState::Idle);
+        }
     }
 
     /// Load-bearing: removing any max-prefix field from the API conversion

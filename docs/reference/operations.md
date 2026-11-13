@@ -1621,6 +1621,16 @@ inherited by dynamic peers follow the same rules. Session-generation
 replacement, explicit disable, neighbor removal, and dynamic-range replacement
 cancel an existing countdown rather than carrying it into new policy.
 
+Any other administrative hold-down reads as `Idle (Admin)` in `rbgp neighbor`
+and its detail view, with `Admin State` naming the owner (`disabled by
+operator`, `disabled by config admin_down`, or `disabled after dampening
+capacity was exceeded`). The JSON `admin_state` is `operator_disabled`,
+`config_admin_down` or `dampening_capacity`, and `enabled` otherwise; `state`
+stays `Idle`. Disabling a session does not replace its error, so the detail
+view labels it `Error Before Disable`: it is the failure from before the hold,
+not why the neighbor is down. A plain `Idle` with no admin suffix is a session
+that is trying to connect.
+
 Before an explicit enable, inspect the latch:
 
 ```bash
@@ -1628,9 +1638,11 @@ rbgp neighbor <addr>
 rbgp --json neighbor <addr>
 ```
 
-Human output reports `Max-Prefix Action` (`shutdown` or `restart`), the
-configured `Max-Prefix Restart`, an active `Max-Prefix Hold-Down` countdown,
-and `Last Error`. The JSON equivalents are `max_prefix_action`,
+Human output shows a latched neighbor's state as `Idle (PfxCt)` and reports
+`Admin State` (`latched down after max-prefix shutdown`), `Max-Prefix Action`
+(`shutdown` or `restart`), the configured `Max-Prefix Restart`, an active
+`Max-Prefix Hold-Down` countdown, and `Last Error`. The JSON equivalents are
+`admin_state` (`max_prefix_latched`), `max_prefix_action`,
 `max_prefix_restart_seconds`, `max_prefix_restart_remaining_millis`, and
 `last_error`. A configured timer has an armed attempt only while the remaining
 field is present: after `Start` delivery failure consumes its one chance, the

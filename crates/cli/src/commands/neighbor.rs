@@ -176,6 +176,7 @@ fn json_neighbor(n: &crate::proto::NeighborState) -> JsonNeighbor {
         learned_peer_address: n.learned_peer_address.clone(),
         discovery_state: output::discovery_state_label(n),
         state: output::format_state_with_stale(n.state, n.stale).to_string(),
+        admin_state: output::admin_state_label(n),
         stale: n.stale,
         slow_peer: n.slow_peer,
         uptime_seconds: n.uptime_seconds,
@@ -454,6 +455,7 @@ fn json_neighbor_detail(n: &crate::proto::NeighborState) -> JsonNeighborDetail {
         learned_peer_address: n.learned_peer_address.clone(),
         discovery_state: output::discovery_state_label(n),
         state: output::format_state_with_stale(n.state, n.stale).to_string(),
+        admin_state: output::admin_state_label(n),
         stale: n.stale,
         slow_peer: n.slow_peer,
         graceful_shutdown_advertise_intent: n.graceful_shutdown_advertise_intent,
@@ -855,11 +857,10 @@ fn render_neighbor_detail_human(n: &crate::proto::NeighborState) -> String {
             );
         }
     }
-    rows.field(
-        0,
-        "State",
-        output::colored_state_with_stale(n.state, n.stale),
-    );
+    rows.field(0, "State", output::colored_neighbor_state(n));
+    if let Some(admin) = output::admin_down_detail(n) {
+        rows.field(0, "Admin State", admin);
+    }
     if n.slow_peer {
         rows.field(
             0,
@@ -1089,7 +1090,17 @@ fn render_neighbor_detail_human(n: &crate::proto::NeighborState) -> String {
     }
     rows.field(0, "Flap Count", n.flap_count);
     if !n.last_error.is_empty() {
-        rows.field(0, "Last Error", &n.last_error);
+        // An administrative hold-down sends a Cease without replacing the
+        // error, so outside a max-prefix latch it predates the hold.
+        let label = match crate::proto::NeighborAdminState::try_from(n.admin_state) {
+            Ok(
+                crate::proto::NeighborAdminState::OperatorDisabled
+                | crate::proto::NeighborAdminState::ConfigAdminDown
+                | crate::proto::NeighborAdminState::DampeningCapacity,
+            ) => "Error Before Disable",
+            _ => "Last Error",
+        };
+        rows.field(0, label, &n.last_error);
     }
     rows.render()
 }
@@ -2059,6 +2070,89 @@ mod tests {
         assert_eq!(output::neighbor_identity(&state), "swp1 (-)");
     }
 
+    /// A held-down neighbor reads as disabled with its owner, in the table,
+    /// the detail view and JSON, instead of a plain Idle; outside a
+    /// max-prefix latch its error is labeled as predating the hold.
+    #[test]
+    fn administratively_held_neighbors_render_their_owner() {
+        use crate::proto::NeighborAdminState as Admin;
+        let mut state = neighbor_projection_fixture();
+        state.state = crate::proto::SessionState::Idle as i32;
+        state.stale = false;
+        state.last_error = "hold timer expired".into();
+        for (admin, suffix, detail_row, json_value, error_label) in [
+            (
+                Admin::OperatorDisabled,
+                Some("Idle (Admin)"),
+                Some("disabled by operator"),
+                Some("operator_disabled"),
+                "Error Before Disable:",
+            ),
+            (
+                Admin::ConfigAdminDown,
+                Some("Idle (Admin)"),
+                Some("disabled by config admin_down"),
+                Some("config_admin_down"),
+                "Error Before Disable:",
+            ),
+            (
+                Admin::DampeningCapacity,
+                Some("Idle (Admin)"),
+                Some("disabled after dampening capacity was exceeded"),
+                Some("dampening_capacity"),
+                "Error Before Disable:",
+            ),
+            (
+                Admin::MaxPrefixLatched,
+                Some("Idle (PfxCt)"),
+                Some("latched down after max-prefix shutdown"),
+                Some("max_prefix_latched"),
+                "Last Error:",
+            ),
+            (Admin::Enabled, None, None, Some("enabled"), "Last Error:"),
+            (Admin::Unspecified, None, None, None, "Last Error:"),
+        ] {
+            state.admin_state = admin as i32;
+            let mut table = Vec::new();
+            output::write_neighbor_table(&mut table, std::slice::from_ref(&state), false).unwrap();
+            let table = String::from_utf8(table).unwrap();
+            let detail = render_neighbor_detail_human(&state);
+            match suffix {
+                Some(label) => {
+                    assert!(table.contains(label), "{admin:?}: {table}");
+                    assert!(detail.contains(label), "{admin:?}: {detail}");
+                }
+                None => {
+                    assert!(!table.contains("Idle ("), "{admin:?}: {table}");
+                    assert!(!detail.contains("Idle ("), "{admin:?}: {detail}");
+                }
+            }
+            match detail_row {
+                Some(row) => {
+                    assert!(detail.contains("Admin State:"), "{admin:?}: {detail}");
+                    assert!(detail.contains(row), "{admin:?}: {detail}");
+                }
+                None => assert!(!detail.contains("Admin State:"), "{admin:?}: {detail}"),
+            }
+            assert!(detail.contains(error_label), "{admin:?}: {detail}");
+            let row = serde_json::to_value(json_neighbor(&state)).unwrap();
+            let captured = captured_neighbor_detail(&state);
+            for json in [&row, &captured] {
+                // `state` keeps its session-state vocabulary.
+                assert_eq!(json["state"], "Idle", "{admin:?}");
+                assert_eq!(json["last_error"], "hold timer expired", "{admin:?}");
+                match json_value {
+                    Some(value) => assert_eq!(json["admin_state"], value, "{admin:?}"),
+                    None => assert!(json.get("admin_state").is_none(), "{admin:?}"),
+                }
+            }
+        }
+        // A stale row's placeholder state is not dressed up as a hold-down.
+        state.stale = true;
+        state.admin_state = Admin::OperatorDisabled as i32;
+        assert_eq!(output::neighbor_state_label(&state), "Stale");
+    }
+
     fn neighbor_projection_fixture() -> crate::proto::NeighborState {
         crate::proto::NeighborState {
             discovery_state: 0,
@@ -2165,6 +2259,7 @@ mod tests {
             tcp_ao_rotation_error: "tcp_ao_rotation_error-value".to_string(),
             slow_peer: true,
             bmp_identity_excluded: true,
+            admin_state: crate::proto::NeighborAdminState::Enabled as i32,
             graceful_shutdown_advertise_intent: Some(false),
             max_prefix_action: "max_prefix_action-value".to_string(),
             max_prefix_restart_remaining_millis: Some(139),

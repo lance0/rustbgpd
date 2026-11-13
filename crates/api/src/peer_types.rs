@@ -2808,6 +2808,8 @@ pub struct PeerInfo {
     pub state: SessionState,
     /// Whether the peer is administratively enabled.
     pub enabled: bool,
+    /// Which owner holds a disabled peer down; `None` while `enabled`.
+    pub admin_down_reason: Option<AdminDownReason>,
     /// Local RFC 8326 graceful-shutdown advertisement intent; this is not
     /// evidence of receiver-side delivery or downstream convergence.
     pub graceful_shutdown_advertise_intent: bool,
@@ -2963,6 +2965,19 @@ pub struct PeerInfo {
     /// Set for an interface-only neighbor (ADR-0142): its discovery state
     /// and the address bound to it.
     pub interface_only: Option<InterfaceOnlyState>,
+}
+
+/// The owner holding a disabled neighbor down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminDownReason {
+    /// A runtime operator disable.
+    Operator,
+    /// The neighbor's configured `admin_down`.
+    ConfigAdminDown,
+    /// A max-prefix shutdown latch.
+    MaxPrefixLatched,
+    /// A route-flap dampening source-capacity disable.
+    DampeningCapacity,
 }
 
 /// How a neighbor's `remote_asn` matches the ASN in the peer's OPEN.
