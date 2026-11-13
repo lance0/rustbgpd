@@ -1177,10 +1177,10 @@ async fn export_only_snapshot_remainder_failure_restores_remainder_then_cohort()
         rib_task.await.unwrap(),
         // The remainder pair shares one export pair, so its RIB step is
         // deferred past both session legs and was never sent: the session
-        // failure comes first. The RIB still holds the acknowledged member's
-        // prior chain, so its rollback sends no RIB step; the member whose
-        // session apply failed is restored, as is the committed cohort.
-        vec![remainder_failing, second, first],
+        // failure comes first. Both members are restored all the same: a
+        // member can register with the RIB during the walk, and that
+        // registration installs the candidate chain its session holds.
+        vec![remainder_failing, remainder_first, second, first],
         "authoritative self-heal completes newest-first before cohort rollback"
     );
 }
@@ -2105,5 +2105,157 @@ async fn batched_remainder_pair_defers_route_refresh_past_its_rib_batch() {
         rib_task.await.unwrap(),
         vec![(pair.to_vec(), vec![0, 0])],
         "the pair's one RIB batch precedes both Route Refreshes"
+    );
+}
+
+/// Two shared pairs in the remainder, the second pair's batch failing. The
+/// first pair's Route Refreshes are sent as soon as that pair commits, before
+/// the second pair's batch, and the rollback restores every remainder member
+/// of both pairs, then the cohort.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one fixture holds the recording RIB stub, three partitions and the rollback order proof"
+)]
+async fn second_remainder_pair_failure_restores_both_pairs_after_first_pair_refreshes() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let peer = |last| IpAddr::V4(Ipv4Addr::new(10, 36, 7, last));
+    let cohort = [peer(1), peer(2), peer(3)];
+    let pair_b = [peer(4), peer(5)];
+    let pair_c = [peer(6), peer(7)];
+    let counters = pair_b.map(|_| Arc::new(FakePeerCounters::default()));
+    let refreshes = {
+        let counters = counters.clone();
+        move || {
+            counters
+                .iter()
+                .map(|counters| counters.route_refresh.load(Ordering::SeqCst))
+                .collect::<Vec<_>>()
+        }
+    };
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(32);
+    let rib_task = tokio::spawn(async move {
+        let mut seen: Vec<(&'static str, Vec<IpAddr>, Vec<u32>)> = Vec::new();
+        let addrs = |replacements: &[rustbgpd_rib::PeerExportPolicyReplacement]| {
+            replacements
+                .iter()
+                .map(|replacement| replacement.peer.addr())
+                .collect::<Vec<_>>()
+        };
+        while let Some(update) = rib_rx.recv().await {
+            match update {
+                RibUpdate::ReplacePeerExportPolicies { reply, .. } => {
+                    let _ = reply.send(Ok(rustbgpd_rib::ExportPolicyCohortOutcome::Committed));
+                }
+                RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+                    replacements,
+                    reply,
+                } => {
+                    let members = addrs(&replacements);
+                    let fails = members == pair_c;
+                    seen.push(("batch", members, refreshes()));
+                    let _ = reply.send(if fails {
+                        Err(rustbgpd_rib::RibCommandError::internal(
+                            "second pair refused",
+                        ))
+                    } else {
+                        Ok(Vec::new())
+                    });
+                }
+                RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                    replacements,
+                    reply,
+                } => {
+                    seen.push(("restore", addrs(&replacements), Vec::new()));
+                    let _ = reply.send(Ok(replacements
+                        .iter()
+                        .rev()
+                        .map(
+                            |replacement| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
+                                peer: replacement.peer,
+                            },
+                        )
+                        .collect()));
+                }
+                _ => {}
+            }
+        }
+        seen
+    });
+    let (_command_tx, command_rx) = mpsc::channel(16);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let installs = Arc::new(AtomicUsize::new(0));
+    for address in cohort.into_iter().chain(pair_c) {
+        insert_test_managed_peer(
+            &mut manager,
+            address,
+            established_export_policy_test_session(address, Arc::clone(&installs), None),
+            false,
+        );
+    }
+    for (address, counters) in pair_b.into_iter().zip(&counters) {
+        insert_test_managed_peer(
+            &mut manager,
+            address,
+            acking_counted_policy_handle(address, Arc::clone(counters)),
+            false,
+        );
+    }
+    let import_next = validation_policy_chain(ImportValidationDependency::Rpki);
+    let target = |address: IpAddr| ResolvedPeerPolicy {
+        address,
+        interface: None,
+        import_policy: pair_b.contains(&address).then(|| import_next.clone()),
+        export_policy: Some(distinct_deny_policy_chain(if cohort.contains(&address) {
+            0
+        } else if pair_b.contains(&address) {
+            1
+        } else {
+            2
+        })),
+    };
+    let all: Vec<IpAddr> = cohort.into_iter().chain(pair_b).chain(pair_c).collect();
+    let result = manager
+        .apply_resolved_policy_snapshot(all.iter().copied().map(target).collect())
+        .await;
+    assert!(
+        result.as_ref().is_err_and(|error| {
+            error.contains("second pair refused")
+                && error.contains("already-applied peers restored")
+                && error.contains("committed cohort restored")
+        }),
+        "{result:?}"
+    );
+    for &address in &all {
+        let state = manager.peers.get(&key(address)).unwrap();
+        assert!(state.export_policy.is_none() && state.import_policy.is_none());
+        assert!(!state.pending_refresh && !state.pending_export_apply);
+        manager.delete_peer(key(address), false).await.unwrap();
+    }
+    drop(manager);
+    assert_eq!(
+        rib_task.await.unwrap(),
+        vec![
+            ("batch", pair_b.to_vec(), vec![0, 0]),
+            // The first pair's refreshes went out before the second batch.
+            ("batch", pair_c.to_vec(), vec![1, 1]),
+            // Every remainder member is restored, whichever batch failed.
+            (
+                "restore",
+                pair_b.into_iter().chain(pair_c).collect(),
+                Vec::new()
+            ),
+            ("restore", cohort.to_vec(), Vec::new()),
+        ]
     );
 }

@@ -239,17 +239,19 @@ therefore carries the shared cohorts of one export pair, which is more than
 one cohort when the pair's members sit in several source groups, or the
 members the paced budget admits. Every RIB command of the remainder,
 per-peer or batched, shares the transaction's one forward budget, anchored at
-its first RIB command. Once every pair has committed, the deferred Route
-Refreshes run in walk order through the step the cohort uses: the session is
+its first RIB command. A pair larger than 100 members is sent as several
+batches of at most 100, the later ones joining the destination group the
+first built, so one batch turn does not grow with the pair. Once a pair has
+committed, its deferred Route Refreshes run in walk order, before the next
+pair's batch, through the step the cohort uses: the session is
 probed again, a positively known-down peer owes no refresh, and a failed
 refresh is fatal. Between its session leg and its batch a member's session
 holds the new chain while the RIB holds the old one, the window cohort
 members already have. Any failure (a session leg, a batch or paced command,
 budget expiry, a deferred refresh) restores every captured prior, remainder
-then cohort. A member whose batch was never sent still holds its prior chain
-in the RIB, so its rollback restores the session and bookkeeping only; a
-member of a batch that was sent, whatever its reply, is in the restore batch.
-The limit that remains: peers with pairwise distinct export changes
+then cohort, including a member whose batch was never sent: a member can
+register with the RIB during the walk, and that registration installs the
+candidate chain its session already holds. The limit that remains: peers with pairwise distinct export changes
 still cost one full-table RIB command each under the two-minute budget.
 
 ## Context

@@ -823,6 +823,97 @@ fn residual_cohort_reload_longest_command_is_flat_in_moved_members() {
     }
 }
 
+/// One export pair of `size` unicast members in one update group moves to a
+/// new chain the way the peer manager's remainder sends it: authoritative
+/// batches of at most 100 members. The first batch builds the destination
+/// group; later batches join it. Returns the longest batch's checkpoints.
+fn shared_pair_in_batches(size: usize) -> Work {
+    const OLD: u32 = 0xFC00_0001;
+    const NEW: u32 = 0xFC00_0011;
+    const BATCH: usize = 100;
+    let arm = ResidualArm::MixedDestinations;
+    let (_tx, mut manager) = manager();
+    let mut receivers: Vec<_> = (0..size)
+        .map(|index| {
+            let (outbound_tx, receiver) = mpsc::channel(4096);
+            let mut up = test_peer_up(member(index), 1, outbound_tx);
+            if let RibUpdate::PeerUp {
+                export_policy,
+                peer_asn,
+                sendable_families,
+                ..
+            } = &mut up
+            {
+                *export_policy = Some(arm.chain(OLD));
+                *peer_asn = 65_100 + u32::try_from(index).unwrap();
+                *sendable_families = arm.families();
+            }
+            manager.handle_update(up);
+            receiver
+        })
+        .collect();
+    arm.seed(&mut manager);
+    assert_eq!(
+        tagged_per_member(&mut receivers, |_| OLD),
+        vec![RESIDUAL_ROWS; size]
+    );
+    let all: Vec<PeerId> = (0..size).map(member).collect();
+    let mut longest = 0;
+    for batch in all.chunks(BATCH) {
+        let work = checkpoints_in(|| {
+            let (reply, mut response) = oneshot::channel();
+            manager.handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+                replacements: batch
+                    .iter()
+                    .map(|peer| crate::PeerExportPolicyReplacement {
+                        peer: *peer,
+                        export_policy: Some(arm.chain(NEW)),
+                    })
+                    .collect(),
+                reply,
+            });
+            assert_eq!(
+                response.try_recv().unwrap().unwrap(),
+                Vec::<PeerId>::new(),
+                "size {size}: a unicast batch commits as a shared cohort"
+            );
+        })[ALL];
+        longest = longest.max(work);
+    }
+    let destination = manager.grouped_member_of(all[0]);
+    assert!(
+        destination.is_some()
+            && all
+                .iter()
+                .all(|peer| manager.grouped_member_of(*peer) == destination),
+        "size {size}: every batch joined one destination group"
+    );
+    assert_eq!(
+        tagged_per_member(&mut receivers, |_| NEW),
+        vec![RESIDUAL_ROWS; size],
+        "size {size}: re-exported tables"
+    );
+    Work::from([("longest batch checkpoints", longest)])
+}
+
+/// A shared pair's batch turn grows with its members, so the peer manager
+/// sends a pair in batches of at most 100. The longest batch is then flat
+/// from a 100-member pair to a 300-member pair: a later batch joins the
+/// occupied destination and costs no more than the first.
+#[test]
+fn shared_pair_longest_batch_is_flat_in_pair_size() {
+    let unit = "longest batch checkpoints";
+    let (small, large) = (
+        shared_pair_in_batches(100)[unit],
+        shared_pair_in_batches(300)[unit],
+    );
+    assert!(small > 0);
+    assert!(
+        large < small * 3 / 2,
+        "the longest batch grew {small} -> {large} from a 100-member to a 300-member pair"
+    );
+}
+
 /// Update-group tables no member belongs to.
 fn memberless_groups(manager: &RibManager) -> usize {
     manager
