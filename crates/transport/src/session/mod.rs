@@ -1136,19 +1136,28 @@ struct AcceptedTransport {
 /// A dropped session must not free a whole outbound inventory in that one
 /// turn, whether its task returned from `run()` or was cancelled at an await
 /// point (`abort_for_transport_safety`, a `shutdown_timeout` expiry): the remainder
-/// goes to the paced release task. A cancelled session must also still end
-/// in the RIB: the RIB-bound messages it held, and the end of an Established
-/// epoch it never closed, are delivered by their own task (see
-/// [`PeerSession::hand_off_rib_backlog`]). Both are skipped without a
-/// runtime, where `tokio::spawn` would panic and nothing could run them,
-/// and while unwinding. A runtime that is shutting down cancels the spawned
-/// tasks at once instead of panicking, which drops the inventory in that
-/// turn and the held messages with the RIB actor they were bound for.
+/// goes to the paced release task. A cancelled or panicked session must also
+/// still end in the RIB and at the BMP collectors: the RIB-bound messages it
+/// held, and the end of an Established epoch it never closed, are delivered
+/// by their own task (see [`PeerSession::hand_off_rib_backlog`]), and the
+/// epoch's BMP Peer Down is queued here (see
+/// [`PeerSession::close_bmp_epoch`]). The paced release is skipped while
+/// unwinding, so freeing an inventory the panic may have left mid-step
+/// cannot panic again; the session ends are not, since a panicked session
+/// would otherwise stay live in the RIB with nothing left to retire it.
+/// Spawning hand-offs is skipped without a runtime, where `tokio::spawn`
+/// would panic and nothing could run them. A runtime that is shutting down
+/// cancels the spawned tasks at once instead of panicking, which drops the
+/// inventory in that turn and the held messages with the RIB actor they
+/// were bound for.
 impl Drop for PeerSession {
     fn drop(&mut self) {
         self.abandon_bmp_peer_down();
-        if !std::thread::panicking() && tokio::runtime::Handle::try_current().is_ok() {
-            self.hand_off_retirement();
+        self.close_bmp_epoch();
+        if tokio::runtime::Handle::try_current().is_ok() {
+            if !std::thread::panicking() {
+                self.hand_off_retirement();
+            }
             self.hand_off_rib_backlog();
         }
     }
@@ -2872,6 +2881,40 @@ impl PeerSession {
                 peer = %self.peer_label,
                 "BMP Peer Down abandoned: the session ended while the BMP event channel stayed full"
             );
+        }
+    }
+
+    /// A session dropped inside an Established epoch whose BMP Peer Down it
+    /// never emitted (its task aborted or panicked before `SessionDown`)
+    /// queues one now: reason 2, local close without NOTIFICATION, behind
+    /// every event it already emitted. It never waits for room: delivered
+    /// later, it could follow a successor's Peer Up, so a full channel
+    /// drops it, counted, as [`Self::abandon_bmp_peer_down`] does.
+    fn close_bmp_epoch(&mut self) {
+        let Some(tx) = self.bmp_tx.as_ref() else {
+            return;
+        };
+        if self.established_at.take().is_none() {
+            return;
+        }
+        let event = BmpEvent::PeerDown {
+            peer_info: self.build_bmp_peer_info(),
+            reason: PeerDownReason::LocalNoNotification(0),
+        };
+        match tx.try_send(event) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                self.metrics
+                    .record_bmp_source_drop(&self.peer_label, "channel_closed");
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.metrics
+                    .record_bmp_source_drop(&self.peer_label, "channel_full");
+                warn!(
+                    peer = %self.peer_label,
+                    "BMP Peer Down dropped: the session ended inside its epoch while the BMP event channel was full"
+                );
+            }
         }
     }
 

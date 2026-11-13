@@ -1174,6 +1174,60 @@ async fn a_dropped_session_with_a_delivered_peer_down_abandons_nothing() {
     );
 }
 
+/// A session dropped inside its Established epoch, by an abort or by a
+/// panic that unwinds through it, emits the BMP Peer Down that
+/// `SessionDown` never did: reason 2, behind the Route Monitoring it
+/// already queued. A session that went down first emits no second one.
+/// Mutation-red: without the drop-time Peer Down the collector keeps the
+/// peer up; closing the epoch on every drop sends a second Peer Down.
+#[tokio::test]
+async fn a_session_dropped_while_established_emits_bmp_peer_down() {
+    let established = || {
+        let (mut session, rib_rx, bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+        session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
+        session.established_at = Some(tokio::time::Instant::now());
+        (session, rib_rx, bmp_rx)
+    };
+    let events = |bmp_rx: &mut mpsc::Receiver<BmpEvent>| {
+        std::iter::from_fn(|| bmp_rx.try_recv().ok())
+            .map(|event| match event {
+                BmpEvent::RouteMonitoring { .. } => "RouteMonitoring",
+                BmpEvent::PeerDown {
+                    reason: PeerDownReason::LocalNoNotification(0),
+                    ..
+                } => "PeerDown(local, no notification)",
+                BmpEvent::PeerDown { .. } => "PeerDown(other)",
+                _ => "other",
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let (mut aborted, _rib_rx, mut bmp_rx) = established();
+    aborted.emit_bmp_event(BmpEvent::RouteMonitoring {
+        peer_info: aborted.build_bmp_peer_info(),
+        update_pdu: Bytes::from_static(&[0xde, 0xad]),
+    });
+    drop(aborted);
+    assert_eq!(
+        events(&mut bmp_rx),
+        ["RouteMonitoring", "PeerDown(local, no notification)"]
+    );
+
+    let (panicked, _rib_rx, mut bmp_rx) = established();
+    let task = tokio::spawn(async move {
+        let _session = panicked;
+        panic!("session task panicked");
+    });
+    assert!(task.await.unwrap_err().is_panic());
+    assert_eq!(events(&mut bmp_rx), ["PeerDown(local, no notification)"]);
+
+    let (mut closed, _rib_rx, mut bmp_rx) = established();
+    closed.last_down_reason = Some(PeerDownReason::RemoteNoNotification);
+    closed.execute_actions(vec![Action::SessionDown]).await;
+    drop(closed);
+    assert_eq!(events(&mut bmp_rx), ["PeerDown(other)"]);
+}
+
 /// LAN-200: a TCP disconnect abandons any pending BMP divergence repair.
 /// Otherwise the run loop's `bmp_repair_timer` arm could fire after the
 /// socket died and emit a synthetic `PeerDown`/`PeerUp` for a dead session
