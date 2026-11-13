@@ -384,6 +384,9 @@ struct HeldState {
     config_admin_down: bool,
     max_prefix_restart_seconds: Option<u32>,
     latch: Option<super::MaxPrefixLatch>,
+    /// The neighbor's session-task crashes, latched or not, carried to its
+    /// next endpoint like the max-prefix latch.
+    crashes: Option<super::notifications::SessionCrashes>,
     counters: rustbgpd_transport::NeighborCounters,
 }
 
@@ -974,6 +977,12 @@ impl PeerManager {
                             latch.deadline,
                         );
                     }
+                    super::snapshot::apply_session_crash(
+                        &mut info,
+                        held.crashes
+                            .as_ref()
+                            .and_then(super::notifications::SessionCrashes::error),
+                    );
                 }
                 Some(info)
             })
@@ -2170,6 +2179,7 @@ impl PeerManager {
                 .get(key)
                 .and_then(|managed| managed.max_prefix_restart_seconds),
             latch: None,
+            crashes: None,
             counters: self.neighbor_counters_for(key),
         };
         let detached = match self
@@ -2202,6 +2212,16 @@ impl PeerManager {
             mut held,
         } = retirement;
         held.latch = self.max_prefix_latches.remove(&key);
+        // Nothing stays under the retired endpoint's key: a later binding
+        // there is a new peer for the same neighbor.
+        held.crashes = self.take_session_crashes(&key);
+        if held
+            .crashes
+            .as_ref()
+            .is_some_and(super::notifications::SessionCrashes::latched)
+        {
+            held.enabled = false;
+        }
         if let Some(latch) = &mut held.latch {
             held.enabled = false;
             self.publish_peer_admin_enabled_metric(&key, false);
@@ -2763,6 +2783,12 @@ impl PeerManager {
             self.recompute_next_max_prefix_restart_deadline();
             carried_latch = true;
         }
+        // Before the add, which honors a carried crash latch.
+        let carried_crashes = held.as_ref().and_then(|held| held.crashes.clone());
+        let had_crashes = carried_crashes.is_some();
+        if let Some(crashes) = carried_crashes {
+            self.restore_session_crashes(&key, crashes);
+        }
         if let Some(rib_peer) = rib_peer {
             self.rib_peers.insert(
                 key.clone(),
@@ -2780,6 +2806,9 @@ impl PeerManager {
             self.neighbor_counters.remove(&key);
             if carried_latch {
                 self.remove_max_prefix_latch(&key);
+            }
+            if had_crashes {
+                self.clear_session_crashes(&key);
             }
             if rib_peer.is_some() {
                 self.rib_peers.remove(&key);

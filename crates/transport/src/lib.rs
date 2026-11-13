@@ -69,8 +69,8 @@ pub use handle::{
     PeerShutdownError, PolicyRejectCounts, PrePolicyRouteCounts, SessionEndRetention,
     SessionIdentity, SessionLifecycleNotification, SessionNotification,
     SessionNotificationDirection, SessionNotificationEvent, SessionNotificationReceiver,
-    SessionNotificationSender, SessionQueryOutcome, SessionRole, StateQueryOutcome,
-    ValidationDelta, WarmCheckpointSessionState, session_notification_channel,
+    SessionNotificationSender, SessionQueryOutcome, SessionRole, SessionTaskExitNotice,
+    StateQueryOutcome, ValidationDelta, WarmCheckpointSessionState, session_notification_channel,
 };
 pub use link::{InterfaceAddress, LinkDown, LinkDownCause, LinkSnapshot, LinkState, LinkStateFeed};
 pub use listener::{
