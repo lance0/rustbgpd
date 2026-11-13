@@ -880,3 +880,133 @@ fn outbound_teardown_and_family_unlock_take_the_ingest_owner() {
         .collect();
     assert_only_ingest_owners("family unlock", &owners);
 }
+
+/// Which actor arm re-observes the condition.
+#[derive(Clone, Copy, Debug)]
+enum ConditionReobserve {
+    /// A swapped dataset that the `condition_policy` reads.
+    DatasetSwap,
+    /// The source peer's group changes, which the policy context carries.
+    SourceGroup,
+}
+
+/// A source holds `routes` /32s inside one `198.18.0.0/16 le 32` condition
+/// range whose `condition_policy` reads an empty dataset, so every candidate
+/// misses; then `arm` re-observes the condition from those Adj-RIB-In rows.
+/// Returns the counted turn and the candidates it observed.
+fn condition_rescan(routes: u16, arm: ConditionReobserve) -> (CountedTurn, usize) {
+    use crate::manager::conditional_advertisement::ConditionObservation;
+    use crate::{ConditionalAdvertiseIf, ConditionalAdvertisement};
+    use rustbgpd_policy::PolicyChain;
+    use rustbgpd_policy::datasets::{DatasetBindings, DatasetData, DatasetHandle, DatasetKind};
+    use rustbgpd_policy::rpol::RpolFile;
+    use rustbgpd_policy::sets::{PrefixSet, PrefixSetEntry, SetStore};
+
+    let (mut manager, readiness_tx) = readiness_manager();
+    let source = peer_v4(SOURCE);
+    register_test_peer(&mut manager, source, 0);
+    let announced = (0..routes)
+        .map(|index| {
+            let [high, low] = index.to_be_bytes();
+            make_route(
+                Ipv4Prefix::new(Ipv4Addr::new(198, 18, high, low), 32),
+                SOURCE,
+            )
+        })
+        .collect();
+    manager.handle_update(super::lifecycle::test_routes_received(source, announced));
+    drain_route_chunks(&mut manager);
+    assert_eq!(manager.loc_rib.len(), usize::from(routes));
+
+    let mut bindings = DatasetBindings::new();
+    bindings.insert(Arc::new(DatasetHandle::new(
+        "allowed",
+        DatasetKind::Prefix,
+        DatasetData::Prefix(PrefixSet::new(None)),
+    )));
+    let compiled = RpolFile::parse(
+        "dataset prefix-set allowed\npolicy p { term t { if route.prefix in allowed { accept } reject } }",
+    )
+    .unwrap()
+    .compile_policy_bound("p", &[], &mut SetStore::new(), &bindings)
+    .unwrap()
+    .unwrap();
+    let _ = manager.install_conditional_advertisements(vec![ConditionalAdvertisement {
+        name: Arc::from("backup"),
+        advertise_policy: PolicyChain::default(),
+        advertise_if: ConditionalAdvertiseIf::Absent,
+        condition_prefixes: vec![PrefixSetEntry {
+            prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 18, 0, 0), 16)),
+            ge: None,
+            le: Some(32),
+        }],
+        condition_policy: Some(PolicyChain::from_named(vec![
+            rustbgpd_policy::NamedPolicy::from_rpol("p".to_string(), Arc::new(compiled)),
+        ])),
+        settle_time: Duration::from_secs(5),
+        retiring: false,
+    }]);
+
+    let candidates = manager.conditional_advertisement_candidate_visits();
+    let update = match arm {
+        ConditionReobserve::DatasetSwap => RibUpdate::ReobserveConditionalAdvertisements {
+            datasets: vec!["allowed".to_string()],
+            changed: Vec::new(),
+            reply: oneshot::channel().0,
+        },
+        ConditionReobserve::SourceGroup => RibUpdate::SetPeerPolicyContext {
+            peer: source,
+            session_id: 0,
+            peer_group: Some("transit".to_string()),
+        },
+    };
+    let turn = counted_turn(
+        &mut manager,
+        readiness_tx,
+        crate::manager::CONDITION_SCAN_ROW,
+        |manager| manager.handle_update(update),
+    );
+    let candidates = manager.conditional_advertisement_candidate_visits() - candidates;
+    assert_eq!(
+        manager.conditional_advertisement_state("backup").unwrap().0,
+        ConditionObservation::Absent,
+        "{arm:?}: the observation is unchanged"
+    );
+    (turn, candidates)
+}
+
+/// Re-observing a range condition walks every Adj-RIB-In row under the
+/// range, then observes each in-range prefix's candidates, in one actor
+/// turn. Both arms that do it with no owner of their own (a dataset swap
+/// and a source peer's group change) answer readiness at each row under
+/// the ingest owner.
+#[test]
+fn condition_rescan_answers_readiness_at_every_visited_row() {
+    for arm in [
+        ConditionReobserve::DatasetSwap,
+        ConditionReobserve::SourceGroup,
+    ] {
+        for routes in [256_u16, 1024] {
+            let (turn, candidates) = condition_rescan(routes, arm);
+            let rows = usize::from(routes);
+            assert_eq!(candidates, rows, "{arm:?} {routes}: one candidate per row");
+            // The walk plus the per-prefix observation; the group change
+            // first walks the source's range until one prefix matches.
+            let walked = match arm {
+                ConditionReobserve::DatasetSwap => 2 * rows,
+                ConditionReobserve::SourceGroup => 2 * rows + 1,
+            };
+            assert_eq!(turn.visited, walked, "{arm:?} {routes}: {turn:?}");
+            assert!(
+                turn.answered >= rows,
+                "{arm:?} {routes}: the rescan answered {}: {turn:?}",
+                turn.answered
+            );
+            assert_eq!(
+                turn.owners,
+                [ReadinessOwnerKind::Ingest],
+                "{arm:?} {routes}"
+            );
+        }
+    }
+}
