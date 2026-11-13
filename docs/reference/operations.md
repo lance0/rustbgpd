@@ -961,10 +961,31 @@ between the same pair of export policies are applied together, so their cost
 is close to one table per policy pair. Peers whose export change is their own
 (per-neighbor export policies) cost one RIB batch each, a pass over the full
 table, so the change scales with distinct policy chains times table size: at
-a full table, on the order of a second per such peer. Every changed peer's
-session takes its new policies first; the RIB batches follow, one policy pair
-at a time, and each pair's Route Refreshes are sent once that pair has
-committed. Elapsed time does not roll
+a full table, on the order of a second per such peer.
+
+The change is applied one step at a time. A step is the peers of one policy
+pair, at most 100 of them; a larger pair takes several steps in a row. Steps
+run in the order in which the first peer of each pair appears in the
+change. Each step does three things before the next one starts: the peers'
+sessions take their new import and export policies, the RIB commits the
+step's export change, and a Route Refresh is sent to each of its peers whose
+import policy changed. A peer with retry state from an earlier failed
+change, or whose change adds or removes its import policy under
+`ebgp_requires_policy`, is a step of its own.
+
+A peer the change has not reached yet runs its old policies on its session
+and in the RIB. Inside its own step a peer is briefly in a mixed state.
+From the session change until the RIB commit, the routes advertised to it
+are still the ones its old export policy produced. From the session change
+until its Route Refresh, its session applies the new import policy to every
+UPDATE that arrives, while the routes it sent earlier stay in its Adj-RIB-In
+as the old import policy accepted them; the refresh has the peer resend
+them, and they are then accepted or dropped under the new policy. That
+state lasts for the one step, a RIB batch and the step's refreshes, not for
+the whole change. If the change fails part-way, only the peers of the steps
+it reached were touched, and only those are restored.
+
+Elapsed time does not roll
 the change back. Neither the forward walk nor a rollback has a total deadline;
 each is bounded by a two-minute stall timeout, measured from the last RIB
 command that completed, inside the 30-minute settlement budget described in

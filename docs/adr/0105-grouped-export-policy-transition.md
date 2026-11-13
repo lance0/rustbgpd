@@ -228,30 +228,49 @@ that pass the cohort's local eligibility check by `(installed, target)`
 export pair, in first-occurrence order. A peer whose pair is its own, a peer
 with retry intent, an RFC 8212 presence transition (ADR-0112: its Route
 Refresh follows its RIB step immediately) and every peer of a snapshot that
-names a peer twice keep the per-peer path in section 4 unchanged. For a
-shared pair, the caller-order walk runs only the session legs of each member
-(both hot-applies, the state probe, the bail rules) and defers the RIB step
-of every member it observed Established. After the walk, each pair is sent
-as one `ReplacePeerExportPoliciesAuthoritatively` batch followed by its paced
-walk, the entry point the cohort handoff uses, so the RIB shares the
-destination build and the old-to-new delta across the pair. One RIB turn
-therefore carries the shared cohorts of one export pair, which is more than
-one cohort when the pair's members sit in several source groups, or the
-members the paced budget admits. Every RIB command of the remainder,
-per-peer or batched, shares the transaction's one forward budget, anchored at
-its first RIB command. A pair larger than 100 members is sent as several
-batches of at most 100, the later ones joining the destination group the
-first built, so one batch turn does not grow with the pair. Once a pair has
-committed, its deferred Route Refreshes run in walk order, before the next
-pair's batch, through the step the cohort uses: the session is
-probed again, a positively known-down peer owes no refresh, and a failed
-refresh is fatal. Between its session leg and its batch a member's session
-holds the new chain while the RIB holds the old one, the window cohort
-members already have. Any failure (a session leg, a batch or paced command,
-budget expiry, a deferred refresh) restores every captured prior, remainder
-then cohort, including a member whose batch was never sent: a member can
-register with the RIB during the walk, and that registration installs the
-candidate chain its session already holds. The limit that remains: peers with pairwise distinct export changes
+names a peer twice keep the per-peer path in section 4 unchanged. The walk
+applies units in the caller's order of each unit's first target: a peer on
+the per-peer path is a unit of its own, and the members of a shared pair run
+together, in caller order, where the pair's first member stands, in groups
+of at most 100. A group is one unit with three steps. First the session legs
+of each member (both hot-applies, the state probe, the bail rules), which
+defer the RIB step of every member observed Established. Then one
+`ReplacePeerExportPoliciesAuthoritatively` batch followed by its paced walk,
+the entry point the cohort handoff uses, so the RIB shares the destination
+build and the old-to-new delta across the group. Then the group's deferred
+Route Refreshes in walk order, through the step the cohort uses: the session
+is probed again, a positively known-down peer owes no refresh, and a failed
+refresh is fatal. Legs precede the batch inside a group because the session's
+acknowledgment is what makes a registration during the walk install the
+right chain, and a failed leg must abort before that group's RIB commit. The
+groups are not run legs-first across the walk: a session would then hold the
+candidate chains, with its Route Refresh pending, for the whole walk, and a
+failed reload would have touched every session instead of the ones reached.
+One RIB turn therefore carries the shared cohorts of one group, which is
+more than one cohort when its members sit in several source groups, or the
+members the paced budget admits. A later group of a pair joins the
+destination group the first built, so one batch turn does not grow with the
+pair. The exception is a pair with a chain that reads a dataset: the batched
+transition does not share an occupied destination across a dataset
+reference, so the RIB hands the groups after the first back and each of
+those members takes the paced walk's own resync, the cost of the per-peer
+path. Refreshing after each group rather than after the pair is safe for the
+reason refreshing between pairs is: a route the refresh re-admits reaches a
+member still awaiting its batch under the old export chain, and that batch
+then moves the member on the delta against the destination. Every RIB
+command of the remainder, per-peer or batched, shares the transaction's one
+forward budget, anchored at its first RIB command; the session legs of later
+units run inside it, as the per-peer walk's always have. Between its session
+leg and its batch a member's session holds the new chain while the RIB holds
+the old one, the window cohort members already have, and until its refresh
+its `AdjRibIn` holds routes accepted under the old import chain; both last
+one group, not the walk. Any failure (a session leg, a batch or paced
+command, budget expiry, a deferred refresh) restores every captured prior,
+remainder then cohort. Those are the members of the units reached; a member
+of a later unit was never touched. A captured member whose batch was never
+sent is restored too: a member can register with the RIB during the walk,
+and that registration installs the candidate chain its session already
+holds. The limit that remains: peers with pairwise distinct export changes
 still cost one full-table RIB command each under the two-minute budget.
 
 **Amended:** 2026-11-13 — the rollback restore is paced, and its wait
@@ -265,7 +284,17 @@ owns the whole RIB side of a rollback partition. It now sends one
 first. That batch restores shared cohorts in its turn, exactly as the
 forward batch moves them, and acknowledges each residual member whose
 session sends any family with a `Deferred` receipt, leaving its installed
-chain in place. The task restores those members with
+chain in place. A member whose installed chain already equals the prior one
+is `Restored` at once, in the batch and in a paced command alike, with no
+regroup and no resync: a rollback names every member the failed walk
+captured, and the RIB never moved most of them. The test is the chain the
+RIB has installed when the command runs, not what the peer manager sent, so
+a member that registered under the candidate chain during the walk is not
+equal and is restored like any other. The forward batch and its paced walk
+share that body and the same shortcut; there it applies only to a member
+that registered under the candidate chain before its batch, whose
+registration already exported under it. The task restores the `Deferred`
+members with
 `RestorePacedExportPolicies` commands before it sends the next batch: the
 paced command's body, turn budget, window and reply, except that the RIB
 applies it even when its caller has dropped the reply. Every command is sent
@@ -320,8 +349,12 @@ table, that deadline rolled back a reload of roughly 80 or more peers with
 distinct export chains although every RIB command was completing, and the
 rollback then repeated the same work in reverse. Both forward budgets are
 now stall detectors, on the rule the rollback wait uses: after each
-completed unit (a remainder target, a pair's batch, a paced command) the
-budget expires `RIB_BATCH_REPLY_TIMEOUT` later. A walk that keeps completing
+completed step (a target's session legs or its whole per-peer apply, a
+batch, a paced command, a group's Route Refreshes) the budget expires
+`RIB_BATCH_REPLY_TIMEOUT` later. The refreshes are session round trips, not
+RIB work; renewing after them keeps a group whose refreshes are slow from
+spending the stall timeout of the RIB command that follows, as the per-peer
+command already excludes its own refresh from the budget. A walk that keeps completing
 units commits however long it takes; a walk whose RIB completes no unit for
 two minutes rolls back, as does one where a peer refuses or fails its step.
 Expiry still admits no further command, and an admitted command stays ahead
@@ -357,11 +390,20 @@ unicast, mixed destinations under one source group) is handed back and
 applied by the paced walk, whose body is the per-peer command's own regroup
 and resync, so its end state is unchanged at the cost of one short extra RIB
 command. A member with no RIB registration is skipped inside the batch, as
-the per-peer command's typed absence was accepted. The walk's order changes
-with it: every planned peer's session legs run before the first RIB batch,
-batches follow in the order each export pair first appears, and a peer's
-Route Refresh follows its pair's commit instead of its own session leg. The
-per-peer command remains for a target that carries retry intent or an
+the per-peer command's typed absence was accepted. The walk's order is the
+remainder amendment's rule, now with every eligible Established peer
+planned: units run in the caller's order of each unit's first target. A pair
+of any size, one member included, runs where its first member stands in
+groups of at most 100; each group runs its session legs, its batch with any
+paced commands and its Route Refreshes before the next unit starts. A target
+on the per-peer command is a unit of its own in its caller position, whole,
+as before. With every peer planned, running the legs ahead of the walk would
+have put all N sessions on the candidate import chain, each with its Route
+Refresh pending and the RIB still exporting to it under the old chain, for
+the whole walk, which is minutes at 150 distinct chains and a full table,
+and a failed reload would have exposed all N sessions instead of the ones
+reached. Interleaved, that state lasts one unit, and the rollback restores
+the units reached. The per-peer command remains for a target that carries retry intent or an
 unconfirmed install, an RFC 8212 presence transition, every target of a
 snapshot that names a peer twice, the honor-knob fan-outs and a single-peer
 hot update.
@@ -374,11 +416,14 @@ timeout instead of two minutes in total, a walk can hold the actor for many
 minutes, and everything else the run loop does waited for it: a BFD Down
 did not stop its BGP session, a crashed session task was not restarted and
 no session event was published until the walk ended. The owner now serves a
-fixed set of events at the seams it already had, where it drains operator
-reads: after each target's session step, after each pair batch and paced
-command, between the members of a cohort's session setup and of each
-deferred-refresh loop, between a rollback's session steps, and, while it
-waits for the detached restore, each time that task completes a RIB command.
+fixed set of events at seams between its steps, most of them where it
+already drained operator reads: after each target's session step (inside a
+group, between two members' steps: a planned member keeps only its key and
+chains there, no session handle), after each group's batch and each paced
+command, at the end of each unit, between the members of a cohort's session
+setup and of its deferred refreshes, between a rollback's session steps and
+refreshes, and, while it waits for the detached restore, each time that task
+has completed a RIB command when the owner is next polled.
 Served there: BFD state changes and due BFD command retries, link changes
 and link-check retries, session lifecycle events, one round of session
 notifications, and NOTIFICATION events, in the run loop's order (lifecycle

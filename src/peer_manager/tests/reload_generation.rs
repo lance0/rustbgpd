@@ -850,9 +850,32 @@ async fn rib_installed_export_chain(
 /// pair; `127.1.0.3` and `127.1.0.4` are the remainder pair, `127.1.0.3`
 /// re-registers on its first export install, and `127.1.0.4` rejects its
 /// session leg.
+///
+/// `127.1.0.4` is captured, so the rollback names it, but the RIB never
+/// moved it: its installed chain is already the prior one. It must not be
+/// handed a paced restore command, which for an ungrouped member (the
+/// second arm: every export chain reads peer context) is a resync of its
+/// whole table. `127.1.0.3` is restored in both arms.
 #[tokio::test]
 async fn rollback_restores_the_rib_chain_of_a_pair_member_that_registered_mid_walk() {
-    let fixture = generated_scenario_fixture("5", "4", &[("GEN_EXPORT_PAIRS", "2")]);
+    Box::pin(rollback_restores_mid_walk_registration(&[(
+        "GEN_EXPORT_PAIRS",
+        "2",
+    )]))
+    .await;
+    Box::pin(rollback_restores_mid_walk_registration(&[
+        ("GEN_EXPORT_PAIRS", "2"),
+        ("GEN_EXPORT_PEER_CONTEXT", "1"),
+    ]))
+    .await;
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one fixture holds the real RIB, the recording relay, the mid-walk registration and the restore proof"
+)]
+async fn rollback_restores_mid_walk_registration(shape: &[(&str, &str)]) {
+    let fixture = generated_scenario_fixture("5", "4", shape);
     let prior = fixture.load();
     let mut harness = GenerationHarness::new(&prior);
     let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(256);
@@ -866,7 +889,28 @@ async fn rollback_restores_the_rib_chain_of_a_pair_member_that_registered_mid_wa
         )
         .run(),
     );
-    harness.mgr.rib_tx = rib_tx.clone();
+    // The peer manager's commands pass through a relay that records which
+    // members the rollback hands a paced restore command.
+    let (relay_tx, mut relay_rx) = mpsc::channel::<RibUpdate>(256);
+    let paced_restores = Arc::new(Mutex::new(Vec::new()));
+    let relay = tokio::spawn({
+        let (rib_tx, seen) = (rib_tx.clone(), Arc::clone(&paced_restores));
+        async move {
+            while let Some(update) = relay_rx.recv().await {
+                if let RibUpdate::RestorePacedExportPolicies { replacements, .. } = &update {
+                    seen.lock().unwrap().extend(
+                        replacements
+                            .iter()
+                            .map(|replacement| replacement.peer.addr()),
+                    );
+                }
+                if rib_tx.send(update).await.is_err() {
+                    break;
+                }
+            }
+        }
+    });
+    harness.mgr.rib_tx = relay_tx;
     harness.rib.abort();
     let mut outbound = Vec::new();
     let mut registered = BTreeMap::new();
@@ -951,11 +995,20 @@ async fn rollback_restores_the_rib_chain_of_a_pair_member_that_registered_mid_wa
         assert!(
             rib_installed_export_chain(&rib_tx, *peer).await
                 == chain.as_ref().map(PolicyChain::compiled_shared),
-            "{address}: the RIB is back on the prior chain"
+            "{shape:?} {address}: the RIB is back on the prior chain"
         );
     }
+    // LOAD-BEARING: without the installed-chain shortcut in the RIB's
+    // restore, the untouched member is acknowledged `Deferred` and named in
+    // a paced restore command.
+    let paced_restores = paced_restores.lock().unwrap().clone();
+    assert!(
+        !paced_restores.contains(&failing),
+        "{shape:?}: {failing} was never moved in the RIB, so its restore owes no paced          command: {paced_restores:?}"
+    );
     harness.shutdown().await;
     drop(outbound);
+    relay.abort();
     rib.abort();
 }
 

@@ -507,7 +507,7 @@ async fn dynamic_idle_mid_walk_is_held_until_the_walk_has_rolled_back() {
     }
 }
 
-/// E-5, flood: one seam serves at most the per-kind budget of session
+/// E-5, flood: a seam serves at most the per-kind budget of session
 /// notifications, the rest stay queued, and the walk commits.
 ///
 /// LOAD-BEARING: an unbounded round drains the whole queue at one seam.
@@ -528,7 +528,8 @@ async fn a_notification_flood_costs_one_seam_its_budget() {
         while let Some(update) = rib_rx.recv().await {
             if is_walk_command(&update) {
                 commands += 1;
-                // The last forward command: one seam follows it.
+                // The last forward command. Two seams follow it: after
+                // the batch's reply and at the end of its unit.
                 if commands == 3 {
                     for _ in 0..FLOOD {
                         notices
@@ -550,8 +551,8 @@ async fn a_notification_flood_costs_one_seam_its_budget() {
     assert!(result.is_ok(), "{result:?}");
     assert_eq!(
         mgr.session_notify_rx.ready_count(),
-        FLOOD - OWNED_WALK_EVENT_BUDGET,
-        "one seam serves its budget and no more"
+        FLOOD - 2 * OWNED_WALK_EVENT_BUDGET,
+        "each seam serves its budget and no more"
     );
     drop(mgr);
     rib.await.unwrap();
@@ -559,17 +560,19 @@ async fn a_notification_flood_costs_one_seam_its_budget() {
 
 /// E-5, stall: events that keep arriving while a unit never completes do
 /// not keep the walk alive. It rolls back one stall timeout after its last
-/// completed unit, plus only the time the seam after that unit spent
-/// serving, which is not the RIB's.
+/// completed RIB command, plus only the time the seam after that command
+/// spent serving, which is not the RIB's.
 ///
-/// The seam's service here takes `PEER_LIFECYCLE_COMMAND_TIMEOUT`: the BFD
-/// Down it serves stops a pending inbound candidate that never exits.
+/// The first peer's batch hands it back for the paced walk, so the seam
+/// after the batch is followed directly by the paced command that stalls.
+/// The seam's service takes `PEER_LIFECYCLE_COMMAND_TIMEOUT`: the BFD Down
+/// it serves stops a pending inbound candidate that never exits.
 ///
 /// LOAD-BEARING: charging the service time to the stall budget ends the
 /// walk that much early.
 #[tokio::test(start_paused = true)]
 async fn events_do_not_renew_a_stalled_walk() {
-    let first_unit = Duration::from_secs(80);
+    let first_command = Duration::from_secs(80);
     let Lab {
         mgr,
         mut rib_rx,
@@ -606,15 +609,18 @@ async fn events_do_not_renew_a_stalled_walk() {
         let mut stalled = Vec::new();
         while let Some(update) = rib_rx.recv().await {
             match update {
-                RibUpdate::ReplacePeerExportPoliciesAuthoritatively { reply, .. } => {
+                RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+                    replacements,
+                    reply,
+                } => {
                     commands += 1;
-                    if commands == 1 {
-                        tokio::time::sleep(first_unit).await;
-                        states.send(down(held));
-                        let _ = reply.send(Ok(Vec::new()));
-                    } else {
-                        stalled.push(reply);
-                    }
+                    tokio::time::sleep(first_command).await;
+                    states.send(down(held));
+                    let _ = reply.send(Ok(vec![replacements[0].peer]));
+                }
+                RibUpdate::ApplyPacedExportPolicies { reply, .. } => {
+                    commands += 1;
+                    stalled.push(reply);
                 }
                 update => answer(update),
             }
@@ -634,7 +640,7 @@ async fn events_do_not_renew_a_stalled_walk() {
     );
     assert_eq!(
         elapsed,
-        first_unit + PEER_LIFECYCLE_COMMAND_TIMEOUT + RIB_BATCH_REPLY_TIMEOUT
+        first_command + PEER_LIFECYCLE_COMMAND_TIMEOUT + RIB_BATCH_REPLY_TIMEOUT
     );
     assert!(mgr.bfd_withholding(&held));
     drop(mgr);
@@ -1035,4 +1041,146 @@ async fn a_hold_taken_in_a_generation_meets_its_commit() {
         assert_eq!(sessions[0].starts.load(Ordering::SeqCst), 1);
         actor.abort();
     }
+}
+
+/// E-3, forward: two session tasks end while the walk runs. The peer whose
+/// unit has committed restarts on the candidate chain. The peer the walk
+/// has not reached restarts on its prior chain, and the walk then applies
+/// the candidate to that new session. The walk commits.
+///
+/// LOAD-BEARING: with no seam the walk reaches the second peer with its
+/// dead session, the hot-apply fails and the walk rolls back.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one test holds two crashing sessions, the scripted RIB and both re-established sessions"
+)]
+async fn session_crash_mid_walk_restarts_on_the_chain_the_walk_holds() {
+    let applied = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let pending = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2));
+    let Lab {
+        mut mgr,
+        mut rib_rx,
+        peers,
+        ..
+    } = lab(1);
+    let mut listeners = Vec::new();
+    let mut triggers = Vec::new();
+    let mut exits = Vec::new();
+    let mut crashed_sessions = Vec::new();
+    for peer in [applied, pending] {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let (crash, crashed) = oneshot::channel();
+        let exited = Arc::new(AtomicBool::new(false));
+        let session_id = u64::try_from(mgr.peers.len()).unwrap() + 1;
+        let exit = SessionTaskExitNotice::new(
+            Some(mgr.session_notify_tx.clone()),
+            SessionIdentity::primary(session_id),
+            peer,
+        );
+        insert_test_managed_peer(
+            &mut mgr,
+            peer,
+            walk_session(
+                peer,
+                Arc::default(),
+                Some((exit, crashed, Arc::clone(&exited))),
+            ),
+            false,
+        );
+        mgr.peers
+            .get_mut(&key(peer))
+            .unwrap()
+            .transport_config
+            .remote_addr = listener.local_addr().unwrap();
+        listeners.push(listener);
+        triggers.push(crash);
+        exits.push(exited);
+        crashed_sessions.push(session_id);
+    }
+    let (registered_tx, mut registered) = mpsc::unbounded_channel();
+    let rib = tokio::spawn(async move {
+        let mut batches = 0;
+        while let Some(update) = rib_rx.recv().await {
+            match update {
+                update @ RibUpdate::ReplacePeerExportPoliciesAuthoritatively { .. } => {
+                    batches += 1;
+                    // The second unit's batch: the first unit has committed
+                    // and the third has not started.
+                    if batches == 2 {
+                        for (crash, exited) in triggers.drain(..).zip(&exits) {
+                            crash.send(()).unwrap();
+                            set(exited).await;
+                        }
+                    }
+                    answer(update);
+                }
+                RibUpdate::PeerUp {
+                    session_id,
+                    export_policy,
+                    ..
+                } => {
+                    let _ = registered_tx.send((session_id, export_policy));
+                }
+                update => answer(update),
+            }
+        }
+        batches
+    });
+
+    // Walked in this order: the applied peer, a bystander, the pending peer.
+    let order = [applied, peers[0], pending];
+    let targets = distinct_targets(&order);
+    let candidate = |peer: IpAddr| {
+        targets
+            .iter()
+            .find(|target| target.address == peer)
+            .unwrap()
+            .export_policy
+            .clone()
+    };
+    let (applied_chain, pending_chain) = (candidate(applied), candidate(pending));
+    let result = mgr
+        .apply_resolved_policy_snapshot_classified(targets, true)
+        .await;
+    assert!(
+        result.is_ok(),
+        "{:?}",
+        result.err().map(|failure| failure.message().to_owned())
+    );
+    let mut restarted = Vec::new();
+    for (peer, crashed_session) in [applied, pending].into_iter().zip(&crashed_sessions) {
+        let session_id = mgr.peers[&key(peer)].session_id();
+        assert_ne!(session_id, *crashed_session, "{peer} was replaced mid-walk");
+        restarted.push(session_id);
+    }
+    assert_eq!(mgr.peers[&key(applied)].export_policy, applied_chain);
+    assert_eq!(mgr.peers[&key(pending)].export_policy, pending_chain);
+
+    // Each restarted session registers with the chain it holds.
+    let _first = accept_and_establish(&listeners[0]).await;
+    let _second = accept_and_establish(&listeners[1]).await;
+    let mut chains = HashMap::new();
+    while chains.len() < 2 {
+        let (session_id, export_policy) =
+            tokio::time::timeout(Duration::from_secs(5), registered.recv())
+                .await
+                .expect("both restarted sessions register")
+                .unwrap();
+        chains.insert(session_id, export_policy);
+    }
+    assert_eq!(chains[&restarted[0]], applied_chain);
+    assert_eq!(
+        chains[&restarted[1]], pending_chain,
+        "the walk applied the candidate to the session that replaced the dead one"
+    );
+    for peer in [applied, pending] {
+        mgr.delete_peer(key(peer), false).await.unwrap();
+    }
+    drop(mgr);
+    assert_eq!(
+        rib.await.unwrap(),
+        2,
+        "a peer that is down when the walk reaches it has no RIB step"
+    );
 }
