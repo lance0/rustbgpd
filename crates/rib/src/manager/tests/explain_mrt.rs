@@ -1816,30 +1816,54 @@ fn mrt_snapshot_lists_a_neighbor_with_its_first_identity() {
     assert_eq!(snapshot.peers[0].peer_asn, 65_001);
 }
 
+/// Removing, clearing or replacing a captured EVPN table between turns
+/// (session teardown, a replacement session, a rebind) withdraws its rows:
+/// the dump keeps the rows already read, skips the rest of that table, and
+/// still reads the next neighbor in full.
 #[test]
-fn mrt_snapshot_rejects_evpn_table_reset_or_replacement() {
-    for replace in [false, true] {
+fn mrt_snapshot_skips_the_rest_of_a_removed_or_reset_evpn_table() {
+    for reset in ["remove", "clear", "replace"] {
         let mut manager = mrt_test_manager();
-        let peer = mrt_test_peer(71);
-        seed_mrt_rib(&mut manager, peer, 0, 6);
+        let (reset_peer, next_peer) = (mrt_test_peer(71), mrt_test_peer(72));
+        seed_mrt_rib(&mut manager, reset_peer, 0, 6);
+        seed_mrt_rib(&mut manager, next_peer, 0, 3);
         let first = manager.mrt_snapshot_chunk(None, 2).unwrap();
         let second = manager.mrt_snapshot_chunk(first.next, 2).unwrap();
-        assert_eq!(second.evpn_routes.len(), 2);
-        if replace {
-            manager.ribs.insert(peer, AdjRibIn::new(peer));
-        } else {
-            manager.ribs.get_mut(&peer).unwrap().clear();
+        let mut rows = second.evpn_routes;
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|route| route.peer == reset_peer));
+        match reset {
+            "remove" => drop(manager.ribs.remove(&reset_peer)),
+            "clear" => manager.ribs.get_mut(&reset_peer).unwrap().clear(),
+            _ => drop(manager.ribs.insert(reset_peer, AdjRibIn::new(reset_peer))),
         }
-        // Relearn in reverse order so unchanged-looking keys occupy other slots.
-        for tag in (0..6).rev() {
-            manager
-                .ribs
-                .get_mut(&peer)
-                .unwrap()
-                .insert_evpn(mrt_test_evpn(peer, tag, 0));
+        if reset != "remove" {
+            // Relearn in reverse order, marked, so new rows fill the slots
+            // the walk has not reached.
+            for tag in (0..6).rev() {
+                manager
+                    .ribs
+                    .get_mut(&reset_peer)
+                    .unwrap()
+                    .insert_evpn(mrt_test_evpn(reset_peer, tag, 1));
+            }
         }
-        let error = manager.mrt_snapshot_chunk(second.next, 2).unwrap_err();
-        assert!(error.contains("EVPN table was reset"), "{error}");
+        let mut cursor = second.next;
+        while let Some(position) = cursor {
+            let chunk = manager
+                .mrt_snapshot_chunk(Some(position), 2)
+                .unwrap_or_else(|error| panic!("{reset}: {error}"));
+            rows.extend(chunk.evpn_routes);
+            cursor = chunk.next;
+        }
+        let from = |peer| rows.iter().filter(|route| route.peer == peer).count();
+        assert_eq!(from(reset_peer), 2, "{reset}: only rows read before");
+        assert_eq!(from(next_peer), 3, "{reset}: next neighbor read in full");
+        let relearned = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1));
+        assert!(
+            rows.iter().all(|route| route.next_hop != relearned),
+            "{reset}"
+        );
     }
 }
 

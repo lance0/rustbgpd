@@ -5094,10 +5094,14 @@ For every family:
   that join afterward contribute neither a peer entry nor routes. A captured
   neighbor keeps its original address, ASN and BGP identifier even if its
   metadata changes during the walk.
-- **An EVPN table reset fails an unfinished walk.** Ordinary withdrawals
-  leave vacancies and the walk continues. Removing, clearing or replacing a
-  captured table before its last step fails the dump instead of silently
-  omitting unchanged rows. Only slots present at the start are visited.
+- **An EVPN table reset ends that neighbor's EVPN walk.** Ordinary
+  withdrawals leave vacancies and the walk continues. If a captured
+  neighbor's EVPN table is removed, cleared or replaced before the walk
+  finishes it (the session goes down without Graceful Restart, a replacement
+  session comes up, or the neighbor is rebound), the rows already read stay
+  in the file, the rest of that table is skipped as withdrawn, and the dump
+  continues with the next neighbor. Routes the new table relearns are not
+  read. Only slots present at the start are visited.
 
 A dump that takes longer than `dump_interval` is followed at once by the next
 one, so dumps run back to back; compare `mrt_last_dump_duration_milliseconds`
@@ -5111,8 +5115,17 @@ are sorted through temporary disk runs with at most eight bounded records
 in a merge. Compression buffers and the filesystem cache are also outside
 the chunk cap; it is not a limit on total process memory or dump file size.
 
+The dump is staged in the output directory as `.<dump file name>.tmp` for
+the whole walk, so it needs free space there for the full file, compressed
+when `compress = true`. EVPN rows also pass through unlinked sort runs on
+the same filesystem: up to about the size of the uncompressed EVPN section,
+and about twice that while runs merge. Both are released when the dump
+publishes or fails.
+
 A dump abandoned before atomic publication removes its staging file and
-publishes nothing. Once the final file has been renamed, cancellation does
+publishes nothing. If the daemon dies mid-dump, the next start removes stage
+files that match this writer's own `file_prefix` dump names, and nothing
+else in the directory. Once the final file has been renamed, cancellation does
 not remove it. Encoding or storage failures keep existing dumps intact.
 
 See [ADR-0044](../adr/0044-mrt-dump-export.md) for design details.

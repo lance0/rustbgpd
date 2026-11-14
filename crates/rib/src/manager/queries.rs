@@ -4650,18 +4650,23 @@ impl RibManager {
                 slot = 0;
                 continue;
             }
-            let rib = self
-                .ribs
-                .get(&captured.entry.peer)
-                .ok_or_else(|| "MRT EVPN table was removed during the snapshot".to_string())?;
-            let (identity, _) = rib.evpn_snapshot_state();
-            if !identity
-                .as_ref()
-                .zip(captured.evpn_identity.as_ref())
-                .is_some_and(|(current, initial)| Arc::ptr_eq(current, initial))
-            {
-                return Err("MRT EVPN table was reset during the snapshot".to_string());
-            }
+            // A removed, cleared or replaced table withdrew every row the walk
+            // had not reached; its new slots are not the captured ones.
+            let Some(rib) = self.ribs.get(&captured.entry.peer).filter(|rib| {
+                rib.evpn_snapshot_state()
+                    .0
+                    .as_ref()
+                    .zip(captured.evpn_identity.as_ref())
+                    .is_some_and(|(current, initial)| Arc::ptr_eq(current, initial))
+            }) else {
+                debug!(
+                    peer = %captured.entry.peer_addr,
+                    "MRT EVPN table reset during the snapshot; skipping its remaining rows"
+                );
+                peer += 1;
+                slot = 0;
+                continue;
+            };
             while slot < captured.evpn_slots {
                 if visited >= budget || chunk.evpn_routes.len() >= max_rows {
                     return Ok(Some(MrtSnapshotPhase::Evpn { peer, slot }));

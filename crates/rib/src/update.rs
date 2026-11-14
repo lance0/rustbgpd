@@ -5,7 +5,7 @@
 use crate::PeerId;
 use crate::peer_id::{PeerEndpoint, PeerScope};
 use std::any::Any;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -4786,7 +4786,8 @@ pub(crate) enum MrtSnapshotPhase {
 /// its paths are a point-in-time view. Different prefixes and EVPN rows may
 /// come from different turns. An unchanged route is copied exactly once.
 /// EVPN withdrawal/reinsertion can move a key past the cursor again; the encoder
-/// deduplicates these rows. EVPN table reset or replacement fails the dump.
+/// deduplicates these rows. A captured EVPN table that is removed, cleared or
+/// replaced mid-walk contributes only the rows read before then.
 #[derive(Debug, Default)]
 pub struct MrtSnapshotChunk {
     /// The frozen peer roster on the first chunk; empty on later chunks.
@@ -4799,17 +4800,19 @@ pub struct MrtSnapshotChunk {
     pub next: Option<MrtSnapshotCursor>,
 }
 
-/// Gathers the chunks of one MRT snapshot.
+/// Gathers the chunks of one MRT snapshot, for tests.
+#[cfg(test)]
 #[derive(Debug, Default)]
-pub struct MrtSnapshotAssembler {
+pub(crate) struct MrtSnapshotAssembler {
     data: MrtSnapshotData,
-    listed: HashSet<PeerId>,
+    listed: std::collections::HashSet<PeerId>,
 }
 
+#[cfg(test)]
 impl MrtSnapshotAssembler {
     /// Append one chunk and return the cursor for the next query. A neighbor
     /// keeps the entry of the first chunk that listed it.
-    pub fn push(&mut self, chunk: MrtSnapshotChunk) -> Option<MrtSnapshotCursor> {
+    pub(crate) fn push(&mut self, chunk: MrtSnapshotChunk) -> Option<MrtSnapshotCursor> {
         for entry in chunk.peers {
             if self.listed.insert(entry.peer) {
                 self.data.peers.push(entry);
@@ -4822,7 +4825,7 @@ impl MrtSnapshotAssembler {
 
     /// The gathered snapshot. Complete once [`Self::push`] returned `None`.
     #[must_use]
-    pub fn finish(self) -> MrtSnapshotData {
+    pub(crate) fn finish(self) -> MrtSnapshotData {
         self.data
     }
 }
