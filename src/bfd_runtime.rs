@@ -127,6 +127,12 @@ pub struct BfdStateChange {
     pub resync: bool,
 }
 
+/// Each peer's pending change; every key has exactly one wake token queued.
+/// `None` marks a token whose change [`BfdStateChangeReceiver::try_take_if`]
+/// took: the slot is kept so the peer's next change reuses that token.
+type PendingChanges =
+    std::sync::Arc<std::sync::Mutex<std::collections::HashMap<IpAddr, Option<BfdStateChange>>>>;
+
 /// Create the BFD → `PeerManager` state-change channel.
 ///
 /// The channel coalesces per peer: at most one pending [`BfdStateChange`] per
@@ -142,9 +148,10 @@ pub struct BfdStateChange {
 pub fn state_change_channel() -> (BfdStateChangeSender, BfdStateChangeReceiver) {
     let pending = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     // Unbounded but bounded by state: the sender queues a wake token only
-    // when it inserts a new pending entry, keyed by peer address, so at most
-    // one token per address (one per BFD session: configuration refuses BFD
-    // on neighbors that share an address) is queued however fast it flaps.
+    // when it inserts a new map key, and only a receive removes one, so the
+    // token count equals the map's key count: at most one per address (one
+    // per BFD session: configuration refuses BFD on neighbors that share an
+    // address) however fast it flaps.
     let (wake_tx, wake_rx) = tokio::sync::mpsc::unbounded_channel();
     (
         BfdStateChangeSender {
@@ -162,9 +169,9 @@ pub fn state_change_channel() -> (BfdStateChangeSender, BfdStateChangeReceiver) 
 #[derive(Clone)]
 pub struct BfdStateChangeSender {
     /// At most one pending change per peer (latest wins, see the merge rule).
-    pending: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<IpAddr, BfdStateChange>>>,
-    /// One wake token per peer with a pending entry — so this queue is bounded
-    /// by the session count, never by the burst rate.
+    pending: PendingChanges,
+    /// One wake token per key of `pending` — so this queue is bounded by the
+    /// session count, never by the burst rate.
     wake: tokio::sync::mpsc::UnboundedSender<IpAddr>,
 }
 
@@ -176,6 +183,7 @@ impl BfdStateChangeSender {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&peer)
             .cloned()
+            .flatten()
     }
 
     /// Enqueue a state change, coalescing with any pending change for the same
@@ -188,16 +196,21 @@ impl BfdStateChangeSender {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match pending.entry(change.peer) {
             std::collections::hash_map::Entry::Occupied(mut slot) => {
-                let resync =
-                    change.resync && (slot.get().revision != change.revision || slot.get().resync);
-                let mut merged = change;
-                merged.resync = resync;
-                slot.insert(merged);
+                // A taken change was handled: the new one is not merged into it.
+                let merged = match slot.get() {
+                    Some(old) => {
+                        let resync =
+                            change.resync && (old.revision != change.revision || old.resync);
+                        BfdStateChange { resync, ..change }
+                    }
+                    None => change,
+                };
+                slot.insert(Some(merged));
                 // No new wake token: one is already queued for this peer.
             }
             std::collections::hash_map::Entry::Vacant(slot) => {
                 let peer = change.peer;
-                slot.insert(change);
+                slot.insert(Some(change));
                 // Receiver gone (daemon shutting down): drop silently, like the
                 // old mpsc send.
                 let _ = self.wake.send(peer);
@@ -208,7 +221,7 @@ impl BfdStateChangeSender {
 
 /// Receiving half of [`state_change_channel`].
 pub struct BfdStateChangeReceiver {
-    pending: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<IpAddr, BfdStateChange>>>,
+    pending: PendingChanges,
     wake: tokio::sync::mpsc::UnboundedReceiver<IpAddr>,
 }
 
@@ -224,6 +237,7 @@ impl BfdStateChangeReceiver {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&peer)
+            .and_then(Option::as_ref)
             .is_some_and(defers)
     }
 
@@ -237,10 +251,11 @@ impl BfdStateChangeReceiver {
                 .pending
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .remove(&peer);
-            // The entry always exists (one wake token per pending entry), but
-            // loop rather than unwrap so an imbalance degrades to a skipped
-            // token instead of a panic.
+                .remove(&peer)
+                .flatten();
+            // Skip the token of a taken change. Its key always exists (one
+            // wake token per key), but loop rather than unwrap so an
+            // imbalance degrades to a skipped token instead of a panic.
             if change.is_some() {
                 return change;
             }
@@ -256,7 +271,8 @@ impl BfdStateChangeReceiver {
                 .pending
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .remove(&peer);
+                .remove(&peer)
+                .flatten();
             if change.is_some() {
                 return change;
             }
@@ -264,8 +280,9 @@ impl BfdStateChangeReceiver {
     }
 
     /// Take one queued change `wanted` accepts and leave every other one
-    /// queued. The taken change's wake token stays behind; `recv` and
-    /// `try_recv` skip a token with no entry.
+    /// queued. The taken change's wake token stays behind with an empty
+    /// slot: the peer's next change reuses it, and `recv` and `try_recv` skip
+    /// it while the slot is empty.
     pub(crate) fn try_take_if(
         &self,
         wanted: impl Fn(&BfdStateChange) -> bool,
@@ -274,8 +291,10 @@ impl BfdStateChangeReceiver {
             .pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let peer = pending.values().find(|change| wanted(change))?.peer;
-        pending.remove(&peer)
+        pending
+            .values_mut()
+            .find(|change| change.as_ref().is_some_and(&wanted))?
+            .take()
     }
 }
 
@@ -3874,6 +3893,33 @@ bfd = {{ profile = "p" }}
             // closes rather than yielding queued leftovers.
             drop(tx);
             assert!(rx.recv().await.is_none());
+        }
+
+        /// A change taken selectively keeps its wake token for the peer's next
+        /// change, so the wake queue stays at one token per peer.
+        #[test]
+        fn a_selectively_taken_change_reuses_its_wake_token() {
+            let (tx, mut rx) = state_change_channel();
+            let a = ip("10.0.0.2");
+            let mut b_down = change(SessionState::Down, false);
+            b_down.peer = ip("10.0.0.3");
+            // Repeated takes, as a flapping peer would see across seams.
+            for _ in 0..100 {
+                tx.send(change(SessionState::Down, false));
+                let taken = rx.try_take_if(|_| true).expect("A's Down");
+                assert_eq!((taken.peer, taken.state), (a, SessionState::Down));
+                assert!(!rx.has_pending_where(a, |_| true), "a taken change is gone");
+                assert!(rx.try_take_if(|_| true).is_none());
+            }
+            assert_eq!(rx.wake.len(), 1, "takes do not accumulate tokens");
+            tx.send(change(SessionState::Up, false));
+            tx.send(b_down);
+            assert_eq!(rx.wake.len(), 2, "one wake token per peer");
+            let first = rx.try_recv().expect("A's Up");
+            assert_eq!((first.peer, first.state), (a, SessionState::Up));
+            let second = rx.try_recv().expect("B's Down");
+            assert_eq!(second.peer, ip("10.0.0.3"));
+            assert!(rx.try_recv().is_none());
         }
 
         #[tokio::test]
