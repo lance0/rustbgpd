@@ -55,11 +55,9 @@ pub(crate) const MUTATION_RPC_TIMEOUT: Duration = Duration::from_secs(11 * 60);
 /// has not settled within 30 minutes (`OWNED_SETTLEMENT_BUDGET`), so no reply
 /// can arrive later; the extra minute covers the fence grace and transfer.
 pub(crate) const SETTLED_MUTATION_RPC_TIMEOUT: Duration = Duration::from_secs(31 * 60);
-/// Client wait for `mrt-dump`. The daemon does not bound a dump, and a
-/// disconnect cancels one only before its RIB snapshot arrives; encoding and
-/// writing then finish regardless. Expiry therefore cannot cut short a dump
-/// that is writing, only one still queued or waiting on the RIB, and 31
-/// minutes is far beyond a healthy snapshot wait.
+/// Client wait for `mrt-dump`. The daemon has no separate dump deadline.
+/// Expiry or disconnect requests cancellation of an unfinished dump, including
+/// encoding and writing; an already published file remains committed.
 pub(crate) const MRT_DUMP_RPC_TIMEOUT: Duration = Duration::from_secs(31 * 60);
 /// Client wait for each config-transaction RPC: diff, plan, apply, confirm,
 /// abort and rollback, unary or streamed. The daemon bounds each operation at
