@@ -333,9 +333,12 @@ const OWNED_WALK_EVENT_BUDGET: usize = 8;
 /// A resolved policy snapshot's walk owns the actor: what it has served at
 /// its seams, and the notifications it holds until it ends.
 pub(super) struct OwnedWalkEvents {
-    /// Notifications that would retire a dynamic peer. Removing a captured
-    /// peer mid-walk would make the walk's rollback inexact, so they go back
-    /// on the notification channel when the walk ends.
+    /// Notifications that would retire a dynamic peer, and the OPEN of a
+    /// retained member's reconnect or collision candidate, whose verdict can
+    /// move the member to another RIB identity. Removing a captured peer
+    /// mid-walk, or changing its identity, would make the walk's rollback
+    /// inexact, so they go back on the notification channel when the walk
+    /// ends.
     held: Vec<SessionNotification>,
     /// When the walk last finished serving events, or began.
     served_at: tokio::time::Instant,
@@ -1750,8 +1753,11 @@ impl PeerManager {
     ///
     /// Call it only between units: a handler can replace a peer's session or
     /// latch the peer disabled, and a unit holds a session handle across its
-    /// awaits. It never removes a peer: a notification that would retire a
-    /// dynamic peer is held. Serving is not walk progress, so the caller
+    /// awaits. It never removes a peer or moves one to another RIB identity:
+    /// a notification that would retire a dynamic peer is held, as is the
+    /// OPEN of a retained member with a collision candidate, so a candidate
+    /// can reach its verdict timeout and fall to Idle meanwhile, and the
+    /// neighbor reconnects. Serving is not walk progress, so the caller
     /// excludes the time from its stall budget and never renews it here.
     /// A no-op when no walk owns the actor.
     pub(super) async fn serve_owned_walk_events(&mut self) {
