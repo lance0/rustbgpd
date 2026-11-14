@@ -657,3 +657,261 @@ fn deferred_old_owner_cleanup_preserves_gr_after_multiple_replacements() {
     assert_eq!(retention(&manager), (1, 1, true));
     assert!(failed_over(&manager, 0));
 }
+
+/// The peer's route to `10.0.octet.0/24`.
+fn v4(octet: u8) -> Prefix {
+    Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, octet, 0), 24))
+}
+
+/// Session `session_id` announces `10.0.octet.0/24`, added to what the
+/// peer already holds.
+fn announce(manager: &mut RibManager, session_id: u64, octet: u8) {
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, octet, 0), 24);
+    manager.handle_update(RibUpdate::RoutesReceived {
+        session_id,
+        peer: peer(),
+        announced: vec![make_route(prefix, Ipv4Addr::new(192, 0, 2, 1))],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    drain_route_chunks(manager);
+}
+
+fn end_of_rib(manager: &mut RibManager, session_id: u64) {
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: peer(),
+        session_id,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    });
+}
+
+/// `(GR-stale, LLGR-stale, selected)` for the peer's route to
+/// `10.0.octet.0/24`; `None` when the peer does not hold it.
+fn held(manager: &RibManager, octet: u8) -> Option<(bool, bool, bool)> {
+    let selected = manager.loc_rib.get(&v4(octet)).is_some();
+    manager
+        .ribs
+        .get(&peer())
+        .and_then(|rib| rib.get(&v4(octet), 0))
+        .map(|route| (route.is_stale, route.is_llgr_stale, selected))
+}
+
+/// Session 1 went down under graceful restart holding route 1; its
+/// reconnect, session 2, announced route 2 and was replaced by session 3
+/// before anything ended session 2.
+fn replacement_before_the_reconnects_end() -> RibManager {
+    let mut manager = test_manager();
+    peer_up(&mut manager, 1);
+    announce(&mut manager, 1, 1);
+    restart(&mut manager, 1);
+    peer_up_superseding(&mut manager, 2, Some(1));
+    announce(&mut manager, 2, 2);
+    assert_eq!(held(&manager, 1), Some((true, false, true)));
+    assert_eq!(held(&manager, 2), Some((false, false, true)));
+    peer_up_superseding(&mut manager, 3, Some(2));
+    manager
+}
+
+/// The replaced reconnect's end can still be queued behind its
+/// replacement's `PeerUp`, where it is discarded. The `PeerUp` applies the
+/// consecutive-restart rule itself (RFC 4724 §4.2): routes still stale from
+/// the first restart are deleted and the replaced session's fresh routes
+/// become stale, so the replacement's End-of-RIB removes what it does not
+/// re-announce.
+/// Mutation-red: without the mark at the superseding `PeerUp`, route 1
+/// stays stale and route 2 stays fresh and selected after End-of-RIB.
+#[test]
+fn replacement_before_the_end_of_a_restart_reconnect_sweeps_its_fresh_routes() {
+    for late in [false, true] {
+        let mut manager = replacement_before_the_reconnects_end();
+        assert_eq!(held(&manager, 1), None, "late: {late}");
+        assert!(manager.loc_rib.get(&v4(1)).is_none());
+        assert_eq!(held(&manager, 2), Some((true, false, true)));
+        assert_eq!(retention(&manager), (1, 1, true));
+
+        announce(&mut manager, 3, 3);
+        end_of_rib(&mut manager, 3);
+        assert_eq!(held(&manager, 2), None);
+        assert!(manager.loc_rib.get(&v4(2)).is_none());
+        assert_eq!(held(&manager, 3), Some((false, false, true)));
+        assert_eq!(retention(&manager), (1, 0, false));
+
+        if late {
+            late_down(&mut manager, 2);
+            late_restart(&mut manager, 2);
+        } else {
+            peer_down(&mut manager, 2);
+            restart(&mut manager, 2);
+        }
+        assert_eq!(retention(&manager), (1, 0, false), "late: {late}");
+        assert_eq!(held(&manager, 3), Some((false, false, true)));
+        assert!(discarded(&manager, 2));
+        assert_eq!(live(&manager), [3]);
+    }
+}
+
+/// Without End-of-RIB from the replacement, the re-armed stale timer
+/// removes what the replaced session left.
+/// Mutation-red: without the mark at the superseding `PeerUp`, route 2 is
+/// fresh and survives the timer.
+#[test]
+fn replacement_before_the_end_of_a_restart_reconnect_times_out_its_fresh_routes() {
+    let mut manager = replacement_before_the_reconnects_end();
+    announce(&mut manager, 3, 3);
+    assert!(manager.gr_stale_deadlines.get(&peer()).is_some());
+    manager.sweep_gr_stale(peer());
+    assert_eq!(held(&manager, 2), None);
+    assert!(manager.loc_rib.get(&v4(2)).is_none());
+    assert_eq!(held(&manager, 3), Some((false, false, true)));
+    assert_eq!(retention(&manager), (1, 0, false));
+}
+
+/// When the replacement itself goes down under graceful restart before the
+/// replaced session's end arrives, that end leaves the replacement's
+/// retention alone.
+#[test]
+fn replaced_end_after_the_replacement_restarted_keeps_its_retention() {
+    let mut manager = replacement_before_the_reconnects_end();
+    announce(&mut manager, 3, 3);
+    restart(&mut manager, 3);
+    assert_eq!(held(&manager, 2), None);
+    assert_eq!(held(&manager, 3), Some((true, false, true)));
+    late_down(&mut manager, 2);
+    late_restart(&mut manager, 2);
+    peer_down(&mut manager, 2);
+    restart(&mut manager, 2);
+    assert_eq!(retention(&manager), (1, 1, true));
+    assert_eq!(held(&manager, 3), Some((true, false, true)));
+    assert_eq!(manager.retention_owner.get(&peer()), Some(&3));
+}
+
+/// Without graceful restart a superseding `PeerUp` clears the replaced
+/// session's table, and that session's late ends are discarded.
+#[test]
+fn replacement_before_the_end_without_restart_clears_the_table() {
+    let mut manager = test_manager();
+    peer_up(&mut manager, 1);
+    announce(&mut manager, 1, 1);
+    peer_up_superseding(&mut manager, 2, Some(1));
+    assert_eq!(retention(&manager), (0, 0, false));
+    assert!(manager.loc_rib.get(&v4(1)).is_none());
+    late_down(&mut manager, 1);
+    late_restart(&mut manager, 1);
+    assert_eq!(retention(&manager), (0, 0, false));
+    assert!(discarded(&manager, 2));
+    assert_eq!(live(&manager), [2]);
+}
+
+/// The reconnect's end delivered before its replacement's `PeerUp`: the
+/// end does the work and the `PeerUp` finds no registered sender, so the
+/// reset block is never entered. Mutation-red only for a mark placed
+/// outside that block (at every superseding `PeerUp` during retention),
+/// which deletes route 2 as already stale; a weakened registered-session
+/// check inside the block cannot reach this order.
+#[test]
+fn in_order_end_then_replacement_is_unchanged() {
+    let reconnect = || {
+        let mut manager = test_manager();
+        peer_up(&mut manager, 1);
+        announce(&mut manager, 1, 1);
+        restart(&mut manager, 1);
+        peer_up_superseding(&mut manager, 2, Some(1));
+        announce(&mut manager, 2, 2);
+        manager
+    };
+
+    let mut manager = reconnect();
+    restart(&mut manager, 2);
+    assert_eq!(held(&manager, 1), None);
+    assert_eq!(held(&manager, 2), Some((true, false, true)));
+    peer_up_superseding(&mut manager, 3, Some(2));
+    assert_eq!(held(&manager, 2), Some((true, false, true)));
+    assert_eq!(retention(&manager), (1, 1, true));
+
+    let mut manager = reconnect();
+    peer_down(&mut manager, 2);
+    assert_eq!(retention(&manager), (0, 0, false));
+    peer_up_superseding(&mut manager, 3, Some(2));
+    assert_eq!(retention(&manager), (0, 0, false));
+    assert_eq!(live(&manager), [3]);
+}
+
+/// Routes promoted to LLGR-stale while the reconnect was registered are
+/// kept by the consecutive-restart mark at its replacement's `PeerUp`
+/// (RFC 9494 §4.2); the reconnect's fresh route becomes stale.
+/// Mutation-red: without the mark route 2 stays fresh; marking only the
+/// GR-phase families withdraws the LLGR-stale route 1.
+#[test]
+fn supersede_mark_keeps_llgr_stale_routes() {
+    let mut manager = test_manager();
+    peer_up(&mut manager, 1);
+    announce(&mut manager, 1, 1);
+    manager.handle_update(RibUpdate::PeerGracefulRestart {
+        peer: peer(),
+        session_id: 1,
+        restart_time: 90,
+        stale_routes_time: 120,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: true,
+        peer_llgr_families: vec![rustbgpd_wire::LlgrFamily {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            forwarding_preserved: false,
+            stale_time: 3600,
+        }],
+        llgr_stale_time: 3600,
+    });
+    peer_up_superseding(&mut manager, 2, Some(1));
+    // The reconnect sends no End-of-RIB before the restart timer expires.
+    manager.sweep_gr_stale(peer());
+    assert!(manager.llgr_peers.contains_key(&peer()));
+    assert!(!manager.gr_peers.contains_key(&peer()));
+    assert_eq!(manager.current_session_id(peer()), Some(2));
+    assert!(held(&manager, 1).is_some_and(|(_, llgr, selected)| llgr && selected));
+    announce(&mut manager, 2, 2);
+    assert_eq!(held(&manager, 2), Some((false, false, true)));
+
+    peer_up_superseding(&mut manager, 3, Some(2));
+    assert!(held(&manager, 1).is_some_and(|(_, llgr, selected)| llgr && selected));
+    assert_eq!(held(&manager, 2), Some((true, false, true)));
+    assert!(manager.gr_peers.contains_key(&peer()));
+}
+
+/// A `PeerUp` that names no superseded session during retention is a
+/// collision: either side may survive, so the registered session's routes
+/// are left as they are.
+/// Mutation-red: marking for an unnamed collision makes route 2 stale.
+#[test]
+fn unnamed_collision_during_retention_is_unchanged() {
+    let mut manager = test_manager();
+    peer_up(&mut manager, 1);
+    restart(&mut manager, 1);
+    peer_up(&mut manager, 2);
+    announce(&mut manager, 2, 2);
+    peer_up(&mut manager, 3);
+    assert_eq!(held(&manager, 2), Some((false, false, true)));
+    assert_eq!(live(&manager), [2, 3]);
+}
+
+/// A `PeerUp` that names a session other than the registered one retires
+/// only that record; the registered session is still live, so its routes
+/// are not marked.
+/// Mutation-red: marking whenever the `PeerUp` names any session makes
+/// route 2 stale.
+#[test]
+fn replacement_naming_an_unregistered_session_leaves_the_registered_routes_fresh() {
+    let mut manager = test_manager();
+    peer_up(&mut manager, 1);
+    announce(&mut manager, 1, 1);
+    restart(&mut manager, 1);
+    peer_up(&mut manager, 2);
+    announce(&mut manager, 2, 2);
+    peer_up_superseding(&mut manager, 3, Some(1));
+    assert_eq!(held(&manager, 1), Some((true, false, true)));
+    assert_eq!(held(&manager, 2), Some((false, false, true)));
+}
