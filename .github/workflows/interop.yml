@@ -2454,6 +2454,7 @@ jobs:
             ${{ runner.temp }}/m122-evidence/capture.pcap
             ${{ runner.temp }}/m122-evidence/capture.tsv
             ${{ runner.temp }}/m122-evidence/capture.log
+            ${{ runner.temp }}/m122-evidence/capture-state.json
             ${{ runner.temp }}/m122-evidence/rr.log
             ${{ runner.temp }}/m122-evidence/source.log
             ${{ runner.temp }}/m122-evidence/client.log

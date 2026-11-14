@@ -191,6 +191,30 @@ class OracleTests(unittest.TestCase):
                 runner.finalize_evidence(complete)
             self.assertFalse((out / "verdict.json").exists())
 
+    def test_capture_exit_snapshot_never_replaces_failed_wait(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(runner, "OUT", Path(directory)):
+            out, calls = Path(directory), []
+            state = {"Running": False, "Status": "exited", "ExitCode": 0,
+                     "FinishedAt": "2026-11-14T17:35:50Z", "Error": ""}
+            def run_command(args, **_kwargs):
+                calls.append(args)
+                if args[1] == "wait":
+                    raise subprocess.TimeoutExpired(args, 15)
+                if args[1] == "inspect":
+                    return subprocess.CompletedProcess(args, 0, stdout=json.dumps(state))
+                if args[1] == "cp":
+                    Path(args[-1]).write_text("")
+                return subprocess.CompletedProcess(args, 0, stdout="capture diagnostics\n")
+            with patch.object(runner.subprocess, "run", side_effect=run_command):
+                complete = runner.collect_evidence()
+            self.assertFalse(complete)
+            self.assertEqual(json.loads((out / "capture-state.json").read_text()), state)
+            self.assertLess(next(i for i, args in enumerate(calls) if args[1] == "inspect"),
+                            next(i for i, args in enumerate(calls) if args[1] == "rm"))
+            with self.assertRaisesRegex(ValueError, "clean exit"):
+                runner.finalize_evidence(complete)
+            self.assertFalse((out / "verdict.json").exists())
+
     def test_failed_final_extraction_cannot_reuse_undeletable_live_tsv(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(runner, "OUT", Path(directory)):
             out = Path(directory)

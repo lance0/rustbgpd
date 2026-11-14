@@ -464,7 +464,7 @@ counters distinguish restart adoption from deferred cleanup; current route and
 IP-VRF state remain the primary operational view.
 
 M122 retains `capture.pcap`, its final payload TSV including TCP ports, capture
-diagnostics, and all three daemon logs in `m122-raw-evidence` on success and
+diagnostics, the container exit state, and all three daemon logs in `m122-raw-evidence` on success and
 failure. Source logs include both sides of the planned restart. The job builds
 GoBGP 4.11.0 from pinned source with a lab-only connection trace patch; these
 are instrumented binaries, not official release artifacts. Provenance records

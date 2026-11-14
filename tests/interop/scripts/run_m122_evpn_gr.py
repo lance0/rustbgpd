@@ -148,6 +148,9 @@ def collect_evidence():
 
     retain(["docker", "kill", "--signal", "SIGINT", CAPTURE])
     flushed = retain(["docker", "wait", CAPTURE])
+    # Retain actual container state before removal even when wait timed out.
+    # This is diagnostic evidence; it cannot replace the bounded wait result.
+    retain(["docker", "inspect", "--format", "{{json .State}}", CAPTURE], "capture-state.json")
     clean_exit = flushed is not None and flushed.stdout.strip() == "0"
     if not clean_exit:
         status = None if flushed is None else flushed.stdout.strip()
@@ -226,7 +229,7 @@ def provenance():
 
 def run():
     OUT.mkdir(parents=True, exist_ok=True)
-    for name in ("verdict.json", "wire-witnesses.json", "fsm-traces.json", "rr.log", "source.log", "client.log"):
+    for name in ("verdict.json", "wire-witnesses.json", "fsm-traces.json", "capture-state.json", "rr.log", "source.log", "client.log"):
         (OUT / name).unlink(missing_ok=True)
     provenance()
     command("docker", "run", "-d", "--name", CAPTURE, "--label", "rustbgpd.lab=m122", "--network", f"container:{REFLECTOR}",
