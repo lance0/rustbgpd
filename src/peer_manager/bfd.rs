@@ -647,7 +647,9 @@ impl PeerManager {
     }
 
     /// The retry turn, deferring to this manager's own queued state changes.
-    /// With `down_only`, a `Start` retry is left for a later turn.
+    /// With `down_only` (a generation's seam), a `Start` retry is left for a
+    /// later turn, and a `BfdDown` retry defers only to a queued change that
+    /// permits BGP.
     fn retry_own_bfd_commands(&mut self, down_only: bool) {
         let events = self.take_bfd_state_change_rx();
         self.retry_bfd_commands_of(events.as_ref(), down_only);
@@ -687,7 +689,13 @@ impl PeerManager {
                 .map(|managed| managed.handle().commands_sender());
             let coupling = self.bfd_coupling.as_mut().expect("BFD retry owns coupling");
             coupling.retry_cursor = Some(peer);
-            if events.is_some_and(|events| events.has_pending(peer)) {
+            // Inside a generation an untaken change stays queued until it
+            // ends; only one that permits BGP supersedes a `BfdDown`.
+            if events.is_some_and(|events| {
+                events.has_pending_where(peer, |change| {
+                    !down_only || change.state == SessionState::Up || change.remote_admin_down
+                })
+            }) {
                 continue;
             }
             if retry.revision != coupling.configured.get(&peer).map(|params| params.revision) {
@@ -1485,7 +1493,8 @@ impl PeerManager {
                 coupling.prior_initially_withheld.remove(&peer);
             }
         }
-        // After the changes: a retry defers to a queued newer outcome.
+        // After the changes: a retry defers to a queued newer outcome, in a
+        // generation only to one that permits BGP.
         if self.bfd_coupling.as_ref().is_some_and(|coupling| {
             coupling
                 .retry_at

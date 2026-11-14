@@ -309,13 +309,25 @@ async fn bfd_down_mid_walk_reaches_its_session_before_the_next_rib_command() {
 
 /// A `BfdDown` that met a full session mailbox before the walk is retried at
 /// the walk's seams, in and out of a generation; a `Start` retry inside a
-/// generation waits for it to end.
+/// generation waits for it to end. Inside a generation the `BfdDown` retry
+/// defers only to a queued change that permits BGP: a level report stays
+/// queued until the generation ends and must not keep BGP up meanwhile.
 ///
 /// LOAD-BEARING: the run loop's retry timer is not polled during a walk and
 /// reports no deadline at all while a generation holds BFD.
 #[tokio::test(start_paused = true)]
 async fn due_bfd_down_retry_is_delivered_at_a_walk_seam() {
-    for (in_generation, start) in [(false, false), (true, false), (true, true)] {
+    type Queued = Option<fn(IpAddr) -> crate::bfd_runtime::BfdStateChange>;
+    let rows: [(bool, bool, Queued, bool); 5] = [
+        (false, false, None, true),
+        (true, false, None, true),
+        (true, true, None, false),
+        // A level report is never taken in a generation.
+        (true, false, Some(super::bfd::down_ack), true),
+        // A resolved flap is one BGP flap avoided.
+        (true, false, Some(up), false),
+    ];
+    for (in_generation, start, queued, expected) in rows {
         let Lab {
             mgr,
             mut rib_rx,
@@ -323,11 +335,14 @@ async fn due_bfd_down_retry_is_delivered_at_a_walk_seam() {
             sessions,
             ..
         } = lab(3);
-        let (mut mgr, _states) = couple_bfd(mgr, peers[2]);
+        let (mut mgr, states) = couple_bfd(mgr, peers[2]);
         mgr.mark_bfd_withheld(peers[2]);
         mgr.schedule_bfd_retry(peers[2], start);
         if in_generation {
             begin_generation(&mut mgr);
+        }
+        if let Some(change) = queued {
+            states.send(change(peers[2]));
         }
         let retried = Arc::clone(&sessions[2]);
         let rib = tokio::spawn(async move {
@@ -361,8 +376,9 @@ async fn due_bfd_down_retry_is_delivered_at_a_walk_seam() {
         drop(mgr);
         assert_eq!(
             rib.await.unwrap(),
-            Some(!start),
-            "in_generation={in_generation} start={start}"
+            Some(expected),
+            "in_generation={in_generation} start={start} queued={}",
+            queued.is_some()
         );
     }
 }

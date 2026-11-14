@@ -213,12 +213,18 @@ pub struct BfdStateChangeReceiver {
 }
 
 impl BfdStateChangeReceiver {
-    /// A queued newer outcome must be handled before retrying a BGP command.
-    pub(crate) fn has_pending(&self, peer: IpAddr) -> bool {
+    /// Whether `peer` has a queued newer outcome that `defers` says must be
+    /// handled before retrying a BGP command.
+    pub(crate) fn has_pending_where(
+        &self,
+        peer: IpAddr,
+        defers: impl Fn(&BfdStateChange) -> bool,
+    ) -> bool {
         self.pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains_key(&peer)
+            .get(&peer)
+            .is_some_and(defers)
     }
 
     /// Receive the next (coalesced) state change, or `None` once every sender

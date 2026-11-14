@@ -104,7 +104,7 @@ fn up_ack(peer: IpAddr) -> crate::bfd_runtime::BfdStateChange {
 
 /// A reconcile "ack" (resync) re-reporting a session that is currently Down
 /// (e.g. a freshly (re)started session) — must never tear BGP down.
-fn down_ack(peer: IpAddr) -> crate::bfd_runtime::BfdStateChange {
+pub(super) fn down_ack(peer: IpAddr) -> crate::bfd_runtime::BfdStateChange {
     crate::bfd_runtime::BfdStateChange {
         revision: 0,
         peer,
