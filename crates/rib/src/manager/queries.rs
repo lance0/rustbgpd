@@ -23,9 +23,9 @@ use crate::update::{
     DataplaneVersions, EvpnRoutePage, EvpnRouteQueryKey, ExactBestRoutes, ExactExportKey,
     ExactFibInstallCandidates, ExplainAdvertisedRoute, ExplainAdvertisedRouteError,
     ExplainBestPath, ExportDestination, FibInstallCandidatesPage, LocalRouteExports, MrtPeerEntry,
-    MrtSnapshotChunk, MrtSnapshotCursor, MrtSnapshotData, MrtSnapshotPhase, NeighborPolicyStats,
-    NeighborRibSnapshot, NeighborRibSnapshotResponse, PeerRouteExport, RibRowFilter,
-    RouteExportCursor, RouteExportDisposition, RouteExportPage, RouteExportPageError,
+    MrtSnapshotChunk, MrtSnapshotCursor, MrtSnapshotData, MrtSnapshotPeer, MrtSnapshotPhase,
+    NeighborPolicyStats, NeighborRibSnapshot, NeighborRibSnapshotResponse, PeerRouteExport,
+    RibRowFilter, RouteExportCursor, RouteExportDisposition, RouteExportPage, RouteExportPageError,
     RouteExportVersion, RoutePage, RoutePageError, RoutePageVersion, RouteQueryFilter,
     RouteQueryKey, RouteQueryScope, UpdateGroupPeerComparison, VersionedPeerGroups,
     WarmMrtSnapshotBudget, WarmMrtSnapshotView, ordered_route_query, prefix_route_query,
@@ -128,10 +128,28 @@ pub(super) fn send_filtered_rows<'a, T: Clone + 'a>(
 pub(super) mod mrt_chunks_built {
     thread_local! {
         static BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        static SLOTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        static ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
 
     pub(super) fn record() {
         BUILT.with(|count| count.set(count.get() + 1));
+    }
+
+    pub(super) fn record_slot() {
+        SLOTS.with(|count| count.set(count.get() + 1));
+    }
+
+    pub(super) fn record_row() {
+        ROWS.with(|count| count.set(count.get() + 1));
+    }
+
+    pub(crate) fn take_slots() -> usize {
+        SLOTS.with(|count| count.replace(0))
+    }
+
+    pub(crate) fn take_rows() -> usize {
+        ROWS.with(|count| count.replace(0))
     }
 
     /// The chunks built since the last call.
@@ -4459,10 +4477,9 @@ impl RibManager {
     pub(super) fn handle_query_mrt_snapshot_chunk(
         &self,
         cursor: Option<MrtSnapshotCursor>,
-        reply: tokio::sync::oneshot::Sender<MrtSnapshotChunk>,
+        reply: tokio::sync::oneshot::Sender<Result<MrtSnapshotChunk, String>>,
     ) {
-        // A canceled on-demand dump drops this receiver while the query waits
-        // in the actor mailbox. Check before cloning any peer or route state.
+        // A canceled request may still be waiting in the actor mailbox.
         if reply.is_closed() {
             debug!("MRT snapshot query canceled before materialization");
             return;
@@ -4473,121 +4490,203 @@ impl RibManager {
         }
     }
 
-    /// One turn of a chunked MRT snapshot: about `budget` rows after `cursor`.
-    ///
-    /// Unicast walks every neighbor's prefix index in step, in prefix order,
-    /// and stops only between prefixes, so one prefix's paths always come
-    /// from one turn. EVPN tables are hash maps with no ordered cursor: they
-    /// are copied one whole shard at a time, neighbors in handle order. A
-    /// key's shard never changes once a table has split, so no route is
-    /// copied twice even when its neighbor's table is replaced mid-dump.
-    // ponytail: an EVPN turn is at least one shard (16,384 rows, or 1/16 of
-    // one neighbor's EVPN table once it splits), so it still grows with the
-    // largest such table; an ordered EVPN index would bound it.
+    /// Freeze the peer index before the encoder writes its first record.
+    fn mrt_snapshot_peers(&self) -> Arc<[MrtSnapshotPeer]> {
+        self.ribs
+            .iter()
+            .filter(|(_, rib)| !rib.is_empty() || rib.evpn_len() > 0)
+            .map(|(peer, _)| peer)
+            .chain(self.peer_asn.keys())
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|peer| {
+                let (evpn_identity, evpn_slots) = self
+                    .ribs
+                    .get(&peer)
+                    .map_or((None, 0), AdjRibIn::evpn_snapshot_state);
+                MrtSnapshotPeer {
+                    entry: MrtPeerEntry::capture(
+                        peer,
+                        self.peer_asn.get(&peer).copied().unwrap_or(0),
+                        self.peer_bgp_id
+                            .get(&peer)
+                            .copied()
+                            .unwrap_or(Ipv4Addr::UNSPECIFIED),
+                    ),
+                    evpn_identity,
+                    evpn_slots,
+                }
+            })
+            .collect()
+    }
+
+    /// Copy one bounded turn. Unicast preserves whole-prefix consistency;
+    /// EVPN visits stable slots directly, charging vacancies as work.
     pub(super) fn mrt_snapshot_chunk(
         &self,
         cursor: Option<MrtSnapshotCursor>,
         budget: usize,
-    ) -> MrtSnapshotChunk {
-        use std::cmp::Reverse;
-
+    ) -> Result<MrtSnapshotChunk, String> {
         #[cfg(test)]
         mrt_chunks_built::record();
+        let first = cursor.is_none();
+        let mut cursor = cursor.unwrap_or_else(|| MrtSnapshotCursor {
+            phase: MrtSnapshotPhase::Unicast(None),
+            peers: self.mrt_snapshot_peers(),
+        });
         let mut chunk = MrtSnapshotChunk::default();
-        // Each source gets an entry with the address it has in this turn:
-        // the encoder runs after the RIB moves on and must not resolve a
-        // handle a later `RebindPeer` moved. A neighbor with no session
-        // (retained through Graceful Restart, say) gets zero ASN and BGP ID.
-        let mut listed = HashSet::new();
-        let mut list = |peers: &mut Vec<MrtPeerEntry>, peer: PeerId| {
-            if listed.insert(peer) {
-                let (asn, bgp_id) =
-                    self.peer_asn
-                        .get(&peer)
-                        .map_or((0, Ipv4Addr::UNSPECIFIED), |&asn| {
-                            let bgp_id = self.peer_bgp_id.get(&peer).copied();
-                            (asn, bgp_id.unwrap_or(Ipv4Addr::UNSPECIFIED))
-                        });
-                peers.push(MrtPeerEntry::capture(peer, asn, bgp_id));
+        if first {
+            chunk.peers = cursor.peers.iter().map(|peer| peer.entry.clone()).collect();
+        }
+        let budget = budget.max(1);
+        let next = match cursor.phase {
+            MrtSnapshotPhase::Unicast(after) => {
+                self.mrt_unicast_chunk(&cursor.peers, after, budget, &mut chunk)?
+            }
+            MrtSnapshotPhase::Evpn { peer, slot } => {
+                self.mrt_evpn_chunk(&cursor.peers, peer, slot, budget, &mut chunk)?
             }
         };
+        if let Some(phase) = next {
+            cursor.phase = phase;
+            chunk.next = Some(cursor);
+        }
+        Ok(chunk)
+    }
 
-        let evpn_from = match cursor.map(|cursor| cursor.0) {
-            Some(MrtSnapshotPhase::Evpn(from)) => from,
-            unicast => {
-                let after = match unicast {
-                    Some(MrtSnapshotPhase::Unicast(prefix)) => Some(prefix),
-                    _ => None,
-                };
-                let mut walks: Vec<_> = self
-                    .ribs
-                    .values()
-                    .map(|rib| rib.iter_prefix_groups_after(after))
-                    .collect();
-                let mut heads = Vec::with_capacity(walks.len());
-                let mut order = std::collections::BinaryHeap::with_capacity(walks.len());
-                for (index, walk) in walks.iter_mut().enumerate() {
-                    let head = walk.next();
-                    if let Some((prefix, _)) = &head {
-                        order.push(Reverse((*prefix, index)));
-                    }
-                    heads.push(head);
-                }
-                let mut walked = None;
-                while let Some(&Reverse((prefix, index))) = order.peek() {
-                    if chunk.routes.len() >= budget && walked != Some(prefix) {
-                        chunk.next = walked
-                            .map(|walked| MrtSnapshotCursor(MrtSnapshotPhase::Unicast(walked)));
-                        return chunk;
-                    }
-                    order.pop();
-                    walked = Some(prefix);
-                    if let Some((_, paths)) = heads[index].take() {
-                        for route in paths {
-                            list(&mut chunk.peers, route.peer);
-                            chunk.routes.push(route.clone());
-                        }
-                    }
-                    heads[index] = walks[index].next();
-                    if let Some((prefix, _)) = &heads[index] {
-                        order.push(Reverse((*prefix, index)));
-                    }
-                }
-                chunk.next = Some(MrtSnapshotCursor(MrtSnapshotPhase::Evpn(None)));
-                return chunk;
-            }
-        };
-
-        let mut peers: Vec<PeerId> = self
-            .ribs
-            .keys()
-            .copied()
-            .filter(|&peer| evpn_from.is_none_or(|(from, _)| peer >= from))
+    fn mrt_unicast_chunk(
+        &self,
+        peers: &[MrtSnapshotPeer],
+        after: Option<Prefix>,
+        budget: usize,
+        chunk: &mut MrtSnapshotChunk,
+    ) -> Result<Option<MrtSnapshotPhase>, String> {
+        use std::cmp::Reverse;
+        // The optional scope is the only clone-side allocation beyond the
+        // vector; charging it for every row avoids a second route scan.
+        let row_bytes = std::mem::size_of::<crate::route::Route>()
+            + std::mem::size_of::<crate::route::NextHopScope>();
+        let max_rows = crate::update::MRT_SNAPSHOT_CHUNK_BYTES / row_bytes;
+        let mut walks: Vec<_> = peers
+            .iter()
+            .filter_map(|peer| self.ribs.get(&peer.entry.peer))
+            .map(|rib| rib.iter_prefix_groups_after(after))
             .collect();
-        peers.sort_unstable();
-        for peer in peers {
-            let first = match evpn_from {
-                Some((from, shard)) if from == peer => shard,
-                _ => 0,
-            };
-            for (shard, rows) in self.ribs[&peer].iter_evpn_shards().enumerate().skip(first) {
-                let copied = chunk.evpn_routes.len();
-                if copied > 0 && copied + rows.len() > budget {
-                    chunk.next = Some(MrtSnapshotCursor(MrtSnapshotPhase::Evpn(Some((
-                        peer, shard,
-                    )))));
-                    return chunk;
+        let mut heads = Vec::with_capacity(walks.len());
+        let mut order = std::collections::BinaryHeap::with_capacity(walks.len());
+        for (index, walk) in walks.iter_mut().enumerate() {
+            let head = walk.next();
+            if let Some((prefix, _, _)) = &head {
+                order.push(Reverse((*prefix, index)));
+            }
+            heads.push(head);
+        }
+        let mut walked = after;
+        let mut members = Vec::new();
+        while let Some(&Reverse((prefix, _))) = order.peek() {
+            if chunk.routes.len() >= budget {
+                return Ok(Some(MrtSnapshotPhase::Unicast(walked)));
+            }
+            members.clear();
+            let mut prefix_rows = 0usize;
+            while let Some(&Reverse((next, index))) = order.peek() {
+                if next != prefix {
+                    break;
                 }
-                if rows.len() > 0 {
-                    list(&mut chunk.peers, peer);
+                order.pop();
+                prefix_rows = prefix_rows.saturating_add(heads[index].as_ref().unwrap().1);
+                members.push(index);
+            }
+            if prefix_rows > max_rows {
+                return Err(format!(
+                    "MRT prefix {prefix} exceeds the {}-byte chunk cap",
+                    crate::update::MRT_SNAPSHOT_CHUNK_BYTES
+                ));
+            }
+            let wanted = chunk.routes.len() + prefix_rows;
+            if wanted > max_rows {
+                return Ok(Some(MrtSnapshotPhase::Unicast(walked)));
+            }
+            if wanted > chunk.routes.capacity() {
+                let reserve = wanted.max(budget.min(max_rows)) - chunk.routes.len();
+                chunk
+                    .routes
+                    .try_reserve_exact(reserve)
+                    .map_err(|_| "failed to reserve MRT unicast chunk storage".to_string())?;
+            }
+            for &index in &members {
+                if let Some((_, _, paths)) = heads[index].take() {
+                    for route in paths {
+                        #[cfg(test)]
+                        mrt_chunks_built::record_row();
+                        chunk.routes.push(route.clone());
+                    }
                 }
-                chunk.evpn_routes.extend(rows.cloned());
+                heads[index] = walks[index].next();
+                if let Some((prefix, _, _)) = &heads[index] {
+                    order.push(Reverse((*prefix, index)));
+                }
+            }
+            walked = Some(prefix);
+        }
+        Ok(Some(MrtSnapshotPhase::Evpn { peer: 0, slot: 0 }))
+    }
+
+    fn mrt_evpn_chunk(
+        &self,
+        peers: &[MrtSnapshotPeer],
+        mut peer: usize,
+        mut slot: usize,
+        budget: usize,
+        chunk: &mut MrtSnapshotChunk,
+    ) -> Result<Option<MrtSnapshotPhase>, String> {
+        let max_rows = crate::update::MRT_SNAPSHOT_CHUNK_BYTES
+            / std::mem::size_of::<crate::route::EvpnRibRoute>();
+        let mut visited = 0;
+        while let Some(captured) = peers.get(peer) {
+            if slot == captured.evpn_slots {
+                peer += 1;
+                slot = 0;
+                continue;
+            }
+            let rib = self
+                .ribs
+                .get(&captured.entry.peer)
+                .ok_or_else(|| "MRT EVPN table was removed during the snapshot".to_string())?;
+            let (identity, _) = rib.evpn_snapshot_state();
+            if !identity
+                .as_ref()
+                .zip(captured.evpn_identity.as_ref())
+                .is_some_and(|(current, initial)| Arc::ptr_eq(current, initial))
+            {
+                return Err("MRT EVPN table was reset during the snapshot".to_string());
+            }
+            while slot < captured.evpn_slots {
+                if visited >= budget || chunk.evpn_routes.len() >= max_rows {
+                    return Ok(Some(MrtSnapshotPhase::Evpn { peer, slot }));
+                }
+                #[cfg(test)]
+                mrt_chunks_built::record_slot();
+                visited += 1;
+                if let Some(route) = rib.evpn_snapshot_slot(
+                    u32::try_from(slot).expect("EVPN slot fits the slab handle space"),
+                ) {
+                    if chunk.evpn_routes.len() == chunk.evpn_routes.capacity() {
+                        let reserve = budget.min(max_rows) - chunk.evpn_routes.len();
+                        chunk
+                            .evpn_routes
+                            .try_reserve_exact(reserve)
+                            .map_err(|_| "failed to reserve MRT EVPN chunk storage".to_string())?;
+                    }
+                    #[cfg(test)]
+                    mrt_chunks_built::record_row();
+                    chunk.evpn_routes.push(route.clone());
+                }
+                slot += 1;
             }
         }
-        for &peer in self.peer_asn.keys() {
-            list(&mut chunk.peers, peer);
-        }
-        chunk
+        Ok(None)
     }
     pub(super) fn handle_query_warm_mrt_snapshot(
         &mut self,
