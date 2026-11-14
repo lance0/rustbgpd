@@ -2641,7 +2641,7 @@ mod tests {
         assert_eq!(f.pending(), [server1()]);
         let update = f.full(server1(), &[3, 4], 500);
         f.mgr.receive(update).await;
-        assert!(f.pending().is_empty());
+        assert_eq!(f.pending(), [] as [SocketAddr; 0]);
         assert!(covers(f.mgr.current_table.as_ref().unwrap(), 3));
         assert_eq!(f.faults.load(Ordering::SeqCst), 1);
 
