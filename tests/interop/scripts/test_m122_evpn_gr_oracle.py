@@ -3,13 +3,18 @@
 
 import copy
 import ipaddress
+import json
+import shutil
 import struct
 import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import m122_evpn_gr_oracle as oracle
 import run_m122_evpn_gr as runner
+from m122_fsm_trace import parse_logs
 
 
 def message(t, body):
@@ -68,6 +73,52 @@ def fixture(restart_forwarding=True, include_eor=True):
     return [f"{stream}\t{src}\t{dst}\t100\t{raw.hex()}" for stream, src, dst, raw in streams]
 
 
+def trace_fixture(closer=oracle.SOURCE, consumed=False):
+    peer = oracle.RR if closer == oracle.SOURCE else oracle.SOURCE
+    local_port, remote_port = (179, 41234) if closer == oracle.SOURCE else (41234, 179)
+    endpoints = {"tcp_local": f"{closer}:{local_port}", "tcp_remote": f"{peer}:{remote_port}"}
+    rows = []
+    if closer == oracle.SOURCE:
+        sequence = [("connection_open", "pre_established")]
+        if consumed:
+            sequence.append(("keepalive_received", "established"))
+        state = "established" if consumed else "pre_established"
+        sequence.extend([("collision_close", state), ("connection_closed", state)])
+        for number, (event, state) in enumerate(sequence, 1):
+            rows.append({"msg": "M122 FSM trace", "event": event, "state": state,
+                         "process_id": 12, "connection_id": 2, "sequence": number, **endpoints})
+        name = "source.log"
+    else:
+        rows.append({"message": "session state changed", "from": "connect", "to": "open_sent"})
+        rows.append({"message": "session state changed", "from": "open_sent", "to": "open_confirm"})
+        if consumed:
+            rows.extend([{"message": "FSM event", "event": "KeepaliveReceived", "state": "open_confirm"},
+                         {"message": "session state changed", "from": "open_confirm", "to": "established"}])
+        rows.append({"message": "BGP NOTIFICATION", "code": 6, "subcode": 7, "direction": "sent",
+                     "collision_state": "established" if consumed else "open_confirm"})
+        rows = [{"fields": {"session_id": 123, **endpoints, **row}} for row in rows]
+        name = "rr.log"
+    return {name: "\n".join(json.dumps(row) for row in rows)}
+
+
+def collision_rows(closer=oracle.SOURCE, coalesced=False):
+    peer = oracle.RR if closer == oracle.SOURCE else oracle.SOURCE
+    local_port, remote_port = (179, 41234) if closer == oracle.SOURCE else (41234, 179)
+    open_ = message(1, open_body())
+    keepalive = message(4, b"")
+    cease = message(3, b"\x06\x07")
+    def row(src, dst, source_port, destination_port, raw, seq=100):
+        return f"9\t{src}\t{dst}\t{seq}\t{raw.hex()}\t{source_port}\t{destination_port}"
+    rows = [row(closer, peer, local_port, remote_port, open_),
+            row(peer, closer, remote_port, local_port, open_ + keepalive)]
+    if coalesced:
+        rows.append(row(closer, peer, local_port, remote_port, keepalive + cease, 100 + len(open_)))
+    else:
+        rows.extend([row(closer, peer, local_port, remote_port, keepalive, 100 + len(open_)),
+                     row(closer, peer, local_port, remote_port, cease, 100 + len(open_) + len(keepalive))])
+    return rows
+
+
 def rr_fixture():
     rows = []
     for t in range(1, 6):
@@ -81,6 +132,118 @@ def rr_fixture():
 
 
 class OracleTests(unittest.TestCase):
+    def test_driver_failure_collects_final_tsv_and_logs(self):
+        cases = ((False, False, "daemon log\n"), (True, False, "daemon log\n"),
+                 (True, True, "daemon log\n"), (False, False, "null\n"),
+                 (False, False, '{"fields": null}\n'))
+        for stale, extraction_fails, daemon_log in cases:
+            with self.subTest(stale=stale, extraction_fails=extraction_fails, daemon_log=daemon_log), tempfile.TemporaryDirectory() as directory:
+                out = Path(directory)
+                if stale:
+                    (out / "capture.tsv").write_text("old live sample")
+                calls = []
+
+                def run_command(args, *, calls=calls, extraction_fails=extraction_fails, daemon_log=daemon_log, **_kwargs):
+                    calls.append(args)
+                    if args[1] == "run":
+                        self.assertIn(["docker", "wait", runner.CAPTURE], calls[:-1])
+                        if extraction_fails:
+                            raise subprocess.CalledProcessError(1, args)
+                        return subprocess.CompletedProcess(args, 0, stdout="final flushed capture\n")
+                    if args[1] == "wait":
+                        return subprocess.CompletedProcess(args, 0, stdout="0\n")
+                    if args[1] == "cp":
+                        Path(args[-1]).write_text(daemon_log)
+                    return subprocess.CompletedProcess(args, 0, stdout="capture diagnostics\n")
+
+                original = ValueError("early driver failure")
+                with patch.object(runner, "OUT", out), \
+                        patch.object(runner, "provenance"), \
+                        patch.object(runner, "command", return_value=""), \
+                        patch.object(runner, "wait", side_effect=original), \
+                        patch.object(runner.subprocess, "run", side_effect=run_command):
+                    with self.assertRaises(ValueError) as raised:
+                        runner.run()
+                    self.assertIs(raised.exception, original)
+                if extraction_fails:
+                    self.assertFalse((out / "capture.tsv").exists())
+                else:
+                    self.assertEqual((out / "capture.tsv").read_text(), "final flushed capture\n")
+                for name in ("capture.log", "rr.log", "source.log", "client.log"):
+                    self.assertTrue((out / name).read_text())
+                self.assertEqual(calls[-1], ["docker", "rm", "-f", runner.CAPTURE])
+
+    def test_unclean_capture_exit_retains_payloads_but_cannot_pass(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(runner, "OUT", Path(directory)):
+            out = Path(directory)
+            def run_command(args, **_kwargs):
+                if args[1] == "wait":
+                    return subprocess.CompletedProcess(args, 0, stdout="137\n")
+                if args[1] == "run":
+                    return subprocess.CompletedProcess(args, 0, stdout="\n".join(fixture()))
+                if args[1] == "cp":
+                    Path(args[-1]).write_text("")
+                return subprocess.CompletedProcess(args, 0, stdout="capture diagnostics\n")
+            with patch.object(runner.subprocess, "run", side_effect=run_command):
+                complete = runner.collect_evidence()
+            self.assertFalse(complete)
+            self.assertTrue((out / "capture.tsv").read_text())
+            with self.assertRaisesRegex(ValueError, "clean exit"):
+                runner.finalize_evidence(complete)
+            self.assertFalse((out / "verdict.json").exists())
+
+    def test_capture_exit_snapshot_never_replaces_failed_wait(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(runner, "OUT", Path(directory)):
+            out, calls = Path(directory), []
+            state = {"Running": False, "Status": "exited", "ExitCode": 0,
+                     "FinishedAt": "2026-11-14T17:35:50Z", "Error": ""}
+            def run_command(args, **_kwargs):
+                calls.append(args)
+                if args[1] == "wait":
+                    raise subprocess.TimeoutExpired(args, 15)
+                if args[1] == "inspect":
+                    return subprocess.CompletedProcess(args, 0, stdout=json.dumps(state))
+                if args[1] == "cp":
+                    Path(args[-1]).write_text("")
+                return subprocess.CompletedProcess(args, 0, stdout="capture diagnostics\n")
+            with patch.object(runner.subprocess, "run", side_effect=run_command):
+                complete = runner.collect_evidence()
+            self.assertFalse(complete)
+            self.assertEqual(json.loads((out / "capture-state.json").read_text()), state)
+            self.assertLess(next(i for i, args in enumerate(calls) if args[1] == "inspect"),
+                            next(i for i, args in enumerate(calls) if args[1] == "rm"))
+            with self.assertRaisesRegex(ValueError, "clean exit"):
+                runner.finalize_evidence(complete)
+            self.assertFalse((out / "verdict.json").exists())
+
+    def test_failed_final_extraction_cannot_reuse_undeletable_live_tsv(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(runner, "OUT", Path(directory)):
+            out = Path(directory)
+            live_tsv = "\n".join(fixture())
+            (out / "capture.tsv").write_text(live_tsv)
+            def run_command(args, **_kwargs):
+                if args[1] == "wait":
+                    return subprocess.CompletedProcess(args, 0, stdout="0\n")
+                if args[1] == "run":
+                    raise subprocess.CalledProcessError(1, args)
+                if args[1] == "cp":
+                    Path(args[-1]).write_text("")
+                return subprocess.CompletedProcess(args, 0, stdout="capture diagnostics\n")
+            with patch.object(runner.subprocess, "run", side_effect=run_command), \
+                    patch.object(Path, "unlink", side_effect=OSError("seeded unlink failure")):
+                complete = runner.collect_evidence()
+            self.assertFalse(complete)
+            self.assertEqual((out / "capture.tsv").read_text(), live_tsv)
+            with self.assertRaisesRegex(ValueError, "clean exit"):
+                runner.finalize_evidence(complete)
+            self.assertFalse((out / "verdict.json").exists())
+
+    def test_collision_trace_requires_matching_cease_frame(self):
+        for closer in (oracle.SOURCE, oracle.RR):
+            for consumed in (False, True):
+                with self.subTest(closer=closer, consumed=consumed), self.assertRaisesRegex(ValueError, "matching captured Cease"):
+                    oracle.analyze_wire(fixture(), parse_logs(trace_fixture(closer, consumed)))
+
     def test_ten_unique_routes_and_complete_lifecycle(self):
         self.assertEqual(len(oracle.expected_nlri([1, 2])), 10)
         result = oracle.analyze_wire(fixture())
@@ -271,7 +434,8 @@ class OracleTests(unittest.TestCase):
         keepalive = message(4, b"").hex()
 
         def row(src, dst, *raw, seq=100):
-            return f"9\t{src}\t{dst}\t{seq}\t{''.join(raw)}"
+            ports = (179, 41234) if src == oracle.SOURCE else (41234, 179)
+            return f"9\t{src}\t{dst}\t{seq}\t{''.join(raw)}\t{ports[0]}\t{ports[1]}"
 
         def collided(notification, rr_sends_keepalive=False, source_sends=()):
             # The RR's own connection to the source, closed by the source.
@@ -280,14 +444,14 @@ class OracleTests(unittest.TestCase):
                                     row(oracle.SOURCE, oracle.RR, open_, *source_sends, notification)] + fixture()[1:]
 
         cease = message(3, b"\x06\x07").hex()
-        oracle.analyze_wire(collided(message(3, b"\x06\x07").hex()))
-        oracle.analyze_wire(collided(message(3, b"\x06\x07").hex(), rr_sends_keepalive=True))
+        oracle.analyze_wire(collided(message(3, b"\x06\x07").hex()), parse_logs(trace_fixture()))
+        oracle.analyze_wire(collided(message(3, b"\x06\x07").hex(), rr_sends_keepalive=True), parse_logs(trace_fixture()))
         cases = {
             "other Cease subcode": collided(message(3, b"\x06\x02").hex()),
             "FSM error": collided(message(3, b"\x05\x00").hex()),
-            "after Established": collided(message(3, b"\x06\x07").hex(), True, (keepalive,)),
-            # An early 6/7 must not excuse a later one on the same stream.
-            "second Cease after Established": collided(cease)
+            "ambiguous after both KEEPALIVEs": collided(message(3, b"\x06\x07").hex(), True, (keepalive,)),
+            # An early 6/7 must not excuse a later ambiguous one on the stream.
+            "second Cease after both KEEPALIVEs": collided(cease)
             + [row(oracle.RR, oracle.SOURCE, keepalive, seq=100 + len(open_) // 2),
                row(oracle.SOURCE, oracle.RR, keepalive, seq=100 + (len(open_) + len(cease)) // 2),
                row(oracle.SOURCE, oracle.RR, cease, seq=100 + (len(open_) + len(cease) + len(keepalive)) // 2)],
@@ -296,6 +460,207 @@ class OracleTests(unittest.TestCase):
         for name, lines in cases.items():
             with self.subTest(name), self.assertRaises(ValueError):
                 oracle.analyze_wire(lines)
+
+    @unittest.skipUnless(shutil.which("tshark"), "tshark is not installed")
+    def test_capture_keeps_reverse_tuple_without_peer_bgp_payload(self):
+        # resolve_collision can close the primary in OpenSent from an OPEN on
+        # the other connection. The primary's peer has sent only SYN/ACK here.
+        open_ = message(1, open_body())
+        packets = [(oracle.RR, oracle.SOURCE, 41234, 179, 99, 0, 0x02, b""),
+                   (oracle.SOURCE, oracle.RR, 179, 41234, 199, 100, 0x12, b""),
+                   (oracle.RR, oracle.SOURCE, 41234, 179, 100, 200, 0x10, b""),
+                   (oracle.RR, oracle.SOURCE, 41234, 179, 100, 200, 0x18, open_),
+                   (oracle.RR, oracle.SOURCE, 41234, 179, 100 + len(open_), 200, 0x18,
+                    message(3, b"\x06\x07"))]
+        capture = struct.pack("<IHHIIII", 0xa1b2c3d4, 2, 4, 0, 0, 65535, 1)
+        for index, (src, dst, sport, dport, seq, ack, flags, payload) in enumerate(packets):
+            tcp = struct.pack("!HHIIBBHHH", sport, dport, seq, ack, 0x50, flags, 65535, 0, 0) + payload
+            ip = struct.pack("!BBHHHBBH4s4s", 0x45, 0, 20 + len(tcp), index, 0, 64, 6, 0,
+                             ipaddress.IPv4Address(src).packed, ipaddress.IPv4Address(dst).packed)
+            frame = bytes.fromhex("0200000000030200000000020800") + ip + tcp
+            capture += struct.pack("<IIII", index + 1, 0, len(frame), len(frame)) + frame
+        logs = trace_fixture(oracle.RR)["rr.log"].splitlines()
+        traces = parse_logs({"rr.log": logs[0] + "\n" + logs[-1].replace("open_confirm", "open_sent")})
+        # Keep the independent, complete route lifecycle on different streams.
+        admitted = [str(int(line[0]) + 10) + line[1:] for line in fixture()]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "open-sent-collision.pcap"
+            path.write_bytes(capture)
+            args = list(runner.CAPTURE_FIELDS)
+            args[args.index("-r") + 1] = str(path)
+            rows = subprocess.run(["tshark", *args], text=True, capture_output=True,
+                                  check=True, timeout=15).stdout.splitlines()
+        result = oracle.analyze_wire(admitted + rows, traces)
+        self.assertEqual(len(rows), 5)
+        self.assertEqual([oracle.capture_row(row)[4] for row in rows[:3]], ["", "", ""])
+        self.assertEqual(result["collision_closes"][0]["state"], "pre_established")
+        with self.assertRaisesRegex(ValueError, "reverse tuple"):
+            oracle.analyze_wire(admitted + [row for row in rows if oracle.capture_row(row)[4]], traces)
+        fields = rows[1].split("\t")
+        fields[-1] = "41235"
+        with self.assertRaisesRegex(ValueError, "reverse tuple"):
+            oracle.analyze_wire(admitted + [rows[0], "\t".join(fields), *rows[2:]], traces)
+        with self.assertRaisesRegex(ValueError, "closing FSM trace missing"):
+            oracle.analyze_wire(admitted + rows)
+
+    def test_crossing_keepalive_bytes_require_actual_closing_fsm_state(self):
+        for closer in (oracle.SOURCE, oracle.RR):
+            for coalesced in (False, True):
+                with self.subTest(closer=closer, coalesced=coalesced):
+                    lines = fixture() + collision_rows(closer, coalesced)
+                    before = parse_logs(trace_fixture(closer))
+                    result = oracle.analyze_wire(lines, before)
+                    self.assertEqual(result["collision_closes"][0]["state"], "pre_established")
+                    with self.assertRaisesRegex(ValueError, "closing FSM trace missing"):
+                        oracle.analyze_wire(lines)
+                    # The SAME packet bytes fit both local event schedules.
+                    after = parse_logs(trace_fixture(closer, consumed=True))
+                    with self.assertRaisesRegex(ValueError, "Established"):
+                        oracle.analyze_wire(lines, after)
+
+    def test_connection_trace_rejects_wrong_direction_other_connection_and_reuse(self):
+        for closer in (oracle.SOURCE, oracle.RR):
+            rows = fixture() + collision_rows(closer)
+            original = parse_logs(trace_fixture(closer))
+            for mutation in ("reverse", "other port", "missing start", "missing close", "unknown state", "reused owner", "duplicate start", "extra event", "contradictory close"):
+                traces = copy.deepcopy(original)
+                for event in traces:
+                    if mutation == "reverse":
+                        event["connection"] = event["connection"][2:] + event["connection"][:2]
+                    elif mutation == "other port":
+                        event["connection"][1] += 1
+                    elif mutation == "unknown state" and event["event"] == "collision_close":
+                        event["state"] = "unknown"
+                if mutation == "missing start":
+                    traces = traces[1:]
+                elif mutation == "missing close":
+                    traces = [event for event in traces if event["event"] != "collision_close"]
+                elif mutation == "reused owner":
+                    other = copy.deepcopy(traces[0])
+                    other["owner"][-1] += 1
+                    traces.append(other)
+                elif mutation == "duplicate start":
+                    traces.insert(1, copy.deepcopy(traces[0]))
+                elif mutation == "extra event":
+                    traces.insert(1, copy.deepcopy(traces[-1]))
+                    for index, event in enumerate(traces, 1):
+                        event["sequence"] = index
+                elif mutation == "contradictory close":
+                    traces[-1]["state"] = "open_sent" if closer == oracle.RR else "established"
+                with self.subTest(closer=closer, mutation=mutation), self.assertRaises(ValueError):
+                    oracle.analyze_wire(rows, traces)
+            for mutation in ("no ports", "reused stream", "wrong reverse port", "changing port"):
+                lines = collision_rows(closer)
+                if mutation == "no ports":
+                    lines = ["\t".join(line.split("\t")[:5]) for line in lines]
+                elif mutation == "reused stream":
+                    lines.extend([line.replace("9\t", "10\t", 1) for line in lines])
+                else:
+                    fields = lines[1 if mutation == "wrong reverse port" else -1].split("\t")
+                    fields[-1] = str(int(fields[-1]) + 1)
+                    lines[1 if mutation == "wrong reverse port" else -1] = "\t".join(fields)
+                with self.subTest(closer=closer, mutation=mutation), self.assertRaises(ValueError):
+                    oracle.analyze_wire(fixture() + lines, original)
+
+    def test_gobgp_trace_requires_contiguous_sequence_and_terminal_close(self):
+        original = parse_logs(trace_fixture())
+        for mutation in ("missing terminal", "sequence gap", "duplicate sequence", "unknown identity", "contradiction"):
+            traces = copy.deepcopy(original)
+            if mutation == "missing terminal":
+                traces.pop()
+            elif mutation == "sequence gap":
+                traces[-1]["sequence"] += 1
+            elif mutation == "duplicate sequence":
+                traces[-1]["sequence"] = traces[-2]["sequence"]
+            elif mutation == "unknown identity":
+                for event in traces:
+                    event["owner"][-1] = 0
+            else:
+                traces[-1]["state"] = "established"
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                oracle.analyze_wire(fixture() + collision_rows(), traces)
+
+    def test_consumed_keepalive_cannot_be_contradicted_by_pre_established_close(self):
+        for closer in (oracle.SOURCE, oracle.RR):
+            traces = parse_logs(trace_fixture(closer, True))
+            for event in traces:
+                if event["event"] in ("collision_close", "connection_closed"):
+                    event["state"] = "pre_established" if closer == oracle.SOURCE else "open_confirm"
+            with self.subTest(closer=closer), self.assertRaisesRegex(ValueError, "contradictory"):
+                oracle.analyze_wire(fixture() + collision_rows(closer), traces)
+
+    def test_log_parser_rejects_truncated_log_and_received_notification_is_not_close(self):
+        for closer in (oracle.SOURCE, oracle.RR):
+            logs = trace_fixture(closer)
+            name = next(iter(logs))
+            logs[name] = logs[name][:-1]
+            with self.subTest(closer=closer), self.assertRaisesRegex(ValueError, "incomplete/non-JSON"):
+                parse_logs(logs)
+        logs = {name: text.replace('"direction": "sent"', '"direction": "received"')
+                for name, text in trace_fixture(oracle.RR).items()}
+        with self.assertRaisesRegex(ValueError, "unique collision close"):
+            oracle.analyze_wire(fixture() + collision_rows(oracle.RR), parse_logs(logs))
+
+    def test_complete_m122_startup_banner_preserves_trace_lines(self):
+        startup = json.dumps({"target": "rustbgpd", "fields": {
+            "message": "starting rustbgpd", "version": "0.82.0"}}) + "\n"
+        banner = "\n  rustbgpd 0.82.0 | AS 65001 | router-id 10.0.122.1\n" \
+            "  |- 2 peers (2 iBGP)\n" \
+            "  |- grpc: tcp://0.0.0.0:50051 (token auth)\n" \
+            "  |- grpc: unix:///var/lib/rustbgpd/grpc.sock\n" \
+            "  |- metrics: http://0.0.0.0:9179/metrics\n\n"
+        trace = trace_fixture(oracle.RR)["rr.log"]
+        text = startup + banner + trace
+        events = parse_logs({"rr.log": text})
+        self.assertEqual(events[0]["line"], 9)
+        result = oracle.analyze_wire(fixture() + collision_rows(oracle.RR), events)
+        self.assertEqual(result["collision_closes"][0]["close_line"], 11)
+        for broken in (text.replace("2 peers (2 iBGP)", "3 peers (3 iBGP)"),
+                       text.replace("  |- metrics: http://0.0.0.0:9179/metrics\n", ""),
+                       text.replace("  rustbgpd 0.82.0", "  rustbgpd 0.81.0"),
+                       banner + trace, startup + banner + banner + trace,
+                       text + "\nunexpected stderr warning\n", text[:-1]):
+            with self.subTest(broken=broken), self.assertRaises(ValueError):
+                parse_logs({"rr.log": broken})
+        with self.assertRaises(ValueError):
+            parse_logs({"source.log": text})
+
+    def test_driver_verdict_requires_final_capture_and_logs(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(runner, "OUT", Path(directory)):
+            out = Path(directory)
+            for name in ("rr.log", "source.log", "client.log"):
+                (out / name).write_text(trace_fixture().get(name, ""))
+            # Final capture catches the late close even if the live phase passed.
+            (out / "capture.tsv").write_text("\n".join(fixture() + collision_rows()))
+            runner.finalize_evidence(True)
+            self.assertTrue((out / "verdict.json").exists())
+            (out / "verdict.json").unlink()
+            (out / "source.log").write_text(trace_fixture(consumed=True)["source.log"])
+            with self.assertRaisesRegex(ValueError, "Established"):
+                runner.finalize_evidence(True)
+            self.assertFalse((out / "verdict.json").exists())
+            (out / "capture.tsv").unlink()
+            with self.assertRaises(FileNotFoundError):
+                runner.finalize_evidence(True)
+
+    def test_closing_side_update_is_positive_established_evidence(self):
+        open_ = message(1, open_body())
+        keepalive = message(4, b"")
+        cease = message(3, b"\x06\x07")
+        for closer, peer in ((oracle.SOURCE, oracle.RR), (oracle.RR, oracle.SOURCE)):
+            for sender in (closer, peer):
+                with self.subTest(closer=closer, update_sender=sender):
+                    closing = open_ + keepalive
+                    other = open_ + keepalive
+                    if sender == closer:
+                        closing += announce(1, 1)
+                    else:
+                        other += announce(1, 1)
+                    rows = [f"9\t{peer}\t{closer}\t100\t{other.hex()}",
+                            f"9\t{closer}\t{peer}\t100\t{(closing + cease).hex()}"]
+                    diagnostic = "after its own UPDATE" if sender == closer else "carries an UPDATE"
+                    with self.assertRaisesRegex(ValueError, diagnostic):
+                        oracle.analyze_wire(fixture() + rows, parse_logs(trace_fixture(closer)))
 
     def test_eor_before_all_five_refreshed_routes_fails(self):
         restart = message(1, open_body(True, True)) + b"".join(announce(t, 1) for t in range(1, 5))

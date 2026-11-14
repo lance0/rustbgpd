@@ -2408,24 +2408,22 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
-      - name: Check M122 oracle and driver
-        run: |
-          python3 tests/interop/scripts/test_m122_evpn_gr_oracle.py
-          bash -n tests/interop/scripts/test-m122-evpn-gr-rr-gobgp.sh
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
-      - name: Stage verified GoBGP 4.11.0 archive
-        uses: ./.github/actions/stage-gobgp-artifact
-        id: gobgp_archive
-        with:
-          version: "4.11.0"
-      - name: Build pinned peer and capture tools
+      - name: Stage pinned GoBGP source archive
+        uses: ./.github/actions/stage-gobgp-source-artifact
+        id: gobgp_source_archive
+      - name: Build pinned instrumented peer and capture tools
         run: |
           docker build --build-arg TARGETARCH=amd64 \
-            --build-arg GOBGP_VERSION=4.11.0 \
-            --build-arg GOBGP_SHA256="${{ steps.gobgp_archive.outputs.sha256 }}" \
-            -t gobgp:v4.11.0-m122 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
+            --build-arg GOBGP_SOURCE_SHA256="${{ steps.gobgp_source_archive.outputs.sha256 }}" \
+            -t gobgp:m122-fsm-trace -f tests/interop/Dockerfile.gobgp-m122-trace tests/interop
           docker build -t rustbgpd:m122-tools -f tests/interop/Dockerfile.m122-tools tests/interop
+      - name: Check M122 oracle and driver with capture tools
+        run: |
+          docker run --rm --network none -v "$PWD:/work:ro" -w /work rustbgpd:m122-tools \
+            python3 tests/interop/scripts/test_m122_evpn_gr_oracle.py
+          bash -n tests/interop/scripts/test-m122-evpn-gr-rr-gobgp.sh
       - name: Run M122 (deploy + test + destroy)
         uses: ./.github/actions/run-interop-test
         env:
@@ -2444,6 +2442,7 @@ jobs:
             ${{ runner.temp }}/m122-evidence/admission.json
             ${{ runner.temp }}/m122-evidence/provenance.json
             ${{ runner.temp }}/m122-evidence/wire-witnesses.json
+            ${{ runner.temp }}/m122-evidence/fsm-traces.json
             ${{ runner.temp }}/m122-evidence/verdict.json
             ${{ runner.temp }}/m122-evidence/initial.json
             ${{ runner.temp }}/m122-evidence/gr-ten.json
@@ -2451,6 +2450,21 @@ jobs:
             ${{ runner.temp }}/m122-evidence/gr-five.json
             ${{ runner.temp }}/m122-evidence/llgr-five.json
             ${{ runner.temp }}/m122-evidence/expired.json
+      - name: Upload M122 capture and daemon logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: m122-raw-evidence
+          path: |
+            ${{ runner.temp }}/m122-evidence/capture.pcap
+            ${{ runner.temp }}/m122-evidence/capture.tsv
+            ${{ runner.temp }}/m122-evidence/capture.log
+            ${{ runner.temp }}/m122-evidence/capture-state.json
+            ${{ runner.temp }}/m122-evidence/rr.log
+            ${{ runner.temp }}/m122-evidence/source.log
+            ${{ runner.temp }}/m122-evidence/client.log
+          if-no-files-found: warn
+          retention-days: 14
 
   m125:
     needs: [prime_dev_image]
