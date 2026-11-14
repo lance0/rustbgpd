@@ -1218,7 +1218,7 @@ fn drain_mrt_snapshot(
     loop {
         let (reply, mut response) = oneshot::channel();
         manager.handle_update(RibUpdate::QueryMrtSnapshotChunk { cursor, reply });
-        let chunk = response.try_recv().unwrap();
+        let chunk = response.try_recv().unwrap().unwrap();
         turns.push(chunk.routes.len() + chunk.evpn_routes.len());
         cursor = snapshot.push(chunk);
         if cursor.is_none() {
@@ -1305,44 +1305,65 @@ fn mrt_snapshot_unicast_turn_is_flat_in_table_size() {
     assert_eq!(longest[0], longest[1], "longest turn grew with the table");
 }
 
-/// Report and bound the EVPN turn: whole hash shards, so at most the larger
-/// of the row budget and one shard of one neighbor's table. It is not flat:
-/// a split table's shard is 1/16 of the table.
+/// Growing the table never grows one actor turn, including sparse slots.
 #[test]
-fn mrt_snapshot_evpn_turn_is_one_shard_at_most() {
+fn mrt_snapshot_evpn_turn_is_flat_in_table_size() {
     let budget = crate::update::MRT_SNAPSHOT_CHUNK_ROWS;
     for routes in [10_000u32, 40_000, 160_000] {
         let mut manager = mrt_test_manager();
         let peer = mrt_test_peer(1);
         seed_mrt_rib(&mut manager, peer, 0, routes);
-        // Small neighbors pack into one turn up to the row budget.
         for index in 2..=9 {
             seed_mrt_rib(&mut manager, mrt_test_peer(index), 0, 1_000);
         }
-        let shard = manager.ribs[&peer]
-            .iter_evpn_shards()
-            .map(|rows| rows.len())
-            .max()
-            .unwrap();
-        let (snapshot, turns) = drain_mrt_snapshot(&mut manager, |_, _| {});
+        let mut slots = Vec::new();
+        crate::manager::queries::mrt_chunks_built::take_slots();
+        let (snapshot, turns) = drain_mrt_snapshot(&mut manager, |_, _| {
+            slots.push(crate::manager::queries::mrt_chunks_built::take_slots());
+        });
+        slots.push(crate::manager::queries::mrt_chunks_built::take_slots());
         assert_eq!(snapshot.evpn_routes.len(), routes as usize + 8_000);
-        let max = turns.iter().copied().max().unwrap();
+        assert_eq!(snapshot.peers.len(), 9, "retained EVPN sources are listed");
+        assert_eq!(slots.iter().sum::<usize>(), routes as usize + 8_000);
+        let max = slots.iter().copied().max().unwrap();
         println!(
-            "mrt snapshot evpn: one_peer_rows={routes} largest_shard={shard} turns={} longest_turn_rows={max}",
+            "mrt snapshot evpn: one_peer_rows={routes} turns={} longest_turn_slots={max}",
             turns.len()
         );
-        assert!(max <= budget.max(shard), "{max} > max({budget}, {shard})");
+        assert_eq!(max, budget);
+        assert!(turns.into_iter().all(|rows| rows <= budget));
     }
+}
+
+#[test]
+fn mrt_snapshot_evpn_sparse_slots_are_bounded_work() {
+    const SLOTS: u32 = 10_000;
+    let mut manager = mrt_test_manager();
+    let peer = mrt_test_peer(1);
+    seed_mrt_rib(&mut manager, peer, 0, SLOTS);
+    let rib = manager.ribs.get_mut(&peer).unwrap();
+    for tag in 0..SLOTS - 1 {
+        assert!(rib.withdraw_evpn(&mrt_test_evpn(peer, tag, 0).key()));
+    }
+    let mut slots = Vec::new();
+    crate::manager::queries::mrt_chunks_built::take_slots();
+    let (snapshot, turns) = drain_mrt_snapshot(&mut manager, |_, _| {
+        slots.push(crate::manager::queries::mrt_chunks_built::take_slots());
+    });
+    slots.push(crate::manager::queries::mrt_chunks_built::take_slots());
+    assert_eq!(snapshot.evpn_routes.len(), 1);
+    assert_eq!(turns, [0, 0, 0, 1]);
+    assert_eq!(slots, [0, 4096, 4096, 1808]);
 }
 
 /// The consistency a chunked snapshot promises while the table changes
 /// between its turns, over several mutation orders:
 /// - a route stored and unchanged for the whole dump is copied exactly once;
-/// - no route identity is copied twice, and a changed route appears in a
-///   form it actually had;
+/// - no unicast identity is copied twice; changed EVPN rows may recur after
+///   slot reuse, but every copied route is in a form it actually had;
 /// - one prefix is read from every neighbor in the same turn;
-/// - every copied route's neighbor is listed, with the session it had in the
-///   turn its routes were read, whether it left or joined mid-dump.
+/// - every copied route names a peer from the initial roster; a departing
+///   peer retains its entry and late joiners are excluded.
 #[expect(
     clippy::too_many_lines,
     reason = "one scenario keeps its mutations and assertions together"
@@ -1376,7 +1397,6 @@ fn mrt_snapshot_under_churn_keeps_its_consistency_model() {
                 .wrapping_add(1_442_695_040_888_963_407);
             u32::try_from((state >> 33) % u64::from(bound)).unwrap()
         };
-        let mut evpn_replaced = false;
 
         let (snapshot, turns) = drain_mrt_snapshot(&mut manager, |manager, turn| {
             let version = u8::try_from(turn % 200).unwrap() + 1;
@@ -1428,28 +1448,7 @@ fn mrt_snapshot_under_churn_keeps_its_consistency_model() {
                     evpn_versions.entry(tag).or_default().insert(version);
                 }
             }
-            // Replace a split EVPN table partway through its shards, as a
-            // session bounce that relearns the same routes does.
-            if !evpn_replaced && manager.ribs[&stayers[0]].iter_evpn_shards().count() > 1 {
-                let walked_evpn = turn > 8 + (PREFIXES as usize * 4) / 4096;
-                if walked_evpn {
-                    evpn_replaced = true;
-                    let old = manager.ribs.remove(&stayers[0]).unwrap();
-                    let mut fresh = AdjRibIn::new(stayers[0]);
-                    for route in old.iter() {
-                        fresh.insert(route.clone());
-                    }
-                    for route in old.iter_evpn() {
-                        fresh.insert_evpn(route.clone());
-                    }
-                    manager.ribs.insert(stayers[0], fresh);
-                }
-            }
         });
-        assert!(
-            evpn_replaced,
-            "seed {seed}: the EVPN table was never replaced mid-walk"
-        );
         assert!(turns.len() > 12, "seed {seed}: {} turns", turns.len());
 
         let version_of = |next_hop: IpAddr| match next_hop {
@@ -1493,13 +1492,9 @@ fn mrt_snapshot_under_churn_keeps_its_consistency_model() {
         // the walk: the dump shows one instant of it.
         assert_eq!(pivot, [250, 250, 250], "seed {seed}");
 
-        let mut evpn_seen = HashSet::new();
+        let mut evpn_stable = HashSet::new();
         let mut evpn_stable_seen = 0usize;
         for route in &snapshot.evpn_routes {
-            assert!(
-                evpn_seen.insert((route.peer, route.key())),
-                "seed {seed}: an EVPN route copied twice"
-            );
             if route.peer != stayers[0] {
                 continue;
             }
@@ -1514,6 +1509,10 @@ fn mrt_snapshot_under_churn_keeps_its_consistency_model() {
                     .is_some_and(|versions| versions.contains(&version));
             assert!(had, "seed {seed}: EVPN tag {tag} in a form it never had");
             if tag < EVPN && tag.is_multiple_of(2) {
+                assert!(
+                    evpn_stable.insert(route.key()),
+                    "unchanged route copied twice"
+                );
                 assert_eq!(version, 0);
                 evpn_stable_seen += 1;
             }
@@ -1545,10 +1544,8 @@ fn mrt_snapshot_under_churn_keeps_its_consistency_model() {
         // the session it had then.
         assert!(rows_of(leaver) > 0 && rows_of(leaver) < PREFIXES as usize);
         assert_eq!(listed[&leaver], 65_001);
-        // The neighbor that joined contributes only prefixes the walk had
-        // not passed, and is listed with its session.
-        assert!(rows_of(joiner) > 0 && rows_of(joiner) < PREFIXES as usize);
-        assert_eq!(listed[&joiner], 65_005);
+        assert_eq!(rows_of(joiner), 0, "late joiner is excluded");
+        assert!(!listed.contains_key(&joiner));
     }
 }
 
@@ -1563,7 +1560,7 @@ fn drain_mrt_snapshot_with_budget(
     let mut turns = Vec::new();
     let mut cursor = None;
     loop {
-        let chunk = manager.mrt_snapshot_chunk(cursor, budget);
+        let chunk = manager.mrt_snapshot_chunk(cursor, budget).unwrap();
         turns.push(chunk.routes.len() + chunk.evpn_routes.len());
         assert!(turns.len() < 10_000, "the walk does not advance");
         cursor = snapshot.push(chunk);
@@ -1744,13 +1741,12 @@ fn canceled_mrt_snapshot_chunk_copies_no_rows() {
         cursor: None,
         reply,
     });
-    assert_eq!(receiver.try_recv().unwrap().routes.len(), 3);
+    assert_eq!(receiver.try_recv().unwrap().unwrap().routes.len(), 3);
     assert_eq!(crate::manager::queries::mrt_chunks_built::take(), 1);
 }
 
-/// EVPN tables that are single hash tables when the walk reaches them and
-/// split before it resumes: the table already read is not read again, and
-/// the one the cursor stopped in front of is read whole, each route once.
+/// Splitting the key index cannot move an unchanged body past the cursor.
+/// Appended routes beyond the initial slot bounds are excluded.
 #[test]
 fn mrt_snapshot_evpn_table_that_splits_mid_walk_is_read_once() {
     const BEFORE: u32 = 10_000;
@@ -1760,12 +1756,11 @@ fn mrt_snapshot_evpn_table_that_splits_mid_walk_is_read_once() {
     peers.sort_unstable();
     for peer in peers {
         seed_mrt_rib(&mut manager, peer, 0, BEFORE);
-        assert_eq!(manager.ribs[&peer].iter_evpn_shards().count(), 1);
+        assert_eq!(manager.ribs[&peer].evpn_index_shards(), 1);
     }
     let mut grown = false;
     let (snapshot, turns) = drain_mrt_snapshot(&mut manager, |manager, turn| {
-        // Turn 1 is unicast (empty); turn 2 reads the first neighbor's
-        // single table and stops in front of the second.
+        // Split the first table while its slot walk is in progress.
         if turn == 2 {
             grown = true;
             for peer in peers {
@@ -1773,12 +1768,12 @@ fn mrt_snapshot_evpn_table_that_splits_mid_walk_is_read_once() {
                 for tag in BEFORE..AFTER {
                     rib.insert_evpn(mrt_test_evpn(peer, tag, 0));
                 }
-                assert!(rib.iter_evpn_shards().count() > 1, "the table split");
+                assert!(rib.evpn_index_shards() > 1, "the table split");
             }
         }
     });
     assert!(grown);
-    assert_eq!(turns[1], BEFORE as usize);
+    assert_eq!(turns[1], crate::update::MRT_SNAPSHOT_CHUNK_ROWS);
     let mut seen = HashSet::new();
     for route in &snapshot.evpn_routes {
         assert!(
@@ -1794,7 +1789,7 @@ fn mrt_snapshot_evpn_table_that_splits_mid_walk_is_read_once() {
             .count()
     };
     assert_eq!(rows_of(peers[0]), BEFORE as usize);
-    assert_eq!(rows_of(peers[1]), AFTER as usize);
+    assert_eq!(rows_of(peers[1]), BEFORE as usize);
 }
 
 /// A neighbor is listed once, with the identity of the first chunk that
@@ -1819,4 +1814,240 @@ fn mrt_snapshot_lists_a_neighbor_with_its_first_identity() {
     assert_eq!(snapshot.routes.len(), 2);
     assert_eq!(snapshot.peers.len(), 1);
     assert_eq!(snapshot.peers[0].peer_asn, 65_001);
+}
+
+/// Removing, clearing or replacing a captured EVPN table between turns
+/// (session teardown, a replacement session, a rebind) withdraws its rows:
+/// the dump keeps the rows already read, skips the rest of that table, and
+/// still reads the next neighbor in full.
+#[test]
+fn mrt_snapshot_skips_the_rest_of_a_removed_or_reset_evpn_table() {
+    for reset in ["remove", "clear", "replace"] {
+        let mut manager = mrt_test_manager();
+        let (reset_peer, next_peer) = (mrt_test_peer(71), mrt_test_peer(72));
+        seed_mrt_rib(&mut manager, reset_peer, 0, 6);
+        seed_mrt_rib(&mut manager, next_peer, 0, 3);
+        let first = manager.mrt_snapshot_chunk(None, 2).unwrap();
+        let second = manager.mrt_snapshot_chunk(first.next, 2).unwrap();
+        let mut rows = second.evpn_routes;
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|route| route.peer == reset_peer));
+        match reset {
+            "remove" => drop(manager.ribs.remove(&reset_peer)),
+            "clear" => manager.ribs.get_mut(&reset_peer).unwrap().clear(),
+            _ => drop(manager.ribs.insert(reset_peer, AdjRibIn::new(reset_peer))),
+        }
+        if reset != "remove" {
+            // Relearn in reverse order, marked, so new rows fill the slots
+            // the walk has not reached.
+            for tag in (0..6).rev() {
+                manager
+                    .ribs
+                    .get_mut(&reset_peer)
+                    .unwrap()
+                    .insert_evpn(mrt_test_evpn(reset_peer, tag, 1));
+            }
+        }
+        let mut cursor = second.next;
+        while let Some(position) = cursor {
+            let chunk = manager
+                .mrt_snapshot_chunk(Some(position), 2)
+                .unwrap_or_else(|error| panic!("{reset}: {error}"));
+            rows.extend(chunk.evpn_routes);
+            cursor = chunk.next;
+        }
+        let from = |peer| rows.iter().filter(|route| route.peer == peer).count();
+        assert_eq!(from(reset_peer), 2, "{reset}: only rows read before");
+        assert_eq!(from(next_peer), 3, "{reset}: next neighbor read in full");
+        let relearned = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1));
+        assert!(
+            rows.iter().all(|route| route.next_hop != relearned),
+            "{reset}"
+        );
+    }
+}
+
+#[test]
+fn mrt_snapshot_freezes_roster_before_any_later_prefix() {
+    let mut manager = mrt_test_manager();
+    let address: IpAddr = "fe80::100".parse().unwrap();
+    let peer = PeerId::allocate(crate::PeerEndpoint::new(address, Some("swp100")));
+    let idle = mrt_test_peer(72);
+    let late = mrt_test_peer(73);
+    let empty_source = mrt_test_peer(74);
+    manager
+        .ribs
+        .insert(empty_source, AdjRibIn::new(empty_source));
+    seed_mrt_rib(&mut manager, peer, 3, 0);
+    manager.peer_asn.insert(peer, 65_100);
+    manager
+        .peer_bgp_id
+        .insert(peer, Ipv4Addr::new(192, 0, 2, 100));
+    manager.peer_asn.insert(idle, 65_101);
+    let first = manager.mrt_snapshot_chunk(None, 1).unwrap();
+    assert_eq!(first.peers.len(), 2, "idle sessions are captured too");
+    let entry = first.peers.iter().find(|entry| entry.peer == peer).unwrap();
+    assert_eq!(entry.peer_addr, address);
+    assert_eq!(entry.peer_asn, 65_100);
+    assert_eq!(entry.interface.as_deref(), Some("swp100"));
+    manager.handle_update(RibUpdate::RebindPeer {
+        peer,
+        endpoint: crate::PeerEndpoint::new("fe80::101".parse().unwrap(), Some("swp100")),
+    });
+    // Rebind tears down the old table; later unicast prefixes may come from
+    // the new session, under the peer metadata frozen at the first query.
+    seed_mrt_rib(&mut manager, peer, 3, 3);
+    manager.peer_asn.insert(peer, 65_200);
+    manager
+        .peer_bgp_id
+        .insert(peer, Ipv4Addr::new(192, 0, 2, 200));
+    seed_mrt_rib(&mut manager, late, 3, 3);
+    manager.peer_asn.insert(late, 65_300);
+    let mut snapshot = crate::update::MrtSnapshotAssembler::default();
+    let mut cursor = snapshot.push(first);
+    while cursor.is_some() {
+        let chunk = manager.mrt_snapshot_chunk(cursor, 1).unwrap();
+        assert!(chunk.peers.is_empty(), "roster is emitted only once");
+        cursor = snapshot.push(chunk);
+    }
+    let snapshot = snapshot.finish();
+    assert_eq!(snapshot.routes.len(), 3);
+    assert!(
+        snapshot.evpn_routes.is_empty(),
+        "EVPN added after capture is excluded"
+    );
+    assert!(snapshot.routes.iter().all(|route| route.peer == peer));
+    assert!(snapshot.evpn_routes.iter().all(|route| route.peer == peer));
+    let entry = snapshot
+        .peers
+        .iter()
+        .find(|entry| entry.peer == peer)
+        .unwrap();
+    assert_eq!(entry.peer_addr, address);
+    assert_eq!(entry.peer_asn, 65_100);
+    assert_eq!(entry.peer_bgp_id, Ipv4Addr::new(192, 0, 2, 100));
+    assert!(peer.release());
+}
+
+fn mrt_unicast_chunk_row_limit() -> usize {
+    crate::MRT_SNAPSHOT_CHUNK_BYTES
+        / (std::mem::size_of::<Route>() + std::mem::size_of::<crate::NextHopScope>())
+}
+
+#[test]
+fn mrt_snapshot_rejects_oversized_prefix_before_cloning() {
+    let mut manager = mrt_test_manager();
+    let peers = [mrt_test_peer(81), mrt_test_peer(82)];
+    for path_id in 0..=u32::try_from(mrt_unicast_chunk_row_limit()).unwrap() {
+        let peer = peers[path_id as usize % peers.len()];
+        let rib = manager
+            .ribs
+            .entry(peer)
+            .or_insert_with(|| AdjRibIn::new(peer));
+        let mut route = mrt_test_route(peer, 0, 0);
+        route.path_id = path_id;
+        rib.insert(route);
+    }
+    crate::manager::queries::mrt_chunks_built::take_rows();
+    let error = manager.mrt_snapshot_chunk(None, 4096).unwrap_err();
+    assert!(
+        error.contains("exceeds the 8388608-byte chunk cap"),
+        "{error}"
+    );
+    assert_eq!(crate::manager::queries::mrt_chunks_built::take_rows(), 0);
+}
+
+#[test]
+fn mrt_snapshot_byte_cap_keeps_whole_prefixes() {
+    let mut manager = mrt_test_manager();
+    let peer = mrt_test_peer(83);
+    let rib = manager
+        .ribs
+        .entry(peer)
+        .or_insert_with(|| AdjRibIn::new(peer));
+    let row_limit = mrt_unicast_chunk_row_limit();
+    for prefix in 0..2 {
+        let mut route = mrt_test_route(peer, prefix, 0);
+        for path_id in 0..u32::try_from(row_limit).unwrap() {
+            route.path_id = path_id;
+            rib.insert(route.clone());
+        }
+    }
+    // A large test-only row budget lets the byte limit be the stopping reason.
+    let first = manager.mrt_snapshot_chunk(None, usize::MAX).unwrap();
+    assert_eq!(first.routes.len(), row_limit);
+    assert!(
+        first
+            .routes
+            .iter()
+            .all(|route| route.prefix == mrt_test_prefix(0))
+    );
+    assert!(first.routes.capacity() <= row_limit);
+    let second = manager.mrt_snapshot_chunk(first.next, usize::MAX).unwrap();
+    assert_eq!(second.routes.len(), row_limit);
+    assert!(
+        second
+            .routes
+            .iter()
+            .all(|route| route.prefix == mrt_test_prefix(1))
+    );
+    assert!(second.routes.capacity() <= row_limit);
+    let last = manager.mrt_snapshot_chunk(second.next, usize::MAX).unwrap();
+    assert!(last.next.is_none());
+}
+
+#[test]
+fn mrt_evpn_slab_preserves_sparse_retention_checkpoints() {
+    const SLOTS: u32 = 100;
+    let mut manager = mrt_test_manager();
+    let peer = mrt_test_peer(84);
+    seed_mrt_rib(&mut manager, peer, 0, SLOTS);
+    let mut rib = manager.ribs.remove(&peer).unwrap();
+    for tag in 0..SLOTS - 1 {
+        assert!(rib.withdraw_evpn(&mrt_test_evpn(peer, tag, 0).key()));
+    }
+    let family = (Afi::L2Vpn, Safi::Evpn);
+    let mut checkpoints = 0;
+    assert_eq!(
+        rib.mark_stale_evpn_with_checkpoint(family, &mut || checkpoints += 1),
+        Vec::new(),
+    );
+    assert!(checkpoints >= 2 * SLOTS);
+    assert_eq!(rib.gr_stale_family_len(family), 1);
+
+    checkpoints = 0;
+    assert_eq!(
+        rib.promote_to_llgr_stale_evpn_with_checkpoint(
+            family,
+            &mut crate::AttrInternTable::new(),
+            &mut || checkpoints += 1,
+        )
+        .len(),
+        1
+    );
+    assert!(checkpoints >= 2 * SLOTS);
+    assert_eq!(rib.gr_stale_family_len(family), 0);
+    assert_eq!(rib.retained_family_len(family, true), 1);
+
+    checkpoints = 0;
+    rib.clear_stale_evpn_with_checkpoint(family, true, &mut || checkpoints += 1);
+    assert!(checkpoints >= SLOTS);
+    assert_eq!(rib.retained_family_len(family, true), 0);
+
+    rib.mark_stale_evpn(family);
+    checkpoints = 0;
+    assert_eq!(
+        rib.sweep_stale_family_evpn_with_checkpoint(family, false, &mut || checkpoints += 1,)
+            .len(),
+        1
+    );
+    assert!(checkpoints >= SLOTS);
+    assert_eq!(rib.evpn_len(), 0);
+
+    checkpoints = 0;
+    rib.retire_with(&mut || checkpoints += 1);
+    assert!(
+        checkpoints >= 2 * SLOTS,
+        "retirement must visit vacant slots too"
+    );
 }

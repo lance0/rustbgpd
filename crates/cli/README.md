@@ -118,11 +118,11 @@ exits 1 on expiry, saying whether SIGHUP was sent; if it was, the reload may
 still be running, so read `rbgp config last-reload` before sending another.
 
 `mrt-dump` waits up to 31 minutes and also exits 1 on expiry, but its
-outcome differs. The daemon treats the dropped request as a cancellation
-until the dump's RIB snapshot arrives. A dump still queued or waiting for
-that snapshot is abandoned, and no file is written. A dump already encoding
-or writing runs to completion. Check the `[mrt] output_dir` directory for a
-new file before triggering another.
+outcome differs. Disconnecting requests cancellation of an unfinished dump,
+including one still encoding or writing. The daemon waits for active blocking
+work to stop and discards the temporary file before publication. A file already
+published is preserved. Check the `[mrt] output_dir` directory for a new file
+before triggering another.
 
 Each config-transaction RPC waits up to 31 minutes, just past the daemon's
 30-minute operation bound: `config diff`, `plan`, `apply`, `confirm`, `abort`

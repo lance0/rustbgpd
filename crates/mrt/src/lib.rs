@@ -12,6 +12,7 @@ pub mod codec;
 pub mod manager;
 /// MRT `TABLE_DUMP_V2` reader (RFC 6396).
 pub mod reader;
+mod stream;
 /// Configuration and re-exported types.
 pub mod types;
 /// Durable, fail-closed warm-checkpoint bundle storage.

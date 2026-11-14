@@ -224,18 +224,16 @@ pub async fn shutdown(
     output::print_result(json, "shutdown", "", "Shutdown requested")
 }
 
-/// The daemon treats a disconnected caller as a cancellation until the RIB
-/// snapshot arrives: a queued dump is skipped and a snapshot wait is
-/// abandoned. Once encoding starts the dump runs to completion. Say so
-/// instead of the generic "may still apply" notice.
+/// Caller disconnection cancels a dump before publication; a file that has
+/// already been published remains available for the operator to verify.
 fn mrt_dump_deadline(status: tonic::Status) -> tonic::Status {
     if status.code() != tonic::Code::DeadlineExceeded {
         return status;
     }
     tonic::Status::deadline_exceeded(format!(
-        "{}; a dump still queued or waiting for its RIB snapshot is cancelled when \
-         rbgp disconnects, but one already encoding or writing still completes; check \
-         for a new file in the `[mrt] output_dir` directory",
+        "{}; disconnecting requests cancellation of an unfinished dump; a file \
+         already published is preserved; check for a new file in the \
+         `[mrt] output_dir` directory",
         status.message()
     ))
 }
