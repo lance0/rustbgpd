@@ -810,8 +810,9 @@ impl PeerManager {
             coupling.rollback_lookup = false;
             // A hold the generation took because its candidate made the peer
             // strict ends here, and the accepted configuration never held
-            // the peer: the `Start` the hold withheld is still owed.
-            relaxed.extend(coupling.held_down.extract_if(|peer| {
+            // the peer: the `Start` the hold withheld is still owed. The hold
+            // stays until that `Start` is queued, as on the commit path.
+            relaxed.extend(coupling.held_down.iter().copied().filter(|peer| {
                 !coupling.prior_held.contains(peer)
                     && !coupling
                         .configured
@@ -831,6 +832,8 @@ impl PeerManager {
             coupling
                 .initially_withheld
                 .extend(coupling.prior_initially_withheld.drain());
+            // A level acknowledgement keeps a relaxed initial hold's retry.
+            coupling.initially_withheld.extend(relaxed.iter().copied());
             // A peer latched disabled while the generation suspended
             // publication (a max-prefix breach or a session-crash latch
             // served during its policy walk) has no entry yet.
@@ -842,7 +845,7 @@ impl PeerManager {
         // A session the rollback already started ignores a second `Start`
         // (RFC 4271 §8.2.2); a removed or disabled peer gets none.
         for peer in relaxed {
-            if let Err(error) = self.enqueue_bfd_command(peer, true) {
+            if let Err(error) = self.release_bgp_bfd_hold(peer) {
                 warn!(%peer, %error, "aborted reload: failed to start the session its candidate withheld");
             }
         }
