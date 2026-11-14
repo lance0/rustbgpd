@@ -48,6 +48,11 @@ impl StreamingSnapshot {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn fix_originated_time(&mut self, originated: u32) {
+        self.encoder.fix_originated_time(originated);
+    }
+
     pub(crate) fn push(&mut self, chunk: &MrtSnapshotChunk) -> Result<(), StreamEncodeError> {
         check_cancelled(&self.cancelled)?;
         self.encoder.write_unicast(

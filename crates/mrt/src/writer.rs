@@ -427,7 +427,7 @@ impl StagedFile {
             .ok_or_else(|| std::io::Error::other("MRT stage discarded"))?
             .into_inner()
             .map_err(std::io::IntoInnerError::into_error)?;
-        file.sync_all()?;
+        durability::sync(&file, "file")?;
         let size = file.metadata()?.len();
         check_cancelled(cancelled)?;
         renameat(
@@ -436,7 +436,9 @@ impl StagedFile {
             &self.directory,
             self.final_name.as_str(),
         )?;
-        self.directory.sync_all().map_err(|error| {
+        #[cfg(test)]
+        durability::record("rename");
+        durability::sync(&self.directory, "directory").map_err(|error| {
             std::io::Error::new(
                 error.kind(),
                 format!("MRT dump published but parent directory sync failed: {error}"),
@@ -482,6 +484,96 @@ impl Drop for StagedFile {
     }
 }
 
+/// Publication's durability barriers; test builds log their order per thread.
+mod durability {
+    #[cfg(test)]
+    thread_local! {
+        static EVENTS: std::cell::RefCell<Vec<&'static str>> = const {
+            std::cell::RefCell::new(Vec::new())
+        };
+    }
+
+    pub(super) fn sync(file: &std::fs::File, what: &'static str) -> std::io::Result<()> {
+        let result = file.sync_all();
+        #[cfg(test)]
+        record(what);
+        #[cfg(not(test))]
+        let _ = what;
+        result
+    }
+
+    #[cfg(test)]
+    pub(super) fn record(event: &'static str) {
+        EVENTS.with(|events| events.borrow_mut().push(event));
+    }
+
+    #[cfg(test)]
+    pub(super) fn take() -> Vec<&'static str> {
+        EVENTS.with(|events| std::mem::take(&mut *events.borrow_mut()))
+    }
+}
+
+/// Remove stage files a previous process left behind in this writer's
+/// output directory: `.<dump name>.tmp` and an unlinked-too-late
+/// `.<dump name>.run.<n>`, where `<dump name>` is this writer's own
+/// `<prefix>.<stamp>.mrt[.gz]`. Nothing else is touched. A missing
+/// directory is left for the first dump to create. Returns the number of
+/// files removed; per-file failures are logged and skipped.
+pub(crate) fn sweep_stale_stages(config: &MrtWriterConfig) -> std::io::Result<usize> {
+    let path: PathBuf = config.output_dir.components().collect();
+    if !path.try_exists()? {
+        return Ok(0);
+    }
+    let dir = open_output_dir(config)?;
+    let mut entries = Dir::openat(
+        &dir.file,
+        ".",
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )?;
+    let mut removed = 0;
+    for entry in entries.iter() {
+        let entry = entry?;
+        let Ok(name) = entry.file_name().to_str() else {
+            continue;
+        };
+        if !is_stage_name(name, &config.file_prefix) {
+            continue;
+        }
+        let regular = fstatat(&dir.file, name, AtFlags::AT_SYMLINK_NOFOLLOW).is_ok_and(|stat| {
+            SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT == SFlag::S_IFREG
+        });
+        if !regular {
+            continue;
+        }
+        match unlinkat(&dir.file, name, UnlinkatFlags::NoRemoveDir) {
+            Ok(()) => {
+                removed += 1;
+                info!(path = %dir.path.join(name).display(), "removed stale MRT stage file");
+            }
+            Err(Errno::ENOENT) => {}
+            Err(errno) => warn!(
+                path = %dir.path.join(name).display(),
+                error = %errno,
+                "failed to remove stale MRT stage file"
+            ),
+        }
+    }
+    Ok(removed)
+}
+
+/// `.{dump}.tmp` or `.{dump}.run.{n}` for one of this writer's dump names.
+fn is_stage_name(name: &str, prefix: &str) -> bool {
+    let Some(name) = name.strip_prefix('.') else {
+        return false;
+    };
+    let dump = name.strip_suffix(".tmp").or_else(|| {
+        let (dump, run) = name.rsplit_once(".run.")?;
+        (!run.is_empty() && run.bytes().all(|byte| byte.is_ascii_digit())).then_some(dump)
+    });
+    dump.is_some_and(|dump| dump_timestamp(dump, prefix).is_some())
+}
+
 pub(crate) fn check_cancelled(cancelled: &AtomicBool) -> std::io::Result<()> {
     if cancelled.load(Ordering::Acquire) {
         // `Write::write_all` retries Interrupted indefinitely.
@@ -524,6 +616,78 @@ mod tests {
             assert_eq!(observed.metadata().unwrap().len(), 0);
             assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
         }
+    }
+
+    #[test]
+    fn publication_syncs_the_file_before_rename_and_the_directory_after() {
+        for compress in [false, true] {
+            let dir = private_tempdir();
+            let directory = File::open(dir.path()).unwrap();
+            durability::take();
+            write_atomic(&directory, ".stage", "published", b"dump", compress).unwrap();
+            assert_eq!(durability::take(), ["file", "rename", "directory"]);
+        }
+    }
+
+    #[test]
+    fn startup_sweep_removes_only_this_writers_stage_files() {
+        let dir = private_tempdir();
+        let dump = "rib.20260101.000000.000000001";
+        let stale = [
+            format!(".{dump}.mrt.tmp"),
+            format!(".{dump}.mrt.gz.tmp"),
+            format!(".{dump}.mrt.run.0"),
+            format!(".{dump}.mrt.gz.run.17"),
+        ];
+        let kept = [
+            format!("{dump}.mrt"),
+            format!("{dump}.mrt.tmp"),
+            format!(".{dump}.mrt.tmp.bak"),
+            format!(".{dump}.mrt.run."),
+            format!(".{dump}.mrt.run.x"),
+            format!(".{dump}.txt.tmp"),
+            ".other.20260101.000000.000000001.mrt.tmp".to_owned(),
+            ".rib.2026.tmp".to_owned(),
+            ".rib.tmp".to_owned(),
+        ];
+        for name in stale.iter().chain(&kept) {
+            std::fs::write(dir.path().join(name), b"x").unwrap();
+        }
+        // Stage-shaped names that are not regular files are left alone.
+        let stage_dir = ".rib.20260101.000000.000000002.mrt.tmp".to_owned();
+        std::fs::create_dir(dir.path().join(&stage_dir)).unwrap();
+        let stage_link = ".rib.20260101.000000.000000003.mrt.tmp".to_owned();
+        std::os::unix::fs::symlink(dir.path().join(&kept[0]), dir.path().join(&stage_link))
+            .unwrap();
+        let config = MrtWriterConfig {
+            output_dir: dir.path().to_path_buf(),
+            dump_interval: 3600,
+            compress: false,
+            file_prefix: "rib".to_string(),
+            max_files: None,
+            ancestor_check: None,
+        };
+
+        assert_eq!(sweep_stale_stages(&config).unwrap(), stale.len());
+        let mut left: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort_unstable();
+        let mut expected: Vec<_> = kept
+            .iter()
+            .cloned()
+            .chain([stage_dir, stage_link])
+            .collect();
+        expected.sort_unstable();
+        assert_eq!(left, expected);
+
+        let missing = MrtWriterConfig {
+            output_dir: dir.path().join("not-created"),
+            ..config
+        };
+        assert_eq!(sweep_stale_stages(&missing).unwrap(), 0);
+        assert!(!missing.output_dir.exists(), "the sweep must not create it");
     }
 
     #[test]

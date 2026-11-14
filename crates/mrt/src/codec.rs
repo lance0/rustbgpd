@@ -1774,6 +1774,9 @@ pub(crate) struct StreamingEncoder {
     max_record_bytes: usize,
     record: Vec<u8>,
     attr_scratch: Vec<u8>,
+    /// Test-only fixed `originated_time`, for byte comparisons.
+    #[cfg(test)]
+    fixed_originated_time: Option<u32>,
 }
 
 impl StreamingEncoder {
@@ -1829,7 +1832,14 @@ impl StreamingEncoder {
             max_record_bytes,
             record: Vec::new(),
             attr_scratch: Vec::new(),
+            #[cfg(test)]
+            fixed_originated_time: None,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fix_originated_time(&mut self, originated: u32) {
+        self.fixed_originated_time = Some(originated);
     }
 
     pub(crate) fn peer_index(&self, peer: PeerId) -> Result<u16, EncodeError> {
@@ -1874,6 +1884,10 @@ impl StreamingEncoder {
         routes: &[Route],
         writer: &mut impl Write,
     ) -> Result<(), StreamEncodeError> {
+        #[cfg(test)]
+        if let Some(originated) = self.fixed_originated_time {
+            return self.write_unicast_inner::<true>(routes, writer, originated);
+        }
         self.write_unicast_inner::<false>(routes, writer, 0)
     }
 
@@ -1939,6 +1953,10 @@ impl StreamingEncoder {
         &mut self,
         route: &EvpnRibRoute,
     ) -> Result<(u16, &[u8]), EncodeError> {
+        #[cfg(test)]
+        if let Some(originated) = self.fixed_originated_time {
+            return self.encode_evpn_inner::<true>(route, originated);
+        }
         self.encode_evpn_inner::<false>(route, 0)
     }
 
@@ -4094,23 +4112,35 @@ mod tests {
         after_first: impl FnOnce() -> F,
     ) -> (rustbgpd_rib::MrtSnapshotData, usize) {
         let mut after_first = Some(after_first);
-        let mut snapshot = rustbgpd_rib::MrtSnapshotAssembler::default();
+        let mut snapshot = rustbgpd_rib::MrtSnapshotData::default();
         let mut cursor = None;
         let mut turns = 0;
         loop {
-            let (reply, chunk) = tokio::sync::oneshot::channel();
-            tx.send(rustbgpd_rib::update::RibUpdate::QueryMrtSnapshotChunk { cursor, reply })
-                .await
-                .unwrap();
-            cursor = snapshot.push(chunk.await.unwrap().unwrap());
+            let chunk = rib_chunk(tx, cursor).await;
+            // Only the first chunk carries the frozen peer roster.
+            snapshot.peers.extend(chunk.peers);
+            snapshot.routes.extend(chunk.routes);
+            snapshot.evpn_routes.extend(chunk.evpn_routes);
+            cursor = chunk.next;
             turns += 1;
             if cursor.is_none() {
-                return (snapshot.finish(), turns);
+                return (snapshot, turns);
             }
             if let Some(after_first) = after_first.take() {
                 after_first().await;
             }
         }
+    }
+
+    async fn rib_chunk(
+        tx: &tokio::sync::mpsc::Sender<rustbgpd_rib::update::RibUpdate>,
+        cursor: Option<rustbgpd_rib::MrtSnapshotCursor>,
+    ) -> rustbgpd_rib::MrtSnapshotChunk {
+        let (reply, chunk) = tokio::sync::oneshot::channel();
+        tx.send(rustbgpd_rib::update::RibUpdate::QueryMrtSnapshotChunk { cursor, reply })
+            .await
+            .unwrap();
+        chunk.await.unwrap().unwrap()
     }
 
     async fn rib_snapshot(
@@ -4265,6 +4295,160 @@ mod tests {
             );
         }
         assert_eq!(decoded.len(), expected_routes.len() + expected_evpn.len());
+
+        drop(tx);
+        actor.await.unwrap();
+    }
+
+    fn make_evpn_imet(peer: IpAddr, tag: u32) -> EvpnRibRoute {
+        use rustbgpd_wire::{EthernetTagId, EvpnImet, EvpnRoute, RouteDistinguisher};
+        EvpnRibRoute {
+            route: EvpnRoute::Imet(EvpnImet {
+                rd: RouteDistinguisher([0x00, 0x00, 0xFD, 0xE8, 0x00, 0x00, 0x00, 0x64]),
+                ethernet_tag: EthernetTagId(tag),
+                originator_ip: peer,
+            }),
+            ..make_evpn_macip(peer, peer)
+        }
+    }
+
+    fn read_dump_file(path: &std::path::Path, compress: bool) -> Vec<u8> {
+        use std::io::Read;
+        let bytes = std::fs::read(path).unwrap();
+        if !compress {
+            return bytes;
+        }
+        let mut plain = Vec::new();
+        flate2::read::GzDecoder::new(bytes.as_slice())
+            .read_to_end(&mut plain)
+            .unwrap();
+        plain
+    }
+
+    /// Two sessions, each with 3,000 unicast prefixes and 20,000 EVPN routes.
+    async fn seed_streamed_dump_table(
+        tx: &tokio::sync::mpsc::Sender<rustbgpd_rib::update::RibUpdate>,
+    ) -> (Vec<MrtPeerEntry>, Vec<Route>, Vec<EvpnRibRoute>) {
+        let mut table = (Vec::new(), Vec::new(), Vec::new());
+        for (index, asn) in [(1u8, 65_001u32), (2, 65_002)] {
+            let addr = IpAddr::V4(Ipv4Addr::new(10, 90, 0, index));
+            let peer = PeerId::from_addr(addr);
+            let routes = chunk_test_routes(addr, 2_000, 1_000);
+            let evpn: Vec<_> = (0..20_000).map(|tag| make_evpn_imet(addr, tag)).collect();
+            table.0.push(MrtPeerEntry {
+                peer,
+                peer_addr: addr,
+                interface: None,
+                peer_bgp_id: Ipv4Addr::new(10, 0, 0, 1),
+                peer_asn: asn,
+            });
+            table.1.extend(routes.iter().cloned());
+            table.2.extend(evpn.iter().cloned());
+            rib_session(tx, peer, asn, routes, evpn).await;
+        }
+        table
+    }
+
+    /// The production streaming path over a real RIB actor, through several
+    /// unicast turns and enough EVPN turns for more than eight sort runs (a
+    /// multi-level disk merge), writes the same file bytes as the
+    /// whole-table encoder for the same table, plain and gzip. An unfixed
+    /// third pass pins `originated_time` to wall time minus route age, not
+    /// to the frozen record timestamp.
+    #[tokio::test]
+    async fn streamed_dump_files_match_the_whole_table_encoder() {
+        use crate::stream::StreamingSnapshot;
+        use crate::types::MrtWriterConfig;
+
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        let manager = rustbgpd_rib::RibManager::new(
+            rx,
+            tokio::sync::mpsc::channel(1).1,
+            None,
+            None,
+            rustbgpd_telemetry::BgpMetrics::new(),
+        );
+        let actor = tokio::spawn(manager.run());
+        let (expected_peers, expected_routes, expected_evpn) = seed_streamed_dump_table(&tx).await;
+
+        let collector = Ipv4Addr::new(10, 255, 0, 1);
+        let (timestamp, originated) = (1_000, 7);
+        let started = unix_now_seconds();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let dirs = [(), (), ()].map(|()| crate::writer::private_tempdir());
+        let mut chunk = rib_chunk(&tx, None).await;
+        let mut streams: Vec<_> = [(false, true), (true, true), (false, false)]
+            .into_iter()
+            .zip(&dirs)
+            .map(|((compress, fixed), dir)| {
+                let config = MrtWriterConfig {
+                    output_dir: dir.path().to_path_buf(),
+                    dump_interval: 3600,
+                    compress,
+                    file_prefix: "rib".to_owned(),
+                    max_files: None,
+                    ancestor_check: None,
+                };
+                let mut stream = StreamingSnapshot::new(
+                    &config,
+                    collector,
+                    timestamp,
+                    &chunk.peers,
+                    Arc::clone(&cancelled),
+                )
+                .unwrap();
+                if fixed {
+                    stream.fix_originated_time(originated);
+                }
+                (compress, stream)
+            })
+            .collect();
+        let (mut unicast_turns, mut evpn_turns) = (0, 0);
+        loop {
+            unicast_turns += usize::from(!chunk.routes.is_empty());
+            evpn_turns += usize::from(!chunk.evpn_routes.is_empty());
+            for (_, stream) in &mut streams {
+                stream.push(&chunk).unwrap();
+            }
+            let Some(cursor) = chunk.next.take() else {
+                break;
+            };
+            chunk = rib_chunk(&tx, Some(cursor)).await;
+        }
+        assert!(unicast_turns >= 2, "unicast took {unicast_turns} turns");
+        assert!(evpn_turns > 8, "EVPN made only {evpn_turns} sort runs");
+        let files: Vec<_> = streams
+            .into_iter()
+            .map(|(compress, stream)| read_dump_file(&stream.finish().unwrap().0, compress))
+            .collect();
+        let finished = unix_now_seconds();
+
+        let expected = encode_snapshot_with_allocation_diagnostics(
+            collector,
+            &expected_peers,
+            &expected_routes,
+            &expected_evpn,
+            timestamp,
+            originated,
+        )
+        .unwrap()
+        .0;
+        assert!(files[0] == expected, "plain streamed dump bytes differ");
+        assert!(files[1] == expected, "gzip streamed dump bytes differ");
+
+        let mut reader = crate::reader::SnapshotReader::new(&files[2]).unwrap();
+        let mut rows = 0;
+        for entry in reader.by_ref() {
+            let entry = entry.unwrap();
+            let originated = u64::from(entry.originated_time);
+            assert!(
+                (started.saturating_sub(3_600)..=finished).contains(&originated),
+                "originated {originated} outside wall time {started}..={finished} for {:?}",
+                entry.nlri
+            );
+            rows += 1;
+        }
+        assert_eq!(rows, expected_routes.len() + expected_evpn.len());
 
         drop(tx);
         actor.await.unwrap();

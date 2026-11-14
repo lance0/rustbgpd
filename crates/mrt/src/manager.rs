@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::MissedTickBehavior;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
@@ -40,6 +40,30 @@ struct CancelEncoding(Arc<AtomicBool>);
 impl Drop for CancelEncoding {
     fn drop(&mut self) {
         self.0.store(true, Ordering::Release);
+    }
+}
+
+/// Holds a dump between blocking steps. If the async owner abandons it (an
+/// error, a cancellation or a dropped future), the stage file and EVPN sort
+/// runs are closed and unlinked on the blocking pool, not on the async worker.
+struct BlockingDrop<T: Send + 'static>(Option<T>);
+
+impl<T: Send + 'static> BlockingDrop<T> {
+    fn take(&mut self) -> T {
+        self.0
+            .take()
+            .expect("the dump is held between blocking steps")
+    }
+}
+
+impl<T: Send + 'static> Drop for BlockingDrop<T> {
+    fn drop(&mut self) {
+        if let Some(value) = self.0.take() {
+            match tokio::runtime::Handle::try_current() {
+                Ok(runtime) => drop(runtime.spawn_blocking(move || drop(value))),
+                Err(_) => drop(value),
+            }
+        }
     }
 }
 
@@ -91,6 +115,18 @@ impl MrtManager {
     pub async fn run(mut self) {
         self.metrics
             .set_mrt_dump_interval_seconds(self.config.dump_interval);
+        // A dump stages its whole file before publication; one interrupted by
+        // a process death leaves that stage behind.
+        let config = self.config.clone();
+        match tokio::task::spawn_blocking(move || writer::sweep_stale_stages(&config)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => warn!(
+                output_dir = %self.config.output_dir.display(),
+                error = %error,
+                "MRT stale stage sweep failed"
+            ),
+            Err(error) => warn!(error = %error, "MRT stale stage sweep task failed"),
+        }
         let mut interval = periodic_interval(Duration::from_secs(self.config.dump_interval));
         // Skip the immediate first tick — the first dump will fire after one interval.
         interval.tick().await;
@@ -193,17 +229,19 @@ impl MrtManager {
         let config = self.config.clone();
         let collector = self.local_bgp_id;
         let cancelled = Arc::clone(&cancellation.0);
-        let mut stream = Self::encode_step(
-            move || {
-                let mut stream =
-                    StreamingSnapshot::new(&config, collector, ts32, &first.peers, cancelled)?;
-                stream.push(&first)?;
-                Ok(stream)
-            },
-            cancel.as_deref_mut(),
-            &cancellation.0,
-        )
-        .await?;
+        let mut stream = BlockingDrop(Some(
+            Self::encode_step(
+                move || {
+                    let mut stream =
+                        StreamingSnapshot::new(&config, collector, ts32, &first.peers, cancelled)?;
+                    stream.push(&first)?;
+                    Ok(stream)
+                },
+                cancel.as_deref_mut(),
+                &cancellation.0,
+            )
+            .await?,
+        ));
         while let Some(position) = cursor {
             let mut chunk = self
                 .query_chunk(Some(position), cancel.as_deref_mut())
@@ -211,17 +249,21 @@ impl MrtManager {
             cursor = chunk.next.take();
             // Await the write before requesting another chunk. A slow disk
             // never queues a second copy of the table behind this task.
-            stream = Self::encode_step(
-                move || {
-                    stream.push(&chunk)?;
-                    Ok(stream)
-                },
-                cancel.as_deref_mut(),
-                &cancellation.0,
-            )
-            .await?;
+            let mut owned = stream.take();
+            stream.0 = Some(
+                Self::encode_step(
+                    move || {
+                        owned.push(&chunk)?;
+                        Ok(owned)
+                    },
+                    cancel.as_deref_mut(),
+                    &cancellation.0,
+                )
+                .await?,
+            );
         }
-        Self::encode_step(move || stream.finish(), cancel, &cancellation.0).await
+        let owned = stream.take();
+        Self::encode_step(move || owned.finish(), cancel, &cancellation.0).await
     }
 
     async fn encode_step<T: Send + 'static>(
@@ -893,6 +935,49 @@ mod tests {
         assert!(rib_rx.recv().await.is_none(), "a canceled walk asked again");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
         assert_eq!(metric_sample(&metrics, "mrt_dump_failures_total", None), 0);
+    }
+
+    /// An abandoned dump's stage and sort runs close on the blocking pool.
+    /// The test runtime has one async thread, the test's own.
+    #[tokio::test]
+    async fn an_abandoned_dump_is_dropped_on_the_blocking_pool() {
+        struct Probe(std::sync::mpsc::Sender<std::thread::ThreadId>);
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                let _ = self.0.send(std::thread::current().id());
+            }
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        drop(BlockingDrop(Some(Probe(tx))));
+        let dropped_on = tokio::task::spawn_blocking(move || rx.recv().unwrap())
+            .await
+            .unwrap();
+        assert_ne!(dropped_on, std::thread::current().id());
+    }
+
+    /// Startup removes a stage file an interrupted process left behind.
+    #[tokio::test]
+    async fn startup_sweeps_a_stale_stage_file() {
+        let dir = private_tempdir();
+        let stale = dir.path().join(".rib.20260101.000000.000000001.mrt.tmp");
+        let dump = dir.path().join("rib.20260101.000000.000000001.mrt");
+        std::fs::write(&stale, b"partial").unwrap();
+        std::fs::write(&dump, b"published").unwrap();
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let (trigger_tx, trigger_rx) = mpsc::channel(1);
+        drop(trigger_tx);
+        let manager = MrtManager::new(
+            test_config(dir.path().to_path_buf()),
+            rib_tx,
+            trigger_rx,
+            Ipv4Addr::LOCALHOST,
+            BgpMetrics::new(),
+        );
+        tokio::time::timeout(Duration::from_secs(10), manager.run())
+            .await
+            .unwrap();
+        assert!(!stale.exists(), "stale stage survived startup");
+        assert_eq!(std::fs::read(&dump).unwrap(), b"published");
     }
 
     #[tokio::test]
