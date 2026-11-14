@@ -3335,7 +3335,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-fsm"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "bytes",
  "proptest",
@@ -3449,7 +3449,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-rpki"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "criterion",
  "rustbgpd-wire",
