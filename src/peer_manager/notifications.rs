@@ -246,11 +246,16 @@ impl PeerManager {
         //
         // Without `wait_for_rib` a full mailbox defers this one as a late
         // end as well, so the replacement's `PeerUp` can reach the RIB
-        // first. That `PeerUp` names the dead session in `supersedes`, so
-        // the RIB resets it on registration and then drops the late end by
-        // session identity; a late end purges no retention an earlier
-        // session of the peer owns. A waited send keeps reads queued while
-        // the peer's session identity is mid-swap.
+        // first. The dead session's routes are still withdrawn by its own
+        // hand-off: its drop sent the open epoch's late `PeerDown` at once
+        // or through a queued mailbox reservation, ahead of the replacement's
+        // `PeerUp` a BGP handshake later, so it reaches the RIB while the
+        // dead session is still registered and runs the full teardown. The
+        // registration reset alone would not: it keeps a graceful-restart
+        // peer's Adj-RIB-In. This late end then finds the dead session no
+        // longer registered and is discarded by session ID; it purges no
+        // retention an earlier session of the peer owns. A waited send
+        // keeps reads queued while the peer's session identity is mid-swap.
         if !wait_for_rib {
             self.defer_retired_session_down(peer_key, old_session_id);
         } else if self
@@ -426,8 +431,10 @@ impl PeerManager {
     /// where its stall detector is not polled. With room, the dead epoch is
     /// closed in the RIB before the new one's `PeerUp`. With the mailbox
     /// full, the `PeerDown` is deferred as a late end and the `PeerUp` can
-    /// arrive first; it names the dead session in `supersedes`, and the RIB
-    /// resets that session on registration.
+    /// arrive first. The dead session's routes are then withdrawn by its own
+    /// drop hand-off, whose late `PeerDown` was queued ahead of the `PeerUp`
+    /// and arrives while that session is still registered; this actor's
+    /// late end is discarded by session ID.
     #[expect(
         clippy::too_many_lines,
         reason = "one ordered decision: which exit retires, which is replaced, and whether the replacement starts"

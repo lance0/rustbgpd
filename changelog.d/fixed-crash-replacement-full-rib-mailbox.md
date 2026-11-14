@@ -10,7 +10,9 @@
   stall timeout ends the change as before.
   **Operator-visible:** under a full RIB mailbox the replacement session's
   registration can reach the RIB before the crashed session's end; it
-  supersedes the crashed session. That late end no longer purges
-  graceful-restart retention owned by an earlier session of the neighbor,
-  as for every other retired session. See
+  supersedes the crashed session. When the crashed session's end is
+  delivered late (a full mailbox, or other RIB updates already queued),
+  graceful-restart retention left by an earlier session of the neighbor is
+  not purged immediately and lasts until the replacement's End-of-RIB or
+  the restart timer, as for every other retired session. See
   [Settlement watchdog](../docs/how-to/settlement-watchdog.md).

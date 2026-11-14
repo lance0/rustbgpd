@@ -114,19 +114,24 @@ enum RibEvent {
     LateDown(u64),
 }
 
-/// A manager whose RIB mailbox is full: its one slot holds a query, and the
-/// tap in front of the running RIB forwards nothing until `release` fires.
-fn manager_with_full_rib_mailbox() -> (
+/// A manager whose one-slot RIB mailbox feeds a tap in front of the running
+/// RIB, which forwards nothing until `release` fires. With `full`, the slot
+/// already holds a query.
+fn manager_with_rib_tap(
+    full: bool,
+) -> (
     PeerManager,
     mpsc::UnboundedReceiver<RibEvent>,
     oneshot::Sender<()>,
 ) {
     let (tap_tx, mut tap_rx) = mpsc::channel::<RibUpdate>(1);
-    let (reply, _) = oneshot::channel();
-    tap_tx
-        .try_send(RibUpdate::QueryLocRibCount { reply })
-        .unwrap();
-    assert_eq!(tap_tx.capacity(), 0);
+    if full {
+        let (reply, _) = oneshot::channel();
+        tap_tx
+            .try_send(RibUpdate::QueryLocRibCount { reply })
+            .unwrap();
+        assert_eq!(tap_tx.capacity(), 0);
+    }
     let (release, released) = oneshot::channel::<()>();
     let (rib_tx, rib_rx) = mpsc::channel(64);
     let (_query_tx, query_rx) = mpsc::channel(4);
@@ -212,7 +217,7 @@ pub(super) async fn accept_and_establish(listener: &TcpListener) -> tokio::net::
 /// returning while the RIB holds its mailbox.
 #[tokio::test]
 async fn panicked_primary_restarts_without_waiting_for_rib_mailbox_room() {
-    let (mut mgr, mut rib_events, release) = manager_with_full_rib_mailbox();
+    let (mut mgr, mut rib_events, release) = manager_with_rib_tap(true);
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     insert_test_managed_peer(&mut mgr, PEER, closed_peer_handle(), false);
     mgr.peers
@@ -273,6 +278,47 @@ async fn panicked_primary_restarts_without_waiting_for_rib_mailbox_room() {
     assert!(
         !seen.contains(&RibEvent::Down(crashed_id)),
         "the dead session ends once, late: {seen:?}"
+    );
+    assert!(mgr.peers[&key(PEER)].handle().is_established());
+}
+
+/// With room in the RIB mailbox and nothing deferred, the dead session's
+/// `PeerDown` is sent at once and plain, not marked late, so the RIB closes
+/// that epoch authoritatively before the replacement's `PeerUp`.
+/// Red proof: deferring it as a late end unconditionally gives
+/// `[LateDown(2), Up(3)]`.
+#[tokio::test]
+async fn panicked_primary_with_mailbox_room_sends_a_plain_peer_down_first() {
+    let (mut mgr, mut rib_events, release) = manager_with_rib_tap(false);
+    release.send(()).unwrap();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    insert_test_managed_peer(&mut mgr, PEER, closed_peer_handle(), false);
+    mgr.peers
+        .get_mut(&key(PEER))
+        .unwrap()
+        .transport_config
+        .remote_addr = listener.local_addr().unwrap();
+    mgr.next_session_id = 2;
+    let crash = install_crashing_primary(&mut mgr, &key(PEER));
+    let crashed_id = mgr.peers[&key(PEER)].session_id();
+    let notification = next_task_exit(&mut mgr, crash).await;
+    mgr.handle_session_notification(notification).await;
+    assert!(mgr.deferred_rib.queue.is_empty());
+
+    let restarted_id = mgr.peers[&key(PEER)].session_id();
+    assert_ne!(restarted_id, crashed_id);
+    let _client = accept_and_establish(&listener).await;
+    let mut seen = Vec::new();
+    while !seen.contains(&RibEvent::Up(restarted_id)) {
+        let event = tokio::time::timeout(Duration::from_secs(5), rib_events.recv())
+            .await
+            .expect("the restarted session comes up")
+            .unwrap();
+        seen.push(event);
+    }
+    assert_eq!(
+        seen,
+        [RibEvent::Down(crashed_id), RibEvent::Up(restarted_id)]
     );
     assert!(mgr.peers[&key(PEER)].handle().is_established());
 }
