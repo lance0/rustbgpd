@@ -557,6 +557,9 @@ struct Harness {
     source_gr: Option<SourceGr>,
     /// An I7 violation a settled segment found, reported by `observe`.
     timer_failure: Option<String>,
+    /// Live exempt local injections when a late first session established
+    /// inside the hold behind a full writer (`known_stale_count`).
+    exempt_behind_full_writer: Vec<usize>,
 }
 
 type Checked = Result<(), TestCaseError>;
@@ -617,6 +620,7 @@ impl Harness {
             absent: None,
             source_gr: None,
             timer_failure: None,
+            exempt_behind_full_writer: Vec::new(),
         };
         if !config.late {
             harness.establish();
@@ -1941,11 +1945,43 @@ impl Harness {
             .manager
             .actual_unicast_advertised_count(peer_v4(OBSERVER));
         prop_assert!(
-            actual == wire.len(),
+            actual == wire.len()
+                || (actual > wire.len() && self.known_stale_count(actual - wire.len()).is_some()),
             "I3: actual advertised count {actual} differs from {} wire keys",
             wire.len()
         );
         Ok(())
+    }
+
+    /// A known open defect that explains `excess` advertised-count entries
+    /// with no wire key after release, or `None`.
+    fn known_stale_count(&self, excess: usize) -> Option<&'static str> {
+        // LAN-2780: a grouped receiver under a prefix limit whose first
+        // session establishes inside the hold behind a full writer seeds
+        // its limiter from the group's desired view, so an exempt row
+        // deleted before it was ever sent stays in its advertised count.
+        // The wire is correct. Each such prefix, under any path id, can
+        // add one entry.
+        if !(self.config.grouped && self.config.limit && self.config.late) {
+            return None;
+        }
+        let stale: BTreeSet<usize> = self
+            .exempt_behind_full_writer
+            .iter()
+            .map(|&injection| &self.injections[injection])
+            .filter(|row| {
+                row.deleted
+                    && !self
+                        .wire
+                        .values()
+                        .any(|&sent| self.injections[sent].prefix == row.prefix)
+            })
+            .map(|row| row.prefix)
+            .collect();
+        if excess <= stale.len() {
+            return allowed("LAN-2780");
+        }
+        None
     }
 }
 
@@ -1982,6 +2018,14 @@ fn run(config: Config, setup: &[Op], hold: &[Op]) -> Checked {
     prop_assert!(harness.manager.selection_deferred(FAMILY));
     harness.observe()?;
     if config.late {
+        if !harness.occupied.is_empty() {
+            harness.exempt_behind_full_writer = harness
+                .local
+                .values()
+                .copied()
+                .filter(|&injection| harness.injections[injection].exempt)
+                .collect();
+        }
         // The receiver's first session establishes inside the hold.
         harness.establish();
         harness.observe()?;
@@ -3684,4 +3728,57 @@ fn a_later_race_restarts_the_absent_peer_after_its_window_expired() {
             .contains_key(&peer_v4(ABSENT)),
         "the later race restarted the absent peer"
     );
+}
+
+/// LAN-2780's case under every path id: a grouped receiver under a limit
+/// whose first session establishes inside the hold behind a full writer
+/// keeps a deleted exempt row in its advertised count, and only that shape
+/// is allowed. The sweep's other variants count the wire exactly. Red
+/// proof: `ORACLE_STRICT=LAN-2780` fails each grouped case on I3.
+#[test]
+fn limited_member_established_behind_a_full_writer_counts_only_its_stale_row() {
+    let config = |grouped, per_client_best, limit, late| Config {
+        grouped,
+        add_path: false,
+        per_client_best,
+        orf: false,
+        limit,
+        late,
+    };
+    let variants = [
+        ("grouped single-best", config(true, false, true, true), true),
+        (
+            "grouped per-client-best",
+            config(true, true, true, true),
+            true,
+        ),
+        ("without the limit", config(true, false, false, true), true),
+        ("without late", config(true, false, true, false), true),
+        ("private", config(false, false, true, true), true),
+        (
+            "without backpressure",
+            config(true, false, true, true),
+            false,
+        ),
+    ];
+    let failed: Vec<_> = (0..PATH_IDS.len())
+        .flat_map(|path| {
+            variants
+                .iter()
+                .filter_map(move |&(name, config, backpressure)| {
+                    let mut setup = vec![Op::Inject {
+                        prefix: 1,
+                        path,
+                        preference: 0,
+                        blackhole: false,
+                    }];
+                    if backpressure {
+                        setup.push(Op::Backpressure(true));
+                    }
+                    failure(config, &setup, &[Op::Delete { prefix: 1, path }])
+                        .map(|reason| format!("{name}, path {path}: {reason}"))
+                })
+        })
+        .collect();
+    assert!(failed.is_empty(), "{failed:#?}");
 }
