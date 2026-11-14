@@ -1961,8 +1961,11 @@ impl Harness {
         // its limiter from the group's desired view, so an exempt row
         // deleted before it was ever sent stays in its advertised count.
         // The wire is correct. Each such prefix, under any path id, can
-        // add one entry.
-        if !(self.config.grouped && self.config.limit && self.config.late) {
+        // add one entry, in that first session only: a reconnect's session
+        // starts with an empty limiter.
+        if !(self.config.grouped && self.config.limit && self.config.late)
+            || self.session != OBSERVER_SESSION
+        {
             return None;
         }
         let stale: BTreeSet<usize> = self
@@ -3761,7 +3764,7 @@ fn limited_member_established_behind_a_full_writer_counts_only_its_stale_row() {
             false,
         ),
     ];
-    let failed: Vec<_> = (0..PATH_IDS.len())
+    let mut failed: Vec<_> = (0..PATH_IDS.len())
         .flat_map(|path| {
             variants
                 .iter()
@@ -3780,5 +3783,29 @@ fn limited_member_established_behind_a_full_writer_counts_only_its_stale_row() {
                 })
         })
         .collect();
+    // A reconnect after the delete starts a session with an empty limiter,
+    // so the first session's stale row explains no count after it.
+    let setup = [
+        Op::Inject {
+            prefix: 1,
+            path: 0,
+            preference: 0,
+            blackhole: false,
+        },
+        Op::Backpressure(true),
+    ];
+    let hold = [
+        Op::Delete { prefix: 1, path: 0 },
+        Op::Reconnect {
+            notification: false,
+            helper: false,
+            gr_families: false,
+            writer_full: false,
+        },
+    ];
+    failed.extend(
+        failure(config(true, false, true, true), &setup, &hold)
+            .map(|reason| format!("reconnected after the delete: {reason}")),
+    );
     assert!(failed.is_empty(), "{failed:#?}");
 }
