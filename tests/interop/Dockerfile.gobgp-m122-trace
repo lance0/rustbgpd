@@ -2,15 +2,21 @@
 # These are instrumented binaries, not official GoBGP release artifacts.
 FROM golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS builder
 ARG TARGETARCH
+ARG GOBGP_SOURCE_VERSION=53ceb78fe284018ce83a92f3039198f0a86dc823
+ARG GOBGP_SOURCE_SHA256=9706526b6fb76b8d6c4de379755819bed41be312e155f59e85baf55f9f3259a8
 WORKDIR /src
+COPY gobgp-source-archive/ /tmp/gobgp-source-archive/
 COPY patches/m122-gobgp-fsm-trace.patch /tmp/m122-gobgp-fsm-trace.patch
 RUN set -eux; \
     test "${TARGETARCH}" = amd64; \
-    curl -fsSL --connect-timeout 10 --max-time 120 \
-      https://codeload.github.com/osrg/gobgp/tar.gz/53ceb78fe284018ce83a92f3039198f0a86dc823 \
-      -o /tmp/gobgp-source.tar.gz; \
-    echo '9706526b6fb76b8d6c4de379755819bed41be312e155f59e85baf55f9f3259a8  /tmp/gobgp-source.tar.gz' | sha256sum --check --strict; \
-    tar -xzf /tmp/gobgp-source.tar.gz --strip-components=1 -C /src; \
+    archive="/tmp/gobgp-source-archive/gobgp-source-${GOBGP_SOURCE_VERSION}.tar.gz"; \
+    if [ ! -f "${archive}" ]; then \
+      curl -fsSL --connect-timeout 10 --max-time 120 \
+        "https://codeload.github.com/osrg/gobgp/tar.gz/${GOBGP_SOURCE_VERSION}" \
+        -o "${archive}"; \
+    fi; \
+    echo "${GOBGP_SOURCE_SHA256}  ${archive}" | sha256sum --check --strict; \
+    tar -xzf "${archive}" --strip-components=1 -C /src; \
     git apply --check /tmp/m122-gobgp-fsm-trace.patch; \
     git apply /tmp/m122-gobgp-fsm-trace.patch
 ENV CGO_ENABLED=0 GOTOOLCHAIN=local GOFLAGS=-mod=readonly GOMAXPROCS=4
@@ -21,7 +27,7 @@ RUN set -eux; \
     test "$(gobgp --version)" = 'gobgp version 4.11.0-m122-fsm-trace'; \
     test "$(gobgpd --version)" = 'gobgpd version 4.11.0-m122-fsm-trace'; \
     mkdir -p /usr/local/share/gobgp-m122; \
-    printf '%s\n' 53ceb78fe284018ce83a92f3039198f0a86dc823 > /usr/local/share/gobgp-m122/source-commit; \
+    printf '%s\n' "${GOBGP_SOURCE_VERSION}" > /usr/local/share/gobgp-m122/source-commit; \
     sha256sum /tmp/m122-gobgp-fsm-trace.patch | cut -d' ' -f1 > /usr/local/share/gobgp-m122/patch-sha256; \
     sha256sum /usr/local/bin/gobgp /usr/local/bin/gobgpd > /usr/local/share/gobgp-m122/binaries.sha256
 

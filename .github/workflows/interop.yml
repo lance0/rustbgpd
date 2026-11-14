@@ -2408,17 +2408,22 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
-      - name: Check M122 oracle and driver
-        run: |
-          python3 tests/interop/scripts/test_m122_evpn_gr_oracle.py
-          bash -n tests/interop/scripts/test-m122-evpn-gr-rr-gobgp.sh
       - name: Build rustbgpd:dev
         uses: ./.github/actions/build-rustbgpd-dev
+      - name: Stage pinned GoBGP source archive
+        uses: ./.github/actions/stage-gobgp-source-artifact
+        id: gobgp_source_archive
       - name: Build pinned instrumented peer and capture tools
         run: |
           docker build --build-arg TARGETARCH=amd64 \
+            --build-arg GOBGP_SOURCE_SHA256="${{ steps.gobgp_source_archive.outputs.sha256 }}" \
             -t gobgp:m122-fsm-trace -f tests/interop/Dockerfile.gobgp-m122-trace tests/interop
           docker build -t rustbgpd:m122-tools -f tests/interop/Dockerfile.m122-tools tests/interop
+      - name: Check M122 oracle and driver with capture tools
+        run: |
+          docker run --rm --network none -v "$PWD:/work:ro" -w /work rustbgpd:m122-tools \
+            python3 tests/interop/scripts/test_m122_evpn_gr_oracle.py
+          bash -n tests/interop/scripts/test-m122-evpn-gr-rr-gobgp.sh
       - name: Run M122 (deploy + test + destroy)
         uses: ./.github/actions/run-interop-test
         env:

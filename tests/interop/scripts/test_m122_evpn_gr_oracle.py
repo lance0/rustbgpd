@@ -4,6 +4,7 @@
 import copy
 import ipaddress
 import json
+import shutil
 import struct
 import subprocess
 import tempfile
@@ -459,6 +460,48 @@ class OracleTests(unittest.TestCase):
         for name, lines in cases.items():
             with self.subTest(name), self.assertRaises(ValueError):
                 oracle.analyze_wire(lines)
+
+    @unittest.skipUnless(shutil.which("tshark"), "tshark is not installed")
+    def test_capture_keeps_reverse_tuple_without_peer_bgp_payload(self):
+        # resolve_collision can close the primary in OpenSent from an OPEN on
+        # the other connection. The primary's peer has sent only SYN/ACK here.
+        open_ = message(1, open_body())
+        packets = [(oracle.RR, oracle.SOURCE, 41234, 179, 99, 0, 0x02, b""),
+                   (oracle.SOURCE, oracle.RR, 179, 41234, 199, 100, 0x12, b""),
+                   (oracle.RR, oracle.SOURCE, 41234, 179, 100, 200, 0x10, b""),
+                   (oracle.RR, oracle.SOURCE, 41234, 179, 100, 200, 0x18, open_),
+                   (oracle.RR, oracle.SOURCE, 41234, 179, 100 + len(open_), 200, 0x18,
+                    message(3, b"\x06\x07"))]
+        capture = struct.pack("<IHHIIII", 0xa1b2c3d4, 2, 4, 0, 0, 65535, 1)
+        for index, (src, dst, sport, dport, seq, ack, flags, payload) in enumerate(packets):
+            tcp = struct.pack("!HHIIBBHHH", sport, dport, seq, ack, 0x50, flags, 65535, 0, 0) + payload
+            ip = struct.pack("!BBHHHBBH4s4s", 0x45, 0, 20 + len(tcp), index, 0, 64, 6, 0,
+                             ipaddress.IPv4Address(src).packed, ipaddress.IPv4Address(dst).packed)
+            frame = bytes.fromhex("0200000000030200000000020800") + ip + tcp
+            capture += struct.pack("<IIII", index + 1, 0, len(frame), len(frame)) + frame
+        logs = trace_fixture(oracle.RR)["rr.log"].splitlines()
+        traces = parse_logs({"rr.log": logs[0] + "\n" + logs[-1].replace("open_confirm", "open_sent")})
+        # Keep the independent, complete route lifecycle on different streams.
+        admitted = [str(int(line[0]) + 10) + line[1:] for line in fixture()]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "open-sent-collision.pcap"
+            path.write_bytes(capture)
+            args = list(runner.CAPTURE_FIELDS)
+            args[args.index("-r") + 1] = str(path)
+            rows = subprocess.run(["tshark", *args], text=True, capture_output=True,
+                                  check=True, timeout=15).stdout.splitlines()
+        result = oracle.analyze_wire(admitted + rows, traces)
+        self.assertEqual(len(rows), 5)
+        self.assertEqual([oracle.capture_row(row)[4] for row in rows[:3]], ["", "", ""])
+        self.assertEqual(result["collision_closes"][0]["state"], "pre_established")
+        with self.assertRaisesRegex(ValueError, "reverse tuple"):
+            oracle.analyze_wire(admitted + [row for row in rows if oracle.capture_row(row)[4]], traces)
+        fields = rows[1].split("\t")
+        fields[-1] = "41235"
+        with self.assertRaisesRegex(ValueError, "reverse tuple"):
+            oracle.analyze_wire(admitted + [rows[0], "\t".join(fields), *rows[2:]], traces)
+        with self.assertRaisesRegex(ValueError, "closing FSM trace missing"):
+            oracle.analyze_wire(admitted + rows)
 
     def test_crossing_keepalive_bytes_require_actual_closing_fsm_state(self):
         for closer in (oracle.SOURCE, oracle.RR):

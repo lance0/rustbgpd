@@ -1,0 +1,32 @@
+name: "Stage verified GoBGP source archive"
+description: "Fetch a checksum-pinned GoBGP source revision into the interop build context."
+inputs:
+  version:
+    description: "Exact GoBGP source commit"
+    required: false
+    default: "53ceb78fe284018ce83a92f3039198f0a86dc823"
+outputs:
+  sha256:
+    description: "Canonical source archive SHA-256"
+    value: ${{ steps.stage.outputs.sha256 }}
+runs:
+  using: "composite"
+  steps:
+    - name: Fetch and verify source archive
+      id: stage
+      shell: bash
+      env:
+        GOBGP_SOURCE_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        [[ $GOBGP_SOURCE_VERSION =~ ^[0-9a-f]{40}$ ]]
+        asset="gobgp-source-${GOBGP_SOURCE_VERSION}.tar.gz"
+        sha256=$(.github/scripts/archive-pin.sh "$asset")
+        archive=$(mktemp "$RUNNER_TEMP/gobgp-source.XXXXXX")
+        trap 'rm -f -- "$archive"' EXIT
+        curl -fsSL --retry 3 --connect-timeout 10 --max-time 120 \
+          "https://codeload.github.com/osrg/gobgp/tar.gz/${GOBGP_SOURCE_VERSION}" \
+          -o "$archive"
+        printf '%s  %s\n' "$sha256" "$archive" | sha256sum --check --strict
+        install -m 0644 "$archive" "tests/interop/gobgp-source-archive/$asset"
+        echo "sha256=${sha256}" >> "$GITHUB_OUTPUT"

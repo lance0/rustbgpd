@@ -22,7 +22,9 @@ CAPTURE = f"clab-{LAB}-capture"
 OUT = Path(os.environ.get("M122_OUT", "/tmp/m122-evpn-gr-rr")).resolve()
 TOOLS = os.environ.get("M122_TOOLS_IMAGE", "rustbgpd:m122-tools")
 IFACE = os.environ.get("M122_SOURCE_INTERFACE", "eth1")
-CAPTURE_FIELDS = ("-r", "/out/capture.pcap", "-Y", "tcp.len > 0", "-T", "fields",
+# A collision loser can close in OpenSent before the peer sends any BGP
+# payload. Keep TCP handshake rows to prove both directions of its tuple.
+CAPTURE_FIELDS = ("-r", "/out/capture.pcap", "-Y", "tcp", "-T", "fields",
                   "-e", "tcp.stream", "-e", "ip.src", "-e", "ip.dst", "-e", "tcp.seq_raw", "-e", "tcp.payload",
                   "-e", "tcp.srcport", "-e", "tcp.dstport")
 
