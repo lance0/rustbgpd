@@ -1797,7 +1797,7 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
             Ok(())
         }
         Drive::ReplacePrimary => {
-            manager.replace_unstoppable_primary(&key(peers[0])).await;
+            manager.replace_unstoppable_primary(&key(peers[0]), true).await;
             Ok(())
         }
         Drive::DampeningDisable => {

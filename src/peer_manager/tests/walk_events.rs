@@ -1499,6 +1499,150 @@ async fn session_crash_during_the_rollback_wait_restarts_on_the_restored_chain()
     assert_eq!(rib.await.unwrap(), 3, "one restore command per prior chain");
 }
 
+/// E-3, rollback, full RIB mailbox: a crash replacement served at the
+/// restore wait's seam does not wait for mailbox room. The dead session's
+/// `PeerDown` is deferred as a late end, so the restore's stall detector
+/// still ends a rollback whose RIB stopped draining.
+///
+/// LOAD-BEARING: a replacement that waits for room blocks inside the seam,
+/// where the stall detector is not polled, and the walk never returns.
+#[tokio::test(start_paused = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one test holds the crashing session, the scripted RIB and the full mailbox"
+)]
+async fn session_crash_during_the_rollback_wait_does_not_wait_for_rib_mailbox_room() {
+    let crashing = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    // Never accepted: the replacement's connect parks in the backlog.
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let Lab {
+        mut mgr,
+        mut rib_rx,
+        peers,
+        ..
+    } = lab(2);
+    let (crash, crashed) = oneshot::channel();
+    let exited = Arc::new(AtomicBool::new(false));
+    let crashing_session = u64::try_from(mgr.peers.len()).unwrap() + 1;
+    let exit = SessionTaskExitNotice::new(
+        Some(mgr.session_notify_tx.clone()),
+        SessionIdentity::primary(crashing_session),
+        crashing,
+    );
+    insert_test_managed_peer(
+        &mut mgr,
+        crashing,
+        walk_session(
+            crashing,
+            Arc::default(),
+            Some((exit, crashed, Arc::clone(&exited))),
+        ),
+        false,
+    );
+    assert_eq!(mgr.peers[&key(crashing)].session_id(), crashing_session);
+    mgr.peers.get_mut(&key(peers[0])).unwrap().export_policy = Some(distinct_deny_policy_chain(8));
+    {
+        let managed = mgr.peers.get_mut(&key(crashing)).unwrap();
+        managed.export_policy = Some(distinct_deny_policy_chain(7));
+        managed.transport_config.remote_addr = listener.local_addr().unwrap();
+    }
+    let (readiness, readiness_rx) = mpsc::channel(1);
+    mgr = mgr.with_readiness_queries(readiness_rx);
+    let (release, released) = oneshot::channel::<()>();
+    let mut filler = Some(mgr.rib_tx.clone());
+    let rib = tokio::spawn(async move {
+        let mut forward = 0;
+        let mut crash = Some(crash);
+        let mut released = Some(released);
+        while let Some(update) = rib_rx.recv().await {
+            match update {
+                RibUpdate::ReplacePeerExportPoliciesAuthoritatively { reply, .. } => {
+                    forward += 1;
+                    let _ = reply.send(if forward < 3 {
+                        Ok(Vec::new())
+                    } else {
+                        Err(RibCommandError::internal("refused"))
+                    });
+                }
+                update @ RibUpdate::RestorePeerExportPoliciesAuthoritatively { .. } => {
+                    let Some(crash) = crash.take() else {
+                        answer(update);
+                        continue;
+                    };
+                    // The walk is in its restore wait once it answers this.
+                    let (reply, in_restore_wait) = oneshot::channel();
+                    readiness
+                        .send(PeerManagerReadinessQuery::Ping { reply })
+                        .await
+                        .unwrap();
+                    in_restore_wait.await.unwrap();
+                    crash.send(()).unwrap();
+                    set(&exited).await;
+                    // Every free slot taken, and the RIB stops draining: the
+                    // seam this answer opens finds the mailbox full.
+                    let rib_tx = filler.take().unwrap();
+                    loop {
+                        let (reply, _) = oneshot::channel();
+                        match rib_tx.try_send(RibUpdate::QueryLocRibCount { reply }) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Full(_)) => break,
+                            Err(mpsc::error::TrySendError::Closed(_)) => unreachable!(),
+                        }
+                    }
+                    drop(rib_tx);
+                    answer(update);
+                    let _ = released.take().unwrap().await;
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let started = tokio::time::Instant::now();
+    let failure = tokio::time::timeout(
+        Duration::from_secs(600),
+        mgr.apply_resolved_policy_snapshot_classified(
+            distinct_targets(&[crashing, peers[0], peers[1]]),
+            true,
+        ),
+    )
+    .await
+    .expect("the crash replacement does not wait for mailbox room")
+    .expect_err("the third batch is refused");
+    assert_eq!(
+        failure.code,
+        rustbgpd_api::runtime_config_settlement::RuntimeConfigPolicyFailureCode::RollbackBatchTimeout,
+        "{}",
+        failure.message()
+    );
+    assert!(
+        started.elapsed() < 2 * RIB_BATCH_REPLY_TIMEOUT,
+        "the stall detector ended the restore wait, after {:?}",
+        started.elapsed()
+    );
+    assert_ne!(
+        mgr.peers[&key(crashing)].session_id(),
+        crashing_session,
+        "the dead session was replaced during the walk"
+    );
+    assert_eq!(mgr.deferred_rib.queue.len(), 1);
+    assert!(
+        matches!(
+            &mgr.deferred_rib.queue[0].1,
+            RibUpdate::LateSessionEnd(end) if matches!(
+                end.as_ref(),
+                RibUpdate::PeerDown { session_id, .. } if *session_id == crashing_session
+            )
+        ),
+        "the dead session's PeerDown waits as a late end"
+    );
+
+    release.send(()).unwrap();
+    mgr.delete_peer(key(crashing), false).await.unwrap();
+    drop(mgr);
+    rib.await.unwrap();
+}
+
 /// A hold a seam took inside a generation meets that generation's commit.
 /// A candidate that replaces the member's BFD session (a new revision) keeps
 /// the hold, and the new session's Up sends the `Start`; a candidate that

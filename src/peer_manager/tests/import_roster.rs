@@ -129,7 +129,7 @@ async fn roster_follows_replacement_deletion_and_rebinding() {
 
     // Notification replacement of an unstoppable primary.
     let second = designated(&roster, peer);
-    mgr.replace_unstoppable_primary(&key(peer)).await;
+    mgr.replace_unstoppable_primary(&key(peer), true).await;
     mgr.assert_import_roster_projection();
     let replaced_id = roster.load().unique_peer(peer).unwrap().session_id;
     assert_ne!(replaced_id, 77);

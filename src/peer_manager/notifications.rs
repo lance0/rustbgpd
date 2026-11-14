@@ -172,9 +172,16 @@ impl PeerManager {
     /// still a usable recovery operation. A primary whose task already ended
     /// is replaced the same way. Returns the replaced task's panic message,
     /// if it panicked.
+    ///
+    /// With `wait_for_rib` the dead session's `PeerDown` waits for mailbox
+    /// room, so it is admitted ahead of a barrier the caller sends next.
+    /// Without it, as from a notification handler that a policy walk serves
+    /// where its stall detector is not polled, a full mailbox defers that
+    /// `PeerDown` as a late end instead.
     pub(super) async fn replace_unstoppable_primary(
         &mut self,
         peer_key: &rustbgpd_api::peer_types::PeerKey,
+        wait_for_rib: bool,
     ) -> Option<String> {
         let (
             old_session_id,
@@ -236,8 +243,22 @@ impl PeerManager {
         // marked late. Whichever arrives second finds an empty peer. The
         // late one can no longer end retention another session created,
         // however long the mailbox delays it.
-        // Reads stay queued while the peer's session identity is mid-swap.
-        if self
+        //
+        // Without `wait_for_rib` a full mailbox defers this one as a late
+        // end as well, so the replacement's `PeerUp` can reach the RIB
+        // first. The dead session's routes are still withdrawn by its own
+        // hand-off: its drop sent the open epoch's late `PeerDown` at once
+        // or through a queued mailbox reservation, ahead of the replacement's
+        // `PeerUp` a BGP handshake later, so it reaches the RIB while the
+        // dead session is still registered and runs the full teardown. The
+        // registration reset alone would not: it keeps a graceful-restart
+        // peer's Adj-RIB-In. This late end then finds the dead session no
+        // longer registered and is discarded by session ID; it purges no
+        // retention an earlier session of the peer owns. A waited send
+        // keeps reads queued while the peer's session identity is mid-swap.
+        if !wait_for_rib {
+            self.defer_retired_session_down(peer_key, old_session_id);
+        } else if self
             .send_rib_update(
                 rustbgpd_rib::RibUpdate::PeerDown {
                     peer: self.rib_peer_of(peer_key),
@@ -405,8 +426,15 @@ impl PeerManager {
     /// thus keeps a live session for a later enable.
     ///
     /// The replacement publishes the dead session's `PeerDown` on this
-    /// actor's ordered RIB lane before the new session gets its `Start`, so
-    /// the dead epoch is closed in the RIB before the new one's `PeerUp`.
+    /// actor's ordered RIB lane before the new session gets its `Start`, and
+    /// does not wait for mailbox room: a policy walk serves this handler
+    /// where its stall detector is not polled. With room, the dead epoch is
+    /// closed in the RIB before the new one's `PeerUp`. With the mailbox
+    /// full, the `PeerDown` is deferred as a late end and the `PeerUp` can
+    /// arrive first. The dead session's routes are then withdrawn by its own
+    /// drop hand-off, whose late `PeerDown` was queued ahead of the `PeerUp`
+    /// and arrives while that session is still registered; this actor's
+    /// late end is discarded by session ID.
     #[expect(
         clippy::too_many_lines,
         reason = "one ordered decision: which exit retires, which is replaced, and whether the replacement starts"
@@ -492,7 +520,7 @@ impl PeerManager {
         }
 
         self.note_unnumbered_session_idle(&peer_key);
-        let panic = self.replace_unstoppable_primary(&peer_key).await;
+        let panic = self.replace_unstoppable_primary(&peer_key, false).await;
         let cause = panic.map_or(cause, |message| scrub(&format!("panicked: {message}")));
         let (count, latch, error) = self.record_session_crash(&peer_key, &cause);
 

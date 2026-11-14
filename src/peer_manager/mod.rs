@@ -417,6 +417,9 @@ const RIB_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 ///   its End-of-RIB grace retirement;
 /// - one `ReleasePeer` per refused operator or reconcile add, or per
 ///   interface-only bind that fails to start;
+/// - one late `PeerDown` per crash replacement made while the mailbox is
+///   full; a peer's crashes are bounded by the crash latch
+///   (`SESSION_CRASH_LATCH` in `SESSION_CRASH_WINDOW`);
 /// - the update a `send_rib_update` call owns while it flushes.
 ///
 /// Admission is not processing: a new session under a reaped label starts
