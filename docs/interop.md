@@ -463,6 +463,14 @@ shared L3 neighbor, while `evpn_l3vxlan_fdb_adopted_total` and
 counters distinguish restart adoption from deferred cleanup; current route and
 IP-VRF state remain the primary operational view.
 
+M122 failures also retain `capture.pcap`, its payload TSV, capture diagnostics,
+and the reflector, source and client logs in `m122-failure-evidence`. Source logs
+include both sides of the planned restart. A collision Cease after both
+KEEPALIVEs remains a failure with an ambiguous-state diagnostic: packet capture
+cannot show whether the closing FSM consumed the peer's KEEPALIVE. A closing
+side's own UPDATE provides positive Established evidence. Use the retained logs
+to investigate ambiguous cases; the job does not retry them.
+
 ## Running Interop Tests
 
 ### Prerequisites

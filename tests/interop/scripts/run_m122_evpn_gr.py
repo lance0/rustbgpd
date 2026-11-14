@@ -65,7 +65,8 @@ def gobgp(container, *args):
 
 def start_peer(container, restarting=False):
     args = " -r" if restarting else ""
-    docker(container, "sh", "-c", f"nohup gobgpd -f /config/gobgp.toml{args} >/tmp/gobgpd.log 2>&1 &")
+    # Keep the original session's collision history when the source restarts.
+    docker(container, "sh", "-c", f"nohup gobgpd -f /config/gobgp.toml{args} >>/tmp/gobgpd.log 2>&1 &")
     ready(container, ["gobgp", "global"])
 
 

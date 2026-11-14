@@ -285,9 +285,9 @@ class OracleTests(unittest.TestCase):
         cases = {
             "other Cease subcode": collided(message(3, b"\x06\x02").hex()),
             "FSM error": collided(message(3, b"\x05\x00").hex()),
-            "after Established": collided(message(3, b"\x06\x07").hex(), True, (keepalive,)),
-            # An early 6/7 must not excuse a later one on the same stream.
-            "second Cease after Established": collided(cease)
+            "ambiguous after both KEEPALIVEs": collided(message(3, b"\x06\x07").hex(), True, (keepalive,)),
+            # An early 6/7 must not excuse a later ambiguous one on the stream.
+            "second Cease after both KEEPALIVEs": collided(cease)
             + [row(oracle.RR, oracle.SOURCE, keepalive, seq=100 + len(open_) // 2),
                row(oracle.SOURCE, oracle.RR, keepalive, seq=100 + (len(open_) + len(cease)) // 2),
                row(oracle.SOURCE, oracle.RR, cease, seq=100 + (len(open_) + len(cease) + len(keepalive)) // 2)],
@@ -296,6 +296,44 @@ class OracleTests(unittest.TestCase):
         for name, lines in cases.items():
             with self.subTest(name), self.assertRaises(ValueError):
                 oracle.analyze_wire(lines)
+
+    def test_crossing_keepalives_remain_ambiguous_for_either_closer(self):
+        open_ = message(1, open_body())
+        keepalive = message(4, b"")
+        cease = message(3, b"\x06\x07")
+        for closer, peer in ((oracle.SOURCE, oracle.RR), (oracle.RR, oracle.SOURCE)):
+            for coalesced in (False, True):
+                with self.subTest(closer=closer, coalesced=coalesced):
+                    # Identical wire bytes permit two local schedules: consume
+                    # the peer KEEPALIVE before the collision, or leave it queued.
+                    rows = [f"9\t{closer}\t{peer}\t100\t{open_.hex()}",
+                            f"9\t{peer}\t{closer}\t100\t{(open_ + keepalive).hex()}"]
+                    if coalesced:
+                        rows.append(f"9\t{closer}\t{peer}\t{100 + len(open_)}\t{(keepalive + cease).hex()}")
+                    else:
+                        rows.extend([f"9\t{closer}\t{peer}\t{100 + len(open_)}\t{keepalive.hex()}",
+                                     f"9\t{closer}\t{peer}\t{100 + len(open_) + len(keepalive)}\t{cease.hex()}"])
+                    with self.assertRaisesRegex(ValueError, "closing FSM state is ambiguous"):
+                        oracle.analyze_wire(fixture() + rows)
+
+    def test_closing_side_update_is_positive_established_evidence(self):
+        open_ = message(1, open_body())
+        keepalive = message(4, b"")
+        cease = message(3, b"\x06\x07")
+        for closer, peer in ((oracle.SOURCE, oracle.RR), (oracle.RR, oracle.SOURCE)):
+            for sender in (closer, peer):
+                with self.subTest(closer=closer, update_sender=sender):
+                    closing = open_ + keepalive
+                    other = open_ + keepalive
+                    if sender == closer:
+                        closing += announce(1, 1)
+                    else:
+                        other += announce(1, 1)
+                    rows = [f"9\t{peer}\t{closer}\t100\t{other.hex()}",
+                            f"9\t{closer}\t{peer}\t100\t{(closing + cease).hex()}"]
+                    diagnostic = "after its own UPDATE" if sender == closer else "carries an UPDATE"
+                    with self.assertRaisesRegex(ValueError, diagnostic):
+                        oracle.analyze_wire(fixture() + rows)
 
     def test_eor_before_all_five_refreshed_routes_fails(self):
         restart = message(1, open_body(True, True)) + b"".join(announce(t, 1) for t in range(1, 5))

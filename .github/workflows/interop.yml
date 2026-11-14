@@ -2451,6 +2451,18 @@ jobs:
             ${{ runner.temp }}/m122-evidence/gr-five.json
             ${{ runner.temp }}/m122-evidence/llgr-five.json
             ${{ runner.temp }}/m122-evidence/expired.json
+      - name: Upload failed M122 capture and daemon logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: m122-failure-evidence
+          path: |
+            ${{ runner.temp }}/m122-evidence/capture.pcap
+            ${{ runner.temp }}/m122-evidence/capture.tsv
+            ${{ runner.temp }}/m122-evidence/capture.log
+            ${{ runner.temp }}/m122-evidence/rr.log
+            ${{ runner.temp }}/m122-evidence/source.log
+            ${{ runner.temp }}/m122-evidence/client.log
 
   m125:
     needs: [prime_dev_image]
