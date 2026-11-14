@@ -901,6 +901,9 @@ Before rolling any versions:
    `changelog.d/` fragment pending, and otherwise lists the release-only
    checks it skipped. `--heavy` adds
    `cargo audit`, the release build, and the multi-package publish dry-run.
+   If `cargo audit` calls for an urgent bump of a crate published in the last
+   three days, use the override in
+   [Bumping Dependencies](../../CONTRIBUTING.md#bumping-dependencies).
 7. Wait for every applicable gate to pass on that exact final `main` SHA,
    including the `ci.yml` and `interop.yml` push runs and the stable-surface
    and metric release-note checks. The tag-triggered publication workflows do
