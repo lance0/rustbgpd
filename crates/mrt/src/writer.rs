@@ -2,10 +2,11 @@
 
 use std::collections::BTreeSet;
 use std::fs::File;
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::num::NonZeroU32;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use chrono::Utc;
@@ -231,41 +232,111 @@ fn publish(
     config: &MrtWriterConfig,
     data: &[u8],
 ) -> std::io::Result<(PathBuf, u64)> {
+    let mut dump = StreamingDump::in_dir(dir, config)?;
+    dump.write_all(data)?;
+    dump.finish(&AtomicBool::new(false))
+}
+
+/// One bounded-memory dump, staged in the validated directory until complete.
+pub(crate) struct StreamingDump {
+    dir: OutputDir,
+    config: MrtWriterConfig,
+    filename: String,
+    stage: StagedFile,
+    next_run: u64,
+}
+
+fn dump_filename(config: &MrtWriterConfig) -> String {
     let now = Utc::now();
     let timestamp = now.format("%Y%m%d.%H%M%S");
     let nanos = now.timestamp_subsec_nanos();
     let ext = if config.compress { ".mrt.gz" } else { ".mrt" };
-    let filename = format!("{}.{timestamp}.{nanos:09}{ext}", config.file_prefix);
-    let final_path = dir.path.join(&filename);
-    let tmp_name = format!(".{filename}.tmp");
+    format!("{}.{timestamp}.{nanos:09}{ext}", config.file_prefix)
+}
 
-    debug!(path = %final_path.display(), bytes = data.len(), "writing MRT dump");
-
-    let size = write_atomic(&dir.file, &tmp_name, &filename, data, config.compress)?;
-
-    info!(
-        path = %final_path.display(),
-        bytes = data.len(),
-        compressed = config.compress,
-        "MRT dump written"
-    );
-
-    // Retention runs only after the new dump is durably published, and a
-    // pruning failure never fails the dump that already succeeded.
-    if let Some(keep) = config.max_files
-        && let Err(error) = prune_old_dumps(dir, &config.file_prefix, keep, &filename)
-    {
-        warn!(
-            output_dir = %dir.path.display(),
-            error = %error,
-            "MRT dump retention failed; older dumps were kept"
-        );
+impl StreamingDump {
+    pub(crate) fn new(config: &MrtWriterConfig) -> std::io::Result<Self> {
+        Self::in_dir(&open_output_dir(config)?, config)
     }
 
-    Ok((final_path, size))
+    fn in_dir(dir: &OutputDir, config: &MrtWriterConfig) -> std::io::Result<Self> {
+        let filename = dump_filename(config);
+        let final_path = dir.path.join(&filename);
+        let tmp_name = format!(".{filename}.tmp");
+
+        debug!(path = %final_path.display(), "staging MRT dump");
+        let stage = StagedFile::new(&dir.file, &tmp_name, &filename, config.compress)?;
+        Ok(Self {
+            dir: OutputDir {
+                file: dir.file.try_clone()?,
+                path: dir.path.clone(),
+            },
+            config: config.clone(),
+            filename,
+            stage,
+            next_run: 0,
+        })
+    }
+
+    /// An anonymous, owner-only file in the same filesystem for an EVPN sort run.
+    /// Unlink immediately so cancellation and process death cannot leave runs.
+    pub(crate) fn create_run(&mut self) -> std::io::Result<File> {
+        let name = format!(".{}.run.{}", self.filename, self.next_run);
+        self.next_run = self
+            .next_run
+            .checked_add(1)
+            .ok_or_else(|| std::io::Error::other("MRT sort run counter exhausted"))?;
+        let file = File::from(openat(
+            &self.dir.file,
+            name.as_str(),
+            OFlag::O_RDWR | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+            Mode::from_bits_truncate(0o600),
+        )?);
+        unlinkat(&self.dir.file, name.as_str(), UnlinkatFlags::NoRemoveDir)?;
+        Ok(file)
+    }
+
+    pub(crate) fn finish(self, cancelled: &AtomicBool) -> std::io::Result<(PathBuf, u64)> {
+        let Self {
+            dir,
+            config,
+            mut stage,
+            ..
+        } = self;
+        let filename = dump_filename(&config);
+        stage.final_name.clone_from(&filename);
+        let final_path = dir.path.join(&filename);
+        let size = stage.finish(cancelled)?;
+        info!(path = %final_path.display(), bytes = size, compressed = config.compress, "MRT dump written");
+
+        // Retention runs only after the new dump is durably published, and a
+        // pruning failure never fails the dump that already succeeded.
+        if let Some(keep) = config.max_files
+            && let Err(error) = prune_old_dumps(&dir, &config.file_prefix, keep, &filename)
+        {
+            warn!(
+                output_dir = %dir.path.display(),
+                error = %error,
+                "MRT dump retention failed; older dumps were kept"
+            );
+        }
+
+        Ok((final_path, size))
+    }
+}
+
+impl Write for StreamingDump {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.stage.write(bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stage.flush()
+    }
 }
 
 /// Stage, sync and rename one dump; returns its size from the descriptor.
+#[cfg(test)]
 fn write_atomic(
     directory: &File,
     tmp_name: &str,
@@ -273,37 +344,151 @@ fn write_atomic(
     data: &[u8],
     compress: bool,
 ) -> std::io::Result<u64> {
-    let mut file = File::from(openat(
-        directory,
-        tmp_name,
-        OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
-        Mode::from_bits_truncate(0o600),
-    )?);
-    let result = (|| -> std::io::Result<u64> {
-        if compress {
-            let mut encoder =
-                flate2::write::GzEncoder::new(&mut file, flate2::Compression::default());
-            encoder.write_all(data)?;
-            encoder.finish()?;
+    let mut stage = StagedFile::new(directory, tmp_name, final_name, compress)?;
+    stage.write_all(data)?;
+    stage.finish(&AtomicBool::new(false))
+}
+
+enum StagedOutput {
+    Plain(StageSink),
+    Gzip(flate2::write::GzEncoder<StageSink>),
+}
+
+/// Detach unfinished buffers before gzip's destructor can write on an async owner.
+struct StageSink(Option<BufWriter<File>>);
+
+impl Write for StageSink {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("MRT stage discarded"))?
+            .write(bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("MRT stage discarded"))?
+            .flush()
+    }
+}
+
+struct StagedFile {
+    directory: File,
+    tmp_name: String,
+    final_name: String,
+    output: Option<StagedOutput>,
+}
+
+impl StagedFile {
+    fn new(
+        directory: &File,
+        tmp_name: &str,
+        final_name: &str,
+        compress: bool,
+    ) -> std::io::Result<Self> {
+        // Clone before creating the file: an fd exhaustion error must not leave a stage.
+        let directory = directory.try_clone()?;
+        let file = File::from(openat(
+            &directory,
+            tmp_name,
+            OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+            Mode::from_bits_truncate(0o600),
+        )?);
+        let buffered = StageSink(Some(BufWriter::with_capacity(64 * 1024, file)));
+        let output = if compress {
+            StagedOutput::Gzip(flate2::write::GzEncoder::new(
+                buffered,
+                flate2::Compression::default(),
+            ))
         } else {
-            file.write_all(data)?;
-        }
+            StagedOutput::Plain(buffered)
+        };
+        Ok(Self {
+            directory,
+            tmp_name: tmp_name.to_owned(),
+            final_name: final_name.to_owned(),
+            output: Some(output),
+        })
+    }
+
+    fn finish(mut self, cancelled: &AtomicBool) -> std::io::Result<u64> {
+        check_cancelled(cancelled)?;
+        let output = self
+            .output
+            .take()
+            .ok_or_else(|| std::io::Error::other("MRT stage already finished"))?;
+        let sink = match output {
+            StagedOutput::Plain(file) => file,
+            StagedOutput::Gzip(encoder) => encoder.finish()?,
+        };
+        let file = sink
+            .0
+            .ok_or_else(|| std::io::Error::other("MRT stage discarded"))?
+            .into_inner()
+            .map_err(std::io::IntoInnerError::into_error)?;
         file.sync_all()?;
         let size = file.metadata()?.len();
-        renameat(directory, tmp_name, directory, final_name)?;
+        check_cancelled(cancelled)?;
+        renameat(
+            &self.directory,
+            self.tmp_name.as_str(),
+            &self.directory,
+            self.final_name.as_str(),
+        )?;
+        self.directory.sync_all().map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("MRT dump published but parent directory sync failed: {error}"),
+            )
+        })?;
         Ok(size)
-    })();
-    if result.is_err() {
-        let _ = unlinkat(directory, tmp_name, UnlinkatFlags::NoRemoveDir);
     }
-    let size = result?;
-    directory.sync_all().map_err(|error| {
-        std::io::Error::new(
-            error.kind(),
-            format!("MRT dump published but parent directory sync failed: {error}"),
-        )
-    })?;
-    Ok(size)
+}
+
+impl Write for StagedFile {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        match self.output.as_mut() {
+            Some(StagedOutput::Plain(file)) => file.write(bytes),
+            Some(StagedOutput::Gzip(encoder)) => encoder.write(bytes),
+            None => Err(std::io::Error::other("MRT stage already finished")),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self.output.as_mut() {
+            Some(StagedOutput::Plain(file)) => file.flush(),
+            Some(StagedOutput::Gzip(encoder)) => encoder.flush(),
+            None => Err(std::io::Error::other("MRT stage already finished")),
+        }
+    }
+}
+
+impl Drop for StagedFile {
+    fn drop(&mut self) {
+        let sink = match self.output.as_mut() {
+            Some(StagedOutput::Plain(sink)) => Some(sink),
+            Some(StagedOutput::Gzip(encoder)) => Some(encoder.get_mut()),
+            None => None,
+        };
+        if let Some(buffered) = sink.and_then(|sink| sink.0.take()) {
+            drop(buffered.into_parts());
+        }
+        let _ = unlinkat(
+            &self.directory,
+            self.tmp_name.as_str(),
+            UnlinkatFlags::NoRemoveDir,
+        );
+    }
+}
+
+pub(crate) fn check_cancelled(cancelled: &AtomicBool) -> std::io::Result<()> {
+    if cancelled.load(Ordering::Acquire) {
+        // `Write::write_all` retries Interrupted indefinitely.
+        Err(std::io::Error::other("MRT dump canceled"))
+    } else {
+        Ok(())
+    }
 }
 
 /// A test directory the writer accepts under any umask: tempfile creates
@@ -323,6 +508,23 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+
+    #[test]
+    fn dropping_a_stage_discards_plain_and_gzip_buffers() {
+        for compress in [false, true] {
+            let dir = private_tempdir();
+            let directory = File::open(dir.path()).unwrap();
+            let mut stage = StagedFile::new(&directory, ".partial", "published", compress).unwrap();
+            let observed = File::open(dir.path().join(".partial")).unwrap();
+            stage
+                .write_all(b"an unfinished dump must not flush on drop")
+                .unwrap();
+            assert_eq!(observed.metadata().unwrap().len(), 0);
+            drop(stage);
+            assert_eq!(observed.metadata().unwrap().len(), 0);
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        }
+    }
 
     #[test]
     fn absolute_file_prefix_cannot_publish_outside_output_dir() {

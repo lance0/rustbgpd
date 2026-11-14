@@ -564,7 +564,13 @@ impl EvpnSlab {
     }
 
     fn values(&self) -> impl Iterator<Item = &EvpnRibRoute> {
-        self.routes.iter()
+        // Ordinary walks keep the hash iterator's live-entry traversal;
+        // slab vacancies must not hide work between caller checkpoints.
+        self.index.values().map(|&handle| {
+            self.routes
+                .get(handle)
+                .expect("EVPN index names a live slot")
+        })
     }
 
     fn clear(&mut self) {
@@ -6273,6 +6279,40 @@ mod tests {
         assert!(rib.withdraw_evpn(&key));
         assert!(rib.get_evpn(&key).is_none());
         assert!(rib.get_evpn(&sibling).is_some(), "sibling key survives");
+    }
+
+    #[test]
+    fn evpn_live_iteration_uses_index_cardinality_after_sparse_withdrawals() {
+        let peer = Ipv4Addr::new(10, 0, 0, 1);
+        let mut rib = AdjRibIn::new(PeerId::from_addr(peer.into()));
+        let keys: Vec<_> = (0..4096)
+            .map(|tag| insert_evpn_imet(&mut rib, peer, tag, Vec::new()))
+            .collect();
+        let retained = [keys[0], keys[2048], keys[4095]];
+        for key in &keys {
+            if !retained.contains(key) {
+                assert!(rib.withdraw_evpn(key));
+            }
+        }
+        assert_eq!(rib.evpn_routes.routes.slot_count(), 4096);
+        // The live hash index has exact remaining cardinality. This guards
+        // the source boundary: a vacancy-filtered slab iterator cannot report
+        // live cardinality and can scan thousands of slots inside one next().
+        {
+            let mut routes = rib.iter_evpn();
+            let mut seen = std::collections::HashSet::new();
+            for remaining in (1..=retained.len()).rev() {
+                assert_eq!(routes.size_hint(), (remaining, Some(remaining)));
+                assert!(seen.insert(routes.next().unwrap().key()));
+            }
+            assert_eq!(routes.size_hint(), (0, Some(0)));
+            assert!(routes.next().is_none());
+            assert_eq!(seen, retained.into_iter().collect());
+        }
+        for key in &retained {
+            assert!(rib.withdraw_evpn(key));
+        }
+        assert_eq!(rib.iter_evpn().size_hint(), (0, Some(0)));
     }
 
     #[test]

@@ -17,6 +17,10 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 - **Periodic + on-demand** — configurable dump interval or gRPC
   `TriggerMrtDump` for immediate snapshots
 - **Optional gzip** compression via flate2
+- **Streaming dumps** — freeze peer metadata first, then encode and write
+  bounded route chunks; EVPN uses bounded disk merges to preserve record
+  order. Each owned route chunk and encoded record is capped at 8 MiB.
+  See [dump consistency and limits](../../docs/reference/configuration.md#what-one-dump-shows)
 - **Retention** — `max_files` keeps at most that many of the writer's
   `<file_prefix>` dumps, deleting the oldest after each successful publish;
   unset keeps every dump

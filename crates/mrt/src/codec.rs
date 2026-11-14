@@ -3048,9 +3048,9 @@ mod tests {
             .unwrap();
         let mut evpn_order: Vec<_> = evpn.iter().collect();
         evpn_order.sort_by_key(|route| (encoder.peer_index(route.peer).unwrap(), route.key()));
-        let mut sequence = encoder.next_sequence();
+        let sequence = encoder.next_sequence();
         assert_eq!(sequence, 2);
-        for route in evpn_order {
+        for (sequence, route) in (sequence..).zip(evpn_order) {
             let (index, record) = encoder
                 .encode_evpn_inner::<true>(route, originated)
                 .unwrap();
@@ -3058,7 +3058,6 @@ mod tests {
             let mut record = record.to_vec();
             record[12..16].copy_from_slice(&sequence.to_be_bytes());
             actual.extend_from_slice(&record);
-            sequence += 1;
         }
         assert_eq!(actual, expected);
         assert!(encoder.record.capacity() <= 4096);
@@ -3078,8 +3077,8 @@ mod tests {
                 }
             ))
         ));
-        assert!(bytes.is_empty());
-        assert!(encoder.record.is_empty());
+        assert_eq!(bytes, [] as [u8; 0]);
+        assert_eq!(encoder.record, [] as [u8; 0]);
         assert!(encoder.record.capacity() <= 19);
 
         let peer = make_peer("192.0.2.1".parse().unwrap(), 65001);
@@ -3089,7 +3088,8 @@ mod tests {
             peer.peer_addr,
         );
         route.attributes = AttrSet::new(vec![PathAttribute::Communities((0..100).collect())]);
-        let mut encoder = StreamingEncoder::new(collector, &[peer.clone()], 1, 64).unwrap();
+        let mut encoder =
+            StreamingEncoder::new(collector, std::slice::from_ref(&peer), 1, 64).unwrap();
         encoder.write_peer_index(&mut bytes).unwrap();
         let before = bytes.clone();
         assert!(matches!(
@@ -3099,14 +3099,14 @@ mod tests {
             ))
         ));
         assert_eq!(bytes, before, "a failed record writes none of its prefix");
-        assert!(encoder.record.is_empty());
+        assert_eq!(encoder.record, [] as [u8; 0]);
         assert!(encoder.record.capacity() <= 64);
         let evpn = make_evpn_macip(peer.peer_addr, peer.peer_addr);
         assert!(matches!(
             encoder.encode_evpn(&evpn),
             Err(EncodeError::RecordSizeLimitExceeded { cap: 64, .. })
         ));
-        assert!(encoder.record.is_empty());
+        assert_eq!(encoder.record, [] as [u8; 0]);
         assert!(encoder.record.capacity() <= 64);
     }
 
@@ -4102,7 +4102,7 @@ mod tests {
             tx.send(rustbgpd_rib::update::RibUpdate::QueryMrtSnapshotChunk { cursor, reply })
                 .await
                 .unwrap();
-            cursor = snapshot.push(chunk.await.unwrap());
+            cursor = snapshot.push(chunk.await.unwrap().unwrap());
             turns += 1;
             if cursor.is_none() {
                 return (snapshot.finish(), turns);
@@ -4270,11 +4270,8 @@ mod tests {
         actor.await.unwrap();
     }
 
-    /// The `PEER_INDEX_TABLE` is built after the last RIB turn, from the
-    /// neighbors each turn captured. A neighbor that leaves mid-dump keeps
-    /// the entry for the rows already read, and one that joins mid-dump gets
-    /// an entry for the rows read after it joined: every RIB entry's peer
-    /// index resolves, with the session's ASN.
+    /// The peer inventory is frozen before the first RIB turn. Departed
+    /// peers keep the metadata for rows already read; late joiners are excluded.
     #[tokio::test]
     async fn peers_that_leave_or_join_mid_dump_keep_every_peer_index_valid() {
         use rustbgpd_rib::update::RibUpdate;
@@ -4322,10 +4319,7 @@ mod tests {
             .map(|peer| (peer.peer_addr, peer.peer_asn))
             .collect();
         table.sort_unstable();
-        assert_eq!(
-            table,
-            [(leaver, 65_001), (stayer, 65_002), (joiner, 65_003)]
-        );
+        assert_eq!(table, [(leaver, 65_001), (stayer, 65_002)]);
         let mut rows = std::collections::HashMap::<IpAddr, usize>::new();
         for entry in reader.by_ref() {
             let entry = entry.unwrap();
@@ -4335,7 +4329,7 @@ mod tests {
         let first_turn = rustbgpd_rib::update::MRT_SNAPSHOT_CHUNK_ROWS / 2;
         assert_eq!(rows[&stayer], 3_000);
         assert_eq!(rows[&leaver], first_turn);
-        assert_eq!(rows[&joiner], 3_000 - first_turn);
+        assert!(!rows.contains_key(&joiner));
 
         drop(tx);
         actor.await.unwrap();

@@ -5033,7 +5033,7 @@ Each dump contains a complete `TABLE_DUMP_V2` snapshot:
 
 | Record | Contents |
 |--------|----------|
-| `PEER_INDEX_TABLE` (subtype 1) | All known peers with ASN and BGP ID |
+| `PEER_INDEX_TABLE` (subtype 1) | Peers captured at the start of the walk, with ASN and BGP ID |
 | `RIB_IPV4_UNICAST` (subtype 2) | IPv4 routes from Adj-RIB-In per peer |
 | `RIB_IPV6_UNICAST` (subtype 4) | IPv6 routes from Adj-RIB-In per peer |
 | `RIB_GENERIC` (subtype 6) | L2VPN/EVPN routes (AFI 25 / SAFI 70) per RFC 6396 section 4.3.3 |
@@ -5048,8 +5048,8 @@ IPv4-with-IPv6-NH `MP_REACH_NLRI`).
 Peer metadata is retained during Graceful Restart and LLGR transitions, so
 dumps taken during a peer restart window still include correct peer entries.
 
-The output directory is created lazily and prepared before a full RIB snapshot,
-so an impossible path does not incur full-table materialization. Later failures
+The output directory is created lazily and prepared before the RIB walk,
+so an impossible path does not start a dump. Later failures
 remain non-fatal. Delayed dumps skip missed intervals rather than replaying a
 catch-up burst.
 
@@ -5075,13 +5075,11 @@ Unicast is read about 4,096 routes per step, whatever the table size:
   seconds apart on a large table. Do not conclude from one file that two
   prefixes were, or were not, announced at the same time.
 
-EVPN (`RIB_GENERIC`) is read one block of one neighbor's table per step. A
-block is the neighbor's whole EVPN table while it holds up to 16,384 routes,
-and one sixteenth of it beyond that, so the EVPN step grows with the largest
-single neighbor's EVPN table: about 4,700 routes for a 75,000-route neighbor,
-about 62,500 for a 1,000,000-route neighbor. The same EVPN route learned from
-two neighbors is read at two different instants; the one-instant rule above
-is unicast only.
+EVPN (`RIB_GENERIC`) visits at most 4,096 storage slots per step, including
+vacancies left by withdrawn routes. This bound stays the same as a neighbor's
+table grows or its hash index splits. The same EVPN route learned from two
+neighbors is read at two different instants; the one-instant rule above is
+unicast only.
 
 For every family:
 
@@ -5091,22 +5089,31 @@ For every family:
 - **The record timestamp is when the walk began.** Every route in the file
   was read at or after it; the file name carries the time the file was
   published.
-- **The peer table is complete.** The `PEER_INDEX_TABLE` is written first but
-  built last, from the neighbors seen in each step. A neighbor that goes down
-  mid-dump keeps its entry and the routes already read; one that comes up
-  mid-dump is listed and contributes what the walk had not yet passed. A
-  neighbor is listed once, with the address, ASN and BGP identifier it had
-  when its routes were first read: if it restarts with a new BGP identifier,
-  or an interface-only neighbor moves to a new link-local address, mid-dump,
-  routes read afterward are still filed under the first identity.
+- **The peer table is frozen at the start.** The `PEER_INDEX_TABLE` is
+  captured and written first, including retained GR/LLGR sources. Neighbors
+  that join afterward contribute neither a peer entry nor routes. A captured
+  neighbor keeps its original address, ASN and BGP identifier even if its
+  metadata changes during the walk.
+- **An EVPN table reset fails an unfinished walk.** Ordinary withdrawals
+  leave vacancies and the walk continues. Removing, clearing or replacing a
+  captured table before its last step fails the dump instead of silently
+  omitting unchanged rows. Only slots present at the start are visited.
 
 A dump that takes longer than `dump_interval` is followed at once by the next
 one, so dumps run back to back; compare `mrt_last_dump_duration_milliseconds`
 with the interval to see it.
 
-A dump abandoned partway (a canceled `TriggerMrtDump`, or shutdown) publishes
-no file. The routes are still gathered in memory before the file is encoded
-and written, so the memory a dump needs is unchanged.
+Chunks are encoded and written before requesting the next chunk. Owned route
+buffers and individual encoded records each have an 8 MiB cap; a single
+unicast prefix that exceeds either cap fails the dump. Shared route
+attributes and the frozen peer inventory are additional memory. EVPN records
+are sorted through temporary disk runs with at most eight bounded records
+in a merge. Compression buffers and the filesystem cache are also outside
+the chunk cap; it is not a limit on total process memory or dump file size.
+
+A dump abandoned before atomic publication removes its staging file and
+publishes nothing. Once the final file has been renamed, cancellation does
+not remove it. Encoding or storage failures keep existing dumps intact.
 
 See [ADR-0044](../adr/0044-mrt-dump-export.md) for design details.
 
