@@ -472,6 +472,8 @@ impl PeerManager {
             // Recorded first: a latched dynamic peer's retirement keeps it.
             let (count, latch, error) = self.record_session_crash(&peer_key, &cause);
             warn!(peer = %peer_addr, session_id, ?role, %cause, count, "session task ended without a shutdown request; retiring it");
+            // The same event: the re-entry counts it again.
+            self.uncount_owned_walk_event();
             Box::pin(self.handle_one_session_notification(
                 SessionNotification::BackToIdle {
                     session_id,

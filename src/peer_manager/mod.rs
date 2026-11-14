@@ -326,7 +326,8 @@ const READINESS_QUERY_BUDGET_PER_POLICY_STEP: usize = 1;
 /// lifecycle events are drained whole, and a notification round that
 /// retires, replaces or promotes a session, or a BFD Down that retires a
 /// pending inbound session, handles every session notification queued at
-/// that moment. `events_served` counts each of those as handled.
+/// that moment. `events_served` counts each of those as handled, except a
+/// notification the walk holds.
 const OWNED_WALK_EVENT_BUDGET: usize = 8;
 
 /// A resolved policy snapshot's walk owns the actor: what it has served at
@@ -343,6 +344,8 @@ pub(super) struct OwnedWalkEvents {
     /// Events handled while the walk owned the actor, however they were
     /// reached: a session notification or lifecycle event is counted by
     /// its handler, so one a served handler drains on its own counts too.
+    /// A held notification is not counted, and a synthetic re-entry for an
+    /// event already counted is not counted again.
     events_served: u64,
     service: Duration,
 }
@@ -1684,7 +1687,9 @@ impl PeerManager {
     }
 
     /// Hold `notification` for the end of the walk that owns the actor.
-    /// Gives it back when no walk does.
+    /// Gives it back when no walk does. Every caller runs inside
+    /// `handle_one_session_notification`, after its entry count, so a held
+    /// notification is uncounted: it is counted when it is handled.
     pub(super) fn hold_for_owned_walk(
         &mut self,
         notification: SessionNotification,
@@ -1692,6 +1697,7 @@ impl PeerManager {
         match self.owned_walk.as_mut() {
             Some(walk) => {
                 walk.held.push(notification);
+                walk.events_served = walk.events_served.saturating_sub(1);
                 None
             }
             None => Some(notification),
@@ -1717,6 +1723,14 @@ impl PeerManager {
     pub(super) fn count_owned_walk_event(&mut self) {
         if let Some(walk) = self.owned_walk.as_mut() {
             walk.events_served += 1;
+        }
+    }
+
+    /// Take back one [`Self::count_owned_walk_event`]: the handler re-enters
+    /// with a synthetic notification for the event it already counted.
+    pub(super) fn uncount_owned_walk_event(&mut self) {
+        if let Some(walk) = self.owned_walk.as_mut() {
+            walk.events_served = walk.events_served.saturating_sub(1);
         }
     }
 
