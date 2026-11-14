@@ -1102,8 +1102,9 @@ async fn rollback_arms_retry_when_a_partially_delivered_refresh_cannot_be_undone
         .await
         .expect_err("a failed Route Refresh fails the forward apply");
     assert!(
-        error.contains("already-applied peers restored"),
-        "the forward failure must have rolled back: {error}"
+        error.contains("restoring already-applied peers also failed")
+            && error.contains("Route Refresh under the restored import policy failed"),
+        "the rollback refresh failed, so the restore is not exact: {error}"
     );
     assert!(
         ipv4_refreshes.load(Ordering::SeqCst) >= 1,

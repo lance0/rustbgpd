@@ -1866,3 +1866,427 @@ async fn cohort_commits_when_a_member_session_ends_after_accepting() {
     drop(outbound);
     rib.abort();
 }
+
+/// The prefix the modeled remote of [`route_evaluating_session`] announces.
+const WINDOW_PREFIX: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 7);
+
+fn window_prefix() -> rustbgpd_wire::Prefix {
+    rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(WINDOW_PREFIX, 32))
+}
+
+/// A session that holds the import chain it was last given and evaluates the
+/// one route its remote sends under it: accepted only under `candidate`. The
+/// remote sends the route once, the moment the session takes `candidate` and
+/// before it acknowledges that chain: an UPDATE that arrives while the
+/// candidate import chain is live. Every Route Refresh the session sends makes
+/// the remote send it again, which the session announces or withdraws under
+/// its current chain. While `refresh_ok` is false a Route Refresh is refused
+/// as a transient send failure, before any family is requested.
+fn route_evaluating_session(
+    peer_addr: IpAddr,
+    session_id: u64,
+    candidate: PolicyChain,
+    rib_tx: mpsc::Sender<RibUpdate>,
+    refresh_ok: Arc<AtomicBool>,
+) -> PeerHandle {
+    use rustbgpd_transport::{PeerCommand, PeerCommandError};
+
+    let peer = PeerId::from_addr(peer_addr);
+    let route = rustbgpd_rib::Route {
+        prefix: window_prefix(),
+        next_hop: peer_addr,
+        link_local_next_hop: None,
+        next_hop_scope: None,
+        peer,
+        attributes: rustbgpd_rib::AttrSet::new(vec![rustbgpd_wire::PathAttribute::Origin(
+            rustbgpd_wire::Origin::Igp,
+        )]),
+        received_at: rustbgpd_rib::route::ReceivedAt::now(),
+        origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+        peer_router_id: Ipv4Addr::new(192, 0, 2, 1),
+        is_stale: false,
+        is_llgr_stale: false,
+        path_id: 0,
+        validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        received_as_path: None,
+        aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
+    };
+    let evaluate = move |accepted: bool| RibUpdate::RoutesReceived {
+        peer,
+        session_id,
+        announced: if accepted {
+            vec![route.clone()]
+        } else {
+            Vec::new()
+        },
+        withdrawn: if accepted {
+            Vec::new()
+        } else {
+            vec![(window_prefix(), 0)]
+        },
+        flowspec_announced: Vec::new(),
+        flowspec_withdrawn: Vec::new(),
+        evpn_announced: Vec::new(),
+        evpn_withdrawn: Vec::new(),
+        validated_with: None,
+    };
+    let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
+    let task = tokio::spawn(async move {
+        let mut accepted = false;
+        while let Some(cmd) = session_rx.recv().await {
+            match cmd {
+                PeerCommand::QueryState { reply } => {
+                    let mut state = policy_test_peer_state(peer_addr, SessionState::Established);
+                    state.negotiated_session = Some(test_negotiated_session(true));
+                    let _ = reply.send(state);
+                }
+                PeerCommand::UpdateImportPolicy { policy, reply } => {
+                    accepted = policy.as_deref() == Some(&candidate);
+                    if accepted {
+                        rib_tx.send(evaluate(true)).await.unwrap();
+                    }
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::UpdateExportPolicy { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::SendRouteRefresh { reply, .. } => {
+                    if refresh_ok.load(Ordering::SeqCst) {
+                        rib_tx.send(evaluate(accepted)).await.unwrap();
+                        let _ = reply.send(Ok(()));
+                    } else {
+                        let _ = reply.send(Err(PeerCommandError::SendFailed(
+                            "writer queue full".to_string(),
+                        )));
+                    }
+                }
+                PeerCommand::Shutdown | PeerCommand::Stop { .. } | PeerCommand::CollisionDump => {
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(session_tx, task)
+}
+
+/// A real RIB behind a relay that refuses the forward export-policy RIB step
+/// `refuse` selects and forwards every other command, so session-driven route
+/// ingestion and the rollback's restore reach the real RIB in send order.
+fn refusing_rib_relay(
+    refuse: impl Fn(&RibUpdate) -> bool + Send + 'static,
+) -> (mpsc::Sender<RibUpdate>, tokio::task::JoinHandle<()>) {
+    let (relay_tx, mut relay_rx) = mpsc::channel::<RibUpdate>(64);
+    let (real_tx, real_rx) = mpsc::channel::<RibUpdate>(64);
+    tokio::spawn(
+        rustbgpd_rib::RibManager::new(real_rx, mpsc::channel(1).1, None, None, BgpMetrics::new())
+            .run(),
+    );
+    let relay = tokio::spawn(async move {
+        while let Some(update) = relay_rx.recv().await {
+            if !refuse(&update) {
+                if real_tx.send(update).await.is_err() {
+                    break;
+                }
+                continue;
+            }
+            match update {
+                RibUpdate::ReplacePeerExportPoliciesAuthoritatively { reply, .. } => {
+                    let _ = reply.send(Err(rustbgpd_rib::RibCommandError::internal(
+                        "export batch refused",
+                    )));
+                }
+                RibUpdate::ReplacePeerExportPolicies { reply, .. } => {
+                    let _ = reply.send(Err("export cohort refused".to_string()));
+                }
+                _ => unreachable!("the relay refuses only forward export-policy steps"),
+            }
+        }
+    });
+    (relay_tx, relay)
+}
+
+/// Register `peer`'s session with the RIB, as its `PeerUp` does.
+async fn register_rib_session(
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    mgr: &PeerManager,
+    peer: IpAddr,
+    export_policy: Option<PolicyChain>,
+) -> mpsc::Receiver<rustbgpd_rib::update::OutboundRouteUpdate> {
+    let (outbound_tx, outbound_rx) = mpsc::channel(64);
+    rib_tx
+        .send(RibUpdate::PeerUp {
+            supersedes: None,
+            peer: PeerId::from_addr(peer),
+            session_id: mgr.peers[&key(peer)].session_id(),
+            peer_asn: 65002,
+            peer_router_id: Ipv4Addr::new(192, 0, 2, 1),
+            outbound_tx,
+            export_policy,
+            sendable_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            add_path_send_families: Vec::new(),
+            add_path_send_max: 0,
+            negotiated_orf_recv: Vec::new(),
+            negotiated_llgr_families: Vec::new(),
+        })
+        .await
+        .unwrap();
+    outbound_rx
+}
+
+/// Whether the Loc-RIB holds `peer`'s route for [`WINDOW_PREFIX`].
+async fn loc_rib_holds_window_route(rib_tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> bool {
+    let (reply, routes) = oneshot::channel();
+    rib_tx
+        .send(RibUpdate::QueryBestRoutes {
+            deadline: tokio::time::Instant::now() + Duration::from_secs(5),
+            reply,
+        })
+        .await
+        .unwrap();
+    routes
+        .await
+        .unwrap()
+        .iter()
+        .any(|route| route.peer == PeerId::from_addr(peer) && route.prefix == window_prefix())
+}
+
+/// Two Established peers, A and B, start on `prior_import` and
+/// `prior_export`, both registered with the RIB behind `rib_tx`. B's session
+/// is a [`route_evaluating_session`] that accepts its route only under
+/// `candidate_import` and refuses Route Refresh until `refresh_ok`.
+async fn two_peer_rollback_fixture(
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    prior_import: &PolicyChain,
+    candidate_import: &PolicyChain,
+    prior_export: &PolicyChain,
+    refresh_ok: &Arc<AtomicBool>,
+) -> (
+    PeerManager,
+    [IpAddr; 2],
+    Vec<mpsc::Receiver<rustbgpd_rib::update::OutboundRouteUpdate>>,
+) {
+    let a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx.clone(),
+        None,
+    );
+    insert_test_managed_peer(
+        &mut mgr,
+        a,
+        acking_policy_handle(a, SessionState::Established),
+        false,
+    );
+    let session_id = u64::try_from(mgr.peers.len()).unwrap() + 1;
+    insert_test_managed_peer(
+        &mut mgr,
+        b,
+        route_evaluating_session(
+            b,
+            session_id,
+            candidate_import.clone(),
+            rib_tx.clone(),
+            Arc::clone(refresh_ok),
+        ),
+        false,
+    );
+    assert_eq!(mgr.peers[&key(b)].session_id(), session_id);
+    let mut outbound = Vec::new();
+    for peer in [a, b] {
+        let managed = mgr.peers.get_mut(&key(peer)).unwrap();
+        managed.import_policy = Some(prior_import.clone());
+        managed.export_policy = Some(prior_export.clone());
+        outbound.push(register_rib_session(rib_tx, &mgr, peer, Some(prior_export.clone())).await);
+    }
+    (mgr, [a, b], outbound)
+}
+
+/// Shared assertions of the two regressions below: `failure` is the rollback
+/// outcome of a snapshot whose RIB step was refused after `peer`'s session
+/// took the candidate import chain and accepted a route under it, and whose
+/// rollback Route Refresh for `peer` failed.
+///
+/// The route stays in the Loc-RIB after the rollback, although the restored
+/// import chain denies it. That cannot be reported as an exact rollback, and
+/// the peer keeps a refresh obligation: once a Route Refresh under the
+/// restored chain can be sent, it removes the route.
+async fn assert_failed_rollback_refresh_keeps_obligation(
+    mgr: &mut PeerManager,
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    failure: &super::super::policy::PolicySnapshotFailure,
+    peer: IpAddr,
+    prior: (PolicyChain, PolicyChain),
+    refresh_ok: &AtomicBool,
+) {
+    use super::super::policy::PolicySnapshotFailureKind;
+
+    let (prior_import, prior_export) = prior;
+    assert_eq!(
+        mgr.peers[&key(peer)].import_policy.as_ref(),
+        Some(&prior_import)
+    );
+    assert!(
+        loc_rib_holds_window_route(rib_tx, peer).await,
+        "the route accepted under the candidate import chain is still held: \
+         the rollback refresh that would remove it failed"
+    );
+    assert_eq!(
+        failure.kind,
+        PolicySnapshotFailureKind::CompensationAmbiguous,
+        "a rollback that leaves a route the restored policy denies is not exact: {}",
+        failure.message()
+    );
+
+    // The retained obligation is what lets a later refresh remove the route.
+    refresh_ok.store(true, Ordering::SeqCst);
+    mgr.update_runtime_policies(peer, Some(prior_import), Some(prior_export))
+        .await
+        .expect("the retry under the restored chains succeeds");
+    assert!(
+        !loc_rib_holds_window_route(rib_tx, peer).await,
+        "the retained refresh obligation re-evaluates the route under the restored chain"
+    );
+    assert!(!mgr.peers[&key(peer)].pending_refresh);
+}
+
+/// The authoritative walk sends each export pair to the RIB as a batch. Peer
+/// A's unit completes; peer B's session takes the candidate import chain and
+/// accepts a route under it, then B's batch is refused and the walk rolls
+/// back both peers. B's rollback Route Refresh fails.
+#[tokio::test]
+async fn failed_rollback_refresh_after_refused_batch_is_not_exact() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let b_peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)));
+    let (rib_tx, relay) = refusing_rib_relay(move |update| {
+        matches!(
+            update,
+            RibUpdate::ReplacePeerExportPoliciesAuthoritatively { replacements, .. }
+                if replacements.iter().any(|replacement| replacement.peer == b_peer)
+        )
+    });
+    let prior_import = deny_policy_chain();
+    let candidate_import = validation_policy_chain(ImportValidationDependency::Rpki);
+    let prior_export = distinct_deny_policy_chain(1);
+    let refresh_ok = Arc::new(AtomicBool::new(false));
+    let (mut mgr, [a, b], outbound) = two_peer_rollback_fixture(
+        &rib_tx,
+        &prior_import,
+        &candidate_import,
+        &prior_export,
+        &refresh_ok,
+    )
+    .await;
+
+    // Distinct export targets: two pairs, so no cohort, and each peer is a
+    // batch of one in the walk, A's first.
+    let targets = [(a, 2), (b, 3)]
+        .into_iter()
+        .map(|(address, depth)| ResolvedPeerPolicy {
+            address,
+            interface: None,
+            import_policy: Some(candidate_import.clone()),
+            export_policy: Some(distinct_deny_policy_chain(depth)),
+        })
+        .collect();
+    let failure = mgr
+        .apply_resolved_policy_snapshot_classified(targets, true)
+        .await
+        .expect_err("B's batch is refused");
+    assert!(
+        failure.message().contains("export batch refused"),
+        "the walk failed at B's batch: {}",
+        failure.message()
+    );
+    assert_eq!(
+        mgr.peers[&key(a)].import_policy.as_ref(),
+        Some(&prior_import),
+        "A's completed unit is rolled back too"
+    );
+
+    assert_failed_rollback_refresh_keeps_obligation(
+        &mut mgr,
+        &rib_tx,
+        &failure,
+        b,
+        (prior_import, prior_export),
+        &refresh_ok,
+    )
+    .await;
+    drop(outbound);
+    drop(mgr);
+    relay.abort();
+}
+
+/// Two peers share one export move and both change their import chain, so
+/// they apply as a cohort: each session takes the candidate import chain
+/// during setup, and peer B accepts a route under it. The cohort's RIB
+/// transition is refused and the cohort rolls back. B's rollback Route
+/// Refresh fails.
+#[tokio::test]
+async fn failed_rollback_refresh_after_refused_cohort_is_not_exact() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let (rib_tx, relay) =
+        refusing_rib_relay(|update| matches!(update, RibUpdate::ReplacePeerExportPolicies { .. }));
+    let prior_import = deny_policy_chain();
+    let candidate_import = validation_policy_chain(ImportValidationDependency::Rpki);
+    let prior_export = distinct_deny_policy_chain(1);
+    let refresh_ok = Arc::new(AtomicBool::new(false));
+    let (mut mgr, [a, b], outbound) = two_peer_rollback_fixture(
+        &rib_tx,
+        &prior_import,
+        &candidate_import,
+        &prior_export,
+        &refresh_ok,
+    )
+    .await;
+
+    let next_export = distinct_deny_policy_chain(2);
+    let targets = [a, b]
+        .into_iter()
+        .map(|address| ResolvedPeerPolicy {
+            address,
+            interface: None,
+            import_policy: Some(candidate_import.clone()),
+            export_policy: Some(next_export.clone()),
+        })
+        .collect();
+    let failure = mgr
+        .apply_resolved_policy_snapshot_classified(targets, true)
+        .await
+        .expect_err("the cohort transition is refused");
+    assert!(
+        failure.message().contains("export cohort refused"),
+        "the cohort failed at its RIB transition: {}",
+        failure.message()
+    );
+
+    assert_failed_rollback_refresh_keeps_obligation(
+        &mut mgr,
+        &rib_tx,
+        &failure,
+        b,
+        (prior_import, prior_export),
+        &refresh_ok,
+    )
+    .await;
+    drop(outbound);
+    drop(mgr);
+    relay.abort();
+}

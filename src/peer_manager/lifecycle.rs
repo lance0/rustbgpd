@@ -3470,6 +3470,7 @@ impl PeerManager {
             error: PeerLifecycleError::NotFound(peer.clone()),
             delivery_began: false,
             acknowledgement_lost: false,
+            unsupported: false,
         })?;
         Ok(SoftResetTarget {
             address: peer.address,
@@ -3538,6 +3539,7 @@ impl SoftResetTarget {
                         )),
                         delivery_began,
                         acknowledgement_lost,
+                        unsupported: matches!(e, PeerCommandError::RouteRefreshUnsupported),
                     });
                 }
             }
@@ -3559,6 +3561,8 @@ pub(super) struct SoftResetFailure {
     /// A command may have been accepted without an authoritative reply. Keep
     /// this distinct from a definite rejection after earlier family delivery.
     pub(super) acknowledgement_lost: bool,
+    /// The session did not negotiate Route Refresh, so no retry can succeed.
+    pub(super) unsupported: bool,
 }
 
 /// The admin state a reload or reshape must apply to `managed` for `next`,
