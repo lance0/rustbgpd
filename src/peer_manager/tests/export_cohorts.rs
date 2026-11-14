@@ -3110,7 +3110,12 @@ async fn remainder_pair_deferred_refresh_failure_rolls_the_walk_back() {
         result.as_ref().is_err_and(|error| {
             error.contains(&format!("failed to apply resolved policy to {}", pair[1]))
                 && error.contains("route refresh: ")
-                && error.contains("already-applied peers restored")
+                // The rejecting member's session ran the candidate import
+                // chain and its rollback refresh failed too: not exact.
+                && error.contains(&format!(
+                    "restoring already-applied peers also failed: {}: Route Refresh under the restored import policy failed",
+                    pair[1]
+                ))
                 && error.contains("committed cohort restored")
         }),
         "a failed deferred refresh must roll the walk back: {result:?}"
@@ -3120,6 +3125,11 @@ async fn remainder_pair_deferred_refresh_failure_rolls_the_walk_back() {
         assert!(
             state.export_policy.is_none() && state.import_policy.is_none(),
             "{address} must finish on its prior chains"
+        );
+        assert_eq!(
+            state.pending_refresh,
+            address == pair[1],
+            "{address}: only the member whose rollback refresh failed keeps its obligation"
         );
         manager.delete_peer(key(address), false).await.unwrap();
     }
