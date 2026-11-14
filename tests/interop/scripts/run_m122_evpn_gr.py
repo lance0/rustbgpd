@@ -6,6 +6,7 @@ import hashlib
 import os
 import re
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -20,6 +21,8 @@ CAPTURE = f"clab-{LAB}-capture"
 OUT = Path(os.environ.get("M122_OUT", "/tmp/m122-evpn-gr-rr")).resolve()
 TOOLS = os.environ.get("M122_TOOLS_IMAGE", "rustbgpd:m122-tools")
 IFACE = os.environ.get("M122_SOURCE_INTERFACE", "eth1")
+CAPTURE_FIELDS = ("-r", "/out/capture.pcap", "-Y", "tcp.len > 0", "-T", "fields",
+                  "-e", "tcp.stream", "-e", "ip.src", "-e", "ip.dst", "-e", "tcp.seq_raw", "-e", "tcp.payload")
 
 
 def command(*args):
@@ -123,10 +126,40 @@ def snapshot(phase, sets, llgr=False):
 
 
 def payloads():
-    text = docker(CAPTURE, "tshark", "-r", "/out/capture.pcap", "-Y", "tcp.len > 0", "-T", "fields",
-                  "-e", "tcp.stream", "-e", "ip.src", "-e", "ip.dst", "-e", "tcp.seq_raw", "-e", "tcp.payload")
+    text = docker(CAPTURE, "tshark", *CAPTURE_FIELDS)
     (OUT / "capture.tsv").write_text(text)
     return text.splitlines()
+
+
+def collect_evidence():
+    def retain(args, destination=None):
+        try:
+            result = subprocess.run(args, text=True, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT if destination == "capture.log" else subprocess.PIPE,
+                                    check=True, timeout=15)
+            if destination:
+                (OUT / destination).write_text(result.stdout)
+            return result
+        except (OSError, subprocess.SubprocessError) as error:
+            print(f"WARNING: M122 evidence collection failed: {error}", file=sys.stderr)
+            return None
+
+    retain(["docker", "kill", "--signal", "SIGINT", CAPTURE])
+    flushed = retain(["docker", "wait", CAPTURE])
+    # A live sample must not masquerade as the final capture if extraction fails.
+    try:
+        (OUT / "capture.tsv").unlink(missing_ok=True)
+    except OSError as error:
+        print(f"WARNING: cannot remove stale M122 capture TSV: {error}", file=sys.stderr)
+    if flushed is not None:
+        retain(["docker", "run", "--rm", "--network", "none", "-v", f"{OUT}:/out:ro",
+                TOOLS, "tshark", *CAPTURE_FIELDS], "capture.tsv")
+    retain(["docker", "logs", CAPTURE], "capture.log")
+    for container, source, destination in ((REFLECTOR, "rustbgpd.log", "rr.log"),
+                                           (PE, "gobgpd.log", "source.log"),
+                                           (SINK, "gobgpd.log", "client.log")):
+        retain(["docker", "cp", f"{container}:/tmp/{source}", str(OUT / destination)])
+    retain(["docker", "rm", "-f", CAPTURE])
 
 
 def live_admission(lines):
@@ -212,13 +245,7 @@ def run():
                               "llgr_routes": 5, "expired_routes": 5, "route_types": [1, 2, 3, 4, 5], "client_flaps": 0})
         print("PASS M122 EVPN GR/EoR/LLGR Types 1–5", flush=True)
     finally:
-        for container in (REFLECTOR, PE, SINK):
-            subprocess.run(["docker", "cp", f"{container}:/tmp/" + ("rustbgpd.log" if container == REFLECTOR else "gobgpd.log"), str(OUT / ("rr.log" if container == REFLECTOR else "source.log" if container == PE else "client.log"))], capture_output=True)
-        subprocess.run(["docker", "kill", "--signal", "SIGINT", CAPTURE], capture_output=True)
-        subprocess.run(["docker", "wait", CAPTURE], capture_output=True, timeout=15)
-        captured = subprocess.run(["docker", "logs", CAPTURE], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=15)
-        (OUT / "capture.log").write_text(captured.stdout)
-        subprocess.run(["docker", "rm", "-f", CAPTURE], capture_output=True)
+        collect_evidence()
 
 
 if __name__ == "__main__":

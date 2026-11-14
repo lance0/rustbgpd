@@ -5,7 +5,9 @@ import copy
 import ipaddress
 import struct
 import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import m122_evpn_gr_oracle as oracle
@@ -81,6 +83,42 @@ def rr_fixture():
 
 
 class OracleTests(unittest.TestCase):
+    def test_driver_failure_collects_final_tsv_and_logs(self):
+        for stale, extraction_fails in ((False, False), (True, False), (True, True)):
+            with self.subTest(stale=stale, extraction_fails=extraction_fails), tempfile.TemporaryDirectory() as directory:
+                out = Path(directory)
+                if stale:
+                    (out / "capture.tsv").write_text("old live sample")
+                calls = []
+
+                def run_command(args, *, calls=calls, extraction_fails=extraction_fails, **_kwargs):
+                    calls.append(args)
+                    if args[1] == "run":
+                        self.assertIn(["docker", "wait", runner.CAPTURE], calls[:-1])
+                        if extraction_fails:
+                            raise subprocess.CalledProcessError(1, args)
+                        return subprocess.CompletedProcess(args, 0, stdout="final flushed capture\n")
+                    if args[1] == "cp":
+                        Path(args[-1]).write_text("daemon log\n")
+                    return subprocess.CompletedProcess(args, 0, stdout="capture diagnostics\n")
+
+                original = ValueError("early driver failure")
+                with patch.object(runner, "OUT", out), \
+                        patch.object(runner, "provenance"), \
+                        patch.object(runner, "command", return_value=""), \
+                        patch.object(runner, "wait", side_effect=original), \
+                        patch.object(runner.subprocess, "run", side_effect=run_command):
+                    with self.assertRaises(ValueError) as raised:
+                        runner.run()
+                    self.assertIs(raised.exception, original)
+                if extraction_fails:
+                    self.assertFalse((out / "capture.tsv").exists())
+                else:
+                    self.assertEqual((out / "capture.tsv").read_text(), "final flushed capture\n")
+                for name in ("capture.log", "rr.log", "source.log", "client.log"):
+                    self.assertTrue((out / name).read_text())
+                self.assertEqual(calls[-1], ["docker", "rm", "-f", runner.CAPTURE])
+
     def test_ten_unique_routes_and_complete_lifecycle(self):
         self.assertEqual(len(oracle.expected_nlri([1, 2])), 10)
         result = oracle.analyze_wire(fixture())
