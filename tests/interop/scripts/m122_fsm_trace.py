@@ -29,7 +29,9 @@ def parse_logs(logs):
                 row = json.loads(line)
             except json.JSONDecodeError as error:
                 raise ValueError(f"{name}:{ordinal}: incomplete/non-JSON daemon log") from error
+            need(isinstance(row, dict), f"{name}:{ordinal}: daemon log record is not an object")
             fields = row.get("fields", {})
+            need(isinstance(fields, dict), f"{name}:{ordinal}: daemon log fields are not an object")
             message = fields.get("message")
             event = None
             if row.get("msg") == "M122 FSM trace":

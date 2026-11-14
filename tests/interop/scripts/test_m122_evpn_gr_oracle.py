@@ -132,14 +132,17 @@ def rr_fixture():
 
 class OracleTests(unittest.TestCase):
     def test_driver_failure_collects_final_tsv_and_logs(self):
-        for stale, extraction_fails in ((False, False), (True, False), (True, True)):
-            with self.subTest(stale=stale, extraction_fails=extraction_fails), tempfile.TemporaryDirectory() as directory:
+        cases = ((False, False, "daemon log\n"), (True, False, "daemon log\n"),
+                 (True, True, "daemon log\n"), (False, False, "null\n"),
+                 (False, False, '{"fields": null}\n'))
+        for stale, extraction_fails, daemon_log in cases:
+            with self.subTest(stale=stale, extraction_fails=extraction_fails, daemon_log=daemon_log), tempfile.TemporaryDirectory() as directory:
                 out = Path(directory)
                 if stale:
                     (out / "capture.tsv").write_text("old live sample")
                 calls = []
 
-                def run_command(args, *, calls=calls, extraction_fails=extraction_fails, **_kwargs):
+                def run_command(args, *, calls=calls, extraction_fails=extraction_fails, daemon_log=daemon_log, **_kwargs):
                     calls.append(args)
                     if args[1] == "run":
                         self.assertIn(["docker", "wait", runner.CAPTURE], calls[:-1])
@@ -149,7 +152,7 @@ class OracleTests(unittest.TestCase):
                     if args[1] == "wait":
                         return subprocess.CompletedProcess(args, 0, stdout="0\n")
                     if args[1] == "cp":
-                        Path(args[-1]).write_text("daemon log\n")
+                        Path(args[-1]).write_text(daemon_log)
                     return subprocess.CompletedProcess(args, 0, stdout="capture diagnostics\n")
 
                 original = ValueError("early driver failure")
