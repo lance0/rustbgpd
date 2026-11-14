@@ -11,8 +11,12 @@
   still stale from the earlier restart, marks the replaced session's
   routes stale, and keeps long-lived-stale routes (RFC 9494 section 4.2);
   the replacement's End-of-RIB or the stale-routes timer removes what it
-  does not re-announce. An in-order end, a replacement without graceful
-  restart, and an unnamed connection collision are handled as before.
+  does not re-announce. Families the replaced session had already
+  completed with End-of-RIB, or that the first graceful-restart capability
+  did not list, are withdrawn at that point rather than held stale, until
+  the replacement re-announces them. An in-order end, a replacement
+  without graceful restart, and an unnamed connection collision are
+  handled as before.
   **Operator-visible:** routes from a replaced session during
   graceful-restart recovery no longer stay advertised after the new
   session's End-of-RIB.

@@ -2008,8 +2008,13 @@ impl RibManager {
         // be queued behind this `PeerUp` and will be discarded, so the
         // consecutive-restart mark is applied here: routes already stale are
         // deleted, its routes become stale, and this session's End-of-RIB or
-        // the stale timer removes what it does not re-announce. Only an
-        // unnamed collision during retention leaves the routes untouched.
+        // the stale timer removes what it does not re-announce. The marked
+        // set is the families still awaited from the first restart, not
+        // the replaced session's own GR families: a family it already
+        // completed with End-of-RIB, or one it negotiated that the first
+        // GR capability did not list, is withdrawn here rather than held
+        // stale, until the replacement re-announces it. Only an unnamed
+        // collision during retention leaves the routes untouched.
         if self.outbound_peers.contains_key(&peer)
             || self.pending_initial_registrations.contains(&peer)
         {

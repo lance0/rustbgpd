@@ -808,9 +808,11 @@ fn replacement_before_the_end_without_restart_clears_the_table() {
 }
 
 /// The reconnect's end delivered before its replacement's `PeerUp`: the
-/// end does the work and the `PeerUp` finds no registered session to mark.
-/// Mutation-red: marking at every superseding `PeerUp` during retention
-/// deletes route 2 as already stale.
+/// end does the work and the `PeerUp` finds no registered sender, so the
+/// reset block is never entered. Mutation-red only for a mark placed
+/// outside that block (at every superseding `PeerUp` during retention),
+/// which deletes route 2 as already stale; a weakened registered-session
+/// check inside the block cannot reach this order.
 #[test]
 fn in_order_end_then_replacement_is_unchanged() {
     let reconnect = || {
@@ -894,4 +896,22 @@ fn unnamed_collision_during_retention_is_unchanged() {
     peer_up(&mut manager, 3);
     assert_eq!(held(&manager, 2), Some((false, false, true)));
     assert_eq!(live(&manager), [2, 3]);
+}
+
+/// A `PeerUp` that names a session other than the registered one retires
+/// only that record; the registered session is still live, so its routes
+/// are not marked.
+/// Mutation-red: marking whenever the `PeerUp` names any session makes
+/// route 2 stale.
+#[test]
+fn replacement_naming_an_unregistered_session_leaves_the_registered_routes_fresh() {
+    let mut manager = test_manager();
+    peer_up(&mut manager, 1);
+    announce(&mut manager, 1, 1);
+    restart(&mut manager, 1);
+    peer_up(&mut manager, 2);
+    announce(&mut manager, 2, 2);
+    peer_up_superseding(&mut manager, 3, Some(1));
+    assert_eq!(held(&manager, 1), Some((true, false, true)));
+    assert_eq!(held(&manager, 2), Some((false, false, true)));
 }
