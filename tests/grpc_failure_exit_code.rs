@@ -1457,6 +1457,46 @@ fn rpki_forwarder_panic_keeps_bgp_up_and_forwards_the_table_again() {
 }
 
 #[test]
+fn sigterm_while_a_cache_is_resync_pending_exits_zero() {
+    use rustbgpd_rpki::rtr_codec::{RTR_VERSION_2, RtrPdu};
+
+    let mut f = RpkiFaultDaemon::start("vrp_manager_precommit_panic", 2);
+    let mut frame = Vec::new();
+    RtrPdu::SerialNotify {
+        session_id: 7,
+        serial: 101,
+    }
+    .encode_with_version(&mut frame, RTR_VERSION_2)
+    .unwrap();
+    f.rtr[0].write_all(&frame).expect("write Serial Notify");
+    assert_eq!(
+        read_rtr_pdu(&mut f.rtr[0]),
+        RtrPdu::SerialQuery {
+            session_id: 7,
+            serial: 100,
+        }
+    );
+    // Both initial tables have committed. This third update is lost before
+    // commit, and the real client must ask for the full table it now owes.
+    write_rtr_full_table(&mut f.rtr[0], 101);
+    f.wait_for_metric(&f.cache_row("bgp_rpki_cache_resync_pending", 0, 1));
+    assert_eq!(read_rtr_pdu(&mut f.rtr[0]), RtrPdu::ResetQuery);
+    let after = f.wait_for_metric("bgp_rpki_task_restarts_total{task=\"vrp_manager\"} 1");
+    for expected in [
+        f.cache_row("bgp_rpki_cache_resync_pending", 0, 1),
+        f.cache_row("bgp_rpki_cache_resync_pending", 1, 0),
+        f.cache_row("bgp_rpki_cache_end_of_data_ready", 0, 1),
+        "bgp_rpki_vrp_count{afi=\"ipv4\"} 1".to_string(),
+    ] {
+        assert!(after.contains(&expected), "missing {expected}\n{after}");
+    }
+    f.assert_routing_untouched();
+    // Leave the Reset Query unanswered, so shutdown settles while the cache
+    // is still pending rather than after a successful resynchronization.
+    f.assert_clean_stop();
+}
+
+#[test]
 fn rpki_manager_panic_is_attributed_and_exits_nonzero() {
     let temp = private_tempdir();
     let config_path = write_rpki_fault_config(temp.path());

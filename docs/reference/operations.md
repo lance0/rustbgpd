@@ -1639,15 +1639,25 @@ the interrupted table arrived, that one pass revalidates every route; states
 change only where the table really differs. The shipped `RpkiTaskRestarted`
 rule fires on any increase of the counter, and `RpkiCacheResyncPending` when a
 cache stays pending for 15 minutes. `rbgp doctor` flags these panic reports
-too, as described above.
+too, as described above. A panic in the restart-counter observer costs only
+that notification; it does not interrupt table recovery.
 
-The daemon still treats as fatal: a panic of the VRP manager outside the
-handling of one message; a second panic while it repeats a lost flush or
-expiry, when the tables cannot be rebuilt without that cache and nothing could
-make its data leave on time; a VRP manager or forwarder task that returns; and
-an RTR client task that ends despite its restart. It logs
-`RPKI subsystem task exited unexpectedly`, performs the ordinary coordinated
-shutdown, and exits 1 for `Restart=on-failure`. Ordinary cache connection
+Recovery is limited to boundaries where the retained state remains usable.
+The daemon still treats these failures as fatal:
+
+- A VRP manager panic outside its per-message and read-only inventory-query
+  handlers: there is no proved checkpoint to resume from.
+- A second panic while removing expired or flushed cache data: the manager
+  cannot ensure the data leaves on time.
+- A forwarder failure while reconstructing a full table, whether receiving
+  an update, draining during backoff or redelivering: recovery cannot safely
+  substitute an older table for the newest one.
+- A manager, forwarder or RTR client task that returns unexpectedly: its
+  channels, delivery or expiry duties no longer have a live owner.
+
+These failures log
+`RPKI subsystem task exited unexpectedly`, perform the ordinary coordinated
+shutdown, and exit 1 for `Restart=on-failure`. Ordinary cache connection
 failures and data expiry continue through the retry behavior below.
 
 The daemon emits exactly one structured fatal receipt. `task` and `outcome`

@@ -2623,7 +2623,9 @@ fn merge_aspa_table_updates(
 /// being forwarded may or may not have reached the RIB and the sessions, so
 /// after a [`rustbgpd_api::restart::RestartBackoff`] delay the latest table received is forwarded
 /// again as `full` builds it: a full re-evaluation, which reaches the right
-/// state whatever the RIB last applied. `on_restart` is told of each panic.
+/// state whatever the RIB last applied. A panic in `full` is fatal because
+/// the newest complete table cannot be retained for recovery. `on_restart`
+/// is told of each recovered panic; failure of that observer is isolated.
 async fn forward_validation_cache<U>(
     mut updates: mpsc::Receiver<U>,
     rib_tx: mpsc::Sender<RibUpdate>,
@@ -2651,7 +2653,11 @@ async fn forward_validation_cache<U>(
                 tokio::select! {
                     update = updates.recv(), if open => match update {
                         Some(update) => {
-                            latest = Some(full(&update));
+                            // Losing the newest table cannot be repaired by
+                            // redelivering an older one.
+                            latest = Some(std::panic::catch_unwind(
+                                std::panic::AssertUnwindSafe(|| full(&update)),
+                            )?);
                             pending = Some(merge(pending.take(), update));
                         }
                         None => open = false,
@@ -2667,6 +2673,7 @@ async fn forward_validation_cache<U>(
                     outcome = refresh.finished() => refresh.complete(outcome).await,
                 }
             }
+            Ok::<(), Box<dyn std::any::Any + Send>>(())
         };
         // Unwind safety: the panicked future is not polled again. What it
         // borrowed is rebuilt or self-correcting: `pending` is replaced
@@ -2675,14 +2682,13 @@ async fn forward_validation_cache<U>(
         // semaphore, and one already sent stays with the RIB; the refresh
         // queue holds at most a reply receiver and a pending delta, and the
         // full pass that follows covers any delta it lost.
-        if std::panic::AssertUnwindSafe(forward)
-            .catch_unwind()
-            .await
-            .is_ok()
-        {
-            return;
+        match std::panic::AssertUnwindSafe(forward).catch_unwind().await {
+            Ok(Ok(())) => return,
+            Ok(Err(panic)) => std::panic::resume_unwind(panic),
+            Err(_) => {}
         }
-        on_restart();
+        // Counter reporting owns no delivery state.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(&on_restart));
         let delay = backoff.next_delay(started.elapsed());
         error!(
             restart_in_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
@@ -4213,8 +4219,9 @@ const TEST_METRICS_LISTENER_UNUSABLE_ENV: &str = "RUSTBGPD_TEST_METRICS_LISTENER
 /// of the first cache's RTR client; `vrp_manager_panic`, which panics the
 /// manager's task outside what it recovers from; `vrp_manager_update_panic`,
 /// which panics the manager while it handles the second End of Data it
-/// accepts; and `vrp_forwarder_panic`, which panics the VRP forwarder on the
-/// second table it forwards. All others are ignored without echoing them.
+/// accepts; `vrp_manager_precommit_panic`, which loses the third data update
+/// before it is applied; and `vrp_forwarder_panic`, which panics the VRP
+/// forwarder on the second table it forwards. All others are ignored without echoing them.
 const TEST_RPKI_TASK_EXIT_ENV: &str = "RUSTBGPD_TEST_RPKI_TASK_EXIT";
 
 /// One aggregate budget to abort and account for every RPKI task after the
@@ -4269,11 +4276,15 @@ fn resolve_test_rpki_task_exit() -> Option<TestRpkiTaskExit> {
         Ok(value) if value == "vrp_manager_update_panic" => {
             Some(TestRpkiTaskExit::VrpManagerUpdate)
         }
+        Ok(value) if value == "vrp_manager_precommit_panic" => {
+            Some(TestRpkiTaskExit::VrpManagerPrecommit)
+        }
         Ok(value) if value == "vrp_forwarder_panic" => Some(TestRpkiTaskExit::VrpForwarder),
         Ok(_) | Err(std::env::VarError::NotUnicode(_)) => {
             warn!(
                 "ignoring invalid {TEST_RPKI_TASK_EXIT_ENV}; expected rtr_client_panic, \
-                 vrp_manager_panic, vrp_manager_update_panic or vrp_forwarder_panic"
+                 vrp_manager_panic, vrp_manager_update_panic, vrp_manager_precommit_panic \
+                 or vrp_forwarder_panic"
             );
             None
         }
@@ -4285,6 +4296,7 @@ enum TestRpkiTaskExit {
     RtrClient,
     VrpManager,
     VrpManagerUpdate,
+    VrpManagerPrecommit,
     VrpForwarder,
 }
 
@@ -5728,6 +5740,11 @@ async fn run<T>(
             &configured_cache_addrs,
             test_rpki_task_exit == Some(TestRpkiTaskExit::VrpManagerUpdate),
         );
+        let vrp_mgr = if test_rpki_task_exit == Some(TestRpkiTaskExit::VrpManagerPrecommit) {
+            vrp_mgr.with_test_precommit_panic_on(3)
+        } else {
+            vrp_mgr
+        };
         let mut rpki_tasks = JoinSet::new();
         let mut rpki_task_registry = BTreeMap::new();
         let handle = rpki_tasks.spawn(async move {
@@ -9379,7 +9396,7 @@ mod tests {
         mpsc::Receiver<PeerManagerCommand>,
     ) {
         let (updates_tx, rib_rx, peer_mgr_rx, _restarts) =
-            spawn_vrp_forwarder_panicking_on(rib_capacity, None);
+            spawn_vrp_forwarder_panicking_on(rib_capacity, None, false);
         (updates_tx, rib_rx, peer_mgr_rx)
     }
 
@@ -9388,6 +9405,7 @@ mod tests {
     fn spawn_vrp_forwarder_panicking_on(
         rib_capacity: usize,
         panic_on: Option<usize>,
+        panic_on_restart: bool,
     ) -> (
         mpsc::Sender<rustbgpd_rpki::RpkiTableUpdate>,
         mpsc::Receiver<RibUpdate>,
@@ -9429,6 +9447,7 @@ mod tests {
             },
             move || {
                 restart_count.fetch_add(1, Ordering::SeqCst);
+                assert!(!panic_on_restart, "injected restart observer panic");
             },
         ));
         (updates_tx, rib_rx, peer_mgr_rx, restarts)
@@ -9459,7 +9478,7 @@ mod tests {
         let delta = || Some(vec![vrp(24)]);
 
         let (updates_tx, mut rib_rx, _peer_mgr_rx, restarts) =
-            spawn_vrp_forwarder_panicking_on(8, Some(2));
+            spawn_vrp_forwarder_panicking_on(8, Some(2), false);
         let first = vrp_table(65_001, 2);
         let table = Arc::clone(&first);
         updates_tx
@@ -9494,6 +9513,108 @@ mod tests {
         assert!(Arc::ptr_eq(&table, &third));
         assert_eq!(forwarded_delta, delta());
         assert_eq!(restarts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn forwarder_restart_observer_panic_does_not_interrupt_redelivery() {
+        let (updates, mut rib_rx, _peer_mgr_rx, restarts) =
+            spawn_vrp_forwarder_panicking_on(1, Some(1), true);
+        let table = vrp_table(65_001, 2);
+        updates
+            .send(rustbgpd_rpki::RpkiTableUpdate {
+                table: Arc::clone(&table),
+                delta: Some(vec![vrp(24)]),
+            })
+            .await
+            .unwrap();
+        let recovered = tokio::time::timeout(Duration::from_secs(1), rib_rx.recv())
+            .await
+            .expect("redelivery after backoff")
+            .expect("forwarder remains running");
+        let RibUpdate::RpkiCacheUpdate {
+            table: received,
+            delta,
+            ..
+        } = recovered
+        else {
+            panic!("expected a VRP table");
+        };
+        assert!(Arc::ptr_eq(&table, &received));
+        assert_eq!(delta, None);
+        assert_eq!(restarts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum FullCallbackFault {
+        Receive,
+        Backoff,
+        Redelivery,
+    }
+
+    async fn assert_full_callback_fault_ends_forwarder(boundary: FullCallbackFault) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (updates_tx, updates_rx) = mpsc::channel(1);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let (peer_tx, _peer_rx) = mpsc::channel(1);
+        let (restarted_tx, mut restarted_rx) = mpsc::unbounded_channel();
+        let full_calls = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::clone(&full_calls);
+        let task = tokio::spawn(forward_validation_cache(
+            updates_rx,
+            rib_tx,
+            peer_tx,
+            |_, newer: u8| newer,
+            |_, _| panic!("injected forwarding panic"),
+            move |update| {
+                let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                assert!(
+                    !(boundary == FullCallbackFault::Receive
+                        || (boundary == FullCallbackFault::Backoff && *update == 2)
+                        || (boundary == FullCallbackFault::Redelivery && call == 2)),
+                    "injected full callback panic"
+                );
+                *update
+            },
+            move || {
+                let _ = restarted_tx.send(());
+            },
+        ));
+        updates_tx.send(1).await.unwrap();
+        if boundary == FullCallbackFault::Backoff {
+            restarted_rx
+                .recv()
+                .await
+                .expect("forwarding entered backoff");
+            updates_tx.send(2).await.unwrap();
+        }
+        let error = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("a broken full-table reconstruction ends the task")
+            .unwrap_err();
+        assert!(error.is_panic());
+        assert_eq!(
+            full_calls.load(Ordering::SeqCst),
+            if boundary == FullCallbackFault::Receive {
+                1
+            } else {
+                2
+            }
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn full_callback_panic_on_receive_ends_the_forwarder() {
+        assert_full_callback_fault_ends_forwarder(FullCallbackFault::Receive).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn full_callback_panic_during_backoff_ends_the_forwarder() {
+        assert_full_callback_fault_ends_forwarder(FullCallbackFault::Backoff).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn full_callback_panic_at_redelivery_ends_the_forwarder() {
+        assert_full_callback_fault_ends_forwarder(FullCallbackFault::Redelivery).await;
     }
 
     /// A RIB that stops reading does not make the forwarder queue one whole
@@ -10491,6 +10612,44 @@ mod tests {
             task: RpkiTaskKind::VrpManager,
             outcome: RpkiTaskExitOutcome::Panicked,
         }));
+    }
+
+    #[tokio::test]
+    async fn an_unexpected_return_of_each_rpki_task_notifies_shutdown_and_aborts_the_rest() {
+        for kind in [
+            RpkiTaskKind::VrpManager,
+            RpkiTaskKind::VrpForwarder,
+            RpkiTaskKind::AspaForwarder,
+            RpkiTaskKind::RtrClient,
+        ] {
+            let mut tasks = JoinSet::new();
+            let mut registry = BTreeMap::new();
+            let (held_tx, held_rx) = oneshot::channel::<()>();
+            let (started_tx, started_rx) = oneshot::channel();
+            let _ = spawn_rpki_test_task(
+                &mut tasks,
+                &mut registry,
+                RpkiTaskKind::RtrClient,
+                async move {
+                    let _hold = held_rx;
+                    started_tx.send(()).unwrap();
+                    std::future::pending::<()>().await;
+                },
+            );
+            started_rx.await.unwrap();
+            let _ = spawn_rpki_test_task(&mut tasks, &mut registry, kind, async {});
+            let (notice_tx, notice_rx) = oneshot::channel();
+            let report =
+                supervise_rpki_tasks(tasks, registry, notice_tx, Duration::from_secs(1)).await;
+            let notice = notice_rx
+                .await
+                .expect("every unexpected return initiates shutdown");
+            assert_eq!(notice.fallback.primary(), (kind.label(), "returned"));
+            assert_eq!(report.primary(), (kind.label(), "returned"));
+            assert!(report.resolution_complete);
+            assert_eq!(report.remaining_count, 0);
+            assert!(held_tx.is_closed(), "the other task was aborted");
+        }
     }
 
     #[tokio::test]
