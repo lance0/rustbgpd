@@ -1656,8 +1656,8 @@ The daemon still treats these failures as fatal:
   channels, delivery or expiry duties no longer have a live owner.
 
 These failures log
-`RPKI subsystem task exited unexpectedly`, performs the ordinary coordinated
-shutdown, and exits 1 for `Restart=on-failure`. Ordinary cache connection
+`RPKI subsystem task exited unexpectedly`, perform the ordinary coordinated
+shutdown, and exit 1 for `Restart=on-failure`. Ordinary cache connection
 failures and data expiry continue through the retry behavior below.
 
 The daemon emits exactly one structured fatal receipt. `task` and `outcome`
