@@ -2463,6 +2463,8 @@ jobs:
             ${{ runner.temp }}/m122-evidence/rr.log
             ${{ runner.temp }}/m122-evidence/source.log
             ${{ runner.temp }}/m122-evidence/client.log
+          if-no-files-found: warn
+          retention-days: 14
 
   m125:
     needs: [prime_dev_image]
