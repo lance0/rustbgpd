@@ -3470,7 +3470,7 @@ impl PeerManager {
             error: PeerLifecycleError::NotFound(peer.clone()),
             delivery_began: false,
             acknowledgement_lost: false,
-            unsupported: false,
+            session: SoftResetSession::Live,
         })?;
         Ok(SoftResetTarget {
             address: peer.address,
@@ -3539,7 +3539,16 @@ impl SoftResetTarget {
                         )),
                         delivery_began,
                         acknowledgement_lost,
-                        unsupported: matches!(e, PeerCommandError::RouteRefreshUnsupported),
+                        session: match e {
+                            PeerCommandError::RouteRefreshUnsupported => {
+                                SoftResetSession::Unsupported
+                            }
+                            PeerCommandError::SessionExited
+                            | PeerCommandError::ReplyDropped
+                            | PeerCommandError::NotEstablished
+                            | PeerCommandError::SendFailed(_) => SoftResetSession::Ending,
+                            _ => SoftResetSession::Live,
+                        },
                     });
                 }
             }
@@ -3561,8 +3570,23 @@ pub(super) struct SoftResetFailure {
     /// A command may have been accepted without an authoritative reply. Keep
     /// this distinct from a definite rejection after earlier family delivery.
     pub(super) acknowledgement_lost: bool,
-    /// The session did not negotiate Route Refresh, so no retry can succeed.
-    pub(super) unsupported: bool,
+    /// What the failure says about the session.
+    pub(super) session: SoftResetSession,
+}
+
+/// The session a failed Route Refresh was addressed to, as its failure shows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SoftResetSession {
+    /// It may still be up and holding what it accepted (a timeout, or any
+    /// other failure).
+    Live,
+    /// It did not negotiate Route Refresh, so no retry can succeed.
+    Unsupported,
+    /// It is ending: its task exited or dropped the reply, it is no longer
+    /// Established, or its writer closed (the priority queue is unbounded,
+    /// so a failed enqueue means a closed writer). Its routes leave the RIB
+    /// with its `PeerDown`.
+    Ending,
 }
 
 /// The admin state a reload or reshape must apply to `managed` for `next`,

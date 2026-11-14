@@ -556,7 +556,12 @@ detached), with a few semantics of its own:
   after the restore last completed a RIB command, so a slow restore that keeps
   completing commands is waited for, inside the owner's settlement budget. A
   stalled restore stays daemon-owned after that wait, but an unproved repair
-  remains `known_divergence` and takes the normal recovery-fence path.
+  remains `known_divergence` and takes the normal recovery-fence path. A
+  rollback Route Refresh that a live session leaves unanswered is retried
+  once from the same two seconds; if it still fails, routes the candidate
+  import policy accepted may remain, and the rollback fences the same way. A
+  refresh refused because the session is ending, or by a peer without Route
+  Refresh, is not counted as remaining routes.
 - **What changed versus the pre-watchdog daemon:** a reload whose
   acknowledgements are lost, or whose reconcile result is not
   authoritative, now fences and exits 70 instead of logging an error

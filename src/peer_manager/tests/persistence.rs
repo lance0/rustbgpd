@@ -1101,10 +1101,12 @@ async fn rollback_arms_retry_when_a_partially_delivered_refresh_cannot_be_undone
         }])
         .await
         .expect_err("a failed Route Refresh fails the forward apply");
+    // A refused send means a closed writer: the session is ending and its
+    // routes leave with it, so this caller's rollback is not fenced, but the
+    // retry intent stays armed.
     assert!(
-        error.contains("restoring already-applied peers also failed")
-            && error.contains("Route Refresh under the restored import policy failed"),
-        "the rollback refresh failed, so the restore is not exact: {error}"
+        error.contains("already-applied peers restored"),
+        "the forward failure must have rolled back: {error}"
     );
     assert!(
         ipv4_refreshes.load(Ordering::SeqCst) >= 1,

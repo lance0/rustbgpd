@@ -3308,9 +3308,15 @@ impl PeerManager {
         }
     }
 
-    /// Returns whether the peer's Route Refresh was sent and failed on a
-    /// session that negotiated Route Refresh.
-    async fn finish_policy_rollback_refresh(&mut self, plan: &PolicyRollbackPeerPlan) -> bool {
+    /// Returns whether the peer's Route Refresh failed on a session that may
+    /// still be up and holding what it accepted: not one positively observed
+    /// down, ending, or without the Route Refresh capability.
+    async fn finish_policy_rollback_refresh(
+        &mut self,
+        plan: &PolicyRollbackPeerPlan,
+        window: &mut CleanStateQueryWindow,
+        operator_reads: OperatorReadAdmission,
+    ) -> bool {
         let Some(refresh_failure) = plan.refresh_failure else {
             return false;
         };
@@ -3322,10 +3328,23 @@ impl PeerManager {
             self.adopt_policies_of_held_task_exit(&plan.peer_key, import.as_ref(), export.as_ref());
             return false;
         }
+        let unrefreshed_pending = match refresh_failure {
+            RefreshFailureHandling::Fatal | RefreshFailureHandling::BestEffortRearm => true,
+            RefreshFailureHandling::BestEffortRestorePrior { pending_refresh } => pending_refresh,
+        };
+        // Only a session the probe positively saw down is skipped: its
+        // `PeerDown` takes what it accepted. An ambiguous probe (timed out, or
+        // the session task gone) is answered by the refresh itself.
+        let known_down = self
+            .peers
+            .get(&plan.peer_key)
+            .is_some_and(|managed| managed.policy_known_down);
         let mut failed = false;
-        let pending_after = if plan.is_established {
+        let pending_after = if !plan.is_established && known_down {
+            unrefreshed_pending
+        } else {
             match self
-                .soft_reset_in_reporting_delivery(plan.peer_key.clone(), Vec::new())
+                .send_policy_rollback_refresh(&plan.peer_key, window, operator_reads)
                 .await
             {
                 Ok(()) => plan
@@ -3335,24 +3354,11 @@ impl PeerManager {
                     warn!(
                         peer = %plan.peer_key.address,
                         error = %failure.error,
+                        session = ?failure.session,
                         "route refresh failed during policy rollback; retained safe pending state"
                     );
-                    failed = !failure.unsupported;
-                    match refresh_failure {
-                        RefreshFailureHandling::Fatal | RefreshFailureHandling::BestEffortRearm => {
-                            true
-                        }
-                        RefreshFailureHandling::BestEffortRestorePrior { pending_refresh } => {
-                            pending_refresh
-                        }
-                    }
-                }
-            }
-        } else {
-            match refresh_failure {
-                RefreshFailureHandling::Fatal | RefreshFailureHandling::BestEffortRearm => true,
-                RefreshFailureHandling::BestEffortRestorePrior { pending_refresh } => {
-                    pending_refresh
+                    failed = failure.session == super::lifecycle::SoftResetSession::Live;
+                    unrefreshed_pending
                 }
             }
         };
@@ -3360,6 +3366,44 @@ impl PeerManager {
             managed.pending_refresh = pending_after;
         }
         failed
+    }
+
+    /// A rollback Route Refresh, retried once when the session may have
+    /// taken the request without answering: the same bounded retry, from the
+    /// same shared allowance, as the transaction's state probes
+    /// ([`Self::query_clean_session_state`]). A repeated request is
+    /// harmless; the session queues at most one per family.
+    async fn send_policy_rollback_refresh(
+        &mut self,
+        peer_key: &PeerKey,
+        window: &mut CleanStateQueryWindow,
+        operator_reads: OperatorReadAdmission,
+    ) -> Result<(), super::lifecycle::SoftResetFailure> {
+        let failure = match self
+            .soft_reset_in_reporting_delivery(peer_key.clone(), Vec::new())
+            .await
+        {
+            Ok(()) => return Ok(()),
+            Err(failure) => failure,
+        };
+        if !failure.acknowledgement_lost
+            || failure.session != super::lifecycle::SoftResetSession::Live
+        {
+            return Err(failure);
+        }
+        let Some(remaining) = window.remaining_retry_budget() else {
+            return Err(failure);
+        };
+        let target = self.soft_reset_target(peer_key)?;
+        let retry_started = tokio::time::Instant::now();
+        let retried = self
+            .await_with_readiness(
+                tokio::time::timeout(remaining, target.send(Vec::new())),
+                operator_reads,
+            )
+            .await;
+        window.charge_retry_since(retry_started);
+        retried.unwrap_or(Err(failure))
     }
 
     fn finish_policy_rollback_rib_success(&mut self, plan: &PolicyRollbackPeerPlan) {
@@ -3396,11 +3440,20 @@ impl PeerManager {
         &mut self,
         plans: &[PolicyRollbackPeerPlan],
         batch_enqueued: bool,
+        context: &mut PolicySnapshotContext,
     ) -> Vec<PeerKey> {
         let mut failed = Vec::new();
         for plan in plans {
             let refreshable = plan.export_restore.is_none() || batch_enqueued;
-            if refreshable && self.finish_policy_rollback_refresh(plan).await {
+            if refreshable
+                && self
+                    .finish_policy_rollback_refresh(
+                        plan,
+                        &mut context.clean_state_window,
+                        context.operator_reads,
+                    )
+                    .await
+            {
                 failed.push(plan.peer_key.clone());
             }
             if plan.export_restore.is_none() {
@@ -3496,7 +3549,10 @@ impl PeerManager {
                     prior.policy.export_policy,
                     refresh_failure,
                     Some(&mut plan),
-                    None,
+                    // One timed-out probe is not proof the session is down:
+                    // the transaction's bounded probe retry applies here too.
+                    // A rollback never requires a clean state.
+                    Some(&mut context.clean_state_window),
                     // Rollback planning returns before the RIB step; the
                     // restore task registered below is awaited under the
                     // rollback's stall detector.
@@ -3535,7 +3591,7 @@ impl PeerManager {
             }
         };
         let failed_refreshes = self
-            .finish_policy_rollback_refreshes(&plans, registered.is_some())
+            .finish_policy_rollback_refreshes(&plans, registered.is_some(), context)
             .await;
 
         if let Some(registered) = registered {

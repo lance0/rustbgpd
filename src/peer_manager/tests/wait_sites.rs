@@ -223,6 +223,14 @@ fn stall_then_hold_state(command: &PeerCommand, index: usize) -> SessionAction {
     }
 }
 
+fn stall_then_hold_refresh(command: &PeerCommand, index: usize) -> SessionAction {
+    match (command, index) {
+        (PeerCommand::SendRouteRefresh { .. }, 0) => SessionAction::Stall,
+        (PeerCommand::SendRouteRefresh { .. }, 1) => SessionAction::Hold,
+        _ => SessionAction::Answer,
+    }
+}
+
 fn hold_first_gshut(command: &PeerCommand, index: usize) -> SessionAction {
     match command {
         PeerCommand::UpdateGracefulShutdown { .. } if index == 0 => SessionAction::Hold,
@@ -611,6 +619,21 @@ const WAIT_SITES: &[WaitSite] = &[
         },
         rib: RibHold::Reply(is_restore),
         session: answer_all,
+        additional_entry: None,
+        window: HELD_FOREVER,
+        contract: Contract::Served,
+        completion: Completion::ExportRestored,
+    },
+    // The retry shares the probe retry's allowance and its read admission.
+    WaitSite {
+        site: "policy.rs::send_policy_rollback_refresh",
+        awaits: "PeerCommand::SendRouteRefresh, the rollback refresh's bounded retry",
+        drive: Drive::ForwardCohort {
+            import_delta: true,
+            cohort_reply: CohortReply::Rejected,
+        },
+        rib: RibHold::None,
+        session: stall_then_hold_refresh,
         additional_entry: None,
         window: HELD_FOREVER,
         contract: Contract::Served,
@@ -2016,6 +2039,17 @@ async fn run(row: &WaitSite) {
                 Some(crate::config::reserved_rfc8212_deny_chain(
                     crate::config::RFC8212_MISSING_IMPORT_POLICY,
                 ));
+        }
+        // The rolled-back cohort restores an installed import chain, so the
+        // sessions still publish import rows while its refresh is parked.
+        Drive::ForwardCohort {
+            import_delta: true,
+            cohort_reply: CohortReply::Rejected,
+        } => {
+            for peer in [first, second] {
+                manager.peers.get_mut(&key(peer)).unwrap().import_policy =
+                    Some(distinct_deny_policy_chain(1));
+            }
         }
         Drive::ValidationRefresh | Drive::LocalRevalidation => {
             for peer in [first, second] {
