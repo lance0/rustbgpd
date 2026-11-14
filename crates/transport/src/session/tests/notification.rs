@@ -213,6 +213,65 @@ fn notification_logs_are_structured_once_per_direction() {
 }
 
 #[test]
+fn collision_notification_log_names_the_owning_connection_state() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    for state in ["open_confirm", "established"] {
+        let mut session = make_test_session(65001, 65002);
+        session.connection = Some(super::super::ConnectionStamp {
+            local: "10.0.122.1:179".parse().unwrap(),
+            remote: "10.0.122.2:41234".parse().unwrap(),
+            carrier: None,
+        });
+        session.fsm.handle_event(Event::ManualStart);
+        session.fsm.handle_event(Event::TcpConnectionConfirmed);
+        session
+            .fsm
+            .handle_event(Event::OpenReceived(notification_gr_open(false)));
+        assert_eq!(session.fsm.state(), SessionState::OpenConfirm);
+        if state == "established" {
+            session.fsm.handle_event(Event::KeepaliveReceived);
+        }
+        let events = capture_session_logs(|| {
+            assert!(
+                runtime
+                    .block_on(session.handle_command(PeerCommand::CollisionDump))
+                    .is_break()
+            );
+        });
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].get("collision_state").map(String::as_str),
+            Some(state)
+        );
+        assert_eq!(
+            events[0].get("tcp_local").map(String::as_str),
+            Some("10.0.122.1:179")
+        );
+        assert_eq!(
+            events[0].get("tcp_remote").map(String::as_str),
+            Some("10.0.122.2:41234")
+        );
+        assert_eq!(
+            events[0].get("session_id"),
+            Some(&session.session_identity.id.to_string())
+        );
+        assert!(session.stop_requested);
+        let collision = NotificationMessage::new(
+            NotificationCode::Cease,
+            cease_subcode::CONNECTION_COLLISION_RESOLUTION,
+            Bytes::new(),
+        );
+        let received = capture_session_logs(|| {
+            session.log_notification(SessionNotificationDirection::Received, &collision, None);
+        });
+        assert!(!received[0].contains_key("collision_state"));
+    }
+}
+
+#[test]
 fn hard_reset_log_keeps_outer_code_and_decodes_inner_description() {
     let notification = NotificationMessage::new(
         NotificationCode::Cease,

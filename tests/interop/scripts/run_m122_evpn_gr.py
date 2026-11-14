@@ -11,7 +11,8 @@ import time
 from pathlib import Path
 
 from m105_capture_oracle import messages, reassemble, need
-from m122_evpn_gr_oracle import SOURCE, RR, RR_CLIENT, CLIENT, admit_open, analyze_wire, check_rr, check_client, client_withdrawals, expected_nlri, nlri_key
+from m122_evpn_gr_oracle import SOURCE, RR, RR_CLIENT, CLIENT, admit_open, analyze_wire, check_rr, check_client, client_withdrawals, expected_nlri, nlri_key, capture_row
+from m122_fsm_trace import parse_logs
 
 LAB = "m122-evpn-gr-rr-gobgp"
 REFLECTOR = f"clab-{LAB}-rustbgpd"
@@ -22,7 +23,8 @@ OUT = Path(os.environ.get("M122_OUT", "/tmp/m122-evpn-gr-rr")).resolve()
 TOOLS = os.environ.get("M122_TOOLS_IMAGE", "rustbgpd:m122-tools")
 IFACE = os.environ.get("M122_SOURCE_INTERFACE", "eth1")
 CAPTURE_FIELDS = ("-r", "/out/capture.pcap", "-Y", "tcp.len > 0", "-T", "fields",
-                  "-e", "tcp.stream", "-e", "ip.src", "-e", "ip.dst", "-e", "tcp.seq_raw", "-e", "tcp.payload")
+                  "-e", "tcp.stream", "-e", "ip.src", "-e", "ip.dst", "-e", "tcp.seq_raw", "-e", "tcp.payload",
+                  "-e", "tcp.srcport", "-e", "tcp.dstport")
 
 
 def command(*args):
@@ -146,26 +148,39 @@ def collect_evidence():
 
     retain(["docker", "kill", "--signal", "SIGINT", CAPTURE])
     flushed = retain(["docker", "wait", CAPTURE])
+    clean_exit = flushed is not None and flushed.stdout.strip() == "0"
+    if not clean_exit:
+        status = None if flushed is None else flushed.stdout.strip()
+        print(f"WARNING: M122 capture did not stop cleanly: exit={status}", file=sys.stderr)
     # A live sample must not masquerade as the final capture if extraction fails.
+    tsv_removed = True
     try:
         (OUT / "capture.tsv").unlink(missing_ok=True)
     except OSError as error:
+        tsv_removed = False
         print(f"WARNING: cannot remove stale M122 capture TSV: {error}", file=sys.stderr)
+    extracted = None
     if flushed is not None:
-        retain(["docker", "run", "--rm", "--network", "none", "-v", f"{OUT}:/out:ro",
-                TOOLS, "tshark", *CAPTURE_FIELDS], "capture.tsv")
+        extracted = retain(["docker", "run", "--rm", "--network", "none", "-v", f"{OUT}:/out:ro",
+                            TOOLS, "tshark", *CAPTURE_FIELDS], "capture.tsv")
     retain(["docker", "logs", CAPTURE], "capture.log")
     for container, source, destination in ((REFLECTOR, "rustbgpd.log", "rr.log"),
                                            (PE, "gobgpd.log", "source.log"),
                                            (SINK, "gobgpd.log", "client.log")):
         retain(["docker", "cp", f"{container}:/tmp/{source}", str(OUT / destination)])
     retain(["docker", "rm", "-f", CAPTURE])
+    try:
+        traces = parse_logs({name: (OUT / name).read_text() for name in ("rr.log", "source.log", "client.log")})
+        save("fsm-traces.json", traces)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        print(f"WARNING: M122 FSM evidence incomplete: {error}", file=sys.stderr)
+    return clean_exit and tsv_removed and extracted is not None
 
 
 def live_admission(lines):
     parts = {}
     for line in lines:
-        stream, src, dst, seq, payload = line.split("\t")
+        stream, src, dst, seq, payload, _ = capture_row(line)
         if payload:
             parts.setdefault((stream, src, dst), []).append((int(seq), bytes.fromhex(payload.replace(":", ""))))
     witnesses = []
@@ -179,30 +194,40 @@ def live_admission(lines):
 
 def provenance():
     peers = []
+    source_commit = "53ceb78fe284018ce83a92f3039198f0a86dc823"
+    patch_path = "tests/interop/patches/m122-gobgp-fsm-trace.patch"
+    patch_sha256 = hashlib.sha256(Path(patch_path).read_bytes()).hexdigest()
+    version = "4.11.0-m122-fsm-trace"
     for container in (PE, SINK):
-        need(gobgp(container, "--version").strip() == "gobgp version 4.11.0", "GoBGP CLI version differs")
-        need(docker(container, "gobgpd", "--version").strip() == "gobgpd version 4.11.0", "GoBGP daemon version differs")
+        need(gobgp(container, "--version").strip() == f"gobgp version {version}", "GoBGP CLI version differs")
+        need(docker(container, "gobgpd", "--version").strip() == f"gobgpd version {version}", "GoBGP daemon version differs")
+        need(docker(container, "cat", "/usr/local/share/gobgp-m122/source-commit").strip() == source_commit, "GoBGP source identity differs")
+        need(docker(container, "cat", "/usr/local/share/gobgp-m122/patch-sha256").strip() == patch_sha256, "GoBGP trace patch differs")
         hashes = docker(container, "sha256sum", "/usr/local/bin/gobgp", "/usr/local/bin/gobgpd").splitlines()
-        want = ["f2a64916729cb019a6b1b8e1ff83cbf2653d93eae1c5ece498e586bf26afab93", "58127efa0ff1aaeadfbb802c771b18134c401c8c16229b6d3d2ab30935f288b2"]
-        need([line.split()[0] for line in hashes] == want, "GoBGP binary identity differs")
+        manifest = docker(container, "cat", "/usr/local/share/gobgp-m122/binaries.sha256").splitlines()
+        need(hashes == manifest and len(hashes) == 2, "GoBGP instrumented binary identity differs")
         image = command("docker", "inspect", "--format", "{{.Image}}", container).strip()
         need(command("docker", "image", "inspect", "--format", "{{.Architecture}}", image).strip() == "amd64", "GoBGP image architecture differs")
-        peers.append({"image": image, "gobgp_sha256": want[0], "gobgpd_sha256": want[1]})
+        peers.append({"image": image, "gobgp_sha256": hashes[0].split()[0], "gobgpd_sha256": hashes[1].split()[0]})
     source_id = command("bash", "scripts/source-id.sh").strip()
     need(docker(REFLECTOR, "cat", "/usr/local/share/rustbgpd/source-id").strip() == source_id, "RR image source ID differs")
     inputs = ["tests/interop/scripts/m122_evpn_gr_oracle.py", "tests/interop/scripts/run_m122_evpn_gr.py",
-              "tests/interop/scripts/m105_capture_oracle.py", "tests/interop/scripts/test-m122-evpn-gr-rr-gobgp.sh",
+              "tests/interop/scripts/m105_capture_oracle.py", "tests/interop/scripts/m122_fsm_trace.py",
+              "tests/interop/Dockerfile.gobgp-m122-trace", patch_path, "tests/interop/scripts/test-m122-evpn-gr-rr-gobgp.sh",
               "tests/interop/m122-evpn-gr-rr-gobgp.clab.yml", "tests/interop/Dockerfile.m122-tools",
               "tests/interop/configs/rustbgpd-m122-evpn-gr-rr.toml", "tests/interop/configs/gobgp-m122-source.toml",
               "tests/interop/configs/gobgp-m122-client.toml"]
     hashes = {name: hashlib.sha256(Path(name).read_bytes()).hexdigest() for name in inputs}
     save("provenance.json", {"rustbgpd_source_id": source_id, "rustbgpd_commit": command("git", "rev-parse", "HEAD").strip(),
                             "harness_dirty": bool(command("git", "status", "--porcelain").strip()), "harness_sha256": hashes,
-                            "gobgp_source_commit": "53ceb78fe284018ce83a92f3039198f0a86dc823", "gobgp_version": "4.11.0", "peers": peers})
+                            "gobgp_source_commit": source_commit, "gobgp_version": version,
+                            "gobgp_trace_patch_sha256": patch_sha256, "peers": peers})
 
 
 def run():
     OUT.mkdir(parents=True, exist_ok=True)
+    for name in ("verdict.json", "wire-witnesses.json", "fsm-traces.json", "rr.log", "source.log", "client.log"):
+        (OUT / name).unlink(missing_ok=True)
     provenance()
     command("docker", "run", "-d", "--name", CAPTURE, "--label", "rustbgpd.lab=m122", "--network", f"container:{REFLECTOR}",
             "--cap-add", "NET_RAW", "-v", f"{OUT}:/out", TOOLS, "tcpdump", "--immediate-mode", "-B", "8192", "-s", "0", "-U", "-i", "any", "-w", "/out/capture.pcap", "tcp", "port", "179")
@@ -239,13 +264,25 @@ def run():
         wait("LLGR expiry at RR", rr_rows, lambda rows: check_rr(rows, []), timeout=60)
         snapshot("expired", [])
         wait("expiry clears stored stale gauge", lambda: metric("bgp_gr_stale_routes"), lambda v: need(v == 0, "stale remains"))
-        lines = wait("complete raw restart/EoR/LLGR witnesses", payloads, analyze_wire, timeout=15)
-        save("wire-witnesses.json", analyze_wire(lines))
-        save("verdict.json", {"result": "pass", "initial_routes": 10, "refreshed_routes": 5, "eor_swept_routes": 5,
-                              "llgr_routes": 5, "expired_routes": 5, "route_types": [1, 2, 3, 4, 5], "client_flaps": 0})
-        print("PASS M122 EVPN GR/EoR/LLGR Types 1–5", flush=True)
+        # Wait for the wire lifecycle only. Collision classification needs the
+        # final flushed capture and logs, and must not be polled until it passes.
+        wait("complete client expiry withdrawals", payloads,
+             lambda rows: need(client_withdrawals(rows) == {nlri_key(n) for n in expected_nlri([1, 2])},
+                               "client expiry withdrawals incomplete"), timeout=15)
     finally:
-        collect_evidence()
+        capture_complete = collect_evidence()
+    finalize_evidence(capture_complete)
+    print("PASS M122 EVPN GR/EoR/LLGR Types 1–5", flush=True)
+
+
+def finalize_evidence(capture_complete):
+    need(capture_complete, "final capture lacks clean exit and fresh extraction")
+    traces = parse_logs({name: (OUT / name).read_text() for name in ("rr.log", "source.log", "client.log")})
+    save("fsm-traces.json", traces)
+    witnesses = analyze_wire((OUT / "capture.tsv").read_text().splitlines(), traces)
+    save("wire-witnesses.json", witnesses)
+    save("verdict.json", {"result": "pass", "initial_routes": 10, "refreshed_routes": 5, "eor_swept_routes": 5,
+                          "llgr_routes": 5, "expired_routes": 5, "route_types": [1, 2, 3, 4, 5], "client_flaps": 0})
 
 
 if __name__ == "__main__":

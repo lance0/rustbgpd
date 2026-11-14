@@ -6,6 +6,7 @@ import struct
 from collections import defaultdict
 
 from m105_capture_oracle import capabilities, messages, need, reassemble, update
+from m122_fsm_trace import collision_witness
 
 SOURCE = "10.0.122.2"
 RR = "10.0.122.1"
@@ -130,10 +131,23 @@ def validate_attributes(attrs):
         need(bool(value) and len(value) % 4 == 0, "COMMUNITIES length must be a positive multiple of four")
 
 
+def capture_row(line):
+    fields = line.rstrip("\n").split("\t")
+    # Old receipts remain replayable when no collision requires TCP identity.
+    need(len(fields) in (5, 7), "capture row must have five or seven fields")
+    stream, src, dst, seq, payload = fields[:5]
+    connection = None
+    if len(fields) == 7:
+        source_port, destination_port = map(int, fields[5:])
+        need(0 < source_port < 65536 and 0 < destination_port < 65536, "invalid capture TCP port")
+        connection = (src, source_port, dst, destination_port)
+    return stream, src, dst, int(seq), payload, connection
+
+
 def client_withdrawals(lines):
     parts = defaultdict(list)
     for line in lines:
-        stream, src, dst, seq, payload = line.rstrip("\n").split("\t")
+        stream, src, dst, seq, payload, _ = capture_row(line)
         if (src, dst) == (RR_CLIENT, CLIENT) and payload:
             parts[stream].append((int(seq), bytes.fromhex(payload.replace(":", ""))))
     need(bool(parts), "client TCP stream absent")
@@ -212,46 +226,56 @@ def check_client_order(events, eor_position):
     return witness
 
 
-def collided_streams(parts):
-    # RFC 4271 §8.2.2 establishes on the local KEEPALIVE receive event.
-    # Seeing both sends (or TCP ACKs) cannot prove that the closing FSM
-    # consumed its peer's KEEPALIVE. Keep that case failing for diagnosis.
-    first_live, first_update, ceases, updates = {}, {}, [], set()
-    for (stream, src, _), segments in parts.items():
+def collided_streams(parts, connections, traces):
+    # RFC 4271 establishes on the local KEEPALIVE receive event. Crossed
+    # sends/ACKs are not that event; require the closing connection's trace.
+    first_update, ceases, updates = {}, [], set()
+    for (stream, src, dst), segments in parts.items():
         for position, typ, body in completed_messages(segments):
-            if typ in (2, 4):
-                first_live.setdefault((stream, src), position[0])
-                if typ == 2:
-                    updates.add(stream)
-                    first_update.setdefault((stream, src), position)
+            if typ == 2:
+                updates.add(stream)
+                first_update.setdefault((stream, src), position)
             if typ == 3:
                 need(body[:2] == b"\x06\x07", "captured BGP NOTIFICATION")
-                ceases.append((stream, src, position))
-    for stream, src, position in ceases:
+                ceases.append((stream, src, dst, position))
+    witnesses = []
+    seen = set()
+    for stream, src, dst, position in ceases:
         sent_update = first_update.get((stream, src))
         need(sent_update is None or sent_update > position,
              f"stream {stream}: {src} sent collision Cease after its own UPDATE (Established)")
         need(stream not in updates, f"stream {stream}: collision-closed stream carries an UPDATE")
-        live = [first for (live_stream, _), first in first_live.items() if live_stream == stream]
-        need(len(live) < 2 or position[0] < max(live),
-             f"stream {stream}: {src} sent collision Cease after both KEEPALIVEs; "
-             "closing FSM state is ambiguous from capture alone (inspect daemon logs)")
-    return {stream for stream, _, _ in ceases}
+        key = (stream, src, dst)
+        need(key not in seen, "multiple collision Ceases on one TCP direction")
+        seen.add(key)
+        connection = connections.get(key)
+        need(connection is not None, "collision capture lacks TCP ports for closing FSM identity")
+        reverse = (dst, connection[3], src, connection[1])
+        need(connections.get((stream, dst, src)) == reverse, "collision TCP stream lacks consistent reverse tuple")
+        matching = {other[0] for other, value in connections.items() if value in (connection, reverse)}
+        need(matching == {stream}, "collision TCP tuple reused across capture streams")
+        witnesses.append({"stream": stream, "cease_completion": position,
+                          **collision_witness(traces, connection)})
+    matched = {(row["log"], row["close_line"]) for row in witnesses}
+    expected = {(row["log"], row["line"]) for row in traces if row["event"] == "collision_close"}
+    need(matched == expected, "FSM collision close lacks matching captured Cease")
+    return {stream for stream, _, _, _ in ceases}, witnesses
 
 
-def analyze_wire(lines):
-    parts = defaultdict(list)
+def analyze_wire(lines, traces=()):
+    parts, connections = defaultdict(list), {}
     for ordinal, line in enumerate(lines, 1):
-        fields = line.rstrip("\n").split("\t")
-        need(len(fields) == 5, "capture row must have five fields")
-        stream, src, dst, seq, payload = fields
+        stream, src, dst, seq, payload, connection = capture_row(line)
+        key = (stream, src, dst)
+        need(key not in connections or connections[key] == connection, "TCP stream changes connection tuple")
+        connections[key] = connection
         if payload:
-            parts[(stream, src, dst)].append((int(seq), bytes.fromhex(payload.replace(":", "")), ordinal))
+            parts[key].append((seq, bytes.fromhex(payload.replace(":", "")), ordinal))
     opens, announced, withdrawn, promoted, eors = [], defaultdict(set), defaultdict(set), set(), []
     client_events = []
     restarted = False
     initial_sources = []
-    collided = collided_streams(parts)
+    collided, collision_witnesses = collided_streams(parts, connections, traces)
     for (stream, src, dst), segments in parts.items():
         if stream in collided:
             continue
@@ -325,7 +349,7 @@ def analyze_wire(lines):
     withdrawn_keys = {nlri_key(n) for n in withdrawn[(RR_CLIENT, CLIENT)]}
     need(withdrawn_keys == {nlri_key(n) for n in expected_nlri([1, 2])}, "client wire withdrawal keys differ")
     order = check_client_order(client_events, eors[0]["completion"])
-    return {"opens": opens, "restart_eor": eors, "initial_source": initial_sources[0],
+    return {"collision_closes": collision_witnesses, "opens": opens, "restart_eor": eors, "initial_source": initial_sources[0],
             "initial_nlri": initial_sources[0]["nlri"],
             "llgr_nlri": sorted(promoted), "withdrawn_keys": sorted(withdrawn_keys),
             "withdrawn_nlri": sorted(withdrawn[(RR_CLIENT, CLIENT)]), "client_order": order}

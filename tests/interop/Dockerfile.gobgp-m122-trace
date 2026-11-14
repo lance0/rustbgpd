@@ -1,0 +1,34 @@
+# GoBGP 4.11.0 source plus M122-only connection FSM instrumentation.
+# These are instrumented binaries, not official GoBGP release artifacts.
+FROM golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS builder
+ARG TARGETARCH
+WORKDIR /src
+COPY patches/m122-gobgp-fsm-trace.patch /tmp/m122-gobgp-fsm-trace.patch
+RUN set -eux; \
+    test "${TARGETARCH}" = amd64; \
+    curl -fsSL --connect-timeout 10 --max-time 120 \
+      https://codeload.github.com/osrg/gobgp/tar.gz/53ceb78fe284018ce83a92f3039198f0a86dc823 \
+      -o /tmp/gobgp-source.tar.gz; \
+    echo '9706526b6fb76b8d6c4de379755819bed41be312e155f59e85baf55f9f3259a8  /tmp/gobgp-source.tar.gz' | sha256sum --check --strict; \
+    tar -xzf /tmp/gobgp-source.tar.gz --strip-components=1 -C /src; \
+    git apply --check /tmp/m122-gobgp-fsm-trace.patch; \
+    git apply /tmp/m122-gobgp-fsm-trace.patch
+ENV CGO_ENABLED=0 GOTOOLCHAIN=local GOFLAGS=-mod=readonly GOMAXPROCS=4
+RUN go test -tags=netgo ./pkg/server -run '^TestM122ConnectionTrace$' -count=1
+RUN set -eux; \
+    go build -trimpath -tags=netgo -ldflags='-s -w -X github.com/osrg/gobgp/v4/internal/pkg/version.IDENTIFIER=m122-fsm-trace' -o /usr/local/bin/gobgp ./cmd/gobgp; \
+    go build -trimpath -tags=netgo -ldflags='-s -w -X github.com/osrg/gobgp/v4/internal/pkg/version.IDENTIFIER=m122-fsm-trace' -o /usr/local/bin/gobgpd ./cmd/gobgpd; \
+    test "$(gobgp --version)" = 'gobgp version 4.11.0-m122-fsm-trace'; \
+    test "$(gobgpd --version)" = 'gobgpd version 4.11.0-m122-fsm-trace'; \
+    mkdir -p /usr/local/share/gobgp-m122; \
+    printf '%s\n' 53ceb78fe284018ce83a92f3039198f0a86dc823 > /usr/local/share/gobgp-m122/source-commit; \
+    sha256sum /tmp/m122-gobgp-fsm-trace.patch | cut -d' ' -f1 > /usr/local/share/gobgp-m122/patch-sha256; \
+    sha256sum /usr/local/bin/gobgp /usr/local/bin/gobgpd > /usr/local/share/gobgp-m122/binaries.sha256
+
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl iproute2 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /usr/local/bin/gobgp /usr/local/bin/gobgp
+COPY --from=builder /usr/local/bin/gobgpd /usr/local/bin/gobgpd
+COPY --from=builder /usr/local/share/gobgp-m122 /usr/local/share/gobgp-m122
+CMD ["sleep", "infinity"]
