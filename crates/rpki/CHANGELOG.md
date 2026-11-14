@@ -5,6 +5,11 @@ Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+- Add the hidden `VrpManager::with_test_precommit_panic_on` fault hook for
+  daemon integration tests. It is disabled by default and injects one panic
+  before a selected metadata-bearing data update is staged. It is not an
+  operator setting and must not be enabled in a running service.
+
 - `RtrClient::run` recovers from a panic while it connects or runs a session.
   The panic is handled as a lost session: the held data and its expiry are
   kept, the manager is told the cache disconnected, and after the retry

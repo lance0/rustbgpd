@@ -396,6 +396,7 @@ pub struct VrpManager {
     fault_observer: Option<Box<dyn Fn() + Send + Sync>>,
     resync_observer: Option<Box<dyn Fn(SocketAddr, bool) + Send + Sync>>,
     cache_inventory: Option<CacheInventoryAttachment>,
+    test_precommit_panic_on: Option<std::sync::atomic::AtomicUsize>,
     /// Upcoming [`Self::injected_fault`] calls that panic.
     #[cfg(test)]
     pub(crate) injected_faults: Arc<std::sync::atomic::AtomicUsize>,
@@ -422,6 +423,7 @@ impl VrpManager {
             fault_observer: None,
             resync_observer: None,
             cache_inventory: None,
+            test_precommit_panic_on: None,
             #[cfg(test)]
             injected_faults: Arc::default(),
         }
@@ -507,6 +509,16 @@ impl VrpManager {
         self
     }
 
+    /// Inject one panic before the numbered metadata-bearing data update is
+    /// staged. Zero disables the injection. For daemon integration tests only;
+    /// never enable this in a running service.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_test_precommit_panic_on(mut self, update_number: usize) -> Self {
+        self.test_precommit_panic_on = Some(std::sync::atomic::AtomicUsize::new(update_number));
+        self
+    }
+
     /// Where a test makes the manager panic: before any state changes.
     #[cfg_attr(
         not(test),
@@ -588,8 +600,10 @@ impl VrpManager {
     ///   notification; the update it reported is already installed.
     /// - A lost connectivity change or inventory query costs only itself.
     ///
-    /// Updates on the legacy channel are not covered: without the attachment
-    /// there is no way to ask a client for a full table.
+    /// Updates on the legacy channel are not covered: legacy senders have no
+    /// resync channel, even when other senders use an inventory attachment.
+    /// A panic outside these per-message and read-only query boundaries ends
+    /// the manager; there is no proved state checkpoint for a general restart.
     pub async fn run(mut self) {
         let mut legacy_updates_open = true;
         let mut enhanced_updates_open = self.cache_inventory.is_some();
@@ -950,6 +964,16 @@ impl VrpManager {
     )]
     fn stage(&self, update: VrpUpdate, accepted: Option<Accepted>) -> Staged {
         self.injected_fault();
+        if accepted.is_some()
+            && let Some(countdown) = &self.test_precommit_panic_on
+        {
+            use std::sync::atomic::Ordering;
+            assert!(
+                countdown.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+                    != Ok(1),
+                "injected VRP manager pre-commit panic"
+            );
+        }
         let old_vrps = |server| self.server_tables.get(server);
         let old_aspas = |server| self.server_aspa_tables.get(server);
         // Whether a cache other than `server` holds `entry`: such an entry
@@ -2604,6 +2628,48 @@ mod tests {
         let prefix = rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, last), 32);
         table.validate(&rustbgpd_wire::Prefix::V4(prefix), 65001)
             == rustbgpd_wire::RpkiValidation::Valid
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn precommit_test_fault_is_one_shot_and_zero_disables_it() {
+        let mut f = recovering().await;
+        f.mgr = f.mgr.with_test_precommit_panic_on(1);
+        let before = f.state();
+        let update = f.full(server1(), &[3, 4], 500);
+        f.mgr.receive(update).await;
+        assert_eq!(f.state(), before);
+        assert_eq!(f.pending(), [server1()]);
+        let update = f.full(server1(), &[3, 4], 500);
+        f.mgr.receive(update).await;
+        assert!(f.pending().is_empty());
+        assert!(covers(f.mgr.current_table.as_ref().unwrap(), 3));
+        assert_eq!(f.faults.load(Ordering::SeqCst), 1);
+
+        f.mgr = f.mgr.with_test_precommit_panic_on(0);
+        let update = f.full(server1(), &[1, 9], 500);
+        f.mgr.receive(update).await;
+        assert!(covers(f.mgr.current_table.as_ref().unwrap(), 1));
+        assert_eq!(f.faults.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_legacy_update_panic_ends_the_manager_with_or_without_inventory() {
+        for with_inventory in [false, true] {
+            let (updates, update_rx) = mpsc::channel(1);
+            let (rib_tx, _rib_rx) = mpsc::channel(1);
+            let mut manager = VrpManager::new(update_rx, rib_tx);
+            if with_inventory {
+                let (inventory, _updates, _queries) = CacheInventoryAttachment::new([server1()]);
+                manager = manager.with_cache_inventory(inventory);
+            }
+            manager.injected_faults.store(1, Ordering::SeqCst);
+            let task = tokio::spawn(manager.run());
+            updates
+                .send(VrpUpdate::ServerDown { server: server1() })
+                .await
+                .unwrap();
+            assert!(task.await.unwrap_err().is_panic());
+        }
     }
 
     /// A panic while a full table or a serial delta is being applied loses
