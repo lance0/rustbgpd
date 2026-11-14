@@ -7,6 +7,13 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd). Requires Rust 1.95 or
 newer. Release-by-release crate changes are recorded in the
 [changelog](CHANGELOG.md).
 
+`rustbgpd-rpki` 0.10.1 is an additive patch on wire `0.28` with no breaking
+change. `RtrClient::run` and `VrpManager::run` with a cache inventory recover
+from a panic instead of ending their task, with the optional
+`RtrClient::with_restart_observer`, `VrpManager::with_fault_observer` and
+`VrpManager::with_resync_observer` callbacks. A cache's replacing full table
+or removal now carries a delta in `RpkiTableUpdate` and `AspaTableUpdate`.
+
 `rustbgpd-rpki` 0.10.0 moves to wire `0.28.0` and bounds the RTR records a
 client holds by default; existing verifier and RTR signatures are unchanged.
 Upgrade wire 0.28, FSM 0.15 and RPKI 0.10 together when exchanging public wire
@@ -115,7 +122,7 @@ published wire crate, so depend on the wire version this release pairs with:
 
 ```toml
 [dependencies]
-rustbgpd-rpki = "0.10.0"
+rustbgpd-rpki = "0.10.1"
 rustbgpd-wire = "0.28.0"
 ```
 
