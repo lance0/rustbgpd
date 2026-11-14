@@ -1117,6 +1117,180 @@ async fn other_as_collision_winner_releases_the_retained_identity() {
     rib_task.abort();
 }
 
+/// A collision verdict for a retained member's candidate waits for the
+/// policy walk that owns the actor. The candidate's OPEN, from another AS,
+/// reaches the peer manager while a refused walk waits for its rollback's
+/// restore, after the restore command named the member's current RIB
+/// identity. Only once the walk has rolled back is the candidate promoted
+/// onto its own identity.
+///
+/// The only notice queued before the walk is the candidate's
+/// `OpenReceived`: the primary's client never sends an OPEN. The test takes
+/// it off the channel and hands it back from the RIB stub once the walk is
+/// in its restore wait, so the seam after the first restore command is the
+/// one that serves it.
+///
+/// LOAD-BEARING: promoting at that seam moves the member onto the
+/// candidate's identity, the restore's receipt no longer matches the peer,
+/// and the rollback is ambiguous (`RollbackBatchReplyLost`).
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one test holds the collision, the scripted RIB and the walk"
+)]
+async fn retained_candidate_promotion_waits_for_the_walk_that_owns_the_actor() {
+    use super::collision::{read_bgp_message, send_bgp_message};
+    use crate::peer_manager::policy::PolicySnapshotFailureKind;
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+    use rustbgpd_rib::{PeerExportPolicyRestoreReceipt, RibCommandError};
+
+    let other = IpAddr::V4(Ipv4Addr::new(10, 42, 0, 1));
+    let (rib_tx, rib_rx) = mpsc::channel(64);
+    let (_query_tx, query_rx) = mpsc::channel(4);
+    let rib_task =
+        tokio::spawn(RibManager::new(rib_rx, query_rx, None, None, BgpMetrics::new()).run());
+    let (tap_tx, mut tap_rx) = mpsc::channel::<RibUpdate>(64);
+    let (readiness, readiness_rx) = mpsc::channel(1);
+    let mut mgr = manager_on(tap_tx).with_readiness_queries(readiness_rx);
+    // Everything but the walk's own commands reaches the real RIB.
+    let (walk_tx, mut walk_rx) = mpsc::unbounded_channel();
+    let tap = tokio::spawn(async move {
+        while let Some(update) = tap_rx.recv().await {
+            match update {
+                RibUpdate::ReplacePeerExportPoliciesAuthoritatively { .. }
+                | RibUpdate::RestorePeerExportPoliciesAuthoritatively { .. } => {
+                    let _ = walk_tx.send(update);
+                }
+                update => {
+                    if rib_tx.send(update).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    });
+
+    let mut client = accept(&mut mgr).await;
+    establish_from(&mut mgr, &mut client, MEMBER_ASN).await;
+    drop_until_idle(&mut mgr, client).await;
+    assert!(mgr.retained_dynamic.contains_key(&key(MEMBER)));
+    let _primary = accept(&mut mgr).await;
+    let mut candidate = accept_at(&mut mgr, MEMBER).await;
+    let candidate_session = mgr.peers[&key(MEMBER)]
+        .pending_inbound
+        .as_ref()
+        .expect("the second connection is a collision candidate")
+        .session_id;
+    let mut buf = BytesMut::new();
+    assert!(matches!(
+        read_bgp_message(&mut candidate, &mut buf).await,
+        Message::Open(_)
+    ));
+    send_bgp_message(&mut candidate, &Message::Open(helper_open(65099))).await;
+    let open = tokio::time::timeout(Duration::from_secs(5), mgr.session_notify_rx.recv())
+        .await
+        .expect("the candidate reports its OPEN")
+        .unwrap();
+    assert!(
+        matches!(
+            open,
+            SessionNotification::OpenReceived { session_id, .. } if session_id == candidate_session
+        ),
+        "{open:?}"
+    );
+    let before = mgr.rib_peer_of(&key(MEMBER));
+
+    // A second target with a prior chain of its own, so the restore is two
+    // commands and the first one's completion is a seam.
+    insert_test_managed_peer(
+        &mut mgr,
+        other,
+        fake_peer_handle(other, SessionState::Established, None, Arc::default()),
+        false,
+    );
+    mgr.peers.get_mut(&key(other)).unwrap().export_policy = Some(distinct_deny_policy_chain(8));
+    let notices = mgr.session_notify_tx.clone();
+    let rib = tokio::spawn(async move {
+        let mut open = Some(open);
+        while let Some(update) = walk_rx.recv().await {
+            match update {
+                // The only forward batch: the established peer's.
+                RibUpdate::ReplacePeerExportPoliciesAuthoritatively { reply, .. } => {
+                    let _ = reply.send(Err(RibCommandError::internal("refused")));
+                }
+                RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                    replacements,
+                    reply,
+                } => {
+                    // Only the restore wait answers a probe. The first one
+                    // proves the walk is there; a later one proves the seam
+                    // after the previous command's completion has run, as
+                    // the wait serves that completion before any probe.
+                    let (probe, in_restore_wait) = oneshot::channel();
+                    readiness
+                        .send(PeerManagerReadinessQuery::Ping { reply: probe })
+                        .await
+                        .unwrap();
+                    in_restore_wait.await.unwrap();
+                    if let Some(open) = open.take() {
+                        notices.send(open).unwrap();
+                    }
+                    let _ = reply.send(Ok(replacements
+                        .iter()
+                        .rev()
+                        .map(|replacement| PeerExportPolicyRestoreReceipt::Restored {
+                            peer: replacement.peer,
+                        })
+                        .collect()));
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let targets = [MEMBER, other]
+        .into_iter()
+        .enumerate()
+        .map(|(index, address)| ResolvedPeerPolicy {
+            address,
+            interface: None,
+            import_policy: None,
+            export_policy: Some(distinct_deny_policy_chain(index)),
+        })
+        .collect();
+    let failure = mgr
+        .apply_resolved_policy_snapshot_classified(targets, true)
+        .await
+        .expect_err("the batch is refused");
+    assert_eq!(
+        failure.kind,
+        PolicySnapshotFailureKind::FullyCompensated,
+        "{} ({})",
+        failure.message(),
+        failure.code.as_str()
+    );
+    assert!(
+        mgr.peers[&key(MEMBER)].pending_inbound.is_some(),
+        "the verdict waits for the walk"
+    );
+    assert_eq!(mgr.rib_peer_of(&key(MEMBER)), before);
+
+    // The walk put the OPEN back: the candidate wins on its own identity.
+    while mgr.peers[&key(MEMBER)].pending_inbound.is_some() {
+        let notification =
+            tokio::time::timeout(Duration::from_secs(5), mgr.session_notify_rx.recv())
+                .await
+                .expect("the held OPEN is back on the channel")
+                .unwrap();
+        mgr.handle_session_notification(notification).await;
+    }
+    assert_ne!(mgr.rib_peer_of(&key(MEMBER)), before, "promoted");
+    drop(mgr);
+    rib.abort();
+    tap.abort();
+    rib_task.abort();
+}
+
 /// An Established member goes idle while a staged transaction's ranges no
 /// longer admit it: the provisional ranges do not reject the retention, so a
 /// rollback finds it intact. Red proof: rejecting against the staged ranges

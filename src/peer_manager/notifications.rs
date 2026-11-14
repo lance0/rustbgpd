@@ -1170,6 +1170,23 @@ impl PeerManager {
                     debug!(peer = %peer_addr, session_id, ?role, "ignoring stale OpenReceived notification");
                     return;
                 }
+                // A retained member's collision verdict can move it to the
+                // candidate's RIB identity, which a policy walk that owns the
+                // actor may already have named in its rollback. The walk
+                // holds the notice until it ends.
+                if self.retained_dynamic_candidate_pending(&peer_key)
+                    && self
+                        .hold_for_owned_walk(SessionNotification::OpenReceived {
+                            session_id,
+                            role,
+                            peer_addr,
+                            remote_router_id,
+                            peer_asn,
+                        })
+                        .is_none()
+                {
+                    return;
+                }
                 self.learn_dynamic_remote_asn(&peer_key, peer_asn);
                 if self
                     .peers
