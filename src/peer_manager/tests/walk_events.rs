@@ -754,6 +754,63 @@ async fn a_retiring_round_at_a_seam_handles_the_whole_queue() {
     );
 }
 
+/// `events_served` counts what a seam handled, once each. A pending
+/// candidate's task exit is handled through a synthetic Idle, which is the
+/// same event; a dynamic peer's Idle that the walk holds is not handled
+/// until the walk has ended.
+///
+/// LOAD-BEARING: counting on handler entry alone reports 2 for the exit and
+/// 1 for the held Idle.
+#[tokio::test(start_paused = true)]
+async fn held_and_reentered_notices_are_counted_once() {
+    let Lab { mut mgr, peers, .. } = lab(1);
+    let candidate = 60;
+    attach_test_pending_inbound(
+        &mut mgr,
+        peers[0],
+        walk_session(peers[0], Arc::default(), None),
+        candidate,
+    );
+    mgr.session_notify_tx
+        .send(SessionNotification::TaskExited {
+            session_id: candidate,
+            role: SessionRole::InboundCandidate,
+            peer_addr: peers[0],
+            cause: "ended".into(),
+        })
+        .unwrap();
+    let service = serve_one_seam(&mut mgr).await;
+    assert!(mgr.peers[&key(peers[0])].pending_inbound.is_none());
+    assert_eq!(service.events_served, 1, "the candidate's exit");
+
+    let dynamic = IpAddr::V4(Ipv4Addr::new(10, 42, 9, 1));
+    insert_test_dynamic_managed_peer(
+        &mut mgr,
+        dynamic,
+        50,
+        walk_session(dynamic, Arc::default(), None),
+        true,
+        IpAddr::V4(Ipv4Addr::new(10, 42, 9, 0)),
+        24,
+        "dynamic",
+    );
+    mgr.session_notify_tx
+        .send(SessionNotification::BackToIdle {
+            session_id: 50,
+            role: SessionRole::Primary,
+            peer_addr: dynamic,
+        })
+        .unwrap();
+    let service = serve_one_seam(&mut mgr).await;
+    assert_eq!(service.events_served, 0, "the held Idle");
+    assert_eq!(
+        mgr.session_notify_rx.ready_count(),
+        1,
+        "the held Idle is back on the channel"
+    );
+    assert!(mgr.peers.contains_key(&key(dynamic)));
+}
+
 /// One seam of a walk that owns the actor, and what it served.
 async fn serve_one_seam(mgr: &mut PeerManager) -> OwnedWalkService {
     assert!(mgr.begin_owned_walk());
