@@ -534,6 +534,30 @@ class OracleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unique collision close"):
             oracle.analyze_wire(fixture() + collision_rows(oracle.RR), parse_logs(logs))
 
+    def test_complete_m122_startup_banner_preserves_trace_lines(self):
+        startup = json.dumps({"target": "rustbgpd", "fields": {
+            "message": "starting rustbgpd", "version": "0.82.0"}}) + "\n"
+        banner = "\n  rustbgpd 0.82.0 | AS 65001 | router-id 10.0.122.1\n" \
+            "  |- 2 peers (2 iBGP)\n" \
+            "  |- grpc: tcp://0.0.0.0:50051 (token auth)\n" \
+            "  |- grpc: unix:///var/lib/rustbgpd/grpc.sock\n" \
+            "  |- metrics: http://0.0.0.0:9179/metrics\n\n"
+        trace = trace_fixture(oracle.RR)["rr.log"]
+        text = startup + banner + trace
+        events = parse_logs({"rr.log": text})
+        self.assertEqual(events[0]["line"], 9)
+        result = oracle.analyze_wire(fixture() + collision_rows(oracle.RR), events)
+        self.assertEqual(result["collision_closes"][0]["close_line"], 11)
+        for broken in (text.replace("2 peers (2 iBGP)", "3 peers (3 iBGP)"),
+                       text.replace("  |- metrics: http://0.0.0.0:9179/metrics\n", ""),
+                       text.replace("  rustbgpd 0.82.0", "  rustbgpd 0.81.0"),
+                       banner + trace, startup + banner + banner + trace,
+                       text + "\nunexpected stderr warning\n", text[:-1]):
+            with self.subTest(broken=broken), self.assertRaises(ValueError):
+                parse_logs({"rr.log": broken})
+        with self.assertRaises(ValueError):
+            parse_logs({"source.log": text})
+
     def test_driver_verdict_requires_final_capture_and_logs(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(runner, "OUT", Path(directory)):
             out = Path(directory)

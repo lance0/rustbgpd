@@ -22,7 +22,25 @@ def parse_logs(logs):
     """Normalize JSON daemon logs, retaining file/line provenance and local order."""
     events = []
     for name, text in logs.items():
-        for ordinal, line in enumerate(text.splitlines(), 1):
+        lines = text.splitlines()
+        version, banner_end = None, 0
+        for ordinal, line in enumerate(lines, 1):
+            if ordinal <= banner_end:
+                continue
+            # Like M69, admit only print_startup_banner's complete topology
+            # block, tied to the preceding structured startup version.
+            if name == "rr.log" and version is not None:
+                banner = [
+                    "", f"  rustbgpd {version} | AS 65001 | router-id 10.0.122.1",
+                    "  |- 2 peers (2 iBGP)",
+                    "  |- grpc: tcp://0.0.0.0:50051 (token auth)",
+                    "  |- grpc: unix:///var/lib/rustbgpd/grpc.sock",
+                    "  |- metrics: http://0.0.0.0:9179/metrics", "",
+                ]
+                if lines[ordinal - 1:ordinal - 1 + len(banner)] == banner:
+                    banner_end = ordinal + len(banner) - 1
+                    version = None
+                    continue
             if not line.strip():
                 continue
             try:
@@ -33,6 +51,8 @@ def parse_logs(logs):
             fields = row.get("fields", {})
             need(isinstance(fields, dict), f"{name}:{ordinal}: daemon log fields are not an object")
             message = fields.get("message")
+            if row.get("target") == "rustbgpd" and message == "starting rustbgpd":
+                version = fields.get("version")
             event = None
             if row.get("msg") == "M122 FSM trace":
                 fields = row
