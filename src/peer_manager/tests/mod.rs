@@ -1562,13 +1562,16 @@ fn peer_identity_gauge(
 ///
 /// The first `idle_queries` state queries report `Idle`; the session is
 /// Established from then on, which is how a peer that comes up between a
-/// caller's probe and its install is reproduced.
+/// caller's probe and its install is reproduced. With
+/// `lose_route_refresh_on_install`, the first answered Route Refresh takes the
+/// capability away: the peer reconnected without it after taking the chain.
 ///
 /// [`ImportPolicyInstall::refused`]: rustbgpd_transport::ImportPolicyInstall::refused
 fn import_recording_handle(
     peer_addr: IpAddr,
     route_refresh: bool,
     idle_queries: usize,
+    lose_route_refresh_on_install: bool,
     prior: Option<PolicyChain>,
     installed: InstalledImports,
     refreshes: Arc<AtomicUsize>,
@@ -1576,6 +1579,7 @@ fn import_recording_handle(
     use rustbgpd_transport::{PeerCommand, PeerCommandError};
     let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
     let task = tokio::spawn(async move {
+        let mut route_refresh = route_refresh;
         let mut queries = 0usize;
         let mut current = prior;
         while let Some(cmd) = session_rx.recv().await {
@@ -1615,6 +1619,9 @@ fn import_recording_handle(
                 PeerCommand::SendRouteRefresh { reply, .. } => {
                     if route_refresh {
                         refreshes.fetch_add(1, Ordering::SeqCst);
+                        // The peer reconnects without the capability once the
+                        // change it took has been refreshed.
+                        route_refresh &= !lose_route_refresh_on_install;
                         let _ = reply.send(Ok(()));
                     } else {
                         let _ = reply.send(Err(PeerCommandError::RouteRefreshUnsupported));
@@ -1652,6 +1659,7 @@ fn install_import_recording_peer_at(
             peer_key.address,
             route_refresh,
             idle_queries,
+            false,
             prior.clone(),
             Arc::clone(&installed),
             Arc::clone(&refreshes),

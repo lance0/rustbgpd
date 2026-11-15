@@ -1607,7 +1607,8 @@ impl PeerManager {
                 "hot update target {peer} is a dynamic peer; reload reconciles static neighbors only"
             )));
         }
-        self.hot_update_peer_in_place(config).await
+        self.hot_update_peer_in_place(config, rustbgpd_transport::ImportPolicyInstall::Change)
+            .await
     }
 
     pub(super) async fn hot_update_peer_owned(
@@ -1660,8 +1661,15 @@ impl PeerManager {
                 failure.to_string(),
             ));
         }
-        match self.hot_update_peer_in_place(config).await {
+        match self
+            .hot_update_peer_in_place(config, rustbgpd_transport::ImportPolicyInstall::Change)
+            .await
+        {
             Ok(()) => OwnedHotUpdatePeerOutcome::Success,
+            // Raised only by a refused policy step, before any effect.
+            Err(error @ PeerLifecycleError::Precondition(_)) => {
+                OwnedHotUpdatePeerOutcome::RejectedNoEffect(error)
+            }
             Err(error) => OwnedHotUpdatePeerOutcome::KnownDivergence(error),
         }
     }
@@ -1678,9 +1686,13 @@ impl PeerManager {
         clippy::too_many_lines,
         reason = "one linear pass: change detection, policy seam, knob apply, export refresh, bookkeeping"
     )]
+    /// `install` states whether the import chain is a forward change, which a
+    /// session without Route Refresh refuses, or the restore of a captured
+    /// prior (compensation), which no session refuses.
     pub(super) async fn hot_update_peer_in_place(
         &mut self,
         config: PeerManagerNeighborConfig,
+        install: rustbgpd_transport::ImportPolicyInstall,
     ) -> Result<(), PeerLifecycleError> {
         let peer = PeerKey::new(config.address, config.interface.clone());
         #[cfg(test)]
@@ -1744,9 +1756,18 @@ impl PeerManager {
                 peer.clone(),
                 config.import_policy.clone(),
                 config.export_policy.clone(),
+                install,
             )
             .await
-            .map_err(PeerLifecycleError::Internal)?;
+            .map_err(|failure| {
+                // A refused install changed nothing, and the policy step is the
+                // update's first effect, so the whole update had none.
+                if failure.refused_without_effect() {
+                    PeerLifecycleError::Precondition(failure.to_string())
+                } else {
+                    PeerLifecycleError::Internal(failure.to_string())
+                }
+            })?;
         }
 
         let mut ipv6_unlock_only = false;

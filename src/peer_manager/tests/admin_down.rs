@@ -105,7 +105,12 @@ async fn config_admin_down_hot_edges_disable_enable_and_keep_runtime_toggle() {
     down.admin_down = Some("maintenance".to_string());
 
     // Setting the key sends Cease/Administrative Shutdown with the reason.
-    mgr.hot_update_peer_in_place(down.clone()).await.unwrap();
+    mgr.hot_update_peer_in_place(
+        down.clone(),
+        rustbgpd_transport::ImportPolicyInstall::Change,
+    )
+    .await
+    .unwrap();
     settle(&mgr, addr).await;
     assert_eq!(
         stops.try_recv().unwrap(),
@@ -120,14 +125,24 @@ async fn config_admin_down_hot_edges_disable_enable_and_keep_runtime_toggle() {
     );
 
     // Clearing it enables the peer.
-    mgr.hot_update_peer_in_place(current.clone()).await.unwrap();
+    mgr.hot_update_peer_in_place(
+        current.clone(),
+        rustbgpd_transport::ImportPolicyInstall::Change,
+    )
+    .await
+    .unwrap();
     settle(&mgr, addr).await;
     assert!(mgr.peers[&key(addr)].enabled);
     assert_eq!(starts.load(Ordering::SeqCst), 1);
 
     // A runtime enable of a config-down peer survives a reload that keeps
     // the key: only a change to `admin_down` overrides the toggle.
-    mgr.hot_update_peer_in_place(down.clone()).await.unwrap();
+    mgr.hot_update_peer_in_place(
+        down.clone(),
+        rustbgpd_transport::ImportPolicyInstall::Change,
+    )
+    .await
+    .unwrap();
     assert!(!mgr.peers[&key(addr)].enabled);
     settle(&mgr, addr).await;
     assert!(stops.try_recv().unwrap().is_some());
@@ -136,7 +151,12 @@ async fn config_admin_down_hot_edges_disable_enable_and_keep_runtime_toggle() {
     assert_eq!(starts.load(Ordering::SeqCst), 2);
     let mut unchanged_key = down.clone();
     unchanged_key.description = "renamed".to_string();
-    mgr.hot_update_peer_in_place(unchanged_key).await.unwrap();
+    mgr.hot_update_peer_in_place(
+        unchanged_key,
+        rustbgpd_transport::ImportPolicyInstall::Change,
+    )
+    .await
+    .unwrap();
     settle(&mgr, addr).await;
     assert!(mgr.peers[&key(addr)].enabled);
     assert_eq!(mgr.peers[&key(addr)].description, "renamed");
@@ -148,7 +168,9 @@ async fn config_admin_down_hot_edges_disable_enable_and_keep_runtime_toggle() {
     // A reason-only edit is bookkeeping; the peer keeps its runtime state.
     let mut new_reason = down;
     new_reason.admin_down = Some("extended".to_string());
-    mgr.hot_update_peer_in_place(new_reason).await.unwrap();
+    mgr.hot_update_peer_in_place(new_reason, rustbgpd_transport::ImportPolicyInstall::Change)
+        .await
+        .unwrap();
     settle(&mgr, addr).await;
     assert!(mgr.peers[&key(addr)].enabled);
     assert_eq!(
@@ -325,11 +347,20 @@ async fn failed_admin_down_stop_enqueue_is_retried_by_the_next_reload() {
     let mut down = forward_config(&mgr, addr);
     down.admin_down = Some("maintenance".to_string());
 
-    assert!(mgr.hot_update_peer_in_place(down.clone()).await.is_err());
+    assert!(
+        mgr.hot_update_peer_in_place(
+            down.clone(),
+            rustbgpd_transport::ImportPolicyInstall::Change
+        )
+        .await
+        .is_err()
+    );
     assert_eq!(mgr.peers[&key(addr)].admin_down, None, "not recorded");
 
     gate_tx.send(()).unwrap();
-    mgr.hot_update_peer_in_place(down).await.unwrap();
+    mgr.hot_update_peer_in_place(down, rustbgpd_transport::ImportPolicyInstall::Change)
+        .await
+        .unwrap();
     let reason = tokio::time::timeout(Duration::from_secs(1), stops.recv())
         .await
         .expect("the retry enqueues Stop");

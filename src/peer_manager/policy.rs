@@ -242,6 +242,14 @@ pub(super) struct PolicyApplyFailure {
     refresh_delivery_began: bool,
 }
 
+impl PolicyApplyFailure {
+    /// Whether the failure was a refusal raised before anything changed: a
+    /// qualification, or a session that refused the import install.
+    pub(super) fn refused_without_effect(&self) -> bool {
+        self.code == RuntimeConfigPolicyFailureCode::PreflightRejected
+    }
+}
+
 impl From<String> for PolicyApplyFailure {
     fn from(message: String) -> Self {
         Self {
@@ -461,6 +469,12 @@ struct PolicySnapshotContext {
     /// report live state after session restoration was attempted; failed
     /// restores can leave sessions on different policies.
     operator_reads: OperatorReadAdmission,
+    /// `Restore` when the snapshot replays chains captured as running
+    /// (a generation or API rollback): it skips the forward qualification,
+    /// sends every import as a restore the session never refuses, and is not
+    /// itself unwound on failure, since unwinding a restore would reinstall
+    /// the candidate it is removing.
+    install: rustbgpd_transport::ImportPolicyInstall,
 }
 
 /// One peer's policy apply, stopped after its session legs and before its RIB
@@ -1372,8 +1386,14 @@ impl PeerManager {
         let Some(peer_key) = self.unique_peer_key_for_address(address) else {
             return Ok(());
         };
-        self.update_runtime_policies_fatal(peer_key, import_policy, export_policy)
-            .await
+        self.update_runtime_policies_fatal(
+            peer_key,
+            import_policy,
+            export_policy,
+            rustbgpd_transport::ImportPolicyInstall::Change,
+        )
+        .await
+        .map_err(|failure| failure.message)
     }
 
     /// Forward-apply resolved chains to one live peer with fatal refresh
@@ -1385,12 +1405,14 @@ impl PeerManager {
         peer_key: PeerKey,
         import_policy: Option<PolicyChain>,
         export_policy: Option<PolicyChain>,
-    ) -> Result<(), String> {
+        install: rustbgpd_transport::ImportPolicyInstall,
+    ) -> Result<(), PolicyApplyFailure> {
         self.update_runtime_policies_for_peer_key(
             peer_key,
             import_policy,
             export_policy,
             RefreshFailureHandling::Fatal,
+            install,
             None,
             None,
             // A single-peer inline edit, not a walk step. Every production
@@ -1402,7 +1424,6 @@ impl PeerManager {
             },
         )
         .await
-        .map_err(|failure| failure.message)
     }
 
     /// Apply resolved import/export chains to a set of live peers, capturing each
@@ -1452,6 +1473,43 @@ impl PeerManager {
         require_clean_convergence: bool,
         operator_reads: OperatorReadAdmission,
     ) -> Result<Vec<ResolvedPeerPolicy>, PolicySnapshotFailure> {
+        self.apply_resolved_policy_snapshot_as(
+            targets,
+            require_clean_convergence,
+            operator_reads,
+            rustbgpd_transport::ImportPolicyInstall::Change,
+        )
+        .await
+    }
+
+    /// Replay chains captured as running (`priors` of an earlier snapshot)
+    /// after a later step of the same transaction failed. Unlike a forward
+    /// apply it is not qualified and never refused: a peer that reconnected
+    /// without Route Refresh while holding the candidate still gets its prior
+    /// chain back, and a refresh it cannot answer leaves the restore reported
+    /// as ambiguous rather than unwound to the candidate.
+    pub(super) async fn restore_resolved_policy_snapshot(
+        &mut self,
+        priors: Vec<ResolvedPeerPolicy>,
+        require_clean_convergence: bool,
+        operator_reads: OperatorReadAdmission,
+    ) -> Result<Vec<ResolvedPeerPolicy>, PolicySnapshotFailure> {
+        self.apply_resolved_policy_snapshot_as(
+            priors,
+            require_clean_convergence,
+            operator_reads,
+            rustbgpd_transport::ImportPolicyInstall::Restore,
+        )
+        .await
+    }
+
+    async fn apply_resolved_policy_snapshot_as(
+        &mut self,
+        targets: Vec<ResolvedPeerPolicy>,
+        require_clean_convergence: bool,
+        operator_reads: OperatorReadAdmission,
+        install: rustbgpd_transport::ImportPolicyInstall,
+    ) -> Result<Vec<ResolvedPeerPolicy>, PolicySnapshotFailure> {
         let snapshot_started = Instant::now();
         let mut phases = PolicySnapshotPhaseTimings {
             total_targets: targets.len(),
@@ -1468,6 +1526,7 @@ impl PeerManager {
                 require_clean_convergence,
                 &mut phases,
                 operator_reads,
+                install,
             )
             .await;
         let service = if owns_actor {
@@ -1523,7 +1582,9 @@ impl PeerManager {
         require_clean_convergence: bool,
         phases: &mut PolicySnapshotPhaseTimings,
         operator_reads: OperatorReadAdmission,
+        install: rustbgpd_transport::ImportPolicyInstall,
     ) -> Result<Vec<ResolvedPeerPolicy>, PolicySnapshotFailure> {
+        let restore = install == rustbgpd_transport::ImportPolicyInstall::Restore;
         // Preparation includes preflight and session setup, even when it
         // rejects before reaching a destination prestage or commit.
         self.operator_read_seam = super::OperatorReadSeam::Prestage;
@@ -1542,13 +1603,20 @@ impl PeerManager {
             rollback: LazyRibBudget::default(),
             clean_state_window: CleanStateQueryWindow::default(),
             operator_reads,
+            install,
         };
-        let preflight = self
-            .preflight_import_transitions(&targets, &mut context.forward, context.operator_reads)
-            .await;
-        phases.preflight_us = elapsed_us(preflight_started);
-        preflight
-            .map_err(|error| PolicySnapshotFailure::rejected_code(error.code, error.message))?;
+        if !restore {
+            let preflight = self
+                .preflight_import_transitions(
+                    &targets,
+                    &mut context.forward,
+                    context.operator_reads,
+                )
+                .await;
+            phases.preflight_us = elapsed_us(preflight_started);
+            preflight
+                .map_err(|error| PolicySnapshotFailure::rejected_code(error.code, error.message))?;
+        }
         // The presence proofs share one absolute budget among themselves.
         // The walks that follow are stall-bounded from their own first RIB
         // command: a budget the preflight anchored would already be spent
@@ -1957,6 +2025,28 @@ impl PeerManager {
         address: IpAddr,
         apply_error: &PolicyApplyFailure,
     ) -> PolicySnapshotFailure {
+        let mut applied = applied;
+        // A session that refused its install, or a qualification that refused
+        // it first, changed nothing: that target, the last captured, owes no
+        // rollback, and with nothing applied before it the walk had no effect.
+        if apply_error.refused_without_effect() {
+            applied.pop();
+            if applied.is_empty() {
+                return PolicySnapshotFailure::rejected_code(
+                    apply_error.code,
+                    format!("failed to apply resolved policy to {address}: {apply_error}"),
+                );
+            }
+        }
+        if context.install == rustbgpd_transport::ImportPolicyInstall::Restore {
+            return PolicySnapshotFailure::ambiguous_code(
+                apply_error.code,
+                format!(
+                    "failed to restore the prior policy of {address}: {apply_error}; the \
+                     restored chains are left in place"
+                ),
+            );
+        }
         match self
             .restore_resolved_policies(applied, context, require_clean_convergence)
             .await
@@ -2081,6 +2171,7 @@ impl PeerManager {
                         target.import_policy.clone(),
                         target.export_policy.clone(),
                         RefreshFailureHandling::Fatal,
+                        context.install,
                         pair.map(|_| &mut plan),
                         require_clean_convergence.then_some(&mut context.clean_state_window),
                         Some(&mut context.forward),
@@ -2461,7 +2552,7 @@ impl PeerManager {
                         rustbgpd_transport::PeerHandle::update_import_policy_via(
                             import_commands,
                             target.import_policy.clone(),
-                            rustbgpd_transport::ImportPolicyInstall::Change,
+                            context.install,
                         ),
                         "update_import_policy",
                     )
@@ -3667,6 +3758,7 @@ impl PeerManager {
                     prior.policy.import_policy,
                     prior.policy.export_policy,
                     refresh_failure,
+                    rustbgpd_transport::ImportPolicyInstall::Restore,
                     Some(&mut plan),
                     // One timed-out probe is not proof the session is down:
                     // the transaction's bounded probe retry applies here too.
@@ -4760,6 +4852,7 @@ impl PeerManager {
         import_policy: Option<PolicyChain>,
         export_policy: Option<PolicyChain>,
         refresh_failure: RefreshFailureHandling,
+        install: rustbgpd_transport::ImportPolicyInstall,
         rollback_plan: Option<&mut Option<PolicyRollbackPeerPlan>>,
         clean_state_window: Option<&mut CleanStateQueryWindow>,
         rib_budget: Option<&mut LazyRibBudget>,
@@ -4771,6 +4864,7 @@ impl PeerManager {
                 import_policy,
                 export_policy,
                 refresh_failure,
+                install,
                 rollback_plan,
                 clean_state_window,
                 rib_budget,
@@ -4824,6 +4918,7 @@ impl PeerManager {
         import_policy: Option<PolicyChain>,
         export_policy: Option<PolicyChain>,
         refresh_failure: RefreshFailureHandling,
+        install: rustbgpd_transport::ImportPolicyInstall,
         rollback_plan: Option<&mut Option<PolicyRollbackPeerPlan>>,
         clean_state_window: Option<&mut CleanStateQueryWindow>,
         mut rib_budget: Option<&mut LazyRibBudget>,
@@ -4849,6 +4944,7 @@ impl PeerManager {
         // chain is best-effort by contract and must never be blocked by the state
         // that made the forward apply fail.
         let rfc8212_fatal_transition = matches!(refresh_failure, RefreshFailureHandling::Fatal)
+            && install == rustbgpd_transport::ImportPolicyInstall::Change
             && self.rfc8212_import_presence_transition(&peer_key, import_policy.as_ref());
         // True only for the Established case: that peer's `AdjRibIn` holds
         // routes the prior verdict accepted, so its refresh is the transition's
@@ -4937,12 +5033,8 @@ impl PeerManager {
                 RefreshFailureHandling::BestEffortRestorePrior { .. }
             );
         // A forward apply is a change the session refuses for a peer without
-        // Route Refresh; a rollback restores the chain it held before.
-        let install = if matches!(refresh_failure, RefreshFailureHandling::Fatal) {
-            rustbgpd_transport::ImportPolicyInstall::Change
-        } else {
-            rustbgpd_transport::ImportPolicyInstall::Restore
-        };
+        // Route Refresh; a rollback or compensation restores the chain it
+        // held before, which the caller states as `install`.
         let import_apply_result = if import_changed || reassert_prior_import {
             handle
                 .update_import_policy_timeout(
@@ -6022,6 +6114,7 @@ impl PeerManager {
                     import_policy,
                     export_policy,
                     RefreshFailureHandling::Fatal,
+                    rustbgpd_transport::ImportPolicyInstall::Change,
                     None,
                     None,
                     Some(&mut rib_budget),
@@ -6141,6 +6234,7 @@ impl PeerManager {
                     import_policy,
                     export_policy,
                     RefreshFailureHandling::Fatal,
+                    rustbgpd_transport::ImportPolicyInstall::Change,
                     None,
                     None,
                     Some(&mut rib_budget),
@@ -6721,7 +6815,10 @@ impl PeerManager {
         let mut applied: Vec<PeerManagerNeighborConfig> = Vec::new();
         for (next, prior) in cohort {
             let peer = PeerKey::new(next.address, next.interface.clone());
-            let Err(error) = self.hot_update_peer_in_place(next).await else {
+            let Err(error) = self
+                .hot_update_peer_in_place(next, rustbgpd_transport::ImportPolicyInstall::Change)
+                .await
+            else {
                 applied.push(prior);
                 continue;
             };
@@ -6729,7 +6826,13 @@ impl PeerManager {
             let mut failures = Vec::new();
             for prior in applied.into_iter().rev() {
                 let restored = PeerKey::new(prior.address, prior.interface.clone());
-                if let Err(restore_error) = self.hot_update_peer_in_place(prior).await {
+                if let Err(restore_error) = self
+                    .hot_update_peer_in_place(
+                        prior,
+                        rustbgpd_transport::ImportPolicyInstall::Restore,
+                    )
+                    .await
+                {
                     failures.push(format!("{restored}: {restore_error}"));
                 }
             }

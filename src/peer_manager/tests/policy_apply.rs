@@ -2590,6 +2590,11 @@ async fn import_edit_refused_by_a_session_that_came_up_after_the_preflight() {
         failure.code,
         RuntimeConfigPolicyFailureCode::PreflightRejected
     );
+    assert_eq!(
+        failure.kind,
+        super::super::policy::PolicySnapshotFailureKind::RejectedNoEffect,
+        "the refused only target changed nothing"
+    );
     assert!(
         failure
             .message()
@@ -2643,6 +2648,199 @@ async fn import_refusal_remedy_names_a_scoped_neighbor() {
         "the remedy must name the scoped neighbor: {err}"
     );
     assert_eq!(installed.lock().unwrap().len(), 0);
+
+    drop(mgr);
+    rib.await.unwrap();
+}
+
+/// A generation or API rollback replays captured priors. A peer that took
+/// the candidate and then reconnected without Route Refresh still gets its
+/// prior chain back: the restore is not qualified, its install is a restore
+/// the session never refuses, and the refresh it cannot answer leaves the
+/// restore reported as ambiguous instead of unwinding it to the candidate.
+///
+/// Load-bearing: replaying the priors as a forward apply rejects the restore
+/// at the preflight, and the candidate stays active after the rollback.
+#[tokio::test]
+async fn restore_replay_reinstalls_the_prior_chain_on_a_peer_without_route_refresh() {
+    use super::super::policy::PolicySnapshotFailureKind;
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let (mut mgr, rib_rx) = rfc8212_status_manager();
+    let rib = spawn_rfc8212_rib_stub(rib_rx, 0);
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let prior = validation_policy_chain(ImportValidationDependency::Rpki);
+    // The peer runs the candidate the failed generation installed.
+    let (installed, _refreshes) =
+        install_import_recording_peer(&mut mgr, addr, false, Some(deny_policy_chain()));
+
+    let failure = mgr
+        .restore_resolved_policy_snapshot(
+            vec![ResolvedPeerPolicy {
+                address: addr,
+                interface: None,
+                import_policy: Some(prior.clone()),
+                export_policy: None,
+            }],
+            false,
+            OperatorReadAdmission::Served,
+        )
+        .await
+        .expect_err("the refresh the peer cannot answer leaves the restore ambiguous");
+
+    assert_eq!(
+        *installed.lock().unwrap(),
+        vec![Some(prior.clone())],
+        "only the prior chain is installed, and it is not unwound: {}",
+        failure.message()
+    );
+    assert_eq!(
+        failure.kind,
+        PolicySnapshotFailureKind::CompensationAmbiguous
+    );
+    assert_eq!(mgr.peers[&key(addr)].import_policy, Some(prior));
+
+    drop(mgr);
+    rib.await.unwrap();
+}
+
+/// The owned hot update's probe sees the peer down; the session comes up
+/// without Route Refresh and refuses the install. Nothing changed, so the
+/// update is `RejectedNoEffect`, not known divergence that would fence a
+/// sequential reload.
+#[tokio::test]
+async fn owned_hot_update_refused_after_its_probe_has_no_effect() {
+    use rustbgpd_api::peer_types::{OwnedHotUpdatePeerOutcome, PeerLifecycleError};
+
+    let (mut mgr, rib_rx) = rfc8212_status_manager();
+    let rib = spawn_rfc8212_rib_stub(rib_rx, 0);
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let prior = validation_policy_chain(ImportValidationDependency::Rpki);
+    let (installed, _refreshes) =
+        install_import_recording_peer_at(&mut mgr, &key(addr), false, 1, Some(prior.clone()));
+    let mut config = make_config(addr, 65002);
+    config.import_policy = Some(deny_policy_chain());
+
+    let outcome = mgr.hot_update_peer_owned(config).await;
+    assert!(
+        matches!(
+            outcome,
+            OwnedHotUpdatePeerOutcome::RejectedNoEffect(PeerLifecycleError::Precondition(ref message))
+                if message.contains("did not negotiate Route Refresh")
+        ),
+        "a refused install must report no effect: {outcome:?}"
+    );
+    assert_eq!(installed.lock().unwrap().len(), 0);
+    let managed = &mgr.peers[&key(addr)];
+    assert_eq!(managed.import_policy, Some(prior));
+    assert!(!managed.pending_refresh && !managed.import_install_unknown);
+
+    drop(mgr);
+    rib.await.unwrap();
+}
+
+/// The owned policy RPC: the walk's only target is refused by its session
+/// after the preflight probe saw it down. Nothing was installed, so the
+/// mutation is `RejectedNoEffect` (`FAILED_PRECONDITION`), not a compensated
+/// failure that the RPC would report as INTERNAL.
+#[tokio::test]
+async fn owned_import_edit_refused_after_the_preflight_has_no_effect() {
+    use rustbgpd_api::peer_types::{
+        CatalogMutationError, ConfigEvent, NamedPolicyDefinition, OwnedCatalogMutationOutcome,
+        PolicyStatementDefinition,
+    };
+
+    let (mut mgr, rib_rx) = rfc8212_status_manager();
+    let rib = spawn_rfc8212_rib_stub(rib_rx, 0);
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+    mgr.current_config.global.ebgp_requires_policy = Some(false);
+    mgr.current_config.policy.import_chain.clear();
+    mgr.current_config.policy.export_chain.clear();
+    *mgr.current_config.neighbors = vec![config_neighbor(addr, 65002)];
+    let setup = mgr
+        .apply_policy_change_owned(
+            ConfigEvent::SetPolicy {
+                name: "edge-in".to_string(),
+                definition: NamedPolicyDefinition {
+                    default_action: "deny".to_string(),
+                    statements: Vec::<PolicyStatementDefinition>::new(),
+                },
+                ack: None,
+            },
+            None,
+        )
+        .await;
+    assert!(matches!(setup, OwnedCatalogMutationOutcome::Success));
+
+    let (installed, _refreshes) =
+        install_import_recording_peer_at(&mut mgr, &key(addr), false, 1, None);
+    let outcome = mgr
+        .apply_policy_change_owned(
+            ConfigEvent::SetGlobalImportChain {
+                policy_names: vec!["edge-in".to_string()],
+                ack: None,
+            },
+            None,
+        )
+        .await;
+    assert!(
+        matches!(
+            outcome,
+            OwnedCatalogMutationOutcome::RejectedNoEffect(
+                CatalogMutationError::FailedPrecondition(_)
+            )
+        ),
+        "a refused only target must report no effect: {outcome:?}"
+    );
+    assert_eq!(installed.lock().unwrap().len(), 0);
+    assert_eq!(mgr.current_config.policy.import_chain.len(), 0);
+
+    drop(mgr);
+    rib.await.unwrap();
+}
+
+/// The other half of the no-effect rule: a target refused after an earlier
+/// target was changed still compensates that earlier target, and the refused
+/// one is left out of the rollback it never needed.
+#[tokio::test]
+async fn import_edit_refused_after_an_applied_target_still_compensates() {
+    use super::super::policy::PolicySnapshotFailureKind;
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let (mut mgr, rib_rx) = rfc8212_status_manager();
+    let rib = spawn_rfc8212_rib_stub(rib_rx, 0);
+    let capable = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let racing = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let prior = validation_policy_chain(ImportValidationDependency::Rpki);
+    let (capable_installed, _) =
+        install_import_recording_peer_at(&mut mgr, &key(capable), true, 0, Some(prior.clone()));
+    let (racing_installed, _) =
+        install_import_recording_peer_at(&mut mgr, &key(racing), false, 1, Some(prior.clone()));
+    let target = |address| ResolvedPeerPolicy {
+        address,
+        interface: None,
+        import_policy: Some(deny_policy_chain()),
+        export_policy: None,
+    };
+
+    let failure = mgr
+        .apply_resolved_policy_snapshot_classified(vec![target(capable), target(racing)], false)
+        .await
+        .expect_err("the racing peer refuses the change");
+    assert_eq!(
+        failure.kind,
+        PolicySnapshotFailureKind::FullyCompensated,
+        "{}",
+        failure.message()
+    );
+    assert_eq!(
+        *capable_installed.lock().unwrap(),
+        vec![Some(deny_policy_chain()), Some(prior.clone())]
+    );
+    assert_eq!(racing_installed.lock().unwrap().len(), 0);
+    for peer in [capable, racing] {
+        assert_eq!(mgr.peers[&key(peer)].import_policy, Some(prior.clone()));
+    }
 
     drop(mgr);
     rib.await.unwrap();

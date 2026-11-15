@@ -9,5 +9,8 @@
   **Operator-visible:** such an edit now fails as a failed precondition with
   nothing changed (`policy_preflight_rejected`); the daemon log names the peer
   and the remedy. To change that peer's import policy, disable the neighbor,
-  which withdraws its routes, apply the edit, then enable it. See the
+  which withdraws its routes, apply the edit, then enable it. An
+  `honor_graceful_shutdown` or `honor_blackhole` toggle likewise leaves such a
+  peer on its prior import chain, reported as a failed peer, until the
+  neighbor is disabled and re-enabled. See the
   [reload matrix](../docs/reference/reload-matrix.md).

@@ -1739,7 +1739,7 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
             let mut config = PeerManager::removed_peer_config(&peer, &manager.peers[&peer]);
             config.local_ipv6_nexthop = Some("2001:db8::1".parse().unwrap());
             manager
-                .hot_update_peer_in_place(config)
+                .hot_update_peer_in_place(config, rustbgpd_transport::ImportPolicyInstall::Change)
                 .await
                 .map_err(|error| error.to_string())
         }

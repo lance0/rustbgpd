@@ -1195,11 +1195,7 @@ impl PeerManager {
             return true;
         }
         let Err(error) = self
-            .apply_resolved_policy_snapshot_with_prestage_reads(
-                priors,
-                true,
-                super::OperatorReadAdmission::Served,
-            )
+            .restore_resolved_policy_snapshot(priors, true, super::OperatorReadAdmission::Served)
             .await
         else {
             return true;
