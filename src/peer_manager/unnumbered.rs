@@ -940,6 +940,7 @@ impl PeerManager {
                     && let Some(refusal) = &port.refusal
                 {
                     refusal.clone_into(&mut info.last_error);
+                    info.last_error_unix_ms = 0;
                 }
                 info.remote_asn_mode = match neighbor.remote_asn {
                     crate::config::RemoteAsn::External => {

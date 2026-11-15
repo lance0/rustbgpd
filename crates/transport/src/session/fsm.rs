@@ -364,15 +364,21 @@ impl PeerSession {
             None => cause.clone(),
         });
         if !local_maintenance {
-            self.last_error = cause;
+            self.set_last_error(cause);
         }
+    }
+
+    /// Set `last_error` and stamp when it was recorded.
+    pub(super) fn set_last_error(&mut self, error: String) {
+        self.last_error = error;
+        self.last_error_unix_ms = rustbgpd_rib::event::unix_time_ms_now();
     }
 
     /// Record a transport-level teardown cause for snapshots and for the
     /// loss lifecycle event.
     pub(super) fn record_transport_cause(&mut self, cause: String) {
         self.teardown_cause = Some(cause.clone());
-        self.last_error = cause;
+        self.set_last_error(cause);
     }
 
     /// The peer's ASN as far as this session knows it (negotiated OPEN first,
@@ -553,7 +559,7 @@ impl PeerSession {
             "fast external failover: interface down, purging routes retained from the lost connection"
         );
         self.gr_retained_connection.set(None);
-        self.last_error = down.teardown_cause();
+        self.set_last_error(down.teardown_cause());
         let _ = self.send_to_rib(RibUpdate::PeerDown {
             peer: self.rib_peer(),
             session_id: retained.session_id,

@@ -524,7 +524,7 @@ impl proto::event_service_server::EventService for EventService {
         request: Request<proto::ListSessionEventsRequest>,
     ) -> Result<Response<proto::ListSessionEventsResponse>, Status> {
         let filter = parse_list_session_events_filter(&request.into_inner())?;
-        let events = peer_manager_read(&self.peer_mgr_tx, |reply| {
+        let history = peer_manager_read(&self.peer_mgr_tx, |reply| {
             PeerManagerCommand::QuerySessionEventHistory {
                 peer: filter.peer,
                 event_types: filter.event_types,
@@ -534,10 +534,13 @@ impl proto::event_service_server::EventService for EventService {
         })
         .await?;
         Ok(Response::new(proto::ListSessionEventsResponse {
-            events: events
+            events: history
+                .events
                 .into_iter()
                 .map(|event| session_event_to_bgp_event(SessionEvent::Lifecycle(event)))
                 .collect(),
+            evicted_total: history.evicted_total,
+            oldest_retained_unix_ms: history.oldest_retained_unix_ms,
         }))
     }
 
@@ -1718,6 +1721,9 @@ mod tests {
             event.payload,
             Some(proto::bgp_event::Payload::Session(_))
         ));
+        // The eviction state is history-wide, not narrowed by the filter.
+        assert_eq!(response.evicted_total, 7);
+        assert_eq!(response.oldest_retained_unix_ms, 1_700_000_000_000);
     }
 
     fn replacement_roster() -> crate::import_roster::ImportRosterPublisher {

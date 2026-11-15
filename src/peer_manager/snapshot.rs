@@ -303,6 +303,7 @@ fn manager_peer_info(
         uptime_secs: 0,
         reconnect_in_secs: 0,
         last_error: String::new(),
+        last_error_unix_ms: 0,
         authentication: authentication_label(
             managed.tcp_ao_protected,
             managed.transport_config.md5_password.is_some(),
@@ -410,6 +411,7 @@ pub(super) fn unbound_interface_only_info(
         uptime_secs: 0,
         reconnect_in_secs: 0,
         last_error: String::new(),
+        last_error_unix_ms: 0,
         authentication: authentication_label(false, false).to_string(),
         tcp_ao_info: None,
         tcp_ao_rotation: rustbgpd_transport::TcpAoRotationStatus::default(),
@@ -465,6 +467,7 @@ fn apply_session_state(info: &mut PeerInfo, md5_configured: bool, state: &PeerSe
     info.uptime_secs = state.uptime_secs;
     info.reconnect_in_secs = state.reconnect_in_secs;
     info.last_error.clone_from(&state.last_error);
+    info.last_error_unix_ms = state.last_error_unix_ms;
     info.authentication = authentication_label(state.tcp_ao_protected, md5_configured).to_string();
     info.tcp_ao_info = state.tcp_ao_info.as_deref().cloned();
     info.stale = false;
@@ -481,6 +484,7 @@ pub(super) fn apply_session_crash(info: &mut PeerInfo, crash: Option<(&str, bool
         && (latched || info.last_error.is_empty())
     {
         crash.clone_into(&mut info.last_error);
+        info.last_error_unix_ms = 0;
         if latched && !info.enabled {
             info.admin_down_reason = Some(AdminDownReason::SessionCrashLatched);
             // A max-prefix restart cannot lift a crash latch, so no automatic
@@ -500,6 +504,7 @@ pub(super) fn apply_max_prefix_latch(
     deadline: Option<tokio::time::Instant>,
 ) {
     error.clone_into(&mut info.last_error);
+    info.last_error_unix_ms = 0;
     if !info.enabled {
         info.admin_down_reason = Some(AdminDownReason::MaxPrefixLatched);
     }

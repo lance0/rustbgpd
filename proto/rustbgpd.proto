@@ -945,6 +945,13 @@ message NeighborState {
   // Administrative hold-down state and its owner. UNSPECIFIED from an older
   // daemon and on a retention-only row.
   NeighborAdminState admin_state = 69;
+  // Unix epoch milliseconds when last_error was recorded by the session; 0
+  // when last_error is empty or its source records no time (a manager-owned
+  // latch or crash message). last_error is not cleared when the session
+  // reaches Established, so compare this with uptime_seconds: an error older
+  // than the current session's establishment is history, not the cause of
+  // anything now.
+  int64 last_error_unix_ms = 70;
 }
 
 // Stale routes one family of a neighbor still holds for GR or LLGR.
@@ -3568,6 +3575,15 @@ message ListSessionEventsRequest {
 
 message ListSessionEventsResponse {
   repeated BgpEvent events = 1;
+  // Session events evicted from the bounded history since daemon start, all
+  // peers. A nonzero value means rows were dropped. state_change retry rows
+  // can be missing at any time; every other event type is dropped only once
+  // no state_change rows remain, oldest first.
+  uint64 evicted_total = 2;
+  // Timestamp of the oldest retained event across all peers, before any
+  // request filter or limit; 0 when the history is empty. Events other than
+  // state_change that are newer than this are all retained.
+  int64 oldest_retained_unix_ms = 3;
 }
 
 message ListPolicyEventsRequest {

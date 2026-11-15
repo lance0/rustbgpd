@@ -132,6 +132,7 @@ async fn content_equal_policy_fanout_skips_unaffected_peers() {
                             flap_count: 0,
                             uptime_secs: 1,
                             last_error: String::new(),
+                            last_error_unix_ms: 0,
                             tcp_ao_info: None,
                             tcp_ao_protected: false,
                             slow_peer: false,

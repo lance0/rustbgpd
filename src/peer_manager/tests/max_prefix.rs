@@ -511,6 +511,7 @@ async fn promoted_dynamic_max_prefix_latch_survives_idle_until_explicit_enable()
                         flap_count: 0,
                         uptime_secs: 0,
                         last_error: "stale TCP connect error".to_string(),
+                        last_error_unix_ms: 0,
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
                         slow_peer: false,

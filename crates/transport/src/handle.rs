@@ -1391,6 +1391,8 @@ pub struct PeerSessionState {
     pub notification_idle_failures: u32,
     /// Human-readable description of the last error (empty if none).
     pub last_error: String,
+    /// When `last_error` was recorded, Unix epoch milliseconds (0 if none).
+    pub last_error_unix_ms: i64,
     /// Query-time TCP-AO socket inspection. Refreshed by `QueryState` and
     /// cleared on disconnect or inspection failure.
     pub tcp_ao_info: Option<Box<crate::TcpAoInfoSnapshot>>,
