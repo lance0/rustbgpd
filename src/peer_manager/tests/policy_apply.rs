@@ -1331,79 +1331,6 @@ remote_asn = 65030
     );
 }
 
-/// A session that answers as a real one does with or without Route Refresh:
-/// its negotiated projection carries the capability, it refuses
-/// `SendRouteRefresh` without it, and it records every import chain it is
-/// told to install. An UPDATE that arrives while the session holds a chain is
-/// judged under that chain, so a recorded install is the window in which the
-/// session can accept routes under it.
-fn import_recording_handle(
-    peer_addr: IpAddr,
-    route_refresh: bool,
-    installed: Arc<std::sync::Mutex<Vec<Option<PolicyChain>>>>,
-    refreshes: Arc<AtomicUsize>,
-) -> PeerHandle {
-    use rustbgpd_transport::{PeerCommand, PeerCommandError};
-    let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
-    let task = tokio::spawn(async move {
-        while let Some(cmd) = session_rx.recv().await {
-            match cmd {
-                PeerCommand::QueryState { reply } => {
-                    let mut state = policy_test_peer_state(peer_addr, SessionState::Established);
-                    state.negotiated_session = Some(test_negotiated_session(route_refresh));
-                    let _ = reply.send(state);
-                }
-                PeerCommand::UpdateImportPolicy { policy, reply } => {
-                    installed.lock().unwrap().push(policy.map(|chain| *chain));
-                    let _ = reply.send(Ok(()));
-                }
-                PeerCommand::UpdateExportPolicy { reply, .. } => {
-                    let _ = reply.send(Ok(()));
-                }
-                PeerCommand::SendRouteRefresh { reply, .. } => {
-                    if route_refresh {
-                        refreshes.fetch_add(1, Ordering::SeqCst);
-                        let _ = reply.send(Ok(()));
-                    } else {
-                        let _ = reply.send(Err(PeerCommandError::RouteRefreshUnsupported));
-                    }
-                }
-                PeerCommand::Shutdown | PeerCommand::Stop { .. } | PeerCommand::CollisionDump => {
-                    break;
-                }
-                _ => {}
-            }
-        }
-        Ok(())
-    });
-    PeerHandle::from_parts(session_tx, task)
-}
-
-type InstalledImports = Arc<std::sync::Mutex<Vec<Option<PolicyChain>>>>;
-
-fn install_import_recording_peer(
-    mgr: &mut PeerManager,
-    addr: IpAddr,
-    route_refresh: bool,
-    prior: Option<PolicyChain>,
-) -> (InstalledImports, Arc<AtomicUsize>) {
-    let installed = InstalledImports::default();
-    let refreshes = Arc::new(AtomicUsize::new(0));
-    insert_test_managed_peer(
-        mgr,
-        addr,
-        import_recording_handle(
-            addr,
-            route_refresh,
-            Arc::clone(&installed),
-            Arc::clone(&refreshes),
-        ),
-        false,
-    );
-    mgr.peers.get_mut(&key(addr)).unwrap().import_policy = prior;
-    (installed, refreshes)
-}
-
 /// ADR-0112: an Established peer that never negotiated Route Refresh cannot
 /// re-evaluate the routes it already sent, so an import chain edit for it is
 /// rejected before its session is told about the candidate chain.
@@ -2151,7 +2078,7 @@ fn route_evaluating_session(
                     state.negotiated_session = Some(test_negotiated_session(true));
                     let _ = reply.send(state);
                 }
-                PeerCommand::UpdateImportPolicy { policy, reply } => {
+                PeerCommand::UpdateImportPolicy { policy, reply, .. } => {
                     accepted = policy.as_deref() == Some(&candidate);
                     if accepted {
                         rib_tx.send(evaluate(true)).await.unwrap();
@@ -2618,4 +2545,105 @@ async fn rollback_refresh_refused_by_an_ending_session_is_exact() {
     );
     assert!(!rollback.mgr.peers[&key(rollback.b)].pending_refresh);
     rollback.finish();
+}
+
+/// The preflight probe sees the peer down, and it comes up without Route
+/// Refresh before its install. The session refuses the change itself, and
+/// the walk reports that refusal as no mutation: no install, no retry intent,
+/// no unknown-install marker.
+///
+/// Load-bearing: without the session's refusal the candidate is installed
+/// and then rolled back after the failed refresh, leaving the window open.
+#[tokio::test]
+async fn import_edit_refused_by_a_session_that_came_up_after_the_preflight() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+    use rustbgpd_api::runtime_config_settlement::RuntimeConfigPolicyFailureCode;
+
+    let (mut mgr, rib_rx) = rfc8212_status_manager();
+    let rib = spawn_rfc8212_rib_stub(rib_rx, 0);
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let prior = validation_policy_chain(ImportValidationDependency::Rpki);
+    let (installed, refreshes) =
+        install_import_recording_peer_at(&mut mgr, &key(addr), false, 1, Some(prior.clone()));
+
+    let failure = mgr
+        .apply_resolved_policy_snapshot_classified(
+            vec![ResolvedPeerPolicy {
+                address: addr,
+                interface: None,
+                import_policy: Some(deny_policy_chain()),
+                export_policy: None,
+            }],
+            false,
+        )
+        .await
+        .expect_err("the session refuses the change");
+
+    let installs = installed.lock().unwrap().len();
+    assert_eq!(
+        installs,
+        0,
+        "the session must never hold the candidate import chain ({})",
+        failure.message()
+    );
+    assert_eq!(
+        failure.code,
+        RuntimeConfigPolicyFailureCode::PreflightRejected
+    );
+    assert!(
+        failure
+            .message()
+            .contains(&format!("rbgp neighbor {addr} disable")),
+        "{}",
+        failure.message()
+    );
+    assert_eq!(refreshes.load(Ordering::SeqCst), 0);
+    let managed = mgr.peers.get(&key(addr)).unwrap();
+    assert_eq!(managed.import_policy, Some(prior));
+    assert!(
+        !managed.pending_refresh
+            && !managed.pending_export_apply
+            && !managed.import_install_unknown,
+        "a refused install owes nothing"
+    );
+
+    drop(mgr);
+    rib.await.unwrap();
+}
+
+/// A scoped link-local neighbor's remedy names it as `rbgp` addresses it, so
+/// the command disables that neighbor and not another one on the address.
+#[tokio::test]
+async fn import_refusal_remedy_names_a_scoped_neighbor() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let (mut mgr, rib_rx) = rfc8212_status_manager();
+    let rib = spawn_rfc8212_rib_stub(rib_rx, 0);
+    let addr: IpAddr = "fe80::1".parse().unwrap();
+    let peer_key = PeerKey::new(addr, Some("eth0".to_string()));
+    let (installed, _refreshes) = install_import_recording_peer_at(
+        &mut mgr,
+        &peer_key,
+        false,
+        0,
+        Some(validation_policy_chain(ImportValidationDependency::Rpki)),
+    );
+
+    let err = mgr
+        .apply_resolved_policy_snapshot(vec![ResolvedPeerPolicy {
+            address: addr,
+            interface: Some("eth0".to_string()),
+            import_policy: Some(deny_policy_chain()),
+            export_policy: None,
+        }])
+        .await
+        .unwrap_err();
+    assert!(
+        err.contains("rbgp neighbor fe80::1%eth0 disable"),
+        "the remedy must name the scoped neighbor: {err}"
+    );
+    assert_eq!(installed.lock().unwrap().len(), 0);
+
+    drop(mgr);
+    rib.await.unwrap();
 }

@@ -798,6 +798,7 @@ async fn query_import_policy_term_hits_snapshots_without_counting() {
         let _ = session
             .handle_command(PeerCommand::UpdateImportPolicy {
                 policy: Some(Box::new(chain)),
+                install: crate::handle::ImportPolicyInstall::Change,
                 reply: reply_tx,
             })
             .await;
@@ -922,6 +923,7 @@ async fn query_import_policy_term_hits_snapshots_without_counting() {
     let _ = session
         .handle_command(PeerCommand::UpdateImportPolicy {
             policy: Some(Box::new(candidate)),
+            install: crate::handle::ImportPolicyInstall::Change,
             reply,
         })
         .await;
@@ -946,6 +948,7 @@ async fn query_import_policy_term_hits_snapshots_without_counting() {
     let _ = session
         .handle_command(PeerCommand::UpdateImportPolicy {
             policy: None,
+            install: crate::handle::ImportPolicyInstall::Change,
             reply,
         })
         .await;
@@ -1131,6 +1134,7 @@ async fn explain_statement_trace_attributes_hit_and_skips_stale() {
     let _ = session
         .handle_command(PeerCommand::UpdateImportPolicy {
             policy: Some(Box::new(chain)),
+            install: crate::handle::ImportPolicyInstall::Change,
             reply: reply_tx,
         })
         .await;
@@ -1794,4 +1798,90 @@ async fn smet_import_policy_family_and_rr_loop_gates() {
             assert_eq!(evpn_withdrawn, vec![route.key()], "{gate}");
         }
     }
+}
+
+/// ADR-0112: an Established session whose peer did not negotiate Route
+/// Refresh refuses a forward import chain change itself, so a manager probe
+/// that saw the session down or capable cannot race an install the peer can
+/// never be asked to replay. Restoring a chain, an equal reinstall, a change
+/// before Established and a change on a capable session still install.
+#[tokio::test]
+async fn import_change_without_route_refresh_is_refused_by_the_session() {
+    use crate::handle::ImportPolicyInstall;
+
+    async fn send(
+        session: &mut PeerSession,
+        policy: Option<PolicyChain>,
+        install: ImportPolicyInstall,
+    ) -> Result<(), PeerCommandError> {
+        let (reply, response) = oneshot::channel();
+        let _ = session
+            .handle_command(PeerCommand::UpdateImportPolicy {
+                policy: policy.map(Box::new),
+                install,
+                reply,
+            })
+            .await;
+        response.await.unwrap()
+    }
+    let deny = PolicyChain::new(vec![Policy {
+        entries: vec![],
+        default_action: PolicyAction::Deny,
+    }]);
+
+    let (mut session, _commands, mut rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+    send(
+        &mut session,
+        Some(deny.clone()),
+        ImportPolicyInstall::Change,
+    )
+    .await
+    .expect("a session that is not Established takes the change");
+    send(&mut session, None, ImportPolicyInstall::Change)
+        .await
+        .unwrap();
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    recv_peer_up_after_export_context(&mut rib_rx).await;
+    assert!(
+        !session.negotiated.as_ref().unwrap().peer_route_refresh,
+        "the test OPEN carries no Route Refresh capability"
+    );
+
+    let generation = session.import_policy_generation;
+    assert!(matches!(
+        send(
+            &mut session,
+            Some(deny.clone()),
+            ImportPolicyInstall::Change
+        )
+        .await,
+        Err(PeerCommandError::RouteRefreshUnsupported)
+    ));
+    assert_eq!(
+        session.import_policy, None,
+        "the refused chain is not installed"
+    );
+    assert_eq!(session.import_policy_generation, generation);
+
+    send(&mut session, None, ImportPolicyInstall::Change)
+        .await
+        .expect("an equal reinstall changes nothing the peer must replay");
+    send(
+        &mut session,
+        Some(deny.clone()),
+        ImportPolicyInstall::Restore,
+    )
+    .await
+    .expect("restoring a chain is never refused");
+    assert_eq!(session.import_policy, Some(deny));
+
+    let mut capable = (**session.negotiated.as_ref().unwrap()).clone();
+    capable.peer_route_refresh = true;
+    session.negotiated = Some(Arc::new(capable));
+    send(&mut session, None, ImportPolicyInstall::Change)
+        .await
+        .expect("a peer with Route Refresh takes the change");
+    assert_eq!(session.import_policy, None);
 }

@@ -1552,6 +1552,125 @@ fn peer_identity_gauge(
         })
 }
 
+/// A session that answers as a real one does with or without Route Refresh:
+/// its negotiated projection carries the capability, it refuses
+/// `SendRouteRefresh` without it, it refuses an import change by the same
+/// predicate the real session applies ([`ImportPolicyInstall::refused`]),
+/// and it records every import chain it installs. An UPDATE that arrives
+/// while the session holds a chain is judged under that chain, so a recorded
+/// install is the window in which the session can accept routes under it.
+///
+/// The first `idle_queries` state queries report `Idle`; the session is
+/// Established from then on, which is how a peer that comes up between a
+/// caller's probe and its install is reproduced.
+///
+/// [`ImportPolicyInstall::refused`]: rustbgpd_transport::ImportPolicyInstall::refused
+fn import_recording_handle(
+    peer_addr: IpAddr,
+    route_refresh: bool,
+    idle_queries: usize,
+    prior: Option<PolicyChain>,
+    installed: InstalledImports,
+    refreshes: Arc<AtomicUsize>,
+) -> PeerHandle {
+    use rustbgpd_transport::{PeerCommand, PeerCommandError};
+    let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
+    let task = tokio::spawn(async move {
+        let mut queries = 0usize;
+        let mut current = prior;
+        while let Some(cmd) = session_rx.recv().await {
+            match cmd {
+                PeerCommand::QueryState { reply } => {
+                    queries += 1;
+                    let fsm_state = if queries <= idle_queries {
+                        SessionState::Idle
+                    } else {
+                        SessionState::Established
+                    };
+                    let mut state = policy_test_peer_state(peer_addr, fsm_state);
+                    state.negotiated_session = (fsm_state == SessionState::Established)
+                        .then(|| test_negotiated_session(route_refresh));
+                    let _ = reply.send(state);
+                }
+                PeerCommand::UpdateImportPolicy {
+                    policy,
+                    install,
+                    reply,
+                } => {
+                    let policy = policy.map(|chain| *chain);
+                    if install.refused(queries >= idle_queries, route_refresh, policy != current) {
+                        let _ = reply.send(Err(PeerCommandError::RouteRefreshUnsupported));
+                    } else {
+                        installed.lock().unwrap().push(policy.clone());
+                        current = policy;
+                        let _ = reply.send(Ok(()));
+                    }
+                }
+                PeerCommand::UpdateExportPolicy { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::UpdateRuntimeConfig { reply, .. } => {
+                    let _ = reply.send(Ok(false));
+                }
+                PeerCommand::SendRouteRefresh { reply, .. } => {
+                    if route_refresh {
+                        refreshes.fetch_add(1, Ordering::SeqCst);
+                        let _ = reply.send(Ok(()));
+                    } else {
+                        let _ = reply.send(Err(PeerCommandError::RouteRefreshUnsupported));
+                    }
+                }
+                PeerCommand::Shutdown | PeerCommand::Stop { .. } | PeerCommand::CollisionDump => {
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(session_tx, task)
+}
+
+type InstalledImports = Arc<std::sync::Mutex<Vec<Option<PolicyChain>>>>;
+
+/// Insert a peer at `peer_key` whose session is [`import_recording_handle`],
+/// with `prior` as its running import chain.
+fn install_import_recording_peer_at(
+    mgr: &mut PeerManager,
+    peer_key: &PeerKey,
+    route_refresh: bool,
+    idle_queries: usize,
+    prior: Option<PolicyChain>,
+) -> (InstalledImports, Arc<AtomicUsize>) {
+    let installed = InstalledImports::default();
+    let refreshes = Arc::new(AtomicUsize::new(0));
+    insert_test_managed_peer_for_key(
+        mgr,
+        peer_key,
+        65002,
+        import_recording_handle(
+            peer_key.address,
+            route_refresh,
+            idle_queries,
+            prior.clone(),
+            Arc::clone(&installed),
+            Arc::clone(&refreshes),
+        ),
+        false,
+    );
+    mgr.peers.get_mut(peer_key).unwrap().import_policy = prior;
+    (installed, refreshes)
+}
+
+fn install_import_recording_peer(
+    mgr: &mut PeerManager,
+    addr: IpAddr,
+    route_refresh: bool,
+    prior: Option<PolicyChain>,
+) -> (InstalledImports, Arc<AtomicUsize>) {
+    install_import_recording_peer_at(mgr, &key(addr), route_refresh, 0, prior)
+}
+
 /// The Established-only negotiated projection a stub session reports.
 ///
 /// Keep it coherent with how the same stub answers `SendRouteRefresh`: a

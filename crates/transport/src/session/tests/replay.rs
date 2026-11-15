@@ -117,6 +117,9 @@ async fn deferred_replay_keeps_a_nested_mutation_before_its_snapshot() {
     commands
         .try_send(PeerCommand::UpdateImportPolicy {
             policy: None,
+            // An ordering probe, not a policy change: exempt from the
+            // Route Refresh refusal.
+            install: crate::handle::ImportPolicyInstall::Restore,
             reply,
         })
         .unwrap();
@@ -497,6 +500,9 @@ async fn exercise_live_replay_admission(wait: ReplayAdmissionWait) {
         commands
             .try_send(PeerCommand::UpdateImportPolicy {
                 policy: Some(Box::new(rustbgpd_policy::PolicyChain::new(vec![]))),
+                // An ordering probe, not a policy change: exempt from the
+                // Route Refresh refusal.
+                install: crate::handle::ImportPolicyInstall::Restore,
                 reply,
             })
             .unwrap();

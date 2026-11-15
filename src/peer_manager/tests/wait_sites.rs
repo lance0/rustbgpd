@@ -367,7 +367,7 @@ const WAIT_SITES: &[WaitSite] = &[
         completion: Completion::ImportApplied,
     },
     WaitSite {
-        site: "policy.rs::qualify_import_change",
+        site: "policy.rs::qualify_import_changes",
         awaits: "PeerCommand::QueryState of each import-moving target (preflight)",
         drive: Drive::ForwardCohort {
             import_delta: true,

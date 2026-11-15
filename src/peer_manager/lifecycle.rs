@@ -1645,15 +1645,17 @@ impl PeerManager {
         // The policy step runs first, so refusing its import change here
         // leaves the whole update without effect.
         if self.import_chain_changes(&peer, config.import_policy.as_ref())
-            && let Err(failure) = self
-                .qualify_import_change(
-                    &peer,
+            && let Some(failure) = self
+                .qualify_import_changes(
+                    std::slice::from_ref(&peer),
                     OperatorReadAdmission::Fenced {
                         reason: "an inline hot update qualifies its import change before any effect",
                     },
                 )
                 .await
+                .pop()
         {
+            warn!(error = %failure, "hot update refused before any effect");
             return OwnedHotUpdatePeerOutcome::RejectedNoEffect(PeerLifecycleError::Precondition(
                 failure.to_string(),
             ));

@@ -79,6 +79,7 @@ async fn denied_classic_replacement_withdraws_exact_route_and_remains_explainabl
     let flow = session
         .handle_command(PeerCommand::UpdateImportPolicy {
             policy: Some(Box::new(deny_chain)),
+            install: crate::handle::ImportPolicyInstall::Change,
             reply: reply_tx,
         })
         .await;
@@ -618,6 +619,7 @@ async fn denied_replacement_is_removed_before_eorr_and_cannot_survive_gr() {
         session
             .handle_command(PeerCommand::UpdateImportPolicy {
                 policy: Some(Box::new(deny_policy)),
+                install: crate::handle::ImportPolicyInstall::Change,
                 reply: reply_tx,
             })
             .await,

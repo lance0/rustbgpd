@@ -356,6 +356,13 @@ impl PolicySnapshotFailure {
 
     /// The settlement outcome this failure reports to an owned caller.
     pub(super) fn into_owned_outcome(self) -> OwnedCatalogMutationOutcome {
+        // The reply carries only the closed failure code; the message names
+        // the peers and the remedy, so the daemon log keeps it.
+        warn!(
+            error = self.code.as_str(),
+            reason = %self.message,
+            "live policy mutation failed"
+        );
         let error = self.closed_catalog_error();
         match self.kind {
             PolicySnapshotFailureKind::RejectedNoEffect => {
@@ -508,6 +515,19 @@ impl std::fmt::Display for PolicyRollbackFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&self.detail)
     }
+}
+
+/// The operator-facing refusal of an import chain change for an Established
+/// session without Route Refresh, naming the neighbor exactly as `rbgp`
+/// addresses it (`address%interface` for a scoped link-local neighbor).
+fn import_refresh_refusal(peer_key: &PeerKey) -> String {
+    format!(
+        "{peer_key}: cannot change the import policy of an Established session that did not \
+         negotiate Route Refresh (RFC 2918): the routes it already sent cannot be re-evaluated \
+         under the new chain; disable the neighbor (rbgp neighbor {peer_key} disable), which \
+         withdraws its routes, apply the change, then enable it so the peer resends them under \
+         the new chain"
+    )
 }
 
 fn paced_budget_expired() -> String {
@@ -1065,8 +1085,9 @@ impl PeerManager {
                 message: format!(
                     "{peer_key}: cannot apply an RFC 8212 import policy-presence change — the \
                  Established session did not negotiate Route Refresh (RFC 2918), so already \
-                 accepted routes cannot be re-evaluated against the new verdict; clear the \
-                 session (rbgp neighbor clear) or let it reconnect, then reapply"
+                 accepted routes cannot be re-evaluated against the new verdict; disable the \
+                 neighbor (rbgp neighbor {peer_key} disable), which withdraws its routes, apply \
+                 the change, then enable it"
                 ),
                 refresh_delivery_began: false,
             });
@@ -1157,56 +1178,70 @@ impl PeerManager {
         self.await_with_readiness(bounded, operator_reads).await
     }
 
-    /// ADR-0112: may this peer take a live import chain change right now?
-    /// Read-only, like [`Self::qualify_rfc8212_import_transition`].
+    /// ADR-0112: may these peers take a live import chain change right now?
+    /// Read-only, like [`Self::qualify_rfc8212_import_transition`]; returns one
+    /// failure per peer that may not.
     ///
     /// An Established session that did not negotiate Route Refresh cannot be
     /// asked to resend what it already sent, so the change could never be
     /// converged. Hot-applying it anyway and rolling back on the failed
     /// refresh is not a rollback: every UPDATE the session judged under the
     /// candidate chain in between stays accepted. Only that positive answer
-    /// rejects. Any other answer keeps the ordinary apply path, which fails
-    /// closed on its own probe and refresh.
-    pub(super) async fn qualify_import_change(
+    /// rejects. Any other answer keeps the ordinary apply path, whose session
+    /// refuses the same change itself ([`ImportPolicyInstall::Change`]) if the
+    /// peer comes up without the capability after this probe.
+    ///
+    /// The probes run concurrently through the shared fan-out bound, so many
+    /// stalled sessions cost about one probe deadline per 64 peers rather
+    /// than one each.
+    ///
+    /// [`ImportPolicyInstall::Change`]: rustbgpd_transport::ImportPolicyInstall::Change
+    pub(super) async fn qualify_import_changes(
         &mut self,
-        peer_key: &PeerKey,
+        peers: &[PeerKey],
         operator_reads: OperatorReadAdmission,
-    ) -> Result<(), PolicyApplyFailure> {
-        let Some(managed) = self.peers.get(peer_key) else {
-            return Ok(());
-        };
-        let commands = managed.handle().commands_sender();
-        let state = self
-            .await_with_readiness(
+    ) -> Vec<PolicyApplyFailure> {
+        let mut targets = Vec::with_capacity(peers.len());
+        let mut probes = Vec::with_capacity(peers.len());
+        for peer_key in peers {
+            let Some(managed) = self.peers.get(peer_key) else {
+                continue;
+            };
+            let commands = managed.handle().commands_sender();
+            targets.push(peer_key);
+            probes.push(async move {
                 rustbgpd_transport::PeerHandle::query_state_outcome_with(
                     commands,
                     PEER_QUERY_TIMEOUT,
-                ),
-                operator_reads,
-            )
+                )
+                .await
+            });
+        }
+        let answers = self
+            .await_with_readiness(super::bounded_fan_out(probes), operator_reads)
             .await;
         self.drain_readiness_queries().await;
         self.drain_operator_queries(operator_reads).await;
-        if let StateQueryOutcome::State(state) = state
-            && state.fsm_state == SessionState::Established
-            && state
-                .negotiated_session
-                .is_some_and(|negotiated| !negotiated.peer_route_refresh)
-        {
-            return Err(PolicyApplyFailure {
-                code: RuntimeConfigPolicyFailureCode::PreflightRejected,
-                message: format!(
-                    "{peer_key}: cannot change the import policy of an Established session that \
-                 did not negotiate Route Refresh (RFC 2918): the routes it already sent cannot \
-                 be re-evaluated under the new chain; disable the neighbor (rbgp neighbor \
-                 {} disable), apply the change, then enable it so the peer resends its routes \
-                 under the new chain",
-                    peer_key.address
-                ),
-                refresh_delivery_began: false,
-            });
-        }
-        Ok(())
+        targets
+            .into_iter()
+            .zip(answers)
+            .filter_map(|(peer_key, state)| {
+                // A negotiated projection exists only while Established; the
+                // state clause states that rather than relying on it.
+                let StateQueryOutcome::State(state) = state else {
+                    return None;
+                };
+                (state.fsm_state == SessionState::Established
+                    && state
+                        .negotiated_session
+                        .is_some_and(|negotiated| !negotiated.peer_route_refresh))
+                .then(|| PolicyApplyFailure {
+                    code: RuntimeConfigPolicyFailureCode::PreflightRejected,
+                    message: import_refresh_refusal(peer_key),
+                    refresh_delivery_began: false,
+                })
+            })
+            .collect()
     }
 
     /// Whether `candidate_import` changes the import chain this peer's session
@@ -1224,7 +1259,7 @@ impl PeerManager {
     /// ADR-0112: qualify every target whose import chain would change, before
     /// the snapshot mutates any peer. An RFC 8212 presence transition takes the
     /// stricter [`Self::qualify_rfc8212_import_transition`]; any other import
-    /// change takes [`Self::qualify_import_change`].
+    /// change takes [`Self::qualify_import_changes`].
     ///
     /// A multi-peer edit is all-or-nothing on this rule: one unqualified peer
     /// rejects the whole set with zero peers touched, rather than letting the
@@ -1237,44 +1272,35 @@ impl PeerManager {
         rib_budget: &mut LazyRibBudget,
         operator_reads: OperatorReadAdmission,
     ) -> Result<(), PolicyApplyFailure> {
-        let transitioning: Vec<(PeerKey, bool)> = targets
-            .iter()
-            .filter_map(|target| {
-                let peer_key = PeerKey::new(target.address, target.interface.clone());
-                let import = target.import_policy.as_ref();
-                if self.rfc8212_import_presence_transition(&peer_key, import) {
-                    Some((peer_key, true))
-                } else if self.import_chain_changes(&peer_key, import) {
-                    Some((peer_key, false))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        if transitioning.is_empty() {
+        let mut presence = Vec::new();
+        let mut changing = Vec::new();
+        for target in targets {
+            let peer_key = PeerKey::new(target.address, target.interface.clone());
+            let import = target.import_policy.as_ref();
+            if self.rfc8212_import_presence_transition(&peer_key, import) {
+                presence.push(peer_key);
+            } else if self.import_chain_changes(&peer_key, import) {
+                changing.push(peer_key);
+            }
+        }
+        let transitioning = presence.len() + changing.len();
+        if transitioning == 0 {
             return Ok(());
         }
 
         let mut rejections = Vec::new();
-        for (peer_key, presence) in &transitioning {
-            let qualified = if *presence {
-                self.qualify_rfc8212_import_transition(
-                    peer_key,
-                    Some(&mut *rib_budget),
-                    operator_reads,
-                )
+        for peer_key in &presence {
+            if let Err(error) = self
+                .qualify_rfc8212_import_transition(peer_key, Some(&mut *rib_budget), operator_reads)
                 .await
-                .map(|_| ())
-            } else {
-                self.qualify_import_change(peer_key, operator_reads).await
-            };
-            if let Err(error) = qualified {
+            {
                 rejections.push(error);
             }
         }
+        rejections.extend(self.qualify_import_changes(&changing, operator_reads).await);
         if rejections.is_empty() {
             info!(
-                peers = transitioning.len(),
+                peers = transitioning,
                 "qualified import policy changes for live apply"
             );
             return Ok(());
@@ -1293,7 +1319,7 @@ impl PeerManager {
             message: format!(
                 "rejected {} of {} live import policy change(s); no peer was modified: {}",
                 rejections.len(),
-                transitioning.len(),
+                transitioning,
                 rejections
                     .iter()
                     .map(|rejection| {
@@ -2435,6 +2461,7 @@ impl PeerManager {
                         rustbgpd_transport::PeerHandle::update_import_policy_via(
                             import_commands,
                             target.import_policy.clone(),
+                            rustbgpd_transport::ImportPolicyInstall::Change,
                         ),
                         "update_import_policy",
                     )
@@ -2443,6 +2470,13 @@ impl PeerManager {
                     if prestaged {
                         self.discard_prepared_export_destination(targets[0]).await;
                     }
+                    // The session refused the change outright: nothing was
+                    // installed, so no retry intent is owed and the unwind
+                    // below is exact.
+                    let refused = matches!(
+                        error,
+                        rustbgpd_transport::PeerCommandError::RouteRefreshUnsupported
+                    );
                     // Mirror the authoritative forward-import bail: bookkeeping
                     // retains the prior chain so the next call still sees the
                     // delta and retries, and `pending_refresh` carries the
@@ -2451,7 +2485,7 @@ impl PeerManager {
                     // reply was lost). The export command was never sent for
                     // this member, so only already-captured peers need
                     // restoring.
-                    if let Some(managed) = self.peers.get_mut(peer_key) {
+                    if !refused && let Some(managed) = self.peers.get_mut(peer_key) {
                         managed.pending_refresh = true;
                         managed.import_install_unknown = true;
                     }
@@ -2459,6 +2493,15 @@ impl PeerManager {
                         .restore_resolved_policies(captured, context, require_clean_convergence)
                         .await;
                     return Some(Err(match prior_restore {
+                        Ok(()) if refused => PolicySnapshotFailure::compensated_code(
+                            RuntimeConfigPolicyFailureCode::PreflightRejected,
+                            format!(
+                                "failed to apply resolved policy to {}: import: {}; \
+                                 already-applied peers restored",
+                                target.address,
+                                import_refresh_refusal(peer_key)
+                            ),
+                        ),
                         Ok(()) => PolicySnapshotFailure::ambiguous_code(
                             RuntimeConfigPolicyFailureCode::SessionApplyRejected,
                             format!(
@@ -2547,6 +2590,7 @@ impl PeerManager {
                             rustbgpd_transport::PeerHandle::update_import_policy_via(
                                 import_restore_commands,
                                 prior.policy.import_policy.clone(),
+                                rustbgpd_transport::ImportPolicyInstall::Restore,
                             ),
                             "update_import_policy",
                         )
@@ -4892,13 +4936,40 @@ impl PeerManager {
                 refresh_failure,
                 RefreshFailureHandling::BestEffortRestorePrior { .. }
             );
+        // A forward apply is a change the session refuses for a peer without
+        // Route Refresh; a rollback restores the chain it held before.
+        let install = if matches!(refresh_failure, RefreshFailureHandling::Fatal) {
+            rustbgpd_transport::ImportPolicyInstall::Change
+        } else {
+            rustbgpd_transport::ImportPolicyInstall::Restore
+        };
         let import_apply_result = if import_changed || reassert_prior_import {
             handle
-                .update_import_policy_timeout(import_policy.clone(), PEER_POLICY_UPDATE_TIMEOUT)
+                .update_import_policy_timeout(
+                    import_policy.clone(),
+                    install,
+                    PEER_POLICY_UPDATE_TIMEOUT,
+                )
                 .await
         } else {
             Ok(())
         };
+        if install == rustbgpd_transport::ImportPolicyInstall::Change
+            && matches!(
+                import_apply_result,
+                Err(rustbgpd_transport::PeerCommandError::RouteRefreshUnsupported)
+            )
+        {
+            // The session refused the change outright, so nothing moved:
+            // restore the retry intent taken above and touch nothing else.
+            managed.pending_refresh = had_pending_refresh;
+            managed.pending_export_apply = had_pending_export_apply;
+            return Err(PolicyApplyFailure {
+                code: RuntimeConfigPolicyFailureCode::PreflightRejected,
+                message: import_refresh_refusal(&peer_key),
+                refresh_delivery_began: false,
+            });
+        }
         let import_apply_failed = if let Err(error) = &import_apply_result {
             warn!(
                 peer = %address,

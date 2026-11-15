@@ -7,6 +7,7 @@
   rolled back and reported as cleanly restored, while UPDATEs received in
   between stayed accepted under the candidate chain.
   **Operator-visible:** such an edit now fails as a failed precondition with
-  nothing changed and names the peer; to change that peer's import policy,
-  disable the neighbor, apply the edit, then enable it. See the
+  nothing changed (`policy_preflight_rejected`); the daemon log names the peer
+  and the remedy. To change that peer's import policy, disable the neighbor,
+  which withdraws its routes, apply the edit, then enable it. See the
   [reload matrix](../docs/reference/reload-matrix.md).

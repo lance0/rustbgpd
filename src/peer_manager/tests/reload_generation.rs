@@ -69,7 +69,7 @@ fn generation_session(addr: IpAddr) -> (PeerHandle, Arc<GenerationSessionCounter
     let task = tokio::spawn(async move {
         while let Some(command) = session_rx.recv().await {
             match command {
-                PeerCommand::UpdateImportPolicy { policy, reply } => {
+                PeerCommand::UpdateImportPolicy { policy, reply, .. } => {
                     if in_task.drop_import_replies.load(Ordering::SeqCst) > 0 {
                         in_task.drop_import_replies.fetch_sub(1, Ordering::SeqCst);
                         drop(reply);

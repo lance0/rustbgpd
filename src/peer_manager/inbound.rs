@@ -1404,7 +1404,12 @@ impl PeerManager {
         let handle = &pending.handle;
         let config = &managed.transport_config;
         handle
-            .update_import_policy_timeout(managed.import_policy.clone(), PEER_POLICY_UPDATE_TIMEOUT)
+            .update_import_policy_timeout(
+                managed.import_policy.clone(),
+                // The chain the manager already runs for this neighbor.
+                rustbgpd_transport::ImportPolicyInstall::Restore,
+                PEER_POLICY_UPDATE_TIMEOUT,
+            )
             .await?;
         handle
             .update_export_policy_timeout(managed.export_policy.clone(), PEER_POLICY_UPDATE_TIMEOUT)

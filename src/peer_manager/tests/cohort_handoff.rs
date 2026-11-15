@@ -50,7 +50,7 @@ fn import_tolerant_cohort_test_session_with_states(
         let mut state_queries = 0usize;
         while let Some(command) = session_rx.recv().await {
             match command {
-                PeerCommand::UpdateImportPolicy { policy, reply } => {
+                PeerCommand::UpdateImportPolicy { policy, reply, .. } => {
                     counters.import_installs.fetch_add(1, Ordering::SeqCst);
                     *counters.live_import.lock().unwrap() = policy.map(|policy| *policy);
                     let _ = reply.send(Ok(()));
