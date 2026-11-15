@@ -3,7 +3,7 @@
 This changelog covers the independently published `rustbgpd-fsm` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
-## Unreleased
+## 0.15.1 - 2026-11-15
 
 - A `ConnectRetryTimerExpires` in Connect, a dial that got no answer, now
   increments the connect-retry counter, so the next `ConnectRetry` interval

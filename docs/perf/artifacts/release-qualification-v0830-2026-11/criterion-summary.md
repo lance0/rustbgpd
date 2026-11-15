@@ -1,0 +1,172 @@
+| cell | gate | A (ABBA) | B (ABBA) | A/A | T | ABBA B/A | conf B/A | verdict |
+|---|---|---|---|---|---|---|---|---|
+| add_path_export_staging/deny_best/256/send_max_1 | gate | 85.524 us | 86.058 us | 0.995 | 1.020 | 1.006 | 0.992 | PASS |
+| add_path_export_staging/deny_best/256/send_max_4 | gate | 89.396 us | 88.581 us | 0.996 | 1.020 | 0.991 | 0.998 | PASS |
+| add_path_export_staging/deny_best/64/send_max_1 | gate | 31.030 us | 31.355 us | 0.994 | 1.020 | 1.010 | 0.988 | PASS |
+| add_path_export_staging/deny_best/64/send_max_4 | gate | 34.105 us | 34.202 us | 0.996 | 1.020 | 1.003 | 0.987 | PASS |
+| add_path_export_staging/deny_best/8/send_max_1 | gate | 13.726 us | 13.915 us | 1.006 | 1.020 | 1.014 | 0.987 | PASS |
+| add_path_export_staging/deny_best/8/send_max_4 | gate | 16.540 us | 16.573 us | 1.017 | 1.027 | 1.002 | 0.986 | PASS |
+| add_path_export_staging/permit_all/256/send_max_1 | gate | 73.287 us | 72.301 us | 1.000 | 1.020 | 0.987 | 0.998 | PASS |
+| add_path_export_staging/permit_all/256/send_max_4 | gate | 75.131 us | 74.439 us | 1.004 | 1.020 | 0.991 | 0.996 | PASS |
+| add_path_export_staging/permit_all/64/send_max_1 | gate | 24.969 us | 24.863 us | 0.995 | 1.020 | 0.996 | 1.004 | PASS |
+| add_path_export_staging/permit_all/64/send_max_4 | gate | 27.107 us | 26.784 us | 1.004 | 1.020 | 0.988 | 1.001 | PASS |
+| add_path_export_staging/permit_all/8/send_max_1 | gate | 9.379 us | 9.430 us | 1.008 | 1.020 | 1.005 | 1.021 | PASS |
+| add_path_export_staging/permit_all/8/send_max_4 | gate | 11.377 us | 11.322 us | 1.028 | 1.038 | 0.995 | 1.016 | PASS |
+| adj_rib_in_insert/10000 | gate | 524.593 us | 535.289 us | 0.972 | 1.039 | 1.020 | 1.024 | PASS |
+| adj_rib_in_insert/100000 | report | 7.365 ms | 7.443 ms | 1.013 | 1.023 | 1.011 | 1.501 | report (PASS) |
+| adj_rib_in_insert/500000 | gate | 42.916 ms | 43.872 ms | 1.001 | 1.020 | 1.022 | 1.102 | FAIL |
+| adj_rib_out_family_gauge/homogeneous_route_server_second_pass/1 | gate | 43.151 us | 43.013 us | 0.983 | 1.028 | 0.997 | 0.994 | PASS |
+| adj_rib_out_family_gauge/homogeneous_route_server_second_pass/1000 | gate | 3.456 ms | 3.574 ms | 1.007 | 1.020 | 1.034 | 1.050 | FAIL |
+| adj_rib_out_family_gauge/homogeneous_route_server_second_pass/256 | gate | 823.255 us | 861.645 us | 1.001 | 1.020 | 1.047 | 1.046 | FAIL |
+| adj_rib_out_family_gauge/homogeneous_route_server_second_pass/64 | gate | 231.229 us | 239.788 us | 1.003 | 1.020 | 1.037 | 1.043 | FAIL |
+| adj_rib_out_family_gauge/homogeneous_route_server_second_pass/8 | gate | 63.073 us | 63.966 us | 0.994 | 1.020 | 1.014 | 1.008 | PASS |
+| attr_decode/as_set_revised/1 | gate | 102.0 ns | 92.5 ns | 0.983 | 1.027 | 0.907 | 0.909 | WIN |
+| attr_decode/rich/11 | gate | 384.0 ns | 343.0 ns | 0.944 | 1.069 | 0.893 | 0.951 | PASS |
+| attr_decode/typical/6 | gate | 180.0 ns | 167.3 ns | 1.010 | 1.020 | 0.930 | 0.997 | PASS |
+| attr_decode_revised/rich/11 | gate | 353.7 ns | 337.7 ns | 1.001 | 1.020 | 0.955 | 1.000 | PASS |
+| attr_decode_revised/typical/6 | gate | 177.3 ns | 170.2 ns | 0.998 | 1.020 | 0.960 | 1.004 | PASS |
+| attr_encode/rich/11 | gate | 395.2 ns | 381.3 ns | 1.004 | 1.020 | 0.965 | 0.995 | PASS |
+| attr_encode/typical/6 | gate | 68.1 ns | 62.8 ns | 0.982 | 1.028 | 0.923 | 0.948 | WIN |
+| attr_intern/many_unique/10000 | gate | 130.481 us | 128.780 us | 1.000 | 1.020 | 0.987 | 1.009 | PASS |
+| attr_intern/rich_independent_equal/10000 | gate | 382.436 us | 380.833 us | 1.000 | 1.020 | 0.996 | 1.004 | PASS |
+| attr_intern/rich_shared_arc/10000 | gate | 77.615 us | 41.012 us | 0.534 | 1.882 | 0.528 | 0.487 | WIN |
+| attr_intern/typical_independent_equal/10000 | gate | 132.261 us | 136.407 us | 1.007 | 1.020 | 1.031 | 1.017 | PASS |
+| attr_intern/typical_independent_equal/100000 | gate | 1.674 ms | 1.705 ms | 1.003 | 1.020 | 1.018 | 0.985 | PASS |
+| attr_intern/typical_shared_arc/10000 | gate | 67.479 us | 40.448 us | 0.639 | 1.575 | 0.599 | 0.471 | WIN |
+| attr_intern/typical_shared_arc/100000 | gate | 870.158 us | 770.814 us | 1.041 | 1.051 | 0.886 | 0.977 | PASS |
+| bulk_initial_load/10000 | gate | 1.729 ms | 1.715 ms | 1.004 | 1.020 | 0.992 | 1.001 | PASS |
+| bulk_initial_load/100000 | gate | 28.176 ms | 26.515 ms | 1.352 | 1.362 | 0.941 | 0.953 | PASS |
+| distribute_fanout/no_policy/1 | gate | 45.936 us | 45.543 us | 0.979 | 1.031 | 0.991 | 0.989 | PASS |
+| distribute_fanout/no_policy/256 | gate | 822.156 us | 862.488 us | 0.997 | 1.020 | 1.049 | 1.041 | FAIL |
+| distribute_fanout/no_policy/64 | gate | 233.628 us | 242.426 us | 0.999 | 1.020 | 1.038 | 1.031 | FAIL |
+| distribute_fanout/no_policy/8 | gate | 65.728 us | 66.349 us | 0.990 | 1.020 | 1.009 | 0.999 | PASS |
+| distribute_fanout/with_modifying_policy/1 | gate | 58.068 us | 58.291 us | 0.984 | 1.026 | 1.004 | 1.003 | PASS |
+| distribute_fanout/with_modifying_policy/256 | gate | 868.259 us | 915.053 us | 1.002 | 1.020 | 1.054 | 1.045 | FAIL |
+| distribute_fanout/with_modifying_policy/64 | gate | 254.755 us | 264.938 us | 1.001 | 1.020 | 1.040 | 1.031 | FAIL |
+| distribute_fanout/with_modifying_policy/8 | gate | 79.164 us | 80.361 us | 0.993 | 1.020 | 1.015 | 1.010 | PASS |
+| distribute_fanout/with_policy/1 | gate | 52.073 us | 52.473 us | 0.988 | 1.022 | 1.008 | 1.003 | PASS |
+| distribute_fanout/with_policy/256 | gate | 935.928 us | 985.435 us | 1.014 | 1.024 | 1.053 | 1.045 | FAIL |
+| distribute_fanout/with_policy/64 | gate | 265.341 us | 276.110 us | 1.010 | 1.020 | 1.041 | 1.034 | FAIL |
+| distribute_fanout/with_policy/8 | gate | 74.427 us | 76.274 us | 1.004 | 1.020 | 1.025 | 1.006 | PASS |
+| failover_encode/announce_only/32 | gate | 190.105 us | 187.110 us | 1.008 | 1.020 | 0.984 | 0.963 | PASS |
+| failover_encode/announce_only/8 | gate | 134.473 us | 123.207 us | 0.990 | 1.020 | 0.916 | 0.969 | WIN |
+| failover_encode/mixed/32 | gate | 706.711 us | 717.315 us | 1.001 | 1.020 | 1.015 | 1.022 | PASS |
+| failover_encode/mixed/8 | gate | 255.795 us | 255.325 us | 1.006 | 1.020 | 0.998 | 0.994 | PASS |
+| grouped_dirty_resync/proof_backed/65536 | gate | 155.633 ms | 156.368 ms | 1.008 | 1.020 | 1.005 | 0.991 | PASS |
+| grouped_policy_denial_fanout/homogeneous_route_server/256 | gate | 7.314 ms | 7.305 ms | 1.007 | 1.020 | 0.999 | 1.004 | PASS |
+| grouped_policy_denial_fanout/homogeneous_route_server/64 | gate | 1.453 ms | 1.455 ms | 1.004 | 1.020 | 1.002 | 1.002 | PASS |
+| grouped_policy_denial_fanout/homogeneous_route_server/8 | gate | 204.039 us | 204.157 us | 1.008 | 1.020 | 1.001 | 1.002 | PASS |
+| grouped_withdrawal_fanout/homogeneous_route_server/64/1000 | gate | 3.278 ms | 3.339 ms | 0.997 | 1.020 | 1.019 | 1.018 | PASS |
+| grouped_withdrawal_fanout/homogeneous_route_server/64/256 | gate | 798.027 us | 812.225 us | 0.985 | 1.025 | 1.018 | 1.024 | PASS |
+| grouped_withdrawal_fanout/homogeneous_route_server/64/64 | gate | 233.945 us | 238.168 us | 0.992 | 1.020 | 1.018 | 1.015 | PASS |
+| grouped_withdrawal_fanout/homogeneous_route_server/64/8 | gate | 73.420 us | 73.624 us | 0.997 | 1.020 | 1.003 | 0.997 | PASS |
+| initial_table_deferred_group_join/16_joiners/65536 | gate | 581.350 ms | 581.081 ms | 1.003 | 1.020 | 1.000 | 0.999 | PASS |
+| initial_table_deferred_group_join/4_joiners/65536 | gate | 151.525 ms | 151.707 ms | 0.996 | 1.020 | 1.001 | 0.998 | PASS |
+| initial_table_group_join/1_sources/65536 | gate | 196.626 ms | 197.649 ms | 1.008 | 1.020 | 1.005 | 0.997 | PASS |
+| initial_table_group_join/8_sources/65536 | gate | 197.485 ms | 196.987 ms | 0.998 | 1.020 | 0.997 | 0.994 | PASS |
+| initial_table_peer_join/rr_client_ipv4_unicast/4096 | gate | 3.290 ms | 3.261 ms | 1.003 | 1.020 | 0.991 | 1.001 | PASS |
+| initial_table_peer_join/rr_client_ipv4_unicast/65536 | gate | 83.463 ms | 82.857 ms | 1.001 | 1.020 | 0.993 | 1.000 | PASS |
+| ixp_exact_export_fanout/distinct_remote_asns/256 | gate | 821.404 us | 859.473 us | 1.001 | 1.020 | 1.046 | 1.041 | FAIL |
+| ixp_exact_export_fanout/distinct_remote_asns/64 | gate | 233.633 us | 242.225 us | 0.998 | 1.020 | 1.037 | 1.028 | FAIL |
+| ixp_exact_export_fanout/distinct_remote_asns/8 | gate | 65.724 us | 66.361 us | 0.988 | 1.022 | 1.010 | 0.995 | PASS |
+| ixp_exact_export_fanout/homogeneous_remote_asn/256 | gate | 820.507 us | 860.947 us | 1.002 | 1.020 | 1.049 | 1.042 | FAIL |
+| ixp_exact_export_fanout/homogeneous_remote_asn/64 | gate | 233.874 us | 242.249 us | 0.997 | 1.020 | 1.036 | 1.029 | FAIL |
+| ixp_exact_export_fanout/homogeneous_remote_asn/8 | gate | 65.747 us | 66.345 us | 0.989 | 1.021 | 1.009 | 0.997 | PASS |
+| ixp_policy_regroup_resync/shared_plan/distinct_remote_asns/4096/64 | gate | 3.416 ms | 3.443 ms | 0.984 | 1.027 | 1.008 | 1.006 | PASS |
+| ixp_policy_regroup_resync/shared_plan/homogeneous_remote_asn/4096/64 | gate | 3.432 ms | 3.456 ms | 0.990 | 1.020 | 1.007 | 1.003 | PASS |
+| loc_rib_recompute/1 | gate | 103.0 ns | 108.0 ns | 1.003 | 1.020 | 1.048 | 1.017 | PASS |
+| loc_rib_recompute/2 | gate | 112.2 ns | 115.2 ns | 1.003 | 1.020 | 1.027 | 1.006 | PASS |
+| loc_rib_recompute/4 | gate | 128.7 ns | 131.9 ns | 0.984 | 1.026 | 1.025 | 1.005 | PASS |
+| loc_rib_recompute/8 | gate | 161.7 ns | 165.7 ns | 0.981 | 1.029 | 1.025 | 0.984 | PASS |
+| mp_exact_export_probe/distinct_shape/64 | gate | 25.732 us | 23.145 us | 0.974 | 1.037 | 0.899 | 0.871 | WIN |
+| mp_exact_export_probe/rich_scalar/50 | gate | 37.522 us | 29.524 us | 0.965 | 1.046 | 0.787 | 0.792 | WIN |
+| mp_exact_export_probe/same_shape/1 | gate | 453.5 ns | 400.3 ns | 0.954 | 1.058 | 0.883 | 0.848 | WIN |
+| mp_exact_export_probe/same_shape/64 | gate | 2.779 us | 2.833 us | 1.008 | 1.020 | 1.020 | 1.010 | PASS |
+| nlri_decode/1 | gate | 22.8 ns | 19.9 ns | 0.997 | 1.020 | 0.876 | 1.002 | PASS |
+| nlri_decode/10 | gate | 105.7 ns | 104.8 ns | 0.998 | 1.020 | 0.992 | 0.999 | PASS |
+| nlri_decode/100 | gate | 634.5 ns | 631.8 ns | 1.008 | 1.020 | 0.996 | 1.001 | PASS |
+| nlri_decode/500 | gate | 2.814 us | 2.789 us | 0.999 | 1.020 | 0.991 | 1.002 | PASS |
+| nlri_encode/1 | gate | 14.3 ns | 14.4 ns | 1.001 | 1.020 | 1.008 | 1.003 | PASS |
+| nlri_encode/10 | gate | 32.2 ns | 32.1 ns | 1.061 | 1.071 | 0.997 | 1.000 | PASS |
+| nlri_encode/100 | gate | 292.9 ns | 283.1 ns | 0.998 | 1.020 | 0.967 | 1.000 | PASS |
+| nlri_encode/500 | gate | 1.386 us | 1.434 us | 0.998 | 1.020 | 1.035 | 0.934 | PASS |
+| outbound_admission/distinct_values | gate | 5.770 ms | 4.708 ms | 0.995 | 1.020 | 0.816 | 0.804 | WIN |
+| outbound_admission/equal_values | gate | 2.758 ms | 1.760 ms | 1.002 | 1.020 | 0.638 | 0.638 | WIN |
+| outbound_admission/evpn_distinct_values | gate | 4.703 ms | 4.699 ms | 1.010 | 1.020 | 0.999 | 0.989 | PASS |
+| outbound_admission/evpn_shared_arc | gate | 501.890 us | 437.856 us | 0.995 | 1.020 | 0.872 | 0.914 | WIN |
+| outbound_admission/evpn_withdraw | gate | 439.424 us | 383.719 us | 1.105 | 1.115 | 0.873 | 0.875 | WIN |
+| outbound_admission/large_extended | gate | 81.904 ms | 52.941 ms | 0.972 | 1.039 | 0.646 | 1.030 | PASS |
+| outbound_admission/large_standard | gate | 5.540 ms | 4.057 ms | 1.013 | 1.023 | 0.732 | 0.722 | WIN |
+| outbound_admission/shared_arc | gate | 420.423 us | 361.101 us | 0.994 | 1.020 | 0.859 | 0.867 | WIN |
+| outbound_admission/vpn_distinct_values | gate | 5.858 ms | 5.841 ms | 1.007 | 1.020 | 0.997 | 0.970 | PASS |
+| outbound_admission/vpn_shared_arc | gate | 914.976 us | 729.678 us | 1.003 | 1.020 | 0.797 | 0.789 | WIN |
+| outbound_admission/vpn_withdraw | gate | 376.447 us | 311.447 us | 1.050 | 1.060 | 0.827 | 0.821 | WIN |
+| outbound_encode/distinct_values/100 | gate | 49.524 us | 41.103 us | 1.003 | 1.020 | 0.830 | 0.826 | WIN |
+| outbound_encode/distinct_values/1000 | gate | 546.632 us | 454.018 us | 0.997 | 1.020 | 0.831 | 0.819 | WIN |
+| outbound_encode/distinct_values/10000 | gate | 5.915 ms | 4.636 ms | 0.998 | 1.020 | 0.784 | 0.769 | WIN |
+| outbound_encode/equal_values/100 | gate | 21.772 us | 13.621 us | 1.020 | 1.030 | 0.626 | 0.618 | WIN |
+| outbound_encode/equal_values/1000 | gate | 245.602 us | 162.119 us | 0.996 | 1.020 | 0.660 | 0.664 | WIN |
+| outbound_encode/equal_values/10000 | gate | 2.766 ms | 1.701 ms | 1.003 | 1.020 | 0.615 | 0.603 | WIN |
+| outbound_encode/shared_arc/100 | gate | 3.834 us | 3.706 us | 1.000 | 1.020 | 0.966 | 0.983 | PASS |
+| outbound_encode/shared_arc/1000 | gate | 29.577 us | 28.094 us | 1.005 | 1.020 | 0.950 | 0.962 | WIN |
+| outbound_encode/shared_arc/10000 | gate | 300.039 us | 275.152 us | 1.011 | 1.021 | 0.917 | 0.902 | WIN |
+| per_client_best_full_resync/ipv4_routes/4096/64 | gate | 254.076 ms | 254.353 ms | 1.018 | 1.028 | 1.001 | 1.007 | PASS |
+| per_client_best_full_resync/ipv4_routes/4096/8 | gate | 27.065 ms | 27.171 ms | 1.009 | 1.020 | 1.004 | 1.005 | PASS |
+| policy_regroup_resync/forced_per_peer/4096/1 | gate | 5.651 ms | 5.674 ms | 0.998 | 1.020 | 1.004 | 1.013 | PASS |
+| policy_regroup_resync/forced_per_peer/4096/64 | gate | 229.698 ms | 228.347 ms | 0.997 | 1.020 | 0.994 | 0.999 | PASS |
+| policy_regroup_resync/forced_per_peer/4096/8 | gate | 30.011 ms | 29.896 ms | 1.002 | 1.020 | 0.996 | 1.004 | PASS |
+| policy_regroup_resync/forced_per_peer/65536/1 | gate | 176.507 ms | 175.495 ms | 0.974 | 1.037 | 0.994 | 0.992 | PASS |
+| policy_regroup_resync/forced_per_peer/65536/64 | gate | 7.367 s | 7.373 s | 1.001 | 1.020 | 1.001 | 1.002 | PASS |
+| policy_regroup_resync/forced_per_peer/65536/8 | gate | 963.431 ms | 970.562 ms | 0.995 | 1.020 | 1.007 | 1.004 | PASS |
+| policy_regroup_resync/shared_plan/4096/1 | gate | 5.655 ms | 5.691 ms | 1.006 | 1.020 | 1.006 | 1.008 | PASS |
+| policy_regroup_resync/shared_plan/4096/64 | gate | 3.412 ms | 3.425 ms | 0.987 | 1.023 | 1.004 | 1.003 | PASS |
+| policy_regroup_resync/shared_plan/4096/8 | gate | 3.249 ms | 3.255 ms | 0.982 | 1.028 | 1.002 | 1.001 | PASS |
+| policy_regroup_resync/shared_plan/65536/1 | gate | 176.836 ms | 175.503 ms | 1.007 | 1.020 | 0.992 | 1.000 | PASS |
+| policy_regroup_resync/shared_plan/65536/64 | gate | 63.687 ms | 63.354 ms | 1.013 | 1.023 | 0.995 | 0.980 | PASS |
+| policy_regroup_resync/shared_plan/65536/8 | gate | 62.725 ms | 63.690 ms | 1.005 | 1.020 | 1.015 | 1.024 | PASS |
+| private_single_best_fanout/policy_peer_context/1 | report | 48.834 us | 48.123 us | 0.952 | 1.060 | 0.985 | 0.979 | report (PASS) |
+| private_single_best_fanout/policy_peer_context/256 | report | 11.433 ms | 11.319 ms | 1.028 | 1.038 | 0.990 | 0.995 | report (PASS) |
+| private_single_best_fanout/policy_peer_context/64 | report | 2.427 ms | 2.403 ms | 1.031 | 1.041 | 0.990 | 0.995 | report (PASS) |
+| private_single_best_fanout/policy_peer_context/8 | report | 299.105 us | 294.880 us | 1.020 | 1.030 | 0.986 | 0.984 | report (PASS) |
+| queued_announce_fanout/multi_source/one_per_message/64/1000 | gate | 6.183 ms | 6.337 ms | 1.004 | 1.020 | 1.025 | 1.012 | PASS |
+| queued_announce_fanout/multi_source/one_per_message/64/256 | gate | 1.633 ms | 1.670 ms | 1.000 | 1.020 | 1.022 | 1.020 | FAIL |
+| queued_announce_fanout/multi_source/packed/64/1000 | gate | 6.142 ms | 6.310 ms | 0.995 | 1.020 | 1.027 | 1.011 | PASS |
+| queued_announce_fanout/multi_source/packed/64/256 | gate | 1.590 ms | 1.626 ms | 1.000 | 1.020 | 1.023 | 1.020 | FAIL |
+| queued_announce_fanout/per_client_best/one_per_message/64/1000 | gate | 5.724 ms | 5.889 ms | 0.996 | 1.020 | 1.029 | 1.027 | FAIL |
+| queued_announce_fanout/per_client_best/one_per_message/64/256 | gate | 1.477 ms | 1.513 ms | 1.000 | 1.020 | 1.025 | 1.023 | FAIL |
+| queued_announce_fanout/per_client_best/packed/64/1000 | gate | 5.691 ms | 5.861 ms | 0.993 | 1.020 | 1.030 | 1.025 | FAIL |
+| queued_announce_fanout/per_client_best/packed/64/256 | gate | 1.435 ms | 1.468 ms | 0.993 | 1.020 | 1.023 | 1.028 | FAIL |
+| queued_announce_fanout/plain/one_per_message/64/1000 | gate | 3.429 ms | 3.588 ms | 1.001 | 1.020 | 1.046 | 1.046 | FAIL |
+| queued_announce_fanout/plain/one_per_message/64/256 | gate | 884.371 us | 930.421 us | 1.004 | 1.020 | 1.052 | 1.041 | FAIL |
+| queued_announce_fanout/plain/packed/64/1000 | gate | 3.380 ms | 3.556 ms | 1.008 | 1.020 | 1.052 | 1.045 | FAIL |
+| queued_announce_fanout/plain/packed/64/256 | gate | 844.979 us | 885.471 us | 1.005 | 1.020 | 1.048 | 1.046 | FAIL |
+| rib_pipeline/1000 | gate | 270.959 us | 275.099 us | 1.006 | 1.020 | 1.015 | 0.994 | PASS |
+| rib_pipeline/10000 | gate | 2.692 ms | 2.737 ms | 0.994 | 1.020 | 1.017 | 0.996 | PASS |
+| rib_pipeline/50000 | report | 16.441 ms | 18.445 ms | 0.791 | 1.274 | 1.122 | 0.812 | report (PASS) |
+| route_refresh_group_member/1_sources/65536 | gate | 53.140 ms | 53.217 ms | 1.034 | 1.044 | 1.001 | 0.956 | PASS |
+| route_refresh_group_member/8_sources/65536 | gate | 54.791 ms | 54.260 ms | 1.020 | 1.030 | 0.990 | 0.983 | PASS |
+| update_build/1 | gate | 157.3 ns | 158.5 ns | 0.988 | 1.022 | 1.007 | 1.010 | PASS |
+| update_build/10 | gate | 240.7 ns | 246.5 ns | 0.970 | 1.041 | 1.024 | 1.002 | PASS |
+| update_build/100 | gate | 568.5 ns | 558.1 ns | 1.002 | 1.020 | 0.982 | 1.012 | PASS |
+| update_build/500 | gate | 1.842 us | 1.844 us | 1.007 | 1.020 | 1.001 | 0.998 | PASS |
+| update_build/ipv6_mp_add_path | gate | 167.7 ns | 169.7 ns | 1.016 | 1.026 | 1.012 | 0.977 | PASS |
+| update_parse/1 | gate | 208.0 ns | 189.9 ns | 1.015 | 1.025 | 0.913 | 1.020 | PASS |
+| update_parse/10 | gate | 301.3 ns | 281.1 ns | 0.999 | 1.020 | 0.933 | 1.000 | PASS |
+| update_parse/100 | gate | 863.0 ns | 843.4 ns | 1.012 | 1.022 | 0.977 | 0.994 | PASS |
+| update_parse/500 | gate | 3.191 us | 3.159 us | 0.999 | 1.020 | 0.990 | 0.997 | PASS |
+| update_parse_revised/1 | gate | 206.5 ns | 205.1 ns | 1.006 | 1.020 | 0.993 | 0.993 | PASS |
+| update_parse_revised/10 | gate | 301.9 ns | 297.5 ns | 1.010 | 1.020 | 0.985 | 0.995 | PASS |
+| update_parse_revised/100 | gate | 863.7 ns | 855.6 ns | 1.014 | 1.024 | 0.991 | 1.002 | PASS |
+| update_parse_revised/500 | gate | 3.177 us | 3.170 us | 0.998 | 1.020 | 0.998 | 1.000 | PASS |
+| update_parse_revised/ipv6_mp_add_path | gate | 217.5 ns | 213.7 ns | 0.997 | 1.020 | 0.982 | 0.993 | PASS |
+| update_parse_revised/ipv6_typical/1 | gate | 243.4 ns | 239.1 ns | 1.028 | 1.038 | 0.982 | 1.009 | PASS |
+| update_parse_revised/ipv6_typical/100 | gate | 990.4 ns | 985.5 ns | 1.009 | 1.020 | 0.995 | 1.009 | PASS |
+| validate_update | gate | 11.5 ns | 11.6 ns | 0.987 | 1.023 | 1.007 | 1.025 | PASS |
+
+cells: 162 paired (156 gated), 4 candidate-only (report-only, unpaired)
+candidate-only: ['outbound_admission/add_path_shared_arc', 'outbound_admission/ipv6_shared_arc', 'outbound_admission/shared_arc_extended', 'outbound_admission/withdraw']
+cells missing a step (INVALID): none
+gated FAIL: ['adj_rib_in_insert/500000', 'adj_rib_out_family_gauge/homogeneous_route_server_second_pass/1000', 'adj_rib_out_family_gauge/homogeneous_route_server_second_pass/256', 'adj_rib_out_family_gauge/homogeneous_route_server_second_pass/64', 'distribute_fanout/no_policy/256', 'distribute_fanout/no_policy/64', 'distribute_fanout/with_modifying_policy/256', 'distribute_fanout/with_modifying_policy/64', 'distribute_fanout/with_policy/256', 'distribute_fanout/with_policy/64', 'ixp_exact_export_fanout/distinct_remote_asns/256', 'ixp_exact_export_fanout/distinct_remote_asns/64', 'ixp_exact_export_fanout/homogeneous_remote_asn/256', 'ixp_exact_export_fanout/homogeneous_remote_asn/64', 'queued_announce_fanout/multi_source/one_per_message/64/256', 'queued_announce_fanout/multi_source/packed/64/256', 'queued_announce_fanout/per_client_best/one_per_message/64/1000', 'queued_announce_fanout/per_client_best/one_per_message/64/256', 'queued_announce_fanout/per_client_best/packed/64/1000', 'queued_announce_fanout/per_client_best/packed/64/256', 'queued_announce_fanout/plain/one_per_message/64/1000', 'queued_announce_fanout/plain/one_per_message/64/256', 'queued_announce_fanout/plain/packed/64/1000', 'queued_announce_fanout/plain/packed/64/256']
+gated WIN: 24
+intruder samples: 0
+VERDICT: FAIL

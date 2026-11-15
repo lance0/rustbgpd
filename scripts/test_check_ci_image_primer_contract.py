@@ -617,6 +617,33 @@ class PrimerContractTests(unittest.TestCase):
                 ),
             )
 
+    def test_gobgp_source_pin_and_staging_are_checked(self):
+        revision = "53ceb78fe284018ce83a92f3039198f0a86dc823"
+        archive = f"gobgp-source-{revision}.tar.gz"
+        dockerfile = "tests/interop/Dockerfile.gobgp-m122-trace"
+        with self.subTest("release checksum cannot replace source checksum"):
+            self.assert_red(
+                f"{dockerfile}: default digest is not the {MANIFEST} pin for {archive}",
+                (dockerfile, f"GOBGP_SOURCE_SHA256={ARCHIVE_PINS[archive]}",
+                 f"GOBGP_SOURCE_SHA256={ARCHIVE_PINS['gobgp_4.11.0_linux_amd64.tar.gz']}"),
+            )
+        with self.subTest("source revision cannot be shortened"):
+            self.assert_red(
+                f"{dockerfile}: default digest is not the {MANIFEST} pin for ?",
+                (dockerfile, f"GOBGP_SOURCE_VERSION={revision}", f"GOBGP_SOURCE_VERSION={revision[:12]}"),
+            )
+        with self.subTest("different source revision staged"):
+            action = ".github/actions/stage-gobgp-source-artifact/action.yml"
+            self.assert_red(
+                f"builds {dockerfile} without first staging gobgp-source {revision}",
+                (action, f'default: "{revision}"', 'default: "' + "0" * 40 + '"'),
+            )
+        with self.subTest("source stage cannot be omitted"):
+            self.assert_red(
+                f"builds {dockerfile} without first staging gobgp-source {revision}",
+                (INTEROP, "        uses: ./.github/actions/stage-gobgp-source-artifact\n", ""),
+            )
+
     def test_lab_workflows_do_not_use_the_artifact_service(self):
         self.assert_red(
             "interop.yml: a lab dependency flows through the artifact service",

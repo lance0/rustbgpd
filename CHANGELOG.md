@@ -11,6 +11,1371 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.83.0] — 2026-11-15
+
+> **Release framing — paced reloads, recovery in place and bounded work.**
+> Export-policy reloads at scale are now paced: on a 700-peer, 400,400-route
+> test bed, a grouped reload completes in under 2 s instead of about 107 s, a
+> distinct-chain reload that v0.82.0 rolled back now commits, and no RIB turn
+> in either exceeds 0.9 s. Steady-state route-reflector throughput is
+> unchanged. The gRPC and metrics/readiness servers and the RPKI tasks now
+> recover in place instead of exiting the daemon. A long export-policy
+> reload or rollback is bounded by a stall timeout instead of a fixed
+> deadline and keeps serving BFD and session events meanwhile. gNMI
+> requests, policy dry runs and MRT dumps
+> bound their work, more long RIB turns keep answering readiness, and
+> credential, config, policy-source and MRT files are held to stricter
+> rules. The string event `timestamp` fields, `Route.med` and the listener
+> `access_mode` key are removed; read the upgrade notes before upgrading.
+> `rustbgpd-fsm` 0.15.1 and `rustbgpd-rpki` 0.10.1 are patch releases on
+> wire 0.28.0.
+
+### Security
+
+- gNMI `Get` accepts at most 16 paths, as `Subscribe` does, and renders paths
+  that select the same data once. A request whose paths would render more
+  than 65,536 leaf updates returns `RESOURCE_EXHAUSTED` before rendering, and
+  rendering runs on the blocking pool, at most four requests at once per
+  listener.
+  Previously one `Get` could put the all-neighbors path in its prefix and
+  send millions of empty paths, each rendering every neighbor in memory on an
+  async worker shared with BGP sessions.
+- gNMI `Subscribe` renders the paths that select the same data once per
+  snapshot, poll, sample tick, and heartbeat, and bounds each render at
+  65,536 leaf updates, as `Get` does. A subscription whose paths would render
+  more than that against the current roster gets `RESOURCE_EXHAUSTED` before
+  any update or `sync_response`, and a stream whose roster grows past the
+  bound ends with `RESOURCE_EXHAUSTED` at its next render. Large renders run
+  on the blocking pool and share `Get`'s four render slots per listener. A
+  dial-out target whose subscription ends with an error status before
+  delivering data now logs it at `warn` and backs off instead of reconnecting
+  every `backoff_initial`.
+  Previously each sample tick rendered up to 16 paths against the whole
+  roster on an async worker shared with BGP sessions, discarding duplicates
+  only after rendering.
+- `TestPolicy` and `ComparePolicy` (`rbgp policy test` and
+  `rbgp policy compare`) now evaluate route pages on the blocking pool
+  instead of the async runtime that serves BGP sessions and other RPCs, and
+  bound the reads that set up the walk and the walk itself at 60 s after
+  the compile, after which the request returns `DEADLINE_EXCEEDED` with the
+  number of routes it evaluated. The CLI waits long enough for the
+  daemon's compile and walk bounds to report first. The two
+  dry-run slots per API listener now cover evaluation as well as the
+  compile, so a third concurrent request returns `RESOURCE_EXHAUSTED` while
+  two walks run. Previously a costly candidate over a large table held one
+  async worker per request for the length of the walk.
+- `TestPolicy` rejects `show_changes` above 1,000 with `INVALID_ARGUMENT`,
+  matching `show_rejected` and `max_samples`, so one request can no longer
+  return a rendered diff for every route in the table. `rbgp policy test`
+  rejects `--show-changes` above 1000 before sending.
+- Bound credential reads to 4 MiB and configuration reads to 64 MiB, refusing
+  non-regular and world-writable credential files, including public listener
+  certificates, CA bundles and CRLs. Read gNMI dial-out TLS credentials outside
+  runtime workers and report their permissions in doctor. Enforce the same
+  config limit before normalized documents are accepted or written, confine
+  dial-out candidate credential paths, and scrub validation buffers.
+- Read candidate `.rpol` entry modules, `[policy] rpol_roots` and dataset files
+  below `operator_only` at the canonical path the confinement check accepted,
+  without resolving the named path again. A symlink retargeted, or a root or
+  ancestor directory replaced by a symlink, between the check and the read can
+  no longer redirect the read outside the accepted policy directories; the
+  read is refused instead. Candidate configs keep the paths as written, and
+  operator, boot and SIGHUP loads are unchanged.
+- Resolve the policy directories that confine candidate sources below
+  `operator_only` once, when the config is read at boot or SIGHUP, instead of
+  again for every candidate. They hold until the next accepted reload, which
+  resolves them again; API commits keep the directories already resolved. A
+  nested policy directory replaced by a symlink in between no longer extends
+  the confinement to the symlink's target. Whether each `[policy] rpol_roots`
+  entry is a directory or a file is fixed at the same time. An entry that is a
+  regular file admits only that file as a path a candidate names: another
+  module cannot import it, its own imports are looked up only under the
+  candidate's policy directories and not relative to its directory, and a
+  directory later put in its place is not a policy directory. The file each
+  gRPC credential path resolved to at boot or SIGHUP stays out of candidate
+  sources until the next accepted reload, across API commits, and so does
+  the file the path resolves to when a candidate is loaded; a credential
+  symlink rotated in between keeps both targets out. A credential file moved
+  aside by rename is not covered under its new name. Operator, boot and
+  SIGHUP loads are unchanged.
+- Update the locked MCP SDK to `rmcp` 3.9.0 for RUSTSEC-2026-0462. The affected
+  Streamable HTTP client transports are disabled in the stdio MCP server build.
+- MRT dump files are now created 0600 and a missing `[mrt] output_dir` is
+  created 0700, instead of following the process umask (0644 and 0755 under
+  umask 022). Dumps carry routes, peer addresses, ASNs and router IDs. An
+  existing `output_dir` and the directories above it are now held to the
+  `runtime_state_dir` ownership and mode rules before each dump. See
+  [`[mrt]`](docs/reference/configuration.md#output-files).
+- Refuse `<config>.unconfirmed-*` backups beside the resolved config target as
+  candidate policy sources below `operator_only`, and check opened source file
+  identities so hardlinks cannot bypass protection of the running config and
+  credential files. Confined candidate loads fail closed when the accepted
+  physical target is missing or replaced.
+- Retain accepted config target authority across launch-link changes and rollback,
+  reject backup hardlink aliases and source-open symlink swaps, and use the
+  accepted config at EVPN candidate admission. Below `operator_only`, fail closed
+  when the config directory exceeds 4096 entries, and return `UNAVAILABLE` when
+  it changes during source reads. Recheck accepted target and parent identities
+  on each source read to reject ancestor-directory replacement without repeating
+  the backup inventory. Only candidates that name `.rpol` or dataset files need
+  the accepted config file unchanged on disk. Loading a config needs only search
+  permission on its ancestor directories, and backups are identified without
+  read permission.
+- Route listings sort and deduplicate their community and large-community
+  filter terms once per request and match each route with a binary search.
+  Previously the RIB compared every term against every scanned route, so one
+  listing carrying a very long community filter could hold the RIB for the
+  whole table scan. Matching results are unchanged.
+- Update the locked `rustix` dependency to 1.1.6 for RUSTSEC-2026-0486,
+  fixing unsound extended-attribute buffer handling. The separate 0.38 series
+  is unaffected and remains unchanged.
+
+### Added
+
+- Session state, FSM event and BGP notification logs include the session ID
+  and last installed TCP endpoints. Sent collision-resolution notifications
+  also record the owning FSM state before teardown, allowing packet captures
+  to be correlated with the closing connection.
+- `InjectionService.BatchListFlowSpecExportDispositions` reads the per-peer
+  export dispositions of up to 1000 locally injected FlowSpec rules, global
+  or VPN, in one paged walk, as `BatchListPathExportDispositions` does for
+  unicast keys. A key with no local rule is listed with `found = false`, and
+  a malformed key is listed at its position with a per-key `error`
+  (`invalid_key`, with a `keys[i]:` message); neither fails the call. An
+  empty, oversized or duplicate key list returns `INVALID_ARGUMENT` naming
+  the key's index. Each page reads its keys in one RIB turn, and a resumed
+  page returns `ABORTED` when any listed rule changed. The RPC is a
+  `sensitive_read`, like the single-key `ListFlowSpecExportDispositions`,
+  and this diagnostic RPC is outside v1. Clients need a daemon newer than
+  v0.82.0; older daemons return `UNIMPLEMENTED`. See
+  [FlowSpec batch read-back](docs/reference/api.md#flowspec-batch-read-back).
+- `rbgp health` prints the running daemon's version (`Version:`, and
+  `daemon_version` in JSON, `null` when an older daemon reports none). After
+  a package upgrade without a restart it differs from
+  `rustbgpd --version`, which reads the binary on disk; the upgrade
+  runbook now verifies with it. The opt-in `rbgp-json` envelope carries
+  this additive field at version 1.3 in this release; `rbgp-rib` stays at
+  1.1. See
+  [Package upgrade and rollback](docs/how-to/deployment.md#upgrade).
+- `[mrt] max_files` keeps at most that many dumps, deleting the oldest
+  `<file_prefix>.*.mrt[.gz]` files after each successful publish. Unset keeps
+  every dump, as before; 0 is rejected. Restart-required like the rest of
+  `[mrt]`. See [`[mrt]`](docs/reference/configuration.md#mrt).
+- `NeighborState` gains `admin_state`, which says whether the daemon holds a
+  neighbor down and which owner did: an operator disable, the configured
+  `admin_down`, a max-prefix shutdown latch, or the latch after repeated
+  session task crashes. `rbgp neighbor` and the TUI show a held-down neighbor
+  as `Idle (Admin)`, `Idle (PfxCt)` or `Idle (Crash)`, the detail view adds
+  `Admin State`, and JSON adds `admin_state`; `state` keeps its value. Outside
+  a latch, the detail view labels the retained error `Error Before Disable`,
+  because it predates the hold. `rbgp doctor` reports a latched neighbor as a
+  stuck peer that names the latch and its last error, not as
+  administratively disabled. The new field and enum amend the pinned pre-v1
+  `NeighborService` stable-surface inventory additively. The opt-in
+  `rbgp-json` envelope advances to version 1.3 for this additive field. See
+  [Administrative state](docs/reference/api.md#administrative-state).
+- `rbgp reload` sends SIGHUP to the daemon behind the local Unix socket,
+  through a pidfd so a reused PID is never signalled, waits for the
+  reload that read the config after its signal (a coalesced follow-up
+  counts), prints the receipt `rbgp config last-reload` shows, and exits
+  0 for `complete`, 2 for `known_partial`, 3 for `rejected_no_effect` or
+  `task_failed`, and 1 on error, a daemon restart, or after `--timeout`,
+  which bounds the whole command. `GetLastSighupReload` records gain
+  `started_monotonic_micros`, the reload's start on the daemon host's
+  `CLOCK_MONOTONIC`, which `rbgp reload` uses to match its reload. The
+  example systemd unit points automation that needs the outcome at
+  `rbgp reload`. See
+  [Configuration reload](docs/reference/operations.md#configuration-reload-sighup).
+- New gauge `bgp_rib_stalled` is 1 while the RIB actor answers "stalled" (one
+  export-policy transition, selection-deferral release or peer teardown has
+  run for 30 seconds or more) and 0 otherwise. The daemon samples it every
+  5 seconds on the telemetry thread, so a stalled RIB is visible to an install
+  that only scrapes `/metrics`; a scrape adds no work to the RIB.
+
+### Changed
+
+- `rbgp rib vpn`, `rbgp rib labeled`, `rbgp rib rtc` and base `rbgp evpn` no
+  longer call the deprecated whole-table `ListVpnRoutes`, `ListLabeledRoutes`,
+  `ListRtcRoutes` and `ListEvpnRoutes`. They walk every page of the bounded
+  `ListVpnRibRoutes`, `ListLabeledRibRoutes`, `ListRtcRibRoutes` and
+  `ListBestEvpnRoutes` and print one listing, as `rbgp rib bgpls` does. The
+  row set, each row's fields and the JSON array shape are unchanged.
+- `rbgp evpn diagnose` reads its Type 2 and Type 3 route counts from
+  `total_count` of one single-row `ListBestEvpnRoutes` page per type instead
+  of listing both types through `ListEvpnRoutes`. Its output is unchanged.
+- The resync tick still sends an owed End-of-RIB that nothing holds, and now
+  logs `End-of-RIB left to the resync tick` at WARN with `peer` and
+  `families` when no refused send explains it. An End-of-RIB is otherwise
+  sent by the event that clears its last hold, so the log marks a hold that
+  ended without sending its marker. The planned-restart grace release log's
+  `held_families` field now also lists a family whose End-of-RIB waits
+  behind its ORF-gated table.
+- An export-policy reload is no longer rolled back because it took longer
+  than two minutes. The walk over changed peers was bounded by one two-minute
+  deadline in total, so at a full table a reload changing roughly 80 or more
+  peers with per-neighbor export policies was rolled back although every
+  step was succeeding, and every peer was then resynced a second time. The
+  two-minute bound is now a stall timeout measured from the walk's last
+  completed piece of work (one peer's session policy change, one RIB command,
+  or the Route Refreshes of one step): a reload that keeps making progress
+  commits, and one is rolled back only when a peer refuses or fails its step
+  or the walk completes nothing for two minutes.
+- A restart-required `[global]` edit is now named by field, with its old and
+  new value, on every report: the SIGHUP `[global] changed` `ERROR` line has
+  a `fields` value, `rustbgpd --diff` lists the fields under `[global]` and in
+  a new JSON `global_changes` array, and a config transaction's
+  `restart_required_sections` adds a `[global].<field>` name after
+  `[global]`. The diff and the SIGHUP log now use one comparator, so they
+  agree on which fields count. Changing `router_id` is no longer
+  indistinguishable from changing `telemetry.log_format`. See the
+  [reload matrix](docs/reference/reload-matrix.md#global).
+- The gRPC server is now restarted in place when it ends on its own,
+  instead of shutting the daemon down
+  ([ADR-0147](docs/adr/0147-management-servers-restart-in-place.md),
+  superseding ADR-0022). BGP sessions and routes stay up. All configured
+  listeners restart together and bind their TCP addresses and Unix socket
+  paths again, with the same backoff as the metrics/readiness server (100 ms
+  to a 10 second cap, no limit); a restart whose listeners cannot start is
+  retried. While the server is down `/readyz` answers
+  `503 not ready: gRPC server is restarting`. Each exit or failed restart
+  counts in `bgp_management_server_crashes_total{server="grpc"}`, exported at
+  0. Requests in flight on connections that were already open run to their
+  own answer, plan tokens issued before a restart stay valid after it, and a
+  runtime-config mutation that had begun still settles under the settlement
+  watchdog. A listener that cannot bind or start at
+  startup still fails startup. See
+  [gRPC server dies unexpectedly](docs/reference/operations.md#grpc-server-dies-unexpectedly).
+- The metrics/readiness HTTP server (`/metrics`, `/readyz`, `/livez`) is now
+  restarted in place when it ends on its own, instead of shutting the daemon
+  down. A management-plane failure is not evidence about routing state, so
+  BGP sessions and routes stay up. After a panic or a failed thread start the
+  next run serves the same bound socket; after an unusable listening socket
+  the daemon binds the configured address again. Restarts back off from
+  100 ms to a 10 second cap with no limit, and none begins once coordinated
+  shutdown has started. New counter
+  `bgp_management_server_crashes_total{server="metrics"}`, exported at 0,
+  counts each unexpected exit or failed start, and the alert pack gains
+  `BgpManagementServerCrashed`. The 10 second cap keeps a restart gap under
+  the failure window of the documented Kubernetes liveness probe; a server
+  that never comes back still fails that probe. A bind failure at startup
+  still fails startup. See
+  [Metrics/readiness server exits unexpectedly](docs/reference/operations.md#metricsreadiness-server-exits-unexpectedly).
+- MRT dumps no longer copy the whole Adj-RIB-In in one RIB step. Unicast is
+  read about 4,096 routes at a time, whatever the table size, with ordinary
+  route processing in between. EVPN is read one block of one neighbor's
+  table at a time (the whole table up to 16,384 routes, one sixteenth of it
+  beyond that), so its step still grows with the largest neighbor's EVPN
+  table. The file format, file names, metrics and configuration are
+  unchanged, and a quiescent table produces the same bytes as before.
+- Prepare each unicast route's outbound attributes once, in the form its
+  UPDATE uses, instead of keeping both the `NEXT_HOP` and the `MP_REACH_NLRI`
+  form for every route in a slice. A session sending a slice of distinct
+  routes with large attribute sets requests about half the transient memory
+  it did. Grouping, order and wire output are unchanged.
+- The outbound refresher's log lines are renamed from
+  `graceful-shutdown outbound refreshes complete`,
+  `graceful-shutdown outbound refresh failed` and
+  `graceful-shutdown outbound refresh reply dropped` to
+  `forced outbound refreshes complete`, `forced outbound refresh failed` and
+  `forced outbound refresh reply dropped`. The refresher now also re-emits
+  routes after a hot-applied `remove_private_as` or `local_ipv6_nexthop`
+  change, not only after graceful-shutdown toggles. Update log filters that
+  match the old text.
+- Size outbound UPDATE messages by encoded bytes. When routes that share one
+  attribute set need more than one UPDATE, each UPDATE except the last is now
+  full to within one route of the negotiated 4,096-byte or Extended Message
+  limit for IPv4 and IPv6 unicast, where it previously carried a count found
+  by halving and was often about half full. EVPN, VPN, labeled-unicast,
+  BGP-LS, RT-Constraint and FlowSpec groups are sized from measured bytes per
+  route: full when their routes are one size, possibly short when sizes vary.
+  A peer receives the same routes and attributes in the same order, usually
+  in fewer UPDATE messages, and the session discards far fewer trial
+  encodings. Nothing for an operator to change; UPDATE counters for large
+  same-attribute announcements and withdrawals read differently.
+- A long export-policy reload no longer holds BFD and session events until
+  it ends. While the peer manager applied a policy change or rolled one
+  back, it served only readiness probes and admitted reads, so a BFD Down
+  did not stop its BGP session, a crashed session task was not restarted
+  and no session event was published until the whole change had finished,
+  which at a full table can now be many minutes. Between two steps of the
+  change (one peer's session step or one RIB command, about a second at a
+  full table) it now serves BFD Down and due `BfdDown` retries, session up,
+  down and NOTIFICATION events, and a static neighbor's session
+  notifications: a crashed session task is restarted, a max-prefix breach
+  or a repeating crash latches the neighbor, an OPEN collision is resolved.
+  Link-state changes are served at any moment, so fast external failover
+  does not wait for a step.
+- Published crates: `rustbgpd-fsm` 0.15.0 → 0.15.1 and `rustbgpd-rpki`
+  0.10.0 → 0.10.1, both patches on wire 0.28; `rustbgpd-wire` stays at
+  0.28.0. FSM has no public API change: an unanswered dial in Connect now
+  counts toward the connect-retry backoff, as a refused dial already did.
+  RPKI is additive: `RtrClient::run` and `VrpManager::run` with a cache
+  inventory recover from a panic, with the optional
+  `RtrClient::with_restart_observer`, `VrpManager::with_fault_observer` and
+  `VrpManager::with_resync_observer` callbacks, and a cache's replacing full
+  table or removal now carries a delta. See the
+  [FSM](crates/fsm/CHANGELOG.md) and [RPKI](crates/rpki/CHANGELOG.md)
+  changelogs.
+- Readiness waits served while a session's Adj-RIB-Out or regroup baseline
+  is retired at teardown, or while a family that becomes sendable
+  mid-session regroups its peer, are now recorded under
+  `bgp_rib_readiness_query_wait_seconds{seam="actor_loop"}` instead of
+  `seam="policy_transition_fence"`: no policy transition is involved in
+  those units.
+- VPN, labeled-unicast, RT-Constrain, BGP-LS and EVPN replacement and
+  withdrawal no longer sweep a large global attribute-intern table on every
+  received UPDATE batch, and neither do local EVPN injection and withdrawal.
+  They share the unicast schedule: collection runs after at most 4,096
+  displaced routes (plus the triggering batch) or a one-second actor deadline,
+  and small tables still collect immediately. Graceful-restart entry now
+  sweeps once, after every affected family is re-selected, instead of up to
+  five times.
+- The Adj-RIB-In stores VPNv4/VPNv6 and labeled-unicast routes the way it
+  stores unicast routes: route bodies in dense slots behind 4-byte handles,
+  with each key's Add-Path index holding the handles. When an UPDATE replaces
+  or withdraws a key's selected path, selecting a new one reads the key's
+  stored paths by handle instead of looking each one up in a hash table.
+  Stored routes and selection results are unchanged.
+
+### Removed
+
+- Event messages no longer carry the decimal-string Unix-seconds `timestamp`
+  field. Every event now reports its time only as `int64 timestamp_unix_ms`:
+  `BgpEvent` and `RouteEvent` already did, and `SessionEvent`,
+  `NotificationEvent`, `PolicyEvent`, `DataplaneRouteEvent`,
+  `EvpnRouteEvent` and `BfdSessionEvent` gain it in this release. The removed
+  fields' numbers and names are reserved. This affects `WatchEvents`,
+  `ListRouteEvents`, `ListSessionEvents`, `ListPolicyEvents` and
+  `ListEvpnEvents`. `rbgp events` JSON keeps its `timestamp` and
+  `timestamp_unix_seconds` keys, now derived from the millisecond time, and
+  the MCP event tools keep their `timestamp` string. See the
+  [API reference](docs/reference/api.md#eventservice).
+- The gRPC listener `access_mode` key under `[global.telemetry.grpc_tcp]` and
+  `[global.telemetry.grpc_uds]` is removed; `max_tier` is the only listener
+  ceiling. A config that still sets `access_mode` fails to load, and the
+  error names the replacement. The mutating handlers keep refusing calls on
+  any listener whose `max_tier` is below `mutating`.
+- `Route` no longer carries the bare `med` scalar (field 8, now reserved by
+  number and name). It reported a route without a MULTI_EXIT_DISC attribute
+  as `0`, the same value as an explicit MED of 0. The optional `med_attr`
+  field, present since 0.51.0, remains the MED report on received, best,
+  advertised and explain route rows. `rbgp` already read only `med_attr`, so
+  its output does not change.
+
+### Fixed
+
+- A session whose task is aborted now still ends in the RIB. A session
+  holds its final `PeerDown` or graceful-restart notice while the RIB
+  mailbox is full. When the bounded 500 ms session shutdown expired in
+  that state, for example while an inbound connection replaced a session
+  whose TCP had just failed, or when the task was aborted after an
+  unacknowledged TCP-AO reset, the held messages were dropped with the
+  task. The old session's routes then stayed installed with no bound; or,
+  once a replacement session established, the old session stayed
+  registered as live, and a later graceful-restart teardown of that peer
+  failed over to the dead session instead of retaining its routes. The
+  held messages, and a `PeerDown` for an Established session that had not
+  queued one, are now delivered in session order as soon as the mailbox
+  has room, without the peer manager waiting for them. An aborted
+  Established session that had not queued its own end is closed with a
+  plain `PeerDown`, so its routes are withdrawn rather than retained under
+  graceful restart. A session whose `PeerUp` was itself still held is not
+  announced to the RIB at all. Session ends delivered this way are
+  marked late: once no session is registered for the peer, a late
+  graceful-restart notice is discarded, and a late `PeerDown` only purges
+  graceful-restart retention its own session created. One that finds
+  another session's retention is discarded and counted in
+  `bgp_rib_stale_peer_down_ignored_total`; one that finds nothing to tear
+  down, as after the neighbor was deleted, is discarded without a count.
+  Session ends sent in the ordinary way are handled as before.
+- Inbound connections dropped from an unknown source, from an unmatched IPv6
+  link-local source, or at the dynamic neighbor limit, and transient listener
+  accept errors, no longer log one line each without limit: a scan or a
+  misconfigured remote could fill the journal. Each kind now logs at most one
+  line per second at its existing level and fields, with a `suppressed` count
+  of the lines skipped since the previous one.
+  `bgp_inbound_connections_dropped_total` still counts every drop.
+- An aborted configuration reload now always starts a BFD-coupled session
+  that its rejected candidate held only because the candidate made the peer
+  strict. When that session's command queue was full, the abort scheduled a
+  retry of the `Start`, but it had already released the BFD hold, so the
+  BFD level report that followed the abort canceled the retry. The peer then
+  stayed enabled, unheld and Idle until BFD went Down and Up again or an
+  operator disabled and re-enabled it. The hold now stays in place until the
+  `Start` is queued, as it does when a reload commits; a genuine BFD Down
+  still cancels the retry and holds the session.
+- A BFD Down that arrives during a configuration reload now stops the BGP
+  session even when that session's command queue was full. The reload
+  recorded the BFD hold and scheduled a retry of the session's `BfdDown`,
+  but any later BFD report for the same peer, such as a level report,
+  kept the retry from running until the reload finished. BGP stayed up
+  over a path BFD had declared down for the rest of the reload. Inside a
+  reload the retry now waits only for a queued BFD Up or remote
+  AdminDown, which means the failure has already cleared; outside a
+  reload it behaves as before.
+- A route that import policy had rejected and later accepts now leaves the
+  rejected-route store even when the max-prefix `block` action withholds the
+  accepted announcement. Before, the stale policy rejection stayed listed in
+  `rbgp rib received PEER --rejected` and counted in the RFC 9972 BMP
+  policy-rejection statistic (type 22). Max-prefix accounting is unchanged.
+- BMP Stats Report type 7 ("routes in Adj-RIBs-In", the pre-policy table in
+  RFC 7854) carried the post-policy accepted count summed across every
+  family, with Add-Path paths collapsed to prefixes, so it duplicated type
+  20 under a pre-policy label. It now carries the exact pre-policy count:
+  accepted IPv4/IPv6-unicast routes plus retained rejections other than
+  treat-as-withdraw. The same value is sent as RFC 9972 type 18, with type 19
+  per negotiated IPv4/IPv6-unicast family. These statistics are sent only
+  while rejected-route retention is enabled with no eviction or max-prefix
+  `Block` withholding since the session reset and unicast Add-Path receive is
+  off; types 7 and 18 also need
+  a session with no other negotiated family.
+  Otherwise they are omitted. See the
+  [BMP statistics contract](docs/reference/configuration.md#what-is-streamed).
+- `rbgp neighbor` with no peers now prints its empty-state line and exits 0
+  when the dynamic-neighbor range query fails, noting that the range count is
+  unavailable. Before, the human view exited 1 with no output while `-j`
+  printed `[]` and exited 0.
+- `rbgp neighbor` now accepts an unnumbered peer's interface name, so
+  `rbgp neighbor swp1 delete|reset|disable|enable` reaches the daemon as the
+  [documented](docs/reference/operations.md) interface-only selector
+  (empty address plus `interface`). Before, the argument parser accepted only
+  an IP or scoped link-local address, so an unbound interface-only neighbor
+  could not be deleted or acted on from the CLI.
+- A conditional-advertisement install, sent at the start of a SIGHUP reload
+  or a runtime policy catalog change, no longer stops the daemon because the
+  RIB is slow. An install that cannot enter a full RIB mailbox within five
+  seconds was never sent, and now rejects the change with no effect instead
+  of fencing `known_divergence` and exiting 70. An install that was sent now
+  waits for the RIB's answer instead of failing after five seconds. A RIB
+  that never answers still stops the daemon once the reload's
+  [settlement watchdog](docs/how-to/settlement-watchdog.md) budget
+  expires, and a compensating restore that cannot be sent still fences.
+- The RIB now answers readiness probes while it re-observes a
+  conditional-advertisement condition after a dataset its
+  `condition_policy` reads is swapped, or after a source peer's group or
+  ASN changes. With a prefix-range condition that re-observation walks
+  every Adj-RIB-In row under the range in one actor turn, and it served no
+  readiness query until it finished.
+- Unanswered dials and peer TCP drops now back off. A dial that gets no answer
+  (SYNs dropped, no RST) doubles the ConnectRetry interval from
+  `connect_retry_secs` on each miss, up to 300 s, instead of redialing at the
+  base interval forever; a dial cut off by the 30 s connect timeout waits out
+  the rest of the interval instead of taking the fast-retry path. A peer that
+  drops TCP without a NOTIFICATION in
+  OpenConfirm or Established joins the reconnect streak that NOTIFICATION
+  teardowns use, with the same 300 s cap and the same reset after five
+  minutes Established. Those TCP drops lengthen the wait but do not hold the
+  neighbor's inbound connections; only NOTIFICATION teardowns do, as before.
+  The ConnectRetry timer and the Idle reconnect wait are
+  now jittered to 75–100% of their value each time they are set, as RFC 4271
+  §10 recommends, so peers no longer retry in lockstep after a shared outage.
+  See [RFC notes](docs/reference/rfc-notes.md).
+- A session task that crashes while the RIB mailbox is full no longer holds
+  the peer manager until the RIB has room. Replacing the crashed session
+  waited for room to send its `PeerDown`. During an export-policy change or
+  its rollback that wait ran where the change's two-minute RIB stall timeout
+  was not checked, so a stalled RIB kept the change open until the
+  30-minute settlement watchdog fenced the daemon and exited 70. The
+  `PeerDown` is now queued, marked late, when the mailbox is full, and the
+  stall timeout ends the change as before.
+- A SIGHUP sent while `rustbgpd` is still loading its config or starting
+  logging no longer terminates the daemon. The signal is held from the start
+  of daemon boot until the reload handler is installed, then runs one reload,
+  so config management that signals during boot no longer kills it.
+- An End-of-RIB that waited behind a forced outbound resync is now sent
+  when that resync is admitted. It used to stay queued until the next
+  resync tick, up to one second later. An End-of-RIB that waits only for
+  routes owed to a slow receiver is sent as soon as those routes are sent
+  or withdrawn at the source, and one that an operator outbound replay's
+  tables complete is sent with the replay as an ordinary marker. The
+  marker still follows the routes it covers.
+- An RFC 7313 enhanced route refresh now removes a retained IPv4/IPv6-unicast
+  rejection the peer did not re-announce before End-of-RIB-Refresh (or before
+  the refresh window timed out), on the same boundary that sweeps stale
+  accepted routes. Such a rejection previously stayed in
+  `rbgp rib received PEER --rejected` and in BMP RFC 9972 type 22 until the
+  session reset. BMP types 7, 18 and 19 are no longer omitted after an
+  enhanced route refresh.
+- An export-policy reload that moves many EVPN peers no longer resyncs all of
+  them in one RIB turn. Peers whose sessions send EVPN are applied a few per
+  RIB command, as many as are predicted to fit a 250 ms turn budget, so
+  UPDATEs from other peers, operator queries and timers run between those
+  commands instead of waiting for the whole cohort.
+  Unicast cohorts are unchanged. The reload still replies once every peer is
+  applied and enqueued, and a failure part-way restores every peer's prior
+  policy. The `authoritative_batch_phase` log adds `deferred_members`, its
+  `fallback_members` no longer counts those peers, and a batch that hands
+  peers back with none on the per-member path is classified `paced`; each
+  paced command logs as `paced_apply`, with `applied_members` the members it
+  applied, `deferred_members` those left for the next command and
+  `fallback_members` 0.
+- Preserve operator authority when applying EVPN runtime candidates, allowing
+  operator callers to stage policy sources outside the running policy roots.
+  Automation and other callers below `operator_only` remain confined.
+- An export-policy reload no longer resyncs a full table once per peer for
+  changed peers that share an export-policy change but are outside the one
+  batched cohort. Each further group of two or more Established peers moving
+  between the same pair of export chains is now applied as one RIB batch, the
+  same one the cohort fallback uses, so a route server whose members fall
+  into several policy groups no longer runs out of the two-minute walk budget
+  and rolls the reload back at a few hundred changed peers. A compensated
+  SIGHUP generation replays its prior chains the same way. A peer whose
+  export change is its own goes through the same batch, alone: the RIB then
+  builds its new table and sends the difference instead of resyncing every
+  route, which costs less than the single-peer command it replaces. A peer
+  the batch cannot move that way (one that also sends a family other than
+  IPv4 or IPv6 unicast, or whose policy reads the peer's own attributes) is
+  applied by the paced commands that follow its batch, with the same result
+  as before.
+- A rolled-back export-policy reload no longer restores every peer with
+  its own prior export policy in one RIB turn. Measured before this change,
+  rolling back about 80 peers with distinct export policies at a full table
+  held the RIB for 66 to 68
+  seconds, during which no UPDATE, query or timer ran. The rollback now
+  restores peers that return to a shared policy in batches of at most 100
+  per policy and the rest a few per RIB command, so other work runs between
+  commands. A peer the failed reload had not yet moved in the RIB costs the
+  rollback no re-export. The rollback is still never abandoned, and a peer
+  whose session drops during it is skipped and comes back up on the restored
+  policy. One case is paced only by that batch limit: up to 100 peers that
+  return from many different policies to one shared policy are restored in
+  one turn.
+- `AddFlowSpec`, `AddLeasedFlowSpec` and `AddGuardedFlowSpec` return
+  `INVALID_ARGUMENT` for a `traffic_marking.dscp` above 63, on every
+  FlowSpec family. A value from 64 to 255 used to be accepted and reduced
+  to its six low bits on encode, so a request for DSCP 64 was reported as
+  added and advertised as DSCP 0 (RFC 8955 §7.5).
+- Received FlowSpec rules from one UPDATE share one copy of its path
+  attributes in the Adj-RIB-In, the Loc-RIB and RFC 9117 validation state,
+  and equal FlowSpec attribute sets are shared across UPDATEs as in the
+  other families. Each rule used to keep its own copy, so a single
+  65,535-byte UPDATE with about 6,500 rules and a large COMMUNITIES
+  attribute could retain about 400 MB. Rules that import policy modifies
+  share one copy per distinct modification outcome, export policy that
+  modifies FlowSpec rules shares one modified copy across the rules and
+  neighbors of a distribution pass, and LLGR promotion and clearing keep
+  shared rules shared. The
+  [configuration reference](docs/reference/configuration.md#flowspec-rfc-8955)
+  now recommends `max_prefixes_ipv4_flowspec` and
+  `max_prefixes_ipv6_flowspec` for FlowSpec peers that are not fully trusted.
+- Import policy that produces more than eight distinct modification
+  outcomes within one UPDATE no longer copies the attribute set for every
+  further route that receives one of those outcomes, for any address
+  family; routes with an equal outcome share one copy.
+- `ControlService.GetHealth`, `rbgp health` and `rbgp doctor` now follow the
+  daemon gate that HTTP `/readyz` already used. During coordinated shutdown
+  or the runtime-config settlement recovery fence they no longer report a
+  healthy daemon while `/readyz` returns 503: `GetHealth` returns
+  `UNAVAILABLE` with a `google.rpc.ErrorInfo` reason of `DAEMON_SHUTTING_DOWN`
+  or `RUNTIME_CONFIG_RECOVERY_FENCE` (see the
+  [API reference](docs/reference/api.md#health-check)).
+- A reload or `SetPeerGroup` that changes `remove_private_as` or
+  `local_ipv6_nexthop` for a peer group no longer waits for each member's
+  outbound re-emission in turn. Once a member's session accepts the new knobs,
+  its re-emission is queued on the background outbound refresher that
+  graceful-shutdown toggles already use, and the edit (or its rollback) moves
+  on to the next member. Previously the peer manager waited for one full-table
+  RIB replay per member, and a single replay slower than 5 s failed the reload
+  as ambiguous, which stopped the daemon (exit 70). A slow or failed
+  re-emission is now logged and no longer fails the edit; the refresher's
+  renamed log lines are listed under Changed. An IPv6 unlock that
+  the session already re-emitted is still confirmed with the RIB before the
+  edit continues. See [operations](docs/reference/operations.md).
+- A SIGHUP that changes `honor_graceful_shutdown` or `honor_blackhole` and
+  leaves some EBGP peers behind now settles as `known_partial` instead of
+  `complete`. A peer is left behind when its chains could not be resolved,
+  its session did not acknowledge the new chains, or it took them but still
+  owes the Route Refresh that re-evaluates its `Adj-RIB-In` (a rejected
+  refresh or an unanswered session state query). `rbgp config last-reload`
+  and `GetLastSighupReload` name each such peer under the
+  `honor_graceful_shutdown.apply` or `honor_blackhole.apply` bucket, and
+  `rbgp doctor` warns on the partial reload. The knob is still installed
+  and the rest of the reload still applies. The next SIGHUP retries those
+  peers; see
+  [Honor-knob partial apply](docs/reference/reload-matrix.md#honor-knob-partial-apply).
+- A SIGHUP with an unchanged config file now retries the EBGP peers that a
+  previous `honor_graceful_shutdown` or `honor_blackhole` step left behind.
+  Fixing the cause and sending SIGHUP again (or running `rbgp reload`) is
+  enough: the step runs again with the unchanged knob value, retargets only
+  the peers whose installed chains differ or that still owe a Route Refresh,
+  and is receipted applied once they acknowledge. A peer that still fails is
+  named again in a `known_partial` receipt. Previously only a
+  generation-route reload, a knob change or a restart retried them. See
+  [Honor-knob partial apply](docs/reference/reload-matrix.md#honor-knob-partial-apply).
+- When stdout is a journal stream (`JOURNAL_STREAM` names it), each log
+  line starts with its level's syslog priority (`ERROR` 3, `WARN` 4,
+  `INFO` 6, `DEBUG`/`TRACE` 7) in both the JSON and text formats.
+  journald stores that priority, so `journalctl -u rustbgpd -p warning`
+  shows the daemon's warnings and errors; previously every line was stored
+  at `info`. Output to a terminal, file or pipe is unchanged. See
+  [Troubleshooting](docs/how-to/deployment.md#troubleshooting).
+- Reconcile managed SVD VXLAN VLAN and tunnel bindings during startup adoption
+  and repair, removing stale bindings and allowing VLAN-to-VNI re-keying while
+  preserving foreign ports and unrelated bridge VLANs. Membership follows the
+  configured bindings, so VLAN/VNI mappings added by hand on a managed SVD,
+  and its default VLAN 1 port VLAN, are now removed.
+- Recognize interior VLAN/VNI bindings in compressed kernel ranges when checking
+  SVD readiness and selecting targets for FDB programming.
+  Match raw ranges without expanding every VLAN per lookup, and reject malformed
+  trailing inventory rows.
+- The ownership and mode check on the directories above `[mrt] output_dir`
+  and `runtime_state_dir` now walks up from the directory already opened
+  for writing, instead of resolving the configured path again. A symlink in
+  that path repointed between the open and the check can no longer let the
+  check approve one directory while dumps or runtime state go to another.
+  The MRT bytes-written metric now takes the dump's size from the written
+  file, so a dump whose directory is renamed while it is published is no
+  longer reported as failed or with another file's size.
+- A ROUTE-REFRESH carrying several Address-Prefix ORF groups (RFC 5291) is now
+  applied as one update followed by at most one re-advertisement pass. Each
+  group previously cost its own pass over the peer's table and its own wait
+  of up to 500 ms in the session, so a peer with `prefix_orf_receive`
+  negotiated could multiply that work by splitting a message into many
+  groups. Groups still apply in message order, a group over the entry limit
+  is still rejected on its own, and a malformed group still resets the list.
+- The RIB now answers readiness probes while a session with an RFC 9234
+  local role goes down. Toward a provider, peer or route server every
+  route carrying Only to Customer (OTC) is denied, so the session holds one
+  egress-denied entry per blocked prefix, up to a full table learned from
+  another provider. Teardown released those entries in one unit that
+  served no readiness query until it finished.
+- A slow RIB no longer stops the daemon in these steps:
+  publishing route-flap dampening owners after a SIGHUP reload, config
+  transaction or neighbor change; a hot update that changes a neighbor's
+  export policy chain or confirms an IPv6 unlock, including a peer-group
+  edit that hot-applies to its members. Each step gave the RIB five
+  seconds, both to accept the request into a busy queue and to answer it.
+  After that it fenced `known_divergence` or `acknowledgement_lost` and
+  exited 70, although the RIB was still working and nothing could be
+  rolled back cleanly. The steps now wait for the RIB, serving readiness
+  meanwhile. The wait is bounded by the operation's
+  [settlement watchdog](docs/how-to/settlement-watchdog.md) budget and,
+  for API-owned changes, by the existing ten-minute dispatch bound.
+- Removing the `.deb` or `.rpm` package now stops and disables `rustbgpd`
+  and every `rustbgpd@` instance before deleting the binaries, so
+  `ExecStopPost` still releases EVPN core-isolation links. Previously the
+  daemon kept peering with its binary and unit deleted. An upgrade still
+  leaves a running daemon alone; its notice now says a restart is
+  required to load the new binary, instead of repeating the fresh-install
+  text. `/var/lib/rustbgpd` is kept. See
+  [Debian / RPM packages](docs/how-to/deployment.md#debian--rpm-packages).
+- A session task that panicked while Established left its routes installed
+  and its session counted live in the RIB until the neighbor was deleted, a
+  replacement session registered, or the daemon restarted. The session's
+  drop now closes the epoch while unwinding too, with a `PeerDown` that
+  withdraws the routes: a panic is a local failure with no session left to
+  resume, so graceful restart does not retain them. A session task that was
+  aborted or panicked while Established also emitted no BMP Peer Down, so
+  collectors kept the peer up; the drop now queues one (the teardown reason
+  the session latched, else reason 2, local close without NOTIFICATION)
+  behind the events already sent, and counts it
+  in `bmp_source_drops_total{reason="channel_full"}` when the BMP channel
+  has no room.
+- Keep session commands responsive while RIB-bound messages wait for RIB
+  mailbox capacity. A policy or configuration command sent to a session that
+  is already holding messages now receives an explicit refusal before changing
+  state, an outbound replay request is answered as unavailable so its caller
+  retries, and a conditional retirement that would end the session is refused
+  while one that keeps it is answered as before. Later Stop and BFD-down
+  commands close the connection at once, and the held updates keep their order
+  before the session end. State reads and required Route Refresh requests
+  remain available. Accepted starts wait for the held updates and can still be
+  canceled by a later stop. An export-policy update or IPv6 export unlock that
+  meets a full mailbox is no longer waited for inside the session: its message
+  is held in order, the acknowledgement follows RIB admission, and the session
+  keeps reading commands meanwhile.
+- Locate repeated `rbgp policy check` diagnostics without rescanning long lines
+  or allocating a column entry per byte, and avoid unused JSON compile findings
+  in text mode.
+- Policy dry runs reject setup and page results observed at or after their
+  deadline and stop before starting further reads or evaluation pages.
+- An export-policy reload now re-exports EVPN, labeled-unicast, FlowSpec and
+  BGP-LS routes for peers that also carry IPv4 or IPv6 unicast in a shared
+  update group. Such peers no longer join the shared unicast-only transition,
+  which left their other families on the previous policy: routes kept the old
+  attributes, and routes the new policy rejects were not withdrawn.
+- Service RIB readiness queries while an inbound enhanced route refresh
+  finishes. End-of-RIB-Refresh and the refresh-window timeout withdrew the
+  routes a peer did not re-advertise, reselected and distributed them in one
+  uninterrupted step, so a peer closing a refresh window over a large table
+  without re-advertising it could make the daemon miss its readiness probe.
+  Key collection, each withdrawal, reselection and attribute reclamation now
+  run under the same readiness owner as the End-of-RIB sweep, and windows
+  that time out together are finished one owner at a time.
+- Bound peer-repeatable ignored ROUTE-REFRESH and ORF warnings to the first
+  message and powers of two per warning class and TCP connection. Message
+  counters continue to count every received refresh.
+- Stop reading the whole RIB at each End-of-RIB and peer down while an
+  exact-export rejection exists. While any peer held a route its session
+  could not encode (for example an IPv6 route with no usable next hop,
+  counted in `bgp_exact_export_rejections_total`), every received
+  End-of-RIB, every peer down and every graceful-restart, long-lived
+  graceful-restart or route-refresh window expiry collected every
+  Adj-RIB-In and Loc-RIB row to decide which rejections were still live,
+  without servicing readiness queries. With a large table and many peers
+  establishing together, the daemon could miss its readiness probe. These
+  events now look up only the rejected routes, so their cost follows the
+  number of rejections instead of the table size. The routes advertised,
+  withdrawn and rejected are unchanged.
+- A SIGHUP reload or API config change now logs the config advisories that
+  `rustbgpd --check` reports, such as `orr_vantage` without a `linkstate`
+  neighbor or `gr_eor_grace_time` above the advisory ceiling. Before, only
+  startup logged them, so an advisory introduced at runtime went unreported.
+- Replacement sessions preserve the last RIB-registered predecessor after the
+  old actor stops, including registration admitted during retirement of a
+  replaced session or of a dynamic session that went idle, and collision
+  promotions whose intervening handshakes never established. A collision
+  candidate promoted over a primary that had registered with the RIB now names
+  that primary in its registration, so the RIB retires the primary's record at
+  once instead of keeping it as a collision fallback.
+- A session that replaces one the daemon has already retired is no longer
+  treated as one side of a connection collision. When an inbound
+  connection replaced an idle session, or a session was respawned after an
+  abort, and the old session's final `PeerDown` was still queued behind a
+  busy RIB, the RIB kept the old session as a possible collision survivor.
+  If the replacement then went down under graceful restart before that
+  `PeerDown` was handled, the peer's registration failed over to the dead
+  session and the replacement's routes were withdrawn instead of retained.
+  The replacement now names the session it supersedes when it registers.
+  The RIB drops that session at once and ignores what it still delivers,
+  so the replacement's routes are retained as stale. A real collision,
+  where either session may survive, is handled as before.
+- An export-policy reload whose cohort falls back to the authoritative batch
+  no longer resyncs its non-EVPN residual peers in one RIB turn. VPN-,
+  labeled-, FlowSpec- and BGP-LS-only peers, ungrouped and per-client-best
+  peers, mixed-family peers and peers of a group that moves to several
+  destinations are now applied a few per RIB command within the same 250 ms
+  turn budget as EVPN peers, so UPDATEs from other peers, operator queries and
+  timers run between those commands. Shared unicast cohorts are unchanged.
+  The per-command overhead and the RIB work interleaved between commands
+  count toward the walk's two-minute stall timeout, which the authoritative
+  batch and each completed paced command renew, so a reload that keeps
+  making progress is not rolled back by its cumulative interleaved work;
+  only a gap of more than two minutes with no completed work rolls it back.
+- A peer whose session task panicked, or whose run loop returned an error,
+  stayed down until it was reconfigured or the daemon restarted. The peer
+  manager now replaces the session and starts it again, after publishing the
+  dead session's `PeerDown` to the RIB. A dynamic peer or an inbound
+  collision candidate is retired as if its session went Idle. A third crash
+  of the same neighbor within ten minutes, counted across restarts, dynamic
+  reconnects and inbound candidates, latches it disabled instead until
+  `rbgp neighbor <peer> enable`; a reconfigure, or an interface-only
+  neighbor's move to a new link-local address, keeps the latch.
+- A refused export-policy change no longer ends as an ambiguous rollback
+  because a retained dynamic neighbor's collision candidate won while the
+  change was rolling back. When the candidate's OPEN arrived during the
+  rollback, its verdict moved the neighbor onto the candidate's RIB identity
+  after the rollback had named the old one. The restore's acknowledgement
+  then no longer matched the neighbor, and the rollback reported
+  `policy_rollback_batch_reply_lost` instead of a full compensation. While
+  a policy change runs, the OPEN of such a neighbor is now held until the
+  change has committed or rolled back, as the removal of a dynamic neighbor
+  already is.
+- The RIB now answers readiness probes during two more actor turns that
+  could walk a whole table without serving them: a session registration
+  that is the first member of its update group, which builds the group
+  table from the whole Loc-RIB before the initial table is sent, and a
+  session teardown or reconnect that releases the member's EVPN recovery
+  ledger.
+- The RIB now answers readiness probes during several actor turns that
+  could walk a whole table without serving them: a BGP-LS UPDATE (selection
+  against every Adj-RIB-In, not only the ORR rebuild), retiring or pruning an
+  exact-export rejection of a FlowSpec, BGP-LS or RT-Constrain route (which
+  walks that family in every Adj-RIB-In), a slow-peer isolation change or a
+  conditional-advertisement attachment change that regroups a peer, and a
+  session teardown that retires the last member's update-group table.
+- A policy rollback whose Route Refresh failed no longer reports an exact
+  restore while the Loc-RIB may hold routes the restored import policy denies.
+  Once a peer's session has taken the candidate import chain, UPDATEs it
+  receives are evaluated under that chain, and only a Route Refresh under the
+  restored chain re-evaluates them. A peer whose export step was still pending
+  in a batched or cohort reload, whose import change was never acknowledged,
+  or whose own forward refresh was refused before any family was requested,
+  was treated as untouched: when the reload then rolled back and that peer's
+  rollback Route Refresh failed, or one 100 ms state probe timed out, the
+  rollback dropped the refresh obligation and reported full compensation, and
+  a route accepted under the candidate policy stayed in the Loc-RIB and was
+  exported. The rollback now retries an unanswered refresh once, from the
+  policy transaction's existing two-second retry allowance, and keeps the
+  obligation armed and reports the restore as inexact if it still fails.
+- A panic in the RPKI VRP manager or in a validation-table forwarder no
+  longer shuts the daemon down. The manager loses only the message it was
+  handling: each cache's VRPs and ASPAs and the validation tables in use stay
+  exactly as they were, so validation states, import policy that matches on
+  them, and advertisements do not change, and nothing is revalidated to
+  NotFound. A cache whose update was lost is asked for a full table (a Reset
+  Query after `retry_interval`); until it arrives the cache's last applied
+  data stays in use, and it is dropped at its original expire if the table
+  never comes. A forwarder forwards the latest table again after a short
+  backoff. BGP sessions and the other caches are not touched. Previously
+  either panic aborted every RPKI task and the daemon exited 1. See
+  [operations](docs/reference/operations.md#rpki-subsystem-task-exits-unexpectedly).
+- A full table that replaces a cache's previous one (after a Cache Reset, a
+  reconnect without a usable serial, or a resynchronization), and the loss of
+  a cache's data at flush or expire, now revalidate only the routes covered
+  by the VRPs that joined or left the merged table; a VRP another cache still
+  holds is not among them. For ASPA, detailed validation is limited to routes
+  whose path contains a customer whose record changed in that cache.
+  Previously each made the RIB and every session re-evaluate all routes. A
+  cache's first table still re-evaluates everything.
+- Keep validation-table recovery running if its restart-counter observer
+  panics. A failure to reconstruct the newest full table now ends the
+  forwarder consistently, including on receive, instead of silently
+  recovering with an older table. The daemon's existing coordinated shutdown
+  handles failures whose state or expiry duties cannot be recovered safely.
+- An rpol compile now keeps at most 256 diagnostics across lexing, parsing,
+  import resolution and typechecking together. The 256-diagnostic limit
+  added in 0.82.0 covered typechecking only, so a 4 MiB source of lex or
+  parse errors still built every diagnostic: 4 MiB of `@a` lines produced
+  about 1.4 million diagnostics and about 400 MB of memory. Lexing and
+  parsing now stop at the cap, and the rendered output's closing line says
+  so: `... N more diagnostic(s) not shown; a compile keeps at most 256`.
+  This applies to `TestPolicy`, `ComparePolicy`, `rbgp policy check` and
+  config load errors.
+- In an rpol term, a literal `set med` or `set local-pref` now replaces an
+  earlier computed `set` of the same attribute, as the
+  [language reference](docs/reference/rpol-language.md) documents. The
+  computed value previously won: `set med route.med + 5; set med 10` gave
+  MED 105 on a route with MED 100. The same applied inside loop bodies and
+  in an applied policy's terms; a computed `set` after a literal one, and
+  `set`s in separate terms, were already correct.
+- The RIB now answers readiness probes while it applies an RT-Constrain
+  UPDATE that changes a VPN update-group member's membership, and while it
+  rebuilds the optimal-route-reflection cache for a BGP-LS UPDATE or for a
+  peer binding or releasing an ORR vantage. Each of these ran as one actor
+  turn that scaled with the group's VPN routes times the membership size, or
+  with the topology size times the number of vantages, and could outlast the
+  readiness deadline. A member that cannot be sent EVPN no longer has the
+  EVPN table walked on its membership change.
+- A panic in one RPKI cache's RTR client no longer shuts the daemon down. The
+  client restarts that cache's session and the panic is handled as an ordinary
+  loss of the RTR session: the cache's VRPs and ASPAs stay in use until the
+  effective expire, the client reconnects after `retry_interval` and
+  resynchronizes with a Reset Query, and BGP sessions and the other caches are
+  not touched. Previously the supervisor aborted every RPKI task and the
+  daemon exited 1. An unexpected exit of the VRP manager or a validation-table
+  forwarder is still fatal. See
+  [operations](docs/reference/operations.md#rpki-subsystem-task-exits-unexpectedly).
+- Close a session at once when fast external failover finds its interface
+  down while the session is busy with a shared update-group encode or an
+  outbound replay's admission wait. The link check now counts as a session
+  close, so the encode stops at the next slice and the replay ends with a
+  retryable refusal, instead of both finishing first. A link check that finds
+  the interface up no longer takes a slot in the session's command queue.
+- Stop a full BMP event queue from delaying a session close. A session
+  leaving Established (Stop, BFD-down, hold-timer expiry, or a transport
+  loss) no longer waits for queue room to report its Peer Down. The Peer Down
+  is sent once the queue drains: after the session's earlier Route Monitoring
+  messages, and before its next Peer Up. The session task still ends only
+  after the Peer Down is queued, so a replacement session and daemon shutdown
+  keep the previous order. If the session is aborted first, or its shutdown
+  budget runs out, the Peer Down is abandoned and counted in
+  `bmp_source_drops_total{reason="channel_full"}`.
+- Keep Stop and BFD-down prompt while a session is busy with its own work.
+  Commands that arrive during an explicit outbound replay's admission wait or
+  a shared update-group encode now wait in a small ordered queue instead of
+  stopping the session from reading further commands. A queued session close,
+  or a full queue, ends the replay with a retryable refusal or stops the
+  encode at the next slice, where the group falls back to per-member
+  encoding; routine commands no longer cost either. An inbound ORF
+  ROUTE-REFRESH that finds the RIB mailbox full is held in order instead of
+  blocking the session until the RIB drains, and a DEFER update is never
+  turned into a plain refresh, so re-advertisement still waits for the
+  peer's own refresh (RFC 5291). An export-policy update that finds the RIB
+  gone now fails with an explicit error and keeps the previous policy.
+- Keep readiness responsive while retiring disconnected sessions and checking
+  interface-only neighbor bindings, and wait on the affected sessions at once
+  instead of 500 ms each in turn. A retirement round shares one 500 ms window
+  from the start of its session waits; each interface-only port has its own.
+  Healthy peers finish while stalled ones wait.
+- Settle End-of-RIB markers after shutdown flushes their last owed withdrawals,
+  preserving withdrawal-before-marker ordering and avoiding a false missed-release
+  warning. Deferred marker settlement now deduplicates peers once per drain.
+- A SIGHUP that arrives while a reload is running is no longer dropped.
+  Each reload reads the config file early, so an edit written after that
+  read and signalled during the reload was silently lost, while
+  `systemctl reload` had already reported success. The signal now sets one
+  pending follow-up, later signals fold into it, and once the running
+  reload settles, whatever its outcome, exactly one follow-up reload
+  re-reads the file. Signals already queued when a reload starts are
+  served by it. Coordinated shutdown takes precedence and discards a
+  pending follow-up with a warning. See
+  [Configuration reload](docs/reference/operations.md#configuration-reload-sighup).
+- A session that replaces a graceful-restart reconnect before the
+  reconnect's own end reaches the RIB now applies the consecutive-restart
+  rule (RFC 4724 section 4.2) at its `PeerUp`. A peer that restarted,
+  reconnected, sent fresh routes and was replaced again could have the
+  replaced session's end queued behind the replacement's `PeerUp`; that
+  end is discarded as superseded, so the replaced session's fresh routes
+  were never marked stale and stayed installed and advertised after the
+  replacement's End-of-RIB. The superseding `PeerUp` now deletes routes
+  still stale from the earlier restart, marks the replaced session's
+  routes stale, and keeps long-lived-stale routes (RFC 9494 section 4.2);
+  the replacement's End-of-RIB or the stale-routes timer removes what it
+  does not re-announce. Families the replaced session had already
+  completed with End-of-RIB, or that the first graceful-restart capability
+  did not list, are withdrawn at that point rather than held stale, until
+  the replacement re-announces them. An in-order end, a replacement
+  without graceful restart, and an unnamed connection collision are
+  handled as before.
+- A session whose connection is discarded after a failed TCP-AO key mutation
+  now goes down at once. When a SIGHUP key rotation failed part-way on a
+  session, or its acknowledgement timed out, the affected sessions closed
+  their sockets but stayed Established: the peer's routes stayed installed
+  and advertised, and its reconnect was dropped against the Established
+  session, until the hold timer expired (indefinitely with a hold time of 0).
+  The close is now handled as a transport failure: the routes are withdrawn,
+  or retained under Graceful Restart where it was negotiated, and the session
+  reconnects.
+- A config transaction whose only change is `[global] dynamic_neighbor_limit`
+  no longer plans as "no changes". The field is applied by SIGHUP reload and
+  has no transaction executor, so the plan now lists
+  `[global].dynamic_neighbor_limit (apply via SIGHUP reload)` under
+  unsupported sections and the transaction is rejected.
+- A peer whose import or export policy update timed out, or otherwise went
+  unacknowledged, no longer keeps a chain the daemon does not record. The
+  session could install the new chain after the deadline while the daemon
+  still recorded the prior one, so a later reload back to that prior chain,
+  such as reverting `honor_graceful_shutdown` or `honor_blackhole`, sent no
+  policy update and reported `complete` while the peer kept the new chain.
+  The daemon now treats that peer's installed chain as unknown and resends
+  it, with a Route Refresh for import, on the next apply that reaches the
+  peer, even when it matches the recorded chain. See
+  [Honor-knob partial apply](docs/reference/reload-matrix.md#honor-knob-partial-apply).
+- Best-path selection for VPNv4/VPNv6 and labeled-unicast no longer re-reads
+  every stored Add-Path path of a key on each received UPDATE. When the
+  UPDATE leaves the key's selected path alone, selection compares only the
+  paths it announced or withdrew with that selected path, so the work per
+  key no longer grows with the paths stored for it. An UPDATE that replaces
+  or withdraws the selected path, and Graceful Restart, route refresh and
+  session teardown, still select from all stored paths. The comparison also
+  reads the attribute set's cached selection inputs instead of scanning the
+  attribute list. Selection results, Add-Path send and Optimal Route
+  Reflection staging are unchanged.
+- The systemd watchdog no longer aborts a daemon whose RIB is busy but
+  answering. Before, the watchdog ping was withheld whenever `/readyz` would
+  fail, including when the RIB reported a policy transition,
+  selection-deferral release or peer teardown as "stalled" after 30 seconds.
+  One such unit of work lasting about three to five minutes ended in SIGABRT
+  from systemd, every BGP session dropped, and the same work ran again after
+  the restart. Now the ping is withheld only when the PeerManager or the RIB
+  gives no answer at all (no reply within 5 seconds, a closed channel or a
+  dropped reply); `/readyz` is unchanged and still returns `503` for a
+  stalled answer.
+
+### Documentation
+
+- Cover client CRL files in credential lifecycle tables and document revocation,
+  candidate-source confinement and dial-out trust boundaries in the gRPC threat
+  model. Clarify candidate graph-budget clamping and link BFD and VPN FlowSpec
+  security boundaries from the security guide.
+- The [guarded FlowSpec reference](docs/reference/api.md#guarded-flowspec-mutations)
+  states that a guarded rule accepts the same component grammar, actions,
+  communities and VPN scope as `AddFlowSpec`, including rules without a
+  destination component, and that export policy matches such a rule by its
+  communities rather than a prefix term. A qualification test covers a
+  destination-less guarded rule through admission, renewal, exact read-back,
+  per-peer export by community and a revision-fenced delete.
+- The IXP filter-pipeline cron script and the `rs-config-render` README now
+  filter their `rsync --delete` to the files the renderer can emit, instead of
+  syncing all of `/etc/rustbgpd`, which removed token files, TLS keys and
+  other operator files. A stale policy, dataset tree or
+  `birdwatcher-reject-communities.json` that a new render omits is still
+  removed. The IXP Manager
+  route-server cookbook fetches the router document with a mode-0600 header
+  file, so the API key no longer appears on `curl`'s command line.
+- The gNMI reference documents the limit of 64 concurrent `Subscribe` streams
+  per listener and the `RESOURCE_EXHAUSTED` status a stream beyond it gets.
+  The RFC notes state that `ebgp_requires_policy` is on by default under
+  `config_epoch = 2`, and quote RFC 4271's hold-time floor as the MUST it is.
+  Smaller corrections cover the benchmark target inventory, the gRPC method
+  inventory's InjectionService read count, the ADR index, EVPN runbook
+  commands, the shipped alert list, draft pull requests and interop labs,
+  readiness checkpoints, the doctor config-freshness check name and the MRT
+  crate's dump retention.
+- The operations reference for `policy chain set` without a scope and
+  `gshut` without `--all` or `--neighbor`, and the API reference for
+  malformed `rpki aspa` and `rpki verify-path` input, now give the actual
+  `rbgp` usage-error exit status, 64 (`EX_USAGE`), instead of 2. The daemon's
+  own invocation errors, such as `rustbgpd --strict` without `--check`, still
+  exit 2.
+- The deployment guide's reload troubleshooting row and operational checks now
+  use `rbgp config last-reload` and `rbgp config diff` against the installed
+  file, which compares it with the running config. The reload matrix no longer
+  says restart-required edits stay visible in `rustbgpd --diff`: that command
+  compares two files and reports no changes once the new file is installed.
+  Both guides note that the two diff commands use opposite exit codes for
+  changes (1 versus 2) and errors.
+
+### Upgrade notes
+
+- BMP collectors no longer receive Stats Report type 7 from every
+  established peer. It is now omitted for sessions that negotiate any family
+  other than IPv4/IPv6 unicast, negotiate unicast Add-Path receive, run with
+  `[policy.reject_retention] enabled = false`, or, since the session reset,
+  have evicted a retained rejection or had max-prefix `Block` withhold an
+  announcement.
+  Where it is still sent, its value is the pre-policy route count and can
+  exceed the post-policy count. Dashboards that read type 7 as the
+  accepted-route count can read RFC 9972 type 20 (total) or type 21 (per
+  family) on unicast-only sessions without unicast Add-Path receive. Type 20
+  does not replace it elsewhere: it covers IPv4/IPv6 unicast only, while the
+  old type 7 summed every family, and Add-Path receive omits types 20 and 21.
+  For those sessions, read the per-peer accepted count from the API
+  (`NeighborState.prefixes_received` from `GetNeighborState`) or the
+  `Prefixes Received` line of `rbgp neighbor <addr>`.
+- Plain `rbgp rib vpn`, `rbgp rib labeled`, `rbgp rib rtc` and `rbgp evpn`
+  print the same rows in a different order: ascending key order from the
+  bounded page RPCs, not the daemon's hash-table order. `rib vpn` sorts by
+  Route Distinguisher, prefix, source neighbor and path ID; `rib labeled` by
+  prefix, source neighbor and path ID; `rib rtc` by origin AS, Route Target,
+  prefix length, source neighbor and path ID; `evpn` by route type, Route
+  Distinguisher, the type's remaining key fields and source neighbor. Sort the
+  rows in any script that compared listings line by line or took the first
+  row. These listings and `rbgp evpn diagnose` now need a daemon that serves
+  `ListVpnRibRoutes`, `ListLabeledRibRoutes`, `ListRtcRibRoutes` and
+  `ListBestEvpnRoutes` (v0.78.0 or later); against an older daemon they fail
+  with `not supported by this daemon`. A table that changes between two pages
+  fails the listing with `aborted: route table changed during pagination;
+  restart with an empty page_token` (exit 1, no rows, no retry); run it again,
+  or page with `--limit` and `--page-token`. An invalid `--neighbor` is now
+  reported as `source_peer_filter` instead of `peer_filter`, and an `evpn
+  --route-type` above 6 as `route_type_filter must be 0 or 1..=6` instead of
+  `invalid route_type_filter N: expected 0 or 1..=6`. See the
+  [CLI guide](crates/cli/README.md#routes-policy-and-dataplane).
+- Config load, startup, SIGHUP reload, both `rustbgpd --check` modes and API
+  config candidates now read and validate each gNMI dial-out `tls_ca_file`,
+  `tls_cert_file` and `tls_key_file`. A file that is missing, empty, not
+  UTF-8, without a PEM block of the expected kind, larger than 4 MiB, not a
+  regular file, or world-writable now refuses boot and keeps a reload on the
+  last-known-good config. Previously a missing or unreadable file only made
+  that target retry at connect time. Before upgrading, run `rustbgpd --check`
+  and install every configured dial-out file, or remove the TLS keys from a
+  target that is not in use.
+- A world-writable listener `tls_cert_file`, `tls_client_ca_file` or
+  `tls_client_crl_file` is now refused like a world-writable token or key;
+  certificates, CA bundles and CRLs were previously accepted regardless of
+  mode. Run `chmod o-w` on the file.
+- The primary config file must be a regular file no larger than 64 MiB, and
+  the normalized document written by API changes must also fit 64 MiB. Pass
+  the daemon the config file itself rather than a FIFO or device. See
+  [credential file permissions](docs/reference/configuration.md#grpc-credential-file-permissions).
+- gRPC event consumers that read a string `timestamp` must read
+  `timestamp_unix_ms` (Unix epoch milliseconds) instead; whole seconds are
+  `timestamp_unix_ms / 1000`. A client built against an older
+  `rustbgpd.proto` that still reads `timestamp` now gets an empty string.
+  This removal is a named pre-v1 waiver of the two-minor / 90-day
+  deprecation floor. It covers all eight string `timestamp` fields: the two
+  on `BgpEvent` and `RouteEvent`, deprecated in 0.79.0, and the six on
+  `SessionEvent`, `NotificationEvent`, `PolicyEvent`, `DataplaneRouteEvent`,
+  `EvpnRouteEvent` and `BfdSessionEvent`, which were never deprecated. The
+  general floor is unchanged.
+- Below `operator_only`, a `[policy] rpol_roots` entry that is a regular file
+  is now only a path a candidate can name. A candidate sent over the API,
+  including a non-operator `rbgp config diff`, is refused when another module
+  imports that file, or when the file's own `import` lines are written
+  relative to its directory, unless a policy directory covers that
+  directory. List the directory in `rpol_roots` and reload. Operator callers
+  and boot and SIGHUP loads are unaffected. See the
+  [reload matrix](docs/reference/reload-matrix.md).
+- A FlowSpec controller that sends `traffic_marking.dscp` from 64 to 255
+  now gets `INVALID_ARGUMENT` and no rule, where the add used to succeed
+  and advertise the value's six low bits. Send the 0 to 63 DSCP itself.
+  Raw `extended_communities` values and `rbgp flowspec add`, which
+  already refused `mark-dscp` above 63, are unchanged.
+- Replace each gRPC listener `access_mode` before upgrading; the key no
+  longer loads. With `access_mode = "read_only"`, delete it and set
+  `max_tier` to the stricter of `"sensitive_read"` and any `max_tier` the
+  listener already has, so `max_tier = "read"` stays `"read"`. With
+  `access_mode = "read_write"`, delete it and keep any existing `max_tier`,
+  or leave `max_tier` unset to serve every tier. This keeps each listener's
+  effective ceiling unchanged. Scripts and benchmark or lab harnesses outside
+  this repository that generate listener tables need the same edit. Run
+  `rustbgpd --check` on the new config before restarting.
+- The `access_mode` label of `bgp_grpc_authz_decisions_total` is renamed
+  `listener_max_tier`, and its value changes from `read_only` or `read_write`
+  to the listener's `max_tier` (`read`, `sensitive_read`, `mutating` or
+  `operator_only`). Rewrite Prometheus queries, alerts and dashboards that use
+  it: select read-only listeners with
+  `listener_max_tier=~"read|sensitive_read"` and listeners that admit
+  mutations with `listener_max_tier=~"mutating|operator_only"`. `grpc_authz`
+  audit records drop the `access_mode` field; log pipelines that read it
+  should read the existing `max_tier` field, which carries the listener
+  ceiling. The listener startup log records `max_tier` instead of
+  `access_mode`. See the
+  [configuration reference](docs/reference/configuration.md#globaltelemetrygrpc_tcp).
+- Monitoring that relied on the daemon exiting 1 when its gRPC server failed
+  no longer sees that event. Alert on
+  `bgp_management_server_crashes_total{server="grpc"}` (the shipped
+  `BgpManagementServerCrashed` rule covers it) and on a `/readyz` that stays
+  `503 not ready: gRPC server is restarting`. A gRPC server that cannot be
+  restarted leaves the daemon running BGP with the API down; restart the
+  process to recover it. gRPC clients with a long-lived connection must
+  reconnect after a restart: the old connection accepts no new requests.
+  `--help` and the man page no longer list the gRPC server among the exit-1
+  causes. The ERROR line is now `gRPC server exited unexpectedly; restarting
+  it in place`, followed by `gRPC server restarted`; `initiating shutdown due
+  to gRPC server failure` is gone.
+- Monitoring that relied on the daemon exiting 1 when its metrics/readiness
+  server failed (a `Restart=on-failure` count, or a log match on `initiating
+  shutdown due to metrics/readiness server failure`) no longer sees that
+  event. Alert on a failed scrape while the listener is down and on an
+  increase of `bgp_management_server_crashes_total` afterwards; the shipped
+  `BgpManagementServerCrashed` rule covers the second. This supersedes the
+  earlier behavior of fail-stopping rather than running without the health
+  surface: the listener is now recovered in place, and a daemon whose restarts
+  keep failing stays up with the listener down and an ERROR line per attempt.
+  `--help` and the man page no longer list this server among the exit-1
+  causes. The ERROR line is now `metrics/readiness server exited unexpectedly;
+  restarting it in place`, with `exit` and `restart_in_ms` fields.
+- Each MRT dump now fails with a permission error, counted by the `mrt_*`
+  failure metrics, unless `[mrt] output_dir` is a real directory (not a
+  symlink) owned by the daemon user and not group- or world-writable, and
+  every directory above it is owned by root or the daemon user and not
+  writable by other users unless sticky. A directory created by an earlier
+  release under umask 002 (mode 0775), a bind mount owned by a host UID, a
+  symlinked `output_dir` (even written as `dir/` or `dir/.`), or a path ending
+  in `..` is refused. Check it with `stat -c '%U %a'
+  <output_dir>`; fix it with `chown <daemon user> <output_dir>` and
+  `chmod go-w <output_dir>`, or point `output_dir` at the real directory. The
+  checks run before every dump, so no restart is needed after the fix. See
+  [`[mrt]`](docs/reference/configuration.md#output-files).
+- gRPC clients that read `Route.med` must read `Route.med_attr` instead: a
+  set value is the route's MED, including an explicit `0`, and an absent
+  value means the route carries no MED attribute. A client built against an
+  older `rustbgpd.proto` that still reads `med` now sees the proto3 default
+  `0` for every route.
+- Monitoring that relied on the daemon exiting 1 when its RPKI VRP manager or
+  a validation-table forwarder panicked no longer sees that event for a panic
+  the daemon recovers from. Alert on `bgp_rpki_task_restarts_total` (the
+  shipped `RpkiTaskRestarted` rule) and on `bgp_rpki_cache_resync_pending`
+  staying `1` (`RpkiCacheResyncPending`). While a cache is resync pending,
+  validation uses that cache's last applied data until its expire; no restart
+  is needed. `rbgp doctor` reports the panic report of a recovered panic as a
+  recent crash. `bgp_rpki_task_restarts_total{task}` covers `vrp_manager`,
+  `vrp_forwarder` and `aspa_forwarder`, each `0` from startup, and
+  `bgp_rpki_cache_resync_pending{cache}` is `1` while a cache owes a full
+  table. Each recovered panic logs at ERROR and leaves a panic report.
+- `bgp_sighup_reload_outcomes_total` replaces the `ignored_in_flight`
+  outcome with `coalesced`, counted once per SIGHUP received while
+  another reload runs; the follow-up reload that serves it records its
+  own outcome separately. Dashboards, alerts and harnesses that select
+  `ignored_in_flight` must switch to `coalesced`. A coalesced signal no
+  longer publishes an interim `GetLastSighupReload` record with outcome
+  `ignored_in_flight`; the record only ever holds a settled reload.
+- A gNMI `Get` with more than 16 paths returns `INVALID_ARGUMENT`, and a
+  full-state all-neighbors `Get` against more than 6,553 neighbors returns
+  `RESOURCE_EXHAUSTED`; request specific neighbors or leaves instead
+  ([gNMI reference](docs/reference/gnmi.md#supported-rpcs)).
+- A full-state all-neighbors gNMI subscription against more than 6,553
+  neighbors, or an all-neighbors `ON_CHANGE` subscription against more than
+  65,536, is refused or ended with `RESOURCE_EXHAUSTED`; subscribe to specific
+  neighbors or leaves instead
+  ([gNMI reference](docs/reference/gnmi.md#supported-rpcs)).
+- A whole-table `TestPolicy` or `ComparePolicy` dry run that needs more than
+  60 s must be narrowed with `--limit`, `--neighbor` or `--family`
+  ([API reference](docs/reference/api.md)).
+- The new `BgpReadinessRibStalled` alert reads the `bgp_rib_stalled` gauge, so
+  it needs no recurring `/readyz` probe. It fires when the gauge reads 1 on
+  every evaluation for ten minutes; an evaluation that reads 0 resets it. The
+  gauge is sampled only when the telemetry listener is configured. The
+  `/readyz` counter `bgp_readiness_probe_failures_total{reason="rib_stalled"}`
+  is unchanged.
+- A large reload of per-neighbor export policies now takes as long as its work
+  needs, about one full-table pass per such peer, and holds configuration
+  changes and peer lifecycle commands for that time; inbound connections, a
+  BFD Up during a SIGHUP reload and a first SIGTERM wait as well. The
+  30-minute settlement budget is the outer bound: a walk that reaches it, at
+  roughly 1,200 such peers at a full table, is fenced and the daemon exits 70.
+  `rbgp reload` still gives up after its `--timeout` (600 seconds by default)
+  although the reload may commit later. This walk's timeout errors no longer
+  say `shared policy-walk budget`: the batched and paced steps name the
+  `policy-walk stall timeout` and the per-peer step the `policy-walk budget`.
+  Log lines report a long walk: `authoritative policy walk started`, then
+  `authoritative policy walk in progress` or `paced export-policy walk in
+  progress` about every ten seconds, as units complete. See
+  [Configuration reload](docs/reference/operations.md#configuration-reload-sighup).
+- The BLACKHOLE FIB discard knobs no longer also raise the `[global] changed`
+  SIGHUP `ERROR` (their own `ERROR` still fires), and an
+  `ebgp_requires_policy`-only edit no longer sets `rustbgpd --diff`'s
+  `restart_required.global_changed`; `ebgp_requires_policy_changed` still
+  reports it as restart-required.
+- An MRT dump is no longer one instant of the whole table. Each unicast prefix
+  record is still a point-in-time view across all neighbors, but different
+  prefixes can be read seconds apart, and the record timestamp is now the
+  start of the walk. See
+  [What one dump shows](docs/reference/configuration.md#what-one-dump-shows).
+- While an export-policy change runs, inbound connections, the removal of a
+  dynamic neighbor whose session went idle, max-prefix restart timers,
+  configuration changes and peer lifecycle commands still wait until it has
+  ended; during a SIGHUP reload a BFD Up also waits, and the held session is
+  started once the reload has committed or rolled back. The shared transition
+  of the largest group of peers making the same export change has no step
+  boundary: session events wait for it. The `reload generation phase timing`
+  log line gains `owned_wait_service_gap_max_us`, `events_served` and
+  `event_service_us`. A neighbor latched disabled during a SIGHUP reload that
+  is then rolled back has its BFD session stopped, as after a reload that
+  commits. A neighbor that a BFD Down holds is no longer restarted when its
+  session task crashes, during a reload or outside one: the BFD Up that
+  releases the hold starts the replacement. See
+  [Configuration reload](docs/reference/operations.md#configuration-reload-sighup).
+- `bgp_rib_attr_intern_global_size` can read above the live set count by the
+  displaced sets still waiting for the next attribute sweep, and
+  `bgp_rib_actor_work_duration_seconds{work_unit="attribute_gc"}` now also
+  records deadline sweeps armed by VPN, labeled-unicast, RT-Constrain, BGP-LS
+  and EVPN routes.
+- After a session is replaced or stopped under RIB backpressure, its routes
+  are withdrawn, or retained as its graceful restart capability says, and
+  `bgp_rib_outbound_registration_failover_total` no longer increments on that
+  peer's next graceful-restart teardown.
+- After an aborted reload under session-queue backpressure, a BFD-coupled peer
+  that the rejected candidate held reconnects once its queue has room.
+- BFD fast failure detection now takes effect during a long reload under
+  session-queue backpressure.
+- `-j` on `rbgp policy fmt`, `diff snapshot from-mrt`, `diff snapshot
+  from-bmp`, `completions` and `man` now prints one `warning: --json has no
+  effect` line on stderr, as `metrics` and `top` already did; stdout and the
+  exit code are unchanged. A failed daemon-side write with EACCES or EROFS,
+  such as config persistence under `ProtectSystem=strict`, now adds a hint
+  naming `chown` and `ReadWritePaths=`; other EACCES failures, such as an
+  unreadable policy source, get a neutral ownership-and-mode hint.
+- An `rbgp neighbor` argument that is, or is one typo away from, a `neighbor`
+  command word, such as `lst` or `list`, is still a usage error (exit 64), and
+  its message explains how to select an unnumbered peer.
+- `Reconnect In` and `reconnect_in_seconds` can read up to 25% below the
+  doubled wait, because the ConnectRetry timer and the Idle reconnect wait are
+  now jittered.
+- Under a full RIB mailbox, a crashed session's replacement registration can
+  reach the RIB before the crashed session's end; it supersedes the crashed
+  session. When the crashed session's end is delivered late (a full mailbox,
+  or other RIB updates already queued), graceful-restart retention left by an
+  earlier session of the neighbor is not purged immediately and lasts until
+  the replacement's End-of-RIB or the restart timer, as for every other
+  retired session. See
+  [Settlement watchdog](docs/how-to/settlement-watchdog.md).
+- The daemon logs `rustbgpd ready` once at the readiness boundary where it
+  sends systemd `READY=1`. `rustbgpd --help` and the man page now describe
+  exit 70 as the [settlement fail-stop](docs/how-to/settlement-watchdog.md),
+  recovered by restarting, and state that the daemon runs in the foreground
+  with no pidfile, logs to stdout, and rewrites its config file canonically on
+  the first persisted runtime change.
+- An export-policy reload applies the changed peers one export-policy group at
+  a time, in the order of each group's first peer and at most 100 peers per
+  step. In a step those peers' sessions take the new policies, their RIB batch
+  commits, and only then is the Route Refresh that follows an import-policy
+  change sent to each of them, not right after the peer's own session step. A
+  peer the reload has not reached yet still runs its old policies on its
+  session and in the RIB, and a reload that fails part-way has touched only
+  the sessions of the steps it reached. A group whose export chain reads a
+  dataset shares only its first batch of 100; its other peers still resync one
+  at a time. The `authoritative_batch_phase` log line appears once per batch
+  during the remainder walk.
+- An export-policy rollback's wait is now a stall detector. It gives up, and
+  the daemon fences with `known_divergence`, only when the restore completes
+  no RIB command for two minutes; a slow restore that keeps making progress is
+  waited for, inside the 30-minute settlement budget, instead of being fenced
+  at two minutes in total. A reload that is rolling back can therefore take
+  longer to report its outcome. Until a peer's own restore command runs, it
+  can receive the results of the rollback's Route Refreshes under the rejected
+  export policy; its restore then re-exports its table. Three log lines follow
+  it: `policy rollback: restoring export policies in the RIB`, a progress line
+  every ten seconds, and `policy rollback: export policies restored in the
+  RIB` with the duration. See
+  [the settlement watchdog guide](docs/how-to/settlement-watchdog.md).
+- During coordinated shutdown or the settlement recovery fence, `rbgp health`
+  prints `daemon not ready (<reason>)` and exits non-zero, and doctor's
+  `daemon.healthy` is red at once without its one-second retry.
+  `CheckLiveness`, `/livez` and the systemd watchdog still ignore the gate.
+- After the daemon adopts a reloaded or committed config, it logs each config
+  advisory the previous config did not raise, using the same WARN line as
+  startup. A rejected or discarded candidate logs nothing.
+- For an export-policy reload whose cohort falls back to the authoritative
+  batch, the `authoritative_batch_phase` log now counts the non-EVPN residual
+  peers in `deferred_members` instead of `fallback_members`, classifies the
+  batch `paced`, and logs each paced command as `paced_apply`.
+- After a session task crash, the neighbor's `last_error` names the crash, its
+  time and the panic message while the peer is latched or for ten minutes
+  after the crash, and the new
+  `bgp_session_task_crashes_total{peer,interface}` counter, exported at 0 for
+  each peer, counts crashes.
+- During a long policy change, a retained dynamic neighbor's held collision
+  candidate can reach its collision-verdict timeout and fall to Idle; the
+  neighbor then reconnects.
+- A policy rollback whose Route Refresh still goes unanswered now fails the
+  reload as `known_divergence` and the daemon fences and exits 70 instead of
+  logging a clean rollback; a configuration transaction with the same failure
+  fences the same way. Only a live session that leaves the refresh unanswered
+  counts: a refresh refused because the session is ending (its routes leave
+  with the session) and a peer that did not negotiate Route Refresh are
+  handled as before. See
+  [the settlement watchdog](docs/how-to/settlement-watchdog.md).
+- Policies with a literal `set` after a computed `set` of the same attribute
+  in one term now advertise, and select on, the literal value. A route can now
+  be accepted where it was denied: a computed `set` that fails closed (for
+  example `set med route.origin-as` on a route with no origin AS) used to deny
+  the route even when a literal `set` of the same attribute followed it, and
+  now the literal replaces it and the route is accepted. If a policy relied on
+  the old result, check it with `rbgp policy check`, which runs its `test`
+  blocks, before upgrading.
+- BGP-LS UPDATEs already queued back to back, up to 32 at a time, rebuild the
+  ORR topology once, when the last one is applied, and a re-announcement
+  identical to the stored BGP-LS route rebuilds nothing. Route selection and
+  BGP-LS advertisement are unchanged; ORR-bound peers receive the burst's net
+  change instead of one update per intermediate topology. During such a burst
+  `bgp_orr_spf_runs_total` grows more slowly, and the ORR topology gauges
+  (nodes, links, unresolved vantages, input diagnostics) and the
+  input-diagnostics log line show the topology as of the last rebuild until
+  the burst ends; an operator query rebuilds first and so always reads the
+  current topology. A vantage that stops resolving and resolves again within
+  one burst is no longer logged.
+- The new `bgp_rpki_rtr_client_restarts_total{cache}` counter starts at `0`
+  for each configured cache and counts restarts after an RTR client panic;
+  each one logs `RTR client panicked; restarting its session with the held
+  data retained` at ERROR and leaves a panic report. A panic at the same
+  source location as the last report the daemon wrote no longer writes another
+  report, so a repeating recovered panic cannot prune older reports; `rbgp
+  doctor` reports any panic report as a recent crash.
+- A session that has not stopped when its retirement round's window ends is
+  aborted, closing TCP without a Cease; the window is per round, so a second
+  retirement of the same peer queued behind one that used it is aborted too.
+  The barrier that precedes removing a dynamic dampening source no longer
+  waits for RIB mailbox room: it queues behind deferred RIB updates and is
+  acknowledged within the same 5 s bound as before, after which the peer
+  manager still stops. An interface-only session holding messages for a full
+  RIB mailbox refuses a conditional retirement at once and is retried; a full
+  mailbox makes the retention query retry. Operator reads now stay queued
+  during the interface-only retention reply (at most 500 ms). See
+  [operations](docs/reference/operations.md).
+- Routes from a replaced session during graceful-restart recovery no longer
+  stay advertised after the new session's End-of-RIB.
+- A session discarded after a failed TCP-AO key mutation records the last
+  error `TCP-AO key mutation failed; connection discarded` and counts in
+  `bgp_session_down_total` with reason `local_no_notification`.
+- For the systemd watchdog, the daemon samples liveness every 10 seconds, from
+  its own thread, and pings after each good sample, so under the shipped
+  `WatchdogSec=5min` the abort comes about five minutes (285 to 305 seconds)
+  after an actor stops answering; it was 2.5 to 5 minutes, documented as five.
+  A RIB that keeps answering "stalled" is never aborted, however long its work
+  runs; the new `BgpReadinessRibStalled` alert rule covers that case. The new
+  counter `bgp_systemd_watchdog_pings_skipped_total` counts each sample that
+  withheld the ping and each ping the notify socket refused, and the new
+  `BgpSystemdWatchdogPingsSkipped` rule alerts when skipping is sustained.
+  Both shipped native units now set `TimeoutAbortSec=2min`, so a watchdog
+  abort waits at most two minutes for the core dump instead of the 32-minute
+  stop timeout; reinstall the unit to pick it up. The
+  [Kubernetes liveness recipe](docs/how-to/deployment.md#kubernetes-probes)
+  now uses `/livez` for the startup and liveness probes: pointing either at
+  `/readyz` restarts a pod for the same stalled answer.
+- The readiness endpoint now stays answered through more long RIB actor turns:
+  conditional-advertisement re-observation after a dataset swap or a source
+  peer's group or ASN change, the teardown of a session with an RFC 9234 local
+  role, the first registration of an update group, the release of a member's
+  EVPN recovery ledger, BGP-LS UPDATE selection, the retirement of FlowSpec,
+  BGP-LS or RT-Constrain exact-export rejections, regrouping for slow-peer
+  isolation or conditional-advertisement attachment, and the retirement of the
+  last member's update-group table. The turns themselves are not shorter, and
+  condition state, routes and wire output are unchanged.
+
 ## [0.82.0] — 2026-11-08
 
 > **Release framing — hardening and composable policy.** This release hardens

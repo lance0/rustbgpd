@@ -28,6 +28,10 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 10
+    # Matches the repo's Cargo 3-day publish-age window. Dependabot applies
+    # cooldown to version updates only, never to security updates.
+    cooldown:
+      default-days: 3
     # Keep direct updates and admit the HTTP stack's lock-only dependencies.
     allow:
       - dependency-type: "direct"

@@ -309,13 +309,25 @@ async fn bfd_down_mid_walk_reaches_its_session_before_the_next_rib_command() {
 
 /// A `BfdDown` that met a full session mailbox before the walk is retried at
 /// the walk's seams, in and out of a generation; a `Start` retry inside a
-/// generation waits for it to end.
+/// generation waits for it to end. Inside a generation the `BfdDown` retry
+/// defers only to a queued change that permits BGP: a level report stays
+/// queued until the generation ends and must not keep BGP up meanwhile.
 ///
 /// LOAD-BEARING: the run loop's retry timer is not polled during a walk and
 /// reports no deadline at all while a generation holds BFD.
 #[tokio::test(start_paused = true)]
 async fn due_bfd_down_retry_is_delivered_at_a_walk_seam() {
-    for (in_generation, start) in [(false, false), (true, false), (true, true)] {
+    type Queued = Option<fn(IpAddr) -> crate::bfd_runtime::BfdStateChange>;
+    let rows: [(bool, bool, Queued, bool); 5] = [
+        (false, false, None, true),
+        (true, false, None, true),
+        (true, true, None, false),
+        // A level report is never taken in a generation.
+        (true, false, Some(super::bfd::down_ack), true),
+        // A resolved flap is one BGP flap avoided.
+        (true, false, Some(up), false),
+    ];
+    for (in_generation, start, queued, expected) in rows {
         let Lab {
             mgr,
             mut rib_rx,
@@ -323,11 +335,14 @@ async fn due_bfd_down_retry_is_delivered_at_a_walk_seam() {
             sessions,
             ..
         } = lab(3);
-        let (mut mgr, _states) = couple_bfd(mgr, peers[2]);
+        let (mut mgr, states) = couple_bfd(mgr, peers[2]);
         mgr.mark_bfd_withheld(peers[2]);
         mgr.schedule_bfd_retry(peers[2], start);
         if in_generation {
             begin_generation(&mut mgr);
+        }
+        if let Some(change) = queued {
+            states.send(change(peers[2]));
         }
         let retried = Arc::clone(&sessions[2]);
         let rib = tokio::spawn(async move {
@@ -361,8 +376,9 @@ async fn due_bfd_down_retry_is_delivered_at_a_walk_seam() {
         drop(mgr);
         assert_eq!(
             rib.await.unwrap(),
-            Some(!start),
-            "in_generation={in_generation} start={start}"
+            Some(expected),
+            "in_generation={in_generation} start={start} queued={}",
+            queued.is_some()
         );
     }
 }
@@ -736,6 +752,63 @@ async fn a_retiring_round_at_a_seam_handles_the_whole_queue() {
         u64::try_from(FLOOD + 1).unwrap(),
         "every handled notification is counted"
     );
+}
+
+/// `events_served` counts what a seam handled, once each. A pending
+/// candidate's task exit is handled through a synthetic Idle, which is the
+/// same event; a dynamic peer's Idle that the walk holds is not handled
+/// until the walk has ended.
+///
+/// LOAD-BEARING: counting on handler entry alone reports 2 for the exit and
+/// 1 for the held Idle.
+#[tokio::test(start_paused = true)]
+async fn held_and_reentered_notices_are_counted_once() {
+    let Lab { mut mgr, peers, .. } = lab(1);
+    let candidate = 60;
+    attach_test_pending_inbound(
+        &mut mgr,
+        peers[0],
+        walk_session(peers[0], Arc::default(), None),
+        candidate,
+    );
+    mgr.session_notify_tx
+        .send(SessionNotification::TaskExited {
+            session_id: candidate,
+            role: SessionRole::InboundCandidate,
+            peer_addr: peers[0],
+            cause: "ended".into(),
+        })
+        .unwrap();
+    let service = serve_one_seam(&mut mgr).await;
+    assert!(mgr.peers[&key(peers[0])].pending_inbound.is_none());
+    assert_eq!(service.events_served, 1, "the candidate's exit");
+
+    let dynamic = IpAddr::V4(Ipv4Addr::new(10, 42, 9, 1));
+    insert_test_dynamic_managed_peer(
+        &mut mgr,
+        dynamic,
+        50,
+        walk_session(dynamic, Arc::default(), None),
+        true,
+        IpAddr::V4(Ipv4Addr::new(10, 42, 9, 0)),
+        24,
+        "dynamic",
+    );
+    mgr.session_notify_tx
+        .send(SessionNotification::BackToIdle {
+            session_id: 50,
+            role: SessionRole::Primary,
+            peer_addr: dynamic,
+        })
+        .unwrap();
+    let service = serve_one_seam(&mut mgr).await;
+    assert_eq!(service.events_served, 0, "the held Idle");
+    assert_eq!(
+        mgr.session_notify_rx.ready_count(),
+        1,
+        "the held Idle is back on the channel"
+    );
+    assert!(mgr.peers.contains_key(&key(dynamic)));
 }
 
 /// One seam of a walk that owns the actor, and what it served.
@@ -1424,6 +1497,150 @@ async fn session_crash_during_the_rollback_wait_restarts_on_the_restored_chain()
     mgr.delete_peer(key(crashing), false).await.unwrap();
     drop(mgr);
     assert_eq!(rib.await.unwrap(), 3, "one restore command per prior chain");
+}
+
+/// E-3, rollback, full RIB mailbox: a crash replacement served at the
+/// restore wait's seam does not wait for mailbox room. The dead session's
+/// `PeerDown` is deferred as a late end, so the restore's stall detector
+/// still ends a rollback whose RIB stopped draining.
+///
+/// LOAD-BEARING: a replacement that waits for room blocks inside the seam,
+/// where the stall detector is not polled, and the walk never returns.
+#[tokio::test(start_paused = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one test holds the crashing session, the scripted RIB and the full mailbox"
+)]
+async fn session_crash_during_the_rollback_wait_does_not_wait_for_rib_mailbox_room() {
+    let crashing = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    // Never accepted: the replacement's connect parks in the backlog.
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let Lab {
+        mut mgr,
+        mut rib_rx,
+        peers,
+        ..
+    } = lab(2);
+    let (crash, crashed) = oneshot::channel();
+    let exited = Arc::new(AtomicBool::new(false));
+    let crashing_session = u64::try_from(mgr.peers.len()).unwrap() + 1;
+    let exit = SessionTaskExitNotice::new(
+        Some(mgr.session_notify_tx.clone()),
+        SessionIdentity::primary(crashing_session),
+        crashing,
+    );
+    insert_test_managed_peer(
+        &mut mgr,
+        crashing,
+        walk_session(
+            crashing,
+            Arc::default(),
+            Some((exit, crashed, Arc::clone(&exited))),
+        ),
+        false,
+    );
+    assert_eq!(mgr.peers[&key(crashing)].session_id(), crashing_session);
+    mgr.peers.get_mut(&key(peers[0])).unwrap().export_policy = Some(distinct_deny_policy_chain(8));
+    {
+        let managed = mgr.peers.get_mut(&key(crashing)).unwrap();
+        managed.export_policy = Some(distinct_deny_policy_chain(7));
+        managed.transport_config.remote_addr = listener.local_addr().unwrap();
+    }
+    let (readiness, readiness_rx) = mpsc::channel(1);
+    mgr = mgr.with_readiness_queries(readiness_rx);
+    let (release, released) = oneshot::channel::<()>();
+    let mut filler = Some(mgr.rib_tx.clone());
+    let rib = tokio::spawn(async move {
+        let mut forward = 0;
+        let mut crash = Some(crash);
+        let mut released = Some(released);
+        while let Some(update) = rib_rx.recv().await {
+            match update {
+                RibUpdate::ReplacePeerExportPoliciesAuthoritatively { reply, .. } => {
+                    forward += 1;
+                    let _ = reply.send(if forward < 3 {
+                        Ok(Vec::new())
+                    } else {
+                        Err(RibCommandError::internal("refused"))
+                    });
+                }
+                update @ RibUpdate::RestorePeerExportPoliciesAuthoritatively { .. } => {
+                    let Some(crash) = crash.take() else {
+                        answer(update);
+                        continue;
+                    };
+                    // The walk is in its restore wait once it answers this.
+                    let (reply, in_restore_wait) = oneshot::channel();
+                    readiness
+                        .send(PeerManagerReadinessQuery::Ping { reply })
+                        .await
+                        .unwrap();
+                    in_restore_wait.await.unwrap();
+                    crash.send(()).unwrap();
+                    set(&exited).await;
+                    // Every free slot taken, and the RIB stops draining: the
+                    // seam this answer opens finds the mailbox full.
+                    let rib_tx = filler.take().unwrap();
+                    loop {
+                        let (reply, _) = oneshot::channel();
+                        match rib_tx.try_send(RibUpdate::QueryLocRibCount { reply }) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Full(_)) => break,
+                            Err(mpsc::error::TrySendError::Closed(_)) => unreachable!(),
+                        }
+                    }
+                    drop(rib_tx);
+                    answer(update);
+                    let _ = released.take().unwrap().await;
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let started = tokio::time::Instant::now();
+    let failure = tokio::time::timeout(
+        Duration::from_secs(600),
+        mgr.apply_resolved_policy_snapshot_classified(
+            distinct_targets(&[crashing, peers[0], peers[1]]),
+            true,
+        ),
+    )
+    .await
+    .expect("the crash replacement does not wait for mailbox room")
+    .expect_err("the third batch is refused");
+    assert_eq!(
+        failure.code,
+        rustbgpd_api::runtime_config_settlement::RuntimeConfigPolicyFailureCode::RollbackBatchTimeout,
+        "{}",
+        failure.message()
+    );
+    assert!(
+        started.elapsed() < 2 * RIB_BATCH_REPLY_TIMEOUT,
+        "the stall detector ended the restore wait, after {:?}",
+        started.elapsed()
+    );
+    assert_ne!(
+        mgr.peers[&key(crashing)].session_id(),
+        crashing_session,
+        "the dead session was replaced during the walk"
+    );
+    assert_eq!(mgr.deferred_rib.queue.len(), 1);
+    assert!(
+        matches!(
+            &mgr.deferred_rib.queue[0].1,
+            RibUpdate::LateSessionEnd(end) if matches!(
+                end.as_ref(),
+                RibUpdate::PeerDown { session_id, .. } if *session_id == crashing_session
+            )
+        ),
+        "the dead session's PeerDown waits as a late end"
+    );
+
+    release.send(()).unwrap();
+    mgr.delete_peer(key(crashing), false).await.unwrap();
+    drop(mgr);
+    rib.await.unwrap();
 }
 
 /// A hold a seam took inside a generation meets that generation's commit.

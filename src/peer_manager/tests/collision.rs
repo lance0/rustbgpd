@@ -3957,7 +3957,7 @@ async fn respawn_after_an_aborted_primary_names_the_session_it_supersedes() {
         .unwrap()
         .transport_config
         .remote_addr = listener.local_addr().unwrap();
-    mgr.replace_unstoppable_primary(&key(peer_addr)).await;
+    mgr.replace_unstoppable_primary(&key(peer_addr), true).await;
     let respawned = mgr.peers[&key(peer_addr)].session_id();
     assert_ne!(respawned, aborted);
     mgr.peers[&key(peer_addr)]

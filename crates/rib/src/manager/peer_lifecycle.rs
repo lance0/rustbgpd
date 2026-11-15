@@ -2003,9 +2003,18 @@ impl RibManager {
         // comparison, not event order), so its record is kept for a
         // possible registration failover; its own `PeerDown`, whenever it
         // lands, prunes it (and is otherwise discarded as stale). GR/LLGR
-        // retention is the exception to the reset: routes deliberately
-        // held stale for a restarting peer stay put — deadline-bounded
-        // and swept on End-of-RIB, exactly as on a plain GR reconnect.
+        // retention is the exception to the reset. A named, still-registered
+        // session that this one supersedes has ended, but its end may still
+        // be queued behind this `PeerUp` and will be discarded, so the
+        // consecutive-restart mark is applied here: routes already stale are
+        // deleted, its routes become stale, and this session's End-of-RIB or
+        // the stale timer removes what it does not re-announce. The marked
+        // set is the families still awaited from the first restart, not
+        // the replaced session's own GR families: a family it already
+        // completed with End-of-RIB, or one it negotiated that the first
+        // GR capability did not list, is withdrawn here rather than held
+        // stale, until the replacement re-announces it. Only an unnamed
+        // collision during retention leaves the routes untouched.
         if self.outbound_peers.contains_key(&peer)
             || self.pending_initial_registrations.contains(&peer)
         {
@@ -2014,7 +2023,9 @@ impl RibManager {
             {
                 selection.session_down(peer, previous_session_id, &self.metrics);
             }
-            if supersedes.is_some() && supersedes == self.current_session_id(peer) {
+            let retires_registered =
+                supersedes.is_some() && supersedes == self.current_session_id(peer);
+            if retires_registered {
                 info!(
                     %peer,
                     session_id,
@@ -2043,6 +2054,25 @@ impl RibManager {
             if !self.gr_peers.contains_key(&peer) && !self.llgr_peers.contains_key(&peer) {
                 self.clear_policy_filtered_routes_for_peer(peer);
                 self.clear_peer_adj_rib_in(peer, self.label_successor(peer));
+            } else if retires_registered {
+                // RFC 4724 §4.2 consecutive restart; the mark keeps
+                // LLGR-stale routes (RFC 9494 §4.2). Deduplicated: a family
+                // marked twice would be deleted.
+                let mut retained: Vec<(Afi, Safi)> = Vec::new();
+                for &family in self
+                    .gr_peers
+                    .get(&peer)
+                    .into_iter()
+                    .flatten()
+                    .chain(self.llgr_peers.get(&peer).into_iter().flatten())
+                {
+                    if !retained.contains(&family) {
+                        retained.push(family);
+                    }
+                }
+                self.with_selection_readiness(|manager| {
+                    manager.mark_gr_retention_with_readiness(peer, &retained);
+                });
             }
             // Transport recreates the outbound channel whenever a session
             // ends, so one connection never registers twice.

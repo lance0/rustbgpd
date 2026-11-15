@@ -1,0 +1,485 @@
+--- a/pkg/server/fsm.go
++++ b/pkg/server/fsm.go
+@@ -276,6 +276,7 @@
+ }
+ 
+ func initializeConn(fsm *fsm, conn net.Conn) {
++	fsm.m122TraceEvent(conn, "connection_open")
+ 	if err := setPeerConnTTL(fsm, conn); err != nil {
+ 		fsm.logger.Warn("cannot set TTL",
+ 			slog.String("State", fsm.state.String()),
+@@ -355,7 +356,7 @@
+ 			if ocm.ctx.Err() != nil {
+ 				// right after connectLoop() returns a connection, the context may be canceled.
+ 				if conn != nil {
+-					conn.Close()
++					m122Close(conn)
+ 				}
+ 				return
+ 			}
+@@ -365,7 +366,7 @@
+ 			// after it sent its OPEN: the peer may keep this connection
+ 			// when it resolves a collision.
+ 			if !ocm.state.CompareAndSwap(bgp.BGP_FSM_CONNECT, bgp.BGP_FSM_OPENSENT) {
+-				conn.Close()
++				m122Close(conn)
+ 				return
+ 			}
+ 
+@@ -379,7 +380,7 @@
+ 
+ 			conn.SetWriteDeadline(time.Now().Add(time.Second))
+ 			if _, err := conn.Write(b); err != nil {
+-				conn.Close()
++				m122Close(conn)
+ 				ocm.state.Store(bgp.BGP_FSM_CONNECT)
+ 				continue
+ 			}
+@@ -408,13 +409,13 @@
+ 				if notif := ocm.notif.Load(); notif != nil {
+ 					_ = fsm.sendNotification(conn, notif)
+ 				} else {
+-					conn.Close()
++					m122Close(conn)
+ 				}
+ 				return
+ 			case reason := <-reasonCh:
+ 				holdTimer.Stop()
+ 				fsm.logger.Debug("outgoing connection IO error", slog.String("reason", reason.String()))
+-				conn.Close()
++				m122Close(conn)
+ 				wg.Wait()
+ 				ocm.state.Store(bgp.BGP_FSM_CONNECT)
+ 				continue
+@@ -426,7 +427,7 @@
+ 					if notif != nil {
+ 						_ = fsm.sendNotification(conn, notif)
+ 					} else {
+-						conn.Close()
++						m122Close(conn)
+ 					}
+ 					ocm.state.Store(bgp.BGP_FSM_CONNECT)
+ 					continue
+@@ -470,7 +471,7 @@
+ 			if notif != nil {
+ 				_ = ocm.fsm.sendNotification(c.conn, notif)
+ 			} else {
+-				c.conn.Close()
++				m122Close(c.conn)
+ 			}
+ 		default:
+ 			return
+@@ -970,6 +971,9 @@
+ 
+ func (fsm *fsm) sendNotification(conn net.Conn, msg *bgp.BGPMessage) error {
+ 	body := msg.Body.(*bgp.BGPNotification)
++	if body.ErrorCode == bgp.BGP_ERROR_CEASE && body.ErrorSubcode == bgp.BGP_ERROR_SUB_CONNECTION_COLLISION_RESOLUTION {
++		fsm.m122TraceEvent(conn, "collision_close")
++	}
+ 	if body.ErrorCode == bgp.BGP_ERROR_CEASE && (body.ErrorSubcode == bgp.BGP_ERROR_SUB_ADMINISTRATIVE_SHUTDOWN || body.ErrorSubcode == bgp.BGP_ERROR_SUB_ADMINISTRATIVE_RESET) {
+ 		communication, rest := decodeAdministrativeCommunication(body.Data)
+ 		fsm.logger.Info("sent notification",
+@@ -991,7 +995,7 @@
+ 	if err == nil {
+ 		fsm.bgpMessageStateUpdate(bgp.BGP_MSG_NOTIFICATION, false)
+ 	}
+-	conn.Close()
++	m122Close(conn)
+ 	return err
+ }
+ 
+@@ -1102,7 +1106,7 @@
+ 			if !ok {
+ 				break
+ 			}
+-			conn.Close()
++			m122Close(conn)
+ 			fsm.logger.Warn("Closed an accepted connection", slog.String("State", fsm.state.String()))
+ 		case <-idleHoldTimer.C:
+ 			if fsm.adminState.Load() == adminStateUp {
+@@ -1213,7 +1217,7 @@
+ 			case <-ctx.Done():
+ 				fsm.logger.Debug("stop connect loop")
+ 				if conn != nil {
+-					conn.Close()
++					m122Close(conn)
+ 				}
+ 				return nil
+ 			default:
+@@ -1268,7 +1272,7 @@
+ 			b, _ := bgp.NewBGPKeepAliveMessage().Serialize()
+ 			result.conn.SetWriteDeadline(time.Now().Add(time.Second))
+ 			if _, err := result.conn.Write(b); err != nil {
+-				result.conn.Close()
++				m122Close(result.conn)
+ 				fsm.logger.Warn("failed to send keepalive on outgoing connection", slog.String("Error", err.Error()))
+ 				// the manager was stopped, restart it
+ 				fsm.outgoingConnMgr = newOutGoingConnManager(ctx, fsm, connectRetryDelay(minConnectRetryInterval))
+@@ -1793,13 +1797,13 @@
+ 	for {
+ 		select {
+ 		case <-ctx.Done():
+-			fsm.conn.Close()
++			m122Close(fsm.conn)
+ 			return -1, newfsmStateReason(fsmDying, nil, nil)
+ 		case conn, ok := <-fsm.connCh:
+ 			if !ok {
+ 				break
+ 			}
+-			conn.Close()
++			m122Close(conn)
+ 			fsm.logger.Warn("Closed an accepted connection", slog.String("State", fsm.state.String()))
+ 		case e := <-recvChan:
+ 			nextState, reason, notif := fsm.handleOpen(e)
+@@ -1807,7 +1811,7 @@
+ 				if notif != nil {
+ 					_ = fsm.sendNotification(fsm.conn, notif)
+ 				} else {
+-					fsm.conn.Close()
++					m122Close(fsm.conn)
+ 				}
+ 				return nextState, reason
+ 			}
+@@ -1830,7 +1834,7 @@
+ 			b, _ := bgp.NewBGPKeepAliveMessage().Serialize()
+ 			fsm.conn.SetWriteDeadline(time.Now().Add(time.Second))
+ 			if _, err := fsm.conn.Write(b); err != nil {
+-				fsm.conn.Close()
++				m122Close(fsm.conn)
+ 				return bgp.BGP_FSM_IDLE, newfsmStateReason(fsmWriteFailed, nil, nil)
+ 			}
+ 			// Stop trying to connect, unless the manager has moved to
+@@ -1876,14 +1880,14 @@
+ 			b, _ := bgp.NewBGPKeepAliveMessage().Serialize()
+ 			fsm.conn.SetWriteDeadline(time.Now().Add(time.Second))
+ 			if _, err := fsm.conn.Write(b); err != nil {
+-				fsm.conn.Close()
++				m122Close(fsm.conn)
+ 				fsm.logger.Warn("failed to send keepalive on outgoing connection", slog.String("Error", err.Error()))
+ 				return bgp.BGP_FSM_IDLE, newfsmStateReason(fsmWriteFailed, nil, nil)
+ 			}
+ 			fsm.bgpMessageStateUpdate(bgp.BGP_MSG_KEEPALIVE, false)
+ 			return bgp.BGP_FSM_OPENCONFIRM, newfsmStateReason(fsmOpenMsgReceived, nil, nil)
+ 		case err := <-reasonCh:
+-			fsm.conn.Close()
++			m122Close(fsm.conn)
+ 			return bgp.BGP_FSM_IDLE, &err
+ 		case <-holdTimer.C:
+ 			m := bgp.NewBGPNotificationMessage(bgp.BGP_ERROR_HOLD_TIMER_EXPIRED, 0, nil)
+@@ -1899,7 +1903,7 @@
+ 			if err == nil {
+ 				switch stateOp.State {
+ 				case adminStateDown:
+-					fsm.conn.Close()
++					m122Close(fsm.conn)
+ 					return bgp.BGP_FSM_IDLE, newfsmStateReason(fsmAdminDown, nil, nil)
+ 				case adminStateUp:
+ 					h.fsm.logger.Error("code logic bug",
+@@ -1960,13 +1964,13 @@
+ 	for {
+ 		select {
+ 		case <-ctx.Done():
+-			fsm.conn.Close()
++			m122Close(fsm.conn)
+ 			return -1, newfsmStateReason(fsmDying, nil, nil)
+ 		case conn, ok := <-fsm.connCh:
+ 			if !ok {
+ 				break
+ 			}
+-			conn.Close()
++			m122Close(conn)
+ 			fsm.logger.Warn("Closed an accepted connection", slog.String("State", fsm.state.String()))
+ 		case result := <-fsm.outgoingConnCh:
+ 			// The peer's OPEN arrived on our own connection while the
+@@ -1997,7 +2001,7 @@
+ 			b, _ := bgp.NewBGPKeepAliveMessage().Serialize()
+ 			fsm.conn.SetWriteDeadline(time.Now().Add(time.Second))
+ 			if _, err := fsm.conn.Write(b); err != nil {
+-				fsm.conn.Close()
++				m122Close(fsm.conn)
+ 				fsm.logger.Warn("failed to send keepalive on outgoing connection", slog.String("Error", err.Error()))
+ 				return bgp.BGP_FSM_IDLE, newfsmStateReason(fsmWriteFailed, nil, nil)
+ 			}
+@@ -2013,7 +2017,7 @@
+ 			b, _ := m.Serialize()
+ 			fsm.conn.SetWriteDeadline(time.Now().Add(time.Second))
+ 			if _, err := fsm.conn.Write(b); err != nil {
+-				fsm.conn.Close()
++				m122Close(fsm.conn)
+ 				return bgp.BGP_FSM_IDLE, newfsmStateReason(fsmWriteFailed, nil, nil)
+ 			}
+ 			fsm.bgpMessageStateUpdate(m.Header.Type, false)
+@@ -2022,6 +2026,7 @@
+ 			case *bgp.BGPMessage:
+ 				switch m.Header.Type {
+ 				case bgp.BGP_MSG_KEEPALIVE:
++					fsm.m122TraceEvent(fsm.conn, "keepalive_received")
+ 					return bgp.BGP_FSM_ESTABLISHED, newfsmStateReason(fsmOpenMsgNegotiated, nil, nil)
+ 				case bgp.BGP_MSG_NOTIFICATION:
+ 					// RFC 4271 8.2.2, OpenConfirm state: "If the local
+@@ -2036,11 +2041,11 @@
+ 					// a NOTIFICATION.
+ 					body := m.Body.(*bgp.BGPNotification)
+ 					fsm.logRecvNotification(body)
+-					fsm.conn.Close()
++					m122Close(fsm.conn)
+ 					return bgp.BGP_FSM_IDLE, newfsmStateReason(fsmNotificationRecv, body, nil)
+ 				}
+ 				// send notification ?
+-				fsm.conn.Close()
++				m122Close(fsm.conn)
+ 				return bgp.BGP_FSM_IDLE, newfsmStateReason(fsmInvalidMsg, nil, nil)
+ 			case *bgp.MessageError:
+ 				n := bgp.NewBGPNotificationMessage(m.TypeCode, m.SubTypeCode, m.Data)
+@@ -2052,7 +2057,7 @@
+ 					slog.Any("Data", e.MsgData))
+ 			}
+ 		case err := <-reasonCh:
+-			fsm.conn.Close()
++			m122Close(fsm.conn)
+ 			return bgp.BGP_FSM_IDLE, &err
+ 		case <-holdTimer.C:
+ 			m := bgp.NewBGPNotificationMessage(bgp.BGP_ERROR_HOLD_TIMER_EXPIRED, 0, nil)
+@@ -2068,7 +2073,7 @@
+ 			if err == nil {
+ 				switch stateOp.State {
+ 				case adminStateDown:
+-					fsm.conn.Close()
++					m122Close(fsm.conn)
+ 					return bgp.BGP_FSM_IDLE, newfsmStateReason(fsmAdminDown, nil, nil)
+ 				case adminStateUp:
+ 					fsm.logger.Error("code logic bug",
+@@ -2111,7 +2116,7 @@
+ 				slog.Any("Data", err))
+ 
+ 			nonblockSendChannel(stateReasonCh, *newfsmStateReason(fsmWriteFailed, nil, nil))
+-			conn.Close()
++			m122Close(conn)
+ 			return fmt.Errorf("closed")
+ 		}
+ 		fsm.bgpMessageStateUpdate(m.Header.Type, false)
+@@ -2343,7 +2348,7 @@
+ 				m, _ = fsm.sendEstablishedNotification(m)
+ 			default:
+ 				// fsm.sendNotification closes the connection.
+-				fsm.conn.Close()
++				m122Close(fsm.conn)
+ 			}
+ 			return -1, newfsmStateReason(fsmDeConfigured, notificationBody(m), nil)
+ 		case m := <-fsm.notification:
+@@ -2355,7 +2360,7 @@
+ 			}
+ 			n := fsm.grNegotiated()
+ 			if !n.HasFamilies() {
+-				conn.Close()
++				m122Close(conn)
+ 				fsm.logger.Warn("Closed an accepted connection", slog.String("State", fsm.state.String()))
+ 				break
+ 			}
+@@ -2385,18 +2390,18 @@
+ 			// finite-state-machine modifications and connection-reset
+ 			// logic introduced by GR." We read this as: the families in
+ 			// the Long-Lived Graceful Restart Capability count too.
+-			fsm.conn.Close()
++			m122Close(fsm.conn)
+ 			// active() takes the connection. idle() would close it.
+ 			select {
+ 			case fsm.connCh <- conn:
+ 			default:
+ 				// Another connection from the peer is queued. active()
+ 				// takes that one.
+-				conn.Close()
++				m122Close(conn)
+ 			}
+ 			return bgp.BGP_FSM_ACTIVE, newfsmStateReason(fsmNewConnection, nil, nil)
+ 		case err := <-reasonCh:
+-			fsm.conn.Close()
++			m122Close(fsm.conn)
+ 			// if recv goroutine hit an error and sent to
+ 			// stateReasonCh, then tx goroutine might take
+ 			// long until it exits because it waits for
+@@ -2547,11 +2552,11 @@
+ 
+ 	select {
+ 	case conn := <-fsm.connCh:
+-		conn.Close()
++		m122Close(conn)
+ 	default:
+ 	}
+ 	if fsm.conn != nil {
+-		fsm.conn.Close()
++		m122Close(fsm.conn)
+ 	}
+ 	close(fsm.connCh)
+ 	cleanInfiniteChannel(fsm.outgoingCh)
+--- /dev/null
++++ b/pkg/server/m122_fsm_trace.go
+@@ -0,0 +1,68 @@
++// Lab-only connection evidence for the M122 collision oracle.
++package server
++
++import (
++	"log/slog"
++	"net"
++	"os"
++	"sync"
++)
++
++// The owning FSM can use a different connection while closing a collision loser.
++type m122ConnectionTrace struct {
++	logger       *slog.Logger
++	id, sequence uint64
++	established  bool
++}
++
++var m122Trace = struct {
++	sync.Mutex
++	nextID      uint64
++	connections map[net.Conn]*m122ConnectionTrace
++}{connections: make(map[net.Conn]*m122ConnectionTrace)}
++
++// Callers hold m122Trace so event order and state are one snapshot.
++func m122Emit(conn net.Conn, trace *m122ConnectionTrace, event string) {
++	state := "pre_established"
++	if trace.established {
++		state = "established"
++	}
++	trace.sequence++
++	trace.logger.Info("M122 FSM trace",
++		slog.String("event", event), slog.String("tcp_local", conn.LocalAddr().String()),
++		slog.String("tcp_remote", conn.RemoteAddr().String()), slog.Int("process_id", os.Getpid()),
++		slog.Uint64("connection_id", trace.id), slog.Uint64("sequence", trace.sequence), slog.String("state", state))
++}
++
++func (fsm *fsm) m122TraceEvent(conn net.Conn, event string) {
++	m122Trace.Lock()
++	defer m122Trace.Unlock()
++	trace := m122Trace.connections[conn]
++	if event == "connection_open" && trace == nil {
++		m122Trace.nextID++
++		trace = &m122ConnectionTrace{logger: fsm.logger, id: m122Trace.nextID}
++		m122Trace.connections[conn] = trace
++	}
++	if trace == nil {
++		fsm.logger.Info("M122 FSM trace", slog.String("event", event),
++			slog.String("tcp_local", conn.LocalAddr().String()), slog.String("tcp_remote", conn.RemoteAddr().String()),
++			slog.Int("process_id", os.Getpid()), slog.Uint64("connection_id", 0),
++			slog.Uint64("sequence", 0), slog.String("state", "unknown"))
++		return
++	}
++	if event == "keepalive_received" {
++		trace.established = true
++	}
++	m122Emit(conn, trace, event)
++}
++
++func m122Close(conn net.Conn) error {
++	err := conn.Close()
++	m122Trace.Lock()
++	defer m122Trace.Unlock()
++	if trace := m122Trace.connections[conn]; trace != nil {
++		m122Emit(conn, trace, "connection_closed")
++		delete(m122Trace.connections, conn)
++	}
++	return err
++}
+--- /dev/null
++++ b/pkg/server/m122_fsm_trace_test.go
+@@ -0,0 +1,97 @@
++package server
++
++import (
++	"bytes"
++	"encoding/json"
++	"errors"
++	"log/slog"
++	"net"
++	"os"
++	"testing"
++
++	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
++)
++
++type m122TestConn struct {
++	net.Conn
++	local, remote *net.TCPAddr
++	closed        bool
++	closeError    error
++}
++
++func (c *m122TestConn) LocalAddr() net.Addr  { return c.local }
++func (c *m122TestConn) RemoteAddr() net.Addr { return c.remote }
++func (c *m122TestConn) Close() error         { c.closed = true; return c.closeError }
++
++func TestM122ConnectionTrace(t *testing.T) {
++	var output bytes.Buffer
++	owner := &fsm{logger: slog.New(slog.NewJSONHandler(&output, nil))}
++	owner.state.Store(bgp.BGP_FSM_ESTABLISHED)
++	conn := func(port int) *m122TestConn {
++		return &m122TestConn{local: &net.TCPAddr{IP: net.ParseIP("10.0.122.2"), Port: port}, remote: &net.TCPAddr{IP: net.ParseIP("10.0.122.1"), Port: 179}}
++	}
++	incoming, outgoing := conn(41000), conn(41001)
++	owner.m122TraceEvent(incoming, "connection_open")
++	owner.m122TraceEvent(outgoing, "connection_open")
++	owner.m122TraceEvent(incoming, "keepalive_received")
++	owner.m122TraceEvent(outgoing, "collision_close")
++	sentinel := errors.New("close witness")
++	outgoing.closeError = sentinel
++	if err := m122Close(outgoing); err != sentinel || !outgoing.closed {
++		t.Fatal("close result changed")
++	}
++	m122Trace.Lock()
++	_, retained := m122Trace.connections[outgoing]
++	m122Trace.Unlock()
++	if retained {
++		t.Fatal("closed connection retained trace state")
++	}
++	// A new connection can reuse the tuple, never the prior instance's state or ID.
++	replacement := conn(41001)
++	owner.m122TraceEvent(replacement, "connection_open")
++	owner.m122TraceEvent(replacement, "collision_close")
++	owner.m122TraceEvent(incoming, "collision_close")
++	_ = m122Close(incoming)
++	_ = m122Close(replacement)
++	owner.m122TraceEvent(outgoing, "collision_close") // closed/unknown must fail closed
++	var rows []map[string]any
++	decoder := json.NewDecoder(&output)
++	for decoder.More() {
++		var row map[string]any
++		if err := decoder.Decode(&row); err != nil {
++			t.Fatal(err)
++		}
++		rows = append(rows, row)
++	}
++	if len(rows) != 11 {
++		t.Fatalf("got %d events", len(rows))
++	}
++	wantEvents := []string{"connection_open", "connection_open", "keepalive_received", "collision_close", "connection_closed", "connection_open", "collision_close", "collision_close", "connection_closed", "connection_closed", "collision_close"}
++	wantStates := []string{"pre_established", "pre_established", "established", "pre_established", "pre_established", "pre_established", "pre_established", "established", "established", "pre_established", "unknown"}
++	sequences := map[float64]float64{}
++	for i, row := range rows {
++		if row["msg"] != "M122 FSM trace" || row["event"] != wantEvents[i] || row["process_id"] != float64(os.Getpid()) || row["tcp_remote"] != "10.0.122.1:179" {
++			t.Fatalf("event %d has invalid identity: %v", i, row)
++		}
++		if row["state"] != wantStates[i] {
++			t.Fatalf("event %d state=%v", i, row["state"])
++		}
++		id, sequence := row["connection_id"].(float64), row["sequence"].(float64)
++		if id == 0 {
++			if sequence != 0 || row["state"] != "unknown" {
++				t.Fatal("unknown trace appears safe")
++			}
++			continue
++		}
++		if sequence != sequences[id]+1 {
++			t.Fatalf("event %d sequence=%v", i, sequence)
++		}
++		sequences[id] = sequence
++	}
++	if rows[1]["connection_id"] == rows[5]["connection_id"] {
++		t.Fatal("tuple reuse reused connection ID")
++	}
++	if rows[3]["tcp_local"] != "10.0.122.2:41001" || rows[7]["tcp_local"] != "10.0.122.2:41000" {
++		t.Fatal("trace names owning actor instead of target connection")
++	}
++}

@@ -111,7 +111,7 @@ impl PeerManager {
         }
         // This joins the old primary before sending its exact PeerDown and
         // installs a fresh Idle actor with the same pre-owned recovery latch.
-        self.replace_unstoppable_primary(&peer).await;
+        self.replace_unstoppable_primary(&peer, true).await;
         let (reply, response) = oneshot::channel();
         match self
             .rib_control(

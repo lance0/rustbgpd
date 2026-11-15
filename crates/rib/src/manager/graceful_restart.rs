@@ -420,7 +420,11 @@ impl RibManager {
         clippy::too_many_lines,
         reason = "one GR-entry owner covers all seven family tables, selection and cleanup"
     )]
-    fn mark_gr_retention_with_readiness(&mut self, peer: PeerId, retained: &[(Afi, Safi)]) {
+    pub(super) fn mark_gr_retention_with_readiness(
+        &mut self,
+        peer: PeerId,
+        retained: &[(Afi, Safi)],
+    ) {
         const EVPN: (Afi, Safi) = (Afi::L2Vpn, Safi::Evpn);
         let readiness = self.replacement_readiness.clone();
         let mut mark = || super::replacement_readiness_checkpoint_at(&readiness, "gr_mark", false);

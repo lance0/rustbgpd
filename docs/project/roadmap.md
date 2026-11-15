@@ -262,7 +262,15 @@ and RPKI 0.10.0. It ships on its per-change regression tests and main CI. The
 [2026-11-08 run](../soaks/soak-rs-flagship-24h-2026-11-08.md) on the v0.82.0 tag
 passes every route-server flagship gate on its on-host verdict, with 1
 tolerated availability miss during a reload; it does not exercise the
-release's Add-Path, RPKI, BFD or VPN FlowSpec changes. Under the
+release's Add-Path, RPKI, BFD or VPN FlowSpec changes. v0.83.0 (2026-11-15)
+is a minor release that restarts the gRPC and metrics/readiness servers and
+recovers RPKI task panics in place, replaces the fixed export-policy reload
+and rollback deadlines with stall timeouts while serving BFD and session
+events between steps, and adds `rbgp reload`, neighbor administrative state
+and the `bgp_rib_stalled` gauge. It removes the string event `timestamp`
+fields, `Route.med` and the listener `access_mode` key. It publishes FSM
+0.15.1 and RPKI 0.10.1 and keeps wire 0.28.0. It ships on its per-change
+regression tests and main CI; no flagship receipt covers it. Under the
 [release checklist](release-checklist.md#flagship-operating-proof), a
 qualifying 24-hour management-load soak on the selected candidate is what a
 flagship operating claim requires; a release may ship without one when this

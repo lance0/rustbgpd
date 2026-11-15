@@ -168,9 +168,11 @@ enum RefreshFailureHandling {
     /// policy: the rollback must refresh back to the prior policy, so a failed
     /// rollback refresh re-arms `pending_refresh = true` to retry.
     BestEffortRearm,
-    /// Rollback of a peer whose `AdjRibIn` provably never left the prior policy:
-    /// no refresh is actually needed, so restore the captured prior
-    /// `pending_refresh` rather than arming a spurious retry.
+    /// Rollback of a peer to which no Route Refresh was sent under the
+    /// candidate policy: restore the captured prior `pending_refresh` rather
+    /// than arming a spurious retry. A peer whose session took the candidate
+    /// import chain still owes a successful refresh; the rollback re-arms a
+    /// failed one itself (`restore_resolved_policies`).
     BestEffortRestorePrior { pending_refresh: bool },
 }
 
@@ -206,7 +208,10 @@ struct CapturedResolvedPolicy {
     /// chain, so the routes the peer sent before its session took that chain
     /// are still held as the prior policy accepted them. An UPDATE that
     /// arrived after the session took the candidate import chain was
-    /// evaluated under it; this flag does not account for those routes.
+    /// evaluated under it; this flag does not account for those routes, and
+    /// `restore_resolved_policies` does: a peer whose session took that chain
+    /// owes the rollback a successful Route Refresh, and a failed one keeps
+    /// `pending_refresh` armed and makes the rollback inexact.
     /// Rollback restores the captured prior pending state
     /// (`RefreshFailureHandling::BestEffortRestorePrior`). After such an exact,
     /// fully-unwound rollback, retry intent is structural: the caller's
@@ -2709,11 +2714,11 @@ impl PeerManager {
                 // This member's own refresh failed at the refresh step, so an
                 // earlier family may already have been requested under the
                 // candidate chain and its rollback owes a refresh back. Later
-                // members keep the flag false: their sessions have been
-                // running the new import chain since the setup hot-apply, but
-                // no refresh was ever fired for them, so the restore's
-                // ordinary `import_changed` reassert plus the prior
-                // pending-flag restore is exact.
+                // members keep the flag false: no refresh was ever fired for
+                // them. Their sessions have been running the new import chain
+                // since the setup hot-apply, so the restore reasserts the
+                // prior chain and its Route Refresh must succeed for the
+                // rollback to be exact.
                 captured[index].adj_rib_in_may_have_moved = failure.refresh_delivery_began;
                 let rollback = self
                     .restore_resolved_policies(captured, context, require_clean_convergence)
@@ -3303,9 +3308,17 @@ impl PeerManager {
         }
     }
 
-    async fn finish_policy_rollback_refresh(&mut self, plan: &PolicyRollbackPeerPlan) {
+    /// Returns whether the peer's Route Refresh failed on a session that may
+    /// still be up and holding what it accepted: not one positively observed
+    /// down, ending, or without the Route Refresh capability.
+    async fn finish_policy_rollback_refresh(
+        &mut self,
+        plan: &PolicyRollbackPeerPlan,
+        window: &mut CleanStateQueryWindow,
+        operator_reads: OperatorReadAdmission,
+    ) -> bool {
         let Some(refresh_failure) = plan.refresh_failure else {
-            return;
+            return false;
         };
         if self.owned_walk_holds_task_exit(&plan.peer_key) {
             // The restore step already advanced bookkeeping to the prior
@@ -3313,40 +3326,84 @@ impl PeerManager {
             let managed = &self.peers[&plan.peer_key];
             let (import, export) = (managed.import_policy.clone(), managed.export_policy.clone());
             self.adopt_policies_of_held_task_exit(&plan.peer_key, import.as_ref(), export.as_ref());
-            return;
+            return false;
         }
-        let pending_after = if plan.is_established {
-            match self.soft_reset_in(plan.peer_key.clone(), Vec::new()).await {
+        let unrefreshed_pending = match refresh_failure {
+            RefreshFailureHandling::Fatal | RefreshFailureHandling::BestEffortRearm => true,
+            RefreshFailureHandling::BestEffortRestorePrior { pending_refresh } => pending_refresh,
+        };
+        // Only a session the probe positively saw down is skipped: its
+        // `PeerDown` takes what it accepted. An ambiguous probe (timed out, or
+        // the session task gone) is answered by the refresh itself.
+        let known_down = self
+            .peers
+            .get(&plan.peer_key)
+            .is_some_and(|managed| managed.policy_known_down);
+        let mut failed = false;
+        let pending_after = if !plan.is_established && known_down {
+            unrefreshed_pending
+        } else {
+            match self
+                .send_policy_rollback_refresh(&plan.peer_key, window, operator_reads)
+                .await
+            {
                 Ok(()) => plan
                     .restore_prior_pending
                     .is_some_and(|(pending_refresh, _)| pending_refresh),
-                Err(error) => {
+                Err(failure) => {
                     warn!(
                         peer = %plan.peer_key.address,
-                        %error,
+                        error = %failure.error,
+                        session = ?failure.session,
                         "route refresh failed during policy rollback; retained safe pending state"
                     );
-                    match refresh_failure {
-                        RefreshFailureHandling::Fatal | RefreshFailureHandling::BestEffortRearm => {
-                            true
-                        }
-                        RefreshFailureHandling::BestEffortRestorePrior { pending_refresh } => {
-                            pending_refresh
-                        }
-                    }
-                }
-            }
-        } else {
-            match refresh_failure {
-                RefreshFailureHandling::Fatal | RefreshFailureHandling::BestEffortRearm => true,
-                RefreshFailureHandling::BestEffortRestorePrior { pending_refresh } => {
-                    pending_refresh
+                    failed = failure.session == super::lifecycle::SoftResetSession::Live;
+                    unrefreshed_pending
                 }
             }
         };
         if let Some(managed) = self.peers.get_mut(&plan.peer_key) {
             managed.pending_refresh = pending_after;
         }
+        failed
+    }
+
+    /// A rollback Route Refresh, retried once when the session may have
+    /// taken the request without answering: the same bounded retry, from the
+    /// same shared allowance, as the transaction's state probes
+    /// ([`Self::query_clean_session_state`]). A repeated request is
+    /// harmless; the session queues at most one per family.
+    async fn send_policy_rollback_refresh(
+        &mut self,
+        peer_key: &PeerKey,
+        window: &mut CleanStateQueryWindow,
+        operator_reads: OperatorReadAdmission,
+    ) -> Result<(), super::lifecycle::SoftResetFailure> {
+        let failure = match self
+            .soft_reset_in_reporting_delivery(peer_key.clone(), Vec::new())
+            .await
+        {
+            Ok(()) => return Ok(()),
+            Err(failure) => failure,
+        };
+        if !failure.acknowledgement_lost
+            || failure.session != super::lifecycle::SoftResetSession::Live
+        {
+            return Err(failure);
+        }
+        let Some(remaining) = window.remaining_retry_budget() else {
+            return Err(failure);
+        };
+        let target = self.soft_reset_target(peer_key)?;
+        let retry_started = tokio::time::Instant::now();
+        let retried = self
+            .await_with_readiness(
+                tokio::time::timeout(remaining, target.send(Vec::new())),
+                operator_reads,
+            )
+            .await;
+        window.charge_retry_since(retry_started);
+        retried.unwrap_or(Err(failure))
     }
 
     fn finish_policy_rollback_rib_success(&mut self, plan: &PolicyRollbackPeerPlan) {
@@ -3376,15 +3433,28 @@ impl PeerManager {
     /// receives the refresh's results under the candidate export chain.
     /// Its restore command then re-exports its whole table. Restoring what
     /// the Loc-RIB accepts is not held back for that.
+    ///
+    /// Returns the peers whose Route Refresh failed
+    /// ([`Self::finish_policy_rollback_refresh`]).
     async fn finish_policy_rollback_refreshes(
         &mut self,
         plans: &[PolicyRollbackPeerPlan],
         batch_enqueued: bool,
-    ) {
+        context: &mut PolicySnapshotContext,
+    ) -> Vec<PeerKey> {
+        let mut failed = Vec::new();
         for plan in plans {
             let refreshable = plan.export_restore.is_none() || batch_enqueued;
-            if refreshable {
-                self.finish_policy_rollback_refresh(plan).await;
+            if refreshable
+                && self
+                    .finish_policy_rollback_refresh(
+                        plan,
+                        &mut context.clean_state_window,
+                        context.operator_reads,
+                    )
+                    .await
+            {
+                failed.push(plan.peer_key.clone());
             }
             if plan.export_restore.is_none() {
                 self.finish_policy_rollback_rib_success(plan);
@@ -3393,6 +3463,7 @@ impl PeerManager {
             // so there is no budget to take this out of.
             self.serve_owned_walk_events().await;
         }
+        failed
     }
 
     /// Re-apply captured prior chains (reverse of application order) to restore
@@ -3433,6 +3504,9 @@ impl PeerManager {
         let mut errors: Vec<String> = Vec::new();
         let mut failure_code = None;
         let mut plans = Vec::new();
+        // Peers whose rollback must re-evaluate their Adj-RIB-In under the
+        // restored import chain.
+        let mut owe_refresh = Vec::new();
         // The forward step that failed was a wait with no seam: a dynamic
         // peer whose task ended during it is held here, before the first
         // restore step probes its session.
@@ -3440,7 +3514,7 @@ impl PeerManager {
         for prior in priors.into_iter().rev() {
             let address = prior.policy.address;
             let peer_key = PeerKey::new(address, prior.policy.interface.clone());
-            if !self.peers.contains_key(&peer_key) {
+            let Some(managed) = self.peers.get(&peer_key) else {
                 if require_exact_pending {
                     failure_code.get_or_insert(RuntimeConfigPolicyFailureCode::RollbackPeerGone);
                     errors.push(format!(
@@ -3448,6 +3522,17 @@ impl PeerManager {
                     ));
                 }
                 continue;
+            };
+            // Bookkeeping advances only when the session acknowledges a
+            // chain, and an unacknowledged command marks the install unknown.
+            // Either way the session may have taken the candidate import
+            // chain, and evaluated every UPDATE it received since under it,
+            // whether or not a Route Refresh followed.
+            if prior.adj_rib_in_may_have_moved
+                || managed.import_install_unknown
+                || managed.import_policy != prior.policy.import_policy
+            {
+                owe_refresh.push(peer_key.clone());
             }
             let refresh_failure = if prior.adj_rib_in_may_have_moved {
                 RefreshFailureHandling::BestEffortRearm
@@ -3464,7 +3549,10 @@ impl PeerManager {
                     prior.policy.export_policy,
                     refresh_failure,
                     Some(&mut plan),
-                    None,
+                    // One timed-out probe is not proof the session is down:
+                    // the transaction's bounded probe retry applies here too.
+                    // A rollback never requires a clean state.
+                    Some(&mut context.clean_state_window),
                     // Rollback planning returns before the RIB step; the
                     // restore task registered below is awaited under the
                     // rollback's stall detector.
@@ -3502,7 +3590,8 @@ impl PeerManager {
                 None
             }
         };
-        self.finish_policy_rollback_refreshes(&plans, registered.is_some())
+        let failed_refreshes = self
+            .finish_policy_rollback_refreshes(&plans, registered.is_some(), context)
             .await;
 
         if let Some(registered) = registered {
@@ -3636,6 +3725,25 @@ impl PeerManager {
                     }
                 }
             }
+        }
+
+        // A route the candidate import chain accepted stays in the Loc-RIB,
+        // and is exported, until a Route Refresh under the restored chain
+        // re-evaluates it. A failed one leaves that obligation open: keep it
+        // armed, after the RIB receipts above restored the prior flags, and
+        // do not report the rollback exact. A peer that never negotiated
+        // Route Refresh cannot be asked; its edit is still rejected as before.
+        for peer_key in failed_refreshes
+            .iter()
+            .filter(|peer_key| owe_refresh.contains(peer_key))
+        {
+            if let Some(managed) = self.peers.get_mut(peer_key) {
+                managed.pending_refresh = true;
+            }
+            failure_code.get_or_insert(RuntimeConfigPolicyFailureCode::RollbackPendingDebt);
+            errors.push(format!(
+                "{peer_key}: Route Refresh under the restored import policy failed; routes the candidate policy accepted may remain"
+            ));
         }
 
         for (peer_key, prior_refresh, prior_export) in pending_priors {

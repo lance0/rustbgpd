@@ -104,7 +104,7 @@ fn up_ack(peer: IpAddr) -> crate::bfd_runtime::BfdStateChange {
 
 /// A reconcile "ack" (resync) re-reporting a session that is currently Down
 /// (e.g. a freshly (re)started session) — must never tear BGP down.
-fn down_ack(peer: IpAddr) -> crate::bfd_runtime::BfdStateChange {
+pub(super) fn down_ack(peer: IpAddr) -> crate::bfd_runtime::BfdStateChange {
     crate::bfd_runtime::BfdStateChange {
         revision: 0,
         peer,
@@ -758,6 +758,45 @@ async fn bfd_reload_abort_restores_nonstrict_admission_without_publishing_candid
     assert!(!mgr.bfd_withholding(&peer));
     assert_eq!(*desired.borrow(), before);
     assert_eq!(counters.stop.load(Ordering::SeqCst), 0);
+}
+
+/// An aborted generation owes the `Start` its strict candidate withheld. On a
+/// full session queue that `Start` is a retry, and the level acknowledgement of
+/// the abort's republish must not cancel it: the peer would stay enabled,
+/// unheld and Idle until BFD cycles Down and Up again.
+#[tokio::test(start_paused = true)]
+async fn bfd_reload_abort_keeps_an_owed_start_through_the_level_ack_when_the_queue_is_full() {
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    for ack in [down_ack, up_ack] {
+        let (commands, mut receiver) = mpsc::channel(1);
+        commands.try_send(PeerCommand::Start).unwrap();
+        let (mut mgr, _) = coupled_mgr(
+            peer,
+            false,
+            PeerHandle::from_parts(commands, tokio::spawn(std::future::pending())),
+        );
+        let coupling = mgr.bfd_coupling.as_mut().unwrap();
+        coupling.prior_held.clone_from(&coupling.held_down);
+        coupling.pending = Some(HashMap::from([(peer, bfd_params(peer, true))]));
+        coupling.reloading = true;
+        mgr.mark_bfd_withheld(peer);
+        mgr.restore_bfd_reload_lookup();
+        mgr.abort_bfd_reload();
+        mgr.handle_bfd_state_change(ack(peer)).await;
+        assert!(
+            mgr.bfd_retry_deadline().is_some(),
+            "owed Start still retried"
+        );
+        assert!(
+            mgr.bfd_withholding(&peer),
+            "hold kept until Start is queued"
+        );
+        assert!(matches!(receiver.try_recv(), Ok(PeerCommand::Start)));
+        tokio::time::advance(std::time::Duration::from_millis(100)).await;
+        mgr.retry_due_bfd_commands();
+        assert!(matches!(receiver.try_recv(), Ok(PeerCommand::Start)));
+        assert!(!mgr.bfd_withholding(&peer));
+    }
 }
 
 /// A peer latched disabled while a generation suspended BFD publication (a

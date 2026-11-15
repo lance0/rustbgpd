@@ -325,7 +325,7 @@ dependencies = [
 
 [[package]]
 name = "birdwatcher-adapter"
-version = "0.82.0"
+version = "0.83.0"
 dependencies = [
  "axum",
  "clap",
@@ -2296,7 +2296,7 @@ checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 
 [[package]]
 name = "peer-loop"
-version = "0.82.0"
+version = "0.83.0"
 dependencies = [
  "bytes",
  "clap",
@@ -2616,9 +2616,9 @@ dependencies = [
 
 [[package]]
 name = "prost"
-version = "0.14.4"
+version = "0.14.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "528ac67416ff8646872a3c02cad9cc4ee5dc9f9540c9b10771855c95cb2e5ae1"
+checksum = "3ef0b569d1d907ab3a28596aee62cf1f61dacb0529a4bedcd8e7460e2d5228b4"
 dependencies = [
  "bytes",
  "prost-derive",
@@ -2647,9 +2647,9 @@ dependencies = [
 
 [[package]]
 name = "prost-derive"
-version = "0.14.4"
+version = "0.14.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
+checksum = "1ad9c5423459fa2f729b8d9235fab810aa29628b171467744fc86d21460ad70d"
 dependencies = [
  "anyhow",
  "itertools 0.14.0",
@@ -2660,9 +2660,9 @@ dependencies = [
 
 [[package]]
 name = "prost-types"
-version = "0.14.4"
+version = "0.14.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f94967dc7688f3054c7fac87473ffae4cc4c3904800e2d9f5b857246d8963b0a"
+checksum = "f29a7c4c7a84cef41a53d338a2d10d4f1b043ea5c3dde26db22ee2c9c1b1c75b"
 dependencies = [
  "prost",
 ]
@@ -3106,7 +3106,7 @@ dependencies = [
 
 [[package]]
 name = "rs-config-render"
-version = "0.82.0"
+version = "0.83.0"
 dependencies = [
  "clap",
  "rustbgpd-policy",
@@ -3139,7 +3139,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpctl"
-version = "0.82.0"
+version = "0.83.0"
 dependencies = [
  "clap",
  "clap_complete",
@@ -3177,7 +3177,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd"
-version = "0.82.0"
+version = "0.83.0"
 dependencies = [
  "bgpkit-parser",
  "bytes",
@@ -3230,7 +3230,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-api"
-version = "0.82.0"
+version = "0.83.0"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -3272,7 +3272,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-bfd"
-version = "0.82.0"
+version = "0.83.0"
 dependencies = [
  "bytes",
  "proptest",
@@ -3281,7 +3281,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-bmp"
-version = "0.82.0"
+version = "0.83.0"
 dependencies = [
  "bytes",
  "rustbgpd-telemetry",
@@ -3292,7 +3292,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-evpn"
-version = "0.82.0"
+version = "0.83.0"
 dependencies = [
  "rustbgpd-wire",
  "thiserror 2.0.21",
@@ -3301,7 +3301,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-evpn-linux"
-version = "0.82.0"
+version = "0.83.0"
 dependencies = [
  "futures",
  "libc",
@@ -3319,7 +3319,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-evpn-load"
-version = "0.82.0"
+version = "0.83.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3335,7 +3335,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-fsm"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "bytes",
  "proptest",
@@ -3345,7 +3345,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-gobgp-bridge"
-version = "0.82.0"
+version = "0.83.0"
 dependencies = [
  "clap",
  "hyper-util",
@@ -3366,7 +3366,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-mcp"
-version = "0.82.0"
+version = "0.83.0"
 dependencies = [
  "clap",
  "rcgen",
@@ -3385,7 +3385,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-mrt"
-version = "0.82.0"
+version = "0.83.0"
 dependencies = [
  "bytes",
  "chrono",
@@ -3406,7 +3406,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-policy"
-version = "0.82.0"
+version = "0.83.0"
 dependencies = [
  "arc-swap",
  "ariadne",
@@ -3425,7 +3425,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-rib"
-version = "0.82.0"
+version = "0.83.0"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -3449,7 +3449,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-rpki"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "criterion",
  "rustbgpd-wire",
@@ -3463,7 +3463,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-telemetry"
-version = "0.82.0"
+version = "0.83.0"
 dependencies = [
  "prometheus",
  "thiserror 2.0.21",
@@ -3475,7 +3475,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-transport"
-version = "0.82.0"
+version = "0.83.0"
 dependencies = [
  "bytes",
  "criterion",

@@ -517,7 +517,10 @@ def check(root: Path) -> list[str]:
         ):
             version = re.search(rf"(?m)^(?:ARG|ENV) {tool}_VERSION=([\w.]+)$", source)
             name = tool.lower()
-            if name == "bird":
+            if name == "gobgp" and arch == "SOURCE":
+                version = re.search(r"(?m)^(?:ARG|ENV) GOBGP_SOURCE_VERSION=([0-9a-f]{40})$", source)
+                archive = f"gobgp-source-{version.group(1)}.tar.gz" if version else "?"
+            elif name == "bird":
                 archive = f"bird-{version.group(1)}.tar.gz" if version else "?"
             else:
                 arch = arch.lower() or "amd64"

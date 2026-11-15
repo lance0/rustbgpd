@@ -45,6 +45,10 @@ tests/soak/runs/
 tests/interop/gobgp-archive/*
 !tests/interop/gobgp-archive/.gitkeep
 
+# CI-staged GoBGP source archive for the instrumented M122 peer
+tests/interop/gobgp-source-archive/*
+!tests/interop/gobgp-source-archive/.gitkeep
+
 # CI-staged BIRD 3 source archive (never vendor upstream tarballs into git)
 tests/interop/bird3-archive/*
 !tests/interop/bird3-archive/.gitkeep

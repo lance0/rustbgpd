@@ -326,15 +326,19 @@ const READINESS_QUERY_BUDGET_PER_POLICY_STEP: usize = 1;
 /// lifecycle events are drained whole, and a notification round that
 /// retires, replaces or promotes a session, or a BFD Down that retires a
 /// pending inbound session, handles every session notification queued at
-/// that moment. `events_served` counts each of those as handled.
+/// that moment. `events_served` counts each of those as handled, except a
+/// notification the walk holds.
 const OWNED_WALK_EVENT_BUDGET: usize = 8;
 
 /// A resolved policy snapshot's walk owns the actor: what it has served at
 /// its seams, and the notifications it holds until it ends.
 pub(super) struct OwnedWalkEvents {
-    /// Notifications that would retire a dynamic peer. Removing a captured
-    /// peer mid-walk would make the walk's rollback inexact, so they go back
-    /// on the notification channel when the walk ends.
+    /// Notifications that would retire a dynamic peer, and the OPEN of a
+    /// retained member's reconnect or collision candidate, whose verdict can
+    /// move the member to another RIB identity. Removing a captured peer
+    /// mid-walk, or changing its identity, would make the walk's rollback
+    /// inexact, so they go back on the notification channel when the walk
+    /// ends.
     held: Vec<SessionNotification>,
     /// When the walk last finished serving events, or began.
     served_at: tokio::time::Instant,
@@ -343,6 +347,8 @@ pub(super) struct OwnedWalkEvents {
     /// Events handled while the walk owned the actor, however they were
     /// reached: a session notification or lifecycle event is counted by
     /// its handler, so one a served handler drains on its own counts too.
+    /// A held notification is not counted, and a synthetic re-entry for an
+    /// event already counted is not counted again.
     events_served: u64,
     service: Duration,
 }
@@ -411,6 +417,9 @@ const RIB_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 ///   its End-of-RIB grace retirement;
 /// - one `ReleasePeer` per refused operator or reconcile add, or per
 ///   interface-only bind that fails to start;
+/// - one late `PeerDown` per crash replacement made while the mailbox is
+///   full; a peer's crashes are bounded by the crash latch
+///   (`SESSION_CRASH_LATCH` in `SESSION_CRASH_WINDOW`);
 /// - the update a `send_rib_update` call owns while it flushes.
 ///
 /// Admission is not processing: a new session under a reaped label starts
@@ -1684,7 +1693,9 @@ impl PeerManager {
     }
 
     /// Hold `notification` for the end of the walk that owns the actor.
-    /// Gives it back when no walk does.
+    /// Gives it back when no walk does. Every caller runs inside
+    /// `handle_one_session_notification`, after its entry count, so a held
+    /// notification is uncounted: it is counted when it is handled.
     pub(super) fn hold_for_owned_walk(
         &mut self,
         notification: SessionNotification,
@@ -1692,6 +1703,7 @@ impl PeerManager {
         match self.owned_walk.as_mut() {
             Some(walk) => {
                 walk.held.push(notification);
+                walk.events_served = walk.events_served.saturating_sub(1);
                 None
             }
             None => Some(notification),
@@ -1720,6 +1732,14 @@ impl PeerManager {
         }
     }
 
+    /// Take back one [`Self::count_owned_walk_event`]: the handler re-enters
+    /// with a synthetic notification for the event it already counted.
+    pub(super) fn uncount_owned_walk_event(&mut self) {
+        if let Some(walk) = self.owned_walk.as_mut() {
+            walk.events_served = walk.events_served.saturating_sub(1);
+        }
+    }
+
     /// Serve the events a long policy walk would otherwise hold until it
     /// ends, at a seam between two of its units: BFD state changes and due
     /// BFD command retries, link changes and link-check retries, session
@@ -1736,8 +1756,11 @@ impl PeerManager {
     ///
     /// Call it only between units: a handler can replace a peer's session or
     /// latch the peer disabled, and a unit holds a session handle across its
-    /// awaits. It never removes a peer: a notification that would retire a
-    /// dynamic peer is held. Serving is not walk progress, so the caller
+    /// awaits. It never removes a peer or moves one to another RIB identity:
+    /// a notification that would retire a dynamic peer is held, as is the
+    /// OPEN of a retained member with a collision candidate, so a candidate
+    /// can reach its verdict timeout and fall to Idle meanwhile, and the
+    /// neighbor reconnects. Serving is not walk progress, so the caller
     /// excludes the time from its stall budget and never renews it here.
     /// A no-op when no walk owns the actor.
     pub(super) async fn serve_owned_walk_events(&mut self) {

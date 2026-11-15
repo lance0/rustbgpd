@@ -303,6 +303,14 @@ impl PeerManager {
         }
     }
 
+    /// Whether `peer`'s retention has a collision candidate beside its
+    /// reconnect, whose verdict can move the neighbor to another RIB identity.
+    pub(super) fn retained_dynamic_candidate_pending(&self, peer: &PeerKey) -> bool {
+        self.retained_dynamic
+            .get(peer)
+            .is_some_and(|retained| retained.candidate.is_some())
+    }
+
     /// The candidate `session_id` was promoted: the live neighbor now runs
     /// on its identity slot and counter block, and a handle the loser
     /// resolves for itself, as late as its own shutdown, is released.

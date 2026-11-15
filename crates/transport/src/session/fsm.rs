@@ -261,10 +261,21 @@ impl PeerSession {
             SessionNotificationDirection::Received => "received",
         };
         let description = notification_description(notification);
+        // Cease/7 is logged directly by collision_dump before changing the
+        // owning FSM or closing TCP. Other notification actions may run after
+        // the FSM already entered Idle, so do not expose that as close evidence.
+        let collision_state = (direction == "sent"
+            && notification.code == NotificationCode::Cease
+            && notification.subcode == cease_subcode::CONNECTION_COLLISION_RESOLUTION)
+            .then(|| self.fsm.state().as_str());
         if let Some(reason) = reason {
             let reason = sanitized_notification_reason(reason);
             info!(
                 peer = %self.peer_label,
+                session_id = self.session_identity.id,
+                tcp_local = self.connection.map(|c| tracing::field::display(c.local)),
+                tcp_remote = self.connection.map(|c| tracing::field::display(c.remote)),
+                collision_state,
                 direction,
                 code = notification.code.as_u8(),
                 subcode = notification.subcode,
@@ -275,6 +286,10 @@ impl PeerSession {
         } else {
             info!(
                 peer = %self.peer_label,
+                session_id = self.session_identity.id,
+                tcp_local = self.connection.map(|c| tracing::field::display(c.local)),
+                tcp_remote = self.connection.map(|c| tracing::field::display(c.remote)),
+                collision_state,
                 direction,
                 code = notification.code.as_u8(),
                 subcode = notification.subcode,
@@ -746,6 +761,10 @@ impl PeerSession {
 
     /// Preserve the FSM's teardown actions while supplying a transport-level
     /// diagnostic that requires the original received PDU.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "FSM event and teardown action batching stays together to preserve ordering invariants"
+    )]
     pub(super) async fn drive_fsm_with_notification(
         &mut self,
         initial_event: Event,
@@ -756,6 +775,9 @@ impl PeerSession {
         while let Some(event) = pending.pop() {
             debug!(
                 peer = %self.peer_label,
+                session_id = self.session_identity.id,
+                tcp_local = self.connection.map(|c| tracing::field::display(c.local)),
+                tcp_remote = self.connection.map(|c| tracing::field::display(c.remote)),
                 state = %self.fsm.state(),
                 event = event.name(),
                 "FSM event"
@@ -1064,6 +1086,9 @@ impl PeerSession {
                     }
                     info!(
                         peer = %self.peer_label,
+                        session_id = self.session_identity.id,
+                        tcp_local = self.connection.map(|c| tracing::field::display(c.local)),
+                        tcp_remote = self.connection.map(|c| tracing::field::display(c.remote)),
                         from = old.as_str(),
                         to = new.as_str(),
                         "session state changed"

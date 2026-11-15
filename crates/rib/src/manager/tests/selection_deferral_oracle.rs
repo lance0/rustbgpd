@@ -3685,3 +3685,80 @@ fn a_later_race_restarts_the_absent_peer_after_its_window_expired() {
         "the later race restarted the absent peer"
     );
 }
+
+/// I3 under every path id: a grouped receiver under a limit whose first
+/// session establishes inside the hold behind a full writer was never sent
+/// an exempt row deleted inside the hold, so the row takes no slot in its
+/// advertised count. Seeding the limiter from the group's desired view kept
+/// it counted after release in both grouped modes. The sweep's other
+/// variants and a reconnect after the delete count the wire exactly too.
+#[test]
+fn limited_member_established_behind_a_full_writer_counts_its_wire() {
+    let config = |grouped, per_client_best, limit, late| Config {
+        grouped,
+        add_path: false,
+        per_client_best,
+        orf: false,
+        limit,
+        late,
+    };
+    let variants = [
+        ("grouped single-best", config(true, false, true, true), true),
+        (
+            "grouped per-client-best",
+            config(true, true, true, true),
+            true,
+        ),
+        ("without the limit", config(true, false, false, true), true),
+        ("without late", config(true, false, true, false), true),
+        ("private", config(false, false, true, true), true),
+        (
+            "without backpressure",
+            config(true, false, true, true),
+            false,
+        ),
+    ];
+    let mut failed: Vec<_> = (0..PATH_IDS.len())
+        .flat_map(|path| {
+            variants
+                .iter()
+                .filter_map(move |&(name, config, backpressure)| {
+                    let mut setup = vec![Op::Inject {
+                        prefix: 1,
+                        path,
+                        preference: 0,
+                        blackhole: false,
+                    }];
+                    if backpressure {
+                        setup.push(Op::Backpressure(true));
+                    }
+                    failure(config, &setup, &[Op::Delete { prefix: 1, path }])
+                        .map(|reason| format!("{name}, path {path}: {reason}"))
+                })
+        })
+        .collect();
+    // A reconnect after the delete starts a session with an empty limiter.
+    let setup = [
+        Op::Inject {
+            prefix: 1,
+            path: 0,
+            preference: 0,
+            blackhole: false,
+        },
+        Op::Backpressure(true),
+    ];
+    let hold = [
+        Op::Delete { prefix: 1, path: 0 },
+        Op::Reconnect {
+            notification: false,
+            helper: false,
+            gr_families: false,
+            writer_full: false,
+        },
+    ];
+    failed.extend(
+        failure(config(true, false, true, true), &setup, &hold)
+            .map(|reason| format!("reconnected after the delete: {reason}")),
+    );
+    assert!(failed.is_empty(), "{failed:#?}");
+}
