@@ -1,0 +1,29 @@
+{
+  "source_tag": "v0.83.0",
+  "schema_path": "docs/reference/rustbgpd.schema.json",
+  "schema_sha256": "c1e37d3a67545eb78084108e82cf749694183b1bbd3e512ab6989fa41867583f",
+  "additional_properties": false,
+  "properties": [
+    "apply_bum_enforcement",
+    "bfd_profiles",
+    "bmp",
+    "config_epoch",
+    "dynamic_neighbors",
+    "ethernet_segments",
+    "evpn_core_isolation",
+    "evpn_instances",
+    "evpn_ip_vrfs",
+    "fib_tables",
+    "flowspec",
+    "global",
+    "gnmi_dialout",
+    "inbound_admission",
+    "managed_netdevs",
+    "mrt",
+    "neighbors",
+    "peer_groups",
+    "policy",
+    "rpki",
+    "security"
+  ]
+}
