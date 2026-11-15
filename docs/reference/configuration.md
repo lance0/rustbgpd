@@ -2556,6 +2556,24 @@ the waiter and only the matching peer EoRR releases it. An ordinary EoR, stray
 EoRR, or local refresh timeout cannot declare convergence. The original
 marker-bounded timer remains the overall fallback.
 
+Family release finishes selection and shared-table staging before pending
+resyncs run, and keeps End-of-RIB behind the released routes. A receiver can
+be caught up for available families while still marked dirty or forced because
+a unicast or VPN family remains selection-deferred. If another family, such as
+FlowSpec, EVPN, labeled unicast or BGP-LS, releases first, each such receiver
+that sends that family gets a full peer resync instead of an incremental delta.
+Each staging or release pass adds at most one full resync attempt per affected
+receiver. Completing collision-failback staging with the matching EoRR does not
+repeat an admitted replay; the timer fallback can rebuild a staged family.
+Writer refusals retain the normal recovery retries, and the later release of
+the held family still owes its own resync. A single-family release keeps its
+usual resync work.
+
+The release retains its readiness owner and checkpoints per member. General
+queries and mutations remain queued until it completes; the replay-count bound
+does not bound actor-turn duration. See the
+[RIB architecture](../../crates/rib/README.md#architecture) for checkpoint scope.
+
 `rbgp neighbor <address>` shows per-family `Selection Deferral` rows.
 A dormant roster has `active = false`, zero remaining time and no release
 reason. Released rows retain their `all_eor`, `collision_refresh`, `all_excluded` (the gate

@@ -101,6 +101,8 @@ impl RibManager {
     /// A dirty peer owes a resync anyway, so it stages nothing.
     pub(super) fn outbound_preflight_refused(&mut self, peer: PeerId) -> bool {
         // Release's final whole-peer pass covers these keys without an extra delta.
+        // Dirty and forced peers fail owing_peer_in_scope, so private-family
+        // producers use this preflight instead of recording owed keys.
         if self.selection_release_resync_pending(peer) {
             return true;
         }

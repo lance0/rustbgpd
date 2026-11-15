@@ -1895,6 +1895,9 @@ impl RibManager {
         reason = "release must sweep every typed RIB family from one atomic family gate"
     )]
     fn recompute_released_selection_family(&mut self, family: (Afi, Safi)) -> HashSet<PeerId> {
+        // Only synchronous transition/completion dispatch calls this function.
+        // Its callees do not dispatch mutations; readiness checkpoints serve
+        // reads, so they cannot reenter it. This scope has no await or early return.
         debug_assert!(!self.selection_release_staging);
         self.wake_selection_partial_recovery(family);
         self.selection_release_staging = true;
