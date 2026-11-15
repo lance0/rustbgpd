@@ -5,7 +5,7 @@
 use crate::PeerId;
 use crate::peer_id::{PeerEndpoint, PeerScope};
 use std::any::Any;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -4423,15 +4423,14 @@ pub enum RibUpdate {
         reply: oneshot::Sender<Vec<crate::ConditionalAdvertisementStatus>>,
     },
     /// One bounded chunk of the Adj-RIB-In copy for an MRT `TABLE_DUMP_V2`
-    /// export. The MRT manager drives the chunk loop and gathers the rows
-    /// with [`MrtSnapshotAssembler`], so no RIB turn copies the whole table
-    /// and live route processing interleaves between chunks.
+    /// export. The MRT manager streams the chunks to its encoder; live route
+    /// processing interleaves between chunks.
     QueryMrtSnapshotChunk {
         /// Resume position from the previous chunk's reply; `None` starts
         /// a fresh dump.
         cursor: Option<MrtSnapshotCursor>,
         /// Response channel.
-        reply: oneshot::Sender<MrtSnapshotChunk>,
+        reply: oneshot::Sender<Result<MrtSnapshotChunk, String>>,
     },
     /// Query one actor-consistent, session-fenced post-import-policy
     /// Adj-RIB-In snapshot for a shutdown warm checkpoint. The caller supplies
@@ -4740,37 +4739,58 @@ pub struct MrtSnapshotData {
 
 /// Rows one [`RibUpdate::QueryMrtSnapshotChunk`] turn copies before it stops.
 ///
-/// A unicast turn finishes the prefix it is on for every neighbor, so it can
-/// exceed this by one prefix's paths. An EVPN turn copies whole hash shards
-/// and always at least one, so its ceiling is the larger of this and one
-/// shard of one neighbor's EVPN table.
+/// A unicast turn finishes its current prefix across neighbors. An EVPN turn
+/// visits at most this many slots, including vacancies.
 pub const MRT_SNAPSHOT_CHUNK_ROWS: usize = 4096;
+
+/// Hard cap on route-vector storage plus cloned next-hop scopes in one MRT
+/// query response. Shared attributes and the frozen peer roster are not charged.
+/// A single unicast prefix larger than this cap fails the dump.
+pub const MRT_SNAPSHOT_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 
 /// Resume position of a chunked MRT snapshot. Opaque: it comes from one
 /// [`MrtSnapshotChunk`] and goes back in the next query.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MrtSnapshotCursor(pub(crate) MrtSnapshotPhase);
+#[derive(Debug, Clone)]
+pub struct MrtSnapshotCursor {
+    pub(crate) phase: MrtSnapshotPhase,
+    pub(crate) peers: Arc<[MrtSnapshotPeer]>,
+}
+
+impl PartialEq for MrtSnapshotCursor {
+    fn eq(&self, other: &Self) -> bool {
+        self.phase == other.phase && Arc::ptr_eq(&self.peers, &other.peers)
+    }
+}
+
+impl Eq for MrtSnapshotCursor {}
+
+#[derive(Debug)]
+pub(crate) struct MrtSnapshotPeer {
+    pub(crate) entry: MrtPeerEntry,
+    pub(crate) evpn_identity: Option<Arc<()>>,
+    pub(crate) evpn_slots: usize,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MrtSnapshotPhase {
     /// Unicast prefixes after this one remain, then EVPN.
-    Unicast(Prefix),
-    /// EVPN shards from this neighbor's shard on remain, in handle order;
-    /// `None` starts at the first neighbor.
-    Evpn(Option<(PeerId, usize)>),
+    Unicast(Option<Prefix>),
+    /// Index into the frozen peer roster and next EVPN slot within it.
+    Evpn { peer: usize, slot: usize },
 }
 
 /// One actor turn's share of an MRT snapshot.
 ///
-/// Every unicast prefix is copied from all neighbors in one turn, so its
-/// paths are a point-in-time view; different prefixes can come from
-/// different turns. A route stored and unchanged for the whole dump is
-/// copied exactly once, and a route announced, replaced or withdrawn during
-/// it at most once.
+/// The first query freezes peer identities; late-joining peers are excluded.
+/// Every unicast prefix is copied from all captured neighbors in one turn, so
+/// its paths are a point-in-time view. Different prefixes and EVPN rows may
+/// come from different turns. An unchanged route is copied exactly once.
+/// EVPN withdrawal/reinsertion can move a key past the cursor again; the encoder
+/// deduplicates these rows. A captured EVPN table that is removed, cleared or
+/// replaced mid-walk contributes only the rows read before then.
 #[derive(Debug, Default)]
 pub struct MrtSnapshotChunk {
-    /// The neighbors the routes below name, captured in this turn; the last
-    /// chunk adds every neighbor with a session.
+    /// The frozen peer roster on the first chunk; empty on later chunks.
     pub peers: Vec<MrtPeerEntry>,
     /// Post-import-policy Adj-RIB-In unicast routes.
     pub routes: Vec<Route>,
@@ -4780,17 +4800,19 @@ pub struct MrtSnapshotChunk {
     pub next: Option<MrtSnapshotCursor>,
 }
 
-/// Gathers the chunks of one MRT snapshot.
+/// Gathers the chunks of one MRT snapshot, for tests.
+#[cfg(test)]
 #[derive(Debug, Default)]
-pub struct MrtSnapshotAssembler {
+pub(crate) struct MrtSnapshotAssembler {
     data: MrtSnapshotData,
-    listed: HashSet<PeerId>,
+    listed: std::collections::HashSet<PeerId>,
 }
 
+#[cfg(test)]
 impl MrtSnapshotAssembler {
     /// Append one chunk and return the cursor for the next query. A neighbor
     /// keeps the entry of the first chunk that listed it.
-    pub fn push(&mut self, chunk: MrtSnapshotChunk) -> Option<MrtSnapshotCursor> {
+    pub(crate) fn push(&mut self, chunk: MrtSnapshotChunk) -> Option<MrtSnapshotCursor> {
         for entry in chunk.peers {
             if self.listed.insert(entry.peer) {
                 self.data.peers.push(entry);
@@ -4803,7 +4825,7 @@ impl MrtSnapshotAssembler {
 
     /// The gathered snapshot. Complete once [`Self::push`] returned `None`.
     #[must_use]
-    pub fn finish(self) -> MrtSnapshotData {
+    pub(crate) fn finish(self) -> MrtSnapshotData {
         self.data
     }
 }

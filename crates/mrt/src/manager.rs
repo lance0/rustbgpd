@@ -2,19 +2,22 @@
 
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::MissedTickBehavior;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
 
-use crate::codec;
-use rustbgpd_rib::{MrtSnapshotAssembler, MrtSnapshotCursor};
+use crate::codec::StreamEncodeError;
+use crate::stream::StreamingSnapshot;
+use rustbgpd_rib::MrtSnapshotCursor;
 
-use crate::types::{MrtSnapshotChunk, MrtSnapshotData, MrtWriterConfig};
+use crate::types::{MrtSnapshotChunk, MrtWriterConfig};
 use crate::writer;
 
 fn periodic_interval(period: Duration) -> tokio::time::Interval {
@@ -29,6 +32,46 @@ fn periodic_interval(period: Duration) -> tokio::time::Interval {
 struct DumpError {
     stage: Option<&'static str>,
     message: String,
+}
+
+/// Dropping an async owner also cancels any blocking encoder it dispatched.
+struct CancelEncoding(Arc<AtomicBool>);
+
+impl Drop for CancelEncoding {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+/// Holds a dump between blocking steps. If the async owner's future is
+/// dropped, the stage file and EVPN sort runs are closed and unlinked on the
+/// blocking pool, not on the async worker. An error path calls
+/// [`Self::settle`] instead, so cleanup finishes before the failure reply.
+struct BlockingDrop<T: Send + 'static>(Option<T>);
+
+impl<T: Send + 'static> BlockingDrop<T> {
+    fn take(&mut self) -> T {
+        self.0
+            .take()
+            .expect("the dump is held between blocking steps")
+    }
+
+    /// Release the held dump on the blocking pool and wait for it.
+    async fn settle(mut self) {
+        let value = self.take();
+        let _ = tokio::task::spawn_blocking(move || drop(value)).await;
+    }
+}
+
+impl<T: Send + 'static> Drop for BlockingDrop<T> {
+    fn drop(&mut self) {
+        if let Some(value) = self.0.take() {
+            match tokio::runtime::Handle::try_current() {
+                Ok(runtime) => drop(runtime.spawn_blocking(move || drop(value))),
+                Err(_) => drop(value),
+            }
+        }
+    }
 }
 
 impl DumpError {
@@ -79,6 +122,18 @@ impl MrtManager {
     pub async fn run(mut self) {
         self.metrics
             .set_mrt_dump_interval_seconds(self.config.dump_interval);
+        // A dump stages its whole file before publication; one interrupted by
+        // a process death leaves that stage behind.
+        let config = self.config.clone();
+        match tokio::task::spawn_blocking(move || writer::sweep_stale_stages(&config)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => warn!(
+                output_dir = %self.config.output_dir.display(),
+                error = %error,
+                "MRT stale stage sweep failed"
+            ),
+            Err(error) => warn!(error = %error, "MRT stale stage sweep task failed"),
+        }
         let mut interval = periodic_interval(Duration::from_secs(self.config.dump_interval));
         // Skip the immediate first tick — the first dump will fire after one interval.
         interval.tick().await;
@@ -129,6 +184,8 @@ impl MrtManager {
         cancel: Option<&mut oneshot::Sender<Result<PathBuf, String>>>,
     ) -> Result<PathBuf, String> {
         let started = Instant::now();
+        // The periodic caller logs its own failures.
+        let on_demand = cancel.is_some();
         match self.dump_once(cancel).await {
             Ok((path, bytes_written)) => {
                 self.metrics
@@ -138,6 +195,9 @@ impl MrtManager {
             Err(DumpError { stage, message }) => {
                 if let Some(stage) = stage {
                     self.metrics.record_mrt_dump_failure(stage);
+                    if on_demand {
+                        error!(stage, error = %message, "on-demand MRT dump failed");
+                    }
                 }
                 Err(message)
             }
@@ -146,10 +206,10 @@ impl MrtManager {
 
     async fn dump_once(
         &self,
-        cancel: Option<&mut oneshot::Sender<Result<PathBuf, String>>>,
+        mut cancel: Option<&mut oneshot::Sender<Result<PathBuf, String>>>,
     ) -> Result<(PathBuf, u64), DumpError> {
         // Reject structurally impossible output paths before asking the
-        // RIB actor to clone a full snapshot. Permissions and storage can
+        // RIB actor to start the snapshot walk. Permissions and storage can
         // still change before publication, so the write remains fallible.
         let config = self.config.clone();
         tokio::task::spawn_blocking(move || writer::prepare_output_dir(&config))
@@ -175,43 +235,104 @@ impl MrtManager {
             .as_secs();
         let ts32 = u32::try_from(timestamp).unwrap_or(u32::MAX);
 
-        let snapshot = self.query_snapshot(cancel).await?;
-
-        let data = codec::encode_snapshot(
-            self.local_bgp_id,
-            &snapshot.peers,
-            &snapshot.routes,
-            &snapshot.evpn_routes,
-            ts32,
-        )
-        .map_err(|e| DumpError::at("encode", format!("encode error: {e}")))?;
-
+        let cancellation = CancelEncoding(Arc::new(AtomicBool::new(false)));
+        let mut first = self.query_chunk(None, cancel.as_deref_mut()).await?;
+        let mut cursor = first.next.take();
         let config = self.config.clone();
-        tokio::task::spawn_blocking(move || writer::write_dump(&config, &data))
-            .await
-            .map_err(|e| DumpError::at("write", format!("join error: {e}")))?
-            .map_err(|e| {
-                error!(error = %e, "MRT dump write failed");
-                DumpError::at("write", format!("write error: {e}"))
-            })
+        let collector = self.local_bgp_id;
+        let cancelled = Arc::clone(&cancellation.0);
+        let mut stream = BlockingDrop(Some(
+            Self::encode_step(
+                move || {
+                    let mut stream =
+                        StreamingSnapshot::new(&config, collector, ts32, &first.peers, cancelled)?;
+                    stream.push(&first)?;
+                    Ok(stream)
+                },
+                cancel.as_deref_mut(),
+                &cancellation.0,
+            )
+            .await?,
+        ));
+        while let Some(position) = cursor {
+            let next = self
+                .query_chunk(Some(position), cancel.as_deref_mut())
+                .await
+                .and_then(|chunk| {
+                    // The roster was frozen and encoded from the first chunk.
+                    if chunk.peers.is_empty() {
+                        Ok(chunk)
+                    } else {
+                        Err(DumpError::at(
+                            "snapshot",
+                            "MRT snapshot chunk carried a second peer roster".to_string(),
+                        ))
+                    }
+                });
+            let mut chunk = match next {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    stream.settle().await;
+                    return Err(error);
+                }
+            };
+            cursor = chunk.next.take();
+            // Await the write before requesting another chunk. A slow disk
+            // never queues a second copy of the table behind this task.
+            let mut owned = stream.take();
+            stream.0 = Some(
+                Self::encode_step(
+                    move || {
+                        owned.push(&chunk)?;
+                        Ok(owned)
+                    },
+                    cancel.as_deref_mut(),
+                    &cancellation.0,
+                )
+                .await?,
+            );
+        }
+        let owned = stream.take();
+        Self::encode_step(move || owned.finish(), cancel, &cancellation.0).await
     }
 
-    /// Gather the snapshot one bounded RIB turn at a time. The RIB actor
-    /// serves other work between the chunks, and a cancellation stops the
-    /// walk at the next chunk.
-    async fn query_snapshot(
-        &self,
-        mut cancel: Option<&mut oneshot::Sender<Result<PathBuf, String>>>,
-    ) -> Result<MrtSnapshotData, DumpError> {
-        let mut snapshot = MrtSnapshotAssembler::default();
-        let mut cursor = None;
-        loop {
-            let chunk = self.query_chunk(cursor, cancel.as_deref_mut()).await?;
-            cursor = snapshot.push(chunk);
-            if cursor.is_none() {
-                return Ok(snapshot.finish());
+    async fn encode_step<T: Send + 'static>(
+        work: impl FnOnce() -> Result<T, StreamEncodeError> + Send + 'static,
+        cancel: Option<&mut oneshot::Sender<Result<PathBuf, String>>>,
+        cancelled: &AtomicBool,
+    ) -> Result<T, DumpError> {
+        // The guard covers a result the blocking pool finished but this future
+        // never took: dropping the JoinHandle then releases it off this worker.
+        let mut task =
+            tokio::task::spawn_blocking(move || work().map(|value| BlockingDrop(Some(value))));
+        let result = if let Some(cancel) = cancel {
+            tokio::select! {
+                biased;
+                () = cancel.closed() => {
+                    cancelled.store(true, Ordering::Release);
+                    // Finish may already have published. Preserve success so
+                    // that committed dumps still update their metrics.
+                    return match task.await {
+                        Ok(Ok(mut value)) => Ok(value.take()),
+                        _ => Err(DumpError::canceled("MRT dump canceled while encoding")),
+                    };
+                }
+                result = &mut task => result,
             }
-        }
+        } else {
+            task.await
+        };
+        result
+            .map_err(|error| DumpError::at("write", format!("MRT encoder task failed: {error}")))?
+            .map(|mut value| value.take())
+            .map_err(|error| match error {
+                StreamEncodeError::Encode(error) => {
+                    DumpError::at("encode", format!("encode error: {error}"))
+                }
+                StreamEncodeError::Io(error) => {
+                    DumpError::at("write", format!("write error: {error}"))
+                }
+            })
     }
 
     async fn query_chunk(
@@ -248,11 +369,14 @@ impl MrtManager {
                     Err(DumpError::canceled("MRT dump canceled while awaiting RIB snapshot"))
                 }
                 result = reply_rx => {
-                    result.map_err(dropped)
+                    result.map_err(dropped)?.map_err(|error| DumpError::at("snapshot", error))
                 }
             }
         } else {
-            reply_rx.await.map_err(dropped)
+            reply_rx
+                .await
+                .map_err(dropped)?
+                .map_err(|error| DumpError::at("snapshot", error))
         }
     }
 }
@@ -399,7 +523,7 @@ mod tests {
         // Spawn a task to reply to the RIB query
         let rib_handler = tokio::spawn(async move {
             if let Some(RibUpdate::QueryMrtSnapshotChunk { reply, .. }) = rib_rx.recv().await {
-                let _ = reply.send(MrtSnapshotChunk {
+                let _ = reply.send(Ok(MrtSnapshotChunk {
                     peers: vec![MrtPeerEntry {
                         peer: rustbgpd_rib::PeerId::from_addr(IpAddr::V4(Ipv4Addr::new(
                             10, 0, 0, 1,
@@ -412,7 +536,7 @@ mod tests {
                     routes: vec![],
                     evpn_routes: vec![],
                     next: None,
-                });
+                }));
             }
         });
 
@@ -484,12 +608,12 @@ mod tests {
         let handle = tokio::spawn(manager.run());
         let rib_handler = tokio::spawn(async move {
             if let Some(RibUpdate::QueryMrtSnapshotChunk { reply, .. }) = rib_rx.recv().await {
-                let _ = reply.send(MrtSnapshotChunk {
+                let _ = reply.send(Ok(MrtSnapshotChunk {
                     peers: vec![],
                     routes: vec![],
                     evpn_routes: vec![],
                     next: None,
-                });
+                }));
             }
         });
 
@@ -546,12 +670,12 @@ mod tests {
             while let Some(update) = rib_rx.recv().await {
                 if let RibUpdate::QueryMrtSnapshotChunk { reply, .. } = update {
                     snapshots += 1;
-                    let _ = reply.send(MrtSnapshotChunk {
+                    let _ = reply.send(Ok(MrtSnapshotChunk {
                         peers: vec![],
                         routes: vec![],
                         evpn_routes: vec![],
                         next: None,
-                    });
+                    }));
                 }
             }
             snapshots
@@ -774,8 +898,7 @@ mod tests {
     }
 
     /// The RIB actor going away between two chunks (daemon shutdown) fails
-    /// the dump at the `snapshot` stage; the partial copy is never encoded
-    /// or published.
+    /// the dump at the `snapshot` stage; its staged bytes are removed.
     #[tokio::test(start_paused = true)]
     async fn rib_loss_between_chunks_fails_the_dump_without_a_file() {
         let dir = private_tempdir();
@@ -848,6 +971,271 @@ mod tests {
         assert_eq!(metric_sample(&metrics, "mrt_dump_failures_total", None), 0);
     }
 
+    /// An abandoned dump's stage and sort runs close on the blocking pool.
+    /// The test runtime has one async thread, the test's own.
+    #[tokio::test]
+    async fn an_abandoned_dump_is_dropped_on_the_blocking_pool() {
+        struct Probe(std::sync::mpsc::Sender<std::thread::ThreadId>);
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                let _ = self.0.send(std::thread::current().id());
+            }
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        drop(BlockingDrop(Some(Probe(tx))));
+        let dropped_on = tokio::task::spawn_blocking(move || rx.recv().unwrap())
+            .await
+            .unwrap();
+        assert_ne!(dropped_on, std::thread::current().id());
+    }
+
+    /// A dump future dropped after its blocking step finished, but before it
+    /// took the result, releases that result on the blocking pool too.
+    #[tokio::test]
+    async fn an_untaken_step_result_is_dropped_on_the_blocking_pool() {
+        struct Probe(std::sync::mpsc::Sender<std::thread::ThreadId>);
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                let _ = self.0.send(std::thread::current().id());
+            }
+        }
+        let (dropped_tx, dropped_rx) = std::sync::mpsc::channel();
+        let (returning_tx, returning_rx) = std::sync::mpsc::channel();
+        let handle = tokio::spawn(async move {
+            let cancelled = AtomicBool::new(false);
+            MrtManager::encode_step(
+                move || {
+                    returning_tx.send(()).unwrap();
+                    Ok(Probe(dropped_tx))
+                },
+                None,
+                &cancelled,
+            )
+            .await
+            .map(drop)
+        });
+        // The test runtime has one thread, so the step's owner cannot run
+        // again while this thread blocks: the finished result stays untaken.
+        while returning_rx.try_recv().is_err() {
+            tokio::task::yield_now().await;
+        }
+        // Give the pool time to store the result in the JoinHandle; a result
+        // not yet stored would be dropped on the pool and hide a regression.
+        std::thread::sleep(Duration::from_millis(100));
+        handle.abort();
+        assert!(matches!(handle.await, Err(error) if error.is_cancelled()));
+        let dropped_on = tokio::task::spawn_blocking(move || dropped_rx.recv().unwrap())
+            .await
+            .unwrap();
+        assert_ne!(dropped_on, std::thread::current().id());
+    }
+
+    /// Startup removes stage files an interrupted process left behind, and
+    /// finishes before the first dump starts: a dump already queued at
+    /// startup finds none when it asks the RIB for its first chunk. Enough
+    /// stale files make a sweep that ran alongside the dump still be
+    /// working when that query arrives.
+    #[tokio::test]
+    async fn startup_sweep_finishes_before_the_first_dump() {
+        let dir = private_tempdir();
+        let stale = |n: u32| {
+            dir.path()
+                .join(format!(".rib.20260101.000000.{n:09}.mrt.tmp"))
+        };
+        for n in 0..2_000 {
+            std::fs::write(stale(n), b"partial").unwrap();
+        }
+        let dump = dir.path().join("rib.20260101.000000.000000001.mrt");
+        std::fs::write(&dump, b"published").unwrap();
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let (trigger_tx, trigger_rx) = mpsc::channel(1);
+        let (reply_tx, reply_rx) = oneshot::channel();
+        trigger_tx.send(reply_tx).await.unwrap();
+        let manager = MrtManager::new(
+            test_config(dir.path().to_path_buf()),
+            rib_tx,
+            trigger_rx,
+            Ipv4Addr::LOCALHOST,
+            BgpMetrics::new(),
+        );
+        let handle = tokio::spawn(manager.run());
+        let Some(RibUpdate::QueryMrtSnapshotChunk { reply, .. }) = rib_rx.recv().await else {
+            panic!("first chunk query");
+        };
+        let left = (0..2_000).filter(|&n| stale(n).exists()).count();
+        assert_eq!(left, 0, "the first dump started before the sweep finished");
+        let _ = reply.send(Ok(MrtSnapshotChunk::default()));
+        reply_rx.await.unwrap().expect("dump");
+        assert_eq!(std::fs::read(&dump).unwrap(), b"published");
+        drop(trigger_tx);
+        handle.await.unwrap();
+    }
+
+    /// The peer roster comes only with the first chunk. A later chunk that
+    /// carries one fails the dump closed, with its stage removed before the
+    /// failure is reported.
+    #[tokio::test]
+    async fn a_second_peer_roster_fails_the_dump_without_a_file() {
+        let dir = private_tempdir();
+        let metrics = BgpMetrics::new();
+        let (trigger_tx, mut rib_rx, actor_tx, handle) =
+            manager_with_proxied_rib(dir.path().to_path_buf(), &metrics);
+        let (reply_tx, reply_rx) = oneshot::channel();
+        trigger_tx.send(reply_tx).await.unwrap();
+        let first = rib_rx.recv().await.expect("first chunk query");
+        actor_tx.send(first).await.unwrap();
+        let Some(RibUpdate::QueryMrtSnapshotChunk { reply, .. }) = rib_rx.recv().await else {
+            panic!("second chunk query");
+        };
+        let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let _ = reply.send(Ok(MrtSnapshotChunk {
+            peers: vec![MrtPeerEntry {
+                peer: rustbgpd_rib::PeerId::from_addr(addr),
+                peer_addr: addr,
+                interface: None,
+                peer_bgp_id: Ipv4Addr::new(10, 0, 0, 1),
+                peer_asn: 65_001,
+            }],
+            ..MrtSnapshotChunk::default()
+        }));
+
+        let error = reply_rx.await.unwrap().expect_err("second roster");
+        assert!(error.contains("second peer roster"), "{error}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        assert_eq!(
+            metric_sample(
+                &metrics,
+                "mrt_dump_failures_total",
+                Some(("stage", "snapshot"))
+            ),
+            1
+        );
+        drop(trigger_tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancellation_waits_for_blocking_stage_cleanup() {
+        let dir = private_tempdir();
+        let config = test_config(dir.path().to_path_buf());
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let owner_flag = Arc::clone(&cancelled);
+        let work_flag = Arc::clone(&cancelled);
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (mut reply_tx, reply_rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let _guard = CancelEncoding(Arc::clone(&owner_flag));
+            MrtManager::encode_step(
+                move || {
+                    let stream =
+                        StreamingSnapshot::new(&config, Ipv4Addr::LOCALHOST, 1, &[], work_flag)?;
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    stream.finish()
+                },
+                Some(&mut reply_tx),
+                &owner_flag,
+            )
+            .await
+        });
+        started_rx.await.unwrap();
+        drop(reply_rx);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !cancelled.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            !handle.is_finished(),
+            "cancellation detached the blocking writer"
+        );
+        release_tx.send(()).unwrap();
+        let result = handle.await.unwrap();
+        assert!(matches!(result, Err(DumpError { stage: None, .. })));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn aborting_async_owner_cancels_its_blocking_writer() {
+        let dir = private_tempdir();
+        let config = test_config(dir.path().to_path_buf());
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let owner_flag = Arc::clone(&cancelled);
+        let work_flag = Arc::clone(&cancelled);
+        let (started_tx, started_rx) = oneshot::channel();
+        let (settled_tx, settled_rx) = oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let handle = tokio::spawn(async move {
+            let _guard = CancelEncoding(Arc::clone(&owner_flag));
+            MrtManager::encode_step(
+                move || {
+                    let stream =
+                        StreamingSnapshot::new(&config, Ipv4Addr::LOCALHOST, 1, &[], work_flag)?;
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    let result = stream.finish();
+                    settled_tx.send(result.is_err()).unwrap();
+                    result
+                },
+                None,
+                &owner_flag,
+            )
+            .await
+        });
+        started_rx.await.unwrap();
+        handle.abort();
+        assert!(matches!(handle.await, Err(error) if error.is_cancelled()));
+        assert!(cancelled.load(Ordering::Acquire));
+        release_tx.send(()).unwrap();
+        assert!(settled_rx.await.unwrap());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_publication_preserves_the_committed_result() {
+        let dir = private_tempdir();
+        let config = test_config(dir.path().to_path_buf());
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let owner_flag = Arc::clone(&cancelled);
+        let work_flag = Arc::clone(&cancelled);
+        let (published_tx, published_rx) = oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (mut reply_tx, reply_rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            MrtManager::encode_step(
+                move || {
+                    let stream =
+                        StreamingSnapshot::new(&config, Ipv4Addr::LOCALHOST, 1, &[], work_flag)?;
+                    let result = stream.finish()?;
+                    published_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(result)
+                },
+                Some(&mut reply_tx),
+                &owner_flag,
+            )
+            .await
+        });
+        published_rx.await.unwrap();
+        drop(reply_rx);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !cancelled.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        release_tx.send(()).unwrap();
+        let Ok((path, bytes)) = handle.await.unwrap() else {
+            panic!("a committed dump was reported as canceled");
+        };
+        assert_eq!(std::fs::metadata(path).unwrap().len(), bytes);
+        assert!(bytes > 0);
+    }
+
     /// Ticks that come due while a dump is in flight start one dump when it
     /// ends, not one per missed tick, and never a second walk alongside it.
     #[tokio::test(start_paused = true)]
@@ -879,7 +1267,7 @@ mod tests {
                 tokio::time::sleep(Duration::from_secs(25)).await;
                 assert!(rib_rx.is_empty(), "a second walk started alongside");
             }
-            let _ = reply.send(MrtSnapshotChunk::default());
+            let _ = reply.send(Ok(MrtSnapshotChunk::default()));
         }
         assert_eq!(queried_at, [10, 35, 40]);
         drop(trigger_tx);
@@ -917,7 +1305,7 @@ mod tests {
         // Wall-clock time: the record timestamp is not on tokio's clock.
         std::thread::sleep(Duration::from_millis(1100));
         let answered = unix_now();
-        let _ = reply.send(MrtSnapshotChunk::default());
+        let _ = reply.send(Ok(MrtSnapshotChunk::default()));
 
         let path = reply_rx.await.unwrap().expect("dump");
         let bytes = std::fs::read(path).unwrap();

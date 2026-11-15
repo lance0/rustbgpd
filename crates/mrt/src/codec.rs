@@ -4,11 +4,14 @@ use rustbgpd_rib::route::{EvpnRibRoute, Route};
 use rustbgpd_rib::update::MrtPeerEntry;
 use rustbgpd_wire::attribute::encode_path_attributes;
 use rustbgpd_wire::error::EncodeError as WireEncodeError;
-use rustbgpd_wire::{Afi, MpReachNlri, PathAttribute, Prefix, Safi, encode_evpn_nlri};
+use rustbgpd_wire::{
+    Afi, EvpnRouteKey, MpReachNlri, PathAttribute, Prefix, Safi, decode_evpn_nlri, encode_evpn_nlri,
+};
 #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
 use std::cell::Cell;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::{HashMap, HashSet};
+use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -202,6 +205,22 @@ pub enum EncodeError {
         /// Encoded buffer length requested by the failed append.
         attempted: usize,
     },
+    /// One streamed record would exceed its temporary byte buffer cap.
+    #[error("MRT record would need {attempted} bytes, exceeding the {cap}-byte cap")]
+    RecordSizeLimitExceeded {
+        /// Encoded record length that the append would produce.
+        attempted: usize,
+        /// Maximum temporary record-buffer capacity.
+        cap: usize,
+    },
+    /// A streamed route cannot be related to the frozen peer inventory.
+    #[error("invalid MRT snapshot peer {peer:?}: {reason}")]
+    InvalidSnapshotPeer {
+        /// Neighbor whose frozen identity is missing or repeated.
+        peer: PeerId,
+        /// Why the inventory cannot be used.
+        reason: &'static str,
+    },
 }
 
 /// Checked append-only view over an MRT output vector.
@@ -212,6 +231,7 @@ pub enum EncodeError {
 struct EncodeBuffer<'a> {
     bytes: &'a mut Vec<u8>,
     budget: Option<&'a WarmSnapshotBudget>,
+    record_cap: Option<usize>,
     accounted_prefix: usize,
     snapshot_output: bool,
     /// Per-attribute encoding scratch, reused for every attribute written
@@ -226,6 +246,7 @@ impl<'a> EncodeBuffer<'a> {
         Self {
             bytes,
             budget,
+            record_cap: None,
             accounted_prefix: 0,
             snapshot_output: false,
             attr_scratch: Vec::new(),
@@ -238,6 +259,7 @@ impl<'a> EncodeBuffer<'a> {
         Self {
             bytes,
             budget,
+            record_cap: None,
             accounted_prefix: 0,
             snapshot_output: true,
             attr_scratch: Vec::new(),
@@ -254,11 +276,20 @@ impl<'a> EncodeBuffer<'a> {
         Self {
             bytes,
             budget,
+            record_cap: None,
             accounted_prefix,
             snapshot_output: false,
             attr_scratch: Vec::new(),
             #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
             snapshot_allocation_probe: None,
+        }
+    }
+
+    fn record(bytes: &'a mut Vec<u8>, cap: usize, attr_scratch: Vec<u8>) -> Self {
+        Self {
+            record_cap: Some(cap),
+            attr_scratch,
+            ..Self::new(bytes, None)
         }
     }
 
@@ -286,6 +317,14 @@ impl<'a> EncodeBuffer<'a> {
         } else {
             local_attempted
         };
+        if let Some(cap) = self.record_cap
+            && local_attempted > cap
+        {
+            return Err(EncodeError::RecordSizeLimitExceeded {
+                attempted: local_attempted,
+                cap,
+            });
+        }
         if local_attempted <= self.bytes.capacity() {
             return Ok(attempted);
         }
@@ -305,6 +344,10 @@ impl<'a> EncodeBuffer<'a> {
                     .max_snapshot_bytes
                     .saturating_sub(self.accounted_prefix),
             )
+        } else if let Some(cap) = self.record_cap {
+            local_attempted
+                .max(self.bytes.capacity().max(4096).saturating_mul(2))
+                .min(cap)
         } else if self.snapshot_output {
             let baseline = self.bytes.capacity().max(4096);
             local_attempted.max(baseline.saturating_add(baseline / 4))
@@ -1712,6 +1755,302 @@ fn encode_snapshot_inner<const FIX_ORIGINATED_TIME: bool>(
     output.check()?;
     Ok(buf)
 }
+/// Errors stay separated so the manager can distinguish encoding and disk failures.
+#[derive(Debug, Error)]
+pub(crate) enum StreamEncodeError {
+    #[error(transparent)]
+    Encode(#[from] EncodeError),
+    #[error(transparent)]
+    Io(#[from] io::Error),
+}
+
+/// Encodes a frozen peer inventory and complete prefix groups one record at a time.
+pub(crate) struct StreamingEncoder {
+    collector_bgp_id: Ipv4Addr,
+    peers: Vec<MrtPeerEntry>,
+    peer_index: PeerIndex,
+    timestamp: u32,
+    sequence: u32,
+    max_record_bytes: usize,
+    record: Vec<u8>,
+    attr_scratch: Vec<u8>,
+    /// Test-only fixed `originated_time`, for byte comparisons.
+    #[cfg(test)]
+    fixed_originated_time: Option<u32>,
+}
+
+impl StreamingEncoder {
+    pub(crate) fn new(
+        collector_bgp_id: Ipv4Addr,
+        peers: &[MrtPeerEntry],
+        timestamp: u32,
+        max_record_bytes: usize,
+    ) -> Result<Self, EncodeError> {
+        if peers.len() > usize::from(u16::MAX) {
+            return Err(EncodeError::FieldTooLarge {
+                field: "PEER_INDEX_TABLE.peer_count",
+                value: peers.len(),
+            });
+        }
+        let mut peers = collect_cancellable(peers.iter().cloned(), None)?;
+        sort_cancellable_by(&mut peers, None, |a, b| {
+            a.peer_addr
+                .cmp(&b.peer_addr)
+                .then_with(|| a.interface.cmp(&b.interface))
+                .then(a.peer_asn.cmp(&b.peer_asn))
+                .then(a.peer_bgp_id.octets().cmp(&b.peer_bgp_id.octets()))
+        })?;
+        let mut peer_index = PeerIndex::new();
+        peer_index
+            .try_reserve(peers.len())
+            .map_err(|_| EncodeError::AllocationFailed {
+                attempted: peers
+                    .len()
+                    .saturating_mul(std::mem::size_of::<(PeerId, (u16, IpAddr))>()),
+            })?;
+        for (index, peer) in peers.iter().enumerate() {
+            let index = u16::try_from(index).map_err(|_| EncodeError::FieldTooLarge {
+                field: "peer index",
+                value: index,
+            })?;
+            if peer_index
+                .insert(peer.peer, (index, peer.peer_addr))
+                .is_some()
+            {
+                return Err(EncodeError::InvalidSnapshotPeer {
+                    peer: peer.peer,
+                    reason: "duplicate frozen peer identity",
+                });
+            }
+        }
+        Ok(Self {
+            collector_bgp_id,
+            peers,
+            peer_index,
+            timestamp,
+            sequence: 0,
+            max_record_bytes,
+            record: Vec::new(),
+            attr_scratch: Vec::new(),
+            #[cfg(test)]
+            fixed_originated_time: None,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fix_originated_time(&mut self, originated: u32) {
+        self.fixed_originated_time = Some(originated);
+    }
+
+    pub(crate) fn peer_index(&self, peer: PeerId) -> Result<u16, EncodeError> {
+        self.peer_index.get(&peer).map(|&(index, _)| index).ok_or(
+            EncodeError::InvalidSnapshotPeer {
+                peer,
+                reason: "route origin is absent from the frozen peer inventory",
+            },
+        )
+    }
+
+    pub(crate) fn next_sequence(&self) -> u32 {
+        self.sequence
+    }
+
+    pub(crate) fn write_peer_index(
+        &mut self,
+        writer: &mut impl Write,
+    ) -> Result<(), StreamEncodeError> {
+        self.record.clear();
+        let mut output = EncodeBuffer::record(
+            &mut self.record,
+            self.max_record_bytes,
+            std::mem::take(&mut self.attr_scratch),
+        );
+        let result = encode_peer_index_table_inner(
+            &mut output,
+            self.timestamp,
+            self.collector_bgp_id,
+            "",
+            &self.peers,
+        );
+        self.attr_scratch = output.attr_scratch;
+        result?;
+        writer.write_all(&self.record)?;
+        Ok(())
+    }
+
+    /// Every prefix must be wholly contained in this chunk, in dump order.
+    pub(crate) fn write_unicast(
+        &mut self,
+        routes: &[Route],
+        writer: &mut impl Write,
+    ) -> Result<(), StreamEncodeError> {
+        #[cfg(test)]
+        if let Some(originated) = self.fixed_originated_time {
+            return self.write_unicast_inner::<true>(routes, writer, originated);
+        }
+        self.write_unicast_inner::<false>(routes, writer, 0)
+    }
+
+    fn write_unicast_inner<const FIX_ORIGINATED_TIME: bool>(
+        &mut self,
+        routes: &[Route],
+        writer: &mut impl Write,
+        fixed_originated_time: u32,
+    ) -> Result<(), StreamEncodeError> {
+        for route in routes {
+            self.peer_index(route.peer)?;
+        }
+        let mut ordered = collect_cancellable(routes.iter(), None)?;
+        sort_cancellable_by(&mut ordered, None, |a, b| {
+            a.prefix
+                .cmp(&b.prefix)
+                .then(self.peer_index[&a.peer].0.cmp(&self.peer_index[&b.peer].0))
+                .then(a.path_id.cmp(&b.path_id))
+        })?;
+        let mut start = 0;
+        while start < ordered.len() {
+            let prefix = ordered[start].prefix;
+            let mut end = start + 1;
+            while end < ordered.len() && ordered[end].prefix == prefix {
+                end += 1;
+            }
+            let group = &ordered[start..end];
+            let count = u16::try_from(group.len()).map_err(|_| EncodeError::FieldTooLarge {
+                field: "RIB entry count",
+                value: group.len(),
+            })?;
+            self.record.clear();
+            let mut output = EncodeBuffer::record(
+                &mut self.record,
+                self.max_record_bytes,
+                std::mem::take(&mut self.attr_scratch),
+            );
+            let result = encode_route_entries_profile::<FIX_ORIGINATED_TIME>(
+                &mut output,
+                self.timestamp,
+                self.sequence,
+                &prefix,
+                group,
+                &self.peer_index,
+                None,
+                RouteEntrySelection::All,
+                count,
+                group.iter().any(|route| route.path_id != 0),
+                unix_now_seconds(),
+                fixed_originated_time,
+            );
+            self.attr_scratch = output.attr_scratch;
+            result?;
+            writer.write_all(&self.record)?;
+            self.sequence = self.sequence.wrapping_add(1);
+            start = end;
+        }
+        Ok(())
+    }
+
+    /// The disk merge assigns the final sequence after sorting EVPN records.
+    pub(crate) fn encode_evpn(
+        &mut self,
+        route: &EvpnRibRoute,
+    ) -> Result<(u16, &[u8]), EncodeError> {
+        #[cfg(test)]
+        if let Some(originated) = self.fixed_originated_time {
+            return self.encode_evpn_inner::<true>(route, originated);
+        }
+        self.encode_evpn_inner::<false>(route, 0)
+    }
+
+    fn encode_evpn_inner<const FIX_ORIGINATED_TIME: bool>(
+        &mut self,
+        route: &EvpnRibRoute,
+        fixed_originated_time: u32,
+    ) -> Result<(u16, &[u8]), EncodeError> {
+        let index = self.peer_index(route.peer)?;
+        let originated = if FIX_ORIGINATED_TIME {
+            fixed_originated_time
+        } else {
+            // Pair the current age with the current wall time, even late in a long dump.
+            u32::try_from(unix_now_seconds().saturating_sub(route.received_at.elapsed().as_secs()))
+                .unwrap_or(u32::MAX)
+        };
+        self.record.clear();
+        let mut output = EncodeBuffer::record(
+            &mut self.record,
+            self.max_record_bytes,
+            std::mem::take(&mut self.attr_scratch),
+        );
+        let result =
+            encode_evpn_rib_generic(&mut output, self.timestamp, 0, route, index, originated);
+        self.attr_scratch = output.attr_scratch;
+        result?;
+        Ok((index, &self.record))
+    }
+}
+
+fn unix_now_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Recover the existing typed sort key from one single-entry EVPN disk-run record.
+pub(crate) fn evpn_record_sort_key(record: &[u8]) -> io::Result<(u16, EvpnRouteKey)> {
+    let invalid = || {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid EVPN MRT disk-run record",
+        )
+    };
+    let header: &[u8; MRT_HEADER_LEN] = record
+        .get(..MRT_HEADER_LEN)
+        .ok_or_else(invalid)?
+        .try_into()
+        .map_err(|_| invalid())?;
+    let payload_len = usize::try_from(u32::from_be_bytes([
+        header[8], header[9], header[10], header[11],
+    ]))
+    .map_err(|_| invalid())?;
+    if u16::from_be_bytes([header[4], header[5]]) != TABLE_DUMP_V2
+        || u16::from_be_bytes([header[6], header[7]]) != RIB_GENERIC
+        || record.len().checked_sub(MRT_HEADER_LEN) != Some(payload_len)
+        || record.get(16..19) != Some(&[0, 25, 70])
+    {
+        return Err(invalid());
+    }
+    let nlri_len = usize::from(*record.get(20).ok_or_else(invalid)?);
+    let nlri_end = 21 + nlri_len;
+    let nlri = record.get(19..nlri_end).ok_or_else(invalid)?;
+    let tail = record.get(nlri_end..).ok_or_else(invalid)?;
+    let [
+        count_hi,
+        count_lo,
+        peer_hi,
+        peer_lo,
+        _,
+        _,
+        _,
+        _,
+        attr_hi,
+        attr_lo,
+        attrs @ ..,
+    ] = tail
+    else {
+        return Err(invalid());
+    };
+    if u16::from_be_bytes([*count_hi, *count_lo]) != 1
+        || attrs.len() != usize::from(u16::from_be_bytes([*attr_hi, *attr_lo]))
+    {
+        return Err(invalid());
+    }
+    let routes = decode_evpn_nlri(nlri)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let [route] = routes.as_slice() else {
+        return Err(invalid());
+    };
+    Ok((u16::from_be_bytes([*peer_hi, *peer_lo]), route.key()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2681,6 +3020,168 @@ mod tests {
         assert!(data.len() > 12);
         assert_eq!(u16::from_be_bytes([data[6], data[7]]), 1);
     }
+
+    #[test]
+    fn streaming_records_match_full_snapshot_bytes() {
+        let collector = Ipv4Addr::new(1, 2, 3, 4);
+        let peers = [
+            make_peer("192.0.2.2".parse().unwrap(), 65002),
+            make_peer("2001:db8::1".parse().unwrap(), 65001),
+            make_peer("192.0.2.1".parse().unwrap(), 65001),
+        ];
+        let v4 = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
+        let v6 = Prefix::V6(Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 48));
+        let routes = [
+            Route {
+                path_id: 9,
+                ..make_route(v4, peers[0].peer_addr, peers[0].peer_addr)
+            },
+            make_route(v4, peers[2].peer_addr, peers[2].peer_addr),
+            Route {
+                path_id: 1,
+                ..make_route(v4, peers[0].peer_addr, peers[0].peer_addr)
+            },
+            make_route(v6, peers[1].peer_addr, peers[1].peer_addr),
+        ];
+        let evpn = [
+            make_evpn_ipprefix(peers[0].peer_addr, peers[0].peer_addr),
+            make_evpn_macip(peers[0].peer_addr, peers[0].peer_addr),
+            make_evpn_macip(peers[2].peer_addr, peers[2].peer_addr),
+        ];
+        let timestamp = 1_700_000_000;
+        let originated = timestamp - 30;
+        let expected = encode_snapshot_with_allocation_diagnostics(
+            collector, &peers, &routes, &evpn, timestamp, originated,
+        )
+        .unwrap()
+        .0;
+        let mut encoder = StreamingEncoder::new(collector, &peers, timestamp, 4096).unwrap();
+        let mut actual = Vec::new();
+        encoder.write_peer_index(&mut actual).unwrap();
+        encoder
+            .write_unicast_inner::<true>(&routes[..3], &mut actual, originated)
+            .unwrap();
+        encoder
+            .write_unicast_inner::<true>(&routes[3..], &mut actual, originated)
+            .unwrap();
+        let mut evpn_order: Vec<_> = evpn.iter().collect();
+        evpn_order.sort_by_key(|route| (encoder.peer_index(route.peer).unwrap(), route.key()));
+        let sequence = encoder.next_sequence();
+        assert_eq!(sequence, 2);
+        for (sequence, route) in (sequence..).zip(evpn_order) {
+            let (index, record) = encoder
+                .encode_evpn_inner::<true>(route, originated)
+                .unwrap();
+            assert_eq!(evpn_record_sort_key(record).unwrap(), (index, route.key()));
+            let mut record = record.to_vec();
+            record[12..16].copy_from_slice(&sequence.to_be_bytes());
+            actual.extend_from_slice(&record);
+        }
+        assert_eq!(actual, expected);
+        assert!(encoder.record.capacity() <= 4096);
+    }
+
+    #[test]
+    fn streaming_record_cap_precedes_buffer_growth_and_partial_write() {
+        let collector = Ipv4Addr::new(1, 2, 3, 4);
+        let mut encoder = StreamingEncoder::new(collector, &[], 1, 19).unwrap();
+        let mut bytes = Vec::new();
+        assert!(matches!(
+            encoder.write_peer_index(&mut bytes),
+            Err(StreamEncodeError::Encode(
+                EncodeError::RecordSizeLimitExceeded {
+                    attempted: 20,
+                    cap: 19
+                }
+            ))
+        ));
+        assert_eq!(bytes, [] as [u8; 0]);
+        assert_eq!(encoder.record, [] as [u8; 0]);
+        assert!(encoder.record.capacity() <= 19);
+
+        let peer = make_peer("192.0.2.1".parse().unwrap(), 65001);
+        let mut route = make_route(
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)),
+            peer.peer_addr,
+            peer.peer_addr,
+        );
+        route.attributes = AttrSet::new(vec![PathAttribute::Communities((0..100).collect())]);
+        let mut encoder =
+            StreamingEncoder::new(collector, std::slice::from_ref(&peer), 1, 64).unwrap();
+        encoder.write_peer_index(&mut bytes).unwrap();
+        let before = bytes.clone();
+        assert!(matches!(
+            encoder.write_unicast(&[route], &mut bytes),
+            Err(StreamEncodeError::Encode(
+                EncodeError::RecordSizeLimitExceeded { cap: 64, .. }
+            ))
+        ));
+        assert_eq!(bytes, before, "a failed record writes none of its prefix");
+        assert_eq!(encoder.record, [] as [u8; 0]);
+        assert!(encoder.record.capacity() <= 64);
+        let evpn = make_evpn_macip(peer.peer_addr, peer.peer_addr);
+        assert!(matches!(
+            encoder.encode_evpn(&evpn),
+            Err(EncodeError::RecordSizeLimitExceeded { cap: 64, .. })
+        ));
+        assert_eq!(encoder.record, [] as [u8; 0]);
+        assert!(encoder.record.capacity() <= 64);
+    }
+
+    #[test]
+    fn streaming_frozen_inventory_rejects_missing_and_duplicate_peers() {
+        let collector = Ipv4Addr::new(1, 2, 3, 4);
+        let peer = make_peer("192.0.2.1".parse().unwrap(), 65001);
+        assert!(matches!(
+            StreamingEncoder::new(collector, &[peer.clone(), peer.clone()], 1, 4096),
+            Err(EncodeError::InvalidSnapshotPeer { .. })
+        ));
+        let mut encoder = StreamingEncoder::new(collector, &[], 1, 4096).unwrap();
+        let mut bytes = Vec::new();
+        encoder.write_peer_index(&mut bytes).unwrap();
+        assert_eq!(bytes, encode_snapshot(collector, &[], &[], &[], 1).unwrap());
+        let route = make_route(
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)),
+            peer.peer_addr,
+            peer.peer_addr,
+        );
+        assert!(matches!(
+            encoder.write_unicast(&[route], &mut bytes),
+            Err(StreamEncodeError::Encode(
+                EncodeError::InvalidSnapshotPeer { .. }
+            ))
+        ));
+        assert!(matches!(
+            encoder.encode_evpn(&make_evpn_macip(peer.peer_addr, peer.peer_addr)),
+            Err(EncodeError::InvalidSnapshotPeer { .. })
+        ));
+    }
+
+    #[test]
+    fn streaming_evpn_run_key_rejects_truncation_and_invalid_record_shape() {
+        let peer = make_peer("192.0.2.1".parse().unwrap(), 65001);
+        let route = make_evpn_macip(peer.peer_addr, peer.peer_addr);
+        let mut encoder = StreamingEncoder::new(Ipv4Addr::LOCALHOST, &[peer], 1, 4096).unwrap();
+        let bytes = encoder.encode_evpn(&route).unwrap().1.to_vec();
+        for end in 0..bytes.len() {
+            assert!(
+                evpn_record_sort_key(&bytes[..end]).is_err(),
+                "truncation at {end}"
+            );
+        }
+        let nlri_end = 21 + usize::from(bytes[20]);
+        for offset in [4, 6, 8, 16, 18, 20, nlri_end, nlri_end + 8] {
+            let mut invalid = bytes.clone();
+            invalid[offset] ^= 1;
+            assert!(
+                evpn_record_sort_key(&invalid).is_err(),
+                "changed field at {offset}"
+            );
+        }
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(evpn_record_sort_key(&trailing).is_err());
+    }
     fn make_evpn_macip(peer: IpAddr, next_hop: IpAddr) -> EvpnRibRoute {
         use rustbgpd_wire::{
             EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, EvpnRoute, MacAddress, MplsLabel,
@@ -3611,23 +4112,35 @@ mod tests {
         after_first: impl FnOnce() -> F,
     ) -> (rustbgpd_rib::MrtSnapshotData, usize) {
         let mut after_first = Some(after_first);
-        let mut snapshot = rustbgpd_rib::MrtSnapshotAssembler::default();
+        let mut snapshot = rustbgpd_rib::MrtSnapshotData::default();
         let mut cursor = None;
         let mut turns = 0;
         loop {
-            let (reply, chunk) = tokio::sync::oneshot::channel();
-            tx.send(rustbgpd_rib::update::RibUpdate::QueryMrtSnapshotChunk { cursor, reply })
-                .await
-                .unwrap();
-            cursor = snapshot.push(chunk.await.unwrap());
+            let chunk = rib_chunk(tx, cursor).await;
+            // Only the first chunk carries the frozen peer roster.
+            snapshot.peers.extend(chunk.peers);
+            snapshot.routes.extend(chunk.routes);
+            snapshot.evpn_routes.extend(chunk.evpn_routes);
+            cursor = chunk.next;
             turns += 1;
             if cursor.is_none() {
-                return (snapshot.finish(), turns);
+                return (snapshot, turns);
             }
             if let Some(after_first) = after_first.take() {
                 after_first().await;
             }
         }
+    }
+
+    async fn rib_chunk(
+        tx: &tokio::sync::mpsc::Sender<rustbgpd_rib::update::RibUpdate>,
+        cursor: Option<rustbgpd_rib::MrtSnapshotCursor>,
+    ) -> rustbgpd_rib::MrtSnapshotChunk {
+        let (reply, chunk) = tokio::sync::oneshot::channel();
+        tx.send(rustbgpd_rib::update::RibUpdate::QueryMrtSnapshotChunk { cursor, reply })
+            .await
+            .unwrap();
+        chunk.await.unwrap().unwrap()
     }
 
     async fn rib_snapshot(
@@ -3787,11 +4300,162 @@ mod tests {
         actor.await.unwrap();
     }
 
-    /// The `PEER_INDEX_TABLE` is built after the last RIB turn, from the
-    /// neighbors each turn captured. A neighbor that leaves mid-dump keeps
-    /// the entry for the rows already read, and one that joins mid-dump gets
-    /// an entry for the rows read after it joined: every RIB entry's peer
-    /// index resolves, with the session's ASN.
+    fn make_evpn_imet(peer: IpAddr, tag: u32) -> EvpnRibRoute {
+        use rustbgpd_wire::{EthernetTagId, EvpnImet, EvpnRoute, RouteDistinguisher};
+        EvpnRibRoute {
+            route: EvpnRoute::Imet(EvpnImet {
+                rd: RouteDistinguisher([0x00, 0x00, 0xFD, 0xE8, 0x00, 0x00, 0x00, 0x64]),
+                ethernet_tag: EthernetTagId(tag),
+                originator_ip: peer,
+            }),
+            ..make_evpn_macip(peer, peer)
+        }
+    }
+
+    fn read_dump_file(path: &std::path::Path, compress: bool) -> Vec<u8> {
+        use std::io::Read;
+        let bytes = std::fs::read(path).unwrap();
+        if !compress {
+            return bytes;
+        }
+        let mut plain = Vec::new();
+        flate2::read::GzDecoder::new(bytes.as_slice())
+            .read_to_end(&mut plain)
+            .unwrap();
+        plain
+    }
+
+    /// Two sessions, each with 3,000 unicast prefixes and 20,000 EVPN routes.
+    async fn seed_streamed_dump_table(
+        tx: &tokio::sync::mpsc::Sender<rustbgpd_rib::update::RibUpdate>,
+    ) -> (Vec<MrtPeerEntry>, Vec<Route>, Vec<EvpnRibRoute>) {
+        let mut table = (Vec::new(), Vec::new(), Vec::new());
+        for (index, asn) in [(1u8, 65_001u32), (2, 65_002)] {
+            let addr = IpAddr::V4(Ipv4Addr::new(10, 90, 0, index));
+            let peer = PeerId::from_addr(addr);
+            let routes = chunk_test_routes(addr, 2_000, 1_000);
+            let evpn: Vec<_> = (0..20_000).map(|tag| make_evpn_imet(addr, tag)).collect();
+            table.0.push(MrtPeerEntry {
+                peer,
+                peer_addr: addr,
+                interface: None,
+                peer_bgp_id: Ipv4Addr::new(10, 0, 0, 1),
+                peer_asn: asn,
+            });
+            table.1.extend(routes.iter().cloned());
+            table.2.extend(evpn.iter().cloned());
+            rib_session(tx, peer, asn, routes, evpn).await;
+        }
+        table
+    }
+
+    /// The production streaming path over a real RIB actor, through several
+    /// unicast turns and enough EVPN turns for more than eight sort runs (a
+    /// multi-level disk merge), writes the same file bytes as the
+    /// whole-table encoder for the same table, plain and gzip. An unfixed
+    /// third pass pins `originated_time` to wall time minus route age, not
+    /// to the frozen record timestamp.
+    #[tokio::test]
+    async fn streamed_dump_files_match_the_whole_table_encoder() {
+        use crate::stream::StreamingSnapshot;
+        use crate::types::MrtWriterConfig;
+
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        let manager = rustbgpd_rib::RibManager::new(
+            rx,
+            tokio::sync::mpsc::channel(1).1,
+            None,
+            None,
+            rustbgpd_telemetry::BgpMetrics::new(),
+        );
+        let actor = tokio::spawn(manager.run());
+        let (expected_peers, expected_routes, expected_evpn) = seed_streamed_dump_table(&tx).await;
+
+        let collector = Ipv4Addr::new(10, 255, 0, 1);
+        let (timestamp, originated) = (1_000, 7);
+        let started = unix_now_seconds();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let dirs = [(), (), ()].map(|()| crate::writer::private_tempdir());
+        let mut chunk = rib_chunk(&tx, None).await;
+        let mut streams: Vec<_> = [(false, true), (true, true), (false, false)]
+            .into_iter()
+            .zip(&dirs)
+            .map(|((compress, fixed), dir)| {
+                let config = MrtWriterConfig {
+                    output_dir: dir.path().to_path_buf(),
+                    dump_interval: 3600,
+                    compress,
+                    file_prefix: "rib".to_owned(),
+                    max_files: None,
+                    ancestor_check: None,
+                };
+                let mut stream = StreamingSnapshot::new(
+                    &config,
+                    collector,
+                    timestamp,
+                    &chunk.peers,
+                    Arc::clone(&cancelled),
+                )
+                .unwrap();
+                if fixed {
+                    stream.fix_originated_time(originated);
+                }
+                (compress, stream)
+            })
+            .collect();
+        let (mut unicast_turns, mut evpn_turns) = (0, 0);
+        loop {
+            unicast_turns += usize::from(!chunk.routes.is_empty());
+            evpn_turns += usize::from(!chunk.evpn_routes.is_empty());
+            for (_, stream) in &mut streams {
+                stream.push(&chunk).unwrap();
+            }
+            let Some(cursor) = chunk.next.take() else {
+                break;
+            };
+            chunk = rib_chunk(&tx, Some(cursor)).await;
+        }
+        assert!(unicast_turns >= 2, "unicast took {unicast_turns} turns");
+        assert!(evpn_turns > 8, "EVPN made only {evpn_turns} sort runs");
+        let files: Vec<_> = streams
+            .into_iter()
+            .map(|(compress, stream)| read_dump_file(&stream.finish().unwrap().0, compress))
+            .collect();
+        let finished = unix_now_seconds();
+
+        let expected = encode_snapshot_with_allocation_diagnostics(
+            collector,
+            &expected_peers,
+            &expected_routes,
+            &expected_evpn,
+            timestamp,
+            originated,
+        )
+        .unwrap()
+        .0;
+        assert!(files[0] == expected, "plain streamed dump bytes differ");
+        assert!(files[1] == expected, "gzip streamed dump bytes differ");
+
+        let mut reader = crate::reader::SnapshotReader::new(&files[2]).unwrap();
+        let mut rows = 0;
+        for entry in reader.by_ref() {
+            let entry = entry.unwrap();
+            let originated = u64::from(entry.originated_time);
+            assert!(
+                (started.saturating_sub(3_600)..=finished).contains(&originated),
+                "originated {originated} outside wall time {started}..={finished} for {:?}",
+                entry.nlri
+            );
+            rows += 1;
+        }
+        assert_eq!(rows, expected_routes.len() + expected_evpn.len());
+
+        drop(tx);
+        actor.await.unwrap();
+    }
+
+    /// The peer inventory is frozen before the first RIB turn. Departed
+    /// peers keep the metadata for rows already read; late joiners are excluded.
     #[tokio::test]
     async fn peers_that_leave_or_join_mid_dump_keep_every_peer_index_valid() {
         use rustbgpd_rib::update::RibUpdate;
@@ -3839,10 +4503,7 @@ mod tests {
             .map(|peer| (peer.peer_addr, peer.peer_asn))
             .collect();
         table.sort_unstable();
-        assert_eq!(
-            table,
-            [(leaver, 65_001), (stayer, 65_002), (joiner, 65_003)]
-        );
+        assert_eq!(table, [(leaver, 65_001), (stayer, 65_002)]);
         let mut rows = std::collections::HashMap::<IpAddr, usize>::new();
         for entry in reader.by_ref() {
             let entry = entry.unwrap();
@@ -3852,7 +4513,7 @@ mod tests {
         let first_turn = rustbgpd_rib::update::MRT_SNAPSHOT_CHUNK_ROWS / 2;
         assert_eq!(rows[&stayer], 3_000);
         assert_eq!(rows[&leaver], first_turn);
-        assert_eq!(rows[&joiner], 3_000 - first_turn);
+        assert!(!rows.contains_key(&joiner));
 
         drop(tx);
         actor.await.unwrap();

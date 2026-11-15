@@ -45,14 +45,13 @@ fn mutations_against_a_silent_daemon_report_an_unknown_outcome() {
                 "`rbgp config status`",
             ][..],
         ),
-        // The daemon cancels a dump whose caller disconnects before the RIB
-        // snapshot arrives, so mrt-dump must not claim the change may apply.
+        // Cancellation can stop encoding/writing, but cannot undo publication.
         (
             &["mrt-dump"][..],
             &[
                 "TriggerMrtDump",
-                "a dump still queued or waiting for its RIB snapshot is cancelled when rbgp \
-                 disconnects, but one already encoding or writing still completes",
+                "disconnecting requests cancellation of an unfinished dump; a file \
+                 already published is preserved",
                 "`[mrt] output_dir`",
             ][..],
         ),

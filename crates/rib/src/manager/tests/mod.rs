@@ -935,7 +935,7 @@ async fn query_mrt_snapshot(tx: &mpsc::Sender<RibUpdate>) -> crate::update::MrtS
         tx.send(RibUpdate::QueryMrtSnapshotChunk { cursor, reply })
             .await
             .unwrap();
-        cursor = snapshot.push(chunk.await.unwrap());
+        cursor = snapshot.push(chunk.await.unwrap().unwrap());
         if cursor.is_none() {
             return snapshot.finish();
         }

@@ -213,6 +213,15 @@ impl<V: Copy> PathIndex<V> {
         matches!(self, Self::Empty)
     }
 
+    fn len(&self) -> usize {
+        match self {
+            Self::Empty => 0,
+            Self::One(..) => 1,
+            Self::Small(paths) => paths.len(),
+            Self::Many(paths) => paths.len(),
+        }
+    }
+
     fn iter(&self) -> PathIndexIter<'_, V> {
         self.iter_after(None)
     }
@@ -506,6 +515,119 @@ impl<K, V> std::ops::Deref for StaleTracked<K, V> {
     }
 }
 
+/// EVPN bodies keep their slots when the key index grows or splits, so MRT
+/// can resume a bounded walk without retaining a second copy of the table.
+#[derive(Debug, Default)]
+struct EvpnSlab {
+    index: ShardedMap<EvpnRouteKey, u32>,
+    routes: RouteSlab<EvpnRibRoute>,
+    counts: StaleCounters,
+    /// A reset invalidates snapshot cursors even if its new slots look alike.
+    identity: Option<std::sync::Arc<()>>,
+}
+
+impl EvpnSlab {
+    fn insert(&mut self, key: EvpnRouteKey, route: EvpnRibRoute) -> bool {
+        self.identity.get_or_insert_with(|| std::sync::Arc::new(()));
+        let after = route.retention();
+        if let Some(&handle) = self.index.get(&key) {
+            let previous = self
+                .routes
+                .get(handle)
+                .expect("EVPN index names a live slot");
+            self.counts.shift(previous.retention(), after);
+            self.routes.set(handle, route);
+            true
+        } else {
+            self.counts.shift(None, after);
+            self.index.insert(key, self.routes.insert(route));
+            false
+        }
+    }
+
+    fn remove(&mut self, key: &EvpnRouteKey) -> Option<EvpnRibRoute> {
+        let handle = self.index.remove(key)?;
+        let previous = self
+            .routes
+            .remove(handle)
+            .expect("EVPN index names a live slot");
+        self.counts.shift(previous.retention(), None);
+        Some(previous)
+    }
+
+    fn get(&self, key: &EvpnRouteKey) -> Option<&EvpnRibRoute> {
+        self.routes.get(*self.index.get(key)?)
+    }
+
+    fn len(&self) -> usize {
+        self.routes.len()
+    }
+
+    fn values(&self) -> impl Iterator<Item = &EvpnRibRoute> {
+        // Ordinary walks keep the hash iterator's live-entry traversal;
+        // slab vacancies must not hide work between caller checkpoints.
+        self.index.values().map(|&handle| {
+            self.routes
+                .get(handle)
+                .expect("EVPN index names a live slot")
+        })
+    }
+
+    fn clear(&mut self) {
+        self.index.clear();
+        self.routes.clear();
+        self.counts = StaleCounters::default();
+        self.identity = None;
+    }
+
+    fn retire_with(&mut self, checkpoint: &mut impl RetirementCheckpoint) {
+        self.routes.release_with(checkpoint);
+        crate::adj_rib_out::release_sharded_map(&mut self.index, checkpoint);
+    }
+
+    fn update(&mut self, key: &EvpnRouteKey, mutate: impl FnOnce(&mut EvpnRibRoute)) {
+        if let Some(&handle) = self.index.get(key) {
+            let route = self
+                .routes
+                .get_mut(handle)
+                .expect("EVPN index names a live slot");
+            let before = route.retention();
+            mutate(route);
+            self.counts.shift(before, route.retention());
+        }
+    }
+
+    fn for_each_mut_with_checkpoint(
+        &mut self,
+        checkpoint: &mut impl FnMut(),
+        mut mutate: impl FnMut(&EvpnRouteKey, &mut EvpnRibRoute),
+    ) {
+        // Vacancies are work too: a nearly empty slab must still checkpoint.
+        for slot in self.routes.iter_slots_mut() {
+            checkpoint();
+            if let Some(route) = slot {
+                let before = route.retention();
+                mutate(&route.key(), route);
+                self.counts.shift(before, route.retention());
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn contains_key(&self, key: &EvpnRouteKey) -> bool {
+        self.index.contains_key(key)
+    }
+}
+
+#[cfg(test)]
+impl std::ops::Index<&EvpnRouteKey> for EvpnSlab {
+    type Output = EvpnRibRoute;
+
+    fn index(&self, key: &EvpnRouteKey) -> &Self::Output {
+        self.get(key).expect("EVPN route exists")
+    }
+}
+
 /// Path-index lookups (one per `PathSlab` find, insert, removal or key walk)
 /// made on this thread, for the selection work tests.
 #[cfg(test)]
@@ -727,7 +849,7 @@ pub struct AdjRibIn {
     /// While clear, every stored `FlowSpec` key has path ID 0.
     flowspec_add_path_seen: bool,
     /// EVPN routes keyed by RFC 7432 route identity.
-    evpn_routes: StaleTracked<EvpnRouteKey, EvpnRibRoute>,
+    evpn_routes: EvpnSlab,
     /// BGP-LS routes keyed by opaque RFC 9552 route identity.
     bgpls_routes: StaleTracked<BgpLsRouteKey, BgpLsRibRoute>,
     /// VPNv4/VPNv6 routes in a slab, indexed by RFC 4364 RD + prefix
@@ -766,7 +888,7 @@ impl AdjRibIn {
         self.prefix_index
             .release_values_with(checkpoint, PathIndex::retire_with);
         crate::adj_rib_out::release_sharded_map(&mut self.flowspec_routes.map, checkpoint);
-        crate::adj_rib_out::release_sharded_map(&mut self.evpn_routes.map, checkpoint);
+        self.evpn_routes.retire_with(checkpoint);
         crate::adj_rib_out::release_sharded_map(&mut self.bgpls_routes.map, checkpoint);
         self.vpn_routes.retire_with(checkpoint);
         self.labeled_routes.retire_with(checkpoint);
@@ -811,7 +933,7 @@ impl AdjRibIn {
             flowspec_routes: StaleTracked::with_capacity(flowspec_capacity),
             flowspec_llgr_stale_local_tags: ShardedMap::default(),
             flowspec_add_path_seen: false,
-            evpn_routes: StaleTracked::default(),
+            evpn_routes: EvpnSlab::default(),
             bgpls_routes: StaleTracked::default(),
             vpn_routes: PathSlab::default(),
             labeled_routes: PathSlab::default(),
@@ -1100,14 +1222,14 @@ impl AdjRibIn {
     pub(crate) fn iter_prefix_groups_after(
         &self,
         after: Option<Prefix>,
-    ) -> impl Iterator<Item = (Prefix, impl Iterator<Item = &Route>)> {
+    ) -> impl Iterator<Item = (Prefix, usize, impl Iterator<Item = &Route>)> {
         let routes = &self.routes;
         self.prefix_index
             .iter_from(after)
             .skip_while(move |(prefix, _)| Some(*prefix) == after)
             .map(move |(prefix, ids)| {
                 let paths = ids.iter().filter_map(move |(_, handle)| routes.get(handle));
-                (prefix, paths)
+                (prefix, ids.len(), paths)
             })
     }
 
@@ -1842,7 +1964,7 @@ impl AdjRibIn {
         if !self.evpn_llgr_stale_local_tags.is_empty() {
             self.evpn_llgr_stale_local_tags.remove(&key);
         }
-        self.evpn_routes.insert(key, route).is_some()
+        self.evpn_routes.insert(key, route)
     }
 
     /// Withdraw an EVPN route. Returns `true` if it existed.
@@ -1866,15 +1988,22 @@ impl AdjRibIn {
         self.evpn_routes.values()
     }
 
-    /// The EVPN routes of each hash shard of this table: one shard until
-    /// the table splits, and a route never changes shard after that.
-    pub(crate) fn iter_evpn_shards(
-        &self,
-    ) -> impl Iterator<Item = impl ExactSizeIterator<Item = &EvpnRibRoute> + Clone> {
-        self.evpn_routes
-            .shards()
-            .iter()
-            .map(|shard| shard.iter().map(|(_, route)| route))
+    /// Snapshot identity and upper slot bound; neither follows hash-index growth.
+    pub(crate) fn evpn_snapshot_state(&self) -> (Option<std::sync::Arc<()>>, usize) {
+        (
+            self.evpn_routes.identity.clone(),
+            self.evpn_routes.routes.slot_count(),
+        )
+    }
+
+    /// Read a stable EVPN slot directly, including its vacant case.
+    pub(crate) fn evpn_snapshot_slot(&self, slot: u32) -> Option<&EvpnRibRoute> {
+        self.evpn_routes.routes.get(slot)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn evpn_index_shards(&self) -> usize {
+        self.evpn_routes.index.shards().len()
     }
 
     /// Return the number of EVPN routes stored.
@@ -1918,10 +2047,12 @@ impl AdjRibIn {
         checkpoint();
         already_stale.extend(
             self.evpn_routes
-                .iter()
+                .routes
+                .iter_slots()
                 .inspect(|_| checkpoint())
-                .filter(|(_, r)| r.is_stale)
-                .map(|(k, _)| *k),
+                .flatten()
+                .filter(|r| r.is_stale)
+                .map(EvpnRibRoute::key),
         );
         for key in &already_stale {
             checkpoint();
@@ -2003,10 +2134,12 @@ impl AdjRibIn {
         checkpoint();
         stale.extend(
             self.evpn_routes
-                .iter()
+                .routes
+                .iter_slots()
                 .inspect(|_| checkpoint())
-                .filter(|(_, r)| if llgr { r.is_llgr_stale } else { r.is_stale })
-                .map(|(k, _)| *k),
+                .flatten()
+                .filter(|r| if llgr { r.is_llgr_stale } else { r.is_stale })
+                .map(EvpnRibRoute::key),
         );
         for key in &stale {
             checkpoint();
@@ -2048,8 +2181,9 @@ impl AdjRibIn {
         let capacity = self.gr_stale_family_len(family);
         let mut no_llgr_keys: Vec<EvpnRouteKey> = Vec::new();
         checkpoint();
-        for (_, route) in self.evpn_routes.iter() {
+        for slot in self.evpn_routes.routes.iter_slots() {
             checkpoint();
+            let Some(route) = slot else { continue };
             if route.is_stale && route.communities().contains(&COMMUNITY_NO_LLGR) {
                 if no_llgr_keys.is_empty() {
                     no_llgr_keys.reserve_exact(capacity);
@@ -2067,8 +2201,10 @@ impl AdjRibIn {
             self.evpn_routes.remove(key);
             checkpoint();
         }
-        self.evpn_routes.for_each_mut(|_, route| {
+        for slot in self.evpn_routes.routes.iter_slots_mut() {
             checkpoint();
+            let Some(route) = slot else { continue };
+            let before = route.retention();
             if route.is_stale {
                 route.is_stale = false;
                 route.is_llgr_stale = true;
@@ -2081,7 +2217,8 @@ impl AdjRibIn {
                 checkpoint();
                 affected.push(route.key());
             }
-        });
+            self.evpn_routes.counts.shift(before, route.retention());
+        }
         retire_llgr_keys(no_llgr_keys, checkpoint);
         affected
     }
@@ -4559,9 +4696,9 @@ mod tests {
             // Allocation edges, both scans, two removal edges, mutation
             // and interning edges for two promoted rows, plus owned-key drops.
             let promotion_edges = 3;
-            // The unicast, VPN and labeled slabs' second scan also visits
-            // the slot vacated by the removed NO_LLGR row.
-            let vacated = usize::from(matches!(index, 0 | 4 | 5));
+            // The unicast, EVPN, VPN and labeled slabs' second scan also
+            // visits the slot vacated by the removed NO_LLGR row.
+            let vacated = usize::from(matches!(index, 0 | 2 | 4 | 5));
             // Unicast, VPN and labeled removals checkpoint before and after
             // the logarithmic Add-Path index operation.
             let indexed = 2 * usize::from(matches!(index, 0 | 4 | 5));
@@ -6142,6 +6279,40 @@ mod tests {
         assert!(rib.withdraw_evpn(&key));
         assert!(rib.get_evpn(&key).is_none());
         assert!(rib.get_evpn(&sibling).is_some(), "sibling key survives");
+    }
+
+    #[test]
+    fn evpn_live_iteration_uses_index_cardinality_after_sparse_withdrawals() {
+        let peer = Ipv4Addr::new(10, 0, 0, 1);
+        let mut rib = AdjRibIn::new(PeerId::from_addr(peer.into()));
+        let keys: Vec<_> = (0..4096)
+            .map(|tag| insert_evpn_imet(&mut rib, peer, tag, Vec::new()))
+            .collect();
+        let retained = [keys[0], keys[2048], keys[4095]];
+        for key in &keys {
+            if !retained.contains(key) {
+                assert!(rib.withdraw_evpn(key));
+            }
+        }
+        assert_eq!(rib.evpn_routes.routes.slot_count(), 4096);
+        // The live hash index has exact remaining cardinality. This guards
+        // the source boundary: a vacancy-filtered slab iterator cannot report
+        // live cardinality and can scan thousands of slots inside one next().
+        {
+            let mut routes = rib.iter_evpn();
+            let mut seen = std::collections::HashSet::new();
+            for remaining in (1..=retained.len()).rev() {
+                assert_eq!(routes.size_hint(), (remaining, Some(remaining)));
+                assert!(seen.insert(routes.next().unwrap().key()));
+            }
+            assert_eq!(routes.size_hint(), (0, Some(0)));
+            assert!(routes.next().is_none());
+            assert_eq!(seen, retained.into_iter().collect());
+        }
+        for key in &retained {
+            assert!(rib.withdraw_evpn(key));
+        }
+        assert_eq!(rib.iter_evpn().size_hint(), (0, Some(0)));
     }
 
     #[test]
