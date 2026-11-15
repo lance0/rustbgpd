@@ -747,9 +747,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   destinations are now applied a few per RIB command within the same 250 ms
   turn budget as EVPN peers, so UPDATEs from other peers, operator queries and
   timers run between those commands. Shared unicast cohorts are unchanged.
-  The cohort's two-minute reload budget now covers the per-command overhead
-  and the RIB work interleaved between commands, so under heavy churn a
-  cohort near that budget can roll back where one long turn committed.
+  The per-command overhead and the RIB work interleaved between commands
+  count toward the walk's two-minute stall timeout, which the authoritative
+  batch and each completed paced command renew, so a reload that keeps
+  making progress is not rolled back by its cumulative interleaved work;
+  only a gap of more than two minutes with no completed work rolls it back.
 - A peer whose session task panicked, or whose run loop returned an error,
   stayed down until it was reconfigured or the daemon restarted. The peer
   manager now replaces the session and starts it again, after publishing the
