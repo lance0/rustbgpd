@@ -100,6 +100,10 @@ impl RibManager {
     /// for rows it actually holds, and an empty diff costs no second resync.
     /// A dirty peer owes a resync anyway, so it stages nothing.
     pub(super) fn outbound_preflight_refused(&mut self, peer: PeerId) -> bool {
+        // Release's final whole-peer pass covers these keys without an extra delta.
+        if self.selection_release_resync_pending(peer) {
+            return true;
+        }
         if !self.outbound_credit_exhausted(peer)
             || (self.outbound_operation_live(peer) && !self.dirty_peers.contains(&peer))
         {

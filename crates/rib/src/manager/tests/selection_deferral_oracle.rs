@@ -168,6 +168,10 @@ enum Op {
     Orf {
         deny: u8,
     },
+    /// The peer manager's forced outbound refresh of the receiver
+    /// (`RefreshPeerOutbound`, as a `GShut` toggle sends). Dedicated cases
+    /// only; no strategy generates it.
+    RefreshOutbound,
     /// Toggle an export-policy BLACKHOLE tag on the current local (or
     /// received) path at `(prefix, path)`, matched by prefix and
     /// `LOCAL_PREF`; `exclusive` instead makes it the prefix's only tagged
@@ -965,6 +969,16 @@ impl Harness {
                 // A receiver with no session yet sends no ORF.
                 if self.config.orf && self.registered {
                     self.push_orf(deny);
+                }
+            }
+            Op::RefreshOutbound => {
+                if self.registered {
+                    let (reply, mut result) = oneshot::channel();
+                    self.manager.handle_update(RibUpdate::RefreshPeerOutbound {
+                        peer: peer_v4(OBSERVER),
+                        reply,
+                    });
+                    result.try_recv().unwrap().unwrap();
                 }
             }
             Op::Backpressure(true) => {
@@ -3764,8 +3778,8 @@ fn limited_member_established_behind_a_full_writer_counts_its_wire() {
 }
 
 /// I1 at release: a received RTBH withdrawn before the hold behind a full
-/// writer is re-received inside it, and an IMMEDIATE ORF (unchanged or
-/// not covering the prefix) forces a resync the gate defers. Release must
+/// writer is re-received inside it, and an IMMEDIATE ORF or a `GShut`
+/// outbound refresh forces a resync the gate defers. Release must
 /// replace the stale row in place. Running the deferred resync on the
 /// frozen best withdrew it in one UPDATE and re-announced it in the next.
 /// The withdrawal comes from the source's stale deadline or its own UPDATE.
@@ -3800,12 +3814,37 @@ fn deferred_forced_resync_keeps_a_rereceived_rtbh_at_release() {
         Op::Backpressure(true),
         Op::ReceiveWithdraw { prefix: 0, path: 0 },
     ];
+    let without_orf = Config {
+        orf: false,
+        ..config
+    };
+    let triggers = [
+        (config, Op::Orf { deny: 0 }),
+        (config, Op::Orf { deny: 14 }),
+        (config, Op::RefreshOutbound),
+        (without_orf, Op::RefreshOutbound),
+        (
+            Config {
+                grouped: true,
+                ..without_orf
+            },
+            Op::RefreshOutbound,
+        ),
+        (
+            Config {
+                grouped: true,
+                per_client_best: true,
+                ..without_orf
+            },
+            Op::RefreshOutbound,
+        ),
+    ];
     let mut failed = Vec::new();
     for (name, setup) in [("stale sweep", &swept[..]), ("withdrawal", &withdrawn[..])] {
-        for deny in [0, 14] {
-            let hold = [rtbh.clone(), Op::Orf { deny }];
-            if let Some(reason) = failure(config, setup, &hold) {
-                failed.push(format!("{name}, deny {deny}: {reason}"));
+        for (config, trigger) in &triggers {
+            let hold = [rtbh.clone(), trigger.clone()];
+            if let Some(reason) = failure(*config, setup, &hold) {
+                failed.push(format!("{name}, {config:?}, {trigger:?}: {reason}"));
             }
         }
     }

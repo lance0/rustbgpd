@@ -591,7 +591,7 @@ impl RibManager {
         self.settle_eor_as(peer, Some(families), offer, operation, false);
     }
 
-    /// A resync of `peer` was admitted earlier in this turn while a
+    /// A resync of `peer` was admitted while a
     /// selection gate still held a family's marker, and that gate is now
     /// released: the marker follows the table as a plain marker, even while
     /// the peer stays dirty for another deferred family. A refused marker

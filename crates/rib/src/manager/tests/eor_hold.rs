@@ -216,6 +216,9 @@ async fn a_marker_leaves_only_from_the_release_that_empties_its_hold_set() {
         steps.rotate_left(turn);
         let mut present = held.clone();
         for step in steps {
+            if !step.iter().any(|reason| present.contains(reason)) {
+                continue;
+            }
             poke(&mut manager, &present);
             assert_eq!(
                 markers(&mut output),
@@ -226,9 +229,17 @@ async fn a_marker_leaves_only_from_the_release_that_empties_its_hold_set() {
             assert_holds(&manager, &present, &case);
             release(&mut manager, step[0]);
             present.retain(|reason| !step.contains(reason));
-            if present.is_empty() {
-                assert_eq!(markers(&mut output), 1, "{case}: last release sends");
+            if step.contains(&EorHold::Selection) {
+                // This empty inventory has a free writer: selection release's
+                // final pass also admits its pending resync, under other holds.
+                present.retain(|reason| *reason != EorHold::Resync);
             }
+            assert_holds(&manager, &present, &case);
+            assert_eq!(
+                markers(&mut output),
+                usize::from(present.is_empty()),
+                "{case}: only the last effective release sends"
+            );
         }
         assert!(!manager.eor.owes(TARGET, FAMILY), "{case}");
         poke(&mut manager, &[]);
@@ -610,6 +621,14 @@ fn assert_route_precedes_marker(output: &mut mpsc::Receiver<OutboundRouteUpdate>
     );
     assert_eq!(
         sent.iter()
+            .flat_map(|update| update.announce.iter())
+            .filter(|route| route.prefix == v4_prefix(7))
+            .count(),
+        1,
+        "{case}: the released route is announced once"
+    );
+    assert_eq!(
+        sent.iter()
             .flat_map(|update| &update.end_of_rib)
             .filter(|family| **family == V4)
             .count(),
@@ -642,6 +661,35 @@ async fn a_gate_release_sends_the_released_routes_before_the_marker_of_a_forced_
         assert!(!manager.eor.owes(TARGET, V4), "{case}");
         assert!(!manager.resync_tick_pending(), "{case}");
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refused_release_keeps_the_force_and_marker_until_the_writer_recovers() {
+    let (mut manager, mut outputs) = late_armed_gate(&[V4], &[(TARGET, 2, &[V4])]);
+    let mut output = outputs.remove(0);
+    force_under_the_gate(&mut manager, TARGET);
+    while output.try_recv().is_ok() {}
+    let writer = manager.outbound_peers[&TARGET].clone();
+    let occupied: Vec<_> = std::iter::from_fn(|| writer.clone().try_reserve_owned().ok()).collect();
+    assert!(manager.outbound_channel_full(TARGET));
+
+    manager.expire_selection_deferral();
+
+    assert!(manager.force_outbound_peers.contains(&TARGET));
+    assert!(manager.dirty_peers.contains(&TARGET));
+    assert!(manager.eor.owes(TARGET, V4));
+    assert!(
+        output.try_recv().is_err(),
+        "neither rows nor EoR bypass the writer"
+    );
+    drop(occupied);
+    manager.resync_dirty_peers_bounded();
+
+    assert_route_precedes_marker(&mut output, "writer recovered after release");
+    assert!(!manager.force_outbound_peers.contains(&TARGET));
+    assert!(!manager.dirty_peers.contains(&TARGET));
+    assert!(!manager.eor.owes(TARGET, V4));
+    assert!(!manager.resync_tick_pending());
 }
 
 /// The same while a second family of the receiver is still deferred, so
@@ -1145,4 +1193,98 @@ fn the_tick_reports_an_unsettled_marker_even_when_the_writer_refuses_it() {
         manager.eor.unsettled_tick_finds, 1,
         "the retry is not reported"
     );
+}
+
+/// Releasing IPv4 must not replay a parked receiver's VPN inventory when
+/// that receiver negotiated only IPv6 unicast and VPN.
+#[test]
+fn an_unrelated_family_release_does_not_replay_a_caught_up_receiver() {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(
+        rx,
+        dummy_query_rx(),
+        None,
+        Some(Ipv4Addr::new(10, 0, 0, 100)),
+        BgpMetrics::new(),
+    )
+    .with_selection_deferral(SelectionDeferralConfig {
+        timeout: Duration::from_mins(2),
+        waiters: vec![SelectionDeferralWaiterConfig {
+            peer: OTHER.into(),
+            families: vec![V4, V6],
+        }],
+    });
+    let _source = connect_with(&mut manager, SOURCE, 1, vec![V4, FAMILY]);
+    let (outbound_tx, mut output) = mpsc::channel(16);
+    let mut up = super::lifecycle::test_peer_up(TARGET, 2, outbound_tx);
+    if let RibUpdate::PeerUp {
+        sendable_families,
+        is_ebgp,
+        route_reflector_client,
+        ..
+    } = &mut up
+    {
+        *sendable_families = vec![V6, FAMILY];
+        *is_ebgp = false;
+        *route_reflector_client = true;
+    }
+    manager.handle_update(up);
+    while output.try_recv().map(delivered).is_ok() {}
+    let route = make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 1), 31, 100, 100);
+    let key = route.key();
+    manager.handle_update(RibUpdate::VpnRoutesReceived {
+        peer: SOURCE,
+        session_id: 1,
+        announced: vec![route],
+        withdrawn: vec![],
+    });
+    drain_route_chunks(&mut manager);
+    let initial: Vec<_> = std::iter::from_fn(|| output.try_recv().ok())
+        .map(delivered)
+        .collect();
+    assert_eq!(
+        initial
+            .iter()
+            .flat_map(|update| update.vpn_announce.iter())
+            .map(VpnRibRoute::key)
+            .collect::<Vec<_>>(),
+        [key]
+    );
+    let _waiter = connect_with(&mut manager, OTHER, 3, vec![V4, V6]);
+    assert!(manager.selection_deferred(V4));
+    assert!(manager.selection_deferred(V6));
+    announce(&mut manager, SOURCE, 1, 7);
+    force_under_the_gate(&mut manager, TARGET);
+    let forced: Vec<_> = std::iter::from_fn(|| output.try_recv().ok())
+        .map(delivered)
+        .collect();
+    assert_eq!(
+        forced
+            .iter()
+            .flat_map(|update| update.vpn_announce.iter())
+            .count(),
+        1
+    );
+    assert!(manager.selection_partial_caught_up(TARGET));
+
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: OTHER,
+        session_id: 3,
+        afi: V4.0,
+        safi: V4.1,
+    });
+
+    assert!(!manager.selection_deferred(V4));
+    assert!(manager.selection_deferred(V6));
+    let sent: Vec<_> = std::iter::from_fn(|| output.try_recv().ok())
+        .map(delivered)
+        .collect();
+    assert!(
+        sent.iter().all(|update| update.vpn_announce.is_empty()),
+        "an unrelated release must not replay the VPN table"
+    );
+    assert!(manager.selection_partial_caught_up(TARGET));
+    assert!(manager.force_outbound_peers.contains(&TARGET));
+    assert!(!manager.dirty_peers.contains(&TARGET));
+    assert!(!manager.resync_pending(TARGET));
 }

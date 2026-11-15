@@ -9223,6 +9223,13 @@ impl RibManager {
         evpn_feeds: HashMap<PeerId, super::evpn_recovery::EvpnCompleteFeed>,
         targets: Option<&HashSet<PeerId>>,
     ) {
+        if self.selection_release_staging
+            && best_changed.is_empty()
+            && all_affected.is_empty()
+            && evpn_feeds.is_empty()
+        {
+            return;
+        }
         let pass = |manager: &mut Self, owned: bool| {
             manager.distribute_changes_with_readiness::<false>(
                 best_changed,
@@ -9507,6 +9514,19 @@ impl RibManager {
                     // For dirty peers, compute full prefix set from Loc-RIB + AdjRibOut
                     if self.evpn_recovery_reset_pending(peer) {
                         self.retry_evpn_recovery_reset(peer);
+                        break 'member;
+                    }
+                    if self.selection_release_resync_pending(peer) {
+                        if self.unicast_pass_reaches(peer, &best_changed, &all_affected) {
+                            // Keep withdrawals missed while shared staging
+                            // advanced the desired table until the final resync.
+                            self.defer_unsent_outbound_pass(
+                                peer,
+                                member_of,
+                                &group_stage,
+                                &checkpoint,
+                            );
+                        }
                         break 'member;
                     }
                     if self.selection_partial_caught_up(peer)

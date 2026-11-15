@@ -18,6 +18,7 @@ use rustbgpd_wire::{Afi, Safi};
 
 use super::RibManager;
 use super::eor_hold::{EorHold, EorTrigger};
+use super::evpn_recovery::EvpnCompleteFeed;
 
 /// Process-wide ceiling across every typed identity retained while route
 /// selection is frozen.  One million matches the documented per-neighbor
@@ -1625,8 +1626,19 @@ impl RibManager {
                 } => {
                     let armed = manager.selection_convergence_held(family);
                     let mut resynced = HashSet::new();
-                    if armed {
-                        manager.wake_selection_partial_recovery(family);
+                    if armed && already_staged {
+                        // Staging already admitted every nondeferred family.
+                        // Release only its marker; another held family may
+                        // still retain the peer's dirty or forced obligation.
+                        resynced.extend(
+                            manager
+                                .dirty_peers
+                                .iter()
+                                .chain(&manager.force_outbound_peers)
+                                .inspect(|_| manager.replacement_checkpoint(false))
+                                .copied()
+                                .filter(|&peer| manager.selection_partial_caught_up(peer)),
+                        );
                     }
                     if armed && !already_staged {
                         // The family's routes are selected and sent while
@@ -1637,19 +1649,7 @@ impl RibManager {
                         if let Some(selection) = manager.selection_deferral.as_mut() {
                             selection.stage_for_release(family);
                         }
-                        let pending: Vec<PeerId> = manager
-                            .dirty_peers
-                            .iter()
-                            .chain(&manager.force_outbound_peers)
-                            .copied()
-                            .filter(|&peer| manager.resync_pending(peer))
-                            .collect();
-                        manager.recompute_released_selection_family(family);
-                        resynced.extend(
-                            pending
-                                .into_iter()
-                                .filter(|&peer| !manager.resync_pending(peer)),
-                        );
+                        resynced = manager.recompute_released_selection_family(family);
                     }
                     if let Some(selection) = manager.selection_deferral.as_mut() {
                         selection.release(family, release_reason, &manager.metrics);
@@ -1681,9 +1681,6 @@ impl RibManager {
             || super::replacement_readiness_checkpoint_at(&readiness, "selection_inventory", false);
         checkpoint();
         let already_staged = staged.is_some();
-        if !already_staged {
-            self.wake_selection_partial_recovery(family);
-        }
         // Release does not by itself purge the stale rows a GR helper keeps:
         // our End-of-RIB does, once it is sent, and replay grace can still
         // hold it. A carry stays while that End-of-RIB can be held and its
@@ -1807,30 +1804,50 @@ impl RibManager {
         self.retire_settled_selection_admission();
     }
 
-    /// A forced resync that ran while a selection gate deferred one of the
-    /// peer's families kept its force bit for that family. Nothing else
-    /// drives a force-only peer, so the staging or release of the gate runs
-    /// the rest here, in an empty pass after the family's unicast selection
-    /// and ahead of its distribution (a grouped forced resync may not share
-    /// a pass with the changes; it re-sends the unstaged group table). The gate
-    /// is still armed at this point on both paths, so the pass cannot send
-    /// the family's End-of-RIB ahead of the routes selected after it.
-    fn run_deferred_forced_resyncs(&mut self) {
-        if self
-            .force_outbound_peers
+    /// Pending peers wait until release has updated both selection and the
+    /// shared group tables; their existing resync obligation covers the delta.
+    pub(super) fn selection_release_resync_pending(&self, peer: PeerId) -> bool {
+        self.selection_release_staging
+            && (self.dirty_peers.contains(&peer) || self.force_outbound_peers.contains(&peer))
+    }
+
+    /// Admit one empty resync pass while the selection gate still holds `EoR`.
+    /// The returned peers need only their marker when that gate releases.
+    fn run_released_selection_resyncs(
+        &mut self,
+        feeds: HashMap<PeerId, EvpnCompleteFeed>,
+    ) -> HashSet<PeerId> {
+        let mut pending: HashSet<_> = self
+            .dirty_peers
             .iter()
-            .any(|&peer| !self.selection_partial_caught_up(peer))
-        {
-            self.distribute_changes(&HashSet::new(), &HashSet::new());
+            .chain(&self.force_outbound_peers)
+            .inspect(|_| self.replacement_checkpoint(false))
+            .copied()
+            .filter(|&peer| self.resync_pending(peer))
+            .collect();
+        if !pending.is_empty() || !feeds.is_empty() {
+            self.distribute_changes_with_evpn_feeds(feeds, false);
+            pending.retain(|&peer| {
+                self.replacement_checkpoint(false);
+                !self.resync_pending(peer)
+            });
         }
+        pending
     }
 
     /// Selection may release an empty or unchanged inventory. Its complete
     /// producer still has to establish coverage before marker-only retries.
     fn complete_selection_evpn_feeds(&mut self) {
+        let (feeds, private_resync) = self.prepare_selection_evpn_feeds();
+        if !feeds.is_empty() || private_resync {
+            self.distribute_changes_with_evpn_feeds(feeds, false);
+        }
+    }
+
+    fn prepare_selection_evpn_feeds(&mut self) -> (HashMap<PeerId, EvpnCompleteFeed>, bool) {
         let family = (Afi::L2Vpn, Safi::Evpn);
         if self.selection_deferred(family) {
-            return;
+            return (HashMap::new(), false);
         }
         let peers: Vec<_> = self
             .eor
@@ -1838,6 +1855,8 @@ impl RibManager {
             .inspect(|_| self.replacement_checkpoint(false))
             .filter(|&peer| {
                 self.eor.owes(peer, family)
+                    && !self.dirty_peers.contains(&peer)
+                    && !self.force_outbound_peers.contains(&peer)
                     && !self.evpn_feed_is_current(peer)
                     && !self.evpn_recovery_reset_pending(peer)
                     && (self.evpn_grouped_member_of(peer).is_some()
@@ -1868,16 +1887,17 @@ impl RibManager {
                 private_resync = true;
             }
         }
-        if !feeds.is_empty() || private_resync {
-            self.distribute_changes_with_evpn_feeds(feeds, false);
-        }
+        (feeds, private_resync)
     }
 
     #[expect(
         clippy::too_many_lines,
         reason = "release must sweep every typed RIB family from one atomic family gate"
     )]
-    fn recompute_released_selection_family(&mut self, family: (Afi, Safi)) {
+    fn recompute_released_selection_family(&mut self, family: (Afi, Safi)) -> HashSet<PeerId> {
+        debug_assert!(!self.selection_release_staging);
+        self.wake_selection_partial_recovery(family);
+        self.selection_release_staging = true;
         if family == (Afi::L2Vpn, Safi::Evpn) {
             // Both Stage and Release reach this seam before any admission.
             // A feed must retain its terminal duty while convergence is held.
@@ -1949,12 +1969,6 @@ impl RibManager {
         let mut prefixes = prefixes.into_set(&mut checkpoint);
         if !prefixes.is_empty() {
             self.recompute_best(&prefixes);
-        }
-        // After selection, so a deferred resync builds from the released
-        // best: on the frozen one it withdraws a row the release then
-        // re-announces, a transient gap for an RTBH.
-        self.run_deferred_forced_resyncs();
-        if !prefixes.is_empty() {
             // A joining peer may not have received an unchanged frozen best.
             self.distribute_changes(&prefixes, &prefixes);
             // A frozen row kept its exact rejections live; retire those whose
@@ -2072,7 +2086,6 @@ impl RibManager {
                 }
                 super::retire_hash_set(&mut evpn, &mut checkpoint);
             }
-            self.complete_selection_evpn_feeds();
         }
 
         let mut vpn = ReleaseKeys::new();
@@ -2259,6 +2272,13 @@ impl RibManager {
         // Overflow state and logical byte budget stay sticky until every
         // typed store and RTC side effect for the family has completed.
         self.deferred_selection_keys.complete_family_release(family);
+        let feeds = if family == (Afi::L2Vpn, Safi::Evpn) {
+            self.prepare_selection_evpn_feeds().0
+        } else {
+            HashMap::new()
+        };
+        self.selection_release_staging = false;
+        self.run_released_selection_resyncs(feeds)
     }
 }
 
