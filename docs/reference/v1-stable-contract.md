@@ -555,12 +555,18 @@ Two deprecation floors apply, each to a different set of surfaces:
   two-minor removal window for inventoried contracts.
 - **Uninventoried and alpha surfaces** (EVPN outside the
   `route-reflector-evpn` boundary, the Linux dataplane, and RPCs,
-  fields, configuration keys, and CLI commands absent from the inventory): a
-  deprecated item remains functional for at least two minor releases and 90
-  days, during both 0.x and 1.x. The inventory's
-  `compatibility.deprecation_window` records this minimum
+  fields, configuration keys, and CLI commands absent from the inventory):
+  from 1.0, a deprecated item remains functional for at least two minor
+  releases and 90 days. Before 1.0, no deprecation window applies: any release
+  can remove such a surface if it ships a `Removed` changelog entry, an upgrade
+  note, and a loud failure (for example a config key that fails to load with
+  an error naming its replacement). The inventory's
+  `compatibility.deprecation_window` records the post-1.0 minimum
   (`minimum_minor_releases = 2`, `minimum_days = 90`), and the release checker
-  rejects any shorter value.
+  rejects any shorter value. The dated ADRs that describe a 0.x window
+  ([ADR-0122](../adr/0122-compatibility-debt-inventory.md),
+  [ADR-0125](../adr/0125-v1-stability-contract.md)) are history; this section
+  is the current rule.
 
 The [stability guide](stability.md) lists which surfaces are alpha.
 
