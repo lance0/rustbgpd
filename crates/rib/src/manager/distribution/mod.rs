@@ -819,9 +819,9 @@ enum ResidualMode {
     /// the batch tests compare against. No command takes it.
     #[cfg(test)]
     All,
-    /// Hand back every residual member whose session sends any family
-    /// unapplied (the forward batch and the rollback batch).
-    DeferSenders,
+    /// Hand back every changed residual member unapplied (the forward
+    /// batch and the rollback batch).
+    DeferChanged,
     /// Apply residual members in caller order while the turn budget allows
     /// (one command of the paced walk); hand back the rest.
     Paced {
@@ -6127,10 +6127,10 @@ impl RibManager {
     /// runs. Duplicate identities reject wholesale instead of inheriting the
     /// forward batch's last-writer-wins fallback. Receipts preserve the actual
     /// newest-first execution order and make every departed peer explicit.
-    /// Shared cohorts are restored here; a residual member whose session
-    /// sends any family keeps its installed chain and is acknowledged as
-    /// `Deferred` for a paced restore command, so the rollback's longest turn
-    /// does not grow with restored members x rows.
+    /// Shared cohorts are restored here; every changed registered residual
+    /// member keeps its installed chain and is acknowledged as `Deferred`
+    /// for a paced restore command. Each member's resync then runs in a
+    /// paced command instead of accumulating in this authoritative batch.
     pub(in crate::manager) fn restore_export_policy_replacements_deferring_residual(
         &mut self,
         mut replacements: Vec<PeerExportPolicyReplacement>,
@@ -6188,7 +6188,7 @@ impl RibManager {
             // left memberless. One this rollback's own refused cohort leaves
             // is adopted or retired by its paced restore commands.
             let mut deferred: HashSet<PeerId> = manager
-                .apply_export_policy_replacements(execution, ResidualMode::DeferSenders)?
+                .apply_export_policy_replacements(execution, ResidualMode::DeferChanged)?
                 .deferred
                 .into_iter()
                 .inspect(|_| checkpoint())
@@ -6242,13 +6242,15 @@ impl RibManager {
 
     /// The forward authoritative batch: the batch body described on the
     /// test-only `apply_export_policy_replacements_synchronously`, except that
-    /// residual members whose session sends any family are left unapplied,
-    /// with their installed chain untouched, and returned in caller order.
+    /// changed residual members are left unapplied, with their installed
+    /// chain untouched, and returned in caller order.
     /// Shared cohorts still commit here. A residual move resyncs the member's
     /// whole table in every family it sends (EVPN, VPN, labeled unicast,
     /// `FlowSpec`, BGP-LS, or the unicast of an ungrouped, per-client-best or
-    /// mixed-destination member), so the caller applies them through
-    /// [`Self::apply_paced_export_policies`], a few per RIB command within
+    /// mixed-destination member). Even a session with no sendable families
+    /// enumerates the Loc-RIB during its dirty resync, so all changed
+    /// residual members go through [`Self::apply_paced_export_policies`],
+    /// a few per RIB command within
     /// [`PACED_TURN_BUDGET`], and other work runs between those commands
     /// instead of waiting behind one actor turn growing with moved members ×
     /// rows. The rollback batch hands the same members back.
@@ -6256,7 +6258,7 @@ impl RibManager {
         &mut self,
         replacements: Vec<PeerExportPolicyReplacement>,
     ) -> Result<Vec<PeerId>, RibCommandError> {
-        self.apply_export_policy_replacements(replacements, ResidualMode::DeferSenders)
+        self.apply_export_policy_replacements(replacements, ResidualMode::DeferChanged)
             .map(|outcome| outcome.deferred)
     }
 
@@ -6533,7 +6535,7 @@ impl RibManager {
         }
         // A new forward batch starts a new walk: an earlier walk's refused
         // destination that no member joined is retired here, in this scope.
-        if matches!(mode, ResidualMode::DeferSenders) {
+        if matches!(mode, ResidualMode::DeferChanged) {
             self.discard_refused_cohort_destinations();
         }
 
@@ -6569,7 +6571,7 @@ impl RibManager {
         let mut displaced: HashMap<PeerId, Option<Option<PolicyChain>>> = HashMap::new();
         let tracks_displaced = matches!(
             mode,
-            ResidualMode::DeferSenders | ResidualMode::Paced { .. }
+            ResidualMode::DeferChanged | ResidualMode::Paced { .. }
         );
         // Install the new chains (content-equal INSTANCE guard — see
         // `replace_peer_export_policy_synchronously` for the ADR-0096
@@ -6730,7 +6732,7 @@ impl RibManager {
                     .group_ribs
                     .get(&destination)
                     .is_some_and(|group| group.members.is_empty());
-                if memberless && matches!(mode, ResidualMode::DeferSenders) {
+                if memberless && matches!(mode, ResidualMode::DeferChanged) {
                     self.refused_cohort_destinations
                         .push((destination, members.clone()));
                 }
@@ -6753,8 +6755,8 @@ impl RibManager {
         // Per-member fallback: the ordinary regroup lifecycle (baseline
         // snapshot + dirty), drained by the one pass below — the exact
         // body of the single-peer seam, minus its per-call pass. A member
-        // handed back (any sender in the forward batch, or one past the
-        // paced budget) is instead restored to its installed chain.
+        // handed back (a changed residual in either authoritative batch, or
+        // one past the paced budget) is restored to its installed chain.
         let mut deferred: HashSet<PeerId> = HashSet::new();
         let (mut applied, mut recompute_max, mut over_budget) =
             (0_usize, std::time::Duration::ZERO, false);
@@ -6781,7 +6783,7 @@ impl RibManager {
             let hand_back = match mode {
                 #[cfg(test)]
                 ResidualMode::All => false,
-                ResidualMode::DeferSenders => !unchanged && self.sends_any_family(peer),
+                ResidualMode::DeferChanged => !unchanged,
                 ResidualMode::Paced { started, .. } => {
                     #[cfg(test)]
                     let elapsed = self
@@ -6933,16 +6935,6 @@ impl RibManager {
             recompute_max,
             pass_max,
         })
-    }
-
-    /// Whether moving `peer` can resync outbound state: its session sends
-    /// some family. Its old chain may have denied every row (no rows held)
-    /// while the new one permits the whole table, so the negotiated families,
-    /// not current rows, decide.
-    fn sends_any_family(&self, peer: PeerId) -> bool {
-        self.peer_sendable_families
-            .get(&peer)
-            .is_some_and(|families| !families.is_empty())
     }
 
     /// Commit one qualifying cohort through the shared batched
@@ -9718,10 +9710,18 @@ impl RibManager {
                         self.replacement_checkpoint(true);
                         let mut all = HashSet::with_capacity(capacity);
                         self.replacement_checkpoint(true);
+                        #[cfg(test)]
+                        let row_observer = self.replacement_readiness_test_hook.as_ref();
                         all.extend(
                             self.loc_rib
                                 .iter()
-                                .inspect(|_| checkpoint())
+                                .inspect(|_| {
+                                    checkpoint();
+                                    #[cfg(test)]
+                                    if let Some(observer) = row_observer {
+                                        observer("resync_loc_rib_key");
+                                    }
+                                })
                                 .map(|r| r.prefix),
                         );
                         if let Some(gid) = member_of {

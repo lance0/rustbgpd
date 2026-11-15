@@ -3829,10 +3829,10 @@ pub enum RibUpdate {
     /// Contract: replacements naming peers no longer registered for
     /// outbound updates are skipped (a reconnect installs the desired
     /// policy — the same posture as the serial per-peer loop this
-    /// replaces). Residual members (every member outside a shared cohort)
-    /// whose session sends any family are not applied: their installed
-    /// chain is left as it was and the reply names them in caller order,
-    /// for the caller to apply through
+    /// replaces). Changed residual members (every member outside a shared
+    /// cohort), including sessions with no sendable families, are not
+    /// applied: their installed chain is left as it was and the reply names
+    /// them in caller order, for the caller to apply through
     /// [`RibUpdate::ApplyPacedExportPolicies`], a few per command within a
     /// turn budget, so that other RIB work runs between those commands.
     /// Shared cohorts commit in the one synchronous call: there is no
@@ -3871,9 +3871,10 @@ pub enum RibUpdate {
     /// ordered [`PeerExportPolicyRestoreReceipt`] per input member. A missing
     /// outbound registration is acknowledged as `NotFound`, never silently
     /// collapsed into success. Shared cohorts are restored in this call. A
-    /// residual member whose session sends any family is left on its
-    /// installed chain and acknowledged as `Deferred`, as the forward batch
-    /// hands such members back: the caller restores them through
+    /// changed residual member is left on its installed chain and
+    /// acknowledged as `Deferred`, including sessions with no sendable
+    /// families, as the forward batch hands such members back: the caller
+    /// restores them through
     /// [`RibUpdate::RestorePacedExportPolicies`]. The command is never
     /// skipped, whether or not its caller still holds the reply.
     RestorePeerExportPoliciesAuthoritatively {
