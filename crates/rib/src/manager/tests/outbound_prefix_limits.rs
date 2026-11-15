@@ -2744,6 +2744,126 @@ fn an_ipv6_limit_seeded_from_a_proof_counts_the_wire_to_convergence() {
     assert_seeded_member_counts_its_wire(true);
 }
 
+/// Prepare walks a proof-backed member's admission proof, so it runs under
+/// a readiness owner: each forced checkpoint of that walk answers the
+/// readiness query queued at the previous one, and the last is answered
+/// before Prepare replies.
+#[test]
+fn prepare_answers_readiness_while_it_measures_a_proof() {
+    let (mut manager, member, held) = member_holding_a_pending_withdrawal(&[1, 2], None);
+    let expected = manager.loc_rib.len();
+    let (readiness_tx, readiness_rx) = mpsc::channel(1);
+    manager.readiness_rx = Some(readiness_rx);
+    manager.flush_poll_budget = Duration::ZERO;
+    let pending = Arc::new(std::sync::Mutex::new(
+        None::<oneshot::Receiver<Result<usize, crate::RibReadinessError>>>,
+    ));
+    let stages = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+    manager.replacement_readiness_test_hook = Some(Arc::new({
+        let pending = Arc::clone(&pending);
+        let stages = Arc::clone(&stages);
+        move |stage| {
+            if let Some(mut response) = pending.lock().unwrap().take() {
+                assert_eq!(
+                    response
+                        .try_recv()
+                        .expect("the previous checkpoint answered readiness")
+                        .unwrap(),
+                    expected
+                );
+            }
+            stages.lock().unwrap().push(stage);
+            let (reply, response) = oneshot::channel();
+            readiness_tx
+                .try_send(crate::RibReadinessQuery::LocRibCount {
+                    reply,
+                    enqueued: Instant::now(),
+                })
+                .unwrap();
+            *pending.lock().unwrap() = Some(response);
+        }
+    }));
+    let (reply, mut result) = oneshot::channel();
+    manager.handle_update(RibUpdate::PrepareOutboundPrefixLimits {
+        txn: 1,
+        config: limit_config(&[(member, Some(8), None)], &[]),
+        reply,
+    });
+    manager.replacement_readiness_test_hook = None;
+    assert_eq!(result.try_recv().unwrap(), Ok(()));
+    let walked = stages
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|stage| **stage == "outbound_limit_seed_proof_count")
+        .count();
+    assert_eq!(
+        walked, 2,
+        "the proof walk is bracketed by forced checkpoints"
+    );
+    let last = pending.lock().unwrap().take();
+    assert_eq!(
+        last.expect("Prepare must install a readiness owner")
+            .try_recv()
+            .expect("the last checkpoint answered readiness")
+            .unwrap(),
+        expected
+    );
+    drop(held);
+}
+
+/// A proof seed reserves this family's distinct proof prefixes, which the
+/// apply-time recheck measured, not every key of the proof: a member whose
+/// proof holds only IPv6 reserves nothing for IPv4.
+#[test]
+fn a_proof_seed_reserves_only_its_own_family() {
+    const PREFIXES: u16 = 64;
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let member = peer_v4(Ipv4Addr::new(10, 113, 0, 1));
+    let mut member_rx = register_peer_with_families(&mut manager, member, &dual_stack_sendable());
+    let source = Ipv6Addr::new(0x2001, 0xdb8, 0, 113, 0, 0, 0, 1);
+    let source_peer = PeerId::from_addr(IpAddr::V6(source));
+    let segments: Vec<u16> = (1..=PREFIXES).collect();
+    announce(
+        &mut manager,
+        source_peer,
+        source_v6_routes(source, &segments),
+    );
+    let mut wire = HashSet::new();
+    apply_to_wire(&mut member_rx, &mut wire);
+    assert_eq!(wire.len(), usize::from(PREFIXES));
+    let held = fill_writer(&manager, member);
+    announce(
+        &mut manager,
+        source_peer,
+        source_v6_routes(source, &[PREFIXES + 1]),
+    );
+    let proof = manager
+        .pending_group_admitted
+        .get(&member)
+        .expect("a complete admission proof");
+    assert_eq!(proof.len(), usize::from(PREFIXES));
+    install(
+        &mut manager,
+        1,
+        limit_config(&[(member, Some(1000), Some(1000))], &[]),
+    );
+    let limits = &manager.outbound_prefix_limits[&member];
+    assert_eq!(limits.grouped_len(Afi::Ipv4), 0);
+    assert_eq!(
+        limits.grouped_capacity(Afi::Ipv4),
+        0,
+        "an IPv4 seed with no IPv4 proof prefix reserves nothing"
+    );
+    assert_eq!(limits.grouped_len(Afi::Ipv6), usize::from(PREFIXES));
+    assert!(
+        limits.grouped_capacity(Afi::Ipv6) < 2 * usize::from(PREFIXES),
+        "the IPv6 seed reserves its distinct prefixes, not the limit"
+    );
+    drop(held);
+}
+
 /// Acceptance: two neighbors on one link-local address, on different
 /// interfaces, each get only their own configured outbound maximum. eth0 is
 /// capped at one prefix and blocks the second; eth1, configured with no
