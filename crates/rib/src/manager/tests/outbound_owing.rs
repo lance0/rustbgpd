@@ -5093,3 +5093,162 @@ fn a_forced_family_release_keeps_a_rereceived_grouped_vpn_route() {
 fn a_forced_family_release_withdraws_a_deleted_grouped_vpn_route() {
     check_grouped_vpn_forced_release(false);
 }
+
+/// A membership delta covers VPN output only. The pending forced resync
+/// must also deliver released RTC rows while unicast remains held.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the membership publication and grouped wire proof require the complete two-gate lifecycle"
+)]
+fn check_rtc_release_membership_and_routes(add_interest: bool) {
+    let vpn = (Afi::Ipv4, Safi::MplsVpn);
+    let rtc = (Afi::Ipv4, Safi::RtConstrain);
+    let mut manager = deferral_manager(vec![V4, rtc], 64);
+    manager.test_force_ungrouped = false;
+    let _source = up(&mut manager, peer_v4(SOURCE), vec![vpn, rtc]);
+    let address = Ipv4Addr::new(10, 0, 43, 2);
+    let peer = peer_v4(address);
+    let mut output = up(&mut manager, peer, vec![V4, vpn, rtc]);
+    let group = manager
+        .vpn_grouped_member_of(peer)
+        .expect("RTC retains VPN group ownership");
+    let interest = make_rtc_rib_route(address, 100, 100);
+    if !add_interest {
+        manager.handle_update(RibUpdate::RtcRoutesReceived {
+            peer,
+            session_id: 0,
+            announced: vec![interest.clone()],
+            withdrawn: vec![],
+        });
+        drain_route_chunks(&mut manager);
+    }
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer,
+        session_id: 0,
+        afi: rtc.0,
+        safi: rtc.1,
+    });
+    send_all(&mut output);
+    let route = make_vpn_rib_route_with_rts(SOURCE, 1, vec![rt(100)]);
+    let key = route.key();
+    manager.handle_update(RibUpdate::VpnRoutesReceived {
+        peer: peer_v4(SOURCE),
+        session_id: 0,
+        announced: vec![route],
+        withdrawn: vec![],
+    });
+    drain_route_chunks(&mut manager);
+    let mut wire = TypedWire::new();
+    assert_eq!(
+        apply_typed_wire(&mut wire, &send_all(&mut output)),
+        (usize::from(!add_interest), 0)
+    );
+    assert_eq!(manager.group_ribs[&group].table.vpn_len(), 1);
+    assert_eq!(
+        manager.peer_rt_membership[&peer].matches_any(&[rt(100)]),
+        !add_interest
+    );
+    let _waiter = connect_families(
+        &mut manager,
+        Ipv4Addr::new(192, 0, 2, 83),
+        vec![V4, rtc],
+        true,
+    );
+    assert!(manager.selection_deferred(V4));
+    assert!(manager.selection_deferred(rtc));
+    assert!(!manager.selection_deferred(vpn));
+    manager.owe_eor(peer, V4);
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::RefreshPeerOutbound { peer, reply });
+    response.try_recv().unwrap().unwrap();
+    assert!(manager.force_outbound_peers.contains(&peer));
+    assert!(
+        !manager.dirty_peers.contains(&peer),
+        "a force-only grouped receiver is the reachable case"
+    );
+    assert!(manager.selection_partial_caught_up(peer));
+    apply_typed_wire(&mut wire, &send_all(&mut output));
+    manager.handle_update(RibUpdate::RtcRoutesReceived {
+        peer,
+        session_id: 0,
+        announced: if add_interest {
+            vec![interest.clone()]
+        } else {
+            vec![]
+        },
+        withdrawn: if add_interest {
+            vec![]
+        } else {
+            vec![interest.key()]
+        },
+    });
+    let sibling = make_rtc_rib_route(SOURCE, 200, 100);
+    manager.handle_update(RibUpdate::RtcRoutesReceived {
+        peer: peer_v4(SOURCE),
+        session_id: 0,
+        announced: vec![sibling.clone()],
+        withdrawn: vec![],
+    });
+    drain_route_chunks(&mut manager);
+    assert!(
+        send_all(&mut output).is_empty(),
+        "RTC selection still holds the membership change and peer route"
+    );
+    assert_eq!(
+        manager.peer_rt_membership[&peer].matches_any(&[rt(100)]),
+        !add_interest
+    );
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: peer_v4(Ipv4Addr::new(192, 0, 2, 83)),
+        session_id: 83,
+        afi: rtc.0,
+        safi: rtc.1,
+    });
+    assert!(!manager.selection_deferred(rtc));
+    assert!(manager.selection_deferred(V4));
+    assert_eq!(
+        manager.peer_rt_membership[&peer].matches_any(&[rt(100)]),
+        add_interest
+    );
+    let mut sent = send_all(&mut output);
+    for _ in 0..8 {
+        if !manager.resync_pending(peer) && manager.owing(peer).is_none() {
+            break;
+        }
+        manager.resync_dirty_peers_bounded();
+        sent.extend(send_all(&mut output));
+    }
+    assert!(!manager.resync_pending(peer));
+    assert_eq!(
+        sent.iter()
+            .flat_map(|update| &update.rtc_announce)
+            .filter(|route| route.key() == sibling.key())
+            .count(),
+        1,
+        "the VPN membership delta must not consume the forced replay of the released RTC route"
+    );
+    assert!(sent.iter().all(|update| update.rtc_withdraw.is_empty()));
+    let counts = apply_typed_wire(&mut wire, &sent);
+    assert_eq!(
+        counts,
+        (usize::from(add_interest), usize::from(!add_interest)),
+        "the RTC delta and forced resync must share one VPN emission"
+    );
+    assert_eq!(wire.len(), usize::from(add_interest));
+    assert_eq!(
+        wire.contains_key(&(super::super::outbound_owing::OwedKey::Vpn(key.nlri_key), 0)),
+        add_interest
+    );
+    assert!(sent.iter().all(|update| !update.end_of_rib.contains(&V4)));
+    assert!(manager.eor.owes(peer, V4));
+}
+
+#[test]
+fn rtc_selection_release_covers_routes_when_vpn_interest_is_added() {
+    check_rtc_release_membership_and_routes(true);
+}
+
+#[test]
+fn rtc_selection_release_covers_routes_when_vpn_interest_is_removed() {
+    check_rtc_release_membership_and_routes(false);
+}
