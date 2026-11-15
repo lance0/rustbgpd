@@ -482,6 +482,20 @@ amendment: inbound connections for static peers, which need a lane of their
 own off the command channel; max-prefix restart timers and BFD Up inside a
 generation; and a seam inside the cohort's clean transition.
 
+**Amended:** 2026-11-15 — both authoritative batches defer every changed
+registered residual member, including a session with no currently sendable
+family. Such a session can still regroup and enumerate the Loc-RIB before
+output-family filtering, so the sendable-family test did not bound its work.
+The existing paced forward and restore commands now own those moves too.
+Unchanged chains remain no-ops and absent registrations remain explicit skips.
+If a family becomes sendable between commands, its ordinary live resync uses
+the chain installed then; the later policy command resyncs under its requested
+chain. This adds no separate family-unlock or rollback state.
+
+The pacing limit remains a predicted member budget, not a hard row or time
+bound. One member's full-table operation, shared cohort work and other dirty
+peers reached by the trailing distribution pass retain their existing limits.
+
 ## Context
 
 A live policy reload can move hundreds of route-reflector or route-server
