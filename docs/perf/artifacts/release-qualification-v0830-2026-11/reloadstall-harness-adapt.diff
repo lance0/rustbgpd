@@ -1,0 +1,25 @@
+diff --git a/bench/scale/reloadstall/src/main.rs b/bench/scale/reloadstall/src/main.rs
+index 649b78eae..c4cc6e3a7 100644
+--- a/bench/scale/reloadstall/src/main.rs
++++ b/bench/scale/reloadstall/src/main.rs
+@@ -535,6 +535,20 @@ const RELOAD_OUTCOMES: [&str; 5] = [
+ fn reload_outcomes(body: &str) -> Result<[u64; 5], String> {
+     let mut outcomes = [0; 5];
+     for (index, outcome) in RELOAD_OUTCOMES.iter().enumerate() {
++        // Measurement adaptation (v0.82.0 control): that daemon exports
++        // `ignored_in_flight` instead of `coalesced`; count either, each optional.
++        if *outcome == "coalesced" {
++            let mut sum = 0;
++            for label in ["coalesced", "ignored_in_flight"] {
++                sum += optional_metric_value(
++                    body,
++                    &format!("bgp_sighup_reload_outcomes_total{{outcome=\"{label}\"}}"),
++                )?
++                .unwrap_or(0);
++            }
++            outcomes[index] = sum;
++            continue;
++        }
+         outcomes[index] = metric_value(
+             body,
+             &format!("bgp_sighup_reload_outcomes_total{{outcome=\"{outcome}\"}}"),

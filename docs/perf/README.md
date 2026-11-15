@@ -237,8 +237,9 @@ Its directory under `artifacts/` commits that comparison JSON and a short
 `README.md` listing each stored file with one SHA-256 hash. It does not commit
 raw-file digest rosters, multi-hundred-KB provenance files, seals over the
 receipt's own files, or audit and disposition JSONs. Raw logs and samples stay
-in the CI artifact or campaign directory named by the run link; the commit SHA
-and the artifact digest identify what ran. The deterministic summarizer is the
+in the CI artifact named by the run link. A local campaign has no hosted run:
+its README names the campaign and says what it retains, and the commit SHAs plus
+the stored hashes identify what ran. The artifact digest does so for a hosted run. The deterministic summarizer is the
 audit: when it is wrong, fix it rather than adding a second audit pass.
 
 Verdicts are `PASS`, `FAIL` or `INVALID`, each with a one-line reason. `FAIL`
@@ -265,6 +266,7 @@ records.
 
 | Document | Date stated | Workload or shape | Establishes | Does not establish |
 |---|---|---|---|---|
+| [v0.83.0 release qualification](release-qualification-v0830-2026-11.md) | 2026-11-14 | Candidate against v0.82.0, separately built: reload stall at 700 peers × 400,400 routes (grouped 200:2, distinct 150), the four-shape rrharness matrix and 162 paired Criterion cells, each A/A, ABBA and confirmation | Reload-stall turn bars, grouped-200:2 completion and all rrharness bars pass; distinct-150 completion has no timing verdict because v0.82.0 rolls that reload back and the candidate commits it. Two accepted FAILs: distinct-150 cgroup peak +3–4% (not like-for-like) and 24 Criterion cells, mostly wide fanout at +2–5% | Attribution of the fanout cost, a single-reload memory comparison, replication or multi-host results |
 | [Complete-frame writer admission](writer-byte-budget-2026-11-07.md) | 2026-11-07 | One controlled writer: 2,049 large routes in standard/extended modes, 10,000 distinct global/VPN FlowSpec rules, and 30 outbound timing cells (A/A, ABBA, confirmation) | The writer's queued-byte bound holds under complete-frame admission in all four allocation cases. The timing rule is FAIL: 24 of 30 cells pass and 6 have confirmed regressions; that measured cost was accepted as the cost of the correctness fix | A timing pass, a bound on transient slice preparation, or a general memory claim |
 | [Shared announcement stream retention](shared-stream-retention-2026-11-07.md) | 2026-11-07 | Two-member shared stream with a delayed follower and blocked End-of-RIB; 1M grouped unicast/VPN and 100k diverse IPv4 routes; 13 timing cells | Completed buffers are released before blocked End-of-RIB; frozen allocation, max-observed memory and 13-cell timing bars pass, with an earlier failed replica retained | Daemon-scale memory or a true lifetime peak RSS |
 | [EVPN core-isolation transition loss](evpn-core-isolation-loss-2026-10-20.md) | 2026-10-19 and 2026-10-20 | M121 all-active EVPN lab on one quiet host, one UDP flow at 2,000 frames/s, uplink carrier cut; 48 valid action-arm A/B cycles across two builds on 2026-10-20, plus one action and one control arm on 2026-10-19 | With `[evpn_core_isolation]` enabled the loss window had a median of about 15 ms (worst 35.5 ms); with it disabled every valid cycle lost the flow for the whole 8 s post-cut window | A hardware NIC, ASIC or line-rate bound, another probe rate, or isolation detected only by EVPN session loss |
