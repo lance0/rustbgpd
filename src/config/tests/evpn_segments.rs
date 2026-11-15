@@ -267,15 +267,14 @@ recovery_delay_seconds = 5
     );
 }
 
-/// Both spellings of the hold-off key publish the validator's `0..=3600`
+/// The hold-off key publishes the validator's `0..=3600`
 /// bounds: the bound parses, one past it is rejected.
 #[test]
 fn ethernet_segment_rejects_recovery_delay_out_of_range() {
     let schema: serde_json::Value = serde_json::from_str(&config_json_schema()).unwrap();
     let properties = &schema["$defs"]["EthernetSegmentConfig"]["properties"];
-    assert_eq!(properties["recovery_delay_seconds"].get("deprecated"), None);
-    assert_eq!(properties["recovery_delay_secs"]["deprecated"], true);
-    for key in ["recovery_delay_seconds", "recovery_delay_secs"] {
+    assert!(properties.get("recovery_delay_secs").is_none());
+    for key in ["recovery_delay_seconds"] {
         assert_eq!(properties[key]["minimum"], 0, "{key} schema minimum");
         assert_eq!(properties[key]["maximum"], 3600, "{key} schema maximum");
         let segment = |value: u64| {
@@ -308,7 +307,7 @@ interface = "eth1"
 }
 
 #[test]
-fn ethernet_segment_accepts_legacy_recovery_delay_secs_spelling() {
+fn ethernet_segment_rejects_removed_recovery_delay_secs_spelling() {
     let segment = |key: &str| {
         evpn_toml_with(&format!(
             r#"
@@ -327,14 +326,18 @@ interface = "eth1"
 "#
         ))
     };
-    let legacy = parse(&segment("recovery_delay_secs")).unwrap();
-    let canonical = parse(&segment("recovery_delay_seconds")).unwrap();
-    assert_eq!(legacy.ethernet_segments[0].recovery_delay_seconds, Some(12));
-    assert_eq!(legacy.ethernet_segments, canonical.ethernet_segments);
-
-    let both = segment("recovery_delay_secs = 12\nrecovery_delay_seconds");
-    let err = parse(&both).unwrap_err().to_string();
-    assert!(err.contains("duplicate field"), "{err}");
+    let err = parse(&segment("recovery_delay_secs"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("unknown field `recovery_delay_secs`"), "{err}");
+    let err =
+        Config::load_toml_with_diagnostics(&segment("recovery_delay_secs"), "removed").unwrap_err();
+    assert!(
+        err.contains("`recovery_delay_secs` in ethernet_segments was removed; rename it to `recovery_delay_seconds`"),
+        "{err}"
+    );
+    let ok = parse(&segment("recovery_delay_seconds")).unwrap();
+    assert_eq!(ok.ethernet_segments[0].recovery_delay_seconds, Some(12));
 }
 
 #[test]

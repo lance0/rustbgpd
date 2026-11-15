@@ -632,8 +632,8 @@ families = ["ipv4_unicast", "ipv6_unicast"]
 # derivable next hop without this. Unrelated to ADR-0113, but without it the
 # IPv6 half of the evidence would silently measure nothing.
 local_ipv6_nexthop = "2001:db8:ffff::ffff"
-max_prefixes_out_ipv4 = {v4}
-max_prefixes_out_ipv6 = {v6}
+max_prefixes_out_ipv4_unicast = {v4}
+max_prefixes_out_ipv6_unicast = {v6}
 
 # Same staging profile, no maxima: this group's member must land in the same
 # update group as the capped one.
@@ -672,8 +672,8 @@ hold_time = 180
 families = ["ipv4_unicast", "ipv6_unicast"]
 route_server_client = true
 per_client_best = true
-max_prefixes_out_ipv4 = {v4}
-max_prefixes_out_ipv6 = {v6}
+max_prefixes_out_ipv4_unicast = {v4}
+max_prefixes_out_ipv6_unicast = {v6}
 "#
     );
     std::fs::write(path, body).expect("write config generation");

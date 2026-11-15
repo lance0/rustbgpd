@@ -2403,7 +2403,98 @@ enforcement = \"tier\"\n\
 
 fn retired_key_error(content: &str) -> Option<String> {
     let document: toml::Value = toml::from_str(content).ok()?;
-    legacy_grpc_enforcement_error(&document).or_else(|| retired_access_mode_error(&document))
+    legacy_grpc_enforcement_error(&document)
+        .or_else(|| retired_access_mode_error(&document))
+        .or_else(|| renamed_key_error(&document))
+}
+
+/// Key spellings removed in favor of a renamed key, per TOML table kind:
+/// (table, old, new).
+const RENAMED_KEYS: &[(&str, &str, &str)] = &[
+    (
+        "neighbors",
+        "max_prefixes_ipv4",
+        "max_prefixes_ipv4_unicast",
+    ),
+    (
+        "neighbors",
+        "max_prefixes_ipv6",
+        "max_prefixes_ipv6_unicast",
+    ),
+    (
+        "neighbors",
+        "max_prefixes_received_ipv4",
+        "max_prefixes_received_ipv4_unicast",
+    ),
+    (
+        "neighbors",
+        "max_prefixes_received_ipv6",
+        "max_prefixes_received_ipv6_unicast",
+    ),
+    (
+        "neighbors",
+        "max_prefixes_out_ipv4",
+        "max_prefixes_out_ipv4_unicast",
+    ),
+    (
+        "neighbors",
+        "max_prefixes_out_ipv6",
+        "max_prefixes_out_ipv6_unicast",
+    ),
+    (
+        "peer_groups",
+        "max_prefixes_ipv4",
+        "max_prefixes_ipv4_unicast",
+    ),
+    (
+        "peer_groups",
+        "max_prefixes_ipv6",
+        "max_prefixes_ipv6_unicast",
+    ),
+    (
+        "peer_groups",
+        "max_prefixes_received_ipv4",
+        "max_prefixes_received_ipv4_unicast",
+    ),
+    (
+        "peer_groups",
+        "max_prefixes_received_ipv6",
+        "max_prefixes_received_ipv6_unicast",
+    ),
+    (
+        "peer_groups",
+        "max_prefixes_out_ipv4",
+        "max_prefixes_out_ipv4_unicast",
+    ),
+    (
+        "peer_groups",
+        "max_prefixes_out_ipv6",
+        "max_prefixes_out_ipv6_unicast",
+    ),
+    (
+        "ethernet_segments",
+        "recovery_delay_secs",
+        "recovery_delay_seconds",
+    ),
+];
+
+/// Name the replacement for a removed key spelling. `[[neighbors]]`,
+/// `[[ethernet_segments]]` are arrays of tables; `[peer_groups.<name>]` is a
+/// table of tables.
+fn renamed_key_error(document: &toml::Value) -> Option<String> {
+    RENAMED_KEYS.iter().find_map(|&(table, old, new)| {
+        let tables: Vec<&toml::Value> = match document.get(table)? {
+            toml::Value::Array(items) => items.iter().collect(),
+            toml::Value::Table(groups) => groups.values().collect(),
+            _ => return None,
+        };
+        tables.iter().any(|t| t.get(old).is_some()).then(|| {
+            format!(
+                "`{old}` in {table} was removed; rename it to `{new}` \
+                 (migration: docs/reference/configuration.md)"
+            )
+        })
+    })
 }
 
 fn legacy_grpc_enforcement_error(document: &toml::Value) -> Option<String> {
