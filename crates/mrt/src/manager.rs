@@ -1000,11 +1000,15 @@ mod tests {
             }
         }
         let (dropped_tx, dropped_rx) = std::sync::mpsc::channel();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
         let (returning_tx, returning_rx) = std::sync::mpsc::channel();
         let handle = tokio::spawn(async move {
             let cancelled = AtomicBool::new(false);
             MrtManager::encode_step(
                 move || {
+                    started_tx.send(()).unwrap();
+                    go_rx.recv().unwrap();
                     returning_tx.send(()).unwrap();
                     Ok(Probe(dropped_tx))
                 },
@@ -1014,11 +1018,15 @@ mod tests {
             .await
             .map(drop)
         });
-        // The test runtime has one thread, so the step's owner cannot run
-        // again while this thread blocks: the finished result stays untaken.
-        while returning_rx.try_recv().is_err() {
+        // The closure blocks on `go`, so the task cannot finish while the
+        // test yields. Once it has started, the test never yields again:
+        // the one-thread runtime cannot poll the task until `abort()`, so
+        // the finished result stays untaken.
+        while started_rx.try_recv().is_err() {
             tokio::task::yield_now().await;
         }
+        go_tx.send(()).unwrap();
+        returning_rx.recv().unwrap();
         // Give the pool time to store the result in the JoinHandle; a result
         // not yet stored would be dropped on the pool and hide a regression.
         std::thread::sleep(Duration::from_millis(100));
