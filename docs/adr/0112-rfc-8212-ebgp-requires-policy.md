@@ -302,6 +302,22 @@ An integration receipt must use a real eBGP session and real route exchange;
 mock-only policy presence is insufficient. It must disclose the enabled family
 set and include at least one unicast and one non-unicast route.
 
+## Amendment (2026-11-15): every import change is qualified for Route Refresh
+
+The no-capability rejection above covered only policy-presence transitions.
+An ordinary import chain edit for an Established peer without Route Refresh
+was hot-applied, failed at its refresh and was rolled back. UPDATEs the
+session received between the hot-apply and the rollback were judged under the
+candidate chain and stayed accepted, while the edit was reported as cleanly
+restored. The snapshot preflight and the owned in-place neighbor update now
+qualify every target whose import chain changes, and reject an Established
+session whose negotiated capabilities omit Route Refresh before any session is
+modified. The rejection names the peer and the remedy: disable the neighbor,
+apply the edit, then enable it, so the session relearns its routes under the
+new chain. A clear or reconnect alone does not help, because the
+re-established session still lacks the capability. The presence-only
+GR/LLGR retained-state check is unchanged.
+
 ## Rejected alternatives
 
 - **Change `evaluate_chain(None, ...)` to deny globally.** This would silently

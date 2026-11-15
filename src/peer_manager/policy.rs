@@ -1157,46 +1157,125 @@ impl PeerManager {
         self.await_with_readiness(bounded, operator_reads).await
     }
 
-    /// ADR-0112: qualify every target whose RFC 8212 import verdict would move,
-    /// before the snapshot mutates any peer.
+    /// ADR-0112: may this peer take a live import chain change right now?
+    /// Read-only, like [`Self::qualify_rfc8212_import_transition`].
+    ///
+    /// An Established session that did not negotiate Route Refresh cannot be
+    /// asked to resend what it already sent, so the change could never be
+    /// converged. Hot-applying it anyway and rolling back on the failed
+    /// refresh is not a rollback: every UPDATE the session judged under the
+    /// candidate chain in between stays accepted. Only that positive answer
+    /// rejects. Any other answer keeps the ordinary apply path, which fails
+    /// closed on its own probe and refresh.
+    pub(super) async fn qualify_import_change(
+        &mut self,
+        peer_key: &PeerKey,
+        operator_reads: OperatorReadAdmission,
+    ) -> Result<(), PolicyApplyFailure> {
+        let Some(managed) = self.peers.get(peer_key) else {
+            return Ok(());
+        };
+        let commands = managed.handle().commands_sender();
+        let state = self
+            .await_with_readiness(
+                rustbgpd_transport::PeerHandle::query_state_outcome_with(
+                    commands,
+                    PEER_QUERY_TIMEOUT,
+                ),
+                operator_reads,
+            )
+            .await;
+        self.drain_readiness_queries().await;
+        self.drain_operator_queries(operator_reads).await;
+        if let StateQueryOutcome::State(state) = state
+            && state.fsm_state == SessionState::Established
+            && state
+                .negotiated_session
+                .is_some_and(|negotiated| !negotiated.peer_route_refresh)
+        {
+            return Err(PolicyApplyFailure {
+                code: RuntimeConfigPolicyFailureCode::PreflightRejected,
+                message: format!(
+                    "{peer_key}: cannot change the import policy of an Established session that \
+                 did not negotiate Route Refresh (RFC 2918): the routes it already sent cannot \
+                 be re-evaluated under the new chain; disable the neighbor (rbgp neighbor \
+                 {} disable), apply the change, then enable it so the peer resends its routes \
+                 under the new chain",
+                    peer_key.address
+                ),
+                refresh_delivery_began: false,
+            });
+        }
+        Ok(())
+    }
+
+    /// Whether `candidate_import` changes the import chain this peer's session
+    /// holds, by the same test the per-peer apply uses to decide on a refresh.
+    pub(super) fn import_chain_changes(
+        &self,
+        peer_key: &PeerKey,
+        candidate_import: Option<&PolicyChain>,
+    ) -> bool {
+        self.peers.get(peer_key).is_some_and(|managed| {
+            managed.import_install_unknown || managed.import_policy.as_ref() != candidate_import
+        })
+    }
+
+    /// ADR-0112: qualify every target whose import chain would change, before
+    /// the snapshot mutates any peer. An RFC 8212 presence transition takes the
+    /// stricter [`Self::qualify_rfc8212_import_transition`]; any other import
+    /// change takes [`Self::qualify_import_change`].
     ///
     /// A multi-peer edit is all-or-nothing on this rule: one unqualified peer
     /// rejects the whole set with zero peers touched, rather than letting the
     /// qualified peers commit and leaving the caller to reason about a partial
     /// fleet. Every unqualified peer is named, so one round trip tells the
     /// operator the full remediation list.
-    async fn preflight_rfc8212_import_transitions(
+    async fn preflight_import_transitions(
         &mut self,
         targets: &[ResolvedPeerPolicy],
         rib_budget: &mut LazyRibBudget,
         operator_reads: OperatorReadAdmission,
     ) -> Result<(), PolicyApplyFailure> {
-        let transitioning: Vec<PeerKey> = targets
+        let transitioning: Vec<(PeerKey, bool)> = targets
             .iter()
-            .map(|target| PeerKey::new(target.address, target.interface.clone()))
-            .zip(targets)
-            .filter(|(peer_key, target)| {
-                self.rfc8212_import_presence_transition(peer_key, target.import_policy.as_ref())
+            .filter_map(|target| {
+                let peer_key = PeerKey::new(target.address, target.interface.clone());
+                let import = target.import_policy.as_ref();
+                if self.rfc8212_import_presence_transition(&peer_key, import) {
+                    Some((peer_key, true))
+                } else if self.import_chain_changes(&peer_key, import) {
+                    Some((peer_key, false))
+                } else {
+                    None
+                }
             })
-            .map(|(peer_key, _)| peer_key)
             .collect();
         if transitioning.is_empty() {
             return Ok(());
         }
 
         let mut rejections = Vec::new();
-        for peer_key in &transitioning {
-            if let Err(error) = self
-                .qualify_rfc8212_import_transition(peer_key, Some(&mut *rib_budget), operator_reads)
+        for (peer_key, presence) in &transitioning {
+            let qualified = if *presence {
+                self.qualify_rfc8212_import_transition(
+                    peer_key,
+                    Some(&mut *rib_budget),
+                    operator_reads,
+                )
                 .await
-            {
+                .map(|_| ())
+            } else {
+                self.qualify_import_change(peer_key, operator_reads).await
+            };
+            if let Err(error) = qualified {
                 rejections.push(error);
             }
         }
         if rejections.is_empty() {
             info!(
                 peers = transitioning.len(),
-                "qualified RFC 8212 import policy-presence transitions for live apply"
+                "qualified import policy changes for live apply"
             );
             return Ok(());
         }
@@ -1212,8 +1291,7 @@ impl PeerManager {
         Err(PolicyApplyFailure {
             code,
             message: format!(
-                "rejected {} of {} RFC 8212 import policy-presence transition(s); no peer was \
-             modified: {}",
+                "rejected {} of {} live import policy change(s); no peer was modified: {}",
                 rejections.len(),
                 transitioning.len(),
                 rejections
@@ -1423,9 +1501,10 @@ impl PeerManager {
         // Preparation includes preflight and session setup, even when it
         // rejects before reaching a destination prestage or commit.
         self.operator_read_seam = super::OperatorReadSeam::Prestage;
-        // ADR-0112: qualify RFC 8212 import-presence transitions before
-        // anything below can touch a peer, so one incapable peer rejects the
-        // whole edit rather than being discovered mid-fanout and unwound.
+        // ADR-0112: qualify every import chain change, RFC 8212 presence
+        // transitions included, before anything below can touch a peer, so
+        // one incapable peer rejects the whole edit rather than being
+        // discovered mid-fanout and unwound.
         let preflight_started = Instant::now();
         // The forward RIB budget: the presence proofs below share it as one
         // absolute deadline and it is then reset, so the authoritative walk
@@ -1439,11 +1518,7 @@ impl PeerManager {
             operator_reads,
         };
         let preflight = self
-            .preflight_rfc8212_import_transitions(
-                &targets,
-                &mut context.forward,
-                context.operator_reads,
-            )
+            .preflight_import_transitions(&targets, &mut context.forward, context.operator_reads)
             .await;
         phases.preflight_us = elapsed_us(preflight_started);
         preflight

@@ -1642,6 +1642,22 @@ impl PeerManager {
         if !self.peers.contains_key(&peer) {
             return OwnedHotUpdatePeerOutcome::RejectedNoEffect(PeerLifecycleError::NotFound(peer));
         }
+        // The policy step runs first, so refusing its import change here
+        // leaves the whole update without effect.
+        if self.import_chain_changes(&peer, config.import_policy.as_ref())
+            && let Err(failure) = self
+                .qualify_import_change(
+                    &peer,
+                    OperatorReadAdmission::Fenced {
+                        reason: "an inline hot update qualifies its import change before any effect",
+                    },
+                )
+                .await
+        {
+            return OwnedHotUpdatePeerOutcome::RejectedNoEffect(PeerLifecycleError::Precondition(
+                failure.to_string(),
+            ));
+        }
         match self.hot_update_peer_in_place(config).await {
             Ok(()) => OwnedHotUpdatePeerOutcome::Success,
             Err(error) => OwnedHotUpdatePeerOutcome::KnownDivergence(error),

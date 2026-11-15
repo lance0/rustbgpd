@@ -1,10 +1,12 @@
 use super::*;
 use rustbgpd_rib::PeerId;
 
-/// A policy-acking peer with a controllable first and subsequent state-query
-/// result. `None` drops the reply and produces a typed session-gone outcome.
+/// A policy-acking peer whose first `first_queries` state queries answer
+/// `first_state` and every later one `subsequent_state`. `None` drops the
+/// reply and produces a typed session-gone outcome.
 fn sequenced_policy_state_handle(
     peer_addr: IpAddr,
+    first_queries: u32,
     first_state: Option<SessionState>,
     subsequent_state: Option<SessionState>,
 ) -> PeerHandle {
@@ -16,7 +18,8 @@ fn sequenced_policy_state_handle(
         while let Some(cmd) = session_rx.recv().await {
             match cmd {
                 PeerCommand::QueryState { reply } => {
-                    let first = state_queries_in_task.fetch_add(1, Ordering::SeqCst) == 0;
+                    let first =
+                        state_queries_in_task.fetch_add(1, Ordering::SeqCst) < first_queries;
                     let Some(state) = (if first { first_state } else { subsequent_state }) else {
                         drop(reply);
                         continue;
@@ -243,10 +246,11 @@ async fn owned_policy_cohort_failure_reports_fully_compensated() {
     rib_driver.await.unwrap();
 }
 
-/// A peer handle that acks policy hot-applies but rejects Route Refresh, as a
-/// peer that did not negotiate the Route Refresh capability would (the session
-/// returns "peer lacks Route Refresh capability"). Used to verify a live-impact
-/// apply rejects an Established non-RR peer cleanly.
+/// A peer handle that acks policy hot-applies but rejects Route Refresh. Its
+/// state answer carries no negotiated projection, so the import preflight
+/// cannot predict the refusal: it drives the rollback after a refresh fails
+/// at apply time. `import_recording_handle` is the coherent session without
+/// the capability.
 fn route_refresh_failing_handle(peer_addr: IpAddr, state: SessionState) -> PeerHandle {
     use rustbgpd_transport::{PeerCommand, PeerCommandError};
     let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
@@ -425,8 +429,11 @@ async fn assert_non_established_rollback_rib_outcome(
     insert_test_managed_peer(
         &mut mgr,
         flapping.addr(),
+        // Established for the import change's preflight qualification and
+        // the forward apply's probe; the rollback probe sees the flap.
         sequenced_policy_state_handle(
             flapping.addr(),
+            2,
             Some(SessionState::Established),
             match rollback_outcome {
                 NonEstablishedRollbackRibOutcome::SessionGoneNotFound => None,
@@ -791,7 +798,7 @@ async fn ordinary_export_apply_unknown_state_rearms_until_established_retry() {
     insert_test_managed_peer(
         &mut mgr,
         peer.addr(),
-        sequenced_policy_state_handle(peer.addr(), None, Some(SessionState::Established)),
+        sequenced_policy_state_handle(peer.addr(), 1, None, Some(SessionState::Established)),
         false,
     );
     let next = deny_policy_chain();
@@ -1324,77 +1331,284 @@ remote_asn = 65030
     );
 }
 
+/// A session that answers as a real one does with or without Route Refresh:
+/// its negotiated projection carries the capability, it refuses
+/// `SendRouteRefresh` without it, and it records every import chain it is
+/// told to install. An UPDATE that arrives while the session holds a chain is
+/// judged under that chain, so a recorded install is the window in which the
+/// session can accept routes under it.
+fn import_recording_handle(
+    peer_addr: IpAddr,
+    route_refresh: bool,
+    installed: Arc<std::sync::Mutex<Vec<Option<PolicyChain>>>>,
+    refreshes: Arc<AtomicUsize>,
+) -> PeerHandle {
+    use rustbgpd_transport::{PeerCommand, PeerCommandError};
+    let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
+    let task = tokio::spawn(async move {
+        while let Some(cmd) = session_rx.recv().await {
+            match cmd {
+                PeerCommand::QueryState { reply } => {
+                    let mut state = policy_test_peer_state(peer_addr, SessionState::Established);
+                    state.negotiated_session = Some(test_negotiated_session(route_refresh));
+                    let _ = reply.send(state);
+                }
+                PeerCommand::UpdateImportPolicy { policy, reply } => {
+                    installed.lock().unwrap().push(policy.map(|chain| *chain));
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::UpdateExportPolicy { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::SendRouteRefresh { reply, .. } => {
+                    if route_refresh {
+                        refreshes.fetch_add(1, Ordering::SeqCst);
+                        let _ = reply.send(Ok(()));
+                    } else {
+                        let _ = reply.send(Err(PeerCommandError::RouteRefreshUnsupported));
+                    }
+                }
+                PeerCommand::Shutdown | PeerCommand::Stop { .. } | PeerCommand::CollisionDump => {
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(session_tx, task)
+}
+
+type InstalledImports = Arc<std::sync::Mutex<Vec<Option<PolicyChain>>>>;
+
+fn install_import_recording_peer(
+    mgr: &mut PeerManager,
+    addr: IpAddr,
+    route_refresh: bool,
+    prior: Option<PolicyChain>,
+) -> (InstalledImports, Arc<AtomicUsize>) {
+    let installed = InstalledImports::default();
+    let refreshes = Arc::new(AtomicUsize::new(0));
+    insert_test_managed_peer(
+        mgr,
+        addr,
+        import_recording_handle(
+            addr,
+            route_refresh,
+            Arc::clone(&installed),
+            Arc::clone(&refreshes),
+        ),
+        false,
+    );
+    mgr.peers.get_mut(&key(addr)).unwrap().import_policy = prior;
+    (installed, refreshes)
+}
+
+/// ADR-0112: an Established peer that never negotiated Route Refresh cannot
+/// re-evaluate the routes it already sent, so an import chain edit for it is
+/// rejected before its session is told about the candidate chain.
+///
+/// Load-bearing: hot-applying the candidate and rolling back after the
+/// refused refresh records the candidate install, and every UPDATE the
+/// session judged in between would stay accepted under it.
 #[tokio::test]
 async fn apply_resolved_policy_snapshot_rejects_non_route_refresh_peer_cleanly() {
     use rustbgpd_api::peer_types::ResolvedPeerPolicy;
 
-    // An Established peer that never negotiated Route Refresh can't be
-    // soft-refreshed, so a live-impact apply that needs to re-evaluate its
-    // existing AdjRibIn under the new policy must reject. The rollback must be
-    // clean (prior chain restored) — not a compound "restore also failed", since
-    // the doomed rollback refresh is best-effort.
-    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
-    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(64);
-    let rib_drainer = tokio::spawn(async move {
-        while let Some(update) = rib_rx.recv().await {
-            if let RibUpdate::ReplacePeerExportPolicy { reply, .. } = update {
-                let _ = reply.send(Ok(()));
-            }
-        }
-    });
-    let mut mgr = PeerManager::new(
-        cmd_rx,
-        65001,
-        Ipv4Addr::new(10, 0, 0, 1),
-        None,
-        None,
-        BgpMetrics::new(),
-        rib_tx,
-        None,
-    );
+    let (mut mgr, rib_rx) = rfc8212_status_manager();
+    let rib = spawn_rfc8212_rib_stub(rib_rx, 0);
     let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-    insert_test_managed_peer(
-        &mut mgr,
-        addr,
-        route_refresh_failing_handle(addr, SessionState::Established),
-        false,
-    );
     let prior = validation_policy_chain(ImportValidationDependency::Rpki);
-    mgr.peers.get_mut(&key(addr)).unwrap().import_policy = Some(prior.clone());
+    let (installed, refreshes) =
+        install_import_recording_peer(&mut mgr, addr, false, Some(prior.clone()));
 
-    let targets = vec![ResolvedPeerPolicy {
-        address: addr,
-        interface: None,
-        import_policy: Some(deny_policy_chain()),
-        export_policy: None,
-    }];
     let err = mgr
-        .apply_resolved_policy_snapshot(targets)
+        .apply_resolved_policy_snapshot(vec![ResolvedPeerPolicy {
+            address: addr,
+            interface: None,
+            import_policy: Some(deny_policy_chain()),
+            export_policy: None,
+        }])
         .await
         .unwrap_err();
 
-    assert!(
-        err.to_lowercase().contains("route refresh"),
-        "rejection should cite the Route Refresh failure: {err}"
-    );
-    assert!(
-        err.contains("already-applied peers restored"),
-        "rollback should be clean: {err}"
-    );
-    assert!(
-        !err.contains("restoring already-applied peers also failed"),
-        "rollback must not be a compound failure for a non-RR peer: {err}"
-    );
+    let installs = installed.lock().unwrap().len();
     assert_eq!(
-        format!("{:?}", mgr.peers.get(&key(addr)).unwrap().import_policy),
-        format!("{:?}", Some(prior)),
-        "the peer's import policy must be restored to its prior chain"
+        installs, 0,
+        "the session must never hold the candidate import chain ({err})"
     );
     assert!(
-        !mgr.peers.get(&key(addr)).unwrap().pending_refresh,
-        "a rejected non-RR apply must restore the prior pending_refresh state"
+        err.contains("did not negotiate Route Refresh") && err.contains("disable"),
+        "the rejection must name the missing capability and the remedy: {err}"
     );
-    rib_drainer.abort();
+    assert!(
+        err.contains("no peer was modified"),
+        "the rejection must come before any mutation: {err}"
+    );
+    assert_eq!(refreshes.load(Ordering::SeqCst), 0);
+    let managed = mgr.peers.get(&key(addr)).unwrap();
+    assert_eq!(managed.import_policy, Some(prior));
+    assert!(
+        !managed.pending_refresh && !managed.pending_export_apply,
+        "a rejection before mutation must not arm retry intent"
+    );
+
+    drop(mgr);
+    rib.await.unwrap();
+}
+
+/// A multi-peer import edit is all-or-nothing on the Route Refresh rule: one
+/// incapable peer rejects it before the capable peer's session is touched,
+/// and the same edit without it commits and refreshes. The second half keeps
+/// the rule from passing by rejecting every import edit.
+#[tokio::test]
+async fn import_edit_preflight_rejects_the_whole_snapshot_before_any_session_mutation() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let (mut mgr, rib_rx) = rfc8212_status_manager();
+    let rib = spawn_rfc8212_rib_stub(rib_rx, 0);
+    let capable = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let incapable = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let prior = validation_policy_chain(ImportValidationDependency::Rpki);
+    let (capable_installed, capable_refreshes) =
+        install_import_recording_peer(&mut mgr, capable, true, Some(prior.clone()));
+    let (incapable_installed, incapable_refreshes) =
+        install_import_recording_peer(&mut mgr, incapable, false, Some(prior.clone()));
+    let target = |address| ResolvedPeerPolicy {
+        address,
+        interface: None,
+        import_policy: Some(deny_policy_chain()),
+        export_policy: None,
+    };
+
+    let err = mgr
+        .apply_resolved_policy_snapshot(vec![target(capable), target(incapable)])
+        .await
+        .unwrap_err();
+    assert!(
+        err.contains("rejected 1 of 2") && err.contains(&incapable.to_string()),
+        "the rejection must name the incapable peer: {err}"
+    );
+    assert!(
+        capable_installed.lock().unwrap().is_empty()
+            && incapable_installed.lock().unwrap().is_empty(),
+        "no session may hold the candidate import chain"
+    );
+    assert_eq!(capable_refreshes.load(Ordering::SeqCst), 0);
+    assert_eq!(incapable_refreshes.load(Ordering::SeqCst), 0);
+    for peer in [capable, incapable] {
+        assert_eq!(mgr.peers[&key(peer)].import_policy, Some(prior.clone()));
+    }
+
+    mgr.apply_resolved_policy_snapshot(vec![target(capable)])
+        .await
+        .expect("a capable peer alone takes the import edit");
+    assert_eq!(
+        *capable_installed.lock().unwrap(),
+        vec![Some(deny_policy_chain())]
+    );
+    assert_eq!(capable_refreshes.load(Ordering::SeqCst), 1);
+
+    drop(mgr);
+    rib.await.unwrap();
+}
+
+/// The gRPC live-policy path: an owned catalog edit that changes an incapable
+/// peer's import chain is `FAILED_PRECONDITION` with nothing mutated, neither
+/// the running config nor the session.
+#[tokio::test]
+async fn owned_import_chain_edit_for_a_peer_without_route_refresh_has_no_effect() {
+    use rustbgpd_api::peer_types::{
+        CatalogMutationError, ConfigEvent, NamedPolicyDefinition, OwnedCatalogMutationOutcome,
+        PolicyStatementDefinition,
+    };
+    use rustbgpd_api::runtime_config_settlement::RuntimeConfigPolicyFailureCode;
+
+    let (mut mgr, rib_rx) = rfc8212_status_manager();
+    let rib = spawn_rfc8212_rib_stub(rib_rx, 0);
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+    mgr.current_config.global.ebgp_requires_policy = Some(false);
+    mgr.current_config.policy.import_chain.clear();
+    mgr.current_config.policy.export_chain.clear();
+    *mgr.current_config.neighbors = vec![config_neighbor(addr, 65002)];
+    let setup = mgr
+        .apply_policy_change_owned(
+            ConfigEvent::SetPolicy {
+                name: "edge-in".to_string(),
+                definition: NamedPolicyDefinition {
+                    default_action: "deny".to_string(),
+                    statements: Vec::<PolicyStatementDefinition>::new(),
+                },
+                ack: None,
+            },
+            None,
+        )
+        .await;
+    assert!(
+        matches!(setup, OwnedCatalogMutationOutcome::Success),
+        "policy setup failed: {setup:?}"
+    );
+
+    let (installed, refreshes) = install_import_recording_peer(&mut mgr, addr, false, None);
+    let outcome = mgr
+        .apply_policy_change_owned(
+            ConfigEvent::SetGlobalImportChain {
+                policy_names: vec!["edge-in".to_string()],
+                ack: None,
+            },
+            None,
+        )
+        .await;
+    let OwnedCatalogMutationOutcome::RejectedNoEffect(error) = outcome else {
+        panic!("an incapable live peer must reject the owned import edit: {outcome:?}")
+    };
+    assert!(matches!(
+        error,
+        CatalogMutationError::FailedPrecondition(ref message)
+            if message == RuntimeConfigPolicyFailureCode::PreflightRejected.as_str()
+    ));
+    assert_eq!(mgr.current_config.policy.import_chain.len(), 0);
+    assert!(installed.lock().unwrap().is_empty());
+    assert_eq!(refreshes.load(Ordering::SeqCst), 0);
+    assert_eq!(mgr.peers[&key(addr)].import_policy, None);
+
+    drop(mgr);
+    rib.await.unwrap();
+}
+
+/// The sequential reload's in-place neighbor update: an import edit for an
+/// incapable peer is refused with no effect instead of hot-applying the
+/// candidate and reporting known divergence after the refused refresh.
+#[tokio::test]
+async fn owned_hot_update_import_edit_for_a_peer_without_route_refresh_has_no_effect() {
+    use rustbgpd_api::peer_types::{OwnedHotUpdatePeerOutcome, PeerLifecycleError};
+
+    let (mut mgr, rib_rx) = rfc8212_status_manager();
+    let rib = spawn_rfc8212_rib_stub(rib_rx, 0);
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let prior = validation_policy_chain(ImportValidationDependency::Rpki);
+    let (installed, refreshes) =
+        install_import_recording_peer(&mut mgr, addr, false, Some(prior.clone()));
+    let mut config = make_config(addr, 65002);
+    config.import_policy = Some(deny_policy_chain());
+
+    let outcome = mgr.hot_update_peer_owned(config).await;
+    assert!(
+        matches!(
+            outcome,
+            OwnedHotUpdatePeerOutcome::RejectedNoEffect(PeerLifecycleError::Precondition(ref message))
+                if message.contains("did not negotiate Route Refresh")
+        ),
+        "an incapable peer must refuse the hot import edit with no effect: {outcome:?}"
+    );
+    assert!(installed.lock().unwrap().is_empty());
+    assert_eq!(refreshes.load(Ordering::SeqCst), 0);
+    let managed = mgr.peers.get(&key(addr)).unwrap();
+    assert_eq!(managed.import_policy, Some(prior));
+    assert!(!managed.pending_refresh);
+
+    drop(mgr);
+    rib.await.unwrap();
 }
 
 #[tokio::test]
@@ -2371,7 +2585,9 @@ async fn failed_rollback_refresh_after_unacknowledged_import_is_not_exact() {
 async fn rollback_probe_timeout_does_not_skip_the_refresh_obligation() {
     let script = Arc::new(WindowSessionScript {
         held_refreshes: AtomicUsize::new(usize::MAX),
-        answered_queries: Some(1),
+        // The import change's preflight qualification and B's forward probe;
+        // the rollback probe goes unanswered.
+        answered_queries: Some(2),
         ..WindowSessionScript::default()
     });
     let rollback = WindowRollback::run(false, &script).await;

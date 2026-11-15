@@ -208,9 +208,12 @@ fn hold_first_state(command: &PeerCommand, index: usize) -> SessionAction {
     }
 }
 
-fn hold_second_state(command: &PeerCommand, index: usize) -> SessionAction {
+/// An import-moving forward drive queries each session first in the import
+/// preflight and again in cohort admission, so its third query is the first
+/// one inside the cohort transaction.
+fn hold_third_state(command: &PeerCommand, index: usize) -> SessionAction {
     match command {
-        PeerCommand::QueryState { .. } if index == 1 => SessionAction::Hold,
+        PeerCommand::QueryState { .. } if index == 2 => SessionAction::Hold,
         _ => SessionAction::Answer,
     }
 }
@@ -255,7 +258,8 @@ fn hold_first_export_apply(command: &PeerCommand, index: usize) -> SessionAction
 fn fail_export_then_hold_state(command: &PeerCommand, index: usize) -> SessionAction {
     match (command, index) {
         (PeerCommand::UpdateExportPolicy { .. }, 0) => SessionAction::Fail,
-        (PeerCommand::QueryState { .. }, 1) => SessionAction::Hold,
+        // After the import preflight's and cohort admission's queries.
+        (PeerCommand::QueryState { .. }, 2) => SessionAction::Hold,
         _ => SessionAction::Answer,
     }
 }
@@ -363,6 +367,20 @@ const WAIT_SITES: &[WaitSite] = &[
         completion: Completion::ImportApplied,
     },
     WaitSite {
+        site: "policy.rs::qualify_import_change",
+        awaits: "PeerCommand::QueryState of each import-moving target (preflight)",
+        drive: Drive::ForwardCohort {
+            import_delta: true,
+            cohort_reply: CohortReply::Committed,
+        },
+        rib: RibHold::None,
+        session: hold_first_state,
+        additional_entry: None,
+        window: HALF_QUERY,
+        contract: Contract::Served,
+        completion: Completion::ExportApplied,
+    },
+    WaitSite {
         site: "policy.rs::export_only_policy_cohort_mask",
         awaits: "PeerCommand::QueryState of each winning cohort member",
         drive: FORWARD_COHORT,
@@ -448,7 +466,7 @@ const WAIT_SITES: &[WaitSite] = &[
             cohort_reply: CohortReply::Committed,
         },
         rib: RibHold::None,
-        session: hold_second_state,
+        session: hold_third_state,
         additional_entry: None,
         window: HALF_QUERY,
         contract: Contract::Served,

@@ -213,14 +213,15 @@ fn shared_clean_state_test_session(
                 PeerCommand::QueryState { reply } => {
                     let query = probe.queries.fetch_add(1, Ordering::SeqCst) + 1;
                     match query {
-                        // Cohort admission sees every member Established.
-                        1 => {
+                        // The import change's preflight qualification and
+                        // cohort admission see every member Established.
+                        1 | 2 => {
                             let _ =
                                 reply.send(policy_test_peer_state(addr, SessionState::Established));
                         }
                         // The deferred-refresh probe misses its ordinary
                         // per-peer deadline and enters the shared retry window.
-                        2 => {
+                        3 => {
                             tokio::spawn(async move {
                                 tokio::time::sleep(PEER_QUERY_TIMEOUT * 2).await;
                                 let _ = reply
@@ -230,7 +231,7 @@ fn shared_clean_state_test_session(
                         // Healthy earlier peers consume part of the shared
                         // window before replying. The final peer withholds its
                         // retry past the shared deadline.
-                        3 => {
+                        4 => {
                             *probe.retry_started.lock().unwrap() =
                                 Some(tokio::time::Instant::now());
                             tokio::spawn(async move {
@@ -624,7 +625,7 @@ async fn clean_state_cohort_shares_retry_window_and_compensates_on_late_exhausti
             "peer {} export debt",
             index + 1
         );
-        assert_eq!(probes[index].queries.load(Ordering::SeqCst), 4);
+        assert_eq!(probes[index].queries.load(Ordering::SeqCst), 5);
         assert_eq!(probes[index].import_installs.load(Ordering::SeqCst), 2);
         assert_eq!(probes[index].export_installs.load(Ordering::SeqCst), 2);
     }
@@ -1176,8 +1177,9 @@ async fn cohort_export_failure_repair_arms_pending_refresh_when_not_established(
         import_tolerant_cohort_test_session(first, Arc::clone(&first_counters), None),
         false,
     );
-    // Established for the cohort-selection state query only: by the time the
-    // repair checks the session again it reports Connect.
+    // Established for the import change's preflight qualification and the
+    // cohort-selection state query only: by the time the repair checks the
+    // session again it reports Connect.
     insert_test_managed_peer(
         &mut manager,
         failing,
@@ -1185,7 +1187,7 @@ async fn cohort_export_failure_repair_arms_pending_refresh_when_not_established(
             failing,
             Arc::clone(&failing_counters),
             Some(1),
-            Some(1),
+            Some(2),
         ),
         false,
     );
@@ -2687,7 +2689,9 @@ fn deferred_dispatch_test_session(
                 }
                 PeerCommand::QueryState { reply } => {
                     queries += 1;
-                    if queries == 2
+                    // The import change's preflight qualification and cohort
+                    // admission come first; the third is the dispatch probe.
+                    if queries == 3
                         && let Some((entered, release)) = &hold_dispatch_query
                     {
                         entered.notify_one();
