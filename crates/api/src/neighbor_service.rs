@@ -1243,6 +1243,7 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         paths_limits,
         flap_count: info.flap_count,
         last_error: info.last_error.clone(),
+        last_error_unix_ms: info.last_error_unix_ms,
         is_dynamic: info.is_dynamic,
         accepted_dynamic_range: info.accepted_dynamic_range.as_ref().map(|range| {
             proto::AcceptedDynamicNeighborRange {
@@ -5683,6 +5684,17 @@ mod tests {
         assert_eq!(state.messages_received, 4321);
         assert_eq!(state.messages_sent, 1234);
         assert!(state.route_reflector_client);
+    }
+
+    #[test]
+    fn peer_info_to_proto_carries_last_error_time() {
+        let mut info = peer_info("10.0.0.1".parse().unwrap());
+        info.last_error = "hold timer expired".to_string();
+        info.last_error_unix_ms = 1_700_000_000_123;
+        assert_eq!(
+            peer_info_to_proto(&info).last_error_unix_ms,
+            1_700_000_000_123
+        );
     }
 
     /// Load-bearing provenance proof: removing the converter projection makes

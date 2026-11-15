@@ -1408,6 +1408,7 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
             notifications_received: 0,
             notifications_sent: 0,
             flap_count: 0,
+            last_error_unix_ms: 0,
             last_error: String::new(),
             authentication: server_proto::AuthenticationMode::TcpAo.into(),
             tcp_ao_health: server_proto::TcpAoHealth::Unavailable.into(),
@@ -2217,6 +2218,8 @@ impl rustbgpd_api::proto::event_service_server::EventService for MockEventServic
         }
         Ok(Response::new(server_proto::ListSessionEventsResponse {
             events: self.state.session_events.lock().await.clone(),
+            evicted_total: 0,
+            oldest_retained_unix_ms: 0,
         }))
     }
 

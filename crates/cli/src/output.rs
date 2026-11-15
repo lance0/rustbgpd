@@ -352,6 +352,10 @@ pub struct JsonNeighbor {
     pub messages_sent: u64,
     pub flap_count: u64,
     pub last_error: String,
+    /// When `last_error` was recorded, Unix epoch milliseconds. Omitted when
+    /// unknown (no error, a daemon-owned latch message, or an older daemon).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error_unix_ms: Option<i64>,
     pub is_dynamic: bool,
     /// `Some(true)` on a row for an address with no neighbor-inventory entry
     /// whose GR/LLGR stale routes the RIB still retains (a down dynamic
@@ -464,6 +468,10 @@ pub struct JsonNeighborDetail {
     pub messages_sent: u64,
     pub flap_count: u64,
     pub last_error: String,
+    /// When `last_error` was recorded, Unix epoch milliseconds. Omitted when
+    /// unknown (no error, a daemon-owned latch message, or an older daemon).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error_unix_ms: Option<i64>,
     pub is_dynamic: bool,
     /// `Some(true)` on a row for an address with no neighbor-inventory entry
     /// whose GR/LLGR stale routes the RIB still retains (a down dynamic
@@ -1635,7 +1643,7 @@ fn write_json_document<W: Write + ?Sized, T: Serialize>(
             writer,
             &Document {
                 format: "rbgp-json",
-                format_version: "1.3",
+                format_version: "1.4",
                 data: value,
             },
         )
@@ -1736,7 +1744,7 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|contract| contract["id"] == "rbgp-json/1.3")
+            .find(|contract| contract["id"] == "rbgp-json/1.4")
             .unwrap();
         for payload in [
             serde_json::json!([]),
@@ -1752,11 +1760,11 @@ mod tests {
             let mut bytes = Vec::new();
             write_json_document(&mut bytes, &payload, true).unwrap();
             let document: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-            assert_json_shape(&document, contract, "rbgp-json/1.3");
+            assert_json_shape(&document, contract, "rbgp-json/1.4");
             assert_eq!(
                 document,
                 serde_json::json!({
-                    "format": "rbgp-json", "format_version": "1.3", "data": payload
+                    "format": "rbgp-json", "format_version": "1.4", "data": payload
                 })
             );
         }
@@ -2238,6 +2246,7 @@ mod tests {
             messages_sent: 21,
             flap_count: 7,
             last_error: String::new(),
+            last_error_unix_ms: None,
             is_dynamic: true,
             retention_only: Some(true),
             accepted_dynamic_range: Some(JsonAcceptedDynamicRange {

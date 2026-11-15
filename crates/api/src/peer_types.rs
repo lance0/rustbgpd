@@ -156,6 +156,18 @@ pub enum SessionLifecycleEventType {
     MaxPrefixWarning,
 }
 
+/// Bounded session-event history answer: the matching events plus what the
+/// ring has lost.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SessionEventHistory {
+    /// Matching events, oldest to newest.
+    pub events: Vec<SessionLifecycleEvent>,
+    /// Events evicted from the ring since daemon start, all peers.
+    pub evicted_total: u64,
+    /// Timestamp of the oldest retained event, before filtering; 0 if empty.
+    pub oldest_retained_unix_ms: i64,
+}
+
 /// Structured session event broadcast by `PeerManager` and bridged by
 /// `EventService.WatchEvents`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -980,8 +992,8 @@ pub enum PeerManagerCommand {
         event_types: BTreeSet<SessionLifecycleEventType>,
         /// Maximum events to return. 0 uses [`SESSION_EVENT_HISTORY_CAPACITY`].
         limit: usize,
-        /// Reply channel returning matching events.
-        reply: oneshot::Sender<Vec<SessionLifecycleEvent>>,
+        /// Reply channel returning matching events and eviction state.
+        reply: oneshot::Sender<SessionEventHistory>,
     },
     /// Diff candidate TOML against the live runtime config snapshot.
     DiffRuntimeConfig {
@@ -2918,6 +2930,8 @@ pub struct PeerInfo {
     pub reconnect_in_secs: u64,
     /// Human-readable last error description.
     pub last_error: String,
+    /// When `last_error` was recorded, Unix epoch milliseconds; 0 if unknown.
+    pub last_error_unix_ms: i64,
     /// Effective transport authentication: plaintext, MD5, or `tcp_ao`.
     /// Protected accepted dynamic sessions derive this from durable live
     /// transport identity rather than a per-neighbor key configuration.

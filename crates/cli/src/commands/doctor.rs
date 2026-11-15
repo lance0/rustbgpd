@@ -4558,6 +4558,8 @@ async fn run_with_deadlines(
                                 messages_sent: n.messages_sent,
                                 flap_count: n.flap_count,
                                 last_error: redact_text(&n.last_error),
+                                last_error_unix_ms: (n.last_error_unix_ms != 0)
+                                    .then_some(n.last_error_unix_ms),
                                 is_dynamic: n.is_dynamic,
                                 retention_only: n.retention_only,
                                 accepted_dynamic_range: output::json_accepted_dynamic_range(
@@ -5133,6 +5135,7 @@ mod tests {
                 messages_sent: 0,
                 flap_count: 0,
                 last_error: String::new(),
+                last_error_unix_ms: None,
                 is_dynamic: false,
                 retention_only: None,
                 accepted_dynamic_range: None,

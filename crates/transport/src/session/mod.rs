@@ -642,6 +642,8 @@ pub(crate) struct PeerSession {
     flap_count: u64,
     established_at: Option<tokio::time::Instant>,
     last_error: String,
+    /// Unix epoch milliseconds when `last_error` was last set (0 if never).
+    last_error_unix_ms: i64,
     /// Bounded cause of the teardown in progress, captured where it happens
     /// and attached to the loss of `Established`. Unlike `last_error`, it
     /// never outlives the transition it explains.
@@ -2613,6 +2615,7 @@ impl PeerSession {
             flap_count: 0,
             established_at: None,
             last_error: String::new(),
+            last_error_unix_ms: 0,
             teardown_cause: None,
             pending_outbound_teardown_cause: None,
             tcp_ao_info,

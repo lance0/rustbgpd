@@ -583,6 +583,50 @@ async fn session_event_history_capacity_evicts_oldest() {
 }
 
 #[tokio::test]
+async fn session_event_history_reports_eviction_and_keeps_transitions_over_retry_churn() {
+    let mut mgr = test_peer_manager();
+    let quiet = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let flapper = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+
+    mgr.publish_peer_lifecycle_event(
+        &key(quiet),
+        SessionLifecycleEventType::Lost,
+        "quiet-peer-lost".to_string(),
+    );
+    // Overfill by 10 with another peer's pre-Established retries.
+    for idx in 0..SESSION_EVENT_HISTORY_CAPACITY + 9 {
+        mgr.publish_peer_lifecycle_event(
+            &key(flapper),
+            SessionLifecycleEventType::StateChanged,
+            format!("retry-{idx}"),
+        );
+    }
+
+    let (reply_tx, reply_rx) = oneshot::channel();
+    mgr.handle_query_session_event_history(None, &BTreeSet::new(), 0, reply_tx);
+    let history = reply_rx.await.unwrap();
+    assert_eq!(history.evicted_total, 10);
+    assert_eq!(history.events.len(), SESSION_EVENT_HISTORY_CAPACITY);
+    assert!(
+        history.events.iter().any(|e| e.reason == "quiet-peer-lost"),
+        "retry churn must not evict another peer's transition"
+    );
+    assert_eq!(
+        history.oldest_retained_unix_ms,
+        history.events[0].timestamp_unix_ms
+    );
+    assert!(history.oldest_retained_unix_ms > 0);
+    let evicted = mgr
+        .metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .find(|family| family.name() == "bgp_session_event_history_evicted_total")
+        .map(|family| family.get_metric()[0].get_counter().get_value());
+    assert_eq!(evicted, Some(10.0));
+}
+
+#[tokio::test]
 async fn policy_event_history_records_events_without_subscriber() {
     let mut mgr = test_peer_manager();
 

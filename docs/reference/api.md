@@ -2052,7 +2052,7 @@ through one RPC shape.
 | Live unicast route deltas | `EventService.WatchEvents` with `EVENT_CATEGORY_ROUTE` | Streaming event feed | Live-only; `WatchEvents` emits `stream_lagged` when slow subscribers miss events |
 | Recent unicast route timeline | `ListRouteEvents` / `rbgp events` | Bounded history query | In-memory 4096-event ring, process-local, oldest entries evicted |
 | Live session lifecycle | `EventService.WatchEvents` with `EVENT_CATEGORY_SESSION` | Streaming event feed | Live-only; no replay after reconnect |
-| Recent session lifecycle | `EventService.ListSessionEvents` / `rbgp events sessions` | Bounded history query | In-memory 4096-event ring, process-local, oldest entries evicted |
+| Recent session lifecycle | `EventService.ListSessionEvents` / `rbgp events sessions` | Bounded history query | In-memory 4096-event ring shared by all peers, process-local; the response reports `evicted_total` and `oldest_retained_unix_ms` |
 | Live policy mutation summaries | `EventService.WatchEvents` with `EVENT_CATEGORY_POLICY` | Streaming event feed | Live-only; slow subscribers can lag and miss events |
 | Recent policy mutation summaries | `EventService.ListPolicyEvents` / `rbgp events policy` | Bounded history query | In-memory 4096-event ring, process-local, oldest entries evicted |
 | Live EVPN route best-path deltas | `EventService.WatchEvents` with `EVENT_CATEGORY_EVPN` | Streaming event feed | Live-only; slow subscribers can lag and miss events |
@@ -3281,6 +3281,26 @@ and `limit` filters. Valid `event_types` are the eight session lifecycle types:
 `BGP_EVENT_TYPE_PEER_REMOVED`, `BGP_EVENT_TYPE_PEER_ENABLED`,
 `BGP_EVENT_TYPE_PEER_DISABLED`, and `BGP_EVENT_TYPE_MAX_PREFIX_WARNING`. Empty
 `event_types` means all eight lifecycle types.
+
+The history is one ring for all peers. When it is full, the oldest repeated
+pre-Established `STATE_CHANGED` event is evicted first, so a down or flapping
+peer's connection retries do not push out another peer's `ESTABLISHED` or
+`LOST` record; with no such event left, the oldest event goes. The response
+carries `evicted_total` (events lost since daemon start, all peers, also
+exported as `bgp_session_event_history_evicted_total`) and
+`oldest_retained_unix_ms` (the oldest retained event across all peers, before
+the request filter or limit). A nonzero `evicted_total` means rows were
+dropped: retry (`STATE_CHANGED`) rows can be missing at any time, while other
+event types are dropped only once no retry rows remain, oldest first, so those
+newer than `oldest_retained_unix_ms` are retained. `rbgp events sessions`
+prints a note on stderr when `evicted_total` is nonzero.
+
+`NeighborState.last_error` is not cleared when the session reaches
+Established. `last_error_unix_ms` is when the session recorded it (0 when
+there is no error or the message is a daemon-owned latch or refusal). An error
+older than the current session's establishment, `now - uptime_seconds`, is
+history, not a cause. `rbgp neighbor` shows the time as `(at <time>)` and in
+JSON as `last_error_unix_ms`.
 `BGP_EVENT_TYPE_MAX_PREFIX_WARNING` is one crossing of a configured
 max-prefix warning threshold (`max_prefix_warning_percent`, or the bound
 itself under `max_prefix_action = "warning"`): it carries

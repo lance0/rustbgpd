@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use rustbgpd_api::peer_types::{
     ConfigEvent, POLICY_EVENT_HISTORY_CAPACITY, PeerKey, PolicyEvent,
-    SESSION_EVENT_HISTORY_CAPACITY, SessionEvent, SessionLifecycleEvent, SessionLifecycleEventType,
-    SessionNotificationEvent, SessionNotificationEventType,
+    SESSION_EVENT_HISTORY_CAPACITY, SessionEvent, SessionEventHistory, SessionLifecycleEvent,
+    SessionLifecycleEventType, SessionNotificationEvent, SessionNotificationEventType,
 };
 use rustbgpd_fsm::SessionState;
 use rustbgpd_rib::event::unix_time_ms_now;
@@ -45,7 +45,18 @@ impl PeerManager {
     pub(super) fn publish_session_event(&mut self, event: SessionEvent) {
         if let SessionEvent::Lifecycle(lifecycle) = &event {
             if self.session_event_history.len() >= SESSION_EVENT_HISTORY_CAPACITY {
-                self.session_event_history.pop_front();
+                // Pre-Established retry churn is the cheapest history to lose:
+                // evict the oldest such row before any transition, so a
+                // flapping or down peer cannot push out another peer's
+                // Established or Lost record.
+                let victim = self
+                    .session_event_history
+                    .iter()
+                    .position(|e| e.event_type == SessionLifecycleEventType::StateChanged)
+                    .unwrap_or(0);
+                self.session_event_history.remove(victim);
+                self.session_event_evicted_total += 1;
+                self.metrics.record_session_event_history_evicted();
             }
             self.session_event_history.push_back(lifecycle.clone());
         }
@@ -304,7 +315,7 @@ impl PeerManager {
         peer: Option<&PeerKey>,
         event_types: &BTreeSet<SessionLifecycleEventType>,
         limit: usize,
-        reply: oneshot::Sender<Vec<SessionLifecycleEvent>>,
+        reply: oneshot::Sender<SessionEventHistory>,
     ) {
         let limit = if limit == 0 {
             SESSION_EVENT_HISTORY_CAPACITY
@@ -324,7 +335,14 @@ impl PeerManager {
             .cloned()
             .collect();
         events.reverse();
-        let _ = reply.send(events);
+        let _ = reply.send(SessionEventHistory {
+            events,
+            evicted_total: self.session_event_evicted_total,
+            oldest_retained_unix_ms: self
+                .session_event_history
+                .front()
+                .map_or(0, |event| event.timestamp_unix_ms),
+        });
     }
 
     pub(super) fn handle_query_policy_event_history(
