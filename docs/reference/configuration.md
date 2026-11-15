@@ -2819,17 +2819,17 @@ LTO release build:
   VPN and labeled slab storage change): VPN 5.1 ms, labeled 9.0 ms. With an
   interleaved fill: VPN 6.8 ms, labeled 17.4 ms. Unicast (unchanged code):
   about 11 ms, or about 36 ms interleaved.
-- The same UPDATE changing only non-best paths: VPN 0.09 to 0.10 ms, labeled
-  0.16 to 0.17 ms. One key at 65,536 stored paths costs about 0.0005 ms for
-  VPN and labeled.
-- One key, one UPDATE, best path withdrawn or made worse, before the VPN and
-  labeled slab change (which brought VPN and labeled to 0.35 to 0.75 times
-  these figures): VPN 0.031 ms at 1,024 stored paths and 2.80 ms at 65,536;
-  labeled 0.024 and 2.45 ms; unicast 0.014 and 0.78 ms.
+- The same UPDATE changing only non-best paths (after the slab change): VPN
+  announce about 0.10 ms (unchanged by the slab change), VPN withdraw 0.058 ms,
+  labeled announce 0.15 ms, labeled withdraw 0.090 ms. One key at 65,536 stored
+  paths costs about 0.0005 ms for a non-best change.
+- Before the VPN and labeled slab change, one key and one UPDATE that withdraws
+  or worsens the best path: VPN 0.031 ms at 1,024 stored paths and 2.80 ms at
+  65,536; labeled 0.024 and 2.45 ms; unicast 0.014 and 0.78 ms. The slab change
+  brought VPN and labeled to 0.35 to 0.75 times these; the post-change
+  absolutes were not recorded.
 - LLGR cycling with 1,024 fresh path IDs per cycle, then a one-path UPDATE, at
   64 cycles (65,536 stored): VPN 2.87 ms, labeled 2.50 ms, unicast 0.77 ms.
-  At 8 cycles (8,192 stored), a single pre-slab sample read 0.51 ms for VPN
-  and 0.43 ms for labeled.
 
 A peer can send UPDATEs of the first kind back to back, so unicast
 best-affecting and interleaved labeled UPDATEs are the largest stalls at the
