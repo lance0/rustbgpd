@@ -13,11 +13,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.83.0] — 2026-11-15
 
-> **Release framing — recovery in place and bounded work.** The gRPC and
-> metrics/readiness servers and the RPKI tasks now recover in place instead
-> of exiting the daemon. A long export-policy reload or rollback is bounded
-> by a stall timeout instead of a fixed deadline and keeps serving BFD and
-> session events meanwhile. gNMI requests, policy dry runs and MRT dumps
+> **Release framing — paced reloads, recovery in place and bounded work.**
+> Export-policy reloads at scale are now paced: on a 700-peer, 400,400-route
+> test bed, a grouped reload completes in under 2 s instead of about 107 s, a
+> distinct-chain reload that v0.82.0 rolled back now commits, and no RIB turn
+> in either exceeds 0.9 s. Steady-state route-reflector throughput is
+> unchanged. The gRPC and metrics/readiness servers and the RPKI tasks now
+> recover in place instead of exiting the daemon. A long export-policy
+> reload or rollback is bounded by a stall timeout instead of a fixed
+> deadline and keeps serving BFD and session events meanwhile. gNMI
+> requests, policy dry runs and MRT dumps
 > bound their work, more long RIB turns keep answering readiness, and
 > credential, config, policy-source and MRT files are held to stricter
 > rules. The string event `timestamp` fields, `Route.med` and the listener
@@ -148,8 +153,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `daemon_version` in JSON, `null` when an older daemon reports none). After
   a package upgrade without a restart it differs from
   `rustbgpd --version`, which reads the binary on disk; the upgrade
-  runbook now verifies with it. The opt-in `rbgp-json` envelope advances
-  to version 1.2 for this additive field; `rbgp-rib` stays at 1.1. See
+  runbook now verifies with it. The opt-in `rbgp-json` envelope carries
+  this additive field at version 1.3 in this release; `rbgp-rib` stays at
+  1.1. See
   [Package upgrade and rollback](docs/how-to/deployment.md#upgrade).
 - `[mrt] max_files` keeps at most that many dumps, deleting the oldest
   `<file_prefix>.*.mrt[.gz]` files after each successful publish. Unset keeps
