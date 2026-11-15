@@ -11,9 +11,11 @@ use crate::manager::distribution::{PACED_TURN_BUDGET, paced_admits_next};
 use crate::manager::helpers::evpn_routes_equal;
 use crate::manager::update_groups::GroupMembership;
 use crate::update::{
-    PacedApplyOutcome, PacedMemberCost, PeerExportPolicyReplacement, RibCommandError,
+    PacedApplyOutcome, PacedMemberCost, PeerExportPolicyReplacement,
+    PeerExportPolicyRestoreReceipt, RibCommandError,
 };
 use rustbgpd_wire::{EthernetTagId, EvpnRouteKey};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration as Span;
 
 const EVPN: (Afi, Safi) = (Afi::L2Vpn, Safi::Evpn);
@@ -911,4 +913,370 @@ fn paced_command_with_a_dropped_reply_is_skipped() {
         fleet.manager.export_chains.get(&deferred[0]).cloned(),
         before
     );
+}
+
+/// IPv4 transport with IPv6-only configuration and no usable local IPv6
+/// next hop registers with no sendable families; the session still exists.
+fn empty_family_peer_up(
+    manager: &mut RibManager,
+    peer: PeerId,
+    session_id: u64,
+    chain: PolicyChain,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    let (sender, receiver) = mpsc::channel(4096);
+    let mut update = registering_peer_up(peer, session_id);
+    let RibUpdate::PeerUp {
+        outbound_tx,
+        export_policy,
+        ..
+    } = &mut update
+    else {
+        unreachable!("PeerUp fixture");
+    };
+    *outbound_tx = sender;
+    *export_policy = Some(chain);
+    manager.handle_update(update);
+    receiver
+}
+
+fn empty_family_fleet(rows: u32) -> Fleet {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(
+        rx,
+        dummy_query_rx(),
+        None,
+        Some(Ipv4Addr::new(192, 0, 2, 254)),
+        BgpMetrics::new(),
+    );
+    manager.flush_poll_budget = Duration::MAX;
+    manager.paced_elapsed_for_test = Some(Duration::ZERO);
+    let members: Vec<_> = (0..32).map(member).collect();
+    let old = community_chain(0xFC00_0002);
+    let outputs = members
+        .iter()
+        .map(|&peer| empty_family_peer_up(&mut manager, peer, 7, old.clone()))
+        .collect();
+    let source_addr = Ipv4Addr::new(198, 51, 100, 1);
+    let source = peer_v4(source_addr);
+    register_test_peer(&mut manager, source, 1);
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: source,
+        session_id: 1,
+        announced: (0..rows)
+            .map(|index| make_indexed_route(index, source_addr))
+            .collect(),
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    drain_route_chunks(&mut manager);
+    assert_eq!(manager.loc_rib.len(), rows as usize);
+    Fleet {
+        manager,
+        members,
+        outputs,
+        source,
+        next: community_chain(TAGGED),
+    }
+}
+
+fn empty_family_policy_work(moved: usize, restore: bool) -> (usize, usize, usize) {
+    const ROWS: u32 = 128;
+    let mut fleet = empty_family_fleet(ROWS);
+    let members = fleet.members[..moved].to_vec();
+    if restore {
+        for &peer in &members {
+            fleet.step(peer).unwrap();
+        }
+        fleet.next = community_chain(0xFC00_0002);
+    }
+    let visits = count_resync_rows(&mut fleet.manager);
+    let replacements = members
+        .iter()
+        .map(|&peer| PeerExportPolicyReplacement {
+            peer,
+            export_policy: Some(fleet.next.clone()),
+        })
+        .collect();
+    let mut pending = if restore {
+        let (reply, mut response) = oneshot::channel();
+        fleet
+            .manager
+            .handle_update(RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                replacements,
+                reply,
+            });
+        response
+            .try_recv()
+            .unwrap()
+            .unwrap()
+            .into_iter()
+            .filter_map(|receipt| match receipt {
+                PeerExportPolicyRestoreReceipt::Deferred { peer } => Some(peer),
+                PeerExportPolicyRestoreReceipt::Restored { .. } => None,
+                PeerExportPolicyRestoreReceipt::NotFound { .. } => panic!("registered member"),
+            })
+            .collect::<Vec<_>>()
+    } else {
+        let (reply, mut response) = oneshot::channel();
+        fleet
+            .manager
+            .handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+                replacements,
+                reply,
+            });
+        response.try_recv().unwrap().unwrap()
+    };
+    let batch_visits = visits.swap(0, Ordering::Relaxed);
+    let (mut max_paced_visits, mut paced_commands) = (0, 0);
+    while !pending.is_empty() {
+        let replacements = pending
+            .iter()
+            .map(|&peer| PeerExportPolicyReplacement {
+                peer,
+                export_policy: Some(fleet.next.clone()),
+            })
+            .collect();
+        let (reply, mut response) = oneshot::channel();
+        let command = if restore {
+            RibUpdate::RestorePacedExportPolicies {
+                replacements,
+                cost: Some(ONE_PER_COMMAND),
+                reply,
+            }
+        } else {
+            RibUpdate::ApplyPacedExportPolicies {
+                replacements,
+                cost: Some(ONE_PER_COMMAND),
+                reply,
+            }
+        };
+        fleet.manager.handle_update(command);
+        let outcome = response.try_recv().unwrap().unwrap();
+        assert_eq!(outcome.applied, 1);
+        assert_eq!(outcome.skipped, Vec::<PeerId>::new());
+        assert_eq!(outcome.pending, pending[1..]);
+        pending = outcome.pending;
+        max_paced_visits = max_paced_visits.max(visits.swap(0, Ordering::Relaxed));
+        paced_commands += 1;
+    }
+    for &peer in &members {
+        assert_eq!(fleet.manager.export_chains[&peer], Some(fleet.next.clone()));
+    }
+    assert_eq!(fleet.manager.loc_rib.len(), ROWS as usize);
+    assert!(
+        fleet
+            .outputs
+            .iter_mut()
+            .all(|output| output.try_recv().is_err())
+    );
+    (batch_visits, max_paced_visits, paced_commands)
+}
+
+#[test]
+fn empty_family_forward_policy_resync_row_work_is_flat_in_moved_members() {
+    let counts: Vec<_> = [8, 32]
+        .into_iter()
+        .map(|moved| (moved, empty_family_policy_work(moved, false)))
+        .collect();
+    eprintln!("empty-family forward (members, (batch rows, max paced rows, commands)): {counts:?}");
+    assert_eq!(counts, vec![(8, (0, 128, 8)), (32, (0, 128, 32))]);
+}
+
+#[test]
+fn empty_family_restore_policy_resync_row_work_is_flat_in_moved_members() {
+    let counts: Vec<_> = [8, 32]
+        .into_iter()
+        .map(|moved| (moved, empty_family_policy_work(moved, true)))
+        .collect();
+    eprintln!("empty-family restore (members, (batch rows, max paced rows, commands)): {counts:?}");
+    assert_eq!(counts, vec![(8, (0, 128, 8)), (32, (0, 128, 32))]);
+}
+
+/// Counts Loc-RIB keys enumerated by resyncs. The drained-writer fixture
+/// isolates changed residuals; group builds and member metadata are outside
+/// this counter. It does not bound a whole actor turn.
+fn count_resync_rows(manager: &mut RibManager) -> Arc<AtomicUsize> {
+    let visits = Arc::new(AtomicUsize::new(0));
+    manager.replacement_readiness_test_hook = Some(Arc::new({
+        let visits = Arc::clone(&visits);
+        move |stage| {
+            if stage == "resync_loc_rib_key" {
+                visits.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }));
+    visits
+}
+
+#[test]
+fn empty_family_unchanged_and_missing_members_avoid_resync() {
+    let mut fleet = empty_family_fleet(4);
+    let peer = fleet.members[0];
+    let old = fleet.manager.export_chains[&peer].as_ref().unwrap();
+    let installed = Arc::clone(old.hit_counters());
+    let old = old.clone();
+    let missing = peer_v4(Ipv4Addr::new(192, 0, 2, 250));
+    let replacements = vec![
+        PeerExportPolicyReplacement {
+            peer,
+            export_policy: Some(old),
+        },
+        PeerExportPolicyReplacement {
+            peer: missing,
+            export_policy: Some(fleet.next.clone()),
+        },
+    ];
+    let visits = count_resync_rows(&mut fleet.manager);
+    let (reply, mut response) = oneshot::channel();
+    fleet
+        .manager
+        .handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements: replacements.clone(),
+            reply,
+        });
+    assert_eq!(response.try_recv().unwrap().unwrap(), Vec::<PeerId>::new());
+    let (reply, mut response) = oneshot::channel();
+    fleet
+        .manager
+        .handle_update(RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+            replacements,
+            reply,
+        });
+    assert_eq!(
+        response.try_recv().unwrap().unwrap(),
+        vec![
+            PeerExportPolicyRestoreReceipt::NotFound { peer: missing },
+            PeerExportPolicyRestoreReceipt::Restored { peer },
+        ]
+    );
+    assert_eq!(visits.load(Ordering::Relaxed), 0);
+    assert!(Arc::ptr_eq(
+        &installed,
+        fleet.manager.export_chains[&peer]
+            .as_ref()
+            .unwrap()
+            .hit_counters()
+    ));
+    assert!(!fleet.manager.export_chains.contains_key(&missing));
+}
+
+#[test]
+fn empty_family_member_unlocks_between_batch_and_paced_apply() {
+    let mut fleet = empty_family_fleet(4);
+    let peer = fleet.members[0];
+    let prefix = Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 48);
+    let mut route = make_v6_route(prefix, "2001:db8::1".parse().unwrap());
+    set_peer(&mut route, fleet.source);
+    fleet.manager.handle_update(RibUpdate::RoutesReceived {
+        peer: fleet.source,
+        session_id: 1,
+        announced: vec![route],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    drain_route_chunks(&mut fleet.manager);
+    let old = fleet.manager.export_chains[&peer].clone();
+    let (reply, mut response) = oneshot::channel();
+    fleet
+        .manager
+        .handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements: vec![PeerExportPolicyReplacement {
+                peer,
+                export_policy: Some(fleet.next.clone()),
+            }],
+            reply,
+        });
+    assert_eq!(response.try_recv().unwrap().unwrap(), [peer]);
+    assert_eq!(fleet.manager.export_chains[&peer], old);
+    fleet.manager.handle_update(RibUpdate::PeerFamilySendable {
+        peer,
+        session_id: 7,
+        family: (Afi::Ipv6, Safi::Unicast),
+        add_path_send_limit: None,
+    });
+    let before: Vec<_> =
+        std::iter::from_fn(|| fleet.outputs[0].try_recv().map(delivered).ok()).collect();
+    assert!(
+        before
+            .iter()
+            .flat_map(|update| update.announce.iter())
+            .any(|route| {
+                route.prefix == Prefix::V6(prefix) && route.communities().contains(&0xFC00_0002)
+            })
+    );
+    let outcome = fleet.paced(&[peer], Some(ONE_PER_COMMAND));
+    assert_eq!(outcome.applied, 1);
+    assert_eq!(outcome.pending, Vec::<PeerId>::new());
+    let after: Vec<_> =
+        std::iter::from_fn(|| fleet.outputs[0].try_recv().map(delivered).ok()).collect();
+    assert!(
+        after
+            .iter()
+            .flat_map(|update| update.announce.iter())
+            .any(|route| {
+                route.prefix == Prefix::V6(prefix) && route.communities().contains(&TAGGED)
+            })
+    );
+    assert_eq!(fleet.manager.export_chains[&peer], Some(fleet.next.clone()));
+}
+
+#[test]
+fn empty_family_deferred_restore_handles_departure_and_replacement() {
+    for reconnect in [false, true] {
+        let mut fleet = empty_family_fleet(4);
+        let peer = fleet.members[0];
+        let prior = fleet.manager.export_chains[&peer].clone();
+        fleet.step(peer).unwrap();
+        let replacements = vec![PeerExportPolicyReplacement {
+            peer,
+            export_policy: prior.clone(),
+        }];
+        let (reply, mut response) = oneshot::channel();
+        fleet
+            .manager
+            .handle_update(RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                replacements: replacements.clone(),
+                reply,
+            });
+        assert_eq!(
+            response.try_recv().unwrap().unwrap(),
+            [PeerExportPolicyRestoreReceipt::Deferred { peer }]
+        );
+        fleet.manager.handle_update(RibUpdate::PeerDown {
+            peer,
+            session_id: 7,
+        });
+        if reconnect {
+            fleet.outputs[0] =
+                empty_family_peer_up(&mut fleet.manager, peer, 8, fleet.next.clone());
+        }
+        let (reply, mut response) = oneshot::channel();
+        fleet
+            .manager
+            .handle_update(RibUpdate::RestorePacedExportPolicies {
+                replacements,
+                cost: Some(ONE_PER_COMMAND),
+                reply,
+            });
+        let outcome = response.try_recv().unwrap().unwrap();
+        assert_eq!(outcome.pending, Vec::<PeerId>::new());
+        if reconnect {
+            assert_eq!(outcome.applied, 1);
+            assert_eq!(outcome.skipped, Vec::<PeerId>::new());
+            assert_eq!(fleet.manager.export_chains[&peer], prior);
+            assert_eq!(fleet.manager.current_session_id(peer), Some(8));
+        } else {
+            assert_eq!(outcome.applied, 0);
+            assert_eq!(outcome.skipped, [peer]);
+            assert!(!fleet.manager.export_chains.contains_key(&peer));
+        }
+    }
 }
