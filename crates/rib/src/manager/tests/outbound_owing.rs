@@ -4820,3 +4820,276 @@ fn family_release_controls_preserve_deletes_and_ordinary_recovery() {
         }
     }
 }
+
+/// A receiver can catch up for its runnable families while two families are
+/// held. Releasing a typed family must wake it even when IPv4 keeps the
+/// partial-caught-up state and the receiver owes no typed-family marker.
+#[expect(
+    clippy::too_many_lines,
+    reason = "two independent gates and both recovery causes share one route-before-sibling-release transcript"
+)]
+fn check_mixed_family_release_wakes_caught_up_receiver(
+    family: (Afi, Safi),
+    forced: bool,
+    staged: bool,
+) {
+    use crate::manager::selection_deferral::SelectionDeferralTransition;
+    let families = vec![V4, family];
+    let survivor = peer_v4(Ipv4Addr::new(192, 0, 2, 84));
+    let mut manager = deferral_manager(families.clone(), 64);
+    if staged {
+        manager = manager.with_selection_deferral(SelectionDeferralConfig {
+            timeout: Duration::from_secs(60),
+            waiters: vec![
+                SelectionDeferralWaiterConfig {
+                    peer: peer_v4(Ipv4Addr::new(192, 0, 2, 83)).into(),
+                    families: families.clone(),
+                },
+                SelectionDeferralWaiterConfig {
+                    peer: survivor.into(),
+                    families: vec![family],
+                },
+            ],
+        });
+    }
+    let _source = up(&mut manager, peer_v4(SOURCE), families.clone());
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 41, 2));
+    let mut output = up(&mut manager, peer, families.clone());
+    send_all(&mut output);
+    assert!(
+        !manager.eor.owes(peer, family),
+        "the established receiver has no typed marker debt"
+    );
+    let _waiter = connect_families(&mut manager, Ipv4Addr::new(192, 0, 2, 83), families, true);
+    assert!(manager.selection_deferred(V4));
+    assert!(manager.selection_deferred(family));
+    if staged {
+        let metrics = manager.metrics.clone();
+        assert_eq!(
+            manager
+                .selection_deferral
+                .as_mut()
+                .unwrap()
+                .await_collision_failback_refresh(
+                    survivor,
+                    84,
+                    false,
+                    &HashSet::from([family]),
+                    true,
+                    &metrics
+                ),
+            Some(vec![])
+        );
+    }
+    manager.owe_eor(peer, V4);
+    if forced {
+        let (reply, mut response) = oneshot::channel();
+        manager.handle_update(RibUpdate::RefreshPeerOutbound { peer, reply });
+        response.try_recv().unwrap().unwrap();
+        assert!(manager.force_outbound_peers.contains(&peer));
+    } else {
+        manager.mark_outbound_dirty(peer);
+        manager.resync_dirty_peers_bounded();
+        assert!(manager.dirty_peers.contains(&peer));
+        assert!(!manager.force_outbound_peers.contains(&peer));
+    }
+    assert!(
+        manager.selection_partial_caught_up(peer),
+        "the real resync caught up under the gates"
+    );
+    assert!(send_all(&mut output).is_empty());
+    if family == EVPN {
+        typed_received(&mut manager, family, &[(1, 0)], &[], 10);
+    } else {
+        let route = make_flowspec_route(SOURCE);
+        receive_discard_rule(&mut manager, &route, false);
+    }
+    assert!(send_all(&mut output).is_empty(), "the typed row is held");
+    assert!(manager.selection_partial_caught_up(peer));
+    assert!(
+        !manager.eor.owes(peer, family),
+        "the wake must follow the family's release, not marker debt"
+    );
+
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: peer_v4(Ipv4Addr::new(192, 0, 2, 83)),
+        session_id: 83,
+        afi: family.0,
+        safi: family.1,
+    });
+    assert!(!manager.selection_deferred(family));
+    assert!(manager.selection_deferred(V4));
+    assert_eq!(manager.selection_convergence_held(family), staged);
+    let sent = send_all(&mut output);
+    assert_eq!(
+        sent.iter()
+            .map(|update| update.evpn_announce.len() + update.flowspec_announce.len())
+            .sum::<usize>(),
+        1,
+        "{family:?}, forced={forced}, staged={staged}: the typed row must leave at its own selection release"
+    );
+    assert!(
+        sent.iter()
+            .all(|update| update.evpn_withdraw.is_empty() && update.flowspec_withdraw.is_empty())
+    );
+    assert!(sent.iter().all(|update| !update.end_of_rib.contains(&V4)));
+    assert!(
+        manager.eor.owes(peer, V4),
+        "the sibling marker remains held"
+    );
+
+    if staged {
+        let metrics = manager.metrics.clone();
+        let selection = manager.selection_deferral.as_mut().unwrap();
+        assert!(
+            selection
+                .begin_route_refresh(survivor, 84, family)
+                .is_none()
+        );
+        let transition = selection
+            .end_route_refresh(survivor, 84, family, &metrics)
+            .unwrap();
+        assert!(matches!(
+            transition,
+            SelectionDeferralTransition::Release {
+                already_staged: true,
+                ..
+            }
+        ));
+        manager.apply_selection_deferral_transitions(
+            [transition],
+            "mixed-family collision refresh completes",
+        );
+        assert!(
+            !manager.resync_pending(peer),
+            "ending a staged hold must not re-arm an undriven resync"
+        );
+        let sent = send_all(&mut output);
+        assert!(
+            sent.iter().all(
+                |update| update.evpn_announce.is_empty() && update.flowspec_announce.is_empty()
+            ),
+            "ending the staged hold must not repeat the typed table"
+        );
+        assert!(sent.iter().all(|update| !update.end_of_rib.contains(&V4)));
+    }
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: peer_v4(Ipv4Addr::new(192, 0, 2, 83)),
+        session_id: 83,
+        afi: V4.0,
+        safi: V4.1,
+    });
+    assert!(!manager.selection_deferred(V4));
+    let mut final_sent = send_all(&mut output);
+    for _ in 0..4 {
+        if !manager.eor.owes(peer, V4) {
+            break;
+        }
+        manager.resync_dirty_peers_bounded();
+        final_sent.extend(send_all(&mut output));
+    }
+    assert!(!manager.eor.owes(peer, V4));
+    assert_eq!(
+        final_sent
+            .iter()
+            .filter(|update| update.end_of_rib.contains(&V4))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn mixed_family_release_wakes_a_caught_up_forced_or_dirty_private_evpn_receiver() {
+    for forced in [false, true] {
+        for staged in [false, true] {
+            check_mixed_family_release_wakes_caught_up_receiver(EVPN, forced, staged);
+        }
+    }
+}
+
+#[test]
+fn mixed_family_release_wakes_a_caught_up_forced_or_dirty_flowspec_receiver() {
+    for forced in [false, true] {
+        for staged in [false, true] {
+            check_mixed_family_release_wakes_caught_up_receiver(
+                (Afi::Ipv4, Safi::FlowSpec),
+                forced,
+                staged,
+            );
+        }
+    }
+}
+
+/// Grouped VPN recovery must retain the admitted OLD withdrawal proof
+/// while staging the released group table. Its member has no private VPN
+/// Adj-RIB-Out, so the exact wire view is the independent state witness.
+fn check_grouped_vpn_forced_release(restored: bool) {
+    let family = (Afi::Ipv4, Safi::MplsVpn);
+    let mut manager = deferral_manager(vec![family], 64);
+    manager.test_force_ungrouped = false;
+    let _source = up(&mut manager, peer_v4(SOURCE), vec![family]);
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 42, 2));
+    let mut output = up_session(&mut manager, peer, 0, vec![family], 4);
+    send_all(&mut output);
+    let group = manager
+        .vpn_grouped_member_of(peer)
+        .expect("the receiver uses the VPN group table");
+    let mut wire = TypedWire::new();
+    let route_key = typed_vpn_route(family.0, 1).key();
+    typed_received(&mut manager, family, &[(1, 0)], &[], 0);
+    assert_eq!(apply_typed_wire(&mut wire, &send_all(&mut output)), (1, 0));
+    assert_eq!(manager.adj_ribs_out[&peer].vpn_len(), 0);
+    assert_eq!(manager.group_ribs[&group].table.vpn_len(), 1);
+    let sender = manager.outbound_peers[&peer].clone();
+    while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
+    typed_received(&mut manager, family, &[], &[(1, 0)], 0);
+    assert!(manager.loc_rib.get_vpn(&route_key.nlri_key).is_none());
+    assert!(manager.dirty_peers.contains(&peer));
+    assert!(manager.pending_group_admitted.contains_key(&peer));
+    let _waiter = connect_families(
+        &mut manager,
+        Ipv4Addr::new(192, 0, 2, 83),
+        vec![family],
+        true,
+    );
+    assert!(manager.selection_deferred(family));
+    if restored {
+        typed_received(&mut manager, family, &[(1, 0)], &[], 10);
+    }
+    assert!(manager.loc_rib.get_vpn(&route_key.nlri_key).is_none());
+    refresh_full_receiver(&mut manager, peer);
+    let sent = release_family_and_collect(&mut manager, peer, family, &mut output, true);
+    let (announced, withdrawn) = apply_typed_wire(&mut wire, &sent);
+    assert_eq!(
+        withdrawn,
+        usize::from(!restored),
+        "a restored grouped VPN row must not be withdrawn"
+    );
+    assert_eq!(
+        announced,
+        usize::from(restored),
+        "one release update, without a forced duplicate"
+    );
+    assert_eq!(wire.len(), usize::from(restored));
+    assert_eq!(wire.contains_key(&(typed_key(family, 1), 0)), restored);
+    let route = sent
+        .iter()
+        .position(|update| !update.vpn_announce.is_empty() || !update.vpn_withdraw.is_empty())
+        .unwrap();
+    let marker = sent
+        .iter()
+        .position(|update| update.end_of_rib.contains(&family))
+        .unwrap();
+    assert!(route <= marker);
+    assert!(!manager.pending_group_admitted.contains_key(&peer));
+}
+
+#[test]
+fn a_forced_family_release_keeps_a_rereceived_grouped_vpn_route() {
+    check_grouped_vpn_forced_release(true);
+}
+
+#[test]
+fn a_forced_family_release_withdraws_a_deleted_grouped_vpn_route() {
+    check_grouped_vpn_forced_release(false);
+}
