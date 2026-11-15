@@ -1343,6 +1343,7 @@ impl PeerSession {
             flap_count: totals.flaps(),
             uptime_secs,
             last_error: self.last_error.clone(),
+            last_error_unix_ms: self.last_error_unix_ms,
             tcp_ao_info: self.tcp_ao_info.clone().map(Box::new),
             tcp_ao_protected: self.tcp_ao_protected,
             slow_peer: self.slow_peer,

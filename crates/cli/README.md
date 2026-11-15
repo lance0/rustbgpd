@@ -879,7 +879,7 @@ This coverage does not widen the [stable surface](../../docs/reference/stability
 or the EVPN and Linux dataplane support boundaries.
 
 For a versioned document, select `rbgp -j --json-version 1 neighbor` (or another
-supported command). The result is `{"format":"rbgp-json","format_version":"1.3","data":...}`.
+supported command). The result is `{"format":"rbgp-json","format_version":"1.4","data":...}`.
 `data` contains the existing command result unchanged, including an empty `[]`,
 optional fields and bounded-list metadata. Ordinary `-j` keeps its current shape.
 The version describes the CLI JSON representation, not the daemon version.
@@ -888,6 +888,8 @@ multiple paths from the same peer and next hop remain distinguishable.
 Version 1.2 adds `daemon_version`, the running daemon's version, to `health`.
 Version 1.3 adds `admin_state` to `neighbor` rows and detail, so a neighbor the
 daemon holds down reads as disabled, with its owner, instead of plain `Idle`.
+Version 1.4 adds `last_error_unix_ms`, when `last_error` was recorded, to `neighbor`
+rows and detail; it is omitted when unknown.
 
 Consumers should check the format and major version and ignore unknown fields.
 Additive fields increment the minor version; removing or renaming fields, changing

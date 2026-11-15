@@ -2345,8 +2345,10 @@ mod tests {
     fn empty_event_history_cannot_claim_no_matching_event() {
         // The RPC has no eviction counter: an evicted matching event and a
         // never-recorded one both return this same empty shape.
-        let session =
-            session_events_result(&proto::ListSessionEventsResponse { events: Vec::new() });
+        let session = session_events_result(&proto::ListSessionEventsResponse {
+            events: Vec::new(),
+            ..Default::default()
+        });
         let route = RouteEventsResult {
             events: Vec::new(),
             retention_note: HISTORY_NOTE.into(),

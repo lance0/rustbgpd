@@ -98,7 +98,7 @@ impl PeerSession {
                 ),
             }
         }
-        self.last_error = last_error;
+        self.set_last_error(last_error);
     }
 
     pub(super) fn reset_connect_failure_episode(&mut self) {
@@ -656,7 +656,7 @@ impl PeerSession {
         );
         self.log_notification(SessionNotificationDirection::Sent, &notif, None);
         self.record_notification_cause(SessionNotificationDirection::Sent, &notif, None);
-        self.last_error = cause.to_string();
+        self.set_last_error(cause.to_string());
         if let Some(teardown_cause) = &mut self.teardown_cause {
             use std::fmt::Write as _;
             let _ = write!(teardown_cause, "; {cause}");

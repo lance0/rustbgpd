@@ -89,6 +89,7 @@ pub(crate) fn peer_info(address: IpAddr) -> PeerInfo {
         uptime_secs: 0,
         reconnect_in_secs: 0,
         last_error: String::new(),
+        last_error_unix_ms: 0,
         authentication: "plaintext".to_string(),
         tcp_ao_info: None,
         tcp_ao_rotation: rustbgpd_transport::TcpAoRotationStatus::default(),
@@ -343,7 +344,11 @@ pub(crate) fn spawn_fake_peer_manager_with_history(
                         .cloned()
                         .collect();
                     events.reverse();
-                    let _ = reply.send(events);
+                    let _ = reply.send(crate::peer_types::SessionEventHistory {
+                        events,
+                        evicted_total: 7,
+                        oldest_retained_unix_ms: 1_700_000_000_000,
+                    });
                 }
                 _ => {}
             }

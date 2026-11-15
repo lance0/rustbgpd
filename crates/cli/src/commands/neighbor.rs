@@ -187,6 +187,7 @@ fn json_neighbor(n: &crate::proto::NeighborState) -> JsonNeighbor {
         messages_sent: n.messages_sent,
         flap_count: n.flap_count,
         last_error: n.last_error.clone(),
+        last_error_unix_ms: (n.last_error_unix_ms != 0).then_some(n.last_error_unix_ms),
         is_dynamic: n.is_dynamic,
         retention_only: n.retention_only,
         accepted_dynamic_range: output::json_accepted_dynamic_range(
@@ -477,6 +478,7 @@ fn json_neighbor_detail(n: &crate::proto::NeighborState) -> JsonNeighborDetail {
         messages_sent: n.messages_sent,
         flap_count: n.flap_count,
         last_error: n.last_error.clone(),
+        last_error_unix_ms: (n.last_error_unix_ms != 0).then_some(n.last_error_unix_ms),
         is_dynamic: n.is_dynamic,
         retention_only: n.retention_only,
         accepted_dynamic_range: output::json_accepted_dynamic_range(
@@ -1099,7 +1101,19 @@ fn render_neighbor_detail_human(n: &crate::proto::NeighborState) -> String {
             ) => "Error Before Disable",
             _ => "Last Error",
         };
-        rows.field(0, label, &n.last_error);
+        if n.last_error_unix_ms == 0 {
+            rows.field(0, label, &n.last_error);
+        } else {
+            rows.field(
+                0,
+                label,
+                format!(
+                    "{} (at {})",
+                    n.last_error,
+                    super::watch::human_timestamp(n.last_error_unix_ms)
+                ),
+            );
+        }
     }
     rows.render()
 }
@@ -2069,6 +2083,28 @@ mod tests {
         assert_eq!(output::neighbor_identity(&state), "swp1 (-)");
     }
 
+    /// `last_error` is sticky, so its record time is shown in the detail view
+    /// and JSON when the daemon reports one, and omitted when it does not.
+    #[test]
+    fn last_error_time_renders_when_reported() {
+        let mut state = neighbor_projection_fixture();
+        state.last_error = "hold timer expired".into();
+        state.last_error_unix_ms = 1_700_000_000_000;
+        let detail = render_neighbor_detail_human(&state);
+        assert!(
+            detail.contains("hold timer expired (at 2023-11-14T22:13:20Z)"),
+            "{detail}"
+        );
+        let json = serde_json::to_value(json_neighbor(&state)).unwrap();
+        assert_eq!(json["last_error_unix_ms"], 1_700_000_000_000_i64);
+
+        state.last_error_unix_ms = 0;
+        let detail = render_neighbor_detail_human(&state);
+        assert!(!detail.contains("(at "), "{detail}");
+        let json = serde_json::to_value(json_neighbor(&state)).unwrap();
+        assert!(json.get("last_error_unix_ms").is_none());
+    }
+
     /// A held-down neighbor reads as disabled with its owner, in the table,
     /// the detail view and JSON, instead of a plain Idle; outside a
     /// max-prefix latch its error is labeled as predating the hold.
@@ -2191,6 +2227,7 @@ mod tests {
             notifications_sent: 109,
             flap_count: 110,
             last_error: "last_error-value".to_string(),
+            last_error_unix_ms: 0,
             is_dynamic: true,
             stale: false,
             local_role: "deliberately-not-config-role".to_string(),

@@ -2184,3 +2184,19 @@ async fn flush_keeps_the_held_reservation_place() {
     assert!(rib_rx.recv().await.is_some());
     assert!(flush.await.unwrap().rib_backlog.is_empty());
 }
+
+/// Load-bearing: `last_error` is sticky across Established, so the operator
+/// needs its record time to tell a stale failure from the current one. A
+/// session with no error reports 0; every setter stamps the wall clock.
+#[tokio::test]
+async fn last_error_is_stamped_when_recorded() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    assert_eq!(session.last_error_unix_ms, 0);
+
+    let before = rustbgpd_rib::event::unix_time_ms_now();
+    session.record_transport_cause("connection reset".to_string());
+    let after = rustbgpd_rib::event::unix_time_ms_now();
+
+    assert_eq!(session.last_error, "connection reset");
+    assert!((before..=after).contains(&session.last_error_unix_ms));
+}

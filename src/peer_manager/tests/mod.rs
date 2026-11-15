@@ -204,7 +204,7 @@ async fn query_session_event_history(
         limit,
         reply_tx,
     );
-    reply_rx.await.unwrap()
+    reply_rx.await.unwrap().events
 }
 
 async fn query_policy_event_history(
@@ -664,6 +664,7 @@ fn established_export_policy_test_session_with_queries(
                         flap_count: 0,
                         uptime_secs: 1,
                         last_error: String::new(),
+                        last_error_unix_ms: 0,
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
                         slow_peer: false,
@@ -744,6 +745,7 @@ fn rollback_ordering_policy_session(
                         flap_count: 0,
                         uptime_secs: 1,
                         last_error: String::new(),
+                        last_error_unix_ms: 0,
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
                         slow_peer: false,
@@ -830,6 +832,7 @@ fn stalled_export_policy_test_session(
                         flap_count: 0,
                         uptime_secs: 1,
                         last_error: String::new(),
+                        last_error_unix_ms: 0,
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
                         slow_peer: false,
@@ -988,40 +991,8 @@ fn max_prefix_on_command_peer_handle(
                         SessionState::Idle
                     };
                     let _ = reply.send(PeerSessionState {
-                        fsm_state,
-                        peer_ip: peer_addr,
                         peer_asn: Some(65002),
-                        prefix_count: 0,
-                        rejected_routes_retained: 0,
-                        policy_reject_counts: None,
-                        pre_policy_route_counts: None,
-                        max_prefix: MaxPrefixState::default(),
-                        negotiated_hold_time: None,
-                        four_octet_as: None,
-                        remote_router_id: None,
-                        negotiated_session: None,
-                        local_role: None,
-                        remote_role: None,
-                        role_negotiated: false,
-                        peer_paths_limits: Vec::new(),
-                        effective_add_path_send_limits: Vec::new(),
-                        updates_received: 0,
-                        updates_sent: 0,
-                        notifications_received: 0,
-                        notifications_sent: 0,
-                        messages_received: 0,
-                        messages_sent: 0,
-                        otc_routes_blocked: 0,
-                        import_policy_routes_permitted: 0,
-                        import_policy_routes_denied: 0,
-                        flap_count: 0,
-                        uptime_secs: 0,
-                        last_error: String::new(),
-                        tcp_ao_info: None,
-                        tcp_ao_protected: false,
-                        slow_peer: false,
-                        reconnect_in_secs: 0,
-                        notification_idle_failures: 0,
+                        ..policy_test_peer_state(peer_addr, fsm_state)
                     });
                     false
                 }
@@ -1153,6 +1124,7 @@ fn fake_peer_handle_with_route_refresh_reply(
                         flap_count: 0,
                         uptime_secs: 0,
                         last_error: String::new(),
+                        last_error_unix_ms: 0,
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
                         slow_peer: false,
@@ -1643,6 +1615,7 @@ fn acking_counted_policy_handle(peer_addr: IpAddr, counters: Arc<FakePeerCounter
                         flap_count: 0,
                         uptime_secs: 0,
                         last_error: String::new(),
+                        last_error_unix_ms: 0,
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
                         slow_peer: false,
@@ -1701,6 +1674,7 @@ fn policy_test_peer_state(peer_addr: IpAddr, state: SessionState) -> PeerSession
         flap_count: 0,
         uptime_secs: 0,
         last_error: String::new(),
+        last_error_unix_ms: 0,
         tcp_ao_info: None,
         tcp_ao_protected: false,
         slow_peer: false,
@@ -1751,6 +1725,7 @@ fn acking_policy_handle(peer_addr: IpAddr, state: SessionState) -> PeerHandle {
                         flap_count: 0,
                         uptime_secs: 0,
                         last_error: String::new(),
+                        last_error_unix_ms: 0,
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
                         slow_peer: false,

@@ -714,6 +714,7 @@ struct BgpMetricsInner {
     event_stream_lagged: IntCounterVec,
     event_stream_subscribers: IntGaugeVec,
     session_event_source_dropped: IntCounterVec,
+    session_event_history_evicted: IntCounter,
     grpc_authz_decisions: IntCounterVec,
     grpc_credential_reloads: IntCounterVec,
     grpc_tls_handshake_failures: IntCounterVec,
@@ -1560,6 +1561,12 @@ impl BgpMetrics {
                     .inc_by(0);
             }
         }
+
+        let session_event_history_evicted = IntCounter::new(
+            "bgp_session_event_history_evicted_total",
+            "Session lifecycle events evicted from the bounded ListSessionEvents history ring.",
+        )
+        .expect("valid metric definition");
 
         let grpc_authz_decisions = IntCounterVec::new(
             Opts::new(
@@ -3490,6 +3497,9 @@ impl BgpMetrics {
             .register(Box::new(session_event_source_dropped.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(session_event_history_evicted.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(grpc_authz_decisions.clone()))
             .expect("metric not already registered");
         registry
@@ -4130,6 +4140,7 @@ impl BgpMetrics {
             event_stream_lagged,
             event_stream_subscribers,
             session_event_source_dropped,
+            session_event_history_evicted,
             grpc_authz_decisions,
             grpc_credential_reloads,
             grpc_tls_handshake_failures,
@@ -5448,6 +5459,11 @@ impl BgpMetrics {
             .event_stream_lagged
             .with_label_values(&[service, source])
             .inc_by(missed);
+    }
+
+    /// Record one session lifecycle event evicted from the bounded history ring.
+    pub fn record_session_event_history_evicted(&self) {
+        self.0.session_event_history_evicted.inc();
     }
 
     /// Record one session state change dropped because its source channel was full.
@@ -8911,6 +8927,14 @@ mod tests {
                 .get(),
             0
         );
+    }
+
+    #[test]
+    fn session_event_history_eviction_counter_exports_and_increments() {
+        let m = BgpMetrics::new();
+        m.record_session_event_history_evicted();
+        m.record_session_event_history_evicted();
+        assert!(gather_text(&m).contains("bgp_session_event_history_evicted_total 2"));
     }
 
     #[test]

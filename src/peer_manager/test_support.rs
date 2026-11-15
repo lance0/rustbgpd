@@ -86,6 +86,7 @@ fn established_policy_handle(peer: IpAddr, acks: EstablishedPolicyPeerAcks) -> P
                         flap_count: 0,
                         uptime_secs: 1,
                         last_error: String::new(),
+                        last_error_unix_ms: 0,
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
                         otc_routes_blocked: 0,

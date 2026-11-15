@@ -55,6 +55,7 @@ fn persistence_probe_handle(peer_addr: IpAddr) -> PeerHandle {
                         flap_count: 3,
                         uptime_secs: 86_400,
                         last_error: String::new(),
+                        last_error_unix_ms: 0,
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
                         slow_peer: false,
@@ -462,7 +463,7 @@ hold_time = 90
             })
             .await
             .unwrap();
-        reply_rx.await.unwrap()
+        reply_rx.await.unwrap().events
     }
 
     async fn runtime_config(&self) -> Config {

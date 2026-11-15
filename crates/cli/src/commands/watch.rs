@@ -133,7 +133,7 @@ pub(crate) fn timestamp_unix_seconds(timestamp_unix_ms: i64) -> Option<u64> {
 /// Human event lines use the same RFC 3339 UTC rendering as
 /// `config history`; a time that rendering cannot cover is shown as whole
 /// seconds.
-fn human_timestamp(timestamp_unix_ms: i64) -> String {
+pub(crate) fn human_timestamp(timestamp_unix_ms: i64) -> String {
     timestamp_unix_seconds(timestamp_unix_ms)
         .and_then(super::config::format_unix_utc)
         .unwrap_or_else(|| unix_seconds_string(timestamp_unix_ms))
@@ -1212,6 +1212,18 @@ pub async fn history(
     Ok(())
 }
 
+/// Tell the operator the session history lost events, so an empty or short
+/// answer is not read as "nothing happened".
+fn eviction_note(evicted_total: u64, oldest_retained_unix_ms: i64) -> Option<String> {
+    (evicted_total > 0).then(|| {
+        format!(
+            "note: {evicted_total} session events were evicted from the bounded history; \
+             transitions are complete only from {}",
+            human_timestamp(oldest_retained_unix_ms)
+        )
+    })
+}
+
 pub async fn session_history(
     connection: Connection,
     neighbor: Option<String>,
@@ -1237,6 +1249,10 @@ pub async fn session_history(
     .await?
     .into_inner();
 
+    if let Some(note) = eviction_note(response.evicted_total, response.oldest_retained_unix_ms) {
+        // stderr: stdout stays one parseable event per line.
+        eprintln!("{note}");
+    }
     if response.events.is_empty() {
         print_empty_history(json, "session")?;
         return Ok(());
@@ -2987,6 +3003,14 @@ mod tests {
             format_bgp_event_line(&event),
             "[2026-09-23T03:05:14Z] bfd_up bfd fe80::1%eth0 Init → Up (none)"
         );
+    }
+
+    #[test]
+    fn eviction_note_names_loss_and_oldest_retained_time() {
+        assert_eq!(eviction_note(0, 1_700_000_000_000), None);
+        let note = eviction_note(5, 1_700_000_000_000).unwrap();
+        assert!(note.contains("5 session events were evicted"), "{note}");
+        assert!(note.contains("2023-11-14T22:13:20Z"), "{note}");
     }
 
     #[test]
