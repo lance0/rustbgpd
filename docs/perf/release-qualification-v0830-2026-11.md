@@ -4,7 +4,7 @@
 
 This receipt compares the v0.83.0 release candidate with v0.82.0 on policy-reload stall, route-reflector throughput and memory, and the hot-path Criterion benchmarks.
 
-**Verdict.** Every reload-stall turn and completion bar and every rrharness bar passes. Two items fail their bars and were accepted as the cost of correctness work: the distinct-150 reload's cgroup peak (+3.0% ABBA, +4.0% confirmation; not a like-for-like comparison) and 24 of 156 gated Criterion cells, 23 of them wide-fanout distribution cells at 64 peers and up (+2–5%). v0.82.0 rolled back the distinct-150 reload at every point; the candidate committed it every time.
+**Verdict.** Every reload-stall turn bar, the grouped-200:2 completion bar and every rrharness bar passes. Distinct-150 completion has no timing verdict: v0.82.0 rolled that reload back, so the result is an outcome change, not a speedup. Two items fail their bars and were accepted as the cost of correctness work: the distinct-150 reload's cgroup peak (+3.0% ABBA, +4.0% confirmation; not a like-for-like comparison) and 24 of 156 gated Criterion cells, 23 of them wide-fanout distribution cells at 64 peers and up (+2–5%). v0.82.0 rolled back the distinct-150 reload at every point; the candidate committed it every time.
 
 ## Arms and protocol
 
@@ -28,7 +28,7 @@ The host was one Linux machine with a 32-core AMD Ryzen Threadripper 7970X and 1
 | distinct 150 | Completion | rolled back, 5 of 5 points | 128.6 s, committed | – | – | – | no ratio |
 | distinct 150 | cgroup peak | 9,134 MiB | 9,407 MiB | 1.003 | 1.030 | 1.040 | FAIL, accepted |
 
-The candidate committed every reload at both shapes. v0.82.0 committed the grouped reloads but rejected the first distinct-150 reload at all five points (`rejected_no_effect`): its RIB manager did not reply within the 120 s shared policy-walk budget, and the daemon restored the peers it had already changed. The 67 s turn is that restore. It ends 187.7–189.8 s after the SIGHUP, and no earlier scrape saw a turn above 1.52 s.
+Only grouped 200:2 has a comparative completion verdict; the distinct-150 completion row records an outcome change (rolled back on v0.82.0, committed on the candidate), not a timing PASS. The candidate committed every reload at both shapes. v0.82.0 committed the grouped reloads but rejected the first distinct-150 reload at all five points (`rejected_no_effect`): its RIB manager did not reply within the 120 s shared policy-walk budget, and the daemon restored the peers it had already changed. The 67 s turn is that restore. It ends 187.7–189.8 s after the SIGHUP, and no earlier scrape saw a turn above 1.52 s.
 
 **Distinct-150 memory is not like-for-like.** Steady RSS before the reload was equal: 7,858–7,862 MiB in the control window on all eight points. The candidate then commits two full 150-peer export generations, while v0.82.0 runs one walk, fails it and restores; the harness stops at a rejected reload. The 274 MiB higher peak was accepted as the cost of a committed reload. A single-reload comparison was not run.
 
