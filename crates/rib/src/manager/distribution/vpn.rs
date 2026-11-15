@@ -1032,12 +1032,16 @@ impl RibManager {
             .filter(|peer| {
                 targeted(peer)
                     && self.grouped_member_of(*peer).is_some()
-                    && self.outbound_channel_full(*peer)
+                    && (self.outbound_channel_full(*peer)
+                        || self.selection_release_resync_pending(*peer))
             })
             .collect();
         let mut speculative_group_admitted = Vec::new();
         for peer in blocked {
-            if self.capture_group_admitted_keys(peer) {
+            if self.selection_release_resync_pending(peer) {
+                // Preserve OLD and enable tombstones before the shared table moves.
+                self.mark_outbound_dirty(peer);
+            } else if self.capture_group_admitted_keys(peer) {
                 speculative_group_admitted.push(peer);
             }
         }
@@ -1080,18 +1084,17 @@ impl RibManager {
                 // never compared by the oracle).
                 self.apply_group_policy_counters(peer, &stage.evals);
                 let member_filter = self.member_rt_filter(peer);
-                // A member already dirty when this pass staged, whose
-                // channel is still full, would only build a send that
-                // fails. Keep that failure's bookkeeping without the
-                // build: no emission, count delta or prior-key set, and
-                // no drop counted (the unicast dirty-and-full deferral).
+                // A dirty member with a full channel or a pending release
+                // resync skips this delta. Keep its recovery bookkeeping
+                // without building a send: no emission, count delta or
+                // prior-key set, and no drop counted.
                 // Staging already recorded this pass's withdrawals as VPN
                 // tombstones (`dirty_members` was non-empty), so only the
                 // member-scoped withdraws, which keep the key IN the
-                // table, need a record. A dirty member with room still
-                // takes the incremental send below, widening its
+                // table, need a record. Outside release, a dirty member
+                // with room takes the incremental send below, widening its
                 // admitted-key proof with what it actually received.
-                if self.outbound_channel_full(peer)
+                if (self.outbound_channel_full(peer) || self.selection_release_resync_pending(peer))
                     && self
                         .group_ribs
                         .get(&gid)

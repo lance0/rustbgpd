@@ -1395,8 +1395,12 @@ fn partial_family_release_wakes_omitted_data_before_its_initial_eor() {
         safi: v6.1,
     });
     let mut updates = apply_wire(&mut rx, &mut wire);
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
-    updates.extend(apply_wire(&mut rx, &mut wire));
+    // With one channel slot, the admitted table can defer its marker until
+    // the writer drains. The production retry sends no second table.
+    manager.resync_dirty_peers_bounded();
+    let retried = apply_wire(&mut rx, &mut wire);
+    assert!(retried.iter().all(|update| update.announce.is_empty()));
+    updates.extend(retried);
     assert_eq!(
         updates
             .iter()

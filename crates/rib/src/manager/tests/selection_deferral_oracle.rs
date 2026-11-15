@@ -3777,10 +3777,9 @@ fn limited_member_established_behind_a_full_writer_counts_its_wire() {
     assert!(failed.is_empty(), "{failed:#?}");
 }
 
-/// I1 at release for a private receiver: a received RTBH withdrawn before
-/// the hold behind a full writer is re-received inside it, and an
-/// IMMEDIATE ORF (unchanged or not covering the prefix) or a forced
-/// outbound refresh (`GShut`) forces a resync the gate defers. Release must
+/// I1 at release: a received RTBH withdrawn before the hold behind a full
+/// writer is re-received inside it, and an IMMEDIATE ORF or a `GShut`
+/// outbound refresh forces a resync the gate defers. Release must
 /// replace the stale row in place. Running the deferred resync on the
 /// frozen best withdrew it in one UPDATE and re-announced it in the next.
 /// The withdrawal comes from the source's stale deadline or its own UPDATE.
@@ -3824,13 +3823,28 @@ fn deferred_forced_resync_keeps_a_rereceived_rtbh_at_release() {
         (config, Op::Orf { deny: 14 }),
         (config, Op::RefreshOutbound),
         (without_orf, Op::RefreshOutbound),
+        (
+            Config {
+                grouped: true,
+                ..without_orf
+            },
+            Op::RefreshOutbound,
+        ),
+        (
+            Config {
+                grouped: true,
+                per_client_best: true,
+                ..without_orf
+            },
+            Op::RefreshOutbound,
+        ),
     ];
     let mut failed = Vec::new();
     for (name, setup) in [("stale sweep", &swept[..]), ("withdrawal", &withdrawn[..])] {
         for (config, trigger) in &triggers {
             let hold = [rtbh.clone(), trigger.clone()];
             if let Some(reason) = failure(*config, setup, &hold) {
-                failed.push(format!("{name}, {trigger:?}, orf {}: {reason}", config.orf));
+                failed.push(format!("{name}, {config:?}, {trigger:?}: {reason}"));
             }
         }
     }

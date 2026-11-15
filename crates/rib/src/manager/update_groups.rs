@@ -3062,31 +3062,19 @@ impl RibManager {
         }
     }
 
-    /// A released family can owe omitted initial rows even when another
-    /// family still keeps the receiver's partial recovery parked.
+    /// A staged or released family can owe rows even when another family
+    /// still keeps the receiver's partial recovery parked.
     pub(super) fn wake_selection_partial_recovery(&mut self, family: (Afi, Safi)) {
-        let slot = match family {
-            (Afi::Ipv4, Safi::Unicast) => 0,
-            (Afi::Ipv6, Safi::Unicast) => 1,
-            (Afi::Ipv4, Safi::MplsVpn) => 2,
-            (Afi::Ipv6, Safi::MplsVpn) => 3,
-            _ => return,
-        };
         let peers: Vec<_> = self
             .dirty_peers
             .iter()
+            .chain(&self.force_outbound_peers)
             .inspect(|_| self.replacement_checkpoint(false))
             .copied()
             .filter(|peer| {
-                self.outbound_session_ids
+                self.peer_sendable_families
                     .get(peer)
-                    .and_then(|session| {
-                        self.live_sessions
-                            .get(peer)?
-                            .iter()
-                            .find(|record| record.session_id == *session)
-                    })
-                    .is_some_and(|record| record.selection_partial_pending[slot])
+                    .is_some_and(|families| families.contains(&family))
             })
             .collect();
         for peer in peers {

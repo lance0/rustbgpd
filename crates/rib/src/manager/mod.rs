@@ -609,10 +609,10 @@ enum FullPassPath {
 /// Runs as a single tokio task, receiving updates via an mpsc channel.
 /// No `Arc<RwLock>` — all state is owned by this task.
 #[cfg_attr(
-    test,
+    any(test, feature = "bench-internals"),
     expect(
         clippy::struct_excessive_bools,
-        reason = "independent test fixture switches coexist with the production event-ID exhaustion and outbound-close flags"
+        reason = "independent test and benchmark switches coexist with production event-ID exhaustion, outbound-close and release-staging flags"
     )
 )]
 pub struct RibManager {
@@ -1032,6 +1032,8 @@ pub struct RibManager {
     eor_replay: eor_grace::ReplayWait,
     /// Process-start RFC 4724 route-selection gates. `None` on cold starts.
     selection_deferral: Option<selection_deferral::SelectionDeferral>,
+    /// Release updates every selected view before pending whole-peer resyncs emit.
+    selection_release_staging: bool,
     /// Route identities touched while their family's Loc-RIB was frozen.
     /// Includes withdrawals so restored rows absent from Adj-RIB-In are
     /// still removed when the gate releases.
@@ -3007,6 +3009,7 @@ impl RibManager {
             eor_grace_deadlines: graceful_restart::DeadlineMap::default(),
             eor_replay: eor_grace::ReplayWait::default(),
             selection_deferral: None,
+            selection_release_staging: false,
             deferred_selection_keys: selection_deferral::DeferredSelectionKeys::default(),
             selection_deferred_refresh: HashMap::new(),
             peer_asn: HashMap::new(),
@@ -6933,6 +6936,11 @@ impl RibManager {
             self.peer_rt_membership.remove(&peer);
             return;
         };
+        if self.selection_release_resync_pending(peer) && self.vpn_grouped_member_of(peer).is_some()
+        {
+            // A membership delta cannot settle the other families release skipped.
+            self.mark_outbound_dirty(peer);
+        }
         let captured_prior =
             self.vpn_grouped_member_of(peer).is_some() && self.capture_group_admitted_keys(peer);
         let published = self.clone_rtc_membership(&new);
