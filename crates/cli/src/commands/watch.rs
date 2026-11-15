@@ -1218,7 +1218,8 @@ fn eviction_note(evicted_total: u64, oldest_retained_unix_ms: i64) -> Option<Str
     (evicted_total > 0).then(|| {
         format!(
             "note: {evicted_total} session events were evicted from the bounded history; \
-             transitions are complete only from {}",
+             retry rows may be missing, and established, lost and admin events are \
+             retained from {} onward",
             human_timestamp(oldest_retained_unix_ms)
         )
     })
@@ -3010,7 +3011,11 @@ mod tests {
         assert_eq!(eviction_note(0, 1_700_000_000_000), None);
         let note = eviction_note(5, 1_700_000_000_000).unwrap();
         assert!(note.contains("5 session events were evicted"), "{note}");
-        assert!(note.contains("2023-11-14T22:13:20Z"), "{note}");
+        assert!(note.contains("retry rows may be missing"), "{note}");
+        assert!(
+            note.contains("retained from 2023-11-14T22:13:20Z onward"),
+            "{note}"
+        );
     }
 
     #[test]

@@ -2765,7 +2765,7 @@ the `BgpMaxPrefixLimitExceeded` counter alert pages on the breach and resolves
 | Metric | What it tells you |
 |--------|-------------------|
 | `bgp_session_event_source_dropped_total{kind,reason}` | Session `state_change` or `notification` events dropped before peer-manager publication because the bounded source channel was `channel_full` or `channel_closed`. All four bounded series exist at zero from startup. |
-| `bgp_session_event_history_evicted_total` | Session lifecycle events evicted from the bounded `ListSessionEvents` ring (4096 events, all peers). Repeated pre-Established `state_change` rows go first; a rise means history older than `oldest_retained_unix_ms` in the `ListSessionEvents` response is incomplete |
+| `bgp_session_event_history_evicted_total` | Session lifecycle events evicted from the bounded `ListSessionEvents` ring (4096 events, all peers). Repeated pre-Established `state_change` rows go first, so a rise means rows were dropped and retry rows can be missing; other event types newer than `oldest_retained_unix_ms` in the `ListSessionEvents` response are retained |
 | `bgp_event_stream_lagged_total{service,source}` | Events skipped because a live stream subscriber fell behind the bounded broadcast channel. `service` is `watch_events`; `source` is `route`, `session`, `policy`, `evpn`, `dataplane`, `dataplane_route`, or `bfd` where applicable |
 | `bgp_event_stream_subscribers{service,source}` | Current live stream subscriber count by service/source |
 | `bgp_route_event_history_depth` | Current number of unicast route events retained for `ListRouteEvents` / `rbgp events` history queries |

@@ -3576,13 +3576,13 @@ message ListSessionEventsRequest {
 message ListSessionEventsResponse {
   repeated BgpEvent events = 1;
   // Session events evicted from the bounded history since daemon start, all
-  // peers. When the history is full, repeated pre-Established state_change
-  // events are evicted before any transition, so a nonzero value does not
-  // by itself mean a transition is missing; compare oldest_retained_unix_ms
-  // with the time you need.
+  // peers. A nonzero value means rows were dropped. state_change retry rows
+  // can be missing at any time; every other event type is dropped only once
+  // no state_change rows remain, oldest first.
   uint64 evicted_total = 2;
   // Timestamp of the oldest retained event across all peers, before any
-  // request filter; 0 when the history is empty.
+  // request filter or limit; 0 when the history is empty. Events other than
+  // state_change that are newer than this are all retained.
   int64 oldest_retained_unix_ms = 3;
 }
 

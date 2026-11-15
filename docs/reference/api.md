@@ -3289,9 +3289,10 @@ peer's connection retries do not push out another peer's `ESTABLISHED` or
 carries `evicted_total` (events lost since daemon start, all peers, also
 exported as `bgp_session_event_history_evicted_total`) and
 `oldest_retained_unix_ms` (the oldest retained event across all peers, before
-the request filter). Retry rows may be missing after the first eviction, so a
-nonzero `evicted_total` is a reason to check `oldest_retained_unix_ms` against
-the time you need, not proof that a transition is gone. `rbgp events sessions`
+the request filter or limit). A nonzero `evicted_total` means rows were
+dropped: retry (`STATE_CHANGED`) rows can be missing at any time, while other
+event types are dropped only once no retry rows remain, oldest first, so those
+newer than `oldest_retained_unix_ms` are retained. `rbgp events sessions`
 prints a note on stderr when `evicted_total` is nonzero.
 
 `NeighborState.last_error` is not cleared when the session reaches
