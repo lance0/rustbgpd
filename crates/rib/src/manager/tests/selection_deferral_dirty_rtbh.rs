@@ -3417,3 +3417,197 @@ fn held_empty_view_resync_flushes_the_markers_the_hold_does_not_hold() {
     assert_eq!(released, vec![FAMILY]);
     assert!(!manager.dirty_peers.contains(&observer));
 }
+
+/// The `bgp_rib_adj_out_prefixes` value for one peer and family.
+fn adj_out_gauge(manager: &RibManager, peer: PeerId, family: &str) -> f64 {
+    let peer_label = peer.label();
+    manager
+        .metrics
+        .registry()
+        .gather()
+        .iter()
+        .find(|metrics| metrics.name() == "bgp_rib_adj_out_prefixes")
+        .and_then(|metrics| {
+            metrics.get_metric().iter().find(|metric| {
+                let labels = metric.get_label();
+                labels
+                    .iter()
+                    .any(|label| label.name() == "peer" && label.value() == peer_label)
+                    && labels
+                        .iter()
+                        .any(|label| label.name() == "family" && label.value() == family)
+            })
+        })
+        .map_or(0.0, |metric| metric.get_gauge().get_value())
+}
+
+/// A grouped member's first session establishes inside the hold behind a
+/// full writer, so it is dirty with nothing sent, and a reload installs an
+/// outbound prefix limit then. The limiter's admitted set must start from
+/// what the member was actually sent, not the group's desired view: a
+/// desired prefix it never received is never withdrawn from it, so it would
+/// stay counted after release. `delete` removes the host route inside the
+/// hold; otherwise it reaches the member at release and is counted then.
+/// `refuse_proof` exhausts the admission-proof budget, so the member is
+/// dirty with no proof and on the conservative withdrawal fallback, which
+/// may withdraw a key it never announced.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one transcript follows a limit installed on a dirty member through the hold release and the next update"
+)]
+fn assert_limited_dirty_member_counts_its_wire(
+    delete: bool,
+    per_client_best: bool,
+    refuse_proof: bool,
+) {
+    let case = format!("delete={delete} per_client_best={per_client_best} refuse={refuse_proof}");
+    let mut manager = manager_with_dormant_waiter();
+    if refuse_proof {
+        manager.pending_group_admitted =
+            crate::manager::update_groups::admitted_recovery::AdmittedRecovery::with_test_limits(
+                0,
+                512 * 1024 * 1024,
+            );
+    }
+    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let observer = peer_v4(OBSERVER);
+    let host = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32);
+    inject_host(&mut manager, host);
+    let _waiter = connect(&mut manager, WAITER, 64, true, false);
+    assert!(manager.selection_deferred(FAMILY));
+    let (tx, mut rx) = mpsc::channel(4);
+    let occupied: Vec<_> = std::iter::from_fn(|| tx.clone().try_reserve_owned().ok()).collect();
+    manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
+        peer: observer,
+        session_id: 82,
+        peer_restart_state: false,
+        peer_gr_helper: true,
+        peer_gr_families: vec![FAMILY],
+        peer_enhanced_refresh: true,
+        peer_llgr_families: vec![],
+        local_llgr_stale_time: 0,
+    });
+    let mut up = super::lifecycle::test_peer_up(observer, 82, tx.clone());
+    if let RibUpdate::PeerUp {
+        sendable_families,
+        per_client_best: pcb,
+        ..
+    } = &mut up
+    {
+        *sendable_families = vec![FAMILY];
+        *pcb = per_client_best;
+    }
+    manager.handle_update(up);
+    assert!(manager.grouped_member_of(observer).is_some(), "{case}");
+    assert!(
+        manager.dirty_peers.contains(&observer),
+        "{case}: nothing was sent"
+    );
+    assert_eq!(
+        manager.pending_group_admitted.get(&observer).is_none(),
+        refuse_proof,
+        "{case}: the member's proof"
+    );
+    assert_eq!(
+        manager.group_recovery_fallback(observer).is_some(),
+        refuse_proof,
+        "{case}: the member's fallback"
+    );
+    super::outbound_prefix_limits::prepare(
+        &mut manager,
+        1,
+        super::outbound_prefix_limits::limit_config(&[(observer, Some(64), None)], &[]),
+    )
+    .unwrap();
+    super::outbound_prefix_limits::apply(&mut manager, 1, true).unwrap();
+    let mut wire = std::collections::HashMap::new();
+    let apply = |rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
+                 wire: &mut std::collections::HashMap<(Prefix, u32), Route>| {
+        let updates: Vec<_> = std::iter::from_fn(|| rx.try_recv().map(delivered).ok()).collect();
+        for update in &updates {
+            for key in update.unicast_withdrawals() {
+                assert!(
+                    wire.remove(key).is_some() || refuse_proof,
+                    "{case}: no unknown withdrawal with a proof"
+                );
+            }
+            for route in update.announce.iter() {
+                wire.insert((route.prefix, route.path_id), route.clone());
+            }
+        }
+        updates.len()
+    };
+    assert_eq!(apply(&mut rx, &mut wire), 0, "{case}");
+    if delete {
+        let (reply, mut result) = oneshot::channel();
+        manager.handle_update(RibUpdate::WithdrawInjected {
+            prefix: Prefix::V4(host),
+            path_id: 0,
+            allow_missing: false,
+            owner: String::new(),
+            override_owner: false,
+            reply,
+        });
+        assert!(result.try_recv().unwrap().unwrap().removed, "{case}");
+    }
+    drop(occupied);
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: peer_v4(WAITER),
+        session_id: 83,
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    });
+    for _ in 0..4 {
+        manager.distribute_changes(&HashSet::new(), &HashSet::new());
+        manager.resync_dirty_peers_bounded();
+        apply(&mut rx, &mut wire);
+    }
+    assert!(!manager.selection_deferred(FAMILY), "{case}");
+    assert!(!manager.dirty_peers.contains(&observer), "{case}");
+    assert_eq!(wire.len(), usize::from(!delete), "{case}: wire {wire:?}");
+    let released = manager.actual_unicast_advertised_count(observer);
+    let released_wire = wire.len();
+    // The next unicast commit to the member publishes its gauge from the
+    // same admitted count.
+    inject_host(
+        &mut manager,
+        Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 3), 32),
+    );
+    apply(&mut rx, &mut wire);
+    assert_eq!(wire.len(), 1 + released_wire, "{case}: wire {wire:?}");
+    let count = manager.actual_unicast_advertised_count(observer);
+    let gauge = adj_out_gauge(&manager, observer, "ipv4_unicast");
+    #[expect(clippy::cast_precision_loss, reason = "a single-digit key count")]
+    let expected = wire.len() as f64;
+    assert!(
+        released == released_wire && count == wire.len() && (gauge - expected).abs() < f64::EPSILON,
+        "{case}: the advertised count after release is {released} for {released_wire} wire keys; \
+         after the next update the count is {count} and the Adj-RIB-Out gauge {gauge} for {} wire keys",
+        wire.len()
+    );
+}
+
+#[test]
+fn limited_dirty_member_drops_a_deleted_route_it_was_never_sent_from_its_count() {
+    for per_client_best in [false, true] {
+        assert_limited_dirty_member_counts_its_wire(true, per_client_best, false);
+    }
+}
+
+/// A guard, not a regression: it passes with the desired-view seed too. It
+/// keeps a proof seed from losing a route the member receives at release.
+#[test]
+fn limited_dirty_member_counts_a_route_it_receives_at_release() {
+    for per_client_best in [false, true] {
+        assert_limited_dirty_member_counts_its_wire(false, per_client_best, false);
+    }
+}
+
+#[test]
+fn limited_dirty_member_without_a_proof_counts_its_wire() {
+    for delete in [false, true] {
+        for per_client_best in [false, true] {
+            assert_limited_dirty_member_counts_its_wire(delete, per_client_best, true);
+        }
+    }
+}
