@@ -9856,7 +9856,7 @@ import_policy_chain = ["origin-guard"]
             .replace("strict_role = false", "strict_role = true")
             .replace(
                 "[[neighbors]]\naddress = \"10.0.0.3\"",
-                "[peer_groups.core]\nmax_prefixes_out_ipv4 = 100\n\n[[neighbors]]\naddress = \"10.0.0.3\"",
+                "[peer_groups.core]\nmax_prefixes_out_ipv4_unicast = 100\n\n[[neighbors]]\naddress = \"10.0.0.3\"",
             );
         let (outcome, tags, calls) =
             drive_generation(&initial, &desired, GenerationReply::Applied).await;
@@ -10211,7 +10211,7 @@ import_policy_chain = ["origin-guard"]
     async fn reload_generation_restores_outbound_prefix_limits_after_rejection() {
         let candidate = baseline_toml().replace(
             "hold_time = 90",
-            "hold_time = 45\nmax_prefixes_out_ipv4 = 100",
+            "hold_time = 45\nmax_prefixes_out_ipv4_unicast = 100",
         );
         for (reply, restore_ok) in [
             (
@@ -10374,7 +10374,7 @@ import_policy_chain = ["origin-guard"]
              families = [\"ipv6_unicast\"]\n",
             baseline_toml().replace(
                 "hold_time = 90",
-                "hold_time = 45\nmax_prefixes_out_ipv4 = 100",
+                "hold_time = 45\nmax_prefixes_out_ipv4_unicast = 100",
             )
         );
         let path = unique_temp_path("reload-generation-preflight");
@@ -10793,7 +10793,7 @@ import_policy_chain = ["origin-guard"]
 
         let raised = baseline_toml().replace(
             "hold_time = 90",
-            "hold_time = 90\nmax_prefixes_out_ipv4 = 100",
+            "hold_time = 90\nmax_prefixes_out_ipv4_unicast = 100",
         );
         let desired_raised =
             Config::load_toml_with_diagnostics(&raised, "limits-preflight-raised").unwrap();
@@ -11822,7 +11822,7 @@ tcp_ao = [
                 )
                 .replace(
                     "hold_time = 90",
-                    "hold_time = 45\nmax_prefixes_out_ipv4 = 100"
+                    "hold_time = 45\nmax_prefixes_out_ipv4_unicast = 100"
                 )
         );
         write_tier_test_config(&path, &candidate);

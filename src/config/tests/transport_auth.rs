@@ -37,14 +37,14 @@ prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 
 [peer_groups.ixp-members]
-max_prefixes_ipv4 = 100
-max_prefixes_ipv6 = 50
+max_prefixes_ipv4_unicast = 100
+max_prefixes_ipv6_unicast = 50
 
 [[neighbors]]
 address = "10.0.0.2"
 remote_asn = 65002
 peer_group = "ixp-members"
-max_prefixes_ipv4 = 10
+max_prefixes_ipv4_unicast = 10
 "#;
     let config = parse(toml_str).unwrap();
     let peers = config.to_peer_configs().unwrap();
@@ -732,15 +732,15 @@ prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 
 [peer_groups.ixp-members]
-max_prefixes_ipv4 = 100
-max_prefixes_received_ipv4 = 120
-max_prefixes_received_ipv6 = 60
+max_prefixes_ipv4_unicast = 100
+max_prefixes_received_ipv4_unicast = 120
+max_prefixes_received_ipv6_unicast = 60
 
 [[neighbors]]
 address = "10.0.0.2"
 remote_asn = 65002
 peer_group = "ixp-members"
-max_prefixes_received_ipv4 = 12
+max_prefixes_received_ipv4_unicast = 12
 "#;
     let config = parse(toml_str).unwrap();
     let peers = config.to_peer_configs().unwrap();
@@ -851,7 +851,7 @@ router_id = "10.0.0.1"
 [[neighbors]]
 address = "10.0.0.2"
 remote_asn = 65002
-max_prefixes_received_ipv4 = {value}
+max_prefixes_received_ipv4_unicast = {value}
 "#
         );
         assert!(parse(&toml_str).is_err(), "{value} must be rejected");
@@ -887,7 +887,7 @@ prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 
 [peer_groups.ixp-members]
-max_prefixes_ipv4 = 100
+max_prefixes_ipv4_unicast = 100
 {group_extra}
 
 [[neighbors]]

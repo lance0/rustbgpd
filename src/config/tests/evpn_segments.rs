@@ -274,7 +274,8 @@ fn ethernet_segment_rejects_recovery_delay_out_of_range() {
     let schema: serde_json::Value = serde_json::from_str(&config_json_schema()).unwrap();
     let properties = &schema["$defs"]["EthernetSegmentConfig"]["properties"];
     assert!(properties.get("recovery_delay_secs").is_none());
-    for key in ["recovery_delay_seconds"] {
+    {
+        let key = "recovery_delay_seconds";
         assert_eq!(properties[key]["minimum"], 0, "{key} schema minimum");
         assert_eq!(properties[key]["maximum"], 3600, "{key} schema maximum");
         let segment = |value: u64| {

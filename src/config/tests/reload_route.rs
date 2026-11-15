@@ -673,7 +673,7 @@ fn diff_rejects_sequential_candidate_adding_group_with_file_only_fields() {
 
     let existing = rs(&md5.replace(
         "max_prefixes = 1000",
-        "max_prefixes = 1000\nmax_prefixes_out_ipv4 = 100",
+        "max_prefixes = 1000\nmax_prefixes_out_ipv4_unicast = 100",
     ));
     assert!(matches!(
         diff_config(&prior, &existing).sighup_route,
