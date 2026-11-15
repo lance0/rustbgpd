@@ -37,14 +37,14 @@ prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 
 [peer_groups.ixp-members]
-max_prefixes_ipv4 = 100
-max_prefixes_ipv6 = 50
+max_prefixes_ipv4_unicast = 100
+max_prefixes_ipv6_unicast = 50
 
 [[neighbors]]
 address = "10.0.0.2"
 remote_asn = 65002
 peer_group = "ixp-members"
-max_prefixes_ipv4 = 10
+max_prefixes_ipv4_unicast = 10
 "#;
     let config = parse(toml_str).unwrap();
     let peers = config.to_peer_configs().unwrap();
@@ -732,15 +732,15 @@ prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 
 [peer_groups.ixp-members]
-max_prefixes_ipv4 = 100
-max_prefixes_received_ipv4 = 120
-max_prefixes_received_ipv6 = 60
+max_prefixes_ipv4_unicast = 100
+max_prefixes_received_ipv4_unicast = 120
+max_prefixes_received_ipv6_unicast = 60
 
 [[neighbors]]
 address = "10.0.0.2"
 remote_asn = 65002
 peer_group = "ixp-members"
-max_prefixes_received_ipv4 = 12
+max_prefixes_received_ipv4_unicast = 12
 "#;
     let config = parse(toml_str).unwrap();
     let peers = config.to_peer_configs().unwrap();
@@ -851,7 +851,7 @@ router_id = "10.0.0.1"
 [[neighbors]]
 address = "10.0.0.2"
 remote_asn = 65002
-max_prefixes_received_ipv4 = {value}
+max_prefixes_received_ipv4_unicast = {value}
 "#
         );
         assert!(parse(&toml_str).is_err(), "{value} must be rejected");
@@ -887,7 +887,7 @@ prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 
 [peer_groups.ixp-members]
-max_prefixes_ipv4 = 100
+max_prefixes_ipv4_unicast = 100
 {group_extra}
 
 [[neighbors]]
@@ -1100,11 +1100,10 @@ fn tcp_mss_rejects_values_outside_the_kernel_range() {
     assert!(parse(&ok).is_ok());
 }
 
-/// Every legacy unicast max-prefix spelling still parses, on neighbors and
-/// peer groups, to the same value as its canonical key; only the canonical
-/// key is written back; and setting both spellings in one table is rejected.
+/// The removed max-prefix spellings are unknown fields on neighbors and peer
+/// groups, the loader names the replacement key, and the replacement parses.
 #[test]
-fn legacy_max_prefix_key_aliases_parse_and_round_trip_canonically() {
+fn removed_max_prefix_key_spellings_are_rejected_naming_the_replacement() {
     const BASE: &str = r#"
 [global]
 asn = 65001
@@ -1115,77 +1114,57 @@ listen_port = 179
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 "#;
-    let neighbor = |line: &str| {
-        format!("{BASE}\n[[neighbors]]\naddress = \"10.0.0.2\"\nremote_asn = 65002\n{line}\n")
-    };
-    let group = |line: &str| {
-        format!(
-            "{BASE}\n[peer_groups.members]\n{line}\n\n[[neighbors]]\naddress = \"10.0.0.2\"\n\
-             remote_asn = 65002\npeer_group = \"members\"\n"
-        )
-    };
-    let neighbor_toml = |config: &Config| toml::to_string(&config.neighbors[0]).unwrap();
-    let group_toml = |config: &Config| toml::to_string(&config.peer_groups["members"]).unwrap();
-
-    assert_eq!(LEGACY_MAX_PREFIX_KEYS.len(), 6);
-    for (legacy, canonical) in LEGACY_MAX_PREFIX_KEYS {
-        for (scope, render, written) in [
+    let pairs = [
+        ("max_prefixes_ipv4", "max_prefixes_ipv4_unicast"),
+        ("max_prefixes_ipv6", "max_prefixes_ipv6_unicast"),
+        (
+            "max_prefixes_received_ipv4",
+            "max_prefixes_received_ipv4_unicast",
+        ),
+        (
+            "max_prefixes_received_ipv6",
+            "max_prefixes_received_ipv6_unicast",
+        ),
+        ("max_prefixes_out_ipv4", "max_prefixes_out_ipv4_unicast"),
+        ("max_prefixes_out_ipv6", "max_prefixes_out_ipv6_unicast"),
+    ];
+    for (old, new) in pairs {
+        for (scope, template) in [
             (
-                "neighbor",
-                &neighbor as &dyn Fn(&str) -> String,
-                &neighbor_toml as &dyn Fn(&Config) -> String,
+                "neighbors",
+                format!(
+                    "{BASE}\n[[neighbors]]\naddress = \"10.0.0.2\"\nremote_asn = 65002\nKEY = 7\n"
+                ),
             ),
-            ("peer group", &group, &group_toml),
+            (
+                "peer_groups",
+                format!("{BASE}\n[peer_groups.members]\nKEY = 7\n"),
+            ),
         ] {
-            let old = parse(&render(&format!("{legacy} = 7"))).unwrap();
-            let new = parse(&render(&format!("{canonical} = 7"))).unwrap();
-            let (old_out, new_out) = (written(&old), written(&new));
-            assert_eq!(
-                old_out, new_out,
-                "{scope}: `{legacy}` must parse like `{canonical}`"
-            );
+            let doc = |key: &str| template.replace("KEY", key);
+            let err = parse(&doc(old)).expect_err("removed spelling must not parse");
             assert!(
-                new_out
-                    .lines()
-                    .any(|line| line == format!("{canonical} = 7")),
-                "{scope}: `{canonical}` must be written back: {new_out}"
+                err.to_string().contains(&format!("unknown field `{old}`")),
+                "{scope} {old}: {err}"
             );
+            let err = Config::load_toml_with_diagnostics(&doc(old), "removed")
+                .expect_err("removed spelling must not load");
             assert!(
-                !new_out
-                    .lines()
-                    .any(|line| line.starts_with(&format!("{legacy} "))),
-                "{scope}: legacy `{legacy}` must not be written back: {new_out}"
+                err.contains(&format!(
+                    "`{old}` in {scope} was removed; rename it to `{new}`"
+                )),
+                "{scope} {old}: {err}"
             );
-            let reparsed = parse(&render(
-                new_out.lines().find(|l| l.starts_with(*canonical)).unwrap(),
-            ))
-            .unwrap();
-            assert_eq!(
-                written(&reparsed),
-                new_out,
-                "{scope}: `{canonical}` must round-trip"
-            );
-
-            let both = render(&format!("{legacy} = 7\n{canonical} = 7"));
-            assert!(
-                parse(&both).is_err(),
-                "{scope}: setting both `{legacy}` and `{canonical}` must be rejected"
-            );
+            parse(&doc(new)).unwrap_or_else(|e| panic!("{scope} {new}: {e}"));
         }
     }
 
     let schema: serde_json::Value = serde_json::from_str(&config_json_schema()).unwrap();
     for definition in ["Neighbor", "PeerGroupConfig"] {
         let properties = &schema["$defs"][definition]["properties"];
-        for (legacy, canonical) in LEGACY_MAX_PREFIX_KEYS {
-            assert_eq!(
-                properties[*legacy]["deprecated"], true,
-                "{definition}.{legacy}"
-            );
-            assert_eq!(
-                properties[*legacy]["type"], properties[*canonical]["type"],
-                "{definition}.{legacy} keeps the canonical key's type"
-            );
+        for (old, new) in pairs {
+            assert!(properties.get(old).is_none(), "{definition}.{old}");
+            assert!(properties.get(new).is_some(), "{definition}.{new}");
         }
     }
 }

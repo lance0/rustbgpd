@@ -1167,9 +1167,8 @@ already succeeded.
 The unicast bounds follow the `max_prefixes[_received|_out]_<family>` naming
 used by every other family bound. The earlier spellings `max_prefixes_ipv4`,
 `max_prefixes_ipv6`, `max_prefixes_received_ipv4`, `max_prefixes_received_ipv6`,
-`max_prefixes_out_ipv4` and `max_prefixes_out_ipv6` are deprecated but still
-accepted with the same meaning; setting both spellings of one key in the same
-table is rejected. Configs the daemon writes back use only the canonical names.
+`max_prefixes_out_ipv4` and `max_prefixes_out_ipv6` were removed; a config that
+still uses one fails to load with an error naming the `_unicast` key.
 
 `max_prefixes_out_ipv4_unicast` / `max_prefixes_out_ipv6_unicast` are the outbound mirror:
 they bound what a bad export policy can grow one client's advertised table
@@ -5745,7 +5744,7 @@ originator_ip = "10.0.0.1"                     # source IP used for Type 1/4 ori
 | `redundancy_mode` | string | no       | `"all-active"` | `"all-active"` sets the ESI Label extcomm Single-Active flag to 0 and allows receiver-side aliasing ECMP. `"single-active"` sets the flag to 1, suppresses all-active aliasing ECMP for remote single-active ES reachability, and enables the receive-side backup-path pre-install path from ADR-0083 |
 | `originator_ip` | string   | yes      | --            | Source IP carried in Type 1/4 origination. Usually equals a member VNI's `local_vtep_ip` |
 | `interface`     | string   | no       | --            | ADR-0085 attachment-circuit link binding: name of the local link whose carrier drives this ES's link drain. When set, carrier loss on the link drains the segment automatically |
-| `recovery_delay_seconds` | u64 | no     | `30`          | ADR-0085 hold-off (seconds, `0..=3600`) to wait after carrier returns before releasing the link drain. Only valid with `interface` — rejected without it. The earlier spelling `recovery_delay_secs` is still accepted as an alias |
+| `recovery_delay_seconds` | u64 | no     | `30`          | ADR-0085 hold-off (seconds, `0..=3600`) to wait after carrier returns before releasing the link drain. Only valid with `interface` — rejected without it. |
 
 ### FRR all-active ES peers
 
