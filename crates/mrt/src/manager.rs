@@ -301,7 +301,10 @@ impl MrtManager {
         cancel: Option<&mut oneshot::Sender<Result<PathBuf, String>>>,
         cancelled: &AtomicBool,
     ) -> Result<T, DumpError> {
-        let mut task = tokio::task::spawn_blocking(work);
+        // The guard covers a result the blocking pool finished but this future
+        // never took: dropping the JoinHandle then releases it off this worker.
+        let mut task =
+            tokio::task::spawn_blocking(move || work().map(|value| BlockingDrop(Some(value))));
         let result = if let Some(cancel) = cancel {
             tokio::select! {
                 biased;
@@ -310,7 +313,7 @@ impl MrtManager {
                     // Finish may already have published. Preserve success so
                     // that committed dumps still update their metrics.
                     return match task.await {
-                        Ok(Ok(value)) => Ok(value),
+                        Ok(Ok(mut value)) => Ok(value.take()),
                         _ => Err(DumpError::canceled("MRT dump canceled while encoding")),
                     };
                 }
@@ -321,6 +324,7 @@ impl MrtManager {
         };
         result
             .map_err(|error| DumpError::at("write", format!("MRT encoder task failed: {error}")))?
+            .map(|mut value| value.take())
             .map_err(|error| match error {
                 StreamEncodeError::Encode(error) => {
                     DumpError::at("encode", format!("encode error: {error}"))
@@ -980,6 +984,47 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         drop(BlockingDrop(Some(Probe(tx))));
         let dropped_on = tokio::task::spawn_blocking(move || rx.recv().unwrap())
+            .await
+            .unwrap();
+        assert_ne!(dropped_on, std::thread::current().id());
+    }
+
+    /// A dump future dropped after its blocking step finished, but before it
+    /// took the result, releases that result on the blocking pool too.
+    #[tokio::test]
+    async fn an_untaken_step_result_is_dropped_on_the_blocking_pool() {
+        struct Probe(std::sync::mpsc::Sender<std::thread::ThreadId>);
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                let _ = self.0.send(std::thread::current().id());
+            }
+        }
+        let (dropped_tx, dropped_rx) = std::sync::mpsc::channel();
+        let (returning_tx, returning_rx) = std::sync::mpsc::channel();
+        let handle = tokio::spawn(async move {
+            let cancelled = AtomicBool::new(false);
+            MrtManager::encode_step(
+                move || {
+                    returning_tx.send(()).unwrap();
+                    Ok(Probe(dropped_tx))
+                },
+                None,
+                &cancelled,
+            )
+            .await
+            .map(drop)
+        });
+        // The test runtime has one thread, so the step's owner cannot run
+        // again while this thread blocks: the finished result stays untaken.
+        while returning_rx.try_recv().is_err() {
+            tokio::task::yield_now().await;
+        }
+        // Give the pool time to store the result in the JoinHandle; a result
+        // not yet stored would be dropped on the pool and hide a regression.
+        std::thread::sleep(Duration::from_millis(100));
+        handle.abort();
+        assert!(matches!(handle.await, Err(error) if error.is_cancelled()));
+        let dropped_on = tokio::task::spawn_blocking(move || dropped_rx.recv().unwrap())
             .await
             .unwrap();
         assert_ne!(dropped_on, std::thread::current().id());
