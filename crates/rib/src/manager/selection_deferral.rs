@@ -1810,8 +1810,9 @@ impl RibManager {
     /// A forced resync that ran while a selection gate deferred one of the
     /// peer's families kept its force bit for that family. Nothing else
     /// drives a force-only peer, so the staging or release of the gate runs
-    /// the rest here, in an empty pass ahead of the family's own changes
-    /// (a grouped forced resync may not share a pass with them). The gate
+    /// the rest here, in an empty pass after the family's unicast selection
+    /// and ahead of its distribution (a grouped forced resync may not share
+    /// a pass with the changes; it re-sends the unstaged group table). The gate
     /// is still armed at this point on both paths, so the pass cannot send
     /// the family's End-of-RIB ahead of the routes selected after it.
     fn run_deferred_forced_resyncs(&mut self) {
@@ -1898,7 +1899,6 @@ impl RibManager {
             }
         }
         self.release_conditional_advertisement_family(family);
-        self.run_deferred_forced_resyncs();
         let readiness = self.replacement_readiness.clone();
         let mut checkpoint =
             || super::replacement_readiness_checkpoint_at(&readiness, "selection_inventory", false);
@@ -1949,6 +1949,12 @@ impl RibManager {
         let mut prefixes = prefixes.into_set(&mut checkpoint);
         if !prefixes.is_empty() {
             self.recompute_best(&prefixes);
+        }
+        // After selection, so a deferred resync builds from the released
+        // best: on the frozen one it withdraws a row the release then
+        // re-announces, a transient gap for an RTBH.
+        self.run_deferred_forced_resyncs();
+        if !prefixes.is_empty() {
             // A joining peer may not have received an unchanged frozen best.
             self.distribute_changes(&prefixes, &prefixes);
             // A frozen row kept its exact rejections live; retire those whose

@@ -3762,3 +3762,52 @@ fn limited_member_established_behind_a_full_writer_counts_its_wire() {
     );
     assert!(failed.is_empty(), "{failed:#?}");
 }
+
+/// I1 at release: a received RTBH withdrawn before the hold behind a full
+/// writer is re-received inside it, and an IMMEDIATE ORF (unchanged or
+/// not covering the prefix) forces a resync the gate defers. Release must
+/// replace the stale row in place. Running the deferred resync on the
+/// frozen best withdrew it in one UPDATE and re-announced it in the next.
+/// The withdrawal comes from the source's stale deadline or its own UPDATE.
+#[test]
+fn deferred_forced_resync_keeps_a_rereceived_rtbh_at_release() {
+    let config = Config {
+        grouped: false,
+        add_path: false,
+        per_client_best: false,
+        orf: true,
+        limit: false,
+        late: false,
+    };
+    let rtbh = Op::Receive {
+        prefix: 0,
+        path: 0,
+        preference: 0,
+        blackhole: true,
+    };
+    let swept = [
+        rtbh.clone(),
+        Op::Backpressure(true),
+        Op::RestartPeer {
+            source: true,
+            restart: 1,
+            stale: 2,
+        },
+        Op::AdvanceToDeadline,
+    ];
+    let withdrawn = [
+        rtbh.clone(),
+        Op::Backpressure(true),
+        Op::ReceiveWithdraw { prefix: 0, path: 0 },
+    ];
+    let mut failed = Vec::new();
+    for (name, setup) in [("stale sweep", &swept[..]), ("withdrawal", &withdrawn[..])] {
+        for deny in [0, 14] {
+            let hold = [rtbh.clone(), Op::Orf { deny }];
+            if let Some(reason) = failure(config, setup, &hold) {
+                failed.push(format!("{name}, deny {deny}: {reason}"));
+            }
+        }
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
+}
