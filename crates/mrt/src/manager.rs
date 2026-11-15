@@ -43,9 +43,10 @@ impl Drop for CancelEncoding {
     }
 }
 
-/// Holds a dump between blocking steps. If the async owner abandons it (an
-/// error, a cancellation or a dropped future), the stage file and EVPN sort
-/// runs are closed and unlinked on the blocking pool, not on the async worker.
+/// Holds a dump between blocking steps. If the async owner's future is
+/// dropped, the stage file and EVPN sort runs are closed and unlinked on the
+/// blocking pool, not on the async worker. An error path calls
+/// [`Self::settle`] instead, so cleanup finishes before the failure reply.
 struct BlockingDrop<T: Send + 'static>(Option<T>);
 
 impl<T: Send + 'static> BlockingDrop<T> {
@@ -53,6 +54,12 @@ impl<T: Send + 'static> BlockingDrop<T> {
         self.0
             .take()
             .expect("the dump is held between blocking steps")
+    }
+
+    /// Release the held dump on the blocking pool and wait for it.
+    async fn settle(mut self) {
+        let value = self.take();
+        let _ = tokio::task::spawn_blocking(move || drop(value)).await;
     }
 }
 
@@ -177,6 +184,8 @@ impl MrtManager {
         cancel: Option<&mut oneshot::Sender<Result<PathBuf, String>>>,
     ) -> Result<PathBuf, String> {
         let started = Instant::now();
+        // The periodic caller logs its own failures.
+        let on_demand = cancel.is_some();
         match self.dump_once(cancel).await {
             Ok((path, bytes_written)) => {
                 self.metrics
@@ -186,6 +195,9 @@ impl MrtManager {
             Err(DumpError { stage, message }) => {
                 if let Some(stage) = stage {
                     self.metrics.record_mrt_dump_failure(stage);
+                    if on_demand {
+                        error!(stage, error = %message, "on-demand MRT dump failed");
+                    }
                 }
                 Err(message)
             }
@@ -243,9 +255,27 @@ impl MrtManager {
             .await?,
         ));
         while let Some(position) = cursor {
-            let mut chunk = self
+            let next = self
                 .query_chunk(Some(position), cancel.as_deref_mut())
-                .await?;
+                .await
+                .and_then(|chunk| {
+                    // The roster was frozen and encoded from the first chunk.
+                    if chunk.peers.is_empty() {
+                        Ok(chunk)
+                    } else {
+                        Err(DumpError::at(
+                            "snapshot",
+                            "MRT snapshot chunk carried a second peer roster".to_string(),
+                        ))
+                    }
+                });
+            let mut chunk = match next {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    stream.settle().await;
+                    return Err(error);
+                }
+            };
             cursor = chunk.next.take();
             // Await the write before requesting another chunk. A slow disk
             // never queues a second copy of the table behind this task.
@@ -955,17 +985,27 @@ mod tests {
         assert_ne!(dropped_on, std::thread::current().id());
     }
 
-    /// Startup removes a stage file an interrupted process left behind.
+    /// Startup removes stage files an interrupted process left behind, and
+    /// finishes before the first dump starts: a dump already queued at
+    /// startup finds none when it asks the RIB for its first chunk. Enough
+    /// stale files make a sweep that ran alongside the dump still be
+    /// working when that query arrives.
     #[tokio::test]
-    async fn startup_sweeps_a_stale_stage_file() {
+    async fn startup_sweep_finishes_before_the_first_dump() {
         let dir = private_tempdir();
-        let stale = dir.path().join(".rib.20260101.000000.000000001.mrt.tmp");
+        let stale = |n: u32| {
+            dir.path()
+                .join(format!(".rib.20260101.000000.{n:09}.mrt.tmp"))
+        };
+        for n in 0..2_000 {
+            std::fs::write(stale(n), b"partial").unwrap();
+        }
         let dump = dir.path().join("rib.20260101.000000.000000001.mrt");
-        std::fs::write(&stale, b"partial").unwrap();
         std::fs::write(&dump, b"published").unwrap();
-        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
         let (trigger_tx, trigger_rx) = mpsc::channel(1);
-        drop(trigger_tx);
+        let (reply_tx, reply_rx) = oneshot::channel();
+        trigger_tx.send(reply_tx).await.unwrap();
         let manager = MrtManager::new(
             test_config(dir.path().to_path_buf()),
             rib_tx,
@@ -973,11 +1013,60 @@ mod tests {
             Ipv4Addr::LOCALHOST,
             BgpMetrics::new(),
         );
-        tokio::time::timeout(Duration::from_secs(10), manager.run())
-            .await
-            .unwrap();
-        assert!(!stale.exists(), "stale stage survived startup");
+        let handle = tokio::spawn(manager.run());
+        let Some(RibUpdate::QueryMrtSnapshotChunk { reply, .. }) = rib_rx.recv().await else {
+            panic!("first chunk query");
+        };
+        let left = (0..2_000).filter(|&n| stale(n).exists()).count();
+        assert_eq!(left, 0, "the first dump started before the sweep finished");
+        let _ = reply.send(Ok(MrtSnapshotChunk::default()));
+        reply_rx.await.unwrap().expect("dump");
         assert_eq!(std::fs::read(&dump).unwrap(), b"published");
+        drop(trigger_tx);
+        handle.await.unwrap();
+    }
+
+    /// The peer roster comes only with the first chunk. A later chunk that
+    /// carries one fails the dump closed, with its stage removed before the
+    /// failure is reported.
+    #[tokio::test]
+    async fn a_second_peer_roster_fails_the_dump_without_a_file() {
+        let dir = private_tempdir();
+        let metrics = BgpMetrics::new();
+        let (trigger_tx, mut rib_rx, actor_tx, handle) =
+            manager_with_proxied_rib(dir.path().to_path_buf(), &metrics);
+        let (reply_tx, reply_rx) = oneshot::channel();
+        trigger_tx.send(reply_tx).await.unwrap();
+        let first = rib_rx.recv().await.expect("first chunk query");
+        actor_tx.send(first).await.unwrap();
+        let Some(RibUpdate::QueryMrtSnapshotChunk { reply, .. }) = rib_rx.recv().await else {
+            panic!("second chunk query");
+        };
+        let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let _ = reply.send(Ok(MrtSnapshotChunk {
+            peers: vec![MrtPeerEntry {
+                peer: rustbgpd_rib::PeerId::from_addr(addr),
+                peer_addr: addr,
+                interface: None,
+                peer_bgp_id: Ipv4Addr::new(10, 0, 0, 1),
+                peer_asn: 65_001,
+            }],
+            ..MrtSnapshotChunk::default()
+        }));
+
+        let error = reply_rx.await.unwrap().expect_err("second roster");
+        assert!(error.contains("second peer roster"), "{error}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        assert_eq!(
+            metric_sample(
+                &metrics,
+                "mrt_dump_failures_total",
+                Some(("stage", "snapshot"))
+            ),
+            1
+        );
+        drop(trigger_tx);
+        handle.await.unwrap();
     }
 
     #[tokio::test]
