@@ -1047,10 +1047,11 @@ async fn apply_policy_change_reaches_live_dynamic_peers() {
 
     // The dynamic peer must have been processed: chains resolved against the
     // synthetic peer-group-backed neighbor, hot-applied to the session, and
-    // the import change refreshed.
+    // the import change refreshed. Two state queries: the import change's
+    // Route Refresh qualification, then the apply's own probe.
     assert_eq!(
         counters.query_state.load(Ordering::SeqCst),
-        1,
+        2,
         "dynamic peer must not be skipped by catalog policy mutations"
     );
     assert_eq!(
@@ -1129,7 +1130,7 @@ async fn set_peer_group_policy_only_change_reaches_live_dynamic_peers() {
 
     assert_eq!(
         counters.query_state.load(Ordering::SeqCst),
-        1,
+        2,
         "SetPeerGroup policy-only edits must not skip live dynamic peers"
     );
     assert_eq!(

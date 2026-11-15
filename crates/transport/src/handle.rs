@@ -25,6 +25,32 @@ use crate::session::PeerSession;
 use crate::session::import_decision_cache::{AllPathMatchLimitExceeded, ImportExplainReply};
 use crate::session::rejected_routes::RejectedRoutesReply;
 
+/// Why a [`PeerCommand::UpdateImportPolicy`] is sent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImportPolicyInstall {
+    /// A forward change. An Established session that did not negotiate Route
+    /// Refresh refuses a chain that differs from the one it holds with
+    /// [`PeerCommandError::RouteRefreshUnsupported`]: the routes it already
+    /// accepted could never be re-evaluated, and every UPDATE judged under
+    /// the new chain would stay accepted after a rollback. The check runs in
+    /// the session, so no state change between a caller's probe and this
+    /// command can slip past it.
+    Change,
+    /// Reinstating the chain the manager already records as running
+    /// (rollback, compensation, adoption). Never refused.
+    Restore,
+}
+
+impl ImportPolicyInstall {
+    /// Whether a session refuses this install: a [`Self::Change`] to a
+    /// different chain on an Established session whose peer did not
+    /// negotiate Route Refresh.
+    #[must_use]
+    pub fn refused(self, established: bool, peer_route_refresh: bool, changes_chain: bool) -> bool {
+        self == Self::Change && established && !peer_route_refresh && changes_chain
+    }
+}
+
 /// Error returned by a peer-session command round-trip.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PeerCommandError {
@@ -745,6 +771,8 @@ pub enum PeerCommand {
     UpdateImportPolicy {
         /// New effective import policy chain (`None` = permit-all).
         policy: Option<Box<PolicyChain>>,
+        /// Whether this is a change the session may refuse.
+        install: ImportPolicyInstall,
         /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), PeerCommandError>>,
     },
@@ -3007,11 +3035,13 @@ impl PeerHandle {
     pub async fn update_import_policy(
         &self,
         policy: Option<PolicyChain>,
+        install: ImportPolicyInstall,
     ) -> Result<(), PeerCommandError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.commands
             .send(PeerCommand::UpdateImportPolicy {
                 policy: policy.map(Box::new),
+                install,
                 reply: reply_tx,
             })
             .await
@@ -3033,9 +3063,10 @@ impl PeerHandle {
     pub async fn update_import_policy_timeout(
         &self,
         policy: Option<PolicyChain>,
+        install: ImportPolicyInstall,
         deadline: Duration,
     ) -> Result<(), PeerCommandError> {
-        Self::update_import_policy_with(self.commands.clone(), policy, deadline).await
+        Self::update_import_policy_with(self.commands.clone(), policy, install, deadline).await
     }
 
     /// Owned-sender variant of [`Self::update_import_policy_timeout`]. See
@@ -3048,9 +3079,14 @@ impl PeerHandle {
     pub async fn update_import_policy_with(
         commands: mpsc::Sender<PeerCommand>,
         policy: Option<PolicyChain>,
+        install: ImportPolicyInstall,
         deadline: Duration,
     ) -> Result<(), PeerCommandError> {
-        match tokio::time::timeout(deadline, Self::update_import_policy_via(commands, policy)).await
+        match tokio::time::timeout(
+            deadline,
+            Self::update_import_policy_via(commands, policy, install),
+        )
+        .await
         {
             Ok(result) => result,
             Err(_elapsed) => Err(PeerCommandError::TimedOut {
@@ -3071,11 +3107,13 @@ impl PeerHandle {
     pub async fn update_import_policy_via(
         commands: mpsc::Sender<PeerCommand>,
         policy: Option<PolicyChain>,
+        install: ImportPolicyInstall,
     ) -> Result<(), PeerCommandError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         commands
             .send(PeerCommand::UpdateImportPolicy {
                 policy: policy.map(Box::new),
+                install,
                 reply: reply_tx,
             })
             .await

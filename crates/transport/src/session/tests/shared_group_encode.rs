@@ -708,6 +708,9 @@ async fn assert_shared_group_failed_stream_keeps_mutation_before_later_query(can
                     entries: vec![],
                     default_action: PolicyAction::Deny,
                 }]))),
+                // An ordering probe, not a policy change: exempt from the
+                // Route Refresh refusal.
+                install: crate::handle::ImportPolicyInstall::Restore,
                 reply,
             })
             .unwrap();
@@ -1008,6 +1011,9 @@ async fn shared_group_elected_encoder_queues_routine_commands_and_stops_for_a_cl
                         entries: vec![],
                         default_action: PolicyAction::Deny,
                     }]))),
+                    // An ordering probe, not a policy change: exempt from the
+                    // Route Refresh refusal.
+                    install: crate::handle::ImportPolicyInstall::Restore,
                     reply,
                 })
                 .unwrap();
@@ -1403,6 +1409,9 @@ async fn shared_group_elected_encoder_keeps_mutation_before_later_read() {
                 entries: vec![],
                 default_action: PolicyAction::Deny,
             }]))),
+            // An ordering probe, not a policy change: exempt from the
+            // Route Refresh refusal.
+            install: crate::handle::ImportPolicyInstall::Restore,
             reply,
         })
         .unwrap();

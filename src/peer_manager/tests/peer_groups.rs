@@ -1511,3 +1511,150 @@ peer_group = "edge"
         .collect::<Vec<_>>();
     assert_eq!(groups, [Some("edge"), Some("edge")]);
 }
+
+/// A combined policy and field peer-group edit takes the in-place path, which
+/// has no import preflight. A member that did not negotiate Route Refresh
+/// refuses the import change in its session, so it is never left on the
+/// candidate chain while the running config keeps the prior one; the member
+/// applied before it is restored and the group definition does not move.
+///
+/// Load-bearing: without the session's refusal the failing member installs
+/// the candidate, its refresh fails, and only the earlier member is restored.
+#[tokio::test]
+async fn peer_group_hot_import_edit_leaves_a_member_without_route_refresh_untouched() {
+    let config = load_test_config(&format!(
+        "{EDGE_GROUP_TOML}\n[policy.definitions.deny-import]\ndefault_action = \"deny\"\n"
+    ));
+    let mut mgr = peer_group_reshape_manager(config.clone());
+    for resolved in config.resolved_neighbors().unwrap() {
+        mgr.add_peer(
+            PeerManager::peer_manager_config_from_resolved(resolved, false),
+            false,
+        )
+        .await
+        .unwrap();
+    }
+    let capable = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let incapable = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let mut logs = Vec::new();
+    for (addr, route_refresh) in [(capable, true), (incapable, false)] {
+        let installed = InstalledImports::default();
+        let session_id = mgr.peers[&key(addr)].session_id();
+        let _replaced = mgr.peers.replace_handle(
+            &key(addr),
+            import_recording_handle(
+                addr,
+                route_refresh,
+                0,
+                false,
+                None,
+                Arc::clone(&installed),
+                Arc::new(AtomicUsize::new(0)),
+            ),
+            session_id,
+        );
+        logs.push(installed);
+    }
+
+    let mut definition = edge_group_definition(Some(90));
+    definition.max_prefixes = Some(5_000);
+    definition.import_policy_chain = vec!["deny-import".to_string()];
+    let error = mgr
+        .apply_peer_group_change(
+            rustbgpd_api::peer_types::ConfigEvent::SetPeerGroup {
+                name: "edge".to_string(),
+                definition,
+                ack: None,
+            },
+            keys([capable, incapable]),
+        )
+        .await
+        .expect_err("the incapable member refuses the import change");
+
+    let message = error.to_string();
+    assert_eq!(
+        logs[1].lock().unwrap().len(),
+        0,
+        "the incapable member must never hold the candidate chain: {message}"
+    );
+    assert!(message.contains("prior peers restored"), "{message}");
+    let capable_installs = logs[0].lock().unwrap().clone();
+    assert_eq!(capable_installs.len(), 2, "applied, then restored");
+    assert_eq!(capable_installs[1], None, "restored to the prior chain");
+    for addr in [capable, incapable] {
+        let managed = &mgr.peers[&key(addr)];
+        assert_eq!(managed.import_policy, None, "{addr} keeps its prior chain");
+        assert_eq!(managed.max_prefixes, None, "{addr} keeps its prior knobs");
+    }
+    let group = &mgr.current_config.peer_groups["edge"];
+    assert!(group.import_policy_chain.is_empty() && group.max_prefixes.is_none());
+}
+
+/// Peer-group compensation restores, it does not change: an earlier member
+/// that took the candidate and then reconnected without Route Refresh gets
+/// its prior chain back when a later member fails.
+///
+/// Load-bearing: compensating through a forward change is refused by that
+/// member's session, which leaves it on the candidate chain.
+#[tokio::test]
+async fn peer_group_hot_compensation_restores_a_member_that_lost_route_refresh() {
+    let config = load_test_config(&format!(
+        "{EDGE_GROUP_TOML}\n[policy.definitions.deny-import]\ndefault_action = \"deny\"\n"
+    ));
+    let mut mgr = peer_group_reshape_manager(config.clone());
+    for resolved in config.resolved_neighbors().unwrap() {
+        mgr.add_peer(
+            PeerManager::peer_manager_config_from_resolved(resolved, false),
+            false,
+        )
+        .await
+        .unwrap();
+    }
+    let earlier = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let failing = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let mut logs = Vec::new();
+    // The earlier member has Route Refresh for its forward apply and loses it
+    // with that install; the later member never has it.
+    for (addr, lose_on_install) in [(earlier, true), (failing, false)] {
+        let installed = InstalledImports::default();
+        let session_id = mgr.peers[&key(addr)].session_id();
+        let _replaced = mgr.peers.replace_handle(
+            &key(addr),
+            import_recording_handle(
+                addr,
+                lose_on_install,
+                0,
+                lose_on_install,
+                None,
+                Arc::clone(&installed),
+                Arc::new(AtomicUsize::new(0)),
+            ),
+            session_id,
+        );
+        logs.push(installed);
+    }
+
+    let mut definition = edge_group_definition(Some(90));
+    definition.max_prefixes = Some(5_000);
+    definition.import_policy_chain = vec!["deny-import".to_string()];
+    let error = mgr
+        .apply_peer_group_change(
+            rustbgpd_api::peer_types::ConfigEvent::SetPeerGroup {
+                name: "edge".to_string(),
+                definition,
+                ack: None,
+            },
+            keys([earlier, failing]),
+        )
+        .await
+        .expect_err("the later member refuses the import change");
+
+    let earlier_installs = logs[0].lock().unwrap().clone();
+    assert_eq!(
+        earlier_installs.last(),
+        Some(&None),
+        "the earlier member is restored to its prior chain: {earlier_installs:?} ({error})"
+    );
+    assert_eq!(mgr.peers[&key(earlier)].import_policy, None);
+    assert_eq!(logs[1].lock().unwrap().len(), 0);
+}

@@ -489,7 +489,7 @@ async fn rfc8212_import_presence_edit_rejects_a_peer_without_route_refresh() {
         "the error must name the missing capability: {error}"
     );
     assert!(
-        error.contains("clear the session"),
+        error.contains(&format!("rbgp neighbor {addr} disable")),
         "the error must be actionable: {error}"
     );
     assert!(

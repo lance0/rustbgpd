@@ -302,6 +302,35 @@ An integration receipt must use a real eBGP session and real route exchange;
 mock-only policy presence is insufficient. It must disclose the enabled family
 set and include at least one unicast and one non-unicast route.
 
+## Amendment (2026-11-15): every import change is qualified for Route Refresh
+
+The no-capability rejection above covered only policy-presence transitions.
+An ordinary import chain edit for an Established peer without Route Refresh
+was hot-applied, failed at its refresh and was rolled back. UPDATEs the
+session received between the hot-apply and the rollback were judged under the
+candidate chain and stayed accepted, while the edit was reported as cleanly
+restored.
+
+Two checks now close it. First, the snapshot preflight and the owned in-place
+neighbor update probe every target whose import chain changes, concurrently,
+and reject the whole edit before any session is modified when one reports
+Established with negotiated capabilities that omit Route Refresh. A probe that
+times out or finds the session gone does not reject; the edit continues to the
+second check. Second, the session itself refuses a forward import change
+(`ImportPolicyInstall::Change`) to a different chain while it is Established
+without Route Refresh. That covers a peer that comes up after the probe and
+every caller without a preflight: the honor-knob fan-outs and the in-place
+peer-group path. Restoring a prior chain (`ImportPolicyInstall::Restore`) is
+never refused.
+
+The rejection names the neighbor as `rbgp` addresses it, including the
+interface of a scoped link-local neighbor, and the remedy: disable the
+neighbor, which withdraws its routes, apply the edit, then enable it, so the
+session relearns its routes under the new chain. A clear or reconnect alone
+does not help, because the re-established session still lacks the capability.
+The RFC 8212 presence rejection gives the same remedy. The presence-only
+GR/LLGR retained-state check is unchanged.
+
 ## Rejected alternatives
 
 - **Change `evaluate_chain(None, ...)` to deny globally.** This would silently

@@ -1755,8 +1755,22 @@ impl PeerSession {
                 let _ = reply.send(self.revalidate_import(&delta));
                 ControlFlow::Continue(())
             }
-            PeerCommand::UpdateImportPolicy { policy, reply } => {
+            PeerCommand::UpdateImportPolicy {
+                policy,
+                install,
+                reply,
+            } => {
                 let policy = policy.map(|policy| *policy);
+                if install.refused(
+                    self.fsm.state() == SessionState::Established,
+                    self.negotiated
+                        .as_ref()
+                        .is_some_and(|negotiated| negotiated.peer_route_refresh),
+                    policy != self.import_policy,
+                ) {
+                    let _ = reply.send(Err(PeerCommandError::RouteRefreshUnsupported));
+                    return ControlFlow::Continue(());
+                }
                 self.install_import_policy(policy);
                 let _ = reply.send(Ok(()));
                 ControlFlow::Continue(())

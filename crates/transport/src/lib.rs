@@ -64,10 +64,10 @@ pub use config::{
 pub use error::TransportError;
 pub use handle::PeerRuntimeConfigUpdate;
 pub use handle::{
-    CommandTicket, ImportPolicyTermHits, ImportRevalidation, NegotiatedGracefulRestartState,
-    NegotiatedSessionState, PeerCommand, PeerCommandError, PeerHandle, PeerSessionState,
-    PeerShutdownError, PolicyRejectCounts, PrePolicyRouteCounts, SessionEndRetention,
-    SessionIdentity, SessionLifecycleNotification, SessionNotification,
+    CommandTicket, ImportPolicyInstall, ImportPolicyTermHits, ImportRevalidation,
+    NegotiatedGracefulRestartState, NegotiatedSessionState, PeerCommand, PeerCommandError,
+    PeerHandle, PeerSessionState, PeerShutdownError, PolicyRejectCounts, PrePolicyRouteCounts,
+    SessionEndRetention, SessionIdentity, SessionLifecycleNotification, SessionNotification,
     SessionNotificationDirection, SessionNotificationEvent, SessionNotificationReceiver,
     SessionNotificationSender, SessionQueryOutcome, SessionRole, SessionTaskExitNotice,
     StateQueryOutcome, ValidationDelta, WarmCheckpointSessionState, session_notification_channel,

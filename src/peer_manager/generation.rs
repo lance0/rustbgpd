@@ -934,12 +934,15 @@ impl PeerManager {
         }
         for prior in applied.hot_priors.into_iter().rev() {
             let peer = PeerKey::new(prior.address, prior.interface.clone());
-            if let Err(error) = self.hot_update_peer_in_place(prior).await {
+            if let Err(error) = self
+                .hot_update_peer_in_place(prior, rustbgpd_transport::ImportPolicyInstall::Restore)
+                .await
+            {
                 failures.push(format!("restore hot update {peer}: {error}"));
             }
         }
         if let Some(priors) = applied.policy_priors
-            && let Err(error) = self.apply_resolved_policy_snapshot_with_prestage_reads(
+            && let Err(error) = self.restore_resolved_policy_snapshot(
                 priors,
                 false,
                 if failures.is_empty() {
