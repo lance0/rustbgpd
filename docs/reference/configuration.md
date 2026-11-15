@@ -2807,6 +2807,35 @@ withheld and counted as `"block"`. So `"warning"` warns only for IDs between
 cap and never warns. An operator-set `receive_max = 65535` admits up to
 65,535 paths per prefix.
 
+Selection cost per UPDATE. Each UPDATE that touches an Add-Path key
+re-selects that key, and the RIB actor handles one message at a time. Figures
+come from the `addpath_selection_rescan` bench target (see
+[benchmarks](../benchmarks.md)); they show shape, not capacity. Each was taken
+on a lab host with no receivers registered, in the `ci` profile rather than the
+LTO release build:
+
+- One UPDATE carrying as many NLRI as fit in 4,096 bytes, every key holding the
+  default 1,024 paths, with the best path withdrawn or made worse (after the
+  VPN and labeled slab storage change): VPN 5.1 ms, labeled 9.0 ms. With an
+  interleaved fill: VPN 6.8 ms, labeled 17.4 ms. Unicast (unchanged code):
+  about 11 ms, or about 36 ms interleaved.
+- The same UPDATE changing only non-best paths: VPN 0.09 to 0.10 ms, labeled
+  0.16 to 0.17 ms. One key at 65,536 stored paths costs about 0.0005 ms for
+  VPN and labeled.
+- One key, one UPDATE, best path withdrawn or made worse, before the VPN and
+  labeled slab change (which brought VPN and labeled to 0.35 to 0.75 times
+  these figures): VPN 0.031 ms at 1,024 stored paths and 2.80 ms at 65,536;
+  labeled 0.024 and 2.45 ms; unicast 0.014 and 0.78 ms.
+- LLGR cycling with 1,024 fresh path IDs per cycle, then a one-path UPDATE, at
+  64 cycles (65,536 stored): VPN 2.87 ms, labeled 2.50 ms, unicast 0.77 ms.
+  At 8 cycles (8,192 stored), a single pre-slab sample read 0.51 ms for VPN
+  and 0.43 ms for labeled.
+
+A peer can send UPDATEs of the first kind back to back, so unicast
+best-affecting and interleaved labeled UPDATEs are the largest stalls at the
+default cap. Raising `receive_max` or enabling LLGR on an Add-Path peer grows
+the stored paths per key, and these costs with them.
+
 Without `receive_max` (or with 0), rustbgpd advertises no Paths-Limit
 capability but still caps each prefix at 1024 retained path IDs, and past
 that default it always withholds the excess as `"block"` does, whatever
