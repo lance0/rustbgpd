@@ -835,10 +835,12 @@ impl RibManager {
 
     /// Distinct admitted prefixes for one limited family.
     ///
-    /// The single definition of "usage" for enforcement, preflight, the
-    /// neighbor API, and the gauges, so a limited grouped member can never
-    /// report the shared group table where its own admitted projection is
-    /// the truth.
+    /// The definition of "usage" for enforcement, the neighbor API, and the
+    /// gauges, so a limited grouped member can never report the shared group
+    /// table where its own admitted projection is the truth. A limit
+    /// transaction checks [`Self::outbound_limit_install_usage`] instead,
+    /// which differs only for a still-unlimited grouped member that holds an
+    /// admission proof.
     pub(in crate::manager) fn outbound_family_usage(
         &self,
         peer: PeerId,
@@ -1271,7 +1273,7 @@ impl RibManager {
                 let Some(limit) = candidate.family(afi) else {
                     continue;
                 };
-                let usage = self.outbound_family_usage(peer, afi, grouped);
+                let usage = self.outbound_limit_install_usage(peer, afi, grouped);
                 if usage > limit.get() as usize {
                     violations.push(OutboundPrefixLimitViolation {
                         peer,
@@ -1391,7 +1393,7 @@ impl RibManager {
                 let Some(limit) = candidate.family(afi) else {
                     continue;
                 };
-                let usage = self.outbound_family_usage(*peer, afi, grouped);
+                let usage = self.outbound_limit_install_usage(*peer, afi, grouped);
                 if usage > limit.get() as usize {
                     self.metrics
                         .observe_rib_outbound_prefix_limit_apply(started.elapsed());
@@ -1430,32 +1432,89 @@ impl RibManager {
         let _ = reply.send(Ok(()));
     }
 
-    /// A grouped member's admitted unicast prefixes for one family, from its
-    /// admission proof, or `None` when it has no complete proof.
+    /// The admission proof a first limit on `afi` seeds a grouped member
+    /// from, or `None` when install seeds from the group's desired view.
     ///
     /// While a proof exists, distribution withdraws from the member only the
     /// keys the proof holds, so the proof is what the member was sent. A
-    /// member dirty behind a full writer can trail the group's desired view:
-    /// seeding a desired prefix it never received would keep that prefix
-    /// charged after its route is deleted, since no withdrawal ever frees it.
-    fn grouped_admitted_from_proof(&self, peer: PeerId, afi: Afi) -> Option<TypedGroupedAdmitted> {
-        let admitted = self.pending_group_admitted.get(&peer)?;
-        let unicast = |key: crate::update::ExactExportKey| match key {
-            crate::update::ExactExportKey::Unicast(prefix, _) => Some(prefix),
-            _ => None,
-        };
-        let capacity = admitted
+    /// member dirty behind a full writer can trail the group's desired view
+    /// either way: a desired prefix it never received would stay charged
+    /// after its route is deleted, since no withdrawal ever frees it, and a
+    /// sent prefix with a pending withdrawal still holds a slot.
+    fn outbound_limit_seed_proof(
+        &self,
+        peer: PeerId,
+        afi: Afi,
+        grouped: bool,
+    ) -> Option<super::update_groups::admitted_recovery::AdmittedKeyView<'_>> {
+        let unlimited = self
+            .outbound_prefix_limits
+            .get(&peer)
+            .and_then(|limits| limits.family(afi))
+            .is_none_or(|family| family.limit.is_none());
+        (grouped && unlimited)
+            .then(|| self.pending_group_admitted.get(&peer))
+            .flatten()
+    }
+
+    /// Unicast prefixes of a proof, prefix-major and each once per path.
+    fn proof_unicast_prefixes<'a>(
+        &'a self,
+        proof: super::update_groups::admitted_recovery::AdmittedKeyView<'a>,
+    ) -> impl Iterator<Item = Prefix> + 'a {
+        proof
             .iter_with_checkpoint(|force| self.replacement_checkpoint(force))
-            .filter_map(unicast)
-            .filter(|prefix| prefix_family(prefix).0 == afi)
-            .count();
-        Some(TypedGroupedAdmitted::collect_with_capacity(
+            .filter_map(|key| match key {
+                crate::update::ExactExportKey::Unicast(prefix, _) => Some(prefix),
+                _ => None,
+            })
+    }
+
+    /// The admitted set a first limit seeds from the member's proof, or
+    /// `None` when [`Self::outbound_limit_seed_proof`] has none.
+    fn grouped_admitted_from_proof(
+        &self,
+        peer: PeerId,
+        afi: Afi,
+        grouped: bool,
+        limit: usize,
+    ) -> Option<TypedGroupedAdmitted> {
+        let proof = self.outbound_limit_seed_proof(peer, afi, grouped)?;
+        // Every key bounds its family's distinct prefixes, and the checks
+        // proved those fit the limit.
+        let capacity = proof.len().min(limit);
+        self.replacement_checkpoint_at("outbound_limit_install_inventory", true);
+        let admitted = TypedGroupedAdmitted::collect_with_capacity(
             afi,
-            admitted
-                .iter_with_checkpoint(|force| self.replacement_checkpoint(force))
-                .filter_map(unicast),
+            self.proof_unicast_prefixes(proof),
             capacity,
-        ))
+        );
+        self.replacement_checkpoint_at("outbound_limit_install_inventory", true);
+        Some(admitted)
+    }
+
+    /// Distinct prefixes a limit on `afi` would charge this peer once
+    /// installed: the set [`Self::install_outbound_limit`] seeds for a
+    /// still-unlimited grouped member, else its current usage. Prepare and
+    /// the apply-time recheck both read this, so a reload is refused before
+    /// any mutation rather than leaving a member over its new limit.
+    fn outbound_limit_install_usage(&self, peer: PeerId, afi: Afi, grouped: bool) -> usize {
+        let usage = self.outbound_family_usage(peer, afi, grouped);
+        let Some(proof) = (usage != usize::MAX)
+            .then(|| self.outbound_limit_seed_proof(peer, afi, grouped))
+            .flatten()
+        else {
+            return usage;
+        };
+        // Keys are sorted prefix-major, so a prefix's paths are adjacent.
+        let mut previous = None;
+        self.proof_unicast_prefixes(proof)
+            .filter(|prefix| {
+                let first = prefix_family(prefix).0 == afi && previous != Some(*prefix);
+                previous = Some(*prefix);
+                first
+            })
+            .count()
     }
 
     /// Move one live family to an already-preflighted maximum.
@@ -1479,9 +1538,10 @@ impl RibManager {
             (Some(previous), Some(limit)) => limit > previous,
             (None, _) => false,
         };
-        // A formerly unlimited grouped member owns no admitted set: preflight
-        // proved its whole advertised projection fits, so materialize it as
-        // the bounded set the limiter now maintains.
+        // A formerly unlimited grouped member owns no admitted set: the
+        // transaction checks proved the set seeded here fits
+        // (`outbound_limit_install_usage`), so materialize it as the bounded
+        // set the limiter now maintains.
         let materialized =
             ((grouped || incomplete) && limit.is_some() && previous.is_none()).then(|| {
                 if incomplete {
@@ -1504,19 +1564,22 @@ impl RibManager {
                         capacity,
                     );
                 }
-                if let Some(admitted) = self.grouped_admitted_from_proof(peer, afi) {
+                let limit = limit.map_or(usize::MAX, |limit| limit.get() as usize);
+                if let Some(admitted) = self.grouped_admitted_from_proof(peer, afi, grouped, limit)
+                {
                     return admitted;
                 }
                 // Every projected route keeps its staged prefix, including lane
                 // substitutions and Add-Path slots. Exclusions only reduce this
-                // distinct-family-prefix upper bound. Preflight proved the
-                // projection fits the limit, and later admissions cannot pass
-                // it, so the limit bounds this retained set for its lifetime.
+                // distinct-family-prefix upper bound. Without a proof the
+                // checks measured this projection, and later admissions cannot
+                // pass the limit, so it bounds this retained set for its
+                // lifetime.
                 let capacity = self
                     .grouped_member_of(peer)
                     .and_then(|gid| self.group_ribs.get(&gid))
                     .map_or(0, |group| group.table.unicast_prefix_count(afi))
-                    .min(limit.map_or(usize::MAX, |limit| limit.get() as usize));
+                    .min(limit);
                 self.replacement_checkpoint_at("outbound_limit_install_inventory", true);
                 let admitted = self.grouped_advertised_routes_iter(peer).map_or_else(
                     || TypedGroupedAdmitted::collect(afi, std::iter::empty()),

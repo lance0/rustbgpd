@@ -3594,6 +3594,8 @@ fn limited_dirty_member_drops_a_deleted_route_it_was_never_sent_from_its_count()
     }
 }
 
+/// A guard, not a regression: it passes with the desired-view seed too. It
+/// keeps a proof seed from losing a route the member receives at release.
 #[test]
 fn limited_dirty_member_counts_a_route_it_receives_at_release() {
     for per_client_best in [false, true] {

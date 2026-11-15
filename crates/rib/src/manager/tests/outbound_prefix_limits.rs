@@ -2532,6 +2532,218 @@ fn a_grouped_member_materializes_and_carries_its_admitted_set() {
     );
 }
 
+/// Every outbound permit of `peer`'s writer, so its next send fails until
+/// they are dropped.
+fn fill_writer(
+    manager: &RibManager,
+    peer: PeerId,
+) -> Vec<tokio::sync::mpsc::OwnedPermit<OutboundRouteUpdate>> {
+    let sender = manager.outbound_peers[&peer].clone();
+    std::iter::from_fn(|| sender.clone().try_reserve_owned().ok()).collect()
+}
+
+/// Fold delivered envelopes into the prefixes the peer holds.
+fn apply_to_wire(
+    outbound_rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
+    wire: &mut HashSet<Prefix>,
+) {
+    while let Ok(update) = outbound_rx.try_recv().map(delivered) {
+        for (prefix, _) in update.unicast_withdrawals() {
+            assert!(wire.remove(prefix), "no unknown withdrawal of {prefix}");
+        }
+        for route in update.announce.iter() {
+            wire.insert(route.prefix);
+        }
+    }
+}
+
+/// An unlimited grouped member that holds a prefix the group no longer
+/// wants: it was sent 203.0.113.1 and .2, its writer then filled, and .2
+/// was withdrawn. Its admission proof still holds both, and a first limit
+/// seeds from that proof, so the member already has two of the limit's
+/// slots although the group's desired view has one prefix.
+fn member_holding_a_pending_withdrawal(
+    announced_before_prepare: &[u8],
+    prepare_limit: Option<u32>,
+) -> (
+    RibManager,
+    PeerId,
+    Vec<tokio::sync::mpsc::OwnedPermit<OutboundRouteUpdate>>,
+) {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let member = peer_v4(Ipv4Addr::new(10, 113, 0, 1));
+    let mut member_rx = register_peer(&mut manager, member);
+    let source = Ipv4Addr::new(192, 0, 2, 113);
+    let mut wire = HashSet::new();
+    announce(
+        &mut manager,
+        peer_v4(source),
+        source_routes(source, announced_before_prepare),
+    );
+    apply_to_wire(&mut member_rx, &mut wire);
+    if let Some(cap) = prepare_limit {
+        prepare(
+            &mut manager,
+            1,
+            limit_config(&[(member, Some(cap), None)], &[]),
+        )
+        .expect("the member fits the limit when it is prepared");
+    }
+    let rest: Vec<u8> = [1, 2]
+        .into_iter()
+        .filter(|octet| !announced_before_prepare.contains(octet))
+        .collect();
+    if !rest.is_empty() {
+        announce(&mut manager, peer_v4(source), source_routes(source, &rest));
+    }
+    apply_to_wire(&mut member_rx, &mut wire);
+    assert_eq!(
+        wire,
+        HashSet::from([v4(1), v4(2)]),
+        "the member was sent both prefixes"
+    );
+    assert!(manager.grouped_member_of(member).is_some());
+    let held = fill_writer(&manager, member);
+    withdraw(&mut manager, peer_v4(source), vec![(v4(2), 0)]);
+    assert!(
+        manager.dirty_peers.contains(&member),
+        "the withdrawal missed"
+    );
+    let proof = manager
+        .pending_group_admitted
+        .get(&member)
+        .expect("a complete admission proof");
+    assert_eq!(proof.len(), 2, "the proof holds both sent prefixes");
+    assert_eq!(
+        ipv4_row(&manager, member).usage,
+        1,
+        "the group's desired view has one prefix"
+    );
+    (manager, member, held)
+}
+
+/// Prepare measures the set install would seed, so a reload whose limit
+/// the member's actual admission already exceeds is refused with no
+/// mutation, instead of installing a limit the member is over at once.
+#[test]
+fn prepare_refuses_a_limit_below_what_a_grouped_member_was_sent() {
+    let (mut manager, member, held) = member_holding_a_pending_withdrawal(&[1, 2], None);
+    let violations = prepare(
+        &mut manager,
+        1,
+        limit_config(&[(member, Some(1), None)], &[]),
+    )
+    .expect_err("the member holds two prefixes");
+    assert_eq!(violations.len(), 1);
+    assert_eq!(violations[0].peer, member);
+    assert_eq!(violations[0].usage, 2);
+    assert_eq!(violations[0].requested, 1);
+    assert!(
+        manager.outbound_prefix_limits.is_empty(),
+        "a refused edit installs no admission state"
+    );
+    assert!(
+        apply(&mut manager, 1, true).is_err(),
+        "nothing was prepared"
+    );
+    drop(held);
+}
+
+/// The apply-time recheck reads the same seeded set: a limit prepared while
+/// the member fit is refused when, by apply, the member holds more.
+#[test]
+fn apply_refuses_a_prepared_limit_a_grouped_member_has_since_outgrown() {
+    let (mut manager, member, held) = member_holding_a_pending_withdrawal(&[1], Some(1));
+    let refused = apply(&mut manager, 1, true).expect_err("the member now holds two prefixes");
+    assert!(refused.contains("advertises 2 prefixes"), "{refused}");
+    assert!(
+        manager.outbound_prefix_limits.is_empty(),
+        "a refused apply installs no admission state"
+    );
+    assert_eq!(ipv4_row(&manager, member).limit, None);
+    drop(held);
+}
+
+/// A limit installed on a grouped member dirty behind a full writer starts
+/// from what it was sent and stays equal to its wire to convergence. P and
+/// R were sent; with the writer full, Q is announced and R withdrawn, the
+/// limit is installed, then Q is withdrawn before release. The member's
+/// usage is its two held prefixes before release and P alone after, and
+/// so is its Adj-RIB-Out gauge. Seeding nothing, the group's desired view,
+/// or the proof narrowed to the desired view all miscount one side.
+fn assert_seeded_member_counts_its_wire(ipv6: bool) {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let member = peer_v4(Ipv4Addr::new(10, 113, 0, 1));
+    let mut member_rx = register_peer_with_families(&mut manager, member, &dual_stack_sendable());
+    let (source, routes, prefix, label) = if ipv6 {
+        let source = Ipv6Addr::new(0x2001, 0xdb8, 0, 113, 0, 0, 0, 1);
+        (
+            PeerId::from_addr(IpAddr::V6(source)),
+            source_v6_routes(source, &[1, 2, 3]),
+            (|segment| v6(u16::from(segment))) as fn(u8) -> Prefix,
+            "ipv6_unicast",
+        )
+    } else {
+        let source = Ipv4Addr::new(192, 0, 2, 113);
+        (
+            peer_v4(source),
+            source_routes(source, &[1, 2, 3]),
+            v4 as fn(u8) -> Prefix,
+            "ipv4_unicast",
+        )
+    };
+    let (p, r, q) = (prefix(1), prefix(2), prefix(3));
+    announce(&mut manager, source, routes[..2].to_vec());
+    let mut wire = HashSet::new();
+    apply_to_wire(&mut member_rx, &mut wire);
+    assert_eq!(wire, HashSet::from([p, r]), "{label}");
+    assert!(manager.grouped_member_of(member).is_some());
+
+    let held = fill_writer(&manager, member);
+    announce(&mut manager, source, routes[2..].to_vec());
+    withdraw(&mut manager, source, vec![(r, 0)]);
+    assert!(manager.dirty_peers.contains(&member), "{label}");
+    assert!(
+        manager.pending_group_admitted.get(&member).is_some(),
+        "{label}"
+    );
+    let config = if ipv6 {
+        limit_config(&[(member, None, Some(8))], &[])
+    } else {
+        limit_config(&[(member, Some(8), None)], &[])
+    };
+    install(&mut manager, 1, config);
+    let before = family_row(&manager, member, label).usage;
+    withdraw(&mut manager, source, vec![(q, 0)]);
+
+    drop(held);
+    while manager.resync_dirty_peers_bounded() {}
+    apply_to_wire(&mut member_rx, &mut wire);
+    assert!(!manager.dirty_peers.contains(&member), "{label}");
+    let after = family_row(&manager, member, label).usage;
+    let gauge = capacity_gauge(&manager.metrics, "bgp_rib_adj_out_prefixes", member, label);
+    assert!(
+        before == 2
+            && wire == HashSet::from([p])
+            && after == 1
+            && gauge.is_some_and(|gauge| (gauge - 1.0).abs() < f64::EPSILON),
+        "{label}: usage {before} while the member held {{P, R}}; after release usage {after} \
+         and Adj-RIB-Out gauge {gauge:?} for wire {wire:?}"
+    );
+}
+
+#[test]
+fn an_ipv4_limit_seeded_from_a_proof_counts_the_wire_to_convergence() {
+    assert_seeded_member_counts_its_wire(false);
+}
+
+#[test]
+fn an_ipv6_limit_seeded_from_a_proof_counts_the_wire_to_convergence() {
+    assert_seeded_member_counts_its_wire(true);
+}
+
 /// Acceptance: two neighbors on one link-local address, on different
 /// interfaces, each get only their own configured outbound maximum. eth0 is
 /// capped at one prefix and blocks the second; eth1, configured with no
