@@ -1430,6 +1430,34 @@ impl RibManager {
         let _ = reply.send(Ok(()));
     }
 
+    /// A grouped member's admitted unicast prefixes for one family, from its
+    /// admission proof, or `None` when it has no complete proof.
+    ///
+    /// While a proof exists, distribution withdraws from the member only the
+    /// keys the proof holds, so the proof is what the member was sent. A
+    /// member dirty behind a full writer can trail the group's desired view:
+    /// seeding a desired prefix it never received would keep that prefix
+    /// charged after its route is deleted, since no withdrawal ever frees it.
+    fn grouped_admitted_from_proof(&self, peer: PeerId, afi: Afi) -> Option<TypedGroupedAdmitted> {
+        let admitted = self.pending_group_admitted.get(&peer)?;
+        let unicast = |key: crate::update::ExactExportKey| match key {
+            crate::update::ExactExportKey::Unicast(prefix, _) => Some(prefix),
+            _ => None,
+        };
+        let capacity = admitted
+            .iter_with_checkpoint(|force| self.replacement_checkpoint(force))
+            .filter_map(unicast)
+            .filter(|prefix| prefix_family(prefix).0 == afi)
+            .count();
+        Some(TypedGroupedAdmitted::collect_with_capacity(
+            afi,
+            admitted
+                .iter_with_checkpoint(|force| self.replacement_checkpoint(force))
+                .filter_map(unicast),
+            capacity,
+        ))
+    }
+
     /// Move one live family to an already-preflighted maximum.
     fn install_outbound_limit(&mut self, peer: PeerId, afi: Afi, limit: Option<NonZeroU32>) {
         let previous = self
@@ -1475,6 +1503,9 @@ impl RibManager {
                             }),
                         capacity,
                     );
+                }
+                if let Some(admitted) = self.grouped_admitted_from_proof(peer, afi) {
+                    return admitted;
                 }
                 // Every projected route keeps its staged prefix, including lane
                 // substitutions and Add-Path slots. Exclusions only reduce this
