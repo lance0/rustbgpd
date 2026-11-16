@@ -804,7 +804,7 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   monitor): `[[ethernet_segments]].interface` drives a `link` drain
   reason through the same primitive — AC carrier loss emits the
   EAD-withdrawn-MACs-retained mass-withdraw shape automatically,
-  recovery holds `recovery_delay_secs` (re-armed per up edge), and
+  recovery holds `recovery_delay_seconds` (re-armed per up edge), and
   operator/link reasons compose so neither trigger overrides the
   other; the same-ESI local bias **landed** (ADR-0085 decision 5,
   slice 3): a remote Type 2 whose ESI is locally attached, healthy,
