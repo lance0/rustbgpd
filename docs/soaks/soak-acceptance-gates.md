@@ -620,7 +620,7 @@ coverage:
    **Closed by scenario 10**, which trips the designated member's
    aggregate `max_prefixes` bound every 4 hours and asserts the full
    breach → countdown → timed-restart → compliant-recovery evidence
-   chain per cycle. (Per-family `max_prefixes_ipv4/ipv6` bounds and the
+   chain per cycle. (Per-family `max_prefixes_ipv4_unicast/ipv6_unicast` bounds and the
    failed-restart indefinite latch remain soak-uncovered — they have
    unit coverage only.)
 7. **Transport-level disturbance.** No packet loss / latency / MTU
