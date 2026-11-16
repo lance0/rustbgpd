@@ -122,8 +122,8 @@ fn malformed_detail(error: DecodeError) -> String {
 #[test]
 fn golden_vectors_for_each_rd_type_round_trip() {
     for (rd, text) in [
-        // Type 0: 44407:40.
-        ([0, 0, 0xad, 0x77, 0, 0, 0, 0x28], "44407:40"),
+        // Type 0: 64500:40.
+        ([0, 0, 0xfb, 0xf4, 0, 0, 0, 0x28], "64500:40"),
         // Type 1: 192.0.2.1:100.
         ([0, 1, 192, 0, 2, 1, 0, 100], "192.0.2.1:100"),
         // Type 2: 65536:10.
@@ -184,7 +184,7 @@ fn route_distinguisher_alone_moves_the_length_past_240() {
     assert_eq!(global.len(), 1 + 235);
 
     let vpn = VpnFlowSpecRule {
-        rd: RouteDistinguisher([0, 0, 0xad, 0x77, 0, 0, 0, 0x28]),
+        rd: RouteDistinguisher([0, 0, 0xfb, 0xf4, 0, 0, 0, 0x28]),
         rule,
     };
     let mut wire = Vec::new();
@@ -206,7 +206,7 @@ fn port_bytes(terms: usize) -> Vec<u8> {
 
 #[test]
 fn rd_inclusive_payloads_of_239_and_240_octets() {
-    let rd = [0, 0, 0xad, 0x77, 0, 0, 0, 0x28];
+    let rd = [0, 0, 0xfb, 0xf4, 0, 0, 0, 0x28];
     // 239 = RD 8 + port 231: the largest one-octet length.
     let mut payload_239 = rd.to_vec();
     payload_239.extend(port_bytes(115));
@@ -288,9 +288,9 @@ fn the_4095_octet_bound_includes_the_route_distinguisher() {
 
 #[test]
 fn malformed_nlri_is_refused() {
-    let rd = [0, 0, 0xad, 0x77, 0, 0, 0, 0x28];
+    let rd = [0, 0, 0xfb, 0xf4, 0, 0, 0, 0x28];
     // A length below the 8-octet RD.
-    let detail = malformed_detail(decode_vpn_flowspec_nlri(&[5, 0, 0, 0xad, 0x77, 0]).unwrap_err());
+    let detail = malformed_detail(decode_vpn_flowspec_nlri(&[5, 0, 0, 0xfb, 0xf4, 0]).unwrap_err());
     assert!(
         detail.contains("shorter than its 8-octet Route Distinguisher"),
         "{detail}"
@@ -314,12 +314,12 @@ fn malformed_nlri_is_refused() {
 
 #[test]
 fn malformed_second_nlri_does_not_misframe_the_first() {
-    let first = nlri([0, 0, 0xad, 0x77, 0, 0, 0, 0x28]);
+    let first = nlri([0, 0, 0xfb, 0xf4, 0, 0, 0, 0x28]);
     let second = nlri([0, 2, 0, 1, 0, 0, 0, 10]);
     let both = [first.clone(), second].concat();
     let decoded = decode_vpn_flowspec_nlri(&both).unwrap();
     assert_eq!(decoded.len(), 2);
-    assert_eq!(decoded[0].rd.to_string(), "44407:40");
+    assert_eq!(decoded[0].rd.to_string(), "64500:40");
     assert_eq!(decoded[1].rd.to_string(), "65536:10");
 
     // A second NLRI too short for its RD fails the whole attribute, with the
@@ -336,7 +336,7 @@ fn malformed_second_nlri_does_not_misframe_the_first() {
 #[test]
 fn non_zero_next_hop_length_is_refused() {
     let mut reach = vec![0x00, 0x01, 0x86, 0x04, 192, 0, 2, 1, 0x00];
-    reach.extend(nlri([0, 0, 0xad, 0x77, 0, 0, 0, 0x28]));
+    reach.extend(nlri([0, 0, 0xfb, 0xf4, 0, 0, 0, 0x28]));
     let detail = malformed_detail(decode(&attr(14, &reach)).unwrap_err());
     assert!(
         detail.contains("next-hop length 4 (expected 0)"),
@@ -358,8 +358,8 @@ fn vpn_flowspec_family_registry_covers_both_ip_families() {
 
 #[test]
 fn ipv6_flow_label_is_malformed_in_ipv4_vpn_flowspec() {
-    // RD 44407:40, then type 13 (Flow Label, IPv6-only per RFC 8956) = 1.
-    let mut nlri = vec![11, 0, 0, 0xad, 0x77, 0, 0, 0, 0x28];
+    // RD 64500:40, then type 13 (Flow Label, IPv6-only per RFC 8956) = 1.
+    let mut nlri = vec![11, 0, 0, 0xfb, 0xf4, 0, 0, 0, 0x28];
     nlri.extend([0x0d, 0x81, 0x01]);
     let mut reach = vec![0x00, 0x01, 0x86, 0x00, 0x00];
     reach.extend(&nlri);
@@ -374,7 +374,7 @@ fn ipv6_flow_label_is_malformed_in_ipv4_vpn_flowspec() {
 #[test]
 fn vpn_flowspec_is_never_encoded_outside_ip_afis() {
     let rule = VpnFlowSpecRule {
-        rd: RouteDistinguisher([0, 0, 0xad, 0x77, 0, 0, 0, 0x28]),
+        rd: RouteDistinguisher([0, 0, 0xfb, 0xf4, 0, 0, 0, 0x28]),
         rule: rule(),
     };
     for afi in [Afi::L2Vpn, Afi::BgpLs] {
@@ -547,7 +547,7 @@ fn ipv6_nlri(rd: [u8; 8], components: &[u8]) -> Vec<u8> {
 #[test]
 fn ipv6_vpn_golden_vectors_cover_offsets_flow_label_and_each_rd_type() {
     for rd in [
-        [0, 0, 0xad, 0x77, 0, 0, 0, 40],
+        [0, 0, 0xfb, 0xf4, 0, 0, 0, 40],
         [0, 1, 192, 0, 2, 1, 0, 100],
         [0, 2, 0, 1, 0, 0, 0, 10],
         [0, 3, 1, 2, 3, 4, 5, 6],

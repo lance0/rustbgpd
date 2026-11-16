@@ -2096,7 +2096,7 @@ fn flowspec_single_rule_churn_work_ignores_stored_rules() {
 /// stored row with validation on either.
 #[test]
 fn vpn_flowspec_single_rule_churn_work_ignores_stored_rules() {
-    let rd = rustbgpd_wire::RouteDistinguisher([0, 0, 0xad, 0x77, 0, 0, 0, 40]);
+    let rd = rustbgpd_wire::RouteDistinguisher([0, 0, 0xfb, 0xf4, 0, 0, 0, 40]);
     assert_flowspec_churn_ignores_stored_rules(Some(rd), false);
     assert_flowspec_churn_ignores_stored_rules(Some(rd), true);
 }

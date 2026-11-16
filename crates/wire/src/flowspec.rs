@@ -1635,7 +1635,7 @@ mod tests {
             Some(crate::capability::Safi::FlowSpecVpn)
         );
         let vpn = VpnFlowSpecRule {
-            rd: RouteDistinguisher([0, 0, 0xad, 0x77, 0, 0, 0, 0x28]),
+            rd: RouteDistinguisher([0, 0, 0xfb, 0xf4, 0, 0, 0, 0x28]),
             rule: FlowSpecRule {
                 components: vec![FlowSpecComponent::IpProtocol(vec![NumericMatch {
                     end_of_list: true,
@@ -1651,13 +1651,13 @@ mod tests {
         try_encode_vpn_flowspec_nlri(std::slice::from_ref(&vpn), &mut wire).unwrap();
         assert_eq!(
             wire,
-            [11, 0, 0, 0xad, 0x77, 0, 0, 0, 0x28, 0x03, 0x81, 0x11]
+            [11, 0, 0, 0xfb, 0xf4, 0, 0, 0, 0x28, 0x03, 0x81, 0x11]
         );
         assert_eq!(
             decode_vpn_flowspec_nlri(&wire).unwrap(),
             std::slice::from_ref(&vpn)
         );
-        assert_eq!(vpn.to_string(), format!("rd 44407:40 {}", vpn.rule));
+        assert_eq!(vpn.to_string(), format!("rd 64500:40 {}", vpn.rule));
     }
 
     #[test]
@@ -2116,7 +2116,7 @@ mod tests {
         let err = decode_flowspec_nlri(&buf, Afi::Ipv4).unwrap_err();
         assert!(err.to_string().contains("component type 13"), "{err}");
         let vpn = VpnFlowSpecRule {
-            rd: RouteDistinguisher([0, 0, 0xad, 0x77, 0, 0, 0, 0x28]),
+            rd: RouteDistinguisher([0, 0, 0xfb, 0xf4, 0, 0, 0, 0x28]),
             rule: with_label,
         };
         let mut buf = Vec::new();

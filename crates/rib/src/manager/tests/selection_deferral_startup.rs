@@ -519,7 +519,7 @@ fn local_vpn_flowspec_is_eligible_during_selection_deferral() {
     route.origin_type = crate::route::RouteOrigin::Local;
     route.peer_router_id = Ipv4Addr::UNSPECIFIED;
     route.rd = Some(rustbgpd_wire::RouteDistinguisher([
-        0, 0, 0xad, 0x77, 0, 0, 0, 40,
+        0, 0, 0xfb, 0xf4, 0, 0, 0, 40,
     ]));
     route.attributes = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),

@@ -203,7 +203,7 @@ EXPECTED_SEEDS: dict[str, bytes] = {
     ),
     # The type-0 RD golden vector in tests/flowspec_vpn.rs (SAFI 134).
     "crates/wire/fuzz/seeds/decode_flowspec/vpn_rd0_dst_udp": bytes.fromhex(
-        "110000ad7700000028" "0120cb00710a038111"
+        "110000fbf400000028" "0120cb00710a038111"
     ),
     # Canonical production KEEPALIVE encoding from keepalive.rs/message.rs.
     "crates/wire/fuzz/seeds/decode_message/keepalive": bytes.fromhex(
@@ -236,14 +236,14 @@ EXPECTED_SEED_SHA256 = {
     "crates/wire/fuzz/seeds/decode_evpn/smet_v6_sg": "e209070a69839f76894e831f21d321ed0ed3f142ed5395281258828b20af1b24",
     "crates/wire/fuzz/seeds/decode_evpn/smet_wildcard_v6_origin": "23e89e400c65ede6052152a62bf31fa5160e9354002951916d6153b896113cd4",
     "crates/wire/fuzz/seeds/decode_flowspec/ipv4_tcp_80": "1cd834ffac49aca73ad096cdd34621e6678e05b7c16803db98a3002929629495",
-    "crates/wire/fuzz/seeds/decode_flowspec/vpn_ipv6_fragment_reserved": "d158d1ebe691d7d81793c815b71de26e7672187fe6d6d2fce781db8f98e08e3e",
-    "crates/wire/fuzz/seeds/decode_flowspec/vpn_ipv6_fragment_wide": "9819eba14e968b6f791e0d30c9d957337dae742bce8137df692ee1282ef96f77",
-    "crates/wire/fuzz/seeds/decode_flowspec/vpn_ipv6_invalid_offset": "4272579bdd3e59897a05efe51513c3e18acbba1b251d4006325da191f851aca6",
-    "crates/wire/fuzz/seeds/decode_flowspec/vpn_ipv6_length239": "8bc7e91f143b9741f36e26cdac1cd8dbc1e4237ed463e852f3976cf6eb7e8f56",
-    "crates/wire/fuzz/seeds/decode_flowspec/vpn_ipv6_length240": "41393ba3bd453f686f2a0766d5d80fd3dd9851ff26ebdd4db77be740e7c92540",
-    "crates/wire/fuzz/seeds/decode_flowspec/vpn_ipv6_offset_flow_label": "f03a29a7c37769fb6df59978a2d9dcf05d895c77aca0bbbb88818883c77d75da",
-    "crates/wire/fuzz/seeds/decode_flowspec/vpn_ipv6_offset_padding": "9b4caae1e1dfbc9cbfce1e4f874132258f5f7fdead258d40d5f816a7325d36f4",
-    "crates/wire/fuzz/seeds/decode_flowspec/vpn_rd0_dst_udp": "1487a5bd2ccab6295dfefcf03a3386043661d124baae3457b61ba6692370a658",
+    "crates/wire/fuzz/seeds/decode_flowspec/vpn_ipv6_fragment_reserved": "6dae9b173e53f6c621a549317928152bdf00b3e33ff08e1bd187c45a01595402",
+    "crates/wire/fuzz/seeds/decode_flowspec/vpn_ipv6_fragment_wide": "140407c02d03b6cd097b20404f3bdc3c901ec9b5d4e3c476dcd77edee71c71da",
+    "crates/wire/fuzz/seeds/decode_flowspec/vpn_ipv6_invalid_offset": "e9e39d1a56bf7f5bf1c73dd0437a69dd6dd467f09afcb25f00ea4a26f1d561d3",
+    "crates/wire/fuzz/seeds/decode_flowspec/vpn_ipv6_length239": "95cdffe3198600b8fb8ff2087eee25008dd1f0b48cc8d12aa6bd3c8c21fcfc36",
+    "crates/wire/fuzz/seeds/decode_flowspec/vpn_ipv6_length240": "fc533e197dba98fa79a59240a134d1c48fcaab02aab93a56b2d2cc19b2b2f344",
+    "crates/wire/fuzz/seeds/decode_flowspec/vpn_ipv6_offset_flow_label": "87d9ea7cce4f7be1c3be52b31a9029b11b2f8f7481387eda98887907ad1b2cbb",
+    "crates/wire/fuzz/seeds/decode_flowspec/vpn_ipv6_offset_padding": "1f23fe916a834a5662664ff8b1660c66bc1cfa8d75aa93a8ae95093c1cb35f97",
+    "crates/wire/fuzz/seeds/decode_flowspec/vpn_rd0_dst_udp": "c71e93f73fa46e6b61d03b12d07dcf7282a02800430494cc51e971fbde2818cb",
     "crates/wire/fuzz/seeds/decode_flowspec/vpn_rd2_extended_len": "810882dd143a29accde0f239ef5e310f0de128614aeb316c003e20d01ac126a6",
     "crates/wire/fuzz/seeds/decode_labeled/announce_two_labels": "e798f0a78d309eb0bf8d92c71a629c7cf48c3dc8b8a05903fd5d481449ebdb5c",
     "crates/wire/fuzz/seeds/decode_labeled/announce_v4": "9c83a82a45560c32507bedd06f86a80eb745b4de18186b79e13c827c2e930474",

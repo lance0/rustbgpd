@@ -1083,7 +1083,7 @@ fn vpn_flowspec_refresh_absorbs_only_its_own_owed_withdrawals() {
         for rd in [
             None,
             Some(rustbgpd_wire::RouteDistinguisher([
-                0, 0, 0xad, 0x77, 0, 0, 0, 40,
+                0, 0, 0xfb, 0xf4, 0, 0, 0, 40,
             ])),
         ] {
             let mut rule = make_flowspec_route(Ipv4Addr::UNSPECIFIED);
@@ -1186,7 +1186,7 @@ async fn lease_expiry_owes_ipv6_vpn_flowspec_beside_global_flowspec() {
         (Afi::Ipv4, None),
         (
             Afi::Ipv6,
-            Some(RouteDistinguisher([0, 0, 0xad, 0x77, 0, 0, 0, 40])),
+            Some(RouteDistinguisher([0, 0, 0xfb, 0xf4, 0, 0, 0, 40])),
         ),
     ] {
         let mut rule = make_flowspec_route(Ipv4Addr::UNSPECIFIED);
@@ -2748,7 +2748,7 @@ fn owed_flowspec_revocation_drains_inside_a_selection_hold() {
             )];
         }
         if flowspec.1 == Safi::FlowSpecVpn {
-            rule.rd = Some(RouteDistinguisher([0, 0, 0xad, 0x77, 0, 0, 0, 40]));
+            rule.rd = Some(RouteDistinguisher([0, 0, 0xfb, 0xf4, 0, 0, 0, 40]));
         }
         let key = rule.selection_key();
         let (reply, mut result) = oneshot::channel();
@@ -4287,7 +4287,7 @@ fn check_flowspec_family_release(family: (Afi, Safi), case: FamilyReleaseCase) {
         )];
     }
     if family.1 == Safi::FlowSpecVpn {
-        rule.rd = Some(RouteDistinguisher([0, 0, 0xad, 0x77, 0, 0, 0, 40]));
+        rule.rd = Some(RouteDistinguisher([0, 0, 0xfb, 0xf4, 0, 0, 0, 40]));
     }
     rule.attributes = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),

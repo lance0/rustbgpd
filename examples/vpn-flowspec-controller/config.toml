@@ -1,6 +1,6 @@
 # IPv4 and IPv6 VPN FlowSpec controller backend.
 #
-# The controller injects a VPN family, RD 44407:40 and scope RT 44407:777
+# The controller injects a VPN family, RD 64500:40 and scope RT 64500:777
 # through the existing FlowSpec RPCs. Configure the receiving PE to import
 # that RT into TRANSIT. RD and RT are supplied per rule; rustbgpd has no VRF objects.
 # Re-inject desired rules after a daemon restart and reconcile their scoped
@@ -8,7 +8,7 @@
 # See docs/reference/api.md and docs/reference/configuration.md.
 
 [global]
-asn = 44407
+asn = 64500
 router_id = "192.0.2.1"
 listen_port = 179
 ebgp_requires_policy = true
@@ -25,7 +25,7 @@ rpol_files = ["transit.rpol"]
 
 [[neighbors]]
 address = "192.0.2.21"
-remote_asn = 44407
+remote_asn = 64500
 description = "pe-transit"
 families = ["l3vpn_ipv4_flowspec", "l3vpn_ipv6_flowspec"]
 required_families = ["l3vpn_ipv4_flowspec", "l3vpn_ipv6_flowspec"]

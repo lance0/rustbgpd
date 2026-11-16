@@ -300,9 +300,9 @@ enforcement = "tier"
                 key = body.get("rule", body)
                 key["afiSafi"] = vpn_family
                 if method != "ListFlowSpecRoutes":
-                    key["rd"] = "44407:40"
+                    key["rd"] = "64500:40"
                 if method.startswith("Add"):
-                    key["routeTargets"] = ["44407:777"]
+                    key["routeTargets"] = ["64500:777"]
                 if fault == "global-fallback":
                     body = global_body
                 if fault == "call-transport":
