@@ -393,7 +393,8 @@ async fn exercise_live_replay_admission(wait: ReplayAdmissionWait) {
         .unwrap();
     let close = match wait {
         ReplayAdmissionWait::Enrollment => PeerCommand::BfdDown,
-        _ => PeerCommand::Stop { reason: None },
+        ReplayAdmissionWait::Bmp => PeerCommand::Stop { reason: None },
+        ReplayAdmissionWait::Rib => PeerCommand::StopForReconnect { reason: None },
     };
     let started = tokio::time::Instant::now();
     let mut manager = None;

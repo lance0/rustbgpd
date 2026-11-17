@@ -983,12 +983,14 @@ async fn shared_group_elected_encoder_queues_routine_commands_and_stops_for_a_cl
     enum Shape {
         Routine,
         StopBehindMutation,
+        ReconnectStopBehindMutation,
         BfdDownAlone,
         QueueFull,
     }
     for shape in [
         Shape::Routine,
         Shape::StopBehindMutation,
+        Shape::ReconnectStopBehindMutation,
         Shape::BfdDownAlone,
         Shape::QueueFull,
     ] {
@@ -1035,6 +1037,12 @@ async fn shared_group_elected_encoder_queues_routine_commands_and_stops_for_a_cl
                     .try_send(PeerCommand::Stop { reason: None })
                     .unwrap();
             }
+            Shape::ReconnectStopBehindMutation => {
+                mutation(&commands);
+                commands
+                    .try_send(PeerCommand::StopForReconnect { reason: None })
+                    .unwrap();
+            }
             Shape::BfdDownAlone => commands.try_send(PeerCommand::BfdDown).unwrap(),
             Shape::QueueFull => {
                 for _ in 0..DEFERRED_COMMAND_LIMIT {
@@ -1050,7 +1058,9 @@ async fn shared_group_elected_encoder_queues_routine_commands_and_stops_for_a_cl
             .unwrap();
         let expected_stops = match shape {
             Shape::Routine => SharedEncodeStops::default(),
-            Shape::StopBehindMutation | Shape::BfdDownAlone => SharedEncodeStops {
+            Shape::StopBehindMutation
+            | Shape::ReconnectStopBehindMutation
+            | Shape::BfdDownAlone => SharedEncodeStops {
                 close: 1,
                 queue_full: 0,
             },
@@ -1092,7 +1102,10 @@ async fn shared_group_elected_encoder_queues_routine_commands_and_stops_for_a_cl
             }
         }
         assert!(member.deferred_commands.is_empty());
-        let closed = matches!(shape, Shape::StopBehindMutation | Shape::BfdDownAlone);
+        let closed = matches!(
+            shape,
+            Shape::StopBehindMutation | Shape::ReconnectStopBehindMutation | Shape::BfdDownAlone
+        );
         assert_eq!(member.stop_requested, closed, "{shape:?}: close observed");
         for mut ack in acks {
             ack.try_recv()

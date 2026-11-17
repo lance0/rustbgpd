@@ -1002,6 +1002,7 @@ impl PeerCommand {
         matches!(
             self,
             Self::Stop { .. }
+                | Self::StopForReconnect { .. }
                 | Self::BfdDown
                 | Self::Shutdown
                 | Self::PurgeReset
