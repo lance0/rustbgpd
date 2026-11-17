@@ -1980,6 +1980,20 @@ class Bars(unittest.TestCase):
                 results = self.release_defect("restart-evpn.json", change)
                 self.assertEqual(results[cell][0], verdict, results[cell])
 
+    def test_unavailable_churn_free_window_is_invalid(self):
+        # The raw gap would pass with nothing excluded; an unavailable
+        # window must not read as that.
+        why = "no RIB reply within 5000 ms of the window's end"
+
+        def change(run):
+            run["unaffected"].update(
+                quiet_excluded={"unavailable": why}, max_gap_ms=330.0, max_gap_raw_ms=330.0
+            )
+
+        results = self.release_defect("restart-evpn.json", change)
+        cell = "cell 7 selection release evpn"
+        self.assert_only(results, cell, "INVALID", f"churn-free window unavailable: {why}")
+
     def test_seeded_fail_outranks_another_runs_missing_instrument(self):
         def mutate(parent, candidate):
             for arm in (parent, candidate):

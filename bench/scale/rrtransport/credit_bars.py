@@ -588,7 +588,12 @@ def healthy_gap(run: dict, what: str) -> tuple[float, str]:
     raw = number(run, "unaffected.max_gap_raw_ms", what)
     if "quiet_excluded" not in run["unaffected"]:
         raise Invalid(f"missing instrument {what}: unaffected.quiet_excluded")
-    if run["unaffected"]["quiet_excluded"] is None:
+    excluded = run["unaffected"]["quiet_excluded"]
+    if isinstance(excluded, dict) and "unavailable" in excluded:
+        # A RIB wait in the window reached its cap: its span is unknown, so
+        # the raw gap is no PASS either.
+        raise Invalid(f"{what}: churn-free window unavailable: {excluded['unavailable']}")
+    if excluded is None:
         # The last churn row before the window never arrived: nothing is
         # excluded, so the gap is the raw one.
         if gap != raw:

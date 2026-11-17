@@ -234,7 +234,12 @@ when the churn restarted, recorded as `unaffected.quiet_excluded` (`from_ms`,
 `to_ms`, `span_ms`), with the configured lead as `unaffected.quiet_lead_ms`.
 A slow delivery of that last row therefore stays in the gap. When it never
 arrived nothing is excluded (`quiet_excluded` is null and the gap is the raw
-one). A gap counts only its part outside that span, so the last row's
+one). The window's RIB waits (the churn's stop and the queries that republish
+the gauges) end at most 5 s past its end; past that the window is unavailable
+(`quiet.unavailable` set, no readings, `quiet_excluded` is
+`{"unavailable": ...}`), the cell still resumes its readers, and bar 3 and the
+plateau are INVALID: an unknown span is not "nothing excluded".
+A gap counts only its part outside that span, so the last row's
 delivery before the window and the first row's after it still count. An
 excluded span over twice `quiet_lead_ms` is INVALID: it could hide a stall. `unaffected.max_gap_ms` is
 the gap after the exclusion, `max_gap_raw_ms` the gap without it; the
@@ -454,14 +459,20 @@ The cell-7 bars read the candidate's measured fixed-shape runs only:
   it), when `socket_ends` is not 2 × receivers, when the row size is not
   uniform (an UPDATE carried more than one announced row, or
   `wire.max_row_bytes` exceeds `wire.min_row_bytes` by more than 1%), and
-  when held fits the slack: there a missing charge cannot show. Measured on
-  one cursor-drain tree (correctness-only runs), the witness detects a
-  missing charge above about 106,000 rows (1.1% of the charge) at 150 ×
-  150k: a clean read held 12,029,952 rows against a 9,879,552-row charge
-  with a slack of 2,256,379 (margin 105,979; 106,636 under churn), and the
-  same tree held 4,611,072 rows over its charge (4,458,496 under churn) with
-  every fourth cursor envelope uncharged and 11,959,296 (11,979,776) with
-  nothing charged, both FAIL.
+  when held fits the slack: there a missing charge cannot show. Its
+  detection limit is observed, not proven. On one cursor-drain tree at
+  150 × 150k (correctness-only runs), three clean full-shape reads left
+  margins of 105,979, 106,636 and 120,831 rows (slack less held − charged),
+  so in those runs a missing charge above about 106,000 rows (1.1% of the
+  charge) would have shown; the first held 12,029,952 rows against a
+  9,879,552-row charge with a slack of 2,256,379. The same tree failed with
+  every fourth cursor envelope uncharged (4,611,072 rows held over its
+  charge; 4,458,496 under churn) and with nothing charged (11,959,296;
+  11,979,776). That margin is what these runs showed for this shape and
+  snapshot, not a bound proven for every sampling interleaving. The RIB's
+  envelope-accounting unit tests
+  (`crates/rib/src/manager/tests/outbound_credit.rs`) are the accounting
+  proof; this witness is an independent check on a running drain.
   An owed EVPN family is not drained by cursor and its whole-table
   operations charge no rows by design, so for EVPN the witness is
   report-only: its line carries no charging verdict either way. The
@@ -598,7 +609,7 @@ a missing or null one makes that cell INVALID, never PASS.
 | --- | --- | --- |
 | 1 | `paused-evpn.json`, every repetition of both arms (or `paused-exit.json` with `oom`) | `mode` = `measured`; `shape.receivers`, `shape.routes`, `shape.seconds`, `shape.round_ms` fixed; `checks.no_session_resets` = true; `not_established` empty; `memory.cgroup_swap_max` = `0`; `memory.cgroup_memory_max` = 12 GiB; `memory.cgroup_memory_peak_bytes`; `memory.vmhwm_kib`; `memory.cgroup_oom_kill`; candidate `memory.peak_credit_bytes` and `row_size_of` |
 | 2 | `exhaust-<family>.json`, every run of both arms | `mode`; `shape.receivers`, `shape.rows_per_receiver`, `shape.pause_ms`, `shape.burst_interval_ms`, `shape.trigger`, `shape.registered_peers` fixed; `witness.refused_receivers`, `witness.peak_credit_rows`, `witness.receivers` (and `witness.peak_credit_bytes` and `row_size_of` on a byte-credit tree); `shape.pause_ms`, `timing.release_sent_ms`, `timing.actual_pause_ms`; `healthy_row_size_of`; `witness.plateau` `samples`, `start_ms`, `end_ms`, `min`, `max`, `resume_issued_ms` and `quiet` `readings`, `churn_stopped_ms`, `churn_delivered_ms`, `end_ms`, `min`; `checks.final_state_exact`, `checks.one_eor_before_burst`, `checks.no_session_resets`; `timing.recovery_ms` once every wire check passed; candidate `timing.drain_after_resume_ms` |
-| 3 | `exhaust-<family>.json`, every run of both arms | `mode`; `unaffected.injected` and `unaffected.delivered` (nonzero), `unaffected.p99_latency_ms`, `unaffected.max_gap_ms`; candidate `unaffected.max_gap_raw_ms`, `unaffected.quiet_lead_ms` and `unaffected.quiet_excluded` (present; null or with `from_ms`, `to_ms`, `span_ms`) |
+| 3 | `exhaust-<family>.json`, every run of both arms | `mode`; `unaffected.injected` and `unaffected.delivered` (nonzero), `unaffected.p99_latency_ms`, `unaffected.max_gap_ms`; candidate `unaffected.max_gap_raw_ms`, `unaffected.quiet_lead_ms` and `unaffected.quiet_excluded` (present; null, with `from_ms`, `to_ms`, `span_ms`, or `unavailable`: INVALID) |
 | 4 | `probes.json`, every run of both arms | `mode`; `probes` = the fixed 9 cells (`cell`, `shape`, `peers`, `stall_ms`; restart `table`), each candidate cell with `dirty_episodes` |
 | 6 | `fill-<family>.json`, every run of both arms, each family | `mode`; `shape.receivers`, `shape.rows_per_receiver` fixed; candidate `estimate.bytes_per_queued_row` and `row_size_of` |
 | 7 | `restart-<family>.json` and `restart-churn-<family>.json`, every candidate run | `mode`; `shape.receivers`, `shape.rows_per_receiver`, `shape.pause_ms`, `shape.trigger`, `shape.registered_peers` fixed; `checks.final_state_exact`, `checks.eor_after_every_route`, `checks.no_session_resets`; `actor.slice_max_us.actor_poll`, `actor.turn_longest_ms`, `actor.work_longest_ms`, `actor.inbox_round_trip.longest_ms`, `probes` and `unfinished`; `witness` (an object; `witness.peak_credit_bytes` and `row_size_of` on a byte-credit tree); `row_credit` (all four constants); `drain_gauges` `from_ms`, `to_ms`, `read_every_ms`, `reads`, `peak_credit_rows`, `peak_operations_live`; unicast `witness.held` `at_ms`, `advertised_rows`, `read_rows`, `charged_before`, `charged_after`, `writer_bytes`, `socket_bytes`, `socket_ends`, and `wire.min_row_bytes`, `wire.max_row_bytes`, `wire.max_rows_per_update` (row-credit trees); `unaffected` as cell 3's candidate; churn variant `churn.withdrawn`, `churn.re_announced`, `churn.started_ms`, `churn.sent_ms`, `timing.release_sent_ms`, `timing.resumed_ms`, `timing.last_eor_ms`, `wire.churn_reflected_before_eor` (one count per receiver); the step line `actor.owed_drain_step_longest_ms` |
