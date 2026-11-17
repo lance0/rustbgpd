@@ -2756,16 +2756,16 @@ async fn an_unchanged_flowspec_readd_does_constant_work_and_sends_nothing() {
 // ADR-0146: VPN FlowSpec keys are scoped by Route Distinguisher; leases stay
 // per owner, across RDs and families.
 
-/// A local rule for `203.0.113.<octet>/32` in RD `44407:<rd>` carrying Route
-/// Target `44407:<rt>`.
+/// A local rule for `203.0.113.<octet>/32` in RD `64500:<rd>` carrying Route
+/// Target `64500:<rt>`.
 fn vpn_rule(octet: u8, rd: u8, rt: u32) -> FlowSpecRoute {
     let mut route = guarded_rule(octet, 0);
     route.rd = Some(rustbgpd_wire::RouteDistinguisher([
-        0, 0, 0xad, 0x77, 0, 0, 0, rd,
+        0, 0, 0xfb, 0xf4, 0, 0, 0, rd,
     ]));
     AttrSet::edit(&mut route.attributes, |attrs| {
         attrs.push(PathAttribute::ExtendedCommunities(vec![
-            rustbgpd_wire::ExtendedCommunity::new(0x0002_ad77_0000_0000 | u64::from(rt)),
+            rustbgpd_wire::ExtendedCommunity::new(0x0002_fbf4_0000_0000 | u64::from(rt)),
         ]));
     });
     route

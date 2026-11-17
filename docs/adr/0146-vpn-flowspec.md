@@ -16,8 +16,8 @@ decisions, [ADR-0135](0135-flowspec-feasibility.md),
 ## Context
 
 An operator runs a mitigation controller that sends FlowSpec rules into a VRF
-with GoBGP: a GoBGP VRF named `TRANSIT` with RD `44407:40` and import/export
-RT `44407:777`, and both `ipv4-flowspec` and `l3vpn-ipv4-flowspec` enabled
+with GoBGP: a GoBGP VRF named `TRANSIT` with RD `64500:40` and import/export
+RT `64500:777`, and both `ipv4-flowspec` and `l3vpn-ipv4-flowspec` enabled
 toward a router. They asked whether rustbgpd can take GoBGP's place.
 
 ADR-0035 excluded SAFI 134 because rustbgpd has no VRF infrastructure. That
@@ -379,12 +379,12 @@ Equivalent of the GoBGP `TRANSIT` setup:
 
 ```toml
 [global]
-asn = 44407
+asn = 64500
 router_id = "192.0.2.1"
 
 [[neighbors]]
 address = "192.0.2.21"
-remote_asn = 44407
+remote_asn = 64500
 description = "pe-transit"
 families = ["ipv4_flowspec", "l3vpn_ipv4_flowspec"]
 # Optional: refuse the session if the PE does not negotiate VPN FlowSpec.
@@ -392,14 +392,14 @@ required_families = ["l3vpn_ipv4_flowspec"]
 ```
 
 The controller supplies the VRF's identity with each rule. It uses the RD
-`44407:40` and the export RT `44407:777`. The import half of GoBGP's "both"
+`64500:40` and the export RT `64500:777`. The import half of GoBGP's "both"
 RT has no meaning for an originator:
 
 ```json
 {
   "afiSafi": "ADDRESS_FAMILY_L3VPN_IPV4_FLOWSPEC",
-  "rd": "44407:40",
-  "routeTargets": ["44407:777"],
+  "rd": "64500:40",
+  "routeTargets": ["64500:777"],
   "components": [
     {"type": 1, "prefix": "203.0.113.10/32"},
     {"type": 3, "value": "=17"}
@@ -606,7 +606,7 @@ what happened to it.
 **GoBGP checks:**
 
 - The OPEN negotiates (1, 134).
-- GoBGP's `ipv4-l3vpn-flowspec` RIB shows RD `44407:40`, RT `44407:777` and
+- GoBGP's `ipv4-l3vpn-flowspec` RIB shows RD `64500:40`, RT `64500:777` and
   the discard action.
 - **Length boundary.** Rules with RD-inclusive payloads of 239 and 240
   octets arrive intact, with the one-octet and two-octet lengths. Releases

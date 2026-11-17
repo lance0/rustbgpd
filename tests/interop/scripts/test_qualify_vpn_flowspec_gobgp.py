@@ -34,7 +34,7 @@ def observed(desired, family=(2, 134)):
                         "type": 16,
                         "value": [
                             {"type": 128, "subtype": 6, "as": 0, "rate": 0},
-                            {"type": 0, "subtype": 2, "value": "44407:777"},
+                            {"type": 0, "subtype": 2, "value": "64500:777"},
                         ],
                     },
                 ],
@@ -56,7 +56,7 @@ class VpnFlowSpecOracleTests(unittest.TestCase):
             lambda row: row["nlri"]["rd"].update(assigned=41),
             lambda row: row["attrs"][0].update(afi=1),
             lambda row: row["attrs"][0].update(safi=133),
-            lambda row: row["attrs"][1]["value"][1].update(value="44407:778"),
+            lambda row: row["attrs"][1]["value"][1].update(value="64500:778"),
             lambda row: row["nlri"]["value"].pop(),
             lambda row: row.update(**{"peer-address": "192.0.2.2"}),
         ]
@@ -138,9 +138,9 @@ class VpnFlowSpecOracleTests(unittest.TestCase):
                 {"type": 3, "value": "=6"},
             ],
         )
-        self.assertEqual(expected_nlri(desired).hex(), "0000ad7700000385026840123456789a038106")
+        self.assertEqual(expected_nlri(desired).hex(), "0000fbf400000385026840123456789a038106")
         desired["components"][0]["offset"] = 65
-        self.assertEqual(expected_nlri(desired).hex(), "0000ad77000003850268412468acf134038106")
+        self.assertEqual(expected_nlri(desired).hex(), "0000fbf4000003850268412468acf134038106")
 
     def test_rd_inclusive_239_240_lengths_and_truncation(self):
         for length in (239, 240):
@@ -160,7 +160,7 @@ class VpnFlowSpecOracleTests(unittest.TestCase):
     def test_raw_update_keeps_family_rd_rt_and_action_together(self):
         nlri = expected_nlri(rule(14, 40))
         reach = struct.pack("!HBBB", 2, 134, 0, 0) + bytes([len(nlri)]) + nlri
-        communities = bytes.fromhex("0002ad77000003098006000000000000")
+        communities = bytes.fromhex("0002fbf4000003098006000000000000")
         attrs = (
             bytes([128, 14, len(reach)]) + reach + bytes([192, 16, len(communities)]) + communities
         )
@@ -177,7 +177,7 @@ class VpnFlowSpecOracleTests(unittest.TestCase):
                     "announce": True,
                     "length_octets": 1,
                     "nlri": nlri.hex(),
-                    "communities": ["0002ad7700000309", "8006000000000000"],
+                    "communities": ["0002fbf400000309", "8006000000000000"],
                 }
             ],
         )
@@ -196,7 +196,7 @@ class VpnFlowSpecOracleTests(unittest.TestCase):
             ]
         ]
         initial = [rule(13, 40), rule(14, 40)]
-        replacement = rule(14, 40, rt="44407:778")
+        replacement = rule(14, 40, rt="64500:778")
         rows = []
         for afi, desired in zip((1, 2), initial):
             row = {
@@ -205,11 +205,11 @@ class VpnFlowSpecOracleTests(unittest.TestCase):
                 "family": [afi, 134],
                 "announce": True,
                 "nlri": expected_nlri(desired).hex(),
-                "communities": ["0002ad7700000309", "8006000000000000"],
+                "communities": ["0002fbf400000309", "8006000000000000"],
             }
             rows.append(row)
             if afi == 2:
-                rows.append(dict(row, communities=["0002ad770000030a", "8006000000000000"]))
+                rows.append(dict(row, communities=["0002fbf40000030a", "8006000000000000"]))
             rows.append(dict(row, announce=False, communities=[]))
         observed = {"opens": opens, "routes": rows}
         check_wire(observed, "d", "p", "g", initial, replacement)
@@ -217,7 +217,7 @@ class VpnFlowSpecOracleTests(unittest.TestCase):
             lambda value: value["opens"][2].update(families=all_families),
             lambda value: value["routes"].append(dict(rows[0], destination="g")),
             lambda value: value["routes"][3].update(
-                communities=["0002ad7700000309", "8006000000000000"]
+                communities=["0002fbf400000309", "8006000000000000"]
             ),
             lambda value: value["routes"].pop(),
         ]

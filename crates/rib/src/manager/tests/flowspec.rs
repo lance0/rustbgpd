@@ -1971,7 +1971,7 @@ fn flowspec_selection_reads_the_full_scan_candidates(
     twin.rd = match rd {
         Some(_) => None,
         None => Some(rustbgpd_wire::RouteDistinguisher([
-            0, 0, 0xad, 0x77, 0, 0, 0, 40,
+            0, 0, 0xfb, 0xf4, 0, 0, 0, 40,
         ])),
     };
     receive(
@@ -2045,7 +2045,7 @@ fn flowspec_selection_reads_the_full_scan_candidates_global() {
 
 #[test]
 fn flowspec_selection_reads_the_full_scan_candidates_vpn() {
-    let rd = rustbgpd_wire::RouteDistinguisher([0, 0, 0xad, 0x77, 0, 0, 0, 41]);
+    let rd = rustbgpd_wire::RouteDistinguisher([0, 0, 0xfb, 0xf4, 0, 0, 0, 41]);
     flowspec_selection_reads_the_full_scan_candidates(Some(rd), false);
     flowspec_selection_reads_the_full_scan_candidates(Some(rd), true);
 }

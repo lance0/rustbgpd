@@ -992,7 +992,7 @@ mod tests {
         let mut flow = make_flowspec_route(Ipv4Addr::new(198, 51, 100, 1));
         flow.attributes = AttrSet::new(vec![path(65001)]);
         flow.rd = Some(rustbgpd_wire::RouteDistinguisher([
-            0, 0, 0xad, 0x77, 0, 0, 0, 40,
+            0, 0, 0xfb, 0xf4, 0, 0, 0, 40,
         ]));
         // A global rule with the same components, from another peer.
         let mut global = make_flowspec_route(Ipv4Addr::new(198, 51, 100, 2));

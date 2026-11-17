@@ -53,14 +53,14 @@ def key(rule):
     return rule["afiSafi"], rule.get("rd", ""), json.dumps(rule["components"], sort_keys=True)
 
 
-def rule(family, rd=None, rt="44407:777", components=None):
+def rule(family, rd=None, rt="64500:777", components=None):
     value = {
         "afiSafi": ENUMS[family],
         "components": components or [{"type": 3, "value": "=6"}, {"type": 5, "value": "=443"}],
         "actions": [{"trafficRate": {"rate": 0}}],
     }
     if rd is not None:
-        value.update(rd=f"44407:{rd}", routeTargets=[rt])
+        value.update(rd=f"64500:{rd}", routeTargets=[rt])
     return value
 
 
@@ -261,7 +261,7 @@ def check_wire(observed, daemon, peer, global_peer, initial, replacement):
             "missing exact announcement/withdrawal",
         )
         communities = ["8006000000000000"] + [
-            struct.pack("!HHI", 2, 44407, int(rt.split(":")[1])).hex()
+            struct.pack("!HHI", 2, 64500, int(rt.split(":")[1])).hex()
             for rt in desired.get("routeTargets", [])
         ]
         need(
@@ -271,8 +271,8 @@ def check_wire(observed, daemon, peer, global_peer, initial, replacement):
         need(len(announcements) == want_announces, "unexpected replacement count")
         if want_announces == 2:
             need(
-                announcements[1]["communities"] == sorted(["8006000000000000", "0002ad770000030a"]),
-                "replacement RT is not 44407:778",
+                announcements[1]["communities"] == sorted(["8006000000000000", "0002fbf40000030a"]),
+                "replacement RT is not 64500:778",
             )
     return {"initial_rules": len(initial), "exact_withdrawals": len(initial), "rt_replacements": 1}
 
@@ -623,11 +623,11 @@ connect-retry = 1
     def inbound(self):
         before = self.discard_count()
         for family, prefix in ((13, "203.0.113.0/24"), (14, "2001:db8:900::/64")):
-            args = ["rd", "44407:900", "match", "destination", prefix]
+            args = ["rd", "64500:900", "match", "destination", prefix]
             if family == 14:
                 args += ["label", "=74566"]
             for action in ("add", "del"):
-                extra = ["then", "discard", "rt", "44407:777"] if action == "add" else []
+                extra = ["then", "discard", "rt", "64500:777"] if action == "add" else []
                 self.docker(
                     self.nodes["peer"],
                     "/gobgp/gobgp",
@@ -726,7 +726,7 @@ connect-retry = 1
             ],
         )
         expected = expected_nlri(desired).hex()
-        need(expected == "0000ad7700000385026840123456789a038106", "RFC 8956 offset vector differs")
+        need(expected == "0000fbf400000385026840123456789a038106", "RFC 8956 offset vector differs")
         self.capture = f"{self.name}-offset-capture"
         self.command(
             "docker",
@@ -834,7 +834,7 @@ connect-retry = 1
             "-a",
             "ipv6-l3vpn-flowspec",
             "rd",
-            "44407:902",
+            "64500:902",
             "match",
             "source",
             "::1234:5678:9a00:0/104",
@@ -844,9 +844,9 @@ connect-retry = 1
             "then",
             "discard",
             "rt",
-            "44407:777",
+            "64500:777",
         )
-        vendor_bytes = "0000ad77000003860268400000000000000000123456789a038106"
+        vendor_bytes = "0000fbf4000003860268400000000000000000123456789a038106"
         self.wait(
             "pinned GoBGP offset framing witness",
             read,
@@ -866,7 +866,7 @@ connect-retry = 1
             {
                 "result": "FAIL",
                 "reason": "GoBGP 4.11.0 emits 13 pattern octets; RFC 8956 requires 5 for length 104 offset 64",
-                "expected_nlri": expected_nlri(dict(desired, rd="44407:902")).hex(),
+                "expected_nlri": expected_nlri(dict(desired, rd="64500:902")).hex(),
                 "observed_nlri": vendor_bytes,
                 "source": "https://github.com/osrg/gobgp/blob/53ceb78fe284018ce83a92f3039198f0a86dc823/pkg/packet/bgp/bgp.go",
                 "standard": "https://www.rfc-editor.org/rfc/rfc8956.html#section-3.8.1",
@@ -928,7 +928,7 @@ connect-retry = 1
                 "non-export evidence differs",
             )
             self.save(f"non-export-{family}.json", reply)
-        replacement = rule(14, 40, rt="44407:778")
+        replacement = rule(14, 40, rt="64500:778")
         self.add(replacement, "REPLACED")
         self.add(replacement, "UNCHANGED")
         current = [replacement if key(r) == key(replacement) else r for r in initial]

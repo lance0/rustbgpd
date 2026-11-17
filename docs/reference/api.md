@@ -4566,12 +4566,12 @@ of its RDs and families; admission revisions remain scoped to each key.
 The CLI uses the same identity and scope attributes:
 
 ```bash
-rbgp flowspec add -a l3vpn_ipv4_flowspec --rd 44407:40 --route-target 44407:777 \
+rbgp flowspec add -a l3vpn_ipv4_flowspec --rd 64500:40 --route-target 64500:777 \
   --match "dest=192.0.2.0/24 port==80" --action drop
-rbgp flowspec add -a l3vpn_ipv6_flowspec --rd 44407:40 --route-target 44407:777 \
+rbgp flowspec add -a l3vpn_ipv6_flowspec --rd 64500:40 --route-target 64500:777 \
   --match "dest=2001:db8::/48 port==80" --action drop
 rbgp flowspec received 0.0.0.0 -a l3vpn_ipv6_flowspec
-rbgp flowspec delete -a l3vpn_ipv6_flowspec --rd 44407:40 \
+rbgp flowspec delete -a l3vpn_ipv6_flowspec --rd 64500:40 \
   --match "dest=2001:db8::/48 port==80"
 ```
 
