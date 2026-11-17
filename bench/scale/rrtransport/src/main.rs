@@ -586,6 +586,7 @@ fn main() -> Result<()> {
         _ => bail!(
             "usage: rrtransport smoke | rrtransport rr1000 <output-dir> | rrtransport rrtiny <output-dir>\n\
              \x20      rrtransport credit-exhaust|credit-restart|credit-restart-churn <unicast|evpn> <output-dir> [--reduced] [--correctness-only] [--pause-ms N]\n\
+             \x20      rrtransport credit-release-mixed|credit-release-timer <output-dir> [--reduced] [--correctness-only]\n\
              \x20      rrtransport credit-paused <output-dir> [--reduced] [--correctness-only] [--seconds N]\n\
              \x20      rrtransport credit-fill <unicast|evpn|vpn|flowspec> <output-dir> [--reduced] [--correctness-only]\n\
              \x20      rrtransport credit-probe <output-dir> [--reduced]"
@@ -618,6 +619,18 @@ fn credit_main(mode: &str, args: &[String]) -> Result<()> {
                 credit::Family::parse(family)?,
                 trigger,
                 mode == "credit-restart-churn",
+                Path::new(output),
+                &options(rest)?,
+            ))?
+        }
+        ("credit-release-mixed" | "credit-release-timer", [output, rest @ ..]) => {
+            let cell = if mode == "credit-release-mixed" {
+                credit::release::Cell::Mixed
+            } else {
+                credit::release::Cell::Timer
+            };
+            harness.block_on(credit::release::run(
+                cell,
                 Path::new(output),
                 &options(rest)?,
             ))?

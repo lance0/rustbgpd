@@ -26,6 +26,8 @@
 //!   one family; bytes per queued row is the slope of allocated bytes over
 //!   the credit-rows gauge before the first refusal.
 
+pub mod release;
+
 use std::collections::{BTreeMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};

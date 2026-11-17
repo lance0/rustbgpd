@@ -18,7 +18,8 @@
 # limit is recorded as an OOM. Each invocation appends the binary hash and
 # its cell list to `provenance.jsonl`, which tells the analyzer what this
 # directory attempted. Use one directory per repetition and one binary per
-# directory.
+# directory. The report-only release-mixed and release-timer cells run only
+# when explicitly named.
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -57,6 +58,7 @@ ulimit -n 65536 2>/dev/null || ulimit -n "$(ulimit -Hn)"
 sha=$(sha256sum "$binary" | cut -d' ' -f1)
 result_of() {
     case $1 in
+    release-mixed | release-timer) echo "$1.json" ;;
     probes) echo probes.json ;;
     paused) echo paused-evpn.json ;;
     exhaust-unicast | exhaust-evpn | restart-unicast | restart-evpn) echo "$1.json" ;;
@@ -83,6 +85,7 @@ echo "rrtransport $sha measured=$measured cells=${cells[*]}"
 status=0
 for cell in "${cells[@]}"; do
     case $cell in
+    release-mixed | release-timer) args=("credit-$cell" "$output") limit=64G ;;
     probes) args=(credit-probe "$output") limit=64G ;;
     exhaust-*) args=(credit-exhaust "${cell#exhaust-}" "$output") limit=64G ;;
     restart-churn-*) args=(credit-restart-churn "${cell#restart-churn-}" "$output") limit=64G ;;

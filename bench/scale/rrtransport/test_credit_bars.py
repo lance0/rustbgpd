@@ -333,6 +333,57 @@ class Bars(unittest.TestCase):
         self.assertEqual(len(results), CELL_COUNT)
         self.assertTrue(all(v == "PASS" for v, _ in results.values()), results)
 
+    def test_failed_optional_release_is_visible_without_gating_campaign(self):
+        def mutate(_parent, candidate):
+            candidate["provenance.jsonl"] = provenance("candidate", [*ALL_CELLS, "release-timer"])
+            candidate["release-timer.json"] = {
+                "cell": "release-timer",
+                "mode": "correctness",
+                "checks": {
+                    **dict.fromkeys(credit_bars.OPTIONAL_RELEASE_CHECKS, True),
+                    "wire_exact": False,
+                },
+                "release_ms": None,
+            }
+            candidate["release-timer-exit.json"] = {"exit": 1}
+
+        results = self.run_bars(mutate)
+        note, detail = results.pop("candidate 1 release-timer")
+        self.assertEqual(note, "REPORT")
+        self.assertIn("failed checks: wire_exact", detail)
+        self.assertIn("last family EoR unavailable", detail)
+        self.assertTrue(all(verdict == "PASS" for verdict, _ in results.values()))
+
+    def test_optional_release_without_provenance_is_not_reported_as_measured(self):
+        def mutate(_parent, candidate):
+            candidate["release-timer.json"] = {"cell": "release-timer", "release_ms": 10}
+
+        verdict, reason = self.run_bars(mutate)["candidate 1 release-timer"]
+        self.assertEqual(verdict, "REPORT")
+        self.assertIn("not from a listed run", reason)
+
+    def test_incomplete_optional_check_set_cannot_report_a_clean_release(self):
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root)
+            path = directory / "release-mixed.json"
+            path.write_text(json.dumps({
+                "cell": "release-mixed",
+                "checks": {"ownership": True},
+                "release_ms": 1,
+                "mode": "measured",
+            }))
+            [(_, verdict, reason)] = credit_bars.check(directory)
+            self.assertEqual(verdict, "REPORT")
+            self.assertIn("incomplete", reason)
+
+    def test_missing_attempted_optional_release_stays_report_only(self):
+        def mutate(parent, _candidate):
+            parent["provenance.jsonl"] = provenance("parent", [*ALL_CELLS, "release-mixed"])
+
+        verdict, reason = self.run_bars(mutate)["parent 1 release-mixed"]
+        self.assertEqual(verdict, "REPORT")
+        self.assertIn("attempted, no result", reason)
+
     def wire_defect(self, check):
         def mutate(_parent, candidate):
             candidate["exhaust-unicast.json"]["checks"][check] = False

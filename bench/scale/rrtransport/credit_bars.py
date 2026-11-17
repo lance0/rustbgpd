@@ -15,9 +15,10 @@ neither, or only a failure marker, makes its cell INVALID. Both arms must
 attempt each cell in the same repetitions, each arm must use one harness
 binary, and the two arms must use different ones.
 
-Every cell gets one ``PASS``, ``FAIL`` or ``INVALID`` line; the analyzer
+Each gated cell gets one ``PASS``, ``FAIL`` or ``INVALID`` line; the analyzer
 never stops at the first failing cell. Exit status: 1 when any cell FAILs,
-else 2 when any is INVALID, else 0.
+else 2 when any is INVALID, else 0. Optional release cells print REPORT
+lines with their observations and do not contribute to either verdict.
 
 ``check`` applies the single-arm parts (wire checks and exhaustion witness)
 to one result set, measured or not, for correctness runs. It also applies
@@ -30,10 +31,22 @@ are cell 7's, which ``analyze`` judges on the candidate alone.
 from __future__ import annotations
 
 import json
+import math
 import statistics
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+OPTIONAL_RELEASES = ("release-mixed", "release-timer")
+OPTIONAL_RELEASE_CHECKS = {
+    "armed_after_staging",
+    "release_reason",
+    "ownership",
+    "wire_exact",
+    "eor_order",
+    "all_markers_after_trigger",
+    "sessions_established",
+}
 
 GIB = 1 << 30
 # Cell 1: the candidate's cgroup peak must be at least this far below the parent's.
@@ -211,8 +224,8 @@ def identity(cell: str) -> tuple[str, str | None]:
     """The `cell` and `family` fields a cell's result must carry."""
     if cell == "paused":
         return "paused", "evpn"
-    if cell == "probes":
-        return "probes", None
+    if cell in ("probes", *OPTIONAL_RELEASES):
+        return cell, None
     kind, family = cell.rsplit("-", 1)
     return kind, family
 
@@ -1226,7 +1239,56 @@ def verdicts(parent_dir: Path, candidate_dir: Path) -> list[tuple[str, str, str]
         except (AttributeError, KeyError, TypeError, ValueError) as error:
             verdict, reason = "INVALID", f"malformed result: {error!r}"
         results.append((name, verdict, reason))
+    for arm in (parent, candidate):
+        for rep, directory in sorted(arm.repetitions.items()):
+            results.extend(optional_release_reports(directory, arm, rep))
     return results
+
+
+def optional_release_reports(
+    directory: Path, arm: Arm | None = None, rep: str = ""
+) -> list[tuple[str, str, str]]:
+    """Describe each optional observation without assigning a campaign verdict."""
+    readings = []
+    for cell in OPTIONAL_RELEASES:
+        result = directory / result_file(cell)
+        marker = directory / f"{cell}-exit.json"
+        if not (result.exists() or marker.exists() or (arm and cell in arm.attempted[rep])):
+            continue
+        name = f"{arm.name} {rep} {cell}" if arm else f"{directory} {cell}"
+        try:
+            if arm:
+                run = arm.run(rep, cell)
+            else:
+                run = explained(read(result), read(marker) if marker.exists() else None, cell)
+            if not run or run.get("cell") != cell:
+                raise Invalid("result belongs to a different cell")
+            checks = need(run, "checks", cell)
+            if (
+                not isinstance(checks, dict)
+                or not OPTIONAL_RELEASE_CHECKS.issubset(checks)
+                or any(not isinstance(value, bool) for value in checks.values())
+            ):
+                raise Invalid("incomplete or malformed release checks")
+            failed = [key for key, passed in checks.items() if not passed]
+            if run.get("release_ms") is None and failed:
+                timing = "last family EoR unavailable"
+            else:
+                ms = number(run, "release_ms", cell)
+                if not math.isfinite(ms) or ms < 0:
+                    raise Invalid("invalid release_ms")
+                timing = f"last family EoR {ms:.2f} ms after ingest"
+            summary = (
+                f"failed checks: {', '.join(failed)}" if failed else "release checks passed"
+            )
+            mode = need(run, "mode", cell)
+            if mode not in ("correctness", "measured"):
+                raise Invalid(f"unknown release mode {mode!r}")
+            reason = f"{summary}; {timing}; mode {mode}"
+        except Invalid as error:
+            reason = f"unavailable: {error}"
+        readings.append((name, "REPORT", reason))
+    return readings
 
 
 def release_readings(run: dict, what: str, family: str) -> str:
@@ -1296,6 +1358,14 @@ def check(directory: Path) -> list[tuple[str, str, str]]:
             except Invalid as error:
                 verdict, reason = "INVALID", str(error)
             results.append((f"{label} {family}", verdict, reason))
+    optional_dirs = {
+        path.parent
+        for cell in OPTIONAL_RELEASES
+        for suffix in (".json", "-exit.json")
+        for path in directory.rglob(f"{cell}{suffix}")
+    }
+    for optional_dir in sorted(optional_dirs):
+        results.extend(optional_release_reports(optional_dir))
     return results
 
 
