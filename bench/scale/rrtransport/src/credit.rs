@@ -53,7 +53,7 @@ use rustbgpd_wire::{
 };
 use serde_json::{json, Value};
 use tokio::net::TcpSocket;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::credit_wire::{
     delivery, unicast_prefix, ChurnState, WireFamily, WireState, BURST_RANGE, CHURN_PREFIX,
@@ -78,6 +78,15 @@ const SAMPLE: Duration = Duration::from_millis(250);
 const FIT_SAMPLE: Duration = Duration::from_millis(50);
 /// Churn period of the healthy receiver's single route.
 const CHURN_EVERY: Duration = Duration::from_millis(20);
+/// The churn-free window ends the pause: the healthy receiver's churn stops
+/// this long before the burst readers resume. Short against cell 3's 1 s
+/// delivery-gap bar, which the hold's own gap counts toward.
+const QUIET_LEAD: Duration = Duration::from_millis(300);
+/// After the held churn row arrives, time for its transport to drop the
+/// written envelope and return its credit.
+const QUIET_SETTLE: Duration = Duration::from_millis(20);
+/// Gauge readings inside the churn-free window.
+const QUIET_READ_EVERY: Duration = Duration::from_millis(10);
 /// Hold time of every receiver session, both ends.
 const HOLD_SECS: u16 = 90;
 /// The receiver stubs' own read timeout. A stub's deadline runs from its
@@ -940,6 +949,162 @@ fn memory_json(instruments: &Instruments) -> Value {
     })
 }
 
+/// The summed credit gauge in its tree's unit: bytes where the byte gauge
+/// exists, else rows.
+fn credit_reading(sample: &Sample) -> f64 {
+    sample.credit_bytes.unwrap_or(sample.credit_rows)
+}
+
+/// The healthy receiver's churn task and its stop flag.
+type Churn = (Arc<AtomicBool>, tokio::task::JoinHandle<()>);
+
+/// Churn-free readings of the summed credit gauge, in ms from `t0`.
+struct Quiet {
+    stopped_ms: f64,
+    last_sequence: Option<u32>,
+    delivered_ms: Option<f64>,
+    published_ms: Option<f64>,
+    end_ms: f64,
+    readings: Vec<f64>,
+}
+
+/// Stop the healthy receiver's churn, wait until its last row reached the
+/// receiver, make the RIB republish its gauges, then read the summed credit
+/// gauge until `until`. The RIB publishes the gauge once per turn and holds
+/// it until its next turn, and the 20 ms churn is nearly every turn, so
+/// outside this window nothing bounds how many samples carry the churn row
+/// (README).
+async fn quiet_window(
+    churn: Churn,
+    rib: &mpsc::Sender<RibUpdate>,
+    metrics: &BgpMetrics,
+    log: &Mutex<Vec<(u32, Instant)>>,
+    received: &Mutex<ChurnState>,
+    t0: Instant,
+    until: Instant,
+) -> Result<Quiet> {
+    let ms = |at: Instant| at.saturating_duration_since(t0).as_secs_f64() * 1e3;
+    churn.0.store(true, Ordering::Release);
+    churn.1.await?;
+    let stopped_ms = ms(Instant::now());
+    let last_sequence = log
+        .lock()
+        .expect("churn log")
+        .last()
+        .map(|&(sequence, _)| sequence);
+    let delivered = loop {
+        let arrived = last_sequence.is_none_or(|last| {
+            received
+                .lock()
+                .expect("churn state")
+                .arrivals
+                .iter()
+                .any(|&(sequence, _)| sequence >= last)
+        });
+        if arrived {
+            break Some(Instant::now());
+        }
+        if Instant::now() >= until {
+            break None;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    };
+    let mut quiet = Quiet {
+        stopped_ms,
+        last_sequence,
+        delivered_ms: delivered.map(ms),
+        published_ms: None,
+        end_ms: stopped_ms,
+        readings: Vec::new(),
+    };
+    if delivered.is_some() {
+        tokio::time::sleep(QUIET_SETTLE).await;
+        // Each query is one RIB turn. The second is served only after the
+        // first turn ended and the next one began by publishing the gauges.
+        for _ in 0..2 {
+            let (reply, count) = oneshot::channel();
+            rib.send(RibUpdate::QueryLocRibCount { reply }).await?;
+            count.await?;
+        }
+        quiet.published_ms = Some(ms(Instant::now()));
+        while Instant::now() < until {
+            let snapshot = Snapshot::take(metrics);
+            let rows = snapshot
+                .total("bgp_rib_outbound_credit_rows")
+                .unwrap_or(0.0);
+            quiet.readings.push(
+                snapshot
+                    .total("bgp_rib_outbound_credit_bytes")
+                    .unwrap_or(rows),
+            );
+            tokio::time::sleep(QUIET_READ_EVERY).await;
+        }
+    }
+    quiet.end_ms = ms(Instant::now());
+    Ok(quiet)
+}
+
+/// The lowest and highest of `values`.
+fn range(values: impl Iterator<Item = f64>) -> Option<(f64, f64)> {
+    values.fold(None, |range, value| {
+        Some(range.map_or((value, value), |(low, high): (f64, f64)| {
+            (low.min(value), high.max(value))
+        }))
+    })
+}
+
+/// The exhaustion plateau: the sampler's samples from the first at or above
+/// the churn-free minimum to the last taken before the readers' resume was
+/// issued, together with the churn-free readings.
+fn plateau_json(instruments: &Instruments, quiet: &Quiet, resume_issued_ms: f64) -> Value {
+    let unit = if instruments.samples.iter().any(|s| s.credit_bytes.is_some()) {
+        "bytes"
+    } else {
+        "rows"
+    };
+    let quiet_range = range(quiet.readings.iter().copied());
+    let threshold = quiet_range.map(|(low, _)| low);
+    let window: Vec<&Sample> = threshold.map_or_else(Vec::new, |threshold| {
+        instruments
+            .samples
+            .iter()
+            .filter(|s| s.at_ms < resume_issued_ms)
+            .skip_while(|s| credit_reading(s) < threshold)
+            .collect()
+    });
+    let range = range(
+        window
+            .iter()
+            .map(|s| credit_reading(s))
+            .chain(quiet.readings.iter().copied()),
+    );
+    json!({
+        "unit": unit,
+        "sample_interval_ms": SAMPLE.as_secs_f64() * 1e3,
+        "threshold": threshold,
+        "start_ms": window.first().map(|s| s.at_ms),
+        "end_ms": window.last().map(|s| s.at_ms),
+        "samples": window.len(),
+        "samples_above_threshold": threshold.map(|threshold| {
+            window.iter().filter(|s| credit_reading(s) > threshold).count()
+        }),
+        "min": range.map(|(low, _)| low),
+        "max": range.map(|(_, high)| high),
+        "resume_issued_ms": resume_issued_ms,
+        "quiet": {
+            "churn_stopped_ms": quiet.stopped_ms,
+            "last_churn_sequence": quiet.last_sequence,
+            "churn_delivered_ms": quiet.delivered_ms,
+            "published_ms": quiet.published_ms,
+            "end_ms": quiet.end_ms,
+            "readings": quiet.readings.len(),
+            "read_every_ms": QUIET_READ_EVERY.as_secs_f64() * 1e3,
+            "min": threshold,
+            "max": quiet_range.map(|(_, high)| high),
+        },
+    })
+}
+
 /// A cell's outcome: every check its result records passed, so the exit
 /// status never disagrees with the result file.
 fn recorded_pass(result: &Value) -> bool {
@@ -1112,21 +1277,28 @@ pub async fn exhaust(
         fixture.metrics.clone(),
         t0,
         watched.clone(),
-        false,
+        true,
         SAMPLE,
         Arc::clone(&sampling),
     );
-    // The healthy receiver's churn runs until the cell ends.
-    let churn_stop = Arc::new(AtomicBool::new(false));
-    let churn_log = Arc::new(Mutex::new(Vec::new()));
-    let start_churn = || {
-        let rib = fixture.rib.clone();
-        let stop = Arc::clone(&churn_stop);
+    // The healthy receiver's churn runs until the cell ends, apart from the
+    // churn-free window; a restarted task continues the sequence.
+    let churn_log = Arc::new(Mutex::new(Vec::<(u32, Instant)>::new()));
+    let rib = fixture.rib.clone();
+    let start_churn = || -> Churn {
+        let rib = rib.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let task_stop = Arc::clone(&stop);
         let log = Arc::clone(&churn_log);
-        tokio::spawn(async move {
-            let mut sequence = 1_u32;
+        let task = tokio::spawn(async move {
+            let last = log
+                .lock()
+                .expect("churn log")
+                .last()
+                .map(|&(sequence, _)| sequence);
+            let mut sequence = last.map_or(1, |last| last + 1);
             let mut tick = tokio::time::interval(CHURN_EVERY);
-            while !stop.load(Ordering::Acquire) {
+            while !task_stop.load(Ordering::Acquire) {
                 tick.tick().await;
                 let sent = Instant::now();
                 if rib.send(churn_update(sequence)).await.is_err() {
@@ -1135,7 +1307,8 @@ pub async fn exhaust(
                 log.lock().expect("churn log").push((sequence, sent));
                 sequence += 1;
             }
-        })
+        });
+        (stop, task)
     };
     // An ordinary burst is paced, so the churn runs beside it from its
     // first UPDATE. A restart's churn starts behind the release in the
@@ -1172,7 +1345,22 @@ pub async fn exhaust(
     let window_start = if restart { t0 + release_sent } else { t0 };
     let churn = churn.take().unwrap_or_else(start_churn);
 
-    tokio::time::sleep_until(tokio::time::Instant::from_std(t0 + pause)).await;
+    tokio::time::sleep_until(tokio::time::Instant::from_std(
+        t0 + pause.saturating_sub(QUIET_LEAD),
+    ))
+    .await;
+    let quiet = quiet_window(
+        churn,
+        &rib,
+        &fixture.metrics,
+        &churn_log,
+        &churn_state,
+        t0,
+        t0 + pause,
+    )
+    .await?;
+    let churn = start_churn();
+    let resume_issued = t0.elapsed();
     fixture.set_paused(0..receivers, false).await?;
     let resumed = t0.elapsed();
     eprintln!("readers resumed at {resumed:?}");
@@ -1194,8 +1382,8 @@ pub async fn exhaust(
     eprintln!("settled at {settled:?}");
     tokio::time::sleep(QUIET).await;
     let end = Instant::now();
-    churn_stop.store(true, Ordering::Release);
-    churn.await?;
+    churn.0.store(true, Ordering::Release);
+    churn.1.await?;
     sampling.store(true, Ordering::Release);
     let instruments = instruments.await?;
     let down = fixture.not_established().await;
@@ -1301,10 +1489,13 @@ pub async fn exhaust(
             // every private receiver with no credit spent, and a live
             // whole-table operation is refused for the same reason.
             "signals": [
-                "peak of bgp_rib_outbound_credit_bytes (bgp_rib_outbound_credit_rows on a tree \
-                 without it), summed over peers, equal to receivers x ceil(per-peer credit at \
-                 shape.registered_peers / row) x row, plus at most one healthy row",
+                "plateau of bgp_rib_outbound_credit_bytes (bgp_rib_outbound_credit_rows on a \
+                 tree without it), summed over peers, before the readers resume: its minimum, \
+                 churn-free readings included, equal to receivers x ceil(per-peer credit at \
+                 shape.registered_peers / row) x row, the churn-free minimum equal to it, and \
+                 its maximum at most one healthy row above it",
             ],
+            "plateau": plateau_json(&instruments, &quiet, ms(resume_issued)),
             "peak_credit_rows": instruments.peak_credit_rows,
             "peak_credit_bytes": instruments.peak_credit_bytes,
             "refused_receivers": refused_peers,

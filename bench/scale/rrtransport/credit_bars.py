@@ -46,6 +46,12 @@ ANNOUNCED_ROW_OVERHEAD = 146
 # Cell 2: recovery <= max(parent x 1.25, parent + 2 s).
 RECOVERY_RATIO = 1.25
 RECOVERY_SLACK_MS = 2_000.0
+# Cell 2: fewest sampler samples on the exhaustion plateau. The fixed shape
+# reaches the row tree's credit at the 108th 500 ms chunk (about 53.5 s) and
+# the byte tree's earlier, leaving 26 s or more, about 100 samples at 250 ms,
+# before the 80 s resume. 40 samples (10 s) keeps a 2.5x margin and rejects a
+# plateau reached only in the burst's last seconds or a stalled sampler.
+PLATEAU_MIN_SAMPLES = 40
 # Cell 2: the actual pause may differ this much from the configured one, and
 # the runs of both arms this much from each other.
 PAUSE_TOLERANCE_MS = 250.0
@@ -306,39 +312,76 @@ def exhaustion(run: dict, what: str) -> str:
     # (bytes: element plus overhead; rows: 1) and admission stops a peer
     # below its credit plus one row, so a peer holds at most
     # full = ceil(credit / row) rows and holds exactly that once it reached
-    # its credit. A sum of exactly receivers x full x row therefore means every
-    # burst receiver reached its credit; the healthy receiver may add one
-    # churn row (a unicast row). Any other sum is INVALID. Credit refusals
-    # are reported but are no witness: the same reason counts a refusal for
-    # a live whole-table operation with nothing charged.
+    # its credit. Paused, the burst receivers' sum stays constant until the
+    # readers resume, while the healthy receiver's churn row (a unicast row)
+    # comes and goes. So the plateau, the samples from the first at or above
+    # the churn-free minimum until the resume was issued, must sit at exactly
+    # receivers x full x row at its minimum, churn-free readings included,
+    # the churn-free minimum must be that minimum, and no sample may exceed
+    # it by more than one healthy row. Anything else is INVALID. Credit
+    # refusals are reported but are no witness: the same reason counts a
+    # refusal for a live whole-table operation with nothing charged.
     if run["witness"].get("peak_credit_bytes") is not None:
         unit, peak, credit = "bytes", number(run, "witness.peak_credit_bytes", what), BYTE_CREDIT
         row = number(run, "row_size_of", what) + ANNOUNCED_ROW_OVERHEAD
     else:
         unit, peak, credit, row = "rows", rows, ROW_CREDIT, 1
+    healthy = 1 if unit == "rows" else (
+        number(run, "healthy_row_size_of", what) + ANNOUNCED_ROW_OVERHEAD
+    )
     limit = min(max(credit[0] // int(peers), credit[1]), credit[2])
     full = -(-limit // int(row))
     expected = receivers * full * row
     shape = f"{receivers} receivers x {full} rows at credit {limit} {unit}"
     refusals = f"credit refusals on {refused}/{receivers} receivers, report-only"
-    if peak == expected:
-        return f"credit gauge peak {peak:.0f} {unit} = {shape} ({refusals})"
-    if peak < expected:
+    samples = number(run, "witness.plateau.samples", what)
+    start = number(run, "witness.plateau.start_ms", what)
+    end = number(run, "witness.plateau.end_ms", what)
+    if samples < PLATEAU_MIN_SAMPLES:
+        raise Invalid(
+            f"{what}: {samples:.0f} plateau samples ({start:.0f}-{end:.0f} ms), fewer than "
+            f"{PLATEAU_MIN_SAMPLES}: credit was reached too late, or the sampler stalled"
+        )
+    quiet = number(run, "witness.plateau.quiet.readings", what)
+    stopped = number(run, "witness.plateau.quiet.churn_stopped_ms", what)
+    quiet_end = number(run, "witness.plateau.quiet.end_ms", what)
+    resume = number(run, "witness.plateau.resume_issued_ms", what)
+    if quiet < 1 or not start <= stopped < quiet_end <= resume:
+        raise Invalid(
+            f"{what}: {quiet:.0f} churn-free readings over {stopped:.0f}-{quiet_end:.0f} ms, not "
+            f"inside the plateau {start:.0f} ms to the {resume:.0f} ms resume"
+        )
+    number(run, "witness.plateau.quiet.churn_delivered_ms", what)
+    low = number(run, "witness.plateau.min", what)
+    high = number(run, "witness.plateau.max", what)
+    calm = number(run, "witness.plateau.quiet.min", what)
+    if low < expected:
         flips = run["witness"].get("owing_flips_total")
         raise Invalid(
-            f"{what}: credit gauge peak {peak:.0f} {unit} < {expected:.0f} = {shape}: a "
+            f"{what}: credit gauge plateau min {low:.0f} {unit} < {expected:.0f} = {shape}: a "
             f"receiver below its credit ({refusals}; {flips} owe-whole flips are not a "
             "witness); the cell never exhausted credit"
         )
-    healthy = 1 if unit == "rows" else (
-        number(run, "healthy_row_size_of", what) + ANNOUNCED_ROW_OVERHEAD
-    )
-    if peak == expected + healthy:
-        return f"credit gauge peak {peak:.0f} {unit} = {shape} + one healthy row ({refusals})"
-    raise Invalid(
-        f"{what}: credit gauge peak {peak:.0f} {unit} is not {expected:.0f} = {shape} (or "
-        f"{expected + healthy:.0f} with one healthy row): more than every receiver at its "
-        f"credit, so the sum cannot show each one reached it ({refusals})"
+    if low != expected:
+        raise Invalid(
+            f"{what}: credit gauge plateau min {low:.0f} {unit} is not {expected:.0f} = "
+            f"{shape}: more than every receiver at its credit, so the sum cannot show each "
+            f"one reached it ({refusals})"
+        )
+    if calm != low:
+        raise Invalid(
+            f"{what}: churn-free min {calm:.0f} {unit} is not the plateau min {low:.0f}: the "
+            "churn hold did not separate the healthy row"
+        )
+    if high > expected + healthy:
+        raise Invalid(
+            f"{what}: credit gauge plateau max {high:.0f} {unit} > {expected + healthy:.0f} = "
+            f"{shape} + one healthy row: more than every receiver at its credit ({refusals})"
+        )
+    return (
+        f"credit gauge plateau {low:.0f}-{high:.0f} {unit} over {samples:.0f} samples "
+        f"({start:.0f}-{end:.0f} ms), churn-free min {calm:.0f} = {shape}, max within one "
+        f"healthy row; peak {peak:.0f} ({refusals})"
     )
 
 

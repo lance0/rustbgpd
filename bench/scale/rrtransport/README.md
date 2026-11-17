@@ -164,32 +164,78 @@ and the harness refuses to start a pause that, with 90 s since the last
 read, would reach it.
 
 **Exhaustion witness.** The cell must show that every burst receiver spent
-its ordinary credit. The result records the peak of the credit gauge, summed
-over peers: `bgp_rib_outbound_credit_bytes` on a tree that exports it, else
-`bgp_rib_outbound_credit_rows`. The analyzer compares that peak with the
-number of burst receivers times the tree's per-peer credit at the cell's 153
-registered peers (the burst receivers, the healthy one and the two sources):
-2 GiB / 153 = 14,035,840 bytes on a byte-credit tree, 16,777,216 / 153 =
-109,655 rows on a row-credit tree. Every burst row charges the same amount
-(a row on a row-credit tree; `row_size_of` + 146 bytes on a byte-credit one)
-and admission stops a peer below its credit plus one row, so a peer holds at
-most ceil(credit / row) rows and exactly that many once it reached its
-credit. The analyzer therefore accepts only a peak of exactly receivers ×
-ceil(credit / row) × row, or that plus one healthy receiver's churn row
-(`healthy_row_size_of` + 146 bytes, or one row): 150 × 56,144 × 250 =
-2,105,400,000 bytes for unicast and 150 × 48,400 × 290 = 2,105,400,000 for
-EVPN on a byte-credit tree, 150 × 109,655 = 16,448,250 rows on a row-credit
-tree. Any other peak is INVALID, never PASS, and the verdict line names the
-numbers. A window instead of the exact value would let the others' sub-row
-overshoot hide a short receiver: 149 receivers at 56,144 unicast rows and
-one at 56,048 sum to 150 × 14,035,840 bytes.
+its ordinary credit. The witness reads the credit gauge, summed over peers:
+`bgp_rib_outbound_credit_bytes` on a tree that exports it, else
+`bgp_rib_outbound_credit_rows`. The expected value is the number of burst
+receivers times the tree's per-peer credit at the cell's 153 registered peers
+(the burst receivers, the healthy one and the two sources): 2 GiB / 153 =
+14,035,840 bytes on a byte-credit tree, 16,777,216 / 153 = 109,655 rows on a
+row-credit tree. Every burst row charges the same amount (a row on a
+row-credit tree; `row_size_of` + 146 bytes on a byte-credit one) and
+admission stops a peer below its credit plus one row, so a peer holds at most
+ceil(credit / row) rows and exactly that many once it reached its credit:
+150 × 56,144 × 250 = 2,105,400,000 bytes for unicast and 150 × 48,400 × 290 =
+2,105,400,000 for EVPN on a byte-credit tree, 150 × 109,655 = 16,448,250 rows
+on a row-credit tree. A window instead of the exact value would let the
+others' sub-row overshoot hide a short receiver: 149 receivers at 56,144
+unicast rows and one at 56,048 sum to 150 × 14,035,840 bytes.
 
-The guarantee rests on that admission rule, which the harness cannot see per
-peer: the credit gauges are unlabeled, so only their sum is readable. If a
-tree admitted more than ceil(credit / row) rows to a peer (a multi-row
-envelope admitted just below the credit), the exact sum could again hide a
-receiver short by the others' excess. Every full-shape result so far sums to
-the exact value.
+A single peak cannot carry that check, because the healthy receiver's churn
+row is in the sum too: 149 receivers at 109,655 rows, one at 109,654 and one
+healthy row total exactly 16,448,250, and a 250-byte burst row and a
+250-byte healthy row trade the same way on a byte-credit tree. The witness
+therefore reads the plateau. While the readers are paused, the burst
+receivers' charge is constant from the moment the last of them reaches its
+credit until the resume; the healthy receiver's row comes and goes. Nothing
+bounds how often a sample catches it: the RIB publishes both gauges once at
+the top of each of its turns, so a turn that staged a churn row publishes
+it unless the healthy receiver's transport wrote it first, and the value
+then holds until the RIB's next turn. With churn every 20 ms, nearly every
+turn during the plateau is a churn turn. On a 4-receiver run with a 10 s
+pause the row was in none of 40 samples, but how often it is under the full
+shape's RIB load is not measured, and a plateau could carry it in every
+sample.
+
+So the harness makes the healthy row separable. A churn-free window ends
+the pause: 300 ms before the resume, it stops the churn task (joined, so
+nothing more is sent), waits until the healthy receiver has the last churn
+row, waits 20 ms for that envelope's credit to return, and sends the RIB two
+`QueryLocRibCount` queries; the RIB serves the second only in a turn that
+began by publishing the gauges, so the next readings carry no churn row. It
+then reads the gauge every 10 ms until the pause deadline, restarts the
+churn with the next sequence number and resumes the readers. The result's
+`witness.plateau` records the sampler's 250 ms sleep between samples, the
+churn-free window (`quiet`: when the churn stopped, when its last row
+arrived, when the gauges were republished, the readings' count, minimum and
+maximum) and the plateau: the sampler's samples from the first at or above
+the churn-free minimum to the last one taken before the resume was issued
+(`resume_issued_ms`), with their bounds, count and how many sat above that
+minimum, and the minimum and maximum over those samples and the churn-free
+readings together. The analyzer accepts the plateau only when its minimum
+is exactly the expected value, the churn-free minimum equals that minimum,
+its maximum is at most one healthy row (`healthy_row_size_of` + 146 bytes,
+or one row) above it, the churn-free window holds at least one reading
+after the last churn row arrived and lies inside the plateau, and the
+plateau holds at least 40 samples. A short receiver plus a healthy row then
+shows a churn-free minimum one row short of the expected value. Every other
+plateau is INVALID, never PASS, and the verdict line names the numbers.
+
+40 samples is 10 s at 250 ms. The fixed shape reaches the row-credit tree's
+credit at the 108th UPDATE, about 53.5 s into the pause, and a byte-credit
+tree's earlier, so a run that exhausts as designed leaves at least 26 s,
+about 100 samples, before the 80 s resume. Fewer than 40 means credit was
+reached only in the burst's last seconds or the sampler stalled. The window
+costs cell 3 a deliberate gap of about 0.3 s in the healthy receiver's
+delivery, which its 1 s bar counts.
+
+The guarantee rests on two things the harness cannot see per peer, since
+the credit gauges are unlabeled and only their sum is readable. Admission
+must stop each burst receiver at the same ceil(credit / row) rows: a tree
+that admitted more to one peer (a multi-row envelope admitted just below
+the credit) could hide another one short by that excess. And the plateau
+must contain a reading without the healthy row: the churn-free window is
+the harness's means to that, and its evidence is the recorded arrival of
+the last churn row before the gauges were republished.
 
 Credit refusals (`bgp_outbound_commit_refusals_total{reason="outbound_credit"}`)
 are recorded and reported but are not a witness: the same reason counts a
@@ -319,7 +365,7 @@ a missing or null one makes that cell INVALID, never PASS.
 | Cell | Result file | Required fields |
 | --- | --- | --- |
 | 1 | `paused-evpn.json`, every repetition of both arms (or `paused-exit.json` with `oom`) | `mode` = `measured`; `shape.receivers`, `shape.routes`, `shape.seconds`, `shape.round_ms` fixed; `checks.no_session_resets` = true; `not_established` empty; `memory.cgroup_swap_max` = `0`; `memory.cgroup_memory_max` = 12 GiB; `memory.cgroup_memory_peak_bytes`; `memory.vmhwm_kib`; `memory.cgroup_oom_kill`; candidate `memory.peak_credit_bytes` and `row_size_of` |
-| 2 | `exhaust-<family>.json`, every run of both arms | `mode`; `shape.receivers`, `shape.rows_per_receiver`, `shape.pause_ms`, `shape.burst_interval_ms`, `shape.trigger`, `shape.registered_peers` fixed; `witness.refused_receivers`, `witness.peak_credit_rows`, `witness.receivers` (and `witness.peak_credit_bytes` and `row_size_of` on a byte-credit tree); `shape.pause_ms`, `timing.release_sent_ms`, `timing.actual_pause_ms` (and `healthy_row_size_of` when the peak includes a healthy row); `checks.final_state_exact`, `checks.one_eor_before_burst`, `checks.no_session_resets`; `timing.recovery_ms` once every wire check passed |
+| 2 | `exhaust-<family>.json`, every run of both arms | `mode`; `shape.receivers`, `shape.rows_per_receiver`, `shape.pause_ms`, `shape.burst_interval_ms`, `shape.trigger`, `shape.registered_peers` fixed; `witness.refused_receivers`, `witness.peak_credit_rows`, `witness.receivers` (and `witness.peak_credit_bytes` and `row_size_of` on a byte-credit tree); `shape.pause_ms`, `timing.release_sent_ms`, `timing.actual_pause_ms`; `healthy_row_size_of`; `witness.plateau` `samples`, `start_ms`, `end_ms`, `min`, `max`, `resume_issued_ms` and `quiet` `readings`, `churn_stopped_ms`, `churn_delivered_ms`, `end_ms`, `min`; `checks.final_state_exact`, `checks.one_eor_before_burst`, `checks.no_session_resets`; `timing.recovery_ms` once every wire check passed |
 | 3 | `exhaust-<family>.json`, every run of both arms | `mode`; `unaffected.injected` and `unaffected.delivered` (nonzero), `unaffected.p99_latency_ms`, `unaffected.max_gap_ms` |
 | 4 | `probes.json`, every run of both arms | `mode`; `probes` = the fixed 9 cells (`cell`, `shape`, `peers`, `stall_ms`; restart `table`), each candidate cell with `dirty_episodes` |
 | 6 | `fill-<family>.json`, every run of both arms, each family | `mode`; `shape.receivers`, `shape.rows_per_receiver` fixed; candidate `estimate.bytes_per_queued_row` and `row_size_of` |
