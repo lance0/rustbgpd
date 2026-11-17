@@ -245,38 +245,45 @@ class Arm:
         arm.sha256 = hashes.pop()
         return arm
 
-    def runs(self, cell: str) -> dict[str, dict]:
-        """Each attempted repetition's result of `cell`; an OOM-killed paused
-        cell reads as `{"oom": True}`."""
+    def run(self, rep: str, cell: str) -> dict | None:
+        """Repetition `rep`'s result of `cell`, None when it did not attempt
+        the cell; an OOM-killed paused cell reads as `{"oom": True}`."""
         file = result_file(cell)
         kind, family = identity(cell)
-        runs = {}
-        for rep, path in sorted(self.repetitions.items()):
-            result, marker = path / file, path / f"{cell}-exit.json"
-            if cell not in self.attempted[rep]:
-                if result.exists() or marker.exists():
-                    raise Invalid(f"{self.name} repetition {rep}: {file} not from a listed run")
-                continue
-            exit_record = read(marker) if marker.exists() else None
-            if cell == "paused" and exit_record is not None and exit_record.get("oom") is True:
-                # `paused` writes its result before teardown, so an OOM kill
-                # can follow a result; the kill is the verdict either way.
-                runs[rep] = {"oom": True}
-            elif result.exists():
-                run = read(result)
-                if run.get("cell") != kind or run.get("family") != family:
-                    raise Invalid(
-                        f"{self.name} repetition {rep}: {file} holds a "
-                        f"{run.get('cell')}/{run.get('family')} result"
-                    )
-                runs[rep] = explained(run, exit_record, f"{self.name} repetition {rep}: {cell}")
-            elif exit_record is not None:
+        path = self.repetitions[rep]
+        result, marker = path / file, path / f"{cell}-exit.json"
+        if cell not in self.attempted[rep]:
+            if result.exists() or marker.exists():
+                raise Invalid(f"{self.name} repetition {rep}: {file} not from a listed run")
+            return None
+        exit_record = read(marker) if marker.exists() else None
+        if cell == "paused" and exit_record is not None and exit_record.get("oom") is True:
+            # `paused` writes its result before teardown, so an OOM kill
+            # can follow a result; the kill is the verdict either way.
+            return {"oom": True}
+        if result.exists():
+            run = read(result)
+            if run.get("cell") != kind or run.get("family") != family:
                 raise Invalid(
-                    f"{self.name} repetition {rep}: {cell} exited "
-                    f"{exit_record.get('exit')} without a result"
+                    f"{self.name} repetition {rep}: {file} holds a "
+                    f"{run.get('cell')}/{run.get('family')} result"
                 )
-            else:
-                raise Invalid(f"{self.name} repetition {rep}: {cell} attempted, no result")
+            return explained(run, exit_record, f"{self.name} repetition {rep}: {cell}")
+        if exit_record is not None:
+            raise Invalid(
+                f"{self.name} repetition {rep}: {cell} exited "
+                f"{exit_record.get('exit')} without a result"
+            )
+        raise Invalid(f"{self.name} repetition {rep}: {cell} attempted, no result")
+
+    def runs(self, cell: str) -> dict[str, dict]:
+        """Each attempted repetition's result of `cell`; INVALID when any
+        attempted repetition has none, or none attempted it."""
+        runs = {
+            rep: run
+            for rep in sorted(self.repetitions)
+            if (run := self.run(rep, cell)) is not None
+        }
         if not runs:
             raise Invalid(f"{self.name}: no repetition ran {cell}")
         return runs
@@ -320,7 +327,13 @@ def per_peer(run: dict, credit: tuple, what: str) -> int:
 
 def row_credit(run: dict, what: str) -> tuple[int, int]:
     """The run's per-peer row credit and rows in one ordinary pass, from the
-    RIB constants the harness recorded."""
+    RIB constants the harness recorded. Both arms run this harness (README,
+    Running), so a result without the record is not campaign evidence."""
+    if run.get("row_credit") is None:
+        raise Invalid(
+            f"{what}: no row_credit record: the result is from an older harness; build both "
+            "arms with this harness (README, Running)"
+        )
     credit = tuple(int(number(run, f"row_credit.{key}", what)) for key in ROW_CREDIT_KEYS)
     return per_peer(run, credit, what), int(number(run, "row_credit.CHUNK_ROWS", what))
 
@@ -852,11 +865,15 @@ def turn_bar(run: dict, what: str) -> Bar:
     (which holds whole turns, so it bounds every turn) and the longest
     inbox round trip (which a drain that yields without serving the RIB's
     update channel stretches). A poll within the bar with a longer round
-    trip, a longer poll with no turn provably over it, a dead poll
-    instrument and a window without an `end_of_rib` turn are undecided."""
+    trip, a longer poll with no turn provably over it, a probe still
+    unanswered at its cap, a dead poll instrument and a window without an
+    `end_of_rib` turn are undecided."""
     poll = number(run, "actor.slice_max_us.actor_poll", what) / 1e3
     trip = number(run, "actor.inbox_round_trip.longest_ms", what)
     probes = number(run, "actor.inbox_round_trip.probes", what)
+    unfinished = need(run, "actor.inbox_round_trip.unfinished", what)
+    if not isinstance(unfinished, bool):
+        raise Invalid(f"{what}: actor.inbox_round_trip.unfinished is not a boolean")
     over, top, labels = [], [], set()
     for path in ("actor.turn_longest_ms", "actor.work_longest_ms"):
         for label, above, at_most in longest_bounds(run, path, what):
@@ -873,6 +890,12 @@ def turn_bar(run: dict, what: str) -> Bar:
     )
     if over:
         return f"{what}: {', '.join(over)} > {ACTOR_TURN_MAX_MS:.0f} ms ({reading})", None, reading
+    if unfinished:
+        return None, (
+            f"{what}: probe unfinished: an inbox round trip got no reply within its "
+            f"{trip:.0f} ms cap, over {ACTOR_TURN_MAX_MS:.0f} ms, yet no turn is provably over "
+            f"it ({reading})"
+        ), reading
     if poll <= 0 or probes < 1:
         return None, f"{what}: dead instrument ({reading})", reading
     if "end_of_rib" not in labels:
@@ -988,19 +1011,33 @@ def release_run(run: dict, what: str, kind: str, family: str) -> tuple[list, lis
     return failures, undecided, readings
 
 
-def release_runs(candidate: Arm, cell: str) -> list[dict]:
-    return measured(list(candidate.runs(cell).values()), f"candidate {cell}", RELEASE_SHAPE)
+def release_runs(candidate: Arm, cell: str) -> tuple[list[tuple[str, dict]], list[str]]:
+    """The candidate's usable measured runs of `cell`, each with its name,
+    and why each other repetition that attempted it is not usable. Cell 7
+    judges the usable runs first, so one missing or malformed repetition
+    leaves another's FAIL standing and only keeps the cell from passing."""
+    usable, undecided = [], []
+    for index, rep in enumerate(sorted(candidate.repetitions)):
+        what = f"candidate {cell} run {index}"
+        try:
+            run = candidate.run(rep, cell)
+            if run is not None:
+                usable.append((what, measured([run], what, RELEASE_SHAPE)[0]))
+        except Invalid as error:
+            undecided.append(str(error))
+    if not usable and not undecided:
+        undecided.append(f"candidate: no repetition ran {cell}")
+    return usable, undecided
 
 
 def cell7(candidate: Arm, kind: str, family: str) -> tuple[str, str]:
     """Bars 2, 3, 4 and 6 on the candidate's release runs of one kind. A
     FAIL in any bar of any run outranks every undecided one."""
     cell = f"{kind}-{family}"
-    failures, undecided, notes = [], [], []
-    for index, run in enumerate(release_runs(candidate, cell)):
-        run_failures, run_undecided, readings = release_run(
-            run, f"candidate {cell} run {index}", kind, family
-        )
+    runs, undecided = release_runs(candidate, cell)
+    failures, notes = [], []
+    for what, run in runs:
+        run_failures, run_undecided, readings = release_run(run, what, kind, family)
         failures += run_failures
         undecided += run_undecided
         notes.append("; ".join(readings))
@@ -1016,9 +1053,9 @@ def cell7_step(candidate: Arm) -> tuple[str, str]:
     failures, undecided = [], []
     for kind, _ in RELEASE_KINDS:
         for family in FAMILIES:
-            cell = f"{kind}-{family}"
-            for index, run in enumerate(release_runs(candidate, cell)):
-                what = f"candidate {cell} run {index}"
+            runs, unusable = release_runs(candidate, f"{kind}-{family}")
+            undecided += unusable
+            for what, run in runs:
                 try:
                     if (run.get("actor") or {}).get("owed_drain_step_longest_ms") is None:
                         raise Invalid(

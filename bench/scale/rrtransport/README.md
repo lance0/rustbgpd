@@ -374,10 +374,13 @@ and patches nothing. What each recorded number measures:
 - `actor.inbox_round_trip`: from the release (`from_ms`) until every burst
   receiver is exact (`to_ms`), one `QueryLocRibCount` (a length read)
   through the RIB's update channel every 10 ms, sent from the harness
-  runtime on both arms: the number of probes, the longest wait for a reply
-  and when that probe was sent. A drain that yields between steps without
-  serving that channel shows as a long round trip even when every poll is
-  short.
+  runtime on both arms: the number of answered probes, the longest wait for
+  a reply and when that probe was sent. A drain that yields between steps
+  without serving that channel shows as a long round trip even when every
+  poll is short. Each probe (send and reply) waits at most 30 s (`cap_ms`);
+  one still unanswered there ends probing with `unfinished: true` and its
+  wait so far as the longest, so a RIB that stops serving the channel
+  cannot hold the cell's result back.
 
 The cell-7 bars read the candidate's measured fixed-shape runs only:
 
@@ -389,7 +392,9 @@ The cell-7 bars read the candidate's measured fixed-shape runs only:
   the whole run window, at most 250 ms. FAIL when a turn or work unit's
   `above_ms` is at least 250. PASS when `slice_max_us.actor_poll` is at most
   250,000 and the longest inbox round trip at most 250 ms. Otherwise
-  INVALID: a poll of 0 or no probe (dead instrument), no `end_of_rib` turn in
+  INVALID: an unfinished probe ("probe unfinished": evidence of a wait over
+  the bar that no turn instrument confirms), a poll of 0 or no probe (dead
+  instrument), no `end_of_rib` turn in
   the window, a longer poll with no turn provably over the bar (a poll may
   hold many short turns), or a poll within the bar with a longer round trip
   ("instruments disagree": the bar is on the turn, so the probe can withhold
@@ -412,7 +417,10 @@ The cell-7 bars read the candidate's measured fixed-shape runs only:
   FAIL such a run, but bar 6 never PASSes it (INVALID).
 
 Each bar of each run is judged on its own, so a FAIL in any of them stands
-even when another bar or another run lacks an instrument.
+even when another bar or another run lacks an instrument. A repetition that
+attempted the cell and left no result, or a result of the wrong mode or
+shape, is undecided evidence in the same way: a FAIL in another run still
+stands, and when nothing failed the line is INVALID, never PASS.
 
 A mixed-family release cell and a release by deferral-timer expiry are not
 part of this harness.
@@ -431,8 +439,13 @@ candidate's charge (row element plus 146 bytes) and flags a family more than
 
 ### Running
 
-Build one binary per arm from its own tree (the candidate tree must contain
-this harness), and check that the two differ:
+Build one binary per arm from its own tree, and check that the two differ.
+The harness links the tree's RIB, so each arm's binary is that tree's
+daemon code driven by this harness: both trees must contain this version of
+`bench/scale/rrtransport/` (merge it, or copy the directory into a parent
+tree that predates it). A result from an older harness lacks the
+`row_credit` record and makes its row-credit cells INVALID ("no row_credit
+record ... build both arms with this harness").
 
 ```sh
 CARGO_INCREMENTAL=0 cargo build --locked --profile scale -p rrtransport
@@ -528,7 +541,7 @@ a missing or null one makes that cell INVALID, never PASS.
 | 3 | `exhaust-<family>.json`, every run of both arms | `mode`; `unaffected.injected` and `unaffected.delivered` (nonzero), `unaffected.p99_latency_ms`, `unaffected.max_gap_ms`; candidate `unaffected.max_gap_raw_ms`, `unaffected.quiet_lead_ms` and `unaffected.quiet_excluded` (present; null or with `from_ms`, `to_ms`, `span_ms`) |
 | 4 | `probes.json`, every run of both arms | `mode`; `probes` = the fixed 9 cells (`cell`, `shape`, `peers`, `stall_ms`; restart `table`), each candidate cell with `dirty_episodes` |
 | 6 | `fill-<family>.json`, every run of both arms, each family | `mode`; `shape.receivers`, `shape.rows_per_receiver` fixed; candidate `estimate.bytes_per_queued_row` and `row_size_of` |
-| 7 | `restart-<family>.json` and `restart-churn-<family>.json`, every candidate run | `mode`; `shape.receivers`, `shape.rows_per_receiver`, `shape.pause_ms`, `shape.trigger`, `shape.registered_peers` fixed; `checks.final_state_exact`, `checks.eor_after_every_route`, `checks.no_session_resets`; `actor.slice_max_us.actor_poll`, `actor.turn_longest_ms`, `actor.work_longest_ms`, `actor.inbox_round_trip.longest_ms` and `probes`; `witness` (an object; `witness.peak_credit_bytes` and `row_size_of` on a byte-credit tree); `row_credit` (all four constants); `drain_gauges` `from_ms`, `to_ms`, `read_every_ms`, `reads`, `peak_credit_rows`, `peak_operations_live`; `unaffected` as cell 3's candidate; churn variant `churn.withdrawn`, `churn.re_announced`, `churn.started_ms`, `churn.sent_ms`, `timing.release_sent_ms`, `timing.resumed_ms`, `timing.last_eor_ms`, `wire.churn_reflected_before_eor` (one count per receiver); the step line `actor.owed_drain_step_longest_ms` |
+| 7 | `restart-<family>.json` and `restart-churn-<family>.json`, every candidate run | `mode`; `shape.receivers`, `shape.rows_per_receiver`, `shape.pause_ms`, `shape.trigger`, `shape.registered_peers` fixed; `checks.final_state_exact`, `checks.eor_after_every_route`, `checks.no_session_resets`; `actor.slice_max_us.actor_poll`, `actor.turn_longest_ms`, `actor.work_longest_ms`, `actor.inbox_round_trip.longest_ms`, `probes` and `unfinished`; `witness` (an object; `witness.peak_credit_bytes` and `row_size_of` on a byte-credit tree); `row_credit` (all four constants); `drain_gauges` `from_ms`, `to_ms`, `read_every_ms`, `reads`, `peak_credit_rows`, `peak_operations_live`; `unaffected` as cell 3's candidate; churn variant `churn.withdrawn`, `churn.re_announced`, `churn.started_ms`, `churn.sent_ms`, `timing.release_sent_ms`, `timing.resumed_ms`, `timing.last_eor_ms`, `wire.churn_reflected_before_eor` (one count per receiver); the step line `actor.owed_drain_step_longest_ms` |
 | all | `provenance.jsonl` per repetition | `sha256` (one per arm, different between arms) and `cells` |
 
 Before it appends its provenance line, the runner deletes the previous result
@@ -546,7 +559,8 @@ checker, plus, against a churned reference, a surviving withdrawn route, a
 stale re-announcement and a route outside the churn after the End-of-RIB;
 it also checks the churn witness and duplicate count, the gap exclusion and
 where it starts, that a plain registry read misses the since-render slice
-maximum the harness keeps, the histogram brackets, and that the mirrored
+maximum the harness keeps, the histogram brackets, that a round-trip probe
+the RIB never answers ends at its cap as unfinished, and that the mirrored
 row-credit constants match the RIB's.
 `python3 -m unittest discover -s
 bench/scale/rrtransport -p 'test_*.py'` seeds each bar's defect into the
@@ -554,8 +568,11 @@ analyzer and checks that only that cell changes verdict (owe-whole flips
 without spent credit and a restart burst offered as cell 2 are both INVALID;
 so are a null owed-drain step instrument, a long poll with no provably long
 turn, a dead turn or gauge instrument, a long inbox round trip under a short
-poll, churn outside the drain or behind every receiver's End-of-RIB, an
-over-wide excluded window and a byte-credit release bound; uncharged owed
-rows FAIL, and a FAIL survives another run's missing instrument),
+poll, an unfinished probe, churn outside the drain or behind every
+receiver's End-of-RIB, an over-wide excluded window, a byte-credit release
+bound and a result without the `row_credit` record; uncharged owed rows
+FAIL, a FAIL survives another run's missing instrument or another
+repetition's missing or wrong-shape result, and a missing repetition keeps
+cell 7 from passing),
 removes each required field in turn, and drives the runner with a stand-in binary to check that a
 rerun clears stale results.

@@ -146,7 +146,13 @@ def release(family, churn=False):
             "turn_longest_ms": {"end_of_rib": histogram(100.0, 200.0)},
             "work_longest_ms": {"distribute_flush": histogram(25.0, 50.0, 400)},
             "owed_drain_step_longest_ms": {"whole": histogram(25.0, 50.0, 900)},
-            "inbox_round_trip": {"probes": 2_500, "longest_ms": 40.0, "longest_sent_ms": 90.0},
+            "inbox_round_trip": {
+                "probes": 2_500,
+                "longest_ms": 40.0,
+                "longest_sent_ms": 90.0,
+                "unfinished": False,
+                "cap_ms": 30_000.0,
+            },
         },
         "drain_gauges": {
             "from_ms": 40.0,
@@ -637,6 +643,21 @@ class Bars(unittest.TestCase):
         for family in credit_bars.FAMILIES:
             candidate[f"exhaust-{family}.json"] = exhaust(family)
 
+    def test_result_from_an_older_harness_is_invalid(self):
+        # A parent built without this harness records no row-credit
+        # constants; the reason names the workflow, not a stray field.
+        def mutate(parent, _candidate):
+            del parent["exhaust-unicast.json"]["row_credit"]
+
+        results = self.run_bars(mutate)
+        self.assert_only(
+            results,
+            "cell 2 exhaustion unicast",
+            "INVALID",
+            "parent run 0: no row_credit record: the result is from an older harness; build "
+            "both arms with this harness",
+        )
+
     def test_row_credit_candidate_passes_cells_2_and_3(self):
         # A clean row-credit candidate (no byte gauge on either arm).
         results = self.run_bars(self.row_candidate)
@@ -941,6 +962,7 @@ class Bars(unittest.TestCase):
                     "actor.work_longest_ms",
                     "actor.inbox_round_trip.longest_ms",
                     "actor.inbox_round_trip.probes",
+                    "actor.inbox_round_trip.unfinished",
                     "drain_gauges.peak_operations_live",
                     "drain_gauges.peak_credit_rows",
                     "drain_gauges.reads",
@@ -1656,6 +1678,79 @@ class Bars(unittest.TestCase):
                     self.assertTrue(all(v == "PASS" for v, _ in results.values()), results)
                 else:
                     self.assert_only(results, line, "INVALID", "instruments disagree")
+
+    def test_seeded_unfinished_round_trip_probe(self):
+        # A probe the RIB never answered within its 30 s cap: over the turn
+        # bar, so bar 2 cannot pass; a turn provably over it still fails.
+        # The flag decides even beside a short recorded wait.
+        line = "cell 7 selection release evpn"
+
+        def unanswered(run, trip=30_000.0):
+            run["actor"]["inbox_round_trip"].update(unfinished=True, longest_ms=trip)
+
+        for trip in (30_000.0, 40.0):
+            with self.subTest(trip=trip):
+                results = self.release_defect(
+                    "restart-evpn.json", lambda run, trip=trip: unanswered(run, trip)
+                )
+                self.assert_only(results, line, "INVALID", "probe unfinished")
+
+        def unanswered_long_turn(run):
+            unanswered(run)
+            run["actor"]["turn_longest_ms"]["end_of_rib"] = histogram(500.0, 1_000.0)
+
+        results = self.release_defect("restart-evpn.json", unanswered_long_turn)
+        self.assert_only(results, line, "FAIL", "end_of_rib over 500 ms > 250 ms")
+
+    def test_seeded_bar_fail_outranks_an_unusable_repetition(self):
+        # Repetition 1 fails bar 4; repetition 2 left no result or a result
+        # of the wrong shape. The FAIL stands.
+        line = "cell 7 selection release unicast"
+        cases = {"missing": None, "wrong shape": release("unicast")}
+        cases["wrong shape"]["shape"]["receivers"] = 4
+        reasons = {"missing": "restart-unicast attempted, no result", "wrong shape": "shape.receivers"}
+        for name, second in cases.items():
+
+            def mutate(_parent, candidate, second=second):
+                candidate["restart-unicast.json"]["unaffected"]["max_gap_ms"] = 5_000.0
+                candidate.setdefault("provenance.jsonl", provenance("candidate"))
+                self.second_repetition(
+                    candidate, ["restart-unicast"], **{"restart-unicast.json": second}
+                )
+
+            with self.subTest(name):
+                results = self.run_bars(mutate)
+                verdict, reason = results[line]
+                self.assertEqual(verdict, "FAIL", reason)
+                self.assertIn("run 0: healthy delivery gap 5000 ms", reason)
+                self.assertIn(reasons[name], reason)
+
+    def test_seeded_step_fail_outranks_an_absent_release_cell(self):
+        def mutate(_parent, candidate):
+            candidate["restart-evpn.json"]["actor"]["owed_drain_step_longest_ms"] = {
+                "whole": histogram(50.0, 100.0)
+            }
+            candidate["restart-unicast.json"] = None
+
+        results = self.run_bars(mutate)
+        verdict, reason = results["cell 7 release owed-drain step"]
+        self.assertEqual(verdict, "FAIL", reason)
+        self.assertIn("candidate restart-evpn run 0: whole step over 50 ms", reason)
+        self.assertIn("restart-unicast attempted, no result", reason)
+        self.assertEqual(results["cell 7 selection release unicast"][0], "INVALID")
+
+    def test_missing_repetition_never_passes_cell_7(self):
+        # Every usable run passes; repetition 2 attempted the cell and left
+        # nothing.
+        def mutate(_parent, candidate):
+            candidate.setdefault("provenance.jsonl", provenance("candidate"))
+            self.second_repetition(candidate, ["restart-churn-evpn"])
+
+        results = self.run_bars(mutate)
+        for line in ("cell 7 release under churn evpn", "cell 7 release owed-drain step"):
+            verdict, reason = results[line]
+            self.assertEqual(verdict, "INVALID", reason)
+            self.assertIn("repetition 2: restart-churn-evpn attempted, no result", reason)
 
     def test_seeded_wide_excluded_window_is_invalid(self):
         # 300 ms configured: up to 600 ms excluded.

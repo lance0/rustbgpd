@@ -109,6 +109,11 @@ const GAUGE_WATCH: Duration = Duration::from_millis(1);
 /// RIB's update channel, so a drain that yields without serving that
 /// channel shows as a long round trip.
 const ROUND_TRIP_EVERY: Duration = Duration::from_millis(10);
+/// The longest one inbox round-trip probe (send and reply) may wait. A
+/// RIB that stops serving its update channel would otherwise hold the
+/// probe, and the cell's join on it, forever; a probe at the cap is
+/// recorded as unfinished, far past the 250 ms turn bar.
+const ROUND_TRIP_CAP: Duration = Duration::from_secs(30);
 /// The RIB's row-credit constants, crate-private in
 /// `crates/rib/src/outbound_credit.rs`: daemon-wide credit, per-peer floor
 /// and ceiling, and one ordinary pass. Results record them so the analyzer
@@ -1058,28 +1063,42 @@ struct RoundTrips {
     longest_ms: f64,
     /// When the longest one was sent, in ms from t0.
     longest_sent_ms: Option<f64>,
+    /// The last probe got no reply within `cap`; `longest_ms` is its wait
+    /// so far and probing stopped there.
+    unfinished: bool,
 }
 
 /// Send one `QueryLocRibCount` every `ROUND_TRIP_EVERY` until `stop` and
-/// keep the longest wait for its reply.
+/// keep the longest wait for its reply. Each probe waits at most `cap`, so
+/// the task ends within `cap` of `stop` whether or not the RIB answers.
 fn probe_round_trips(
     rib: mpsc::Sender<RibUpdate>,
     t0: Instant,
     stop: Arc<AtomicBool>,
+    cap: Duration,
 ) -> tokio::task::JoinHandle<Result<RoundTrips>> {
     tokio::spawn(async move {
         let mut trips = RoundTrips::default();
         while !stop.load(Ordering::Acquire) {
             let sent = Instant::now();
             let (reply, count) = oneshot::channel();
-            rib.send(RibUpdate::QueryLocRibCount { reply }).await?;
-            count.await?;
+            let probe = async {
+                rib.send(RibUpdate::QueryLocRibCount { reply }).await?;
+                count.await?;
+                anyhow::Ok(())
+            };
+            let finished = tokio::time::timeout(cap, probe).await;
             let took = sent.elapsed().as_secs_f64() * 1e3;
-            trips.probes += 1;
             if took > trips.longest_ms {
                 trips.longest_ms = took;
                 trips.longest_sent_ms = Some(sent.duration_since(t0).as_secs_f64() * 1e3);
             }
+            if finished.is_err() {
+                trips.unfinished = true;
+                break;
+            }
+            finished??;
+            trips.probes += 1;
             tokio::time::sleep(ROUND_TRIP_EVERY).await;
         }
         Ok(trips)
@@ -1614,7 +1633,12 @@ pub async fn exhaust(
     let watching = Arc::new(AtomicBool::new(false));
     let gauges = watch_gauges(fixture.metrics.clone(), t0, Arc::clone(&watching));
     let probing = Arc::new(AtomicBool::new(false));
-    let round_trips = probe_round_trips(fixture.rib.clone(), t0, Arc::clone(&probing));
+    let round_trips = probe_round_trips(
+        fixture.rib.clone(),
+        t0,
+        Arc::clone(&probing),
+        ROUND_TRIP_CAP,
+    );
     let window_start = if restart { t0 + release_sent } else { t0 };
     let churn = churn.take().unwrap_or_else(start_churn);
 
@@ -1812,6 +1836,8 @@ pub async fn exhaust(
             "probes": round_trips.probes,
             "longest_ms": round_trips.longest_ms,
             "longest_sent_ms": round_trips.longest_sent_ms,
+            "unfinished": round_trips.unfinished,
+            "cap_ms": ms(ROUND_TRIP_CAP),
         },
     });
     let drain_gauges = json!({
@@ -2139,6 +2165,8 @@ mod tests {
     use std::time::Duration;
 
     use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
     use rustbgpd_rib::update::RibUpdate;
 
@@ -2296,6 +2324,28 @@ mod tests {
         assert_eq!(gap(window), Duration::from_millis(910));
         // Undelivered: nothing is excluded.
         assert_eq!(super::excluded_window(at(100), None, at(1_300)), None);
+    }
+
+    #[tokio::test]
+    async fn round_trip_probe_ends_unfinished_when_the_rib_never_replies() {
+        let (rib, mut inbox) = tokio::sync::mpsc::channel(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        let cap = Duration::from_millis(100);
+        let probe = super::probe_round_trips(rib, Instant::now(), Arc::clone(&stop), cap);
+        // Handshake: the probe is in flight once its query is received;
+        // holding the reply sender, the RIB never answers.
+        let Some(RibUpdate::QueryLocRibCount { reply: _held }) = inbox.recv().await else {
+            panic!("a round-trip query");
+        };
+        stop.store(true, Ordering::Release);
+        let trips = tokio::time::timeout(Duration::from_secs(10), probe)
+            .await
+            .expect("the join ends within the probe cap")
+            .unwrap()
+            .unwrap();
+        assert!(trips.unfinished);
+        assert_eq!(trips.probes, 0);
+        assert!(trips.longest_ms >= 100.0, "{}", trips.longest_ms);
     }
 
     #[test]
