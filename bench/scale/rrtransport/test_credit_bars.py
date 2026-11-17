@@ -25,12 +25,14 @@ def exhaust(family, recovery_ms=20_000.0, p99=5.0, gap=60.0, candidate=False):
         "family": family,
         "mode": "measured",
         "row_size_of": 104 if family == "unicast" else 144,
+        "healthy_row_size_of": 104,
         "shape": dict(credit_bars.EXHAUST_SHAPE),
         "timing": {
-            "release_sent_ms": 7_000.0,
-            "resumed_ms": 10_000.0,
+            "release_sent_ms": 73_200.0,
+            "resumed_ms": 80_006.0,
+            "actual_pause_ms": 80_006.0,
             "recovery_ms": recovery_ms,
-            "drain_after_resume_ms": recovery_ms - 10_000.0,
+            "drain_after_resume_ms": recovery_ms / 2,
         },
         "checks": {name: True for name in credit_bars.WIRE_CHECKS},
         "witness": {
@@ -290,30 +292,82 @@ class Bars(unittest.TestCase):
                 )
                 self.assertIn(f"{side} run 0", results["cell 2 exhaustion unicast"][1])
 
-    def test_witness_window_edges(self):
-        # Upper edge: every receiver one row (unicast 104 + 146 bytes) past
-        # its credit, plus one healthy row; one more is INVALID.
-        cases = {
-            "candidate": ("peak_credit_bytes", 150 * (BYTE_CREDIT + 250) + 250),
-            "parent": ("peak_credit_rows", 150 * (ROW_CREDIT + 1) + 1),
-        }
-        for side, (gauge, high) in cases.items():
-            for peak, verdict in ((high, "PASS"), (high + 1, "INVALID")):
+    def test_witness_accepts_only_every_receiver_at_its_credit(self):
+        # Every receiver at ceil(credit / row) rows (unicast 56,144 x 250 B;
+        # rows 109,655), plus at most one healthy row (a unicast 250 B row).
+        full = {"candidate": 150 * 56_144 * 250, "parent": 150 * ROW_CREDIT}
+        healthy = {"candidate": 250, "parent": 1}
+        gauge = {"candidate": "peak_credit_bytes", "parent": "peak_credit_rows"}
+        for side, base in full.items():
+            for peak, verdict in (
+                (base, "PASS"),
+                (base + healthy[side], "PASS"),
+                (base - 1, "INVALID"),
+                (base + 1, "INVALID") if side == "candidate" else (base + 2, "INVALID"),
+                (base + healthy[side] + 1, "INVALID"),
+            ):
                 with self.subTest(side=side, peak=peak):
-                    results = self.witness_defect(side, **{gauge: float(peak)})
+                    results = self.witness_defect(side, **{gauge[side]: float(peak)})
                     self.assertEqual(results["cell 2 exhaustion unicast"][0], verdict, results)
 
-    def test_seeded_burst_sent_after_resume_is_invalid(self):
-        for sent in (10_000.0, 15_000.0):
+    def test_seeded_one_short_receiver_masked_by_sub_row_overshoot(self):
+        # 149 receivers at 56,144 unicast rows and one at 56,048: the sum is
+        # exactly 150 x credit, 2,105,376,000 B.
+        peak = (149 * 56_144 + 56_048) * 250
+        self.assertEqual(peak, 150 * BYTE_CREDIT)
+        results = self.witness_defect("candidate", peak_credit_bytes=float(peak))
+        self.assert_only(results, "cell 2 exhaustion unicast", "INVALID", "a receiver below")
 
-            def mutate(_parent, candidate, sent=sent):
-                candidate["exhaust-unicast.json"]["timing"]["release_sent_ms"] = sent
+    def test_healthy_row_needs_its_size(self):
+        def mutate(_parent, candidate):
+            run = candidate["exhaust-evpn.json"]
+            # EVPN burst rows (144 + 146 B) plus a unicast healthy row.
+            run["witness"]["peak_credit_bytes"] = 150.0 * 48_400 * 290 + 250
+            del run["healthy_row_size_of"]
+
+        results = self.run_bars(mutate)
+        self.assert_only(results, "cell 2 exhaustion evpn", "INVALID", "healthy_row_size_of")
+
+    def test_seeded_burst_submission_past_the_pause_deadline_is_invalid(self):
+        # The burst ended at or after the 80 s deadline; the readers stayed
+        # paused until then, so the resume still follows the last send.
+        for sent in (80_000.0, 95_000.0):
+
+            def mutate(parent, candidate, sent=sent):
+                # Both arms alike, so the arms' pauses agree.
+                for arm in (parent, candidate):
+                    arm["exhaust-unicast.json"]["timing"].update(
+                        release_sent_ms=sent, resumed_ms=sent + 6.0, actual_pause_ms=sent + 6.0
+                    )
 
             with self.subTest(sent=sent):
                 results = self.run_bars(mutate)
-                self.assert_only(
-                    results, "cell 2 exhaustion unicast", "INVALID", "not before the readers"
-                )
+                self.assertEqual(results["cell 2 exhaustion unicast"][0], "INVALID", results)
+                self.assertIn("pause deadline", results["cell 2 exhaustion unicast"][1])
+
+    def test_seeded_actual_pause_off_the_configured_pause_is_invalid(self):
+        for actual, verdict in ((80_250.0, "PASS"), (80_251.0, "INVALID"), (79_749.0, "INVALID")):
+
+            def mutate(parent, candidate, actual=actual):
+                for arm in (parent, candidate):
+                    arm["exhaust-unicast.json"]["timing"]["actual_pause_ms"] = actual
+
+            with self.subTest(actual=actual):
+                verdict_, reason = self.run_bars(mutate)["cell 2 exhaustion unicast"]
+                self.assertEqual(verdict_, verdict, reason)
+                if verdict == "INVALID":
+                    self.assertIn("from the configured 80000 ms", reason)
+
+    def test_seeded_arms_with_different_actual_pauses_are_invalid(self):
+        # Each arm within 250 ms of 80 s, but 400 ms apart.
+        def mutate(parent, candidate):
+            parent["exhaust-unicast.json"]["timing"]["actual_pause_ms"] = 79_800.0
+            candidate["exhaust-unicast.json"]["timing"]["actual_pause_ms"] = 80_200.0
+
+        results = self.run_bars(mutate)
+        for cell in ("cell 2 exhaustion unicast", "cell 3 unaffected peer unicast"):
+            self.assertEqual(results[cell][0], "INVALID", results[cell])
+            self.assertIn("actual pauses differ by 400 ms", results[cell][1])
 
     def test_seeded_witness_receivers_differ_from_shape(self):
         results = self.witness_defect(
@@ -410,14 +464,16 @@ class Bars(unittest.TestCase):
         for peers, unit, limit in cases:
             with self.subTest(peers=peers, unit=unit):
                 receivers = peers - 3
+                row = 250 if unit == "bytes" else 1
+                full = -(-limit // row)
                 run = exhaust("unicast", candidate=unit == "bytes")
                 run["shape"].update(receivers=receivers, registered_peers=peers)
                 run["witness"]["receivers"] = receivers
                 gauge = "peak_credit_bytes" if unit == "bytes" else "peak_credit_rows"
-                run["witness"][gauge] = float(receivers * limit)
+                run["witness"][gauge] = float(receivers * full * row)
                 _, verdict, reason = self.check_one(run)
                 self.assertEqual(verdict, "PASS", reason)
-                self.assertIn(f"{receivers * limit} {unit} in [{receivers} x {limit},", reason)
+                self.assertIn(f"{receivers} receivers x {full} rows at credit {limit}", reason)
 
     def test_seeded_refusals_on_too_few_receivers_are_not_a_witness(self):
         results = self.witness_defect("parent", peak_credit_rows=0.0, refused_receivers=149)
@@ -434,10 +490,13 @@ class Bars(unittest.TestCase):
     def test_clean_witness_names_what_it_counted(self):
         reason = self.run_bars()["cell 2 exhaustion unicast"][1]
         self.assertIn(
-            f"parent credit gauge peak 16448250 rows in [150 x {ROW_CREDIT}, 16448401]", reason
+            f"parent credit gauge peak 16448250 rows = 150 receivers x {ROW_CREDIT} rows at "
+            f"credit {ROW_CREDIT} rows",
+            reason,
         )
         self.assertIn(
-            f"candidate credit gauge peak 2105400000 bytes in [150 x {BYTE_CREDIT}, 2105413750]",
+            "candidate credit gauge peak 2105400000 bytes = 150 receivers x 56144 rows at "
+            f"credit {BYTE_CREDIT} bytes",
             reason,
         )
 
@@ -533,7 +592,8 @@ class Bars(unittest.TestCase):
                     "witness.receivers",
                     "shape.receivers",
                     "timing.release_sent_ms",
-                    "timing.resumed_ms",
+                    "timing.actual_pause_ms",
+                    "shape.pause_ms",
                     "row_size_of",
                     "checks.final_state_exact",
                     "checks.one_eor_before_burst",

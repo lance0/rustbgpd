@@ -46,6 +46,9 @@ ANNOUNCED_ROW_OVERHEAD = 146
 # Cell 2: recovery <= max(parent x 1.25, parent + 2 s).
 RECOVERY_RATIO = 1.25
 RECOVERY_SLACK_MS = 2_000.0
+# Cell 2: the actual pause may differ this much from the configured one, and
+# the runs of both arms this much from each other.
+PAUSE_TOLERANCE_MS = 250.0
 # Cell 3: no delivery gap over 1 s; p99 <= parent x 1.10.
 MAX_GAP_MS = 1_000.0
 P99_RATIO = 1.10
@@ -284,46 +287,58 @@ def exhaustion(run: dict, what: str) -> str:
     rows = number(run, "witness.peak_credit_rows", what)
     if receivers <= 0 or peers < receivers:
         raise Invalid(f"{what}: {receivers} burst receivers among {peers} registered peers")
-    # The burst must be in the RIB before the readers resume, or the peak
-    # need not have been reached while every reader was paused.
-    sent, resumed = number(run, "timing.release_sent_ms", what), number(
-        run, "timing.resumed_ms", what
-    )
-    if sent >= resumed:
+    # The whole burst must be in the RIB before the pause deadline, or the
+    # readers stayed paused until it was and the pause ran long.
+    pause = number(run, "shape.pause_ms", what)
+    sent = number(run, "timing.release_sent_ms", what)
+    if sent >= pause:
         raise Invalid(
-            f"{what}: the burst's last UPDATE was sent at {sent:.0f} ms, not before the "
-            f"readers resumed at {resumed:.0f} ms"
+            f"{what}: burst submission ended at {sent:.0f} ms, not before the {pause:.0f} ms "
+            "pause deadline"
         )
-    # The gauge sums every peer. Admission stops a peer below its credit
-    # plus one row, so a sum in [R x credit, R x (credit + row)] means every
-    # burst receiver reached its credit; the healthy receiver may hold one
-    # churn row on top (a unicast row, never larger than the burst's). A
-    # larger sum leaves room for one receiver short of its credit. Credit
-    # refusals are reported but are no witness: the same reason counts a
-    # refusal for a live whole-table operation with nothing charged.
+    actual = number(run, "timing.actual_pause_ms", what)
+    if abs(actual - pause) > PAUSE_TOLERANCE_MS:
+        raise Invalid(
+            f"{what}: actual pause {actual:.0f} ms is more than {PAUSE_TOLERANCE_MS:.0f} ms "
+            f"from the configured {pause:.0f} ms"
+        )
+    # The gauge sums every peer. Every burst row charges the same `row`
+    # (bytes: element plus overhead; rows: 1) and admission stops a peer
+    # below its credit plus one row, so a peer holds at most
+    # full = ceil(credit / row) rows and holds exactly that once it reached
+    # its credit. A sum of exactly receivers x full x row therefore means every
+    # burst receiver reached its credit; the healthy receiver may add one
+    # churn row (a unicast row). Any other sum is INVALID. Credit refusals
+    # are reported but are no witness: the same reason counts a refusal for
+    # a live whole-table operation with nothing charged.
     if run["witness"].get("peak_credit_bytes") is not None:
         unit, peak, credit = "bytes", number(run, "witness.peak_credit_bytes", what), BYTE_CREDIT
         row = number(run, "row_size_of", what) + ANNOUNCED_ROW_OVERHEAD
     else:
         unit, peak, credit, row = "rows", rows, ROW_CREDIT, 1
     limit = min(max(credit[0] // int(peers), credit[1]), credit[2])
-    low, high = receivers * limit, receivers * (limit + row) + row
+    full = -(-limit // int(row))
+    expected = receivers * full * row
+    shape = f"{receivers} receivers x {full} rows at credit {limit} {unit}"
     refusals = f"credit refusals on {refused}/{receivers} receivers, report-only"
-    if peak < low:
+    if peak == expected:
+        return f"credit gauge peak {peak:.0f} {unit} = {shape} ({refusals})"
+    if peak < expected:
         flips = run["witness"].get("owing_flips_total")
         raise Invalid(
-            f"{what}: credit gauge peak {peak:.0f} {unit} < {receivers} x {limit} ({refusals}; "
-            f"{flips} owe-whole flips are not a witness); the cell never exhausted credit"
+            f"{what}: credit gauge peak {peak:.0f} {unit} < {expected:.0f} = {shape}: a "
+            f"receiver below its credit ({refusals}; {flips} owe-whole flips are not a "
+            "witness); the cell never exhausted credit"
         )
-    if peak > high:
-        raise Invalid(
-            f"{what}: credit gauge peak {peak:.0f} {unit} > {receivers} x ({limit} + {row:.0f}) "
-            f"+ {row:.0f} = {high:.0f}: more than every receiver at its credit, so the sum "
-            f"cannot show each one reached it ({refusals})"
-        )
-    return (
-        f"credit gauge peak {peak:.0f} {unit} in [{receivers} x {limit}, {high:.0f}] "
-        f"({refusals})"
+    healthy = 1 if unit == "rows" else (
+        number(run, "healthy_row_size_of", what) + ANNOUNCED_ROW_OVERHEAD
+    )
+    if peak == expected + healthy:
+        return f"credit gauge peak {peak:.0f} {unit} = {shape} + one healthy row ({refusals})"
+    raise Invalid(
+        f"{what}: credit gauge peak {peak:.0f} {unit} is not {expected:.0f} = {shape} (or "
+        f"{expected + healthy:.0f} with one healthy row): more than every receiver at its "
+        f"credit, so the sum cannot show each one reached it ({refusals})"
     )
 
 
@@ -376,6 +391,17 @@ def exhaust_runs(parent: Arm, candidate: Arm, family: str) -> dict[str, list[dic
                     f"{'present' if present else 'absent'}; the parent must lack "
                     "bgp_rib_outbound_credit_bytes and the candidate must export it"
                 )
+    # Arms are comparable only over the same actual pause.
+    pauses = [
+        number(run, "timing.actual_pause_ms", f"{arm} {cell} run {index}")
+        for arm, arm_runs in arms.items()
+        for index, run in enumerate(arm_runs)
+    ]
+    if max(pauses) - min(pauses) > PAUSE_TOLERANCE_MS:
+        raise Invalid(
+            f"{cell}: actual pauses differ by {max(pauses) - min(pauses):.0f} ms across the "
+            f"arms' runs, more than {PAUSE_TOLERANCE_MS:.0f} ms"
+        )
     return arms
 
 

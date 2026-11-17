@@ -133,8 +133,13 @@ Established; the healthy receiver's session counts too). Recovery runs from
 the first burst UPDATE to the moment every burst receiver is exact, on the
 harness clock; it includes the paced burst (73.5 s) and the rest of the fixed
 80 s pause. `drain_after_resume_ms` reports the part after the readers
-resume. The burst's last UPDATE (`release_sent_ms`) must precede the resume
-(`resumed_ms`), or the run is INVALID.
+resume. If burst submission ran past the pause deadline, the readers would
+stay paused until it ended, so the result records `actual_pause_ms` (from
+the moment every burst reader acknowledged its pause to every reader's
+acknowledged resume). The run is INVALID when the burst's last UPDATE
+(`release_sent_ms`) is not before `shape.pause_ms`, or when `actual_pause_ms`
+is more than 250 ms from `shape.pause_ms`; the analyzer also refuses to
+compare arms whose runs' actual pauses spread more than 250 ms.
 
 Because `recovery_ms` includes the fixed pause, the cell 2 bar is
 insensitive to the drain. On the untimed full shape the parent recovers in
@@ -165,15 +170,26 @@ over peers: `bgp_rib_outbound_credit_bytes` on a tree that exports it, else
 number of burst receivers times the tree's per-peer credit at the cell's 153
 registered peers (the burst receivers, the healthy one and the two sources):
 2 GiB / 153 = 14,035,840 bytes on a byte-credit tree, 16,777,216 / 153 =
-109,655 rows on a row-credit tree. Admission stops a peer below its credit
-plus one row, so the sum is a witness only inside a window: at least
-receivers × credit, and at most receivers × (credit + one row) plus one
-healthy receiver's row, where a row is 1 on a row-credit tree and
-`row_size_of` + 146 bytes on a byte-credit one. A larger sum leaves room for
-one receiver that never reached its credit while others went past it, for
-example a credit larger than the burst. The per-peer gauge values are not
-exported, so the sum is all the harness can read. Outside the window the cell
-is INVALID, never PASS, and the verdict line names the numbers.
+109,655 rows on a row-credit tree. Every burst row charges the same amount
+(a row on a row-credit tree; `row_size_of` + 146 bytes on a byte-credit one)
+and admission stops a peer below its credit plus one row, so a peer holds at
+most ceil(credit / row) rows and exactly that many once it reached its
+credit. The analyzer therefore accepts only a peak of exactly receivers ×
+ceil(credit / row) × row, or that plus one healthy receiver's churn row
+(`healthy_row_size_of` + 146 bytes, or one row): 150 × 56,144 × 250 =
+2,105,400,000 bytes for unicast and 150 × 48,400 × 290 = 2,105,400,000 for
+EVPN on a byte-credit tree, 150 × 109,655 = 16,448,250 rows on a row-credit
+tree. Any other peak is INVALID, never PASS, and the verdict line names the
+numbers. A window instead of the exact value would let the others' sub-row
+overshoot hide a short receiver: 149 receivers at 56,144 unicast rows and
+one at 56,048 sum to 150 × 14,035,840 bytes.
+
+The guarantee rests on that admission rule, which the harness cannot see per
+peer: the credit gauges are unlabeled, so only their sum is readable. If a
+tree admitted more than ceil(credit / row) rows to a peer (a multi-row
+envelope admitted just below the credit), the exact sum could again hide a
+receiver short by the others' excess. Every full-shape result so far sums to
+the exact value.
 
 Credit refusals (`bgp_outbound_commit_refusals_total{reason="outbound_credit"}`)
 are recorded and reported but are not a witness: the same reason counts a
@@ -303,7 +319,7 @@ a missing or null one makes that cell INVALID, never PASS.
 | Cell | Result file | Required fields |
 | --- | --- | --- |
 | 1 | `paused-evpn.json`, every repetition of both arms (or `paused-exit.json` with `oom`) | `mode` = `measured`; `shape.receivers`, `shape.routes`, `shape.seconds`, `shape.round_ms` fixed; `checks.no_session_resets` = true; `not_established` empty; `memory.cgroup_swap_max` = `0`; `memory.cgroup_memory_max` = 12 GiB; `memory.cgroup_memory_peak_bytes`; `memory.vmhwm_kib`; `memory.cgroup_oom_kill`; candidate `memory.peak_credit_bytes` and `row_size_of` |
-| 2 | `exhaust-<family>.json`, every run of both arms | `mode`; `shape.receivers`, `shape.rows_per_receiver`, `shape.pause_ms`, `shape.burst_interval_ms`, `shape.trigger`, `shape.registered_peers` fixed; `witness.refused_receivers`, `witness.peak_credit_rows`, `witness.receivers` (and `witness.peak_credit_bytes` and `row_size_of` on a byte-credit tree); `timing.release_sent_ms`, `timing.resumed_ms`; `checks.final_state_exact`, `checks.one_eor_before_burst`, `checks.no_session_resets`; `timing.recovery_ms` once every wire check passed |
+| 2 | `exhaust-<family>.json`, every run of both arms | `mode`; `shape.receivers`, `shape.rows_per_receiver`, `shape.pause_ms`, `shape.burst_interval_ms`, `shape.trigger`, `shape.registered_peers` fixed; `witness.refused_receivers`, `witness.peak_credit_rows`, `witness.receivers` (and `witness.peak_credit_bytes` and `row_size_of` on a byte-credit tree); `shape.pause_ms`, `timing.release_sent_ms`, `timing.actual_pause_ms` (and `healthy_row_size_of` when the peak includes a healthy row); `checks.final_state_exact`, `checks.one_eor_before_burst`, `checks.no_session_resets`; `timing.recovery_ms` once every wire check passed |
 | 3 | `exhaust-<family>.json`, every run of both arms | `mode`; `unaffected.injected` and `unaffected.delivered` (nonzero), `unaffected.p99_latency_ms`, `unaffected.max_gap_ms` |
 | 4 | `probes.json`, every run of both arms | `mode`; `probes` = the fixed 9 cells (`cell`, `shape`, `peers`, `stall_ms`; restart `table`), each candidate cell with `dirty_episodes` |
 | 6 | `fill-<family>.json`, every run of both arms, each family | `mode`; `shape.receivers`, `shape.rows_per_receiver` fixed; candidate `estimate.bytes_per_queued_row` and `row_size_of` |

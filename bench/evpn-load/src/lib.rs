@@ -248,7 +248,8 @@ pub async fn establish_stream(stream: TcpStream, cfg: PeerConfig) -> Result<Peer
 async fn establish_stream_with_read_hold(
     mut stream: TcpStream,
     cfg: PeerConfig,
-    read_hold: u16,
+    // The reader's hold timer, in seconds; `cfg.hold_time` is advertised.
+    hold: u16,
 ) -> Result<PeerHandle, PeerError> {
     validate_hold_time(cfg.hold_time)?;
 
@@ -283,8 +284,7 @@ async fn establish_stream_with_read_hold(
 
     let (mut reader, mut writer) = stream.into_split();
 
-    let hold = cfg.hold_time;
-    let ka_interval = keepalive_interval(hold);
+    let ka_interval = keepalive_interval(cfg.hold_time);
 
     // Writer task: pulls from tx, writes to socket, injects periodic KEEPALIVE.
     let writer_task = tokio::spawn(async move {
@@ -347,7 +347,7 @@ async fn establish_stream_with_read_hold(
     // sit forever and the harness would mistake silence for "in
     // progress." We implement it by selecting between socket read
     // and a deadline timer that gets reset on every byte received.
-    let hold_secs = u64::from(read_hold);
+    let hold_secs = u64::from(hold);
     let reader_task = tokio::spawn(async move {
         let mut frame_buf = BytesMut::with_capacity(65536);
         let mut tmp = [0u8; 8192];

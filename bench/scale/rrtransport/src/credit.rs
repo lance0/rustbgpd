@@ -1268,9 +1268,16 @@ pub async fn exhaust(
             "receiver_rcvbuf_bytes": RECEIVER_RCVBUF,
         },
         "row_size_of": family.row_size_of(),
+        // The healthy receiver's churn row, which the summed credit gauge
+        // may hold on top of the burst receivers'.
+        "healthy_row_size_of": Family::Unicast.row_size_of(),
         "timing": {
             "release_sent_ms": ms(release_sent),
             "resumed_ms": ms(resumed),
+            // From t0, when every burst reader had acknowledged its pause,
+            // to every reader's acknowledged resume: longer than
+            // `shape.pause_ms` when burst submission ran past the deadline.
+            "actual_pause_ms": ms(resumed),
             "settled_ms": settled.map(ms),
             "recovery_ms": settled.map(|_| ms(latest)),
             "drain_after_resume_ms": settled.map(|_| ms(latest.saturating_sub(resumed))),
@@ -1295,8 +1302,8 @@ pub async fn exhaust(
             // whole-table operation is refused for the same reason.
             "signals": [
                 "peak of bgp_rib_outbound_credit_bytes (bgp_rib_outbound_credit_rows on a tree \
-                 without it), summed over peers, between receivers x the per-peer credit at \
-                 shape.registered_peers and receivers x (that credit + one row) + one row",
+                 without it), summed over peers, equal to receivers x ceil(per-peer credit at \
+                 shape.registered_peers / row) x row, plus at most one healthy row",
             ],
             "peak_credit_rows": instruments.peak_credit_rows,
             "peak_credit_bytes": instruments.peak_credit_bytes,
