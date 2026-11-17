@@ -2205,7 +2205,7 @@ fn a_receiver_with_exactly_the_cap_after_its_cursor_is_kept() {
     let (mut manager, mut receivers) = owing(2, 16, CREDIT);
     // Receiver 0 never has credit; receiver 1 takes one step of eight
     // keys, then reads nothing.
-    let _stalled = crate::outbound_credit::OutboundCharge::new(
+    let stalled = crate::outbound_credit::OutboundCharge::new(
         &manager.outbound_credit_handle(receivers[0].peer),
         CREDIT,
     );
@@ -2236,7 +2236,7 @@ fn a_receiver_with_exactly_the_cap_after_its_cursor_is_kept() {
     assert!(manager.owes_whole(receivers[1].peer, UNICAST));
     assert!(!manager.dirty_peers.contains(&receivers[1].peer));
     assert_eq!(manager.owed_rows[0].len(), cap, "cut back to the cap");
-    drop(_stalled);
+    drop(stalled);
     drain(&mut manager, &mut receivers);
     for receiver in &receivers {
         assert_eq!(receiver.wire.markers, 1);
