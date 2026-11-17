@@ -6574,7 +6574,7 @@ async fn confirmed_abort_with_route_refresh_resets_nothing() {
         vec![Some(PolicyAction::Deny), Some(PolicyAction::Permit)]
     );
     assert_eq!(edit.acks.route_refreshes(), 2, "apply and rollback refresh");
-    assert_eq!(edit.acks.resets_after(0).await, Vec::<usize>::new());
+    assert_eq!(edit.acks.resets_once_drained().await, Vec::<usize>::new());
     edit.controller
         .reject_if_pending("test mutation")
         .await
@@ -6633,7 +6633,10 @@ async fn forward_import_edit_on_a_peer_without_route_refresh_is_still_refused() 
             vec![Some(PolicyAction::Deny)],
             "{confirm_id:?}: nothing is installed"
         );
-        assert!(edit.acks.resets_after(0).await.is_empty(), "{confirm_id:?}");
+        assert!(
+            edit.acks.resets_once_drained().await.is_empty(),
+            "{confirm_id:?}"
+        );
         edit.controller
             .reject_if_pending("test mutation")
             .await
@@ -6703,7 +6706,7 @@ async fn history_rollback_import_edit_on_a_peer_without_route_refresh_is_refused
         "the rollback installs nothing"
     );
     assert!(
-        edit.acks.resets_after(0).await.is_empty(),
+        edit.acks.resets_once_drained().await.is_empty(),
         "no session reset"
     );
     let runtime = crate::reload::runtime_config_snapshot(&edit.peer_tx)

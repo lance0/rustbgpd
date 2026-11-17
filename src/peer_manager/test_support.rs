@@ -27,6 +27,9 @@ pub(crate) struct EstablishedPolicyPeerAcks {
     /// installed when the reset arrived.
     resets: Arc<std::sync::Mutex<Vec<usize>>>,
     reset_notify: Arc<Notify>,
+    /// The session's command queue, held weakly so the session still exits
+    /// when the peer manager drops its handle.
+    commands: Arc<std::sync::OnceLock<mpsc::WeakSender<PeerCommand>>>,
 }
 
 impl EstablishedPolicyPeerAcks {
@@ -60,6 +63,22 @@ impl EstablishedPolicyPeerAcks {
             }
             notified.await;
         }
+    }
+
+    /// The resets the session has handled, read once it has answered a state
+    /// query sent behind every command already queued. A reset is only
+    /// admitted to the session's queue, so this orders the read after any
+    /// reset queued before the call.
+    pub(crate) async fn resets_once_drained(&self) -> Vec<usize> {
+        let commands = self
+            .commands
+            .get()
+            .and_then(mpsc::WeakSender::upgrade)
+            .expect("the session is running");
+        PeerHandle::query_state_with(commands, std::time::Duration::from_secs(5))
+            .await
+            .expect("the session answers behind its queued commands");
+        self.resets.lock().unwrap().clone()
     }
 
     pub(crate) fn route_refreshes(&self) -> u32 {
@@ -101,6 +120,7 @@ fn negotiated_session(route_refresh: bool) -> rustbgpd_transport::NegotiatedSess
 
 fn established_policy_handle(peer: IpAddr, acks: EstablishedPolicyPeerAcks) -> PeerHandle {
     let (command_tx, mut command_rx) = mpsc::channel(8);
+    let _ = acks.commands.set(command_tx.downgrade());
     let task = tokio::spawn(async move {
         let mut route_refresh = true;
         let mut current_import = None;

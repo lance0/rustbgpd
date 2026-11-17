@@ -2918,6 +2918,12 @@ const BARE_SESSION_WAIT_FNS: &[(&str, usize, &str)] = &[
         1,
         "not a session: stops discovery on a removed interface",
     ),
+    (
+        "test_support.rs::resets_once_drained",
+        1,
+        "test-only: a test drains a fake session's queue before reading its reset log; \
+         never runs on the actor",
+    ),
 ];
 
 /// The session handle's async commands, read from the transport crate so a
