@@ -590,22 +590,49 @@ second position and send only the rows the hold exempts (local host and
 BLACKHOLE routes, and the withdrawal of a local row the receiver holds); the
 release reads the held rows again.
 
-The list is trimmed behind the slowest position and freed when no receiver
-holds one, so a receiver that falls behind pins it. Its cap is twice the
-family's peak plus 4,096 keys, where the peak is the most keys one pass has
-accounted for while any receiver held a position: the family's Loc-RIB after
-the pass plus the keys the pass carried. One value per address family, zero
-again when the list is freed. A pass's withdrawals count toward the peak, so
-one large withdrawal, a peer loss or a selection release that carries more
-keys than the released table never exceeds the cap, whatever the receivers
-have read. Only fresh keys that keep rotating through the table past a
-receiver that does not keep up do: a receiver that reads nothing, or one
-that reads more slowly than the table turns over. The slowest receivers are
+The list holds one entry per key, in two ordered maps (by sequence and by
+key). A key that changes again moves its entry, so the list has no dead
+entries and a step reads only the keys it sends. No call does list work
+that grows with the table: logging a key moves one entry, and the maps have
+no capacity to rehash or relocate. The list is trimmed behind the slowest
+position, so a receiver that falls behind pins it. When a position leaves
+(its receiver caught up, flapped or was evicted), the entries behind the
+next slowest are dropped at most 4,096 per trim and two per key logged, on
+the passes and resync ticks that follow; the list does not grow while any
+wait, and it is empty some ticks after the last position has left.
+
+Its cap is twice the family's peak plus 4,096 keys, where the peak is the
+most keys one pass has accounted for while any receiver held a position:
+the family's Loc-RIB after the pass plus the keys the pass carried. One
+value per address family, zero again when the list has emptied. The cap is
+checked after each pass, so the list holds at most the cap plus the keys of
+one pass: three times the peak plus 4,096 keys, at about 105 bytes a key
+(some 30 MB at 150,000 routes when passes are small against the table, and
+about 425 MB at 1,000,000 routes when one pass carries the whole table; by
+allocation count in a model of the two maps, not a daemon measurement). A
+pass's withdrawals count toward the peak, so one large withdrawal, a peer
+loss or a selection release that carries more keys than the released table
+does not reach the cap. Fresh keys that keep rotating through the table past
+a receiver that does not keep up do (a receiver that reads nothing, or one
+that reads more slowly than the table turns over): after about one table's
+worth of prefixes the list has not held before. The slowest receivers are
 then resynced instead (the slice 1a path, counted by
-`bgp_rib_outbound_owing_fallback_total`) until the list fits. The cap is
-checked after the pass's member loop, and the pass builds nothing for the
-receivers it evicts: they are marked dirty and each is resynced as any dirty
-receiver is, one receiver per unit of the resync tick.
+`bgp_rib_outbound_owing_fallback_total`) until the list fits.
+
+That fallback is a whole-peer resync: one uncharged whole-table operation
+per evicted receiver, a turn and a table copy that grow with the table. It
+is paced, not bounded like a step. The pass that finds the list over its cap
+builds nothing; it marks the receivers it evicts dirty, and only the resync
+tick builds their resyncs, one receiver per unit. An ordinary pass leaves
+such a receiver dirty, as it leaves one whose channel has no room, so no
+pass builds a table for each evicted receiver. The tick's units are not
+drain steps and are not observed in
+`bgp_rib_outbound_owed_drain_step_seconds`; they show in
+`bgp_rib_actor_slice_seconds`.
+
+A full outbound channel at a family's last step refuses only the
+End-of-RIB: every owed row was admitted, so the receiver is not resynced
+and the resync tick retries the marker alone.
 
 Three sends for a unicast family still owed stay outside this: a
 ROUTE-REFRESH answer and an operator replay absorb the rest of the walk into

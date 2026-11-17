@@ -95,10 +95,18 @@ resolved.
     ROUTE-REFRESH answer or an operator replay for a family still owed sends
     the remainder as one operation, as before. So does the fallback for a
     receiver that falls behind while new routes keep replacing old ones (it
-    has stopped reading, or reads more slowly than the table turns over):
-    it is resynced as a whole peer, one receiver per resync-tick unit, and
-    counted in `bgp_rib_outbound_owing_fallback_total`. One large
-    withdrawal, a peer loss or a selection release does not cause that.
+    has stopped reading, or reads more slowly than the table turns over)
+    for about one table's worth of prefixes not seen since it began to owe
+    the family: it is resynced as a whole peer and counted in
+    `bgp_rib_outbound_owing_fallback_total`. That resync is one whole-table
+    operation outside the outbound credit, in one RIB turn that grows with
+    the table; only the resync tick runs it, one receiver per unit, and no
+    update pass does. One large withdrawal, a peer loss or a selection
+    release does not cause it. Until then the list of changed routes such a
+    receiver holds back is at most three times the family's table plus the
+    routes of one pass, at about 105 bytes a route: an estimated 30 MB at
+    150,000 routes when updates are small against the table, and about
+    425 MB at 1,000,000 routes when one update carries the whole table.
   - Whole-family sends of the other families, still on main: labeled
     unicast, VPN, EVPN, FlowSpec, BGP-LS and RT-Constrain owed whole still
     go out as one operation per receiver that is not charged against the
