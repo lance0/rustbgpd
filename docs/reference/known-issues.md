@@ -53,6 +53,40 @@ resolved.
   permits isolated breaches while retaining them as evidence; they do not
   automatically block release when all agreed acceptance gates pass.
 
+- **Work toward private receivers can run as one long RIB turn.** A private
+  receiver is one not served by a shared update group, for example every
+  EVPN receiver and peers using Add-Path, ORF or per-client best path. While
+  such a turn runs, every peer's updates wait behind it.
+  - Selection release, v0.83.0 and earlier: an RFC 4724 selection release
+    toward private receivers ran as one RIB turn that grew with receivers ×
+    rows, 86–94 s at 150 receivers × 150,000 rows in the transport harness
+    (production RIB and transport, in-process, over loopback). Fixed on main
+    after v0.83.0 for that shape: the longest gap seen by an unrelated peer
+    was 0.38–0.52 s, at the cost of a 9.7% higher memory peak for unicast.
+  - Other End-of-RIB hold releases, still on main (fix in progress): replay
+    grace window expiry and replay-complete, route-target-membership
+    releases and the ORF cap still send each private receiver's owed
+    families inside the releasing turn, without reading outbound credit, so
+    the work grows with receivers × rows. The evidence is work counts in
+    unit-level probes, not timings. A planned restart that uses the
+    [replay grace window](configuration.md#planned-restart-end-of-rib-grace-window)
+    can therefore still produce a long turn.
+  - Ordinary UPDATE bursts, still on main and not yet attributed: 150,000
+    routes sent at once as ordinary UPDATEs toward 150 private receivers
+    delayed an unrelated peer's updates by 27–34 s. Paced at one
+    1,024-route UPDATE per 500 ms, the gap was about 0.4 s for unicast and
+    4.6 s for EVPN. These are single untimed harness runs on a shared host,
+    and the cause, one long unit of work or many short units served in
+    arrival order, is not yet established.
+  - Whole-family sends, still on main: these are outside the outbound
+    credit. A receiver that is owed a released family, or whose owed keys
+    exceed the keyed threshold (a quarter of its table), is sent the whole
+    family as one operation that is not charged against the outbound
+    credit. Each such send is one table-sized RIB turn, 278–632 ms at
+    150,000 rows. Recovery after credit exhaustion past the threshold is one
+    table walk per receiver: 54.9 s at 150 receivers × 190,000 rows, in a
+    single untimed run.
+
 - **A GR helper can keep a deleted RTBH whose prefix still has another
   route until End-of-RIB.** This applies after a planned restart, when a
   receiver that is a Graceful Restart helper flaps while End-of-RIB toward
@@ -115,6 +149,18 @@ resolved.
   `rbgp rib --prefix P advertised PEER --explain` shows what rustbgpd now
   advertises for the prefix, or why it is held; the helper's own stale-route
   view shows whether it still holds the RTBH.
+
+- **Disabling or deleting a Notification GR peer leaves its routes stale in
+  v0.83.0 and earlier.** With the RFC 8538 N bit negotiated, a neighbor
+  disable, administrative down (`admin_down`), neighbor deletion or
+  administrative reset sends a plain Cease, so both speakers keep each
+  other's routes as stale for the restart time and any long-lived stale
+  time, although RFC 8538 §5.1 maps these events to Hard Reset. Fixed on
+  main after v0.83.0: these events now send Cease / Hard Reset wrapping the
+  original subcode, and neither side retains routes. Daemon shutdown still
+  sends the plain Cease and retains routes, by design, because the daemon
+  is expected to restart. On a released tag, expect a disabled or deleted
+  Notification GR peer's routes to remain until the stale timers expire.
 
 ## Resolved
 
