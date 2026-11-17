@@ -202,13 +202,33 @@ pub async fn establish(cfg: PeerConfig) -> Result<PeerHandle, PeerError> {
 /// Returns a [`PeerError`] if local-address inspection, accept, OPEN exchange,
 /// or initial KEEPALIVE fails.
 pub async fn establish_on(listener: TcpListener, cfg: PeerConfig) -> Result<PeerHandle, PeerError> {
+    let hold = cfg.hold_time;
+    establish_on_with_read_hold(listener, cfg, hold).await
+}
+
+/// [`establish_on`] with the reader's own hold timer set to `read_hold`
+/// seconds instead of the advertised `cfg.hold_time` (0 disables it). The
+/// reader's deadline runs from its last read and keeps running across a
+/// read pause, so a fixture that pauses reads close to the negotiated hold
+/// time sets a longer local one; the advertised value and the KEEPALIVE
+/// cadence stay those of `cfg.hold_time`.
+///
+/// # Errors
+///
+/// As [`establish_on`], or when `read_hold` is 1 or 2 seconds.
+pub async fn establish_on_with_read_hold(
+    listener: TcpListener,
+    cfg: PeerConfig,
+    read_hold: u16,
+) -> Result<PeerHandle, PeerError> {
     validate_hold_time(cfg.hold_time)?;
+    validate_hold_time(read_hold)?;
     let listen = listener.local_addr()?;
     tracing::info!(%listen, "evpn-load peer listening for BGP session");
     let (stream, remote) = listener.accept().await?;
     tracing::info!(%remote, "evpn-load peer accepted inbound BGP connection");
     drop(listener);
-    establish_stream(stream, cfg).await
+    establish_stream_with_read_hold(stream, cfg, read_hold).await
 }
 
 /// Establish a synthetic peer over an already-connected TCP stream.
@@ -219,10 +239,16 @@ pub async fn establish_on(listener: TcpListener, cfg: PeerConfig) -> Result<Peer
 /// # Errors
 ///
 /// Returns a [`PeerError`] if the OPEN exchange or initial KEEPALIVE fails.
+pub async fn establish_stream(stream: TcpStream, cfg: PeerConfig) -> Result<PeerHandle, PeerError> {
+    let hold = cfg.hold_time;
+    establish_stream_with_read_hold(stream, cfg, hold).await
+}
+
 #[expect(clippy::too_many_lines, reason = "reader task body is the bulk")]
-pub async fn establish_stream(
+async fn establish_stream_with_read_hold(
     mut stream: TcpStream,
     cfg: PeerConfig,
+    read_hold: u16,
 ) -> Result<PeerHandle, PeerError> {
     validate_hold_time(cfg.hold_time)?;
 
@@ -321,7 +347,7 @@ pub async fn establish_stream(
     // sit forever and the harness would mistake silence for "in
     // progress." We implement it by selecting between socket read
     // and a deadline timer that gets reset on every byte received.
-    let hold_secs = u64::from(hold);
+    let hold_secs = u64::from(read_hold);
     let reader_task = tokio::spawn(async move {
         let mut frame_buf = BytesMut::with_capacity(65536);
         let mut tmp = [0u8; 8192];
@@ -619,6 +645,37 @@ mod tests {
             Err(PeerError::InvalidHoldTime(2))
         ));
         assert!(validate_hold_time(3).is_ok());
+    }
+
+    #[tokio::test]
+    async fn read_hold_replaces_the_advertised_hold_on_the_reader() {
+        // Advertised 30 s, local 3 s: a silent peer ends the reader after 3 s.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let cfg = |hold_time| PeerConfig {
+            listen: address,
+            local_as: 64512,
+            router_id: Ipv4Addr::LOCALHOST,
+            hold_time,
+            families: vec![(Afi::Ipv4, Safi::Unicast)],
+        };
+        let (held, silent) =
+            tokio::join!(establish_on_with_read_hold(listener, cfg(30), 3), async {
+                establish_stream(TcpStream::connect(address).await.unwrap(), cfg(0)).await
+            });
+        // Keep the decoded-message queue open: a closed one ends the reader too.
+        let PeerHandle {
+            rx: _rx,
+            tasks: [_, reader],
+            ..
+        } = held.unwrap();
+        let started = tokio::time::Instant::now();
+        tokio::time::timeout(Duration::from_secs(20), reader)
+            .await
+            .expect("the 3 s read hold ends the reader")
+            .unwrap();
+        assert!(started.elapsed() >= Duration::from_secs(2));
+        drop(silent);
     }
 
     #[tokio::test]

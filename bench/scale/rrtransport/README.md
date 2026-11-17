@@ -133,7 +133,17 @@ Established; the healthy receiver's session counts too). Recovery runs from
 the first burst UPDATE to the moment every burst receiver is exact, on the
 harness clock; it includes the paced burst (73.5 s) and the rest of the fixed
 80 s pause. `drain_after_resume_ms` reports the part after the readers
-resume.
+resume. The burst's last UPDATE (`release_sent_ms`) must precede the resume
+(`resumed_ms`), or the run is INVALID.
+
+Because `recovery_ms` includes the fixed pause, the cell 2 bar is
+insensitive to the drain. On the untimed full shape the parent recovers in
+about 90.5 s, 10.5 s of it after the resume, so the bar is max(90.5 × 1.25,
+90.5 + 2) = 113.1 s; a candidate may then drain for 113.1 − 80 = 33.1 s, about
+3.2 times the parent's drain, and still pass. The bar stays as frozen. The
+analyzer adds a report-only line that applies the same rule to
+`drain_after_resume_ms` (both medians, their ratio and the time the rule
+would allow); it never changes the verdict.
 
 The burst is paced because the RIB is serial: sent at once, 150,000 routes
 toward 150 private receivers occupy it for tens of seconds on any tree, with
@@ -141,8 +151,12 @@ the readers paused or not, and the healthy receiver's churn waits behind them
 in the RIB's queue. That delay measures the backlog, not the credit. One
 1,024-route UPDATE every 500 ms is about half the rate the RIB stages them,
 so the queue stays short and cell 3 shows what spent credit costs a healthy
-peer. The pause must stay below the receivers' 90 s hold time: a stub
-counts its hold time across a read pause.
+peer. A receiver stub's read deadline runs from its last read and keeps
+running across a read pause, and the daemon's KEEPALIVEs put that read up
+to the 90 s negotiated hold time before the pause. The stubs therefore time
+their reads out after a local 240 s (the negotiated hold time stays 90 s),
+and the harness refuses to start a pause that, with 90 s since the last
+read, would reach it.
 
 **Exhaustion witness.** The cell must show that every burst receiver spent
 its ordinary credit. The result records the peak of the credit gauge, summed
@@ -151,13 +165,26 @@ over peers: `bgp_rib_outbound_credit_bytes` on a tree that exports it, else
 number of burst receivers times the tree's per-peer credit at the cell's 153
 registered peers (the burst receivers, the healthy one and the two sources):
 2 GiB / 153 = 14,035,840 bytes on a byte-credit tree, 16,777,216 / 153 =
-109,655 rows on a row-credit tree. Admission stops within one row of a
-peer's credit, so a sum at that product means every burst receiver reached
-it. A credit refusal on every burst receiver
-(`bgp_outbound_commit_refusals_total{reason="outbound_credit"}`) is accepted
-too; a clean peer past its credit owes keys instead of refusing, so the full
-shapes show none. Without either the cell is INVALID, never PASS, and the
-verdict line names what it counted.
+109,655 rows on a row-credit tree. Admission stops a peer below its credit
+plus one row, so the sum is a witness only inside a window: at least
+receivers × credit, and at most receivers × (credit + one row) plus one
+healthy receiver's row, where a row is 1 on a row-credit tree and
+`row_size_of` + 146 bytes on a byte-credit one. A larger sum leaves room for
+one receiver that never reached its credit while others went past it, for
+example a credit larger than the burst. The per-peer gauge values are not
+exported, so the sum is all the harness can read. Outside the window the cell
+is INVALID, never PASS, and the verdict line names the numbers.
+
+Credit refusals (`bgp_outbound_commit_refusals_total{reason="outbound_credit"}`)
+are recorded and reported but are not a witness: the same reason counts a
+refusal made only because a whole-table operation is live, with no row
+charged. A clean peer past its credit owes keys instead of refusing, so the
+full shapes show none.
+
+The analyzer also checks arm identity: the parent's exhaustion results must
+lack `bgp_rib_outbound_credit_bytes` and the candidate's must carry it, so
+two builds of one tree cannot pass as the pair (cells 2 and 3 INVALID
+otherwise). `witness.receivers` must equal `shape.receivers`.
 
 Owe-whole flips (`bgp_rib_outbound_owing_flips_total`) are recorded but are
 not a witness. An RFC 4724 selection release owes its family whole to every
@@ -257,7 +284,7 @@ the fixed 9 probe cells.
 | Cell | Bar |
 | --- | --- |
 | 1 | no OOM; candidate cgroup peak ≤ parent peak − 1.5 GiB; candidate credit-bytes peak ≤ 2 GiB + 150 × one 1,024-row pass |
-| 2 | witness on both arms; exact wire state, End-of-RIB order and zero resets in every run; recovery ≤ max(parent × 1.25, parent + 2 s) |
+| 2 | witness on both arms; exact wire state, End-of-RIB order and zero resets in every run; recovery ≤ max(parent × 1.25, parent + 2 s) (the same rule on the drain after resume is report-only) |
 | 3 | no candidate delivery gap over 1 s; candidate p99 ≤ parent p99 × 1.10 |
 | 4 | zero dirty episodes in every candidate probe cell |
 | 6 | report-only |
@@ -276,7 +303,7 @@ a missing or null one makes that cell INVALID, never PASS.
 | Cell | Result file | Required fields |
 | --- | --- | --- |
 | 1 | `paused-evpn.json`, every repetition of both arms (or `paused-exit.json` with `oom`) | `mode` = `measured`; `shape.receivers`, `shape.routes`, `shape.seconds`, `shape.round_ms` fixed; `checks.no_session_resets` = true; `not_established` empty; `memory.cgroup_swap_max` = `0`; `memory.cgroup_memory_max` = 12 GiB; `memory.cgroup_memory_peak_bytes`; `memory.vmhwm_kib`; `memory.cgroup_oom_kill`; candidate `memory.peak_credit_bytes` and `row_size_of` |
-| 2 | `exhaust-<family>.json`, every run of both arms | `mode`; `shape.receivers`, `shape.rows_per_receiver`, `shape.pause_ms`, `shape.burst_interval_ms`, `shape.trigger`, `shape.registered_peers` fixed; `witness.refused_receivers`, `witness.peak_credit_rows`, `witness.receivers` (and `witness.peak_credit_bytes` on a byte-credit tree); `checks.final_state_exact`, `checks.one_eor_before_burst`, `checks.no_session_resets`; `timing.recovery_ms` once every wire check passed |
+| 2 | `exhaust-<family>.json`, every run of both arms | `mode`; `shape.receivers`, `shape.rows_per_receiver`, `shape.pause_ms`, `shape.burst_interval_ms`, `shape.trigger`, `shape.registered_peers` fixed; `witness.refused_receivers`, `witness.peak_credit_rows`, `witness.receivers` (and `witness.peak_credit_bytes` and `row_size_of` on a byte-credit tree); `timing.release_sent_ms`, `timing.resumed_ms`; `checks.final_state_exact`, `checks.one_eor_before_burst`, `checks.no_session_resets`; `timing.recovery_ms` once every wire check passed |
 | 3 | `exhaust-<family>.json`, every run of both arms | `mode`; `unaffected.injected` and `unaffected.delivered` (nonzero), `unaffected.p99_latency_ms`, `unaffected.max_gap_ms` |
 | 4 | `probes.json`, every run of both arms | `mode`; `probes` = the fixed 9 cells (`cell`, `shape`, `peers`, `stall_ms`; restart `table`), each candidate cell with `dirty_episodes` |
 | 6 | `fill-<family>.json`, every run of both arms, each family | `mode`; `shape.receivers`, `shape.rows_per_receiver` fixed; candidate `estimate.bytes_per_queued_row` and `row_size_of` |

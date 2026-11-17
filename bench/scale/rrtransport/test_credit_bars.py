@@ -26,7 +26,12 @@ def exhaust(family, recovery_ms=20_000.0, p99=5.0, gap=60.0, candidate=False):
         "mode": "measured",
         "row_size_of": 104 if family == "unicast" else 144,
         "shape": dict(credit_bars.EXHAUST_SHAPE),
-        "timing": {"recovery_ms": recovery_ms},
+        "timing": {
+            "release_sent_ms": 7_000.0,
+            "resumed_ms": 10_000.0,
+            "recovery_ms": recovery_ms,
+            "drain_after_resume_ms": recovery_ms - 10_000.0,
+        },
         "checks": {name: True for name in credit_bars.WIRE_CHECKS},
         "witness": {
             "refused_receivers": 0,
@@ -241,14 +246,178 @@ class Bars(unittest.TestCase):
                     results, "cell 2 exhaustion evpn", "INVALID", "flips are not a witness"
                 )
 
-    def test_refusals_on_every_receiver_are_a_witness(self):
-        # Each arm's own gauge below its credit, every receiver refused.
+    def test_seeded_operation_refusals_are_not_a_witness(self):
+        # Every receiver refused only because a whole-table operation was
+        # live: the same `outbound_credit` reason, nothing charged.
         for side, gauge in (("parent", "peak_credit_rows"), ("candidate", "peak_credit_bytes")):
             with self.subTest(side=side):
                 results = self.witness_defect(side, refused_receivers=150, **{gauge: 0.0})
-                verdict, reason = results["cell 2 exhaustion unicast"]
+                self.assert_only(
+                    results, "cell 2 exhaustion unicast", "INVALID", "never exhausted credit"
+                )
+                self.assertIn("refusals on 150/150 receivers, report-only", results[
+                    "cell 2 exhaustion unicast"
+                ][1])
+
+    def test_refusals_are_reported_beside_a_witness(self):
+        results = self.witness_defect("candidate", refused_receivers=3)
+        verdict, reason = results["cell 2 exhaustion unicast"]
+        self.assertEqual(verdict, "PASS", reason)
+        self.assertIn("credit refusals on 3/150 receivers, report-only", reason)
+
+    def test_seeded_overadmission_masks_a_receiver_that_spent_nothing(self):
+        # 149 receivers each one 1,024-row envelope over their credit, the
+        # 150th at zero: the sum still clears 150 x credit.
+        results = self.witness_defect(
+            "candidate", peak_credit_bytes=149.0 * (BYTE_CREDIT + 1_024 * 250)
+        )
+        self.assert_only(
+            results, "cell 2 exhaustion unicast", "INVALID", "cannot show each one reached it"
+        )
+
+    def test_seeded_credit_above_the_burst_is_invalid(self):
+        # A credit larger than the 150,000-row burst: nobody reaches it, yet
+        # the sum of whole bursts clears receivers x credit.
+        cases = {
+            "candidate": {"peak_credit_bytes": 150.0 * 150_000 * 250},
+            "parent": {"peak_credit_rows": 150.0 * 150_000},
+        }
+        for side, fields in cases.items():
+            with self.subTest(side=side):
+                results = self.witness_defect(side, **fields)
+                self.assert_only(
+                    results, "cell 2 exhaustion unicast", "INVALID", "more than every receiver"
+                )
+                self.assertIn(f"{side} run 0", results["cell 2 exhaustion unicast"][1])
+
+    def test_witness_window_edges(self):
+        # Upper edge: every receiver one row (unicast 104 + 146 bytes) past
+        # its credit, plus one healthy row; one more is INVALID.
+        cases = {
+            "candidate": ("peak_credit_bytes", 150 * (BYTE_CREDIT + 250) + 250),
+            "parent": ("peak_credit_rows", 150 * (ROW_CREDIT + 1) + 1),
+        }
+        for side, (gauge, high) in cases.items():
+            for peak, verdict in ((high, "PASS"), (high + 1, "INVALID")):
+                with self.subTest(side=side, peak=peak):
+                    results = self.witness_defect(side, **{gauge: float(peak)})
+                    self.assertEqual(results["cell 2 exhaustion unicast"][0], verdict, results)
+
+    def test_seeded_burst_sent_after_resume_is_invalid(self):
+        for sent in (10_000.0, 15_000.0):
+
+            def mutate(_parent, candidate, sent=sent):
+                candidate["exhaust-unicast.json"]["timing"]["release_sent_ms"] = sent
+
+            with self.subTest(sent=sent):
+                results = self.run_bars(mutate)
+                self.assert_only(
+                    results, "cell 2 exhaustion unicast", "INVALID", "not before the readers"
+                )
+
+    def test_seeded_witness_receivers_differ_from_shape(self):
+        results = self.witness_defect(
+            "candidate", receivers=1, peak_credit_bytes=float(BYTE_CREDIT)
+        )
+        self.assert_only(
+            results, "cell 2 exhaustion unicast", "INVALID", "witness.receivers 1 is not"
+        )
+
+    def test_seeded_arm_identity(self):
+        # Two builds of one tree: a parent with the byte gauge, or a
+        # candidate without it.
+        cases = {
+            "parent": {"peak_credit_bytes": 150.0 * BYTE_CREDIT},
+            "candidate": {"peak_credit_bytes": None, "peak_credit_rows": 150.0 * ROW_CREDIT},
+        }
+        for side, fields in cases.items():
+            with self.subTest(side=side):
+                results = self.witness_defect(side, **fields)
+                for cell in ("cell 2 exhaustion unicast", "cell 3 unaffected peer unicast"):
+                    self.assertEqual(results[cell][0], "INVALID", results[cell])
+                    self.assertIn(f"{side} exhaust-unicast run 0: byte credit gauge", results[
+                        cell
+                    ][1])
+                others = [v for name, (v, _) in results.items() if "unicast" not in name]
+                self.assertTrue(all(v == "PASS" for v in others), results)
+
+    def test_drain_after_resume_is_reported_not_gated(self):
+        # The candidate drains 3.1x slower after resume, yet recovery (which
+        # includes the 80 s pause) stays under its bar.
+        def mutate(parent, candidate):
+            parent["exhaust-unicast.json"]["timing"].update(
+                recovery_ms=90_501.0, resumed_ms=80_006.0, drain_after_resume_ms=10_495.0
+            )
+            candidate["exhaust-unicast.json"]["timing"].update(
+                recovery_ms=113_000.0, resumed_ms=80_006.0, drain_after_resume_ms=32_994.0
+            )
+
+        verdict, reason = self.run_bars(mutate)["cell 2 exhaustion unicast"]
+        self.assertEqual(verdict, "PASS", reason)
+        self.assertIn(
+            "report-only, not a bar: drain after resume candidate 32994 ms vs parent 10495 ms "
+            "(ratio 3.14; the recovery rule would allow 13119 ms)",
+            reason,
+        )
+
+    def test_drain_report_rides_a_recovery_fail(self):
+        def mutate(_parent, candidate):
+            candidate["exhaust-evpn.json"]["timing"]["recovery_ms"] = 25_001.0
+            candidate["exhaust-evpn.json"]["timing"]["drain_after_resume_ms"] = None
+
+        verdict, reason = self.run_bars(mutate)["cell 2 exhaustion evpn"]
+        self.assertEqual(verdict, "FAIL", reason)
+        self.assertIn("drain after resume: not recorded in every run", reason)
+
+    def test_seeded_later_repetition_without_witness_is_invalid(self):
+        def mutate(parent, candidate):
+            bad = exhaust("unicast", candidate=True)
+            bad["witness"]["peak_credit_bytes"] = 0.0
+            self.two_repetitions(
+                parent,
+                candidate,
+                "exhaust-unicast",
+                "exhaust-unicast.json",
+                exhaust("unicast"),
+                bad,
+            )
+
+        results = self.run_bars(mutate)
+        self.assertEqual(results["cell 2 exhaustion unicast"][0], "INVALID", results)
+        self.assertIn("candidate run 1", results["cell 2 exhaustion unicast"][1])
+
+    def check_one(self, run):
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, "exhaust-unicast.json").write_text(json.dumps(run))
+            return credit_bars.check(Path(root))[0]
+
+    def test_seeded_fewer_registered_peers_than_receivers_is_invalid(self):
+        run = exhaust("unicast")
+        run["shape"]["registered_peers"] = 149
+        _, verdict, reason = self.check_one(run)
+        self.assertEqual(verdict, "INVALID", reason)
+        self.assertIn("150 burst receivers among 149 registered peers", reason)
+
+    def test_per_peer_credit_clamps(self):
+        # (registered peers, unit, per-peer credit): the ceiling binds at 7
+        # peers (the reduced shape), the floor past 1,024 or 2,048.
+        cases = [
+            (7, "rows", 1_048_576),
+            (7, "bytes", 256 << 20),
+            (2_051, "rows", 8_192),
+            (2_051, "bytes", 2 << 20),
+        ]
+        for peers, unit, limit in cases:
+            with self.subTest(peers=peers, unit=unit):
+                receivers = peers - 3
+                run = exhaust("unicast", candidate=unit == "bytes")
+                run["shape"].update(receivers=receivers, registered_peers=peers)
+                run["witness"]["receivers"] = receivers
+                gauge = "peak_credit_bytes" if unit == "bytes" else "peak_credit_rows"
+                run["witness"][gauge] = float(receivers * limit)
+                _, verdict, reason = self.check_one(run)
                 self.assertEqual(verdict, "PASS", reason)
-                self.assertIn(f"{side} credit refusals on 150/150", reason)
+                self.assertIn(f"{receivers * limit} {unit} in [{receivers} x {limit},", reason)
 
     def test_seeded_refusals_on_too_few_receivers_are_not_a_witness(self):
         results = self.witness_defect("parent", peak_credit_rows=0.0, refused_receivers=149)
@@ -256,14 +425,20 @@ class Bars(unittest.TestCase):
 
     def test_seeded_byte_credit_tree_without_its_gauge_is_invalid(self):
         # Judged in rows, a byte-credit tree's rows never reach the row credit.
-        results = self.witness_defect("candidate", peak_credit_bytes=None)
-        self.assert_only(results, "cell 2 exhaustion unicast", "INVALID", "rows <")
+        run = exhaust("unicast", candidate=True)
+        run["witness"]["peak_credit_bytes"] = None
+        _, verdict, reason = self.check_one(run)
+        self.assertEqual(verdict, "INVALID", reason)
+        self.assertIn("rows <", reason)
 
     def test_clean_witness_names_what_it_counted(self):
         reason = self.run_bars()["cell 2 exhaustion unicast"][1]
-        self.assertIn(f"parent credit gauge peak 16448250 rows >= 150 x {ROW_CREDIT}", reason)
         self.assertIn(
-            f"candidate credit gauge peak 2105400000 bytes >= 150 x {BYTE_CREDIT}", reason
+            f"parent credit gauge peak 16448250 rows in [150 x {ROW_CREDIT}, 16448401]", reason
+        )
+        self.assertIn(
+            f"candidate credit gauge peak 2105400000 bytes in [150 x {BYTE_CREDIT}, 2105413750]",
+            reason,
         )
 
     def test_seeded_selection_release_is_not_an_exhaustion_cell(self):
@@ -356,6 +531,10 @@ class Bars(unittest.TestCase):
                     "witness.refused_receivers",
                     "witness.peak_credit_rows",
                     "witness.receivers",
+                    "shape.receivers",
+                    "timing.release_sent_ms",
+                    "timing.resumed_ms",
+                    "row_size_of",
                     "checks.final_state_exact",
                     "checks.one_eor_before_burst",
                     "checks.no_session_resets",

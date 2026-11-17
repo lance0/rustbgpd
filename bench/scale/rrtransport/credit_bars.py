@@ -61,6 +61,8 @@ ORDINARY_TRIGGER = "ordinary_announce_burst"
 # Cell 2 witness: each tree's per-peer ordinary credit, as (daemon-wide
 # credit, per-peer floor, per-peer ceiling), in the unit of the gauge the
 # tree exports: bytes where `bgp_rib_outbound_credit_bytes` exists, else rows.
+# The clamps bind outside the fixed shape (under 16 or over 1,024 registered
+# peers), which `check` can read, such as the reduced shape's 7.
 BYTE_CREDIT = (CREDIT_TARGET, 2 << 20, 256 << 20)
 ROW_CREDIT = (16_777_216, 8_192, 1_048_576)
 
@@ -272,27 +274,56 @@ def exhaustion(run: dict, what: str) -> str:
             "it cannot exhaust ordinary credit"
         )
     receivers = number(run, "witness.receivers", what)
+    if receivers != number(run, "shape.receivers", what):
+        raise Invalid(
+            f"{what}: witness.receivers {receivers} is not shape.receivers "
+            f"{run['shape']['receivers']}"
+        )
     refused = number(run, "witness.refused_receivers", what)
     peers = number(run, "shape.registered_peers", what)
     rows = number(run, "witness.peak_credit_rows", what)
     if receivers <= 0 or peers < receivers:
         raise Invalid(f"{what}: {receivers} burst receivers among {peers} registered peers")
-    # The gauge sums every peer. Admission stops at a peer's credit (within
-    # one row), so a sum at receivers x credit means every one reached it.
+    # The burst must be in the RIB before the readers resume, or the peak
+    # need not have been reached while every reader was paused.
+    sent, resumed = number(run, "timing.release_sent_ms", what), number(
+        run, "timing.resumed_ms", what
+    )
+    if sent >= resumed:
+        raise Invalid(
+            f"{what}: the burst's last UPDATE was sent at {sent:.0f} ms, not before the "
+            f"readers resumed at {resumed:.0f} ms"
+        )
+    # The gauge sums every peer. Admission stops a peer below its credit
+    # plus one row, so a sum in [R x credit, R x (credit + row)] means every
+    # burst receiver reached its credit; the healthy receiver may hold one
+    # churn row on top (a unicast row, never larger than the burst's). A
+    # larger sum leaves room for one receiver short of its credit. Credit
+    # refusals are reported but are no witness: the same reason counts a
+    # refusal for a live whole-table operation with nothing charged.
     if run["witness"].get("peak_credit_bytes") is not None:
         unit, peak, credit = "bytes", number(run, "witness.peak_credit_bytes", what), BYTE_CREDIT
+        row = number(run, "row_size_of", what) + ANNOUNCED_ROW_OVERHEAD
     else:
-        unit, peak, credit = "rows", rows, ROW_CREDIT
+        unit, peak, credit, row = "rows", rows, ROW_CREDIT, 1
     limit = min(max(credit[0] // int(peers), credit[1]), credit[2])
-    if peak >= receivers * limit:
-        return f"credit gauge peak {peak:.0f} {unit} >= {receivers} x {limit}"
-    if refused >= receivers:
-        return f"credit refusals on {refused}/{receivers} receivers"
-    flips = run["witness"].get("owing_flips_total")
-    raise Invalid(
-        f"{what}: credit gauge peak {peak:.0f} {unit} < {receivers} x {limit} and credit "
-        f"refusals on {refused}/{receivers} receivers ({flips} owe-whole flips are not a "
-        "witness); the cell never exhausted credit"
+    low, high = receivers * limit, receivers * (limit + row) + row
+    refusals = f"credit refusals on {refused}/{receivers} receivers, report-only"
+    if peak < low:
+        flips = run["witness"].get("owing_flips_total")
+        raise Invalid(
+            f"{what}: credit gauge peak {peak:.0f} {unit} < {receivers} x {limit} ({refusals}; "
+            f"{flips} owe-whole flips are not a witness); the cell never exhausted credit"
+        )
+    if peak > high:
+        raise Invalid(
+            f"{what}: credit gauge peak {peak:.0f} {unit} > {receivers} x ({limit} + {row:.0f}) "
+            f"+ {row:.0f} = {high:.0f}: more than every receiver at its credit, so the sum "
+            f"cannot show each one reached it ({refusals})"
+        )
+    return (
+        f"credit gauge peak {peak:.0f} {unit} in [{receivers} x {limit}, {high:.0f}] "
+        f"({refusals})"
     )
 
 
@@ -330,10 +361,22 @@ def recovery(runs: list[dict], arm: str) -> float:
 def exhaust_runs(parent: Arm, candidate: Arm, family: str) -> dict[str, list[dict]]:
     cell = f"exhaust-{family}"
     runs = pair(parent, candidate, cell)
-    return {
+    arms = {
         "parent": measured(runs[0], f"parent {cell}", EXHAUST_SHAPE),
         "candidate": measured(runs[1], f"candidate {cell}", EXHAUST_SHAPE),
     }
+    # Arm identity: the parent is a row-credit tree and the candidate a
+    # byte-credit one, so two builds of one tree cannot pass as the pair.
+    for arm, arm_runs in arms.items():
+        for index, run in enumerate(arm_runs):
+            present = (run.get("witness") or {}).get("peak_credit_bytes") is not None
+            if present != (arm == "candidate"):
+                raise Invalid(
+                    f"{arm} {cell} run {index}: byte credit gauge "
+                    f"{'present' if present else 'absent'}; the parent must lack "
+                    "bgp_rib_outbound_credit_bytes and the candidate must export it"
+                )
+    return arms
 
 
 def cell2(parent: Arm, candidate: Arm, family: str) -> tuple[str, str]:
@@ -350,10 +393,30 @@ def cell2(parent: Arm, candidate: Arm, family: str) -> tuple[str, str]:
         f"recovery candidate {times['candidate']:.0f} ms vs bar {bar:.0f} ms "
         f"(parent {times['parent']:.0f} ms)"
     )
+    report = drain_report(arms)
     if times["candidate"] > bar:
-        return "FAIL", f"recovery over bar: {line}"
+        return "FAIL", f"recovery over bar: {line}; {report}"
+    line += "; " + report
     witnessed = "; ".join(f"{arm} {witness}" for arm, (_, witness) in single.items())
     return "PASS", f"exhaustion witnessed ({witnessed}); wire exact, ordered, no resets; {line}"
+
+
+def drain_report(arms: dict[str, list[dict]]) -> str:
+    """The recovery rule applied to `drain_after_resume_ms`, report-only:
+    `recovery_ms` includes the fixed pause, which dilutes the bar."""
+    drains = {}
+    for arm, runs in arms.items():
+        values = [(run.get("timing") or {}).get("drain_after_resume_ms") for run in runs]
+        if not all(isinstance(v, int | float) and not isinstance(v, bool) for v in values):
+            return "report-only drain after resume: not recorded in every run"
+        drains[arm] = statistics.median(values)
+    parent, candidate = drains["parent"], drains["candidate"]
+    bar = max(parent * RECOVERY_RATIO, parent + RECOVERY_SLACK_MS)
+    ratio = f"{candidate / parent:.2f}" if parent > 0 else "n/a"
+    return (
+        f"report-only, not a bar: drain after resume candidate {candidate:.0f} ms vs parent "
+        f"{parent:.0f} ms (ratio {ratio}; the recovery rule would allow {bar:.0f} ms)"
+    )
 
 
 def cell3(parent: Arm, candidate: Arm, family: str) -> tuple[str, str]:

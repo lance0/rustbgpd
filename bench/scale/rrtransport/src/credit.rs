@@ -34,7 +34,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, ensure, Context, Result};
-use rustbgpd_evpn_load::{establish_on, PeerConfig as StubConfig, PeerIoControl};
+use rustbgpd_evpn_load::{establish_on_with_read_hold, PeerConfig as StubConfig, PeerIoControl};
 use rustbgpd_fsm::{PeerConfig, SessionState};
 use rustbgpd_policy::{
     NeighborSetMatch, Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications,
@@ -80,6 +80,10 @@ const FIT_SAMPLE: Duration = Duration::from_millis(50);
 const CHURN_EVERY: Duration = Duration::from_millis(20);
 /// Hold time of every receiver session, both ends.
 const HOLD_SECS: u16 = 90;
+/// The receiver stubs' own read timeout. A stub's deadline runs from its
+/// last read and keeps running across a read pause, so it is longer than
+/// the negotiated hold time; the daemon's sessions still use `HOLD_SECS`.
+const READ_HOLD_SECS: u16 = 240;
 /// Quiet period after every burst receiver is exact.
 const QUIET: Duration = Duration::from_secs(2);
 
@@ -605,7 +609,7 @@ struct Fixture {
     manager: tokio::task::JoinHandle<()>,
     daemon: tokio::runtime::Handle,
     receivers: Vec<Receiver>,
-    _sources: Vec<mpsc::Receiver<rustbgpd_rib::update::OutboundRouteUpdate>>,
+    sources: Vec<mpsc::Receiver<rustbgpd_rib::update::OutboundRouteUpdate>>,
 }
 
 impl Fixture {
@@ -628,7 +632,7 @@ impl Fixture {
             manager: daemon.spawn(manager.run()),
             daemon,
             receivers: Vec::new(),
-            _sources: Vec::new(),
+            sources: Vec::new(),
         }
     }
 
@@ -649,7 +653,8 @@ impl Fixture {
                 hold_time: HOLD_SECS,
                 families: families.clone(),
             };
-            let handshake = tokio::spawn(establish_on(listener, stub));
+            let handshake =
+                tokio::spawn(establish_on_with_read_hold(listener, stub, READ_HOLD_SECS));
             let guard = self.daemon.enter();
             let session = PeerHandle::spawn(
                 transport_config(address, families),
@@ -952,6 +957,18 @@ fn write_result(output: &Path, name: &str, value: &Value) -> Result<()> {
     Ok(())
 }
 
+/// A paused stub's read deadline runs from its last read before the pause,
+/// which the daemon's KEEPALIVEs keep within `HOLD_SECS`, so the pause plus
+/// that must stay inside the stub's `READ_HOLD_SECS`.
+fn check_read_hold(pause: Duration) -> Result<()> {
+    ensure!(
+        pause + Duration::from_secs(HOLD_SECS.into()) < Duration::from_secs(READ_HOLD_SECS.into()),
+        "a {pause:?} pause plus up to {HOLD_SECS} s since the last read must stay inside the \
+         receivers' {READ_HOLD_SECS} s read hold"
+    );
+    Ok(())
+}
+
 /// Cells 2 and 3: the exhaustion cell and its unaffected peer, or the same
 /// cell behind an RFC 4724 restart.
 pub async fn exhaust(
@@ -972,12 +989,7 @@ pub async fn exhaust(
         (150, 150_000, trigger.pause(), Duration::from_secs(900))
     };
     let pause = options.pause.unwrap_or(pause);
-    // A receiver stub counts its hold time across a read pause, so a pause
-    // that long would end the session on the harness side.
-    ensure!(
-        pause < Duration::from_secs(HOLD_SECS.into()),
-        "the pause must be shorter than the receivers' {HOLD_SECS} s hold time"
-    );
+    check_read_hold(pause)?;
     let interval = trigger.interval(options.reduced);
     let burst_family = family.afi_safi();
     let restart = trigger == Trigger::Restart;
@@ -1000,7 +1012,7 @@ pub async fn exhaust(
     // before any receiver registers and every burst End-of-RIB is held.
     let source_rx = source_up(&fixture.rib, SOURCE, gr_families).await?;
     let churn_rx = source_up(&fixture.rib, CHURN_SOURCE, Vec::new()).await?;
-    fixture._sources = vec![source_rx, churn_rx];
+    fixture.sources = vec![source_rx, churn_rx];
     let burst_policy = (family == Family::Unicast).then(private_unicast_policy);
     let mut specs: Vec<_> = (0..receivers)
         .map(|_| (vec![burst_family], burst_policy.clone()))
@@ -1014,6 +1026,9 @@ pub async fn exhaust(
         receivers + 1
     );
     let healthy = receivers;
+    // Every outbound peer the RIB divides its credit among: the burst
+    // receivers, the healthy one and the sources.
+    let registered_peers = fixture.receivers.len() + fixture.sources.len();
 
     // Collectors: burst receivers check the table; the healthy one logs churn.
     let stop = watch::channel(false);
@@ -1151,6 +1166,7 @@ pub async fn exhaust(
             })
             .await?;
     }
+    // When the burst's last UPDATE (a restart's End-of-RIB) was sent.
     let release_sent = t0.elapsed();
     eprintln!("burst sent at {release_sent:?}");
     let window_start = if restart { t0 + release_sent } else { t0 };
@@ -1248,9 +1264,7 @@ pub async fn exhaust(
             "chunk_rows": CHUNK,
             "burst_interval_ms": ms(interval),
             "trigger": trigger.name(),
-            // Every outbound peer the RIB divides its credit among: the
-            // burst receivers, the healthy one and the two sources.
-            "registered_peers": receivers + 3,
+            "registered_peers": registered_peers,
             "receiver_rcvbuf_bytes": RECEIVER_RCVBUF,
         },
         "row_size_of": family.row_size_of(),
@@ -1275,14 +1289,14 @@ pub async fn exhaust(
             "session_flaps_total": flaps,
         },
         "witness": {
-            // What an analyzer may count as exhaustion. Owe-whole flips are
-            // context only: a selection release flips every private
-            // receiver with no credit spent.
+            // What an analyzer may count as exhaustion. Owe-whole flips and
+            // credit refusals are context only: a selection release flips
+            // every private receiver with no credit spent, and a live
+            // whole-table operation is refused for the same reason.
             "signals": [
                 "peak of bgp_rib_outbound_credit_bytes (bgp_rib_outbound_credit_rows on a tree \
-                 without it), summed over peers, against receivers x the per-peer credit at \
-                 shape.registered_peers",
-                "bgp_outbound_commit_refusals_total{reason=\"outbound_credit\"} on every burst receiver",
+                 without it), summed over peers, between receivers x the per-peer credit at \
+                 shape.registered_peers and receivers x (that credit + one row) + one row",
             ],
             "peak_credit_rows": instruments.peak_credit_rows,
             "peak_credit_bytes": instruments.peak_credit_bytes,
@@ -1329,7 +1343,7 @@ pub async fn paused(output: &Path, options: &Options) -> Result<bool> {
     let seconds = options.seconds.unwrap_or(seconds);
     let round = Duration::from_secs(2);
     let mut fixture = Fixture::start(options, None);
-    fixture._sources = vec![source_up(&fixture.rib, SOURCE, Vec::new()).await?];
+    fixture.sources = vec![source_up(&fixture.rib, SOURCE, Vec::new()).await?];
     let specs = (0..receivers)
         .map(|_| (vec![(Afi::L2Vpn, Safi::Evpn)], None))
         .collect();
@@ -1420,7 +1434,7 @@ pub async fn fill(family: Family, output: &Path, options: &Options) -> Result<bo
         (150, 150_000)
     };
     let mut fixture = Fixture::start(options, None);
-    fixture._sources = vec![source_up(&fixture.rib, SOURCE, Vec::new()).await?];
+    fixture.sources = vec![source_up(&fixture.rib, SOURCE, Vec::new()).await?];
     // Unicast and VPN group by default; the peer-context policy keeps them private.
     let policy = matches!(family, Family::Unicast | Family::Vpn).then(private_unicast_policy);
     let specs = (0..receivers)
@@ -1524,7 +1538,9 @@ mod tests {
 
     use std::time::Instant;
 
-    use super::{recorded_pass, Options, Trigger};
+    use std::time::Duration;
+
+    use super::{check_read_hold, recorded_pass, Options, Trigger};
     use crate::credit_wire::{Observed, WireFamily, WireState};
 
     fn parse(args: &[&str]) -> Options {
@@ -1577,6 +1593,29 @@ mod tests {
         assert_eq!(run(&[&route, &eor, &route]), (false, false));
         assert_ne!(Trigger::Ordinary.eor_check(), Trigger::Restart.eor_check());
         assert_ne!(Trigger::Ordinary.cell(), Trigger::Restart.cell());
+    }
+
+    #[test]
+    fn read_hold_covers_the_pause_and_the_time_since_the_last_read() {
+        // Fixed pauses: 80 s ordinary, 30 s restart.
+        for trigger in [Trigger::Ordinary, Trigger::Restart] {
+            check_read_hold(trigger.pause()).unwrap();
+        }
+        // 240 s read hold - 90 s since the last read.
+        check_read_hold(Duration::from_millis(149_999)).unwrap();
+        assert!(check_read_hold(Duration::from_secs(150)).is_err());
+    }
+
+    #[test]
+    fn burst_intervals_match_the_measured_shape() {
+        // `credit_bars.py` fixes `burst_interval_ms` at 500 for a measured run.
+        assert_eq!(
+            Trigger::Ordinary.interval(false),
+            Duration::from_millis(500)
+        );
+        assert_eq!(Trigger::Ordinary.interval(true), Duration::from_millis(10));
+        assert_eq!(Trigger::Restart.interval(false), Duration::ZERO);
+        assert_eq!(Trigger::Restart.interval(true), Duration::ZERO);
     }
 
     #[test]
