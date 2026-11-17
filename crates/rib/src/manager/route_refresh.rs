@@ -1033,18 +1033,18 @@ impl RibManager {
             }
         };
         if matches!(replay_kind, FamilyReplayKind::SelectionRelease) {
-            if family == (Afi::L2Vpn, Safi::Evpn)
-                && (self.evpn_grouped_member_of(peer).is_some()
-                    || self.has_private_evpn_handoff(peer))
-            {
-                return FamilyReplayOutcome::Deferred;
-            }
+            // Only a unicast or VPN group member replays here. A family the
+            // peer holds in its own Adj-RIB-Out is owed at release and sent
+            // by the owed-key drain.
             let grouped = match family.1 {
                 Safi::Unicast => self.grouped_member_of(peer).is_some(),
                 Safi::MplsVpn => self.vpn_grouped_member_of(peer).is_some(),
                 _ => false,
             };
-            if grouped && !self.pending_group_admitted.contains_key(&peer) {
+            if !grouped {
+                return FamilyReplayOutcome::Deferred;
+            }
+            if !self.pending_group_admitted.contains_key(&peer) {
                 if !self.retain_initial_group_admitted(peer) {
                     return FamilyReplayOutcome::Committed;
                 }
@@ -2265,124 +2265,36 @@ impl RibManager {
             return FamilyReplayOutcome::Failed;
         }
         if matches!(replay_kind, FamilyReplayKind::SelectionRelease) {
+            // Ordinary release already committed every changed slot; only
+            // unchanged rows omitted from the held initial dump can still
+            // be missing from this exact member's proof.
             let proof = self.pending_group_admitted.get(&peer);
-            let private = self.adj_ribs_out.get(&peer);
+            let admitted = |key: crate::update::ExactExportKey| {
+                proof.as_ref().is_some_and(|proof| proof.contains(&key))
+            };
             let announce = std::mem::take(&mut unicast.announce);
             let next_hop_override = std::mem::take(&mut unicast.next_hop_override);
             for (route, action) in announce.into_iter().zip(next_hop_override) {
                 self.replacement_checkpoint(false);
-                let admitted = if member_of.is_some() {
-                    // Ordinary release already committed every changed slot;
-                    // only unchanged rows omitted from the held initial dump
-                    // can still be missing from this exact member's proof.
-                    proof.as_ref().is_some_and(|proof| {
-                        proof.contains(&crate::update::ExactExportKey::Unicast(
-                            route.prefix,
-                            route.path_id,
-                        ))
-                    })
-                } else {
-                    private.is_some_and(|rib| {
-                        rib.get(&route.prefix, route.path_id).is_some_and(|old| {
-                            super::helpers::routes_equal(old, &route)
-                                && rib.next_hop_override(&route.prefix, route.path_id)
-                                    == action.as_ref()
-                        })
-                    })
-                };
-                if !admitted {
+                if !admitted(crate::update::ExactExportKey::Unicast(
+                    route.prefix,
+                    route.path_id,
+                )) {
                     unicast.announce.push(route);
                     unicast.next_hop_override.push(action);
                 }
             }
             unicast.withdraw.retain(|(prefix, path_id)| {
                 self.replacement_checkpoint(false);
-                if member_of.is_some() {
-                    proof.as_ref().is_some_and(|proof| {
-                        proof.contains(&crate::update::ExactExportKey::Unicast(*prefix, *path_id))
-                    })
-                } else {
-                    private.is_some_and(|rib| rib.get(prefix, *path_id).is_some())
-                }
-            });
-            fs_announce.retain(|route| {
-                self.replacement_checkpoint(false);
-                !private.is_some_and(|rib| {
-                    rib.get_flowspec(&route.selection_key()).is_some_and(|old| {
-                        old.peer == route.peer && old.attributes == route.attributes
-                    })
-                })
-            });
-            fs_withdraw.retain(|key| {
-                self.replacement_checkpoint(false);
-                private.is_some_and(|rib| rib.get_flowspec(key).is_some())
-            });
-            evpn_announce.retain(|route| {
-                self.replacement_checkpoint(false);
-                !private.is_some_and(|rib| {
-                    rib.get_evpn(&route.key())
-                        .is_some_and(|old| super::helpers::evpn_routes_equal(old, route))
-                })
-            });
-            evpn_withdraw.retain(|key| {
-                self.replacement_checkpoint(false);
-                private.is_some_and(|rib| rib.get_evpn(key).is_some())
-            });
-            bgpls_announce.retain(|route| {
-                self.replacement_checkpoint(false);
-                !private.is_some_and(|rib| {
-                    rib.get_bgpls(&route.key())
-                        .is_some_and(|old| super::helpers::bgpls_routes_equal(old, route))
-                })
-            });
-            bgpls_withdraw.retain(|key| {
-                self.replacement_checkpoint(false);
-                private.is_some_and(|rib| rib.get_bgpls(key).is_some())
+                admitted(crate::update::ExactExportKey::Unicast(*prefix, *path_id))
             });
             vpn_announce.retain(|route| {
                 self.replacement_checkpoint(false);
-                if vpn_member_of.is_some() {
-                    !proof.as_ref().is_some_and(|proof| {
-                        proof.contains(&crate::update::ExactExportKey::Vpn(route.key()))
-                    })
-                } else {
-                    !private.is_some_and(|rib| {
-                        rib.get_vpn(&route.key())
-                            .is_some_and(|old| super::helpers::vpn_routes_equal(old, route))
-                    })
-                }
+                !admitted(crate::update::ExactExportKey::Vpn(route.key()))
             });
             vpn_withdraw.retain(|key| {
                 self.replacement_checkpoint(false);
-                if vpn_member_of.is_some() {
-                    proof.as_ref().is_some_and(|proof| {
-                        proof.contains(&crate::update::ExactExportKey::Vpn(key.clone()))
-                    })
-                } else {
-                    private.is_some_and(|rib| rib.get_vpn(key).is_some())
-                }
-            });
-            labeled_announce.retain(|route| {
-                self.replacement_checkpoint(false);
-                !private.is_some_and(|rib| {
-                    rib.get_labeled(&route.key())
-                        .is_some_and(|old| super::helpers::labeled_routes_equal(old, route))
-                })
-            });
-            labeled_withdraw.retain(|key| {
-                self.replacement_checkpoint(false);
-                private.is_some_and(|rib| rib.get_labeled(key).is_some())
-            });
-            rtc_announce.retain(|route| {
-                self.replacement_checkpoint(false);
-                !private.is_some_and(|rib| {
-                    rib.get_rtc(&route.key())
-                        .is_some_and(|old| super::helpers::rtc_routes_equal(old, route))
-                })
-            });
-            rtc_withdraw.retain(|key| {
-                self.replacement_checkpoint(false);
-                private.is_some_and(|rib| rib.get_rtc(key).is_some())
+                admitted(crate::update::ExactExportKey::Vpn(key.clone()))
             });
         }
         // Only this shape preserves the current advertised view until the
