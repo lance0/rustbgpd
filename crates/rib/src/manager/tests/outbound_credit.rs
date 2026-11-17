@@ -1188,9 +1188,9 @@ fn producers_stage_nothing_for_a_peer_without_credit() {
 /// turn: the peer owes the family and stays clean. With the peer's credit
 /// spent the resync tick stages nothing either, and the End-of-RIB stays
 /// owed behind the family; once credit returns, or at once with credit, a
-/// tick sends the family and then the End-of-RIB. Red without the credit
-/// check ahead of the marker's absorption: the first tick stages the family
-/// past the spent credit.
+/// tick sends the family and then the End-of-RIB. With credit spent the tick
+/// is not due: it polls for returned credit and takes no handoff for an
+/// End-of-RIB that waits on an absorption the spent credit holds.
 #[test]
 fn a_selection_release_without_credit_stages_nothing() {
     use super::selection_deferral_dirty_rtbh::{connect, manager_with_dormant_waiter};
@@ -1235,6 +1235,10 @@ fn a_selection_release_without_credit_stages_nothing() {
                 "nothing staged without credit"
             );
             assert!(manager.owes(peer, FAMILY));
+            assert!(
+                !manager.owing_tick_due(),
+                "a waiting End-of-RIB does not make the tick due without credit"
+            );
             assert!(!manager.dirty_peers.contains(&peer), "owed, not dirty");
             assert!(
                 manager.eor_pending(peer).contains(&FAMILY),

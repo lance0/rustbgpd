@@ -2959,7 +2959,6 @@ fn injected_unicast_replaces_frozen_received_selection_without_fallback() {
             assert_eq!(manager.loc_rib.get(&prefix).unwrap().peer, source);
         }
         // One family's table per tick; the session writes it before the next.
-        // One family's table per tick; the session writes it before the next.
         let mut released: Vec<_> = deferred_unicast_drain(&mut rx)
             .into_iter()
             .map(delivered)
