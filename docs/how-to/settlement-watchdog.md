@@ -560,8 +560,24 @@ detached), with a few semantics of its own:
   rollback Route Refresh that a live session leaves unanswered is retried
   once from the same two seconds; if it still fails, routes the candidate
   import policy accepted may remain, and the rollback fences the same way. A
-  refresh refused because the session is ending, or by a peer without Route
-  Refresh, is not counted as remaining routes.
+  refresh refused because the session is ending is not counted as remaining
+  routes.
+- **A rollback resets a session it cannot refresh.** When a rollback puts a
+  prior import policy back on an Established peer that did not negotiate
+  Route Refresh, the routes that peer sent under the candidate policy cannot
+  be re-evaluated in place. Once the prior policy is installed on the session,
+  the daemon resets that one session (Cease/Administrative Reset, sent as a
+  Hard Reset when the peer negotiated it), and the peer resends its routes
+  under the prior policy when it reconnects. The daemon waits only for the
+  session to accept the reset, at most 500 ms, never for the reconnect; a
+  reset the session does not accept fences the same way. This covers a config
+  transaction whose candidate could not be published, which then returns
+  `INTERNAL` naming the reset peers instead of `FAILED_PRECONDITION`, because
+  the peers saw their sessions reset; it also covers the compensation of a
+  failed live policy or peer-group edit. A forward edit is never answered with
+  a reset: an import change for such a peer is still refused before anything
+  is applied. Each reset logs a warning with the peer and
+  `reason="route_refresh_unsupported"`.
 - **What changed versus the pre-watchdog daemon:** a reload whose
   acknowledgements are lost, or whose reconcile result is not
   authoritative, now fences and exits 70 instead of logging an error

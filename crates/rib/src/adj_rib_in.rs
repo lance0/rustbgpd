@@ -6056,7 +6056,7 @@ mod tests {
         for rd in [
             None,
             Some(rustbgpd_wire::RouteDistinguisher([
-                0, 0, 0xad, 0x77, 0, 0, 0, 40,
+                0, 0, 0xfb, 0xf4, 0, 0, 0, 40,
             ])),
         ] {
             let mut route = make_flowspec_route(Ipv4Addr::new(10, 0, 0, 1));
@@ -8458,7 +8458,7 @@ mod tests {
                     // the RD tells the keys apart.
                     route.rd =
                         (safi == Safi::FlowSpecVpn).then_some(rustbgpd_wire::RouteDistinguisher([
-                            0, 0, 0xad, 0x77, 0, 0, 0, 40,
+                            0, 0, 0xfb, 0xf4, 0, 0, 0, 40,
                         ]));
                     route.path_id = u32::from(key);
                     if insert.is_none() {

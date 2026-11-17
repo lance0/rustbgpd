@@ -189,9 +189,20 @@ impl PeerSession {
         }
     }
 
+    /// A reset never leaves the peer's routes retained. In Idle there is no
+    /// session to tear down, but routes an earlier close left retained under
+    /// GR/LLGR are purged before the restart; every other state reaches
+    /// `SessionDown` through the FSM.
     async fn administrative_reset(&mut self, reason: Option<bytes::Bytes>) {
         if self.fsm.state() == SessionState::Idle {
             info!(peer = %self.peer_label, "administrative reset requested while idle");
+            if let Some(retained) = self.gr_retained_connection.get() {
+                self.gr_retained_connection.set(None);
+                let _ = self.send_to_rib(RibUpdate::PeerDown {
+                    peer: self.rib_peer(),
+                    session_id: retained.session_id,
+                });
+            }
             self.clear_reconnect_streak();
             if !self.stop_requested {
                 self.start_after_rib_admission().await;
@@ -1659,9 +1670,13 @@ impl PeerSession {
                 // subcode 4) through the FSM, which closes TCP and arms the
                 // ordinary reconnect timer on the Idle transition because
                 // `stop_requested` is deliberately left alone.
-                if self.drain_outbound_before_close().await {
-                    // The drain raised a Cease/8, but this is still the
-                    // operator's reset: it clears the backoff streak.
+                self.hard_reset_drain = true;
+                let drain_raised_cease = self.drain_outbound_before_close().await;
+                self.hard_reset_drain = false;
+                if drain_raised_cease {
+                    // The drain raised a Cease/8 (a Hard Reset under the N
+                    // bit), but this is still the operator's reset: it clears
+                    // the backoff streak.
                     self.local_notification_teardown = false;
                     self.clear_reconnect_streak();
                     self.finish_drain_teardown().await;

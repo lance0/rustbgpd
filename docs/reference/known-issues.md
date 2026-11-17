@@ -75,7 +75,8 @@ resolved.
   same key, implicitly replacing the stale row, or End-of-RIB reaches it.
   Selection release distributes routes while the grace window still holds
   End-of-RIB, so an exportable replacement normally reaches the helper at
-  release. The RTBH stays until End-of-RIB only while no replacement is
+  release, or in the resync ticks right after it for a receiver outside an
+  update group. The RTBH stays until End-of-RIB only while no replacement is
   advertised at its key: the candidate is denied by this peer's export
   policy, or is still held by selection deferral or by the ORF gate on the
   family's table (below), or, toward an Add-Path receiver, the replacement

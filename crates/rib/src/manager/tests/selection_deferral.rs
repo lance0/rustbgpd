@@ -2568,6 +2568,17 @@ fn overflow_fallback_sweeps_every_typed_loc_rib_store() {
         bgpls_family,
         crate::route::RtcRibRouteKey::afi_safi(),
     ];
+    // The timer releases every family of an armed gate through the
+    // production transition.
+    let waiter = peer_v4(Ipv4Addr::new(192, 0, 2, 77));
+    manager = manager.with_selection_deferral(SelectionDeferralConfig {
+        timeout: Duration::from_secs(60),
+        waiters: vec![SelectionDeferralWaiterConfig {
+            peer: waiter.into(),
+            families: families.to_vec(),
+        }],
+    });
+    super::arm_selection_waiter(&mut manager, waiter, &families);
     for family in families {
         manager.mark_deferred_selection_overflow_for_test(family);
     }
@@ -2634,7 +2645,7 @@ fn overflow_fallback_sweeps_every_typed_loc_rib_store() {
             *pending.lock().unwrap() = Some((stage, response));
         }
     }));
-    manager.release_selection_families(&families, "test all-family overflow release");
+    manager.expire_selection_deferral();
     manager.replacement_readiness_test_hook = None;
     let (stage, mut response) = pending.lock().unwrap().take().unwrap();
     observed

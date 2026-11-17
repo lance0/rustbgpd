@@ -1550,6 +1550,7 @@ async fn peer_group_hot_import_edit_leaves_a_member_without_route_refresh_untouc
                 None,
                 Arc::clone(&installed),
                 Arc::new(AtomicUsize::new(0)),
+                ResetLog::default(),
             ),
             session_id,
         );
@@ -1592,7 +1593,8 @@ async fn peer_group_hot_import_edit_leaves_a_member_without_route_refresh_untouc
 
 /// Peer-group compensation restores, it does not change: an earlier member
 /// that took the candidate and then reconnected without Route Refresh gets
-/// its prior chain back when a later member fails.
+/// its prior chain back when a later member fails, and its session is reset
+/// so it resends its routes under that chain.
 ///
 /// Load-bearing: compensating through a forward change is refused by that
 /// member's session, which leaves it on the candidate chain.
@@ -1617,6 +1619,7 @@ async fn peer_group_hot_compensation_restores_a_member_that_lost_route_refresh()
     // with that install; the later member never has it.
     for (addr, lose_on_install) in [(earlier, true), (failing, false)] {
         let installed = InstalledImports::default();
+        let resets = ResetLog::default();
         let session_id = mgr.peers[&key(addr)].session_id();
         let _replaced = mgr.peers.replace_handle(
             &key(addr),
@@ -1628,10 +1631,11 @@ async fn peer_group_hot_compensation_restores_a_member_that_lost_route_refresh()
                 None,
                 Arc::clone(&installed),
                 Arc::new(AtomicUsize::new(0)),
+                Arc::clone(&resets),
             ),
             session_id,
         );
-        logs.push(installed);
+        logs.push((installed, resets));
     }
 
     let mut definition = edge_group_definition(Some(90));
@@ -1648,13 +1652,28 @@ async fn peer_group_hot_compensation_restores_a_member_that_lost_route_refresh()
         )
         .await
         .expect_err("the later member refuses the import change");
+    session_drained(&mgr, earlier).await;
 
-    let earlier_installs = logs[0].lock().unwrap().clone();
+    let earlier_installs = logs[0].0.lock().unwrap().clone();
     assert_eq!(
         earlier_installs.last(),
         Some(&None),
         "the earlier member is restored to its prior chain: {earlier_installs:?} ({error})"
     );
+    // It cannot be asked to resend its routes under that chain, so its
+    // session is reset once the chain is installed, and the compensation is
+    // complete.
+    assert_eq!(
+        *logs[0].1.lock().unwrap(),
+        vec![earlier_installs.len()],
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("prior peers restored"),
+        "{error}"
+    );
     assert_eq!(mgr.peers[&key(earlier)].import_policy, None);
-    assert_eq!(logs[1].lock().unwrap().len(), 0);
+    assert!(!mgr.peers[&key(earlier)].pending_refresh, "{error}");
+    assert_eq!(logs[1].0.lock().unwrap().len(), 0);
+    assert!(logs[1].1.lock().unwrap().is_empty(), "{error}");
 }

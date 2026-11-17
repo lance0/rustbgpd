@@ -92,7 +92,7 @@ fn vpn_rule(afi: Afi, assigned: u8) -> VpnFlowSpecRule {
         FlowSpecPrefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 10), 32))
     };
     VpnFlowSpecRule {
-        rd: RouteDistinguisher([0, 0, 0xad, 0x77, 0, 0, 0, assigned]),
+        rd: RouteDistinguisher([0, 0, 0xfb, 0xf4, 0, 0, 0, assigned]),
         rule: FlowSpecRule {
             components: vec![FlowSpecComponent::DestinationPrefix(prefix)],
         },

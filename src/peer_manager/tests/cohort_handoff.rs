@@ -17,12 +17,19 @@ async fn assert_session_state_query_count(counter: &AtomicUsize, expected: usize
 /// Session model for the LAN-462 import-tolerant cohort tests: acks import,
 /// export, refresh, and state queries while counting each, tracks the live
 /// import chain, and optionally fails one export attempt.
+///
+/// With `loses_route_refresh`, the session models a reconnect without Route
+/// Refresh right after its first import install: every later refresh is
+/// answered `RouteRefreshUnsupported`, and each administrative reset records
+/// how many import chains were installed when it arrived.
 #[derive(Default)]
 struct CohortSessionCounters {
     import_installs: AtomicUsize,
     export_installs: AtomicUsize,
     refreshes: AtomicUsize,
     live_import: Mutex<Option<rustbgpd_policy::PolicyChain>>,
+    loses_route_refresh: bool,
+    resets: Mutex<Vec<usize>>,
 }
 
 fn import_tolerant_cohort_test_session(
@@ -68,7 +75,19 @@ fn import_tolerant_cohort_test_session_with_states(
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
                     counters.refreshes.fetch_add(1, Ordering::SeqCst);
-                    let _ = reply.send(Ok(()));
+                    let _ = reply.send(
+                        if counters.loses_route_refresh
+                            && counters.import_installs.load(Ordering::SeqCst) > 0
+                        {
+                            Err(rustbgpd_transport::PeerCommandError::RouteRefreshUnsupported)
+                        } else {
+                            Ok(())
+                        },
+                    );
+                }
+                PeerCommand::AdministrativeReset { .. } => {
+                    let installed = counters.import_installs.load(Ordering::SeqCst);
+                    counters.resets.lock().unwrap().push(installed);
                 }
                 PeerCommand::QueryState { reply } => {
                     state_queries += 1;
@@ -1121,6 +1140,109 @@ async fn import_tolerant_cohort_export_failure_reasserts_failing_member_import()
         assert_eq!(peer_state.export_policy, None);
         assert!(!peer_state.pending_refresh);
         assert!(!peer_state.pending_export_apply);
+    }
+
+    for peer in [first, failing] {
+        manager.delete_peer(key(peer), false).await.unwrap();
+    }
+}
+
+/// The failing member accepted the candidate import chain, then reconnected
+/// without Route Refresh before its export hot-apply failed. Its prior import
+/// chain is reasserted and, since it cannot be refreshed, its session is
+/// reset after that chain is installed: the rollback completes without
+/// refresh debt and the failure names the reset session.
+#[tokio::test]
+async fn cohort_export_failure_resets_a_failing_member_that_lost_route_refresh() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let first = IpAddr::V4(Ipv4Addr::new(10, 45, 1, 1));
+    let failing = IpAddr::V4(Ipv4Addr::new(10, 45, 1, 2));
+    let first_counters = Arc::new(CohortSessionCounters::default());
+    let failing_counters = Arc::new(CohortSessionCounters {
+        loses_route_refresh: true,
+        ..CohortSessionCounters::default()
+    });
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let _rib_task = tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            if let RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                replacements,
+                reply,
+            } = update
+            {
+                let _ = reply.send(Ok(replacements
+                    .into_iter()
+                    .rev()
+                    .map(
+                        |replacement| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
+                            peer: replacement.peer,
+                        },
+                    )
+                    .collect()));
+            }
+        }
+    });
+    let (_command_tx, command_rx) = mpsc::channel(16);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    insert_test_managed_peer(
+        &mut manager,
+        first,
+        import_tolerant_cohort_test_session(first, Arc::clone(&first_counters), None),
+        false,
+    );
+    insert_test_managed_peer(
+        &mut manager,
+        failing,
+        import_tolerant_cohort_test_session(failing, Arc::clone(&failing_counters), Some(1)),
+        false,
+    );
+
+    let shared_export = deny_policy_chain();
+    let changed_import = validation_policy_chain(ImportValidationDependency::Rpki);
+    let result = manager
+        .apply_resolved_policy_snapshot(
+            [first, failing]
+                .into_iter()
+                .map(|address| ResolvedPeerPolicy {
+                    address,
+                    interface: None,
+                    import_policy: Some(changed_import.clone()),
+                    export_policy: Some(shared_export.clone()),
+                })
+                .collect(),
+        )
+        .await;
+    session_drained(&manager, failing).await;
+
+    let error = result.expect_err("the export failure surfaces");
+    assert!(
+        error.contains("already-applied peers restored")
+            && error.contains(&format!(
+                "reset 1 session(s) that did not negotiate Route Refresh, so each resends its \
+                 routes under the restored import policy: {}",
+                key(failing)
+            )),
+        "the rollback completes and names the reset session: {error}"
+    );
+    assert_eq!(*failing_counters.live_import.lock().unwrap(), None);
+    assert_eq!(
+        *failing_counters.resets.lock().unwrap(),
+        vec![2],
+        "one reset, after the prior import chain was reasserted"
+    );
+    assert!(first_counters.resets.lock().unwrap().is_empty());
+    for peer in [first, failing] {
+        assert!(!manager.peers[&key(peer)].pending_refresh);
     }
 
     for peer in [first, failing] {
@@ -3502,4 +3624,342 @@ async fn paced_cohort_walk_does_not_spend_the_remainder_budget() {
     for peer in peers {
         manager.delete_peer(key(peer), false).await.unwrap();
     }
+}
+
+/// Every chain one restore-test session was asked to install, in order,
+/// and for each administrative reset the number of import chains installed
+/// when it arrived.
+#[derive(Default)]
+struct RestoreSessionLog {
+    imports: Mutex<Vec<Option<rustbgpd_policy::PolicyChain>>>,
+    exports: Mutex<Vec<Option<rustbgpd_policy::PolicyChain>>>,
+    refreshes: AtomicUsize,
+    resets: Mutex<Vec<usize>>,
+}
+
+/// How a restore-test session answers a Route Refresh.
+#[derive(Clone, Copy)]
+enum RefreshAnswer {
+    Sent,
+    /// As a session that did not negotiate Route Refresh.
+    Unsupported,
+    /// Never: the reply is dropped, as by a session that is ending.
+    Lost,
+}
+
+/// An Established session that records each chain it is sent. It fails its
+/// first export install when `fail_export` is set, and answers a Route
+/// Refresh as `refresh` says.
+fn restore_recording_session(
+    addr: IpAddr,
+    log: Arc<RestoreSessionLog>,
+    fail_export: bool,
+    refresh: RefreshAnswer,
+) -> PeerHandle {
+    use rustbgpd_transport::{PeerCommand, PeerCommandError};
+
+    let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(16);
+    let task = tokio::spawn(async move {
+        while let Some(command) = session_rx.recv().await {
+            match command {
+                PeerCommand::UpdateImportPolicy { policy, reply, .. } => {
+                    log.imports
+                        .lock()
+                        .unwrap()
+                        .push(policy.map(|policy| *policy));
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::UpdateExportPolicy { policy, reply } => {
+                    let attempt = {
+                        let mut exports = log.exports.lock().unwrap();
+                        exports.push(policy.map(|policy| *policy));
+                        exports.len()
+                    };
+                    let _ = reply.send(if fail_export && attempt == 1 {
+                        Err(PeerCommandError::SessionExited)
+                    } else {
+                        Ok(())
+                    });
+                }
+                PeerCommand::SendRouteRefresh { reply, .. } => {
+                    log.refreshes.fetch_add(1, Ordering::SeqCst);
+                    match refresh {
+                        RefreshAnswer::Sent => {
+                            let _ = reply.send(Ok(()));
+                        }
+                        RefreshAnswer::Unsupported => {
+                            let _ = reply.send(Err(PeerCommandError::RouteRefreshUnsupported));
+                        }
+                        RefreshAnswer::Lost => drop(reply),
+                    }
+                }
+                PeerCommand::AdministrativeReset { .. } => {
+                    let installed = log.imports.lock().unwrap().len();
+                    log.resets.lock().unwrap().push(installed);
+                }
+                PeerCommand::QueryState { reply } => {
+                    let _ = reply.send(policy_test_peer_state(addr, SessionState::Established));
+                }
+                PeerCommand::Shutdown => break,
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(session_tx, task)
+}
+
+/// RIB commands one restore test observed.
+#[derive(Default)]
+struct RestoreRibLog {
+    cohort_transitions: AtomicUsize,
+    rollback_restores: AtomicUsize,
+}
+
+/// A RIB that skips the destination prestage, commits or fails the cohort
+/// transition, and counts every rollback restore it is asked for.
+fn spawn_restore_rib_stub(
+    mut rib_rx: mpsc::Receiver<RibUpdate>,
+    commit_transition: bool,
+) -> Arc<RestoreRibLog> {
+    let log = Arc::new(RestoreRibLog::default());
+    let rib_log = Arc::clone(&log);
+    tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            match update {
+                RibUpdate::PrepareExportPolicyDestination { reply, .. } => {
+                    let _ = reply.send(Err("test: prestage skipped".to_string()));
+                }
+                RibUpdate::ReplacePeerExportPolicies { reply, .. } => {
+                    rib_log.cohort_transitions.fetch_add(1, Ordering::SeqCst);
+                    let _ = reply.send(if commit_transition {
+                        Ok(rustbgpd_rib::ExportPolicyCohortOutcome::Committed)
+                    } else {
+                        Err("injected cohort failure".to_string())
+                    });
+                }
+                RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                    replacements,
+                    reply,
+                } => {
+                    rib_log.rollback_restores.fetch_add(1, Ordering::SeqCst);
+                    let _ = reply.send(Ok(replacements
+                        .into_iter()
+                        .rev()
+                        .map(
+                            |replacement| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
+                                peer: replacement.peer,
+                            },
+                        )
+                        .collect()));
+                }
+                _ => {}
+            }
+        }
+    });
+    log
+}
+
+struct FailedCohortRestore {
+    outcome: Result<Vec<PeerKey>, super::super::policy::PolicySnapshotFailure>,
+    manager: PeerManager,
+    peers: [IpAddr; 2],
+    sessions: [Arc<RestoreSessionLog>; 2],
+    rib: Arc<RestoreRibLog>,
+}
+
+impl FailedCohortRestore {
+    /// A two-member restore cohort: both members run the candidate import
+    /// and export chains a failed transaction installed, and the restore
+    /// puts back the prior permit-all chains. `fail_export` and `refresh`
+    /// shape the second member's session.
+    async fn run(commit_transition: bool, fail_export: bool, refresh: RefreshAnswer) -> Self {
+        use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+        let peers = [
+            IpAddr::V4(Ipv4Addr::new(10, 48, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(10, 48, 0, 2)),
+        ];
+        let sessions = [
+            Arc::new(RestoreSessionLog::default()),
+            Arc::new(RestoreSessionLog::default()),
+        ];
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let rib = spawn_restore_rib_stub(rib_rx, commit_transition);
+        let (_command_tx, command_rx) = mpsc::channel(16);
+        let mut manager = PeerManager::new(
+            command_rx,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            BgpMetrics::new(),
+            rib_tx,
+            None,
+        );
+        for (index, (peer, log)) in peers.iter().zip(&sessions).enumerate() {
+            let second = index == 1;
+            insert_test_managed_peer(
+                &mut manager,
+                *peer,
+                restore_recording_session(
+                    *peer,
+                    Arc::clone(log),
+                    second && fail_export,
+                    if second { refresh } else { RefreshAnswer::Sent },
+                ),
+                false,
+            );
+            // The candidate chains the failed transaction installed.
+            let peer_state = manager.peers.get_mut(&key(*peer)).unwrap();
+            peer_state.import_policy =
+                Some(validation_policy_chain(ImportValidationDependency::Rpki));
+            peer_state.export_policy = Some(deny_policy_chain());
+        }
+
+        let outcome = manager
+            .restore_resolved_policy_snapshot(
+                peers
+                    .iter()
+                    .map(|&address| ResolvedPeerPolicy {
+                        address,
+                        interface: None,
+                        import_policy: None,
+                        export_policy: None,
+                    })
+                    .collect(),
+                false,
+                OperatorReadAdmission::Served,
+            )
+            .await;
+        Self {
+            outcome,
+            manager,
+            peers,
+            sessions,
+            rib,
+        }
+    }
+
+    /// A failed restore is ambiguous and is never unwound: no session is
+    /// sent a candidate chain after its prior one, and no RIB rollback
+    /// restore runs.
+    fn assert_left_in_place(&self) {
+        let failure = self
+            .outcome
+            .as_ref()
+            .expect_err("the injected fault fails the restore");
+        let message = failure.message();
+        assert_eq!(
+            failure.kind,
+            super::super::policy::PolicySnapshotFailureKind::CompensationAmbiguous,
+            "{message}"
+        );
+        for (peer, log) in self.peers.iter().zip(&self.sessions) {
+            assert_eq!(
+                *log.imports.lock().unwrap(),
+                vec![None],
+                "{peer} is sent only its prior import chain: {message}"
+            );
+            assert_eq!(
+                *log.exports.lock().unwrap(),
+                vec![None],
+                "{peer} is sent only its prior export chain: {message}"
+            );
+            assert_eq!(self.manager.peers[&key(*peer)].import_policy, None);
+        }
+        assert_eq!(
+            self.rib.rollback_restores.load(Ordering::SeqCst),
+            0,
+            "a failed restore registers no RIB rollback: {message}"
+        );
+    }
+
+    async fn finish(mut self) {
+        for peer in self.peers {
+            self.manager.delete_peer(key(peer), false).await.unwrap();
+        }
+    }
+}
+
+/// The cohort RIB transition of a restore fails. The sessions already run
+/// the prior chains, and they keep them: the captured priors are the
+/// candidate the restore is removing, so unwinding would reinstall it.
+#[tokio::test]
+async fn failed_restore_rib_transition_leaves_the_prior_chains_in_place() {
+    let restore = FailedCohortRestore::run(false, false, RefreshAnswer::Sent).await;
+
+    assert_eq!(restore.rib.cohort_transitions.load(Ordering::SeqCst), 1);
+    restore.assert_left_in_place();
+    for peer in restore.peers {
+        assert_eq!(restore.manager.peers[&key(peer)].export_policy, None);
+    }
+    restore.finish().await;
+}
+
+/// The second member's export install fails during the restore cohort's
+/// setup. Neither member is unwound, and the failing member is not sent its
+/// candidate chains inline either: its export install is left unknown.
+#[tokio::test]
+async fn failed_restore_cohort_setup_does_not_reassert_the_candidate() {
+    let restore = FailedCohortRestore::run(true, true, RefreshAnswer::Sent).await;
+
+    assert_eq!(
+        restore.rib.cohort_transitions.load(Ordering::SeqCst),
+        0,
+        "a setup failure stops before the RIB transition"
+    );
+    restore.assert_left_in_place();
+    assert_eq!(
+        restore.sessions[1].refreshes.load(Ordering::SeqCst),
+        0,
+        "no refresh is sent under the candidate import chain"
+    );
+    assert!(restore.manager.peers[&key(restore.peers[1])].export_install_unknown);
+    restore.finish().await;
+}
+
+/// A member takes its prior import chain and then never answers the
+/// deferred refresh. Both members keep the prior chains and the restore
+/// reports ambiguous, instead of returning both to the candidate.
+#[tokio::test]
+async fn failed_restore_deferred_refresh_leaves_the_prior_chains_in_place() {
+    let restore = FailedCohortRestore::run(true, false, RefreshAnswer::Lost).await;
+
+    assert_eq!(restore.rib.cohort_transitions.load(Ordering::SeqCst), 1);
+    assert_eq!(restore.sessions[1].refreshes.load(Ordering::SeqCst), 1);
+    restore.assert_left_in_place();
+    restore.finish().await;
+}
+
+/// The production-shaped case: a cohort member that did not negotiate Route
+/// Refresh takes its prior import chain, since a restore is never refused,
+/// and cannot answer the deferred refresh. Its session is reset after the
+/// chain is installed, so the peer resends its routes under it, and the
+/// restore completes; the other member is refreshed.
+#[tokio::test]
+async fn restore_cohort_resets_a_member_without_route_refresh() {
+    let restore = FailedCohortRestore::run(true, false, RefreshAnswer::Unsupported).await;
+    for peer in restore.peers {
+        session_drained(&restore.manager, peer).await;
+    }
+
+    assert_eq!(
+        restore
+            .outcome
+            .as_ref()
+            .map_err(super::super::policy::PolicySnapshotFailure::message),
+        Ok(&vec![key(restore.peers[1])])
+    );
+    assert_eq!(restore.rib.cohort_transitions.load(Ordering::SeqCst), 1);
+    assert_eq!(restore.sessions[0].refreshes.load(Ordering::SeqCst), 1);
+    assert!(restore.sessions[0].resets.lock().unwrap().is_empty());
+    assert_eq!(*restore.sessions[1].imports.lock().unwrap(), vec![None]);
+    assert_eq!(
+        *restore.sessions[1].resets.lock().unwrap(),
+        vec![1],
+        "one reset, after the prior chain was installed"
+    );
+    assert!(!restore.manager.peers[&key(restore.peers[1])].pending_refresh);
+    restore.finish().await;
 }

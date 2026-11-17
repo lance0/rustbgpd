@@ -4044,10 +4044,16 @@ impl RibManager {
                 refused_withdrawals = true;
             }
         }
+        // The basis of a clean regroup's seal, which stands in for a proof.
+        let evpn_clean_regroup = batch
+            .evpn_complete_feed
+            .as_ref()
+            .and_then(|seal| seal.clean_regroup().cloned());
         if !self.reserve_evpn_recovery_admission(
             peer,
             &mut batch.evpn_announce,
             &mut batch.evpn_withdraw,
+            evpn_clean_regroup.is_some(),
         ) {
             batch.retire_with(
                 &mut || checkpoint(),
@@ -4658,8 +4664,14 @@ impl RibManager {
                     &source_excluded,
                     &previously_advertised,
                     |key| {
-                        self.evpn_prior_admitted(peer, key, evpn_stage, evpn_clean_replay)
-                            .unwrap_or(false)
+                        self.evpn_prior_admitted(
+                            peer,
+                            key,
+                            evpn_stage,
+                            evpn_clean_replay,
+                            evpn_clean_regroup.as_deref(),
+                        )
+                        .unwrap_or(false)
                     },
                 );
                 group_prior = previously_advertised;
@@ -4875,6 +4887,7 @@ impl RibManager {
                 &evpn_withdraw,
                 evpn_stage,
                 evpn_clean_replay,
+                evpn_clean_regroup.as_deref(),
             ) else {
                 if let Some(handle) = self.evpn_recovery_handle(peer) {
                     self.evpn_recovery.fail_admission(handle);
@@ -5934,7 +5947,7 @@ impl RibManager {
             // and ungrouped peers (per-peer equality-suppressed diff) —
             // takes the dirty resync exactly as before.
             let before = manager.grouped_member_of(peer);
-            let mut evpn_feed = manager.recompute_update_group(peer);
+            let mut evpn_feed = manager.recompute_update_group_for_pass(peer);
             manager.create_installed_export_counters([peer]);
             let key_stable = before.is_some() && before == manager.grouped_member_of(peer);
             if !key_stable {
@@ -6821,7 +6834,7 @@ impl RibManager {
             }
             let member_started = std::time::Instant::now();
             let before = self.grouped_member_of(peer);
-            let mut evpn_feed = self.recompute_update_group(peer);
+            let mut evpn_feed = self.recompute_update_group_for_pass(peer);
             let key_stable = before.is_some() && before == self.grouped_member_of(peer);
             if !key_stable {
                 self.mark_outbound_dirty_with_evpn_feed(peer, &mut evpn_feed);
@@ -9324,6 +9337,12 @@ impl RibManager {
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
         checkpoint();
+        // Feeds built with no proof of actual OLD: each is settled after the
+        // member loop, whatever became of its commit.
+        let clean_evpn_regroups: Vec<_> = evpn_feeds
+            .iter()
+            .filter_map(|(&peer, feed)| Some((peer, feed.seal.clean_regroup()?.clone())))
+            .collect();
 
         // An owed-key drain carries no route change: none of a pass's
         // preamble side effects apply to it.
@@ -9470,6 +9489,9 @@ impl RibManager {
         drop(readiness);
         self.finish_readiness_owner(prep_installed);
         let distribute_peers = || {
+            // The unicast AFIs this pass carries, read once for the first
+            // peer that owes one of them whole.
+            let mut carried_afis: Option<[bool; 2]> = None;
             for peer in peers {
                 let paced_member_started = self
                     .paced_member_costs
@@ -9943,7 +9965,20 @@ impl RibManager {
                         HashSet::new()
                     };
 
-                    let mut effective_evpn_keys: HashSet<rustbgpd_wire::EvpnRouteKey> = if resync
+                    // A group-owned member's resync stages EVPN from its
+                    // complete feed, never from this key set, so it enumerates
+                    // no key. The empty-resync exit below still needs to know
+                    // whether the set would have held one.
+                    let owned_evpn_scope = resync
+                        && evpn_group_owned
+                        && !self.selection_deferred((Afi::L2Vpn, Safi::Evpn))
+                        && (self.loc_rib.evpn_len() != 0
+                            || self
+                                .adj_ribs_out
+                                .get(&peer)
+                                .is_some_and(|rib_out| rib_out.evpn_len() != 0));
+                    let mut effective_evpn_keys: HashSet<rustbgpd_wire::EvpnRouteKey> = if (resync
+                        && !evpn_group_owned)
                         || whole(super::outbound_owing::OwedFamily::EVPN)
                     {
                         self.replacement_checkpoint(true);
@@ -9952,10 +9987,18 @@ impl RibManager {
                                 + self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::evpn_len),
                         );
                         self.replacement_checkpoint(true);
+                        #[cfg(test)]
+                        let row_observer = self.replacement_readiness_test_hook.as_ref();
                         all.extend(
                             self.loc_rib
                                 .iter_evpn()
-                                .inspect(|_| checkpoint())
+                                .inspect(|_| {
+                                    checkpoint();
+                                    #[cfg(test)]
+                                    if let Some(observer) = row_observer {
+                                        observer("resync_evpn_key");
+                                    }
+                                })
                                 .map(crate::route::EvpnRibRoute::key),
                         );
                         if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
@@ -10303,24 +10346,46 @@ impl RibManager {
                             {
                                 let sendable = self.peer_sendable_families.get(&peer);
                                 let orf = self.peer_orf_pending.get(&peer);
-                                let mut kept = HashSet::with_capacity(effective_prefixes.len());
+                                // Every AFI the pass carries is owed whole
+                                // (a selection release toward each private
+                                // receiver): nothing is staged or marked,
+                                // so the prefixes are not visited per peer.
+                                let afi =
+                                    |prefix: &Prefix| usize::from(matches!(prefix, Prefix::V6(_)));
+                                let whole_only = gates.contains(&OwingGate::Whole) && {
+                                    let carried = *carried_afis.get_or_insert_with(|| {
+                                        let mut carried = [false; 2];
+                                        for prefix in best_changed.iter().chain(&all_affected) {
+                                            checkpoint();
+                                            carried[afi(prefix)] = true;
+                                        }
+                                        carried
+                                    });
+                                    (0..2)
+                                        .all(|afi| !carried[afi] || gates[afi] == OwingGate::Whole)
+                                };
+                                let mut kept = HashSet::new();
                                 let mut marks = Vec::new();
-                                for prefix in effective_prefixes.iter() {
-                                    checkpoint();
-                                    let family = prefix_family(prefix);
-                                    match gates[usize::from(matches!(prefix, Prefix::V6(_)))] {
-                                        OwingGate::Stream { .. } => {
-                                            kept.insert(*prefix);
+                                if !whole_only {
+                                    kept.reserve(effective_prefixes.len());
+                                    for prefix in effective_prefixes.iter() {
+                                        checkpoint();
+                                        let family = prefix_family(prefix);
+                                        match gates[afi(prefix)] {
+                                            OwingGate::Stream { .. } => {
+                                                kept.insert(*prefix);
+                                            }
+                                            OwingGate::Owe
+                                                if sendable.is_some_and(|families| {
+                                                    families.contains(&family)
+                                                }) && !orf.is_some_and(|gated| {
+                                                    gated.contains(&family)
+                                                }) =>
+                                            {
+                                                marks.push(OwedKey::Unicast(*prefix));
+                                            }
+                                            OwingGate::Owe | OwingGate::Whole => {}
                                         }
-                                        OwingGate::Owe
-                                            if sendable.is_some_and(|families| {
-                                                families.contains(&family)
-                                            }) && !orf
-                                                .is_some_and(|gated| gated.contains(&family)) =>
-                                        {
-                                            marks.push(OwedKey::Unicast(*prefix));
-                                        }
-                                        OwingGate::Owe | OwingGate::Whole => {}
                                     }
                                 }
                                 self.mark_owed(peer, marks);
@@ -10392,6 +10457,7 @@ impl RibManager {
                                 }))
                         && effective_flowspec_rules.is_empty()
                         && effective_evpn_keys.is_empty()
+                        && !owned_evpn_scope
                         && effective_bgpls_keys.is_empty()
                         && effective_l3vpn_keys.is_empty()
                         && !grouped_vpn_live
@@ -11075,6 +11141,16 @@ impl RibManager {
                                     selection.selection_deferred(route.family())
                                 })
                         });
+                        if !resync {
+                            // A drain sends what the peer lacks: a rule it
+                            // already holds unchanged is not announced again.
+                            fs_announce.retain(|route| {
+                                checkpoint();
+                                !rib_out
+                                    .get_flowspec(&route.selection_key())
+                                    .is_some_and(|old| old.same_advertisement(route))
+                            });
+                        }
                     }
 
                     let mut evpn_complete_feed = None;
@@ -11865,6 +11941,19 @@ impl RibManager {
             super::with_executor_handoff(distribute_peers);
         } else {
             distribute_peers();
+        }
+        for (peer, basis) in clean_evpn_regroups {
+            let started = std::time::Instant::now();
+            self.settle_clean_evpn_regroup(peer, &basis);
+            // A missed mover's capture is part of its share of this pass:
+            // the paced walk budgets the next command from it.
+            if let Some(Some(share)) = self
+                .paced_member_costs
+                .as_mut()
+                .and_then(|costs| costs.get_mut(&peer))
+            {
+                *share += started.elapsed();
+            }
         }
         // Shared cleanup is owned when it releases inventory: an owned pass,
         // more memoized source attribute sets than staged prefixes (several

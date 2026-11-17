@@ -1565,8 +1565,14 @@ fn peer_identity_gauge(
 /// caller's probe and its install is reproduced. With
 /// `lose_route_refresh_on_install`, the first answered Route Refresh takes the
 /// capability away: the peer reconnected without it after taking the chain.
+/// Each administrative reset records how many chains the session had
+/// installed when it arrived, in `resets`; the session stays up.
 ///
 /// [`ImportPolicyInstall::refused`]: rustbgpd_transport::ImportPolicyInstall::refused
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one recording session stub; every argument is an independent axis a test sets"
+)]
 fn import_recording_handle(
     peer_addr: IpAddr,
     route_refresh: bool,
@@ -1575,6 +1581,7 @@ fn import_recording_handle(
     prior: Option<PolicyChain>,
     installed: InstalledImports,
     refreshes: Arc<AtomicUsize>,
+    resets: ResetLog,
 ) -> PeerHandle {
     use rustbgpd_transport::{PeerCommand, PeerCommandError};
     let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
@@ -1627,6 +1634,9 @@ fn import_recording_handle(
                         let _ = reply.send(Err(PeerCommandError::RouteRefreshUnsupported));
                     }
                 }
+                PeerCommand::AdministrativeReset { .. } => {
+                    resets.lock().unwrap().push(installed.lock().unwrap().len());
+                }
                 PeerCommand::Shutdown | PeerCommand::Stop { .. } | PeerCommand::CollisionDump => {
                     break;
                 }
@@ -1640,6 +1650,22 @@ fn import_recording_handle(
 
 type InstalledImports = Arc<std::sync::Mutex<Vec<Option<PolicyChain>>>>;
 
+/// For each administrative reset a recording session received, how many
+/// import chains it had installed when the reset arrived.
+type ResetLog = Arc<std::sync::Mutex<Vec<usize>>>;
+
+/// Return once `addr`'s session has handled every command queued before
+/// this one. A reset is only admitted to the session's queue, so a test
+/// reads the session's [`ResetLog`] after this handshake.
+async fn session_drained(mgr: &PeerManager, addr: IpAddr) {
+    PeerHandle::query_state_with(
+        mgr.peers[&key(addr)].handle().commands_sender(),
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("the session answers behind its queued commands");
+}
+
 /// Insert a peer at `peer_key` whose session is [`import_recording_handle`],
 /// with `prior` as its running import chain.
 fn install_import_recording_peer_at(
@@ -1649,8 +1675,23 @@ fn install_import_recording_peer_at(
     idle_queries: usize,
     prior: Option<PolicyChain>,
 ) -> (InstalledImports, Arc<AtomicUsize>) {
+    let (installed, refreshes, _resets) =
+        install_reset_recording_peer_at(mgr, peer_key, route_refresh, idle_queries, prior);
+    (installed, refreshes)
+}
+
+/// [`install_import_recording_peer_at`], also returning the session's
+/// [`ResetLog`].
+fn install_reset_recording_peer_at(
+    mgr: &mut PeerManager,
+    peer_key: &PeerKey,
+    route_refresh: bool,
+    idle_queries: usize,
+    prior: Option<PolicyChain>,
+) -> (InstalledImports, Arc<AtomicUsize>, ResetLog) {
     let installed = InstalledImports::default();
     let refreshes = Arc::new(AtomicUsize::new(0));
+    let resets = ResetLog::default();
     insert_test_managed_peer_for_key(
         mgr,
         peer_key,
@@ -1663,11 +1704,12 @@ fn install_import_recording_peer_at(
             prior.clone(),
             Arc::clone(&installed),
             Arc::clone(&refreshes),
+            Arc::clone(&resets),
         ),
         false,
     );
     mgr.peers.get_mut(peer_key).unwrap().import_policy = prior;
-    (installed, refreshes)
+    (installed, refreshes, resets)
 }
 
 fn install_import_recording_peer(

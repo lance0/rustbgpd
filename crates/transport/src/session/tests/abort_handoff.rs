@@ -13,20 +13,20 @@ use crate::{PeerHandle, PeerShutdownError};
 const RELAY: usize = 64;
 const SHUTDOWN_BOUND: Duration = Duration::from_millis(500);
 
-fn first() -> Ipv4Prefix {
+pub(super) fn first() -> Ipv4Prefix {
     Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24)
 }
 fn second() -> Ipv4Prefix {
     Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)
 }
 
-struct GatedRib {
+pub(super) struct GatedRib {
     relay_tx: mpsc::Sender<RibUpdate>,
     relay_rx: mpsc::Receiver<RibUpdate>,
     rib_tx: mpsc::Sender<RibUpdate>,
     metrics: BgpMetrics,
     /// Session-end messages forwarded to the RIB so far, in order.
-    ends: Vec<(&'static str, u64)>,
+    pub(super) ends: Vec<(&'static str, u64)>,
     /// Every forwarded message from a session, as `(kind, session id)`.
     forwarded: Vec<(&'static str, u64)>,
     /// Every message forwarded through the relay other than its fillers.
@@ -36,7 +36,7 @@ struct GatedRib {
 }
 
 impl GatedRib {
-    fn spawn() -> Self {
+    pub(super) fn spawn() -> Self {
         let (relay_tx, relay_rx) = mpsc::channel(RELAY);
         let (rib_tx, rib_rx) = mpsc::channel(RELAY);
         let (_query_tx, query_rx) = mpsc::channel(8);
@@ -69,7 +69,7 @@ impl GatedRib {
     /// Forward everything the senders can deliver. The paused clock only
     /// advances once every task is idle, so the timeout is the handshake
     /// for "nothing further is coming", not a wall-clock wait.
-    async fn release(&mut self) {
+    pub(super) async fn release(&mut self) {
         while let Ok(Some(update)) =
             tokio::time::timeout(Duration::from_millis(10), self.relay_rx.recv()).await
         {
@@ -124,7 +124,7 @@ impl GatedRib {
     }
 
     /// Loc-RIB size once the RIB has handled everything forwarded so far.
-    async fn loc_rib_count(&self) -> usize {
+    pub(super) async fn loc_rib_count(&self) -> usize {
         let (reply, count) = oneshot::channel();
         self.rib_tx
             .send(RibUpdate::QueryLocRibCount { reply })
@@ -133,7 +133,7 @@ impl GatedRib {
         count.await.unwrap()
     }
 
-    async fn retained_stale(&self, peer: PeerId) -> usize {
+    pub(super) async fn retained_stale(&self, peer: PeerId) -> usize {
         let (reply, count) = oneshot::channel();
         self.rib_tx
             .send(RibUpdate::QueryPeerRetainedStale { peer, reply })
@@ -153,7 +153,7 @@ impl GatedRib {
 
 /// An Established session `id` for the one test peer, delivering to `rib`
 /// through the relay.
-async fn established(
+pub(super) async fn established(
     rib: &GatedRib,
     id: u64,
 ) -> (PeerSession, mpsc::Sender<PeerCommand>, TcpStream) {
@@ -218,13 +218,13 @@ fn negotiate_restart(session: &mut PeerSession) {
     session.negotiated = Some(Arc::new(negotiated));
 }
 
-fn receive(session: &mut PeerSession, prefix: Ipv4Prefix) {
+pub(super) fn receive(session: &mut PeerSession, prefix: Ipv4Prefix) {
     session.read_buf.buf.extend_from_slice(
         &rustbgpd_wire::encode_message(&Message::Update(ipv4_announce(prefix, 0, false))).unwrap(),
     );
 }
 
-async fn tcp_fails(session: &mut PeerSession) {
+pub(super) async fn tcp_fails(session: &mut PeerSession) {
     session.handle_tcp_disconnect();
     session.drive_fsm(Event::TcpConnectionFails).await;
 }

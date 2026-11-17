@@ -87,6 +87,7 @@ The authority and compensation matrix is:
 | --- | --- | --- |
 | Stage failure or lost stage acknowledgement before runtime mutation | No runtime work begins | Clean no effect |
 | `NotPublished` plus complete acknowledged compensation | Restore runtime and snapshot | Clean no effect |
+| `NotPublished` plus complete compensation that reset a session without Route Refresh (amended 2026-11-17) | Restore runtime and snapshot; reset that one session | Settled `INTERNAL` naming the session; not fenced |
 | `NotPublished` after a neighbor, peer-group, or policy session mutation | Session identity cannot be restored | `KnownDivergence` |
 | `NotPublished` plus known compensation failure | Stop compensation | `KnownDivergence` |
 | `NotPublished` plus accepted compensation reply loss | Do not guess completion | `AcknowledgementLost` |
@@ -536,3 +537,28 @@ is discarded; the reply to an accepted command keeps its own bound.
 Controlled-time unit tests prove that each handoff ends at exactly its
 pre-effect deadline without delivering the command, and that an accepted
 command's reply still waits past that deadline.
+
+## Amendment (2026-11-17): a policy rollback resets a session it cannot refresh
+
+A live policy transaction whose candidate is `NotPublished` restores the prior
+chains. A peer that came up without Route Refresh after the forward apply took
+the candidate import chain, and the routes it sent since were judged under it;
+the restore cannot ask that peer to resend them, so it was reported ambiguous
+and the owner fenced `known_divergence`, dropping every session for one peer.
+
+The restore now resets that one session (Cease/Administrative Reset, as a Hard
+Reset when negotiated) once the session has acknowledged the prior chain, and
+the peer resends its routes under it on reconnect. The runtime is exact, so
+the owner does not fence. It is not the clean no-effect refusal either: the
+peer saw its session reset, so the result is a settled `INTERNAL` that names
+the reset sessions, not `FAILED_PRECONDITION`. The peer-manager actor waits
+only for the session to admit the reset; a reset that is not admitted leaves
+the restore ambiguous, and the owner fences as before. The same rule applies
+wherever the actor restores captured chains: the compensation of a failed
+forward policy or peer-group edit, and the restoration of a rejected reload
+generation.
+
+The live chains are still restored before the config snapshot. While the
+candidate snapshot is staged the actor refuses every dynamic accept, so a
+reset dynamic peer that reconnects before the snapshot is restored is
+dropped, not accepted under the candidate's chains.

@@ -3254,6 +3254,7 @@ fn assert_deferred_frozen_rejection_stays_exact(
     }
     assert!(!manager.selection_deferred(family), "{case}");
     assert_eq!(frozen(&manager), reannounce, "{case}");
+    drain_resync_ticks(&mut manager);
 
     assert_eq!(
         bmp_advertised(&mut manager, classic, family),

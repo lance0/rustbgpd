@@ -9,24 +9,24 @@ use crate::test_support::peer_v4;
 use crate::update::{InjectOutcome, RibCommandError};
 use rustbgpd_wire::{ExtendedCommunity, RouteDistinguisher};
 
-const RD_A: RouteDistinguisher = RouteDistinguisher([0, 0, 0xad, 0x77, 0, 0, 0, 40]);
-const RD_B: RouteDistinguisher = RouteDistinguisher([0, 0, 0xad, 0x77, 0, 0, 0, 41]);
-const RD_C: RouteDistinguisher = RouteDistinguisher([0, 0, 0xad, 0x77, 0, 0, 0, 42]);
+const RD_A: RouteDistinguisher = RouteDistinguisher([0, 0, 0xfb, 0xf4, 0, 0, 0, 40]);
+const RD_B: RouteDistinguisher = RouteDistinguisher([0, 0, 0xfb, 0xf4, 0, 0, 0, 41]);
+const RD_C: RouteDistinguisher = RouteDistinguisher([0, 0, 0xfb, 0xf4, 0, 0, 0, 42]);
 const GLOBAL: (Afi, Safi) = (Afi::Ipv4, Safi::FlowSpec);
 const VPN: (Afi, Safi) = (Afi::Ipv4, Safi::FlowSpecVpn);
 const GLOBAL_V6: (Afi, Safi) = (Afi::Ipv6, Safi::FlowSpec);
 const VPN_V6: (Afi, Safi) = (Afi::Ipv6, Safi::FlowSpecVpn);
 const RTC: (Afi, Safi) = (Afi::Ipv4, Safi::RtConstrain);
 
-/// Route Target `44407:value` (two-octet AS, type 0x00 / sub-type 0x02).
+/// Route Target `64500:value` (two-octet AS, type 0x00 / sub-type 0x02).
 fn rt(value: u32) -> PathAttribute {
     PathAttribute::ExtendedCommunities(vec![ExtendedCommunity::new(
-        0x0002_ad77_0000_0000 | u64::from(value),
+        0x0002_fbf4_0000_0000 | u64::from(value),
     )])
 }
 
 /// A local rule for `192.0.2.0/24` in `rd` (global when `None`), exported
-/// with Route Target `44407:rt_value`.
+/// with Route Target `64500:rt_value`.
 fn local_rule(rd: Option<RouteDistinguisher>, rt_value: u32) -> FlowSpecRoute {
     let mut route = make_flowspec_route(Ipv4Addr::UNSPECIFIED);
     route.peer = LOCAL_PEER;
@@ -320,7 +320,7 @@ async fn missing_vpn_rule_diagnostics_preserve_the_scoped_identity() {
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     // These two RDs have the same Display text but different wire encodings.
-    let small_asn_type_two = RouteDistinguisher([0, 2, 0, 0, 0xad, 0x77, 0, 40]);
+    let small_asn_type_two = RouteDistinguisher([0, 2, 0, 0, 0xfb, 0xf4, 0, 40]);
     assert_eq!(RD_A.to_string(), small_asn_type_two.to_string());
     for afi in [Afi::Ipv4, Afi::Ipv6] {
         for rd in [None, Some(RD_A), Some(RD_B), Some(small_asn_type_two)] {
@@ -431,9 +431,9 @@ async fn rpol_vpn_rt_rewrite_preserves_identity_actions_and_other_scopes() {
     let policy = rpol_chain(
         r"policy export {
             term vpn {
-                if route.family == vpnv4-flowspec && route.ext-communities has RT:44407:777 {
-                    remove ext-community RT:44407:777
-                    add ext-community RT:44407:778
+                if route.family == vpnv4-flowspec && route.ext-communities has RT:64500:777 {
+                    remove ext-community RT:64500:777
+                    add ext-community RT:64500:778
                     accept
                 }
             }
@@ -473,7 +473,7 @@ async fn rpol_vpn_rt_rewrite_preserves_identity_actions_and_other_scopes() {
             Some(RD_B) => 779,
             _ => unreachable!("the exact advertised keys were checked above"),
         };
-        let expected = ExtendedCommunity::new(0x0002_ad77_0000_0000 | target);
+        let expected = ExtendedCommunity::new(0x0002_fbf4_0000_0000 | target);
         assert_eq!(route.extended_communities().len(), 2);
         assert!(route.extended_communities().contains(&expected));
         assert!(route.extended_communities().contains(&action));
@@ -484,7 +484,7 @@ async fn rpol_vpn_rt_rewrite_preserves_identity_actions_and_other_scopes() {
     assert!(
         original
             .extended_communities()
-            .contains(&ExtendedCommunity::new(0x0002_ad77_0000_0309)),
+            .contains(&ExtendedCommunity::new(0x0002_fbf4_0000_0309)),
         "export modifications do not rewrite the selected input"
     );
 
@@ -699,7 +699,7 @@ async fn an_rt_change_that_export_policy_denies_withdraws_the_rule() {
         rustbgpd_policy::RouteModifications::default(),
     );
     deny.match_community = vec![rustbgpd_policy::CommunityMatch::RouteTarget {
-        global: 44407,
+        global: 64500,
         local: 999,
     }];
     deny.action = rustbgpd_policy::PolicyAction::Deny;

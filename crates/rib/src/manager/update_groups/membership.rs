@@ -29,13 +29,37 @@ impl RibManager {
     /// (per-peer gRPC edits, ADR-0076 live-impact txns, SIGHUP rpol
     /// overlays). A key-stable recompute (content-equal chain
     /// reinstall) is a strict no-op.
+    ///
+    /// The returned feed may be dropped: a member that leaves an owned EVPN
+    /// group holds a proof of actual OLD before anything moves.
+    pub(in crate::manager) fn recompute_update_group(
+        &mut self,
+        peer: PeerId,
+    ) -> Option<super::super::evpn_recovery::EvpnCompleteFeed> {
+        self.recompute_update_group_inner(peer, false)
+    }
+
+    /// [`Self::recompute_update_group`] for a caller that hands the returned
+    /// feed to a distribution pass in the same actor turn. A clean member
+    /// moving between two owned EVPN groups then captures no proof: the pass
+    /// settles its feed, and captures actual OLD from the feed's basis only
+    /// if the admission is missed
+    /// ([`RibManager::settle_clean_evpn_regroup`]).
+    pub(in crate::manager) fn recompute_update_group_for_pass(
+        &mut self,
+        peer: PeerId,
+    ) -> Option<super::super::evpn_recovery::EvpnCompleteFeed> {
+        self.recompute_update_group_inner(peer, true)
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "the membership lifecycle keeps every residue-carry rule at one seam"
     )]
-    pub(in crate::manager) fn recompute_update_group(
+    fn recompute_update_group_inner(
         &mut self,
         peer: PeerId,
+        feeds_pass: bool,
     ) -> Option<super::super::evpn_recovery::EvpnCompleteFeed> {
         let readiness = self.replacement_readiness.clone();
         let mut checkpoint = || crate::manager::replacement_readiness_checkpoint(&readiness, false);
@@ -66,9 +90,14 @@ impl RibManager {
                 .get(&gid)
                 .is_some_and(GroupRibOut::owns_evpn_routes)
         });
+        // A clean member bound for an installed owned table skips the
+        // capture: its feed carries the basis of actual OLD instead.
+        let clean_evpn_regroup = feeds_pass
+            && old_evpn_owned
+            && new_gid.is_some_and(|gid| self.clean_evpn_regroup_eligible(peer, gid));
         // Capture actual OLD before any registry change or last-member leave.
         // A failed capture retains the old owner until its fenced reset.
-        if old_evpn_owned && !self.capture_shared_evpn_admitted(peer) {
+        if old_evpn_owned && !clean_evpn_regroup && !self.capture_shared_evpn_admitted(peer) {
             self.invalidate_evpn_feed_completion(peer);
             self.mark_outbound_dirty_inner(peer, false);
             return None;
@@ -158,7 +187,28 @@ impl RibManager {
             }
         }
         self.invalidate_evpn_feed_completion(peer);
-        let mut evpn_feed = if new_evpn_owned {
+        let clean_evpn_feed = if clean_evpn_regroup {
+            self.prepare_clean_regroup_evpn_feed(
+                peer,
+                new_gid.expect("eligible destination"),
+                prev_gid.expect("owned OLD has a group"),
+            )
+        } else {
+            None
+        };
+        // No feed, so no basis: OLD is still installed. Capture it and go
+        // on exactly as a member that was never eligible.
+        if clean_evpn_regroup
+            && clean_evpn_feed.is_none()
+            && !self.capture_shared_evpn_admitted(peer)
+        {
+            self.invalidate_evpn_feed_completion(peer);
+            self.mark_outbound_dirty_inner(peer, false);
+            return None;
+        }
+        let mut evpn_feed = if clean_evpn_feed.is_some() {
+            clean_evpn_feed
+        } else if new_evpn_owned {
             new_gid
                 .filter(|_| !deferred_evpn_destination && !self.complete_feed_deferred(peer))
                 .and_then(|gid| {

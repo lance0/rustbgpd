@@ -1085,7 +1085,7 @@ fn vpn_flowspec_refresh_absorbs_only_its_own_owed_withdrawals() {
         for rd in [
             None,
             Some(rustbgpd_wire::RouteDistinguisher([
-                0, 0, 0xad, 0x77, 0, 0, 0, 40,
+                0, 0, 0xfb, 0xf4, 0, 0, 0, 40,
             ])),
         ] {
             let mut rule = make_flowspec_route(Ipv4Addr::UNSPECIFIED);
@@ -1189,7 +1189,7 @@ async fn lease_expiry_owes_ipv6_vpn_flowspec_beside_global_flowspec() {
         (Afi::Ipv4, None),
         (
             Afi::Ipv6,
-            Some(RouteDistinguisher([0, 0, 0xad, 0x77, 0, 0, 0, 40])),
+            Some(RouteDistinguisher([0, 0, 0xfb, 0xf4, 0, 0, 0, 40])),
         ),
     ] {
         let mut rule = make_flowspec_route(Ipv4Addr::UNSPECIFIED);
@@ -2758,7 +2758,7 @@ fn owed_flowspec_revocation_drains_inside_a_selection_hold() {
             )];
         }
         if flowspec.1 == Safi::FlowSpecVpn {
-            rule.rd = Some(RouteDistinguisher([0, 0, 0xad, 0x77, 0, 0, 0, 40]));
+            rule.rd = Some(RouteDistinguisher([0, 0, 0xfb, 0xf4, 0, 0, 0, 40]));
         }
         let key = rule.selection_key();
         let (reply, mut result) = oneshot::channel();
@@ -3910,6 +3910,74 @@ fn begin_close_flushes_typed_withdrawals_and_moves_only() {
     }
 }
 
+/// A pass whose keys all belong to a family owed whole (a selection release
+/// toward each private receiver) is skipped without visiting the keys per
+/// receiver: the AFIs the pass carries are read once for the pass. A pass
+/// that also carries a key of a streaming AFI still stages that key.
+#[test]
+fn a_keyed_pass_of_a_whole_owed_family_reads_its_keys_once_for_all_receivers() {
+    use super::super::outbound_owing::KeyedPass;
+    let families = [
+        (Afi::Ipv4, Safi::LabeledUnicast),
+        (Afi::Ipv6, Safi::LabeledUnicast),
+    ];
+    let owed = families.map(|family| OwedFamily::of(family).unwrap());
+    let keys: HashSet<_> = (1..=4).map(|index| typed_key(families[0], index)).collect();
+    let mut mixed = keys.clone();
+    let other = typed_key(families[1], 1);
+    mixed.insert(other);
+    let mut manager = manager(64);
+    let visits = std::cell::Cell::new(0);
+    let index = |key: &super::super::outbound_owing::OwedKey| usize::from(key.family() == owed[1]);
+    let counted = |key: &super::super::outbound_owing::OwedKey| {
+        visits.set(visits.get() + 1);
+        index(key)
+    };
+    let (mut carried, mut carried_mixed) = (None, None);
+    let mut sessions = Vec::new();
+    for receiver in 1..=3 {
+        let peer = peer_v4(Ipv4Addr::new(10, 0, 32, receiver));
+        sessions.push(up(&mut manager, peer, families.to_vec()));
+        manager.owe_whole_family(peer, owed[0]);
+        assert!(matches!(
+            manager.owing_keyed_pass(peer, &keys, owed, counted, |key| *key, &mut carried),
+            KeyedPass::Skip
+        ));
+        let KeyedPass::Stage { keys: staged, .. } =
+            manager.owing_keyed_pass(peer, &mixed, owed, index, |key| *key, &mut carried_mixed)
+        else {
+            panic!("the streaming AFI's key is staged")
+        };
+        assert_eq!(staged.iter().copied().collect::<Vec<_>>(), [other]);
+    }
+    assert_eq!(visits.get(), keys.len(), "one read for three receivers");
+}
+
+/// A unicast AFI owed whole stages nothing in a pass, and does not hold a
+/// change of the other AFI: the pass that carries it stages it at once.
+#[test]
+fn a_whole_owed_unicast_afi_does_not_hold_the_other_afis_changes() {
+    let (v4, v6) = ((Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast));
+    let mut manager = manager(64);
+    let mut source = up(&mut manager, peer_v4(SOURCE), vec![v4, v6]);
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 33, 1));
+    let mut rx = up(&mut manager, peer, vec![v4, v6]);
+    send_all(&mut rx);
+    manager.owe_whole_family(peer, OwedFamily::IPV4_UNICAST);
+    typed_received(&mut manager, v4, &[(1, 0)], &[], 0);
+    assert!(send_all(&mut rx).is_empty(), "owed whole: nothing staged");
+    typed_received(&mut manager, v6, &[(1, 0)], &[], 0);
+    let sent = send_all(&mut rx);
+    let announced: Vec<_> = sent
+        .iter()
+        .flat_map(|update| update.announce.iter().map(|route| route.prefix))
+        .collect();
+    assert_eq!(announced, [typed_prefix(Afi::Ipv6, 1)]);
+    assert!(manager.owes(peer, v4));
+    assert!(!manager.owes(peer, v6));
+    send_all(&mut source);
+}
+
 /// A partial pass can leave unnegotiated keys behind its last staged row.
 /// Cancellation must filter that remainder before recording or flipping debt.
 #[test]
@@ -3947,6 +4015,7 @@ fn partial_keyed_pass_only_owes_negotiated_families() {
             families.map(|family| OwedFamily::of(family).unwrap()),
             |key| usize::from(key.family() == OwedFamily::of(families[1]).unwrap()),
             |key| *key,
+            &mut None,
         ) else {
             panic!("one row of credit stages a partial pass")
         };
@@ -4302,7 +4371,7 @@ fn check_flowspec_family_release(family: (Afi, Safi), case: FamilyReleaseCase) {
         )];
     }
     if family.1 == Safi::FlowSpecVpn {
-        rule.rd = Some(RouteDistinguisher([0, 0, 0xad, 0x77, 0, 0, 0, 40]));
+        rule.rd = Some(RouteDistinguisher([0, 0, 0xfb, 0xf4, 0, 0, 0, 40]));
     }
     rule.attributes = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
@@ -4371,19 +4440,27 @@ fn check_flowspec_family_release(family: (Afi, Safi), case: FamilyReleaseCase) {
                 ))
                 .collect::<Vec<_>>()
         );
-        let route = sent
-            .iter()
-            .position(|update| {
-                update.flowspec_announce.iter().any(|route| {
-                    route.selection_key() == key && route.extended_communities().contains(&discard)
-                })
+        let route = sent.iter().position(|update| {
+            update.flowspec_announce.iter().any(|route| {
+                route.selection_key() == key && route.extended_communities().contains(&discard)
             })
-            .expect("the restored discard is announced");
+        });
+        // The withdrawal never left (the writer was full and the family was
+        // owed), so the peer still holds the rule: an owed drain announces
+        // nothing for it, and a forced resync sends it again.
+        assert_eq!(
+            route.is_some(),
+            case != FamilyReleaseCase::OwedRereceive,
+            "{case:?}"
+        );
         let marker = sent
             .iter()
             .position(|update| update.end_of_rib.contains(&family))
             .expect("the family marker is sent");
-        assert!(route <= marker, "the marker follows the restored discard");
+        assert!(
+            route.is_none_or(|route| route <= marker),
+            "the marker follows the restored discard"
+        );
     } else {
         assert!(
             sent.iter()
@@ -4804,6 +4881,86 @@ fn a_forced_family_release_keeps_a_rereceived_bgpls_vpn_route() {
         (Afi::BgpLs, Safi::BgpLsVpn),
         FamilyReleaseCase::ForcedRereceive,
     );
+}
+
+/// A reflected rule the receiver holds is withdrawn behind a full writer,
+/// which leaves the family owed, and its iBGP source announces it again
+/// from a session with another BGP identifier (`changed`) or the same one.
+/// The session derives `ORIGINATOR_ID` from that identifier, so the drain
+/// must announce the rule again when it changed, and only then. Red when
+/// the drain compares the held rule by source peer and attributes alone:
+/// the receiver keeps the obsolete `ORIGINATOR_ID`.
+#[test]
+fn an_owed_flowspec_drain_reannounces_a_rule_whose_source_identifier_changed() {
+    let family = (Afi::Ipv4, Safi::FlowSpec);
+    for changed in [true, false] {
+        let mut manager = manager(64);
+        let _source = up(&mut manager, peer_v4(SOURCE), vec![family]);
+        let peer = peer_v4(Ipv4Addr::new(10, 0, 38, 2));
+        let mut output = up_session(&mut manager, peer, 0, vec![family], 4);
+        send_all(&mut output);
+        let mut rule = make_flowspec_route(SOURCE);
+        rule.origin_type = crate::RouteOrigin::Ibgp;
+        rule.peer_router_id = Ipv4Addr::new(10, 0, 0, 1);
+        rule.attributes = AttrSet::new(vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath { segments: vec![] }),
+            PathAttribute::LocalPref(100),
+        ]);
+        let key = rule.selection_key();
+        receive_discard_rule(&mut manager, &rule, false);
+        let initial = send_all(&mut output);
+        assert_eq!(
+            initial
+                .iter()
+                .map(|update| update.flowspec_announce.len())
+                .sum::<usize>(),
+            1
+        );
+
+        let sender = manager.outbound_peers[&peer].clone();
+        while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
+        receive_discard_rule(&mut manager, &rule, true);
+        assert!(manager.adj_ribs_out[&peer].get_flowspec(&key).is_some());
+        assert!(manager.owes_whole(peer, OwedFamily::of(family).unwrap()));
+        if changed {
+            rule.peer_router_id = Ipv4Addr::new(10, 0, 0, 2);
+        }
+        receive_discard_rule(&mut manager, &rule, false);
+
+        let mut sent = send_all(&mut output);
+        for _ in 0..8 {
+            manager.resync_dirty_peers_bounded();
+            sent.extend(send_all(&mut output));
+        }
+        assert!(manager.owing(peer).is_none(), "changed {changed}");
+        assert!(
+            sent.iter()
+                .all(|update| update.flowspec_withdraw.is_empty()),
+            "changed {changed}: the rule is replaced, not withdrawn"
+        );
+        let announced: Vec<_> = sent
+            .iter()
+            .flat_map(|update| &update.flowspec_announce)
+            .map(|route| (route.selection_key(), route.peer_router_id))
+            .collect();
+        assert_eq!(
+            announced,
+            if changed {
+                vec![(key.clone(), Ipv4Addr::new(10, 0, 0, 2))]
+            } else {
+                vec![]
+            },
+            "changed {changed}"
+        );
+        assert_eq!(
+            manager.adj_ribs_out[&peer]
+                .get_flowspec(&key)
+                .map(|held| held.peer_router_id),
+            Some(rule.peer_router_id),
+            "changed {changed}"
+        );
+    }
 }
 
 #[test]

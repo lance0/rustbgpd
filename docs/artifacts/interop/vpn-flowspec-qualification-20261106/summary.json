@@ -48,10 +48,10 @@
   "nonzero_offset": {
     "result": "FAIL",
     "reason": "Pinned GoBGP 4.11.0 is incompatible with RFC 8956 nonzero-offset prefix framing.",
-    "rfc_send_witness": "0000ad7700000385026840123456789a038106",
+    "rfc_send_witness": "0000fbf400000385026840123456789a038106",
     "gobgp_receive": "unknown component; CLI path nlri=null and attrs=null",
-    "vendor_send_expected": "0000ad7700000386026840123456789a038106",
-    "vendor_send_observed": "0000ad77000003860268400000000000000000123456789a038106",
+    "vendor_send_expected": "0000fbf400000386026840123456789a038106",
+    "vendor_send_observed": "0000fbf4000003860268400000000000000000123456789a038106",
     "receiver_response": "NOTIFICATION 3/9; session Idle; flapCount 1 after core qualification"
   },
   "capture": {

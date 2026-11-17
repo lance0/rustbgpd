@@ -2655,15 +2655,16 @@ async fn import_refusal_remedy_names_a_scoped_neighbor() {
 
 /// A generation or API rollback replays captured priors. A peer that took
 /// the candidate and then reconnected without Route Refresh still gets its
-/// prior chain back: the restore is not qualified, its install is a restore
-/// the session never refuses, and the refresh it cannot answer leaves the
-/// restore reported as ambiguous instead of unwinding it to the candidate.
+/// prior chain back: the restore is not qualified, and its install is a
+/// restore the session never refuses. The peer cannot be asked to resend its
+/// routes under that chain, so its session is reset once the chain is
+/// installed, and the restore is exact.
 ///
 /// Load-bearing: replaying the priors as a forward apply rejects the restore
-/// at the preflight, and the candidate stays active after the rollback.
+/// at the preflight, and the candidate stays active after the rollback;
+/// leaving the refresh failure unanswered leaves the restore ambiguous.
 #[tokio::test]
-async fn restore_replay_reinstalls_the_prior_chain_on_a_peer_without_route_refresh() {
-    use super::super::policy::PolicySnapshotFailureKind;
+async fn restore_replay_resets_a_peer_without_route_refresh() {
     use rustbgpd_api::peer_types::ResolvedPeerPolicy;
 
     let (mut mgr, rib_rx) = rfc8212_status_manager();
@@ -2671,10 +2672,10 @@ async fn restore_replay_reinstalls_the_prior_chain_on_a_peer_without_route_refre
     let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let prior = validation_policy_chain(ImportValidationDependency::Rpki);
     // The peer runs the candidate the failed generation installed.
-    let (installed, _refreshes) =
-        install_import_recording_peer(&mut mgr, addr, false, Some(deny_policy_chain()));
+    let (installed, _refreshes, resets) =
+        install_reset_recording_peer_at(&mut mgr, &key(addr), false, 0, Some(deny_policy_chain()));
 
-    let failure = mgr
+    let reset = mgr
         .restore_resolved_policy_snapshot(
             vec![ResolvedPeerPolicy {
                 address: addr,
@@ -2686,19 +2687,398 @@ async fn restore_replay_reinstalls_the_prior_chain_on_a_peer_without_route_refre
             OperatorReadAdmission::Served,
         )
         .await
-        .expect_err("the refresh the peer cannot answer leaves the restore ambiguous");
+        .unwrap_or_else(|failure| panic!("the reset makes the restore exact: {failure:?}"));
+    session_drained(&mgr, addr).await;
 
+    assert_eq!(reset, vec![key(addr)]);
     assert_eq!(
         *installed.lock().unwrap(),
         vec![Some(prior.clone())],
-        "only the prior chain is installed, and it is not unwound: {}",
-        failure.message()
+        "only the prior chain is installed"
     );
+    assert_eq!(
+        *resets.lock().unwrap(),
+        vec![1],
+        "one reset, after the prior chain was installed"
+    );
+    let managed = &mgr.peers[&key(addr)];
+    assert_eq!(managed.import_policy, Some(prior));
+    assert!(!managed.pending_refresh, "the reset owes no refresh");
+
+    drop(mgr);
+    rib.await.unwrap();
+}
+
+/// A config transaction's live apply moves a peer's import chain; the peer
+/// then reconnects without Route Refresh, and the transaction's publication
+/// fails. The rollback command restores the prior chain on that peer: a
+/// restore is not qualified, so the capability loss cannot keep the
+/// candidate installed. The peer cannot be asked to resend its routes, so its
+/// session is reset after the prior chain is installed, and the reply names
+/// it.
+///
+/// The capability is lost when the forward apply's own Route Refresh is
+/// answered, so the rollback always observes it. Load-bearing: rolling back
+/// through the forward `ApplyResolvedPolicySnapshot` rejects the restore at
+/// its preflight, and the candidate stays installed.
+#[tokio::test]
+async fn config_rollback_resets_the_peer_that_lost_route_refresh() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let (mut mgr, rib_rx) = rfc8212_status_manager();
+    let rib = spawn_rfc8212_rib_stub(rib_rx, 0);
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let prior = validation_policy_chain(ImportValidationDependency::Rpki);
+    let candidate = deny_policy_chain();
+    let installed = InstalledImports::default();
+    let refreshes = Arc::new(AtomicUsize::new(0));
+    let resets = ResetLog::default();
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        import_recording_handle(
+            addr,
+            true,
+            0,
+            true,
+            Some(prior.clone()),
+            Arc::clone(&installed),
+            Arc::clone(&refreshes),
+            Arc::clone(&resets),
+        ),
+        false,
+    );
+    mgr.peers.get_mut(&key(addr)).unwrap().import_policy = Some(prior.clone());
+
+    let (reply, response) = oneshot::channel();
+    let _ = Box::pin(
+        mgr.dispatch_command(PeerManagerCommand::ApplyPolicyImpactSnapshot {
+            static_targets: vec![ResolvedPeerPolicy {
+                address: addr,
+                interface: None,
+                import_policy: Some(candidate.clone()),
+                export_policy: None,
+            }],
+            dynamic_ranges: Vec::new(),
+            reply,
+        }),
+    )
+    .await;
+    let priors = response
+        .await
+        .unwrap()
+        .expect("the forward apply takes the candidate");
+    assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+    assert_eq!(*installed.lock().unwrap(), vec![Some(candidate.clone())]);
+    assert!(
+        resets.lock().unwrap().is_empty(),
+        "a forward apply resets nothing"
+    );
+
+    let (reply, response) = oneshot::channel();
+    let _ = Box::pin(
+        mgr.dispatch_command(PeerManagerCommand::RestoreResolvedPolicySnapshot { priors, reply }),
+    )
+    .await;
+    let outcome = response.await.unwrap();
+    session_drained(&mgr, addr).await;
+
+    assert_eq!(
+        *installed.lock().unwrap(),
+        vec![Some(candidate), Some(prior.clone())],
+        "the rollback reinstalls the prior chain: {outcome:?}"
+    );
+    assert_eq!(
+        *resets.lock().unwrap(),
+        vec![2],
+        "one reset, after the prior chain was installed: {outcome:?}"
+    );
+    assert_eq!(outcome, Ok(vec![key(addr)]));
+    assert_eq!(mgr.peers[&key(addr)].import_policy, Some(prior));
+
+    drop(mgr);
+    rib.await.unwrap();
+}
+
+/// Only a restore that owes an import re-evaluation resets a session. An
+/// export-only restore on a peer without Route Refresh requests no refresh
+/// and resets nothing.
+#[tokio::test]
+async fn export_only_restore_resets_no_session() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let (mut mgr, rib_rx) = rfc8212_status_manager();
+    let rib = spawn_rfc8212_rib_stub(rib_rx, 0);
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let import = validation_policy_chain(ImportValidationDependency::Rpki);
+    let (installed, _refreshes, resets) =
+        install_reset_recording_peer_at(&mut mgr, &key(addr), false, 0, Some(import.clone()));
+
+    let reset = mgr
+        .restore_resolved_policy_snapshot(
+            vec![ResolvedPeerPolicy {
+                address: addr,
+                interface: None,
+                import_policy: Some(import),
+                export_policy: Some(deny_policy_chain()),
+            }],
+            false,
+            OperatorReadAdmission::Served,
+        )
+        .await
+        .unwrap_or_else(|failure| panic!("an export-only restore completes: {failure:?}"));
+    session_drained(&mgr, addr).await;
+
+    assert_eq!(reset, Vec::<PeerKey>::new());
+    assert!(installed.lock().unwrap().is_empty(), "no import install");
+    assert!(resets.lock().unwrap().is_empty());
+
+    drop(mgr);
+    rib.await.unwrap();
+}
+
+/// A restore whose peers differ: the one with Route Refresh is refreshed, and
+/// only the one without it is reset.
+#[tokio::test]
+async fn restore_resets_only_the_peer_without_route_refresh() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let (mut mgr, rib_rx) = rfc8212_status_manager();
+    let rib = spawn_rfc8212_rib_stub(rib_rx, 0);
+    let capable = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let incapable = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let prior = validation_policy_chain(ImportValidationDependency::Rpki);
+    let (capable_installs, capable_refreshes, capable_resets) = install_reset_recording_peer_at(
+        &mut mgr,
+        &key(capable),
+        true,
+        0,
+        Some(deny_policy_chain()),
+    );
+    let (incapable_installs, _, incapable_resets) = install_reset_recording_peer_at(
+        &mut mgr,
+        &key(incapable),
+        false,
+        0,
+        Some(deny_policy_chain()),
+    );
+
+    let reset = mgr
+        .restore_resolved_policy_snapshot(
+            [capable, incapable]
+                .into_iter()
+                .map(|address| ResolvedPeerPolicy {
+                    address,
+                    interface: None,
+                    import_policy: Some(prior.clone()),
+                    export_policy: None,
+                })
+                .collect(),
+            false,
+            OperatorReadAdmission::Served,
+        )
+        .await
+        .unwrap_or_else(|failure| panic!("the restore completes: {failure:?}"));
+    session_drained(&mgr, capable).await;
+    session_drained(&mgr, incapable).await;
+
+    assert_eq!(reset, vec![key(incapable)]);
+    assert_eq!(*capable_installs.lock().unwrap(), vec![Some(prior.clone())]);
+    assert_eq!(capable_refreshes.load(Ordering::SeqCst), 1);
+    assert!(
+        capable_resets.lock().unwrap().is_empty(),
+        "a peer with Route Refresh is refreshed, not reset"
+    );
+    assert_eq!(*incapable_installs.lock().unwrap(), vec![Some(prior)]);
+    assert_eq!(*incapable_resets.lock().unwrap(), vec![1]);
+
+    drop(mgr);
+    rib.await.unwrap();
+}
+
+/// A forward edit is never answered with a reset: an import change for an
+/// Established peer without Route Refresh is still refused by the
+/// preflight, with nothing installed.
+#[tokio::test]
+async fn forward_import_edit_without_route_refresh_is_refused_not_reset() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let (mut mgr, rib_rx) = rfc8212_status_manager();
+    let rib = spawn_rfc8212_rib_stub(rib_rx, 0);
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (installed, _refreshes, resets) = install_reset_recording_peer_at(
+        &mut mgr,
+        &key(addr),
+        false,
+        0,
+        Some(validation_policy_chain(ImportValidationDependency::Rpki)),
+    );
+
+    let error = mgr
+        .apply_resolved_policy_snapshot(vec![ResolvedPeerPolicy {
+            address: addr,
+            interface: None,
+            import_policy: Some(deny_policy_chain()),
+            export_policy: None,
+        }])
+        .await
+        .expect_err("the preflight refuses the edit");
+    session_drained(&mgr, addr).await;
+
+    assert!(
+        error.contains(&format!("rbgp neighbor {addr} disable")),
+        "{error}"
+    );
+    assert!(installed.lock().unwrap().is_empty());
+    assert!(resets.lock().unwrap().is_empty(), "{error}");
+
+    drop(mgr);
+    rib.await.unwrap();
+}
+
+/// A restore whose session reset is not admitted, because the session task
+/// ended after answering its refresh, stays ambiguous: the session may keep
+/// what it accepted under the candidate chain.
+#[tokio::test]
+async fn restore_whose_reset_is_not_admitted_stays_ambiguous() {
+    use super::super::policy::PolicySnapshotFailureKind;
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+    use rustbgpd_transport::{PeerCommand, PeerCommandError};
+
+    let (mut mgr, rib_rx) = rfc8212_status_manager();
+    let rib = spawn_rfc8212_rib_stub(rib_rx, 0);
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let prior = validation_policy_chain(ImportValidationDependency::Rpki);
+    let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
+    let task = tokio::spawn(async move {
+        while let Some(command) = session_rx.recv().await {
+            match command {
+                PeerCommand::QueryState { reply } => {
+                    let mut state = policy_test_peer_state(addr, SessionState::Established);
+                    state.negotiated_session = Some(test_negotiated_session(false));
+                    let _ = reply.send(state);
+                }
+                PeerCommand::UpdateImportPolicy { reply, .. }
+                | PeerCommand::UpdateExportPolicy { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+                // The session ends after answering, so the reset finds no
+                // receiver.
+                PeerCommand::SendRouteRefresh { reply, .. } => {
+                    let _ = reply.send(Err(PeerCommandError::RouteRefreshUnsupported));
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        PeerHandle::from_parts(session_tx, task),
+        false,
+    );
+    mgr.peers.get_mut(&key(addr)).unwrap().import_policy = Some(deny_policy_chain());
+
+    let failure = mgr
+        .restore_resolved_policy_snapshot(
+            vec![ResolvedPeerPolicy {
+                address: addr,
+                interface: None,
+                import_policy: Some(prior),
+                export_policy: None,
+            }],
+            false,
+            OperatorReadAdmission::Served,
+        )
+        .await
+        .expect_err("a reset that is not admitted is not a completed restore");
+
     assert_eq!(
         failure.kind,
         PolicySnapshotFailureKind::CompensationAmbiguous
     );
-    assert_eq!(mgr.peers[&key(addr)].import_policy, Some(prior));
+    assert!(
+        failure.message().contains("session reset"),
+        "{}",
+        failure.message()
+    );
+
+    drop(mgr);
+    rib.await.unwrap();
+}
+
+/// A forward walk compensates a peer that took the candidate while down and
+/// came up without Route Refresh: its prior chain is restored and, since it
+/// cannot be asked to resend what it accepted under the candidate, its
+/// session is reset. Before, a refusal by a peer without Route Refresh
+/// counted as nothing remaining, and the edit reported full compensation
+/// while that peer kept the routes the candidate accepted.
+///
+/// A is Idle for the preflight probe, its install and its own post-install
+/// probe, and Established without Route Refresh from its compensation on. B
+/// is Established without Route Refresh at its install, which its session
+/// refuses, so the walk compensates A.
+#[tokio::test]
+async fn forward_compensation_resets_a_peer_that_came_up_without_route_refresh() {
+    use super::super::policy::PolicySnapshotFailureKind;
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let (mut mgr, rib_rx) = rfc8212_status_manager();
+    let rib = spawn_rfc8212_rib_stub(rib_rx, 0);
+    let a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let prior = validation_policy_chain(ImportValidationDependency::Rpki);
+    let candidate = deny_policy_chain();
+    let (a_installs, _, a_resets) =
+        install_reset_recording_peer_at(&mut mgr, &key(a), false, 2, Some(prior.clone()));
+    let (b_installs, _, b_resets) =
+        install_reset_recording_peer_at(&mut mgr, &key(b), false, 1, Some(prior.clone()));
+
+    let failure = mgr
+        .apply_resolved_policy_snapshot_classified(
+            [a, b]
+                .into_iter()
+                .map(|address| ResolvedPeerPolicy {
+                    address,
+                    interface: None,
+                    import_policy: Some(candidate.clone()),
+                    export_policy: None,
+                })
+                .collect(),
+            false,
+        )
+        .await
+        .expect_err("B refuses the candidate");
+    session_drained(&mgr, a).await;
+    session_drained(&mgr, b).await;
+
+    assert_eq!(
+        *a_installs.lock().unwrap(),
+        vec![Some(candidate), Some(prior.clone())],
+        "{}",
+        failure.message()
+    );
+    assert_eq!(
+        *a_resets.lock().unwrap(),
+        vec![2],
+        "A is reset after its prior chain is installed: {}",
+        failure.message()
+    );
+    assert_eq!(failure.kind, PolicySnapshotFailureKind::FullyCompensated);
+    assert!(
+        failure
+            .message()
+            .contains(&format!("restored import policy: {a}")),
+        "{}",
+        failure.message()
+    );
+    assert!(b_installs.lock().unwrap().is_empty());
+    assert!(b_resets.lock().unwrap().is_empty());
+    let managed = &mgr.peers[&key(a)];
+    assert_eq!(managed.import_policy, Some(prior));
+    assert!(!managed.pending_refresh, "{}", failure.message());
 
     drop(mgr);
     rib.await.unwrap();

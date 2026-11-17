@@ -652,7 +652,10 @@ its last processed peer message
 ([ADR-0078](../adr/0078-inbound-rib-backpressure.md)): a deliberate local
 overload close, not a hold-timer expiry. The session is torn down; the
 maximum-prefix limit uses Cease subcode 1 instead. There is no fallback to
-another subcode.
+another subcode, with one exception: a Cease/8 raised while an administrative
+reset drains queued output to a peer that negotiated the RFC 8538 N bit is
+sent as Cease / Hard Reset carrying 6/8 (RFC 8538 §3.1), so the reset leaves
+neither side's routes retained.
 
 ### Message Size Limits (RFC 4271 + RFC 8654)
 

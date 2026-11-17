@@ -50,17 +50,22 @@ stop it before the after-snapshot, or replace a scoped call with a global
 mutation. Transport/read failures are INVALID; accepted global fallback is
 FAIL. All three controls detect the broken condition. Two earlier harness
 attempts were INVALID before mutation (empty address lookup and wrong health
-field); their raw output is preserved in the rollback archive.
+field); their raw output was recorded in the rollback archive, since removed (see the note below).
 
 ## Artifacts and limits
 
-[Curated result](summary.json), [rollback rows](rollback-summary.json),
-[rollback raw evidence](rollback-evidence.tar.gz), and
-[GoBGP raw evidence](gobgp-evidence.tar.gz) retain the functional results and
-negative controls. Archive hashes and exact executable/image pins are in the
-curated result. Extract the archives to inspect requests, replies and captures.
-Reproduction drivers are in `tests/interop/scripts/qualify-vpn-flowspec-rollback.py`
+[Curated result](summary.json) and [rollback rows](rollback-summary.json)
+retain the functional results and negative controls. Exact executable/image
+pins are in the curated result. Reproduction drivers are in
+`tests/interop/scripts/qualify-vpn-flowspec-rollback.py`
 and `tests/interop/scripts/qualify_vpn_flowspec_gobgp.py`.
+
+Note (2026-11-16): the raw evidence archives (logs and packet captures,
+listed with their original hashes under `artifacts` in the curated result)
+were removed from the tree because they carried a non-documentation AS number.
+The AS, RD and RT values in this README and the summary JSON files were
+replaced with RFC 5398 documentation values; the verdicts and all other
+recorded values are unchanged.
 
 This is API, BGP wire and peer RIB evidence. IOS XR installation, action
 execution, forwarding, performance, memory, scale and soak were not qualified.

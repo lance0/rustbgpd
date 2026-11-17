@@ -515,7 +515,7 @@ const WAIT_SITES: &[WaitSite] = &[
         rib: RibHold::Reply(is_cohort_replace),
         session: answer_all,
         additional_entry: Some(
-            "PeerManagerCommand::ApplyResolvedPolicySnapshot publication-failure compensation",
+            "PeerManagerCommand::RestoreResolvedPolicySnapshot publication-failure compensation",
         ),
         window: HELD_FOREVER,
         contract: Contract::Served,
@@ -1644,11 +1644,7 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
             }
         }
         Drive::ApiPublicationCompensation => manager
-            .apply_resolved_policy_snapshot_with_prestage_reads(
-                targets,
-                false,
-                OperatorReadAdmission::Served,
-            )
+            .restore_resolved_policy_snapshot(targets, false, OperatorReadAdmission::Served)
             .await
             .map(drop)
             .map_err(|failure| failure.message),

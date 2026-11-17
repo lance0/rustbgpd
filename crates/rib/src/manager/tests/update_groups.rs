@@ -246,8 +246,12 @@ async fn ordinary_ingest_services_readiness_mid_mixed_fanout() {
     assert_mixed_fanout_readiness(false).await;
 }
 
+/// The same fanout after a selection release: the release turn serves the
+/// grouped peers from one shared probe, and the peer-context peers hold the
+/// family in their own Adj-RIB-Out, so the resync ticks after it probe them
+/// one at a time. Readiness is answered between those probes too.
 #[tokio::test(start_paused = true)]
-async fn selection_release_services_readiness_mid_mixed_fanout() {
+async fn selection_release_drain_services_readiness_between_private_receivers() {
     assert_mixed_fanout_readiness(true).await;
 }
 
@@ -384,6 +388,12 @@ async fn assert_mixed_fanout_readiness(selection_release: bool) {
         tokio::time::advance(std::time::Duration::from_secs(1)).await;
         manager.expire_selection_deferral();
         assert_eq!(manager.loc_rib.len(), 1);
+        assert_eq!(
+            probe.probes.load(Ordering::Relaxed),
+            0,
+            "the release turn probes no peer-context peer"
+        );
+        drain_resync_ticks(&mut manager);
     }
 
     assert_eq!(
@@ -421,7 +431,7 @@ async fn assert_mixed_fanout_readiness(selection_release: bool) {
 }
 
 /// A minimal deny-one-prefix statement (everything else unset).
-fn deny_statement(prefix: Ipv4Prefix) -> PolicyStatement {
+pub(super) fn deny_statement(prefix: Ipv4Prefix) -> PolicyStatement {
     PolicyStatement {
         prefix: Some(Prefix::V4(prefix)),
         ge: None,

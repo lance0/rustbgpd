@@ -363,6 +363,7 @@ bench-list:
       bench/scale/reloadstall/failover_cell.sh
       bench/scale/reloadstall/run-recovery-mass-dirty.sh
       bench/scale/reloadstall/run-unsent-leg.sh
+      bench/scale/rrtransport/run-credit-cells.sh
       bench/netns-calibration/run-vm.sh
       bench/evpn-load/fanout.py
       bench/run-fib-kernel-dump.py

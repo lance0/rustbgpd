@@ -1297,6 +1297,37 @@ impl FlowSpecRoute {
         flowspec_family(self.afi, self.rd.as_ref())
     }
 
+    /// Whether a peer that holds `self` would be sent the same UPDATE for
+    /// `other`. Everything but the receive time counts: the session builds
+    /// the reflection attributes (`ORIGINATOR_ID`) from `origin_type` and
+    /// `peer_router_id`, not from `attributes` alone. The destructuring makes
+    /// a new field a decision here instead of an omission.
+    pub(crate) fn same_advertisement(&self, other: &Self) -> bool {
+        let Self {
+            rule,
+            afi,
+            rd,
+            peer,
+            attributes,
+            received_at: _,
+            origin_type,
+            peer_router_id,
+            is_stale,
+            is_llgr_stale,
+            path_id,
+        } = self;
+        *peer == other.peer
+            && *path_id == other.path_id
+            && *origin_type == other.origin_type
+            && *peer_router_id == other.peer_router_id
+            && *is_stale == other.is_stale
+            && *is_llgr_stale == other.is_llgr_stale
+            && *afi == other.afi
+            && *rd == other.rd
+            && *attributes == other.attributes
+            && *rule == other.rule
+    }
+
     /// Extract the ORIGIN attribute value, defaulting to `Incomplete`.
     #[must_use]
     pub fn origin(&self) -> Origin {
