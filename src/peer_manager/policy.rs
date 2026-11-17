@@ -2642,14 +2642,24 @@ impl PeerManager {
                 // its prior chain (the reply may fail after a partial local
                 // apply). Reassert the failing peer's prior chain first, then
                 // unwind the already-acknowledged peers newest-first.
-                let restore_commands = self
-                    .peers
-                    .get(peer_key)
-                    .expect("cohort peer existed while restoring failed export hot-apply")
-                    .handle()
-                    .commands_sender();
-                let failing_restore = self
-                    .hot_apply_session_policy(
+                //
+                // A restore's prior chains are the candidate it is removing,
+                // so a failed restore reasserts neither: the failing member's
+                // export install stays unknown and the outcome is ambiguous.
+                let restoring = context.install == rustbgpd_transport::ImportPolicyInstall::Restore;
+                let failing_restore = if restoring {
+                    Err(format!(
+                        "{} export restore failed and is not unwound",
+                        target.address
+                    ))
+                } else {
+                    let restore_commands = self
+                        .peers
+                        .get(peer_key)
+                        .expect("cohort peer existed while restoring failed export hot-apply")
+                        .handle()
+                        .commands_sender();
+                    self.hot_apply_session_policy(
                         rustbgpd_transport::PeerHandle::update_export_policy_via(
                             restore_commands,
                             prior.policy.export_policy.clone(),
@@ -2659,7 +2669,8 @@ impl PeerManager {
                     .await
                     .map_err(|restore_error| {
                         format!("{} session restore failed: {restore_error}", target.address)
-                    });
+                    })
+                };
                 if failing_restore.is_err()
                     && let Some(managed) = self.peers.get_mut(peer_key)
                 {
@@ -2669,7 +2680,7 @@ impl PeerManager {
                 // acknowledged (and bookkeeping advanced) during setup, so
                 // reassert its prior import chain too, unwinding in reverse
                 // of the import-then-export forward order.
-                let failing_import_restore = if import_changed {
+                let failing_import_restore = if import_changed && !restoring {
                     let import_restore_commands = self
                         .peers
                         .get(peer_key)
@@ -3700,6 +3711,17 @@ impl PeerManager {
         context: &mut PolicySnapshotContext,
         require_exact_pending: bool,
     ) -> Result<(), PolicyRollbackFailure> {
+        // A restore captured the candidate chains it is removing as its
+        // priors, so unwinding a failed restore would reinstall them. Leave
+        // the restored chains in place: every caller turns this `Err` into an
+        // ambiguous outcome, and every restore owner fences on it.
+        if context.install == rustbgpd_transport::ImportPolicyInstall::Restore {
+            return Err(PolicyRollbackFailure {
+                code: RuntimeConfigPolicyFailureCode::RollbackSessionRejected,
+                detail: "a failed restore is not unwound; the restored chains are left in place"
+                    .to_string(),
+            });
+        }
         self.operator_read_seam = super::OperatorReadSeam::Rollback;
         let pending_priors = priors
             .iter()
