@@ -3084,18 +3084,6 @@ impl PeerManager {
             PeerManagerCommand::EffectiveRuntimeConfig { reply } => {
                 let _ = reply.send(self.current_config.effective_redacted_toml());
             }
-            PeerManagerCommand::ApplyResolvedPolicySnapshot { targets, reply } => {
-                let result = boxed(|| {
-                    self.apply_resolved_policy_snapshot_with_prestage_reads(
-                        targets,
-                        false,
-                        OperatorReadAdmission::Served,
-                    )
-                })
-                .await
-                .map_err(policy::PolicySnapshotFailure::into_apply_error);
-                let _ = reply.send(result);
-            }
             PeerManagerCommand::RestoreResolvedPolicySnapshot {
                 priors,
                 dynamic_ranges,
@@ -3569,66 +3557,6 @@ impl PeerManager {
             }
             PeerManagerCommand::GetPeerGroup { name, reply } => {
                 let _ = reply.send(named_peer_group_from_config(&self.current_config, &name));
-            }
-            PeerManagerCommand::SetPeerGroup {
-                name,
-                definition,
-                reply,
-            } => {
-                let event = ConfigEvent::SetPeerGroup {
-                    name: name.clone(),
-                    definition: definition.clone(),
-                    ack: None,
-                };
-                let result = if self.peer_group_policy_only_update(&name, &definition) {
-                    self.apply_policy_change(event, None).await
-                } else {
-                    // Static members are reshaped here; interface-only members
-                    // rebind on the port reconcile that follows.
-                    let affected = self.peer_group_member_keys(&name);
-                    self.apply_peer_group_change(event, affected).await
-                };
-                let _ = reply.send(result);
-            }
-            PeerManagerCommand::DeletePeerGroup { name, reply } => {
-                let result = self
-                    .apply_peer_group_change(
-                        ConfigEvent::DeletePeerGroup { name, ack: None },
-                        Vec::new(),
-                    )
-                    .await;
-                let _ = reply.send(result);
-            }
-            PeerManagerCommand::SetNeighborPeerGroup {
-                address,
-                peer_group,
-                reply,
-            } => {
-                let result = self
-                    .apply_peer_group_change(
-                        ConfigEvent::SetNeighborPeerGroup {
-                            address,
-                            interface: None,
-                            peer_group,
-                            ack: None,
-                        },
-                        vec![PeerKey::new(address, None)],
-                    )
-                    .await;
-                let _ = reply.send(result);
-            }
-            PeerManagerCommand::ClearNeighborPeerGroup { address, reply } => {
-                let result = self
-                    .apply_peer_group_change(
-                        ConfigEvent::ClearNeighborPeerGroup {
-                            address,
-                            interface: None,
-                            ack: None,
-                        },
-                        vec![PeerKey::new(address, None)],
-                    )
-                    .await;
-                let _ = reply.send(result);
             }
             PeerManagerCommand::GetNeighborPeerGroupMembership { address, reply } => {
                 let _ = reply.send(neighbor_peer_group_from_config(

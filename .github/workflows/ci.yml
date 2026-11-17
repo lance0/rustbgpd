@@ -608,6 +608,12 @@ jobs:
           credit_smoke=$(mktemp -d)
           cargo run --locked -p rrtransport -- credit-exhaust unicast "$credit_smoke" --reduced
           cargo run --locked -p rrtransport -- credit-exhaust evpn "$credit_smoke" --reduced
+          # Restart bursts carry no witness, so their wire checks pass at the
+          # reduced size; the reduced exhaustion witness is INVALID by design.
+          restart_smoke=$(mktemp -d)
+          cargo run --locked -p rrtransport -- credit-restart unicast "$restart_smoke" --reduced
+          cargo run --locked -p rrtransport -- credit-restart evpn "$restart_smoke" --reduced
+          python3 bench/scale/rrtransport/credit_bars.py check "$restart_smoke"
           python3 -m unittest discover -s bench/scale/rrtransport -p 'test_*.py'
           shellcheck -x bench/scale/rrtransport/run-credit-cells.sh
           rrtransport_receipt=$(mktemp -d)

@@ -330,13 +330,14 @@ async fn rejected_preflight_read_is_labelled_prestage() {
     let actor = tokio::spawn(manager.run());
     let (reply, applied) = oneshot::channel();
     command_tx
-        .send(PeerManagerCommand::ApplyResolvedPolicySnapshot {
-            targets: vec![ResolvedPeerPolicy {
+        .send(PeerManagerCommand::ApplyPolicyImpactSnapshot {
+            static_targets: vec![ResolvedPeerPolicy {
                 address: peer,
                 interface: None,
                 import_policy: Some(deny_policy_chain()),
                 export_policy: None,
             }],
+            dynamic_ranges: Vec::new(),
             reply,
         })
         .await

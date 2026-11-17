@@ -2761,7 +2761,7 @@ async fn restore_replay_resets_a_peer_without_route_refresh() {
 ///
 /// The capability is lost when the forward apply's own Route Refresh is
 /// answered, so the rollback always observes it. Load-bearing: rolling back
-/// through the forward `ApplyResolvedPolicySnapshot` rejects the restore at
+/// through the forward `ApplyPolicyImpactSnapshot` rejects the restore at
 /// its preflight, and the candidate stays installed.
 #[tokio::test]
 async fn config_rollback_resets_the_peer_that_lost_route_refresh() {
