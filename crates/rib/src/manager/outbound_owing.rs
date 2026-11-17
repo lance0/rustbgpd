@@ -1237,19 +1237,18 @@ impl RibManager {
     }
 
     /// Whether some owing peer could make progress this tick: it has credit,
-    /// channel room and runnable work, or an End-of-RIB waits on an
-    /// absorption with its latch free. Read before taking the tick's
-    /// executor handoff.
+    /// channel room and runnable work (an End-of-RIB that waits on an
+    /// absorption with its latch free included). Read before taking the
+    /// tick's executor handoff.
     pub(super) fn owing_tick_due(&self) -> bool {
         let limit = self.outbound_row_credit();
         self.owing_peers.iter().any(|&peer| {
             self.owing_peer_runnable(peer)
-                && ((self
+                && self
                     .outbound_credit
                     .get(&peer)
                     .is_some_and(|entry| entry.credit.rows() < limit)
-                    && !self.outbound_channel_full(peer))
-                    || (!self.outbound_operation_live(peer) && self.eor_waits_on_owed_keys(peer)))
+                && !self.outbound_channel_full(peer)
         })
     }
 
@@ -1276,8 +1275,8 @@ impl RibManager {
     }
 
     /// Drain owed keys under the tick's poll budget, round-robin over the
-    /// owing peers from [`Self::owing_cursor`]: per peer, retry a barrier
-    /// waiting on an absorption, then, with credit, run one step of its next
+    /// owing peers from [`Self::owing_cursor`]: per peer, with credit, retry
+    /// a barrier waiting on an absorption, then run one step of its next
     /// runnable family. Rounds repeat while a step progressed. Returns
     /// whether the budget cut the slice short.
     pub(super) fn drain_owing_bounded(&mut self, poll_start: std::time::Instant) -> bool {
@@ -1317,13 +1316,23 @@ impl RibManager {
         if self.dirty_peers.contains(&peer) || self.force_outbound_peers.contains(&peer) {
             return false;
         }
+        // Spent credit holds the marker's absorption too: the family it
+        // would stage waits for the receiver to read, and only this
+        // receiver's own End-of-RIB waits with it.
+        let limit = self.outbound_row_credit();
+        let rows = self
+            .outbound_credit
+            .get(&peer)
+            .map_or(limit, |entry| entry.credit.rows());
+        if rows >= limit || self.outbound_channel_full(peer) {
+            return false;
+        }
         let mut progressed = false;
         if !self.outbound_operation_live(peer) && self.eor_waits_on_owed_keys(peer) {
             let before = self.eor.families(peer).count();
             self.release_eor_hold(peer, EorHold::OwedKeys, EorTrigger::Release);
             progressed |= self.eor.families(peer).count() < before;
         }
-        let limit = self.outbound_row_credit();
         let rows = self
             .outbound_credit
             .get(&peer)

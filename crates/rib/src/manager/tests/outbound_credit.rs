@@ -1184,11 +1184,13 @@ fn producers_stage_nothing_for_a_peer_without_credit() {
     }
 }
 
-/// A selection release's replay toward a private peer is an ordinary
-/// envelope: with the peer's credit spent it stages nothing and leaves the
-/// peer dirty, its End-of-RIB still owed; with credit it stages the family
-/// and sends the End-of-RIB. Red without the preflight: the replay stages
-/// the family before the send is refused.
+/// A selection release stages nothing toward a private peer in its own
+/// turn: the peer owes the family and stays clean. With the peer's credit
+/// spent the resync tick stages nothing either, and the End-of-RIB stays
+/// owed behind the family; once credit returns, or at once with credit, a
+/// tick sends the family and then the End-of-RIB. Red without the credit
+/// check ahead of the marker's absorption: the first tick stages the family
+/// past the spent credit.
 #[test]
 fn a_selection_release_without_credit_stages_nothing() {
     use super::selection_deferral_dirty_rtbh::{connect, manager_with_dormant_waiter};
@@ -1218,25 +1220,42 @@ fn a_selection_release_without_credit_stages_nothing() {
             safi: FAMILY.1,
         });
         assert!(!manager.selection_deferred(FAMILY), "released");
-        let sent = send_all(&mut rx);
-        let staged = manager.outbound_stagings(peer) - before;
+        assert_eq!(
+            manager.outbound_stagings(peer),
+            before,
+            "the release turn stages nothing"
+        );
+        assert!(manager.owes(peer, FAMILY), "the family is owed");
+        assert!(send_all(&mut rx).is_empty());
+        manager.resync_dirty_peers_bounded();
         if spent {
-            assert_eq!(staged, 0, "nothing staged without credit");
-            assert!(manager.dirty_peers.contains(&peer));
+            assert_eq!(
+                manager.outbound_stagings(peer),
+                before,
+                "nothing staged without credit"
+            );
+            assert!(manager.owes(peer, FAMILY));
+            assert!(!manager.dirty_peers.contains(&peer), "owed, not dirty");
             assert!(
                 manager.eor_pending(peer).contains(&FAMILY),
                 "EoR still owed"
             );
-            assert!(sent.iter().all(|update| update.end_of_rib.is_empty()));
-        } else {
-            assert!(staged > 0, "the release replays the family");
-            assert!(
-                sent.iter()
-                    .any(|update| update.end_of_rib.contains(&FAMILY))
-            );
-            assert!(!manager.dirty_peers.contains(&peer));
+            assert!(send_all(&mut rx).is_empty());
+            drop(charge);
+            manager.resync_dirty_peers_bounded();
         }
-        drop(charge);
+        let sent = send_all(&mut rx);
+        assert!(
+            manager.outbound_stagings(peer) > before,
+            "spent {spent}: a tick with credit sends the family"
+        );
+        assert!(
+            sent.iter()
+                .any(|update| update.end_of_rib.contains(&FAMILY)),
+            "spent {spent}"
+        );
+        assert!(!manager.owes(peer, FAMILY), "spent {spent}");
+        assert!(!manager.dirty_peers.contains(&peer), "spent {spent}");
     }
 }
 
