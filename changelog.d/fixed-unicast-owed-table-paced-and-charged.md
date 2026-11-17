@@ -14,9 +14,14 @@
   updates over the resync ticks that follow; one that has stopped reading
   is queued at most its credit plus one step; and
   `bgp_rib_outbound_operations_live` no longer counts these sends. A
-  receiver that stops reading for long enough that the list names more
-  than twice the family's table plus 4,096 routes is resynced instead and
-  counted in `bgp_rib_outbound_owing_fallback_total`. A ROUTE-REFRESH
+  receiver that falls behind while new routes keep replacing old ones (it
+  has stopped reading, or reads more slowly than the table turns over),
+  until the list names more than twice the most routes one pass accounted
+  for (the family's table after the pass plus the routes it carried) plus
+  4,096, is resynced instead, one receiver per resync-tick unit, and
+  counted in `bgp_rib_outbound_owing_fallback_total`. One large
+  withdrawal, a peer loss or a selection release does not cause that. A
+  ROUTE-REFRESH
   answer or an operator replay for a family still owed sends the remainder
   in its own operation, as before. Labeled unicast, VPN, EVPN, FlowSpec,
   BGP-LS and RT-Constrain keep the whole-family send; see

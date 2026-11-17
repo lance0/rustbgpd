@@ -148,8 +148,9 @@ impl<K: Clone + Eq + Hash> OwedKeys<K> {
 /// over a churned list stays bounded.
 const CURSOR_SCAN: usize = 4 * CHUNK_ROWS;
 
-/// Keys a list may hold beyond twice its family's Loc-RIB before the
-/// slowest receivers are resynced instead ([`RibManager::log_owed_rows`]).
+/// Keys a list may hold beyond twice its family's peak ([`OwedRows::peak`])
+/// before the slowest receivers are resynced instead
+/// ([`RibManager::cap_owed_rows`]).
 const OWED_ROWS_SLACK: usize = 4 * CHUNK_ROWS;
 
 /// The unicast keys of one AFI that passes carried while some receiver owed
@@ -166,6 +167,13 @@ pub(super) struct OwedRows {
     /// Sequence of the newest entry ever logged; it never goes back, so a
     /// cursor taken from it stays valid across a trim.
     head: u64,
+    /// The most keys one pass has accounted for while a cursor was held:
+    /// the family's Loc-RIB after the pass plus the keys the pass carried,
+    /// so the rows a pass withdrew still count. The cap is taken from it:
+    /// one large withdrawal, flap or selection release never exceeds it,
+    /// and only fresh keys rotating past a receiver that falls behind do.
+    /// Zero again once the list is freed.
+    peak: usize,
 }
 
 impl OwedRows {
@@ -217,6 +225,7 @@ impl OwedRows {
         let Some(floor) = floor else {
             self.order = std::collections::VecDeque::new();
             self.live = FastMap::default();
+            self.peak = 0;
             return;
         };
         while let Some(&(key, sequence)) = self.order.front() {
@@ -1753,9 +1762,7 @@ impl RibManager {
     /// A unicast pass is about to stage `best_changed` and `all_affected`:
     /// log them once for the receivers that owe their family whole, whose
     /// gate stages and marks nothing. With no such receiver nothing is
-    /// logged. A list that outgrows its cap (a stalled receiver pinning it
-    /// while fresh keys rotate through the table) is cut back by resyncing
-    /// its slowest receivers, slice 1a's path.
+    /// logged.
     pub(super) fn log_owed_rows(
         &mut self,
         best_changed: &HashSet<Prefix>,
@@ -1773,16 +1780,31 @@ impl RibManager {
                 .iter()
                 .filter(|prefix| !best_changed.contains(*prefix)),
         );
+        let mut carried = [0usize; 2];
         for prefix in changed {
             self.replacement_checkpoint(false);
             let index = afi_index(prefix);
             if floors[index].is_some() {
                 self.owed_rows[index].touch(*prefix);
+                carried[index] += 1;
             }
         }
         let table = self.loc_rib.family_lens().unicast;
+        for (index, rows) in self.owed_rows.iter_mut().enumerate() {
+            if floors[index].is_some() {
+                rows.peak = rows.peak.max(table[index] + carried[index]);
+            }
+        }
+    }
+
+    /// After a pass's member loop: a list that outgrew its cap (fresh keys
+    /// rotating through the table past a receiver that does not keep up) is
+    /// cut back by marking its slowest receivers dirty, slice 1a's path.
+    /// Nothing is built here: the pass that logged the keys is over, so
+    /// each resync is a unit of the dirty ring, not part of this turn.
+    pub(super) fn cap_owed_rows(&mut self) {
         for (index, family) in OwedFamily::UNICAST.into_iter().enumerate() {
-            let cap = 2 * table[index] + OWED_ROWS_SLACK;
+            let cap = 2 * self.owed_rows[index].peak + OWED_ROWS_SLACK;
             while self.owed_rows[index].len() > cap {
                 let slowest = self
                     .owing_peers

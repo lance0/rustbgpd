@@ -11941,6 +11941,11 @@ impl RibManager {
         } else {
             distribute_peers();
         }
+        // After the member loop, so an evicted receiver's resync is a unit
+        // of the dirty ring and never part of this pass.
+        if !draining {
+            self.cap_owed_rows();
+        }
         for (peer, basis) in clean_evpn_regroups {
             let started = std::time::Instant::now();
             self.settle_clean_evpn_regroup(peer, &basis);

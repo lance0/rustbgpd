@@ -93,7 +93,12 @@ resolved.
     step, and each step is an ordinary update charged against its credit.
     The evidence is work counts in unit-level tests, not timings. A
     ROUTE-REFRESH answer or an operator replay for a family still owed sends
-    the remainder as one operation, as before.
+    the remainder as one operation, as before. So does the fallback for a
+    receiver that falls behind while new routes keep replacing old ones (it
+    has stopped reading, or reads more slowly than the table turns over):
+    it is resynced as a whole peer, one receiver per resync-tick unit, and
+    counted in `bgp_rib_outbound_owing_fallback_total`. One large
+    withdrawal, a peer loss or a selection release does not cause that.
   - Whole-family sends of the other families, still on main: labeled
     unicast, VPN, EVPN, FlowSpec, BGP-LS and RT-Constrain owed whole still
     go out as one operation per receiver that is not charged against the

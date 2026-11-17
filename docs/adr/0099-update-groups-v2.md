@@ -591,10 +591,21 @@ BLACKHOLE routes, and the withdrawal of a local row the receiver holds); the
 release reads the held rows again.
 
 The list is trimmed behind the slowest position and freed when no receiver
-holds one. A receiver that reads nothing pins it. Once it names more than
-twice the family's Loc-RIB plus 4,096 keys, the slowest receivers are
-resynced instead (the slice 1a path, counted by
-`bgp_rib_outbound_owing_fallback_total`) until it fits.
+holds one, so a receiver that falls behind pins it. Its cap is twice the
+family's peak plus 4,096 keys, where the peak is the most keys one pass has
+accounted for while any receiver held a position: the family's Loc-RIB after
+the pass plus the keys the pass carried. One value per address family, zero
+again when the list is freed. A pass's withdrawals count toward the peak, so
+one large withdrawal, a peer loss or a selection release that carries more
+keys than the released table never exceeds the cap, whatever the receivers
+have read. Only fresh keys that keep rotating through the table past a
+receiver that does not keep up do: a receiver that reads nothing, or one
+that reads more slowly than the table turns over. The slowest receivers are
+then resynced instead (the slice 1a path, counted by
+`bgp_rib_outbound_owing_fallback_total`) until the list fits. The cap is
+checked after the pass's member loop, and the pass builds nothing for the
+receivers it evicts: they are marked dirty and each is resynced as any dirty
+receiver is, one receiver per unit of the resync tick.
 
 Three sends for a unicast family still owed stay outside this: a
 ROUTE-REFRESH answer and an operator replay absorb the rest of the walk into
