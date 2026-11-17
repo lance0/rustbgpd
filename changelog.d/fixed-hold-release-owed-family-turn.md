@@ -16,5 +16,6 @@
   a receiver that has stopped reading delays only its own table and
   End-of-RIB, and a receiver owed several families gets them one after
   another. The grace-window release logs gain a `pending_families` field
-  naming the held families whose End-of-RIB follows a table still owed. A
+  naming the held families whose End-of-RIB did not leave with the release:
+  another hold still keeps it or its table is still owed. A
   ROUTE-REFRESH for an owed family is answered as before.

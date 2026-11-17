@@ -449,6 +449,36 @@ fn a_grace_release_sends_a_marker_whose_family_owes_nothing_at_once() {
     assert_delivered(&manager, &receivers, &wires, 50);
 }
 
+/// A grace release's `pending_families` lists a held family whose
+/// End-of-RIB stayed behind: one the selection gate still holds with
+/// nothing owed, and one whose table is still owed; a family whose marker
+/// left is not listed.
+#[test]
+fn a_grace_release_lists_held_and_owed_families_as_pending() {
+    use rustbgpd_telemetry::reason_labels::GrEorGraceReleaseReason::Deadline;
+    let release = |manager: &mut RibManager, peer| {
+        manager
+            .release_eor_grace_peer(&crate::EorGraceTarget::Peer(peer), Deadline)
+            .2
+    };
+    let (mut manager, receivers) = build(&grace(), 1, 50);
+    let peer = receivers[0].0;
+    assert!(manager.owing(peer).is_none(), "nothing owed under the gate");
+    assert_eq!(release(&mut manager, peer), "ipv4_unicast", "still held");
+
+    let (mut manager, receivers) = released(&grace(), 1, 50);
+    let peer = receivers[0].0;
+    assert_eq!(release(&mut manager, peer), "ipv4_unicast", "still owed");
+
+    let (mut manager, mut receivers) = released(&grace(), 1, 50);
+    let mut wires = vec![Wire::default()];
+    drain(&mut manager, &mut receivers, &mut wires);
+    let peer = receivers[0].0;
+    assert_eq!(release(&mut manager, peer), "", "the marker left");
+    write_all(&mut receivers, &mut wires);
+    assert_eq!(wires[0].markers(FAMILY), 1);
+}
+
 /// The RT-Constrain membership cap passes for every held receiver: the
 /// VPN End-of-RIB it held leaves in that turn, the owed unicast family
 /// does not.

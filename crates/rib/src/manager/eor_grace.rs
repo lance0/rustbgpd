@@ -281,7 +281,8 @@ impl RibManager {
                 held_families = %held,
                 pending_families = %pending,
                 "every listed controller signalled replay complete; releasing held End-of-RIB. \
-                 A pending family's End-of-RIB follows the table still owed to the peer"
+                 A pending family's End-of-RIB is still held or still owed: it leaves when \
+                 another hold ends or after the table still owed to the peer"
             );
         }
         // One retirement for the whole batch: a carry kept for these windows
@@ -292,11 +293,13 @@ impl RibManager {
     }
 
     /// End `peer`'s window: count the release and emit its held markers.
-    /// A marker whose table is still owed to the peer stays pending behind
-    /// it: a dirty peer's for its resync, an owed family's for the owed-key
-    /// drain. Returns the session's helper flag, the held families and
-    /// those of them still pending.
-    fn release_eor_grace_peer(
+    /// A marker another hold still keeps (the selection gate, the
+    /// RT-Constrain membership hold, the EVPN feed) stays pending, and so
+    /// does one whose table is still owed to the peer: a dirty peer's for
+    /// its resync, an owed family's for the owed-key drain. Returns the
+    /// session's helper flag, the held families and those of them still
+    /// pending.
+    pub(super) fn release_eor_grace_peer(
         &mut self,
         target: &EorGraceTarget,
         reason: GrEorGraceReleaseReason,
@@ -456,8 +459,9 @@ impl RibManager {
                     pending_families = %pending,
                     "End-of-RIB grace window ended at its deadline; releasing held End-of-RIB. \
                      Controller replay completion is not verified: a route not re-injected by now \
-                     is removed by the helper at this End-of-RIB. A pending family's End-of-RIB \
-                     follows the table still owed to the peer"
+                     is removed by the helper at this End-of-RIB. A pending family's End-of-RIB is \
+                     still held or still owed: it leaves when another hold ends or after the \
+                     table still owed to the peer"
                 );
             } else {
                 warn!(
@@ -470,7 +474,8 @@ impl RibManager {
                     "End-of-RIB grace window ended at its deadline before every listed controller \
                      signalled replay complete; releasing held End-of-RIB. A route the awaited \
                      controllers have not re-injected is removed by the helper at this End-of-RIB. \
-                     A pending family's End-of-RIB follows the table still owed to the peer"
+                     A pending family's End-of-RIB is still held or still owed: it leaves when \
+                     another hold ends or after the table still owed to the peer"
                 );
             }
         }
