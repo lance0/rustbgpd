@@ -2083,8 +2083,8 @@ Automated test: `bash tests/interop/scripts/test-m20-privateas-frr.sh` — **22 
 - **FRR bgpd won't peer:** Ensure `-f /etc/frr/frr.conf` is passed when
   restarting bgpd manually. Without it, bgpd starts with no config.
 - **No auto-reconnect:** If rustbgpd session stays in Idle after a peer
-  failure, verify `stop_requested` isn't set. Only `Stop` and `Shutdown`
-  commands set it.
+  failure, verify `stop_requested` isn't set. A stop or shutdown command, BFD
+  Down, a purge reset, a collision dump and a max-prefix shutdown set it.
 - **Large Docker build context:** Ensure `.dockerignore` includes `target/`.
   Without it, the build context exceeds 2 GB.
 - **BIRD "Cannot create control socket":** Run `mkdir -p /run/bird` inside the

@@ -689,11 +689,12 @@ pub(crate) struct PeerSession {
     /// carried it is down, so retained routes would point into a dead link.
     /// Skip GR/LLGR retention on this teardown.
     suppress_gr_retention: bool,
-    /// An administrative reset is draining before its close: a Cease/8 the
-    /// drain raises goes out as a Hard Reset when the N bit was negotiated,
-    /// so the reset leaves neither side's routes retained (RFC 8538 §3.1,
-    /// §4). Without the N bit the plain Cease/8 already purges them.
-    hard_reset_drain: bool,
+    /// An administrative reset or stop is ending the session: a Cease/8 its
+    /// drain raises, and a stop's Administrative Shutdown, go out as a Hard
+    /// Reset when the N bit was negotiated, so neither side's routes stay
+    /// retained (RFC 8538 §3.1, §4, §5.1). Without the N bit the plain Cease
+    /// already purges them.
+    hard_reset_teardown: bool,
     /// The current TCP connection, if any (fast external failover).
     connection: Option<ConnectionStamp>,
     /// The previous connection while its routes are retained under GR/LLGR,
@@ -2637,7 +2638,7 @@ impl PeerSession {
             received_hard_reset: false,
             sent_hard_reset: false,
             suppress_gr_retention: false,
-            hard_reset_drain: false,
+            hard_reset_teardown: false,
             connection,
             gr_retained_connection: crate::handle::RetainedConnectionState::default(),
             established,

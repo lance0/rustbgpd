@@ -85,7 +85,7 @@ impl PeerManager {
                     let enabled = super::lifecycle::config_admin_enable(managed, cfg)
                         .unwrap_or(managed.enabled);
                     if let Some(reason) =
-                        super::lifecycle::replacement_stop_reason(managed.enabled, enabled, cfg)
+                        super::lifecycle::replacement_stop(managed.enabled, enabled, cfg)
                     {
                         stop_reasons.insert(peer.clone(), reason);
                     }
