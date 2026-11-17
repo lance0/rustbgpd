@@ -585,7 +585,7 @@ fn main() -> Result<()> {
         [mode, rest @ ..] if mode.starts_with("credit-") => credit_main(mode, rest),
         _ => bail!(
             "usage: rrtransport smoke | rrtransport rr1000 <output-dir> | rrtransport rrtiny <output-dir>\n\
-             \x20      rrtransport credit-exhaust|credit-restart <unicast|evpn> <output-dir> [--reduced] [--correctness-only] [--pause-ms N]\n\
+             \x20      rrtransport credit-exhaust|credit-restart|credit-restart-churn <unicast|evpn> <output-dir> [--reduced] [--correctness-only] [--pause-ms N]\n\
              \x20      rrtransport credit-paused <output-dir> [--reduced] [--correctness-only] [--seconds N]\n\
              \x20      rrtransport credit-fill <unicast|evpn|vpn|flowspec> <output-dir> [--reduced] [--correctness-only]\n\
              \x20      rrtransport credit-probe <output-dir> [--reduced]"
@@ -605,15 +605,19 @@ fn credit_main(mode: &str, args: &[String]) -> Result<()> {
         Ok(options)
     };
     let passed = match (mode, args) {
-        ("credit-exhaust" | "credit-restart", [family, output, rest @ ..]) => {
-            let trigger = if mode == "credit-restart" {
-                credit::Trigger::Restart
-            } else {
+        (
+            "credit-exhaust" | "credit-restart" | "credit-restart-churn",
+            [family, output, rest @ ..],
+        ) => {
+            let trigger = if mode == "credit-exhaust" {
                 credit::Trigger::Ordinary
+            } else {
+                credit::Trigger::Restart
             };
             harness.block_on(credit::exhaust(
                 credit::Family::parse(family)?,
                 trigger,
+                mode == "credit-restart-churn",
                 Path::new(output),
                 &options(rest)?,
             ))?

@@ -56,8 +56,8 @@ use tokio::net::TcpSocket;
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::credit_wire::{
-    delivery, unicast_prefix, ChurnState, WireFamily, WireState, BURST_RANGE, CHURN_PREFIX,
-    EVPN_ORIGINATOR, EVPN_RD,
+    delivery, unicast_prefix, ChurnState, Reference, WireFamily, WireState, BURST_RANGE,
+    CHURN_PREFIX, EVPN_ORIGINATOR, EVPN_RD,
 };
 use crate::rr1000_support::rss_kib;
 
@@ -95,6 +95,46 @@ const HOLD_SECS: u16 = 90;
 const READ_HOLD_SECS: u16 = 240;
 /// Quiet period after every burst receiver is exact.
 const QUIET: Duration = Duration::from_secs(2);
+/// The release-under-churn variant withdraws every this-many-th burst
+/// route during the drain and re-announces every other one of those at
+/// `CHURN_VERSION`.
+const CHURN_NTH: usize = 100;
+const CHURN_VERSION: u32 = 9;
+/// Period of the getter reads of the live-operation and credit-rows
+/// gauges from the release on. The RIB publishes both once per run-loop
+/// iteration; a getter read costs one atomic load.
+const GAUGE_WATCH: Duration = Duration::from_millis(1);
+/// Period of the inbox round-trip probe from the release until the burst
+/// receivers settle: one `QueryLocRibCount` (a length read) through the
+/// RIB's update channel, so a drain that yields without serving that
+/// channel shows as a long round trip.
+const ROUND_TRIP_EVERY: Duration = Duration::from_millis(10);
+/// The longest one inbox round-trip probe (send and reply) may wait. A
+/// RIB that stops serving its update channel would otherwise hold the
+/// probe, and the cell's join on it, forever; a probe at the cap is
+/// recorded as unfinished, far past the 250 ms turn bar.
+const ROUND_TRIP_CAP: Duration = Duration::from_secs(30);
+/// The RIB's row-credit constants, crate-private in
+/// `crates/rib/src/outbound_credit.rs`: daemon-wide credit, per-peer floor
+/// and ceiling, and one ordinary pass. Results record them so the analyzer
+/// reads them from the run; a test fails when they drift from the RIB's.
+const ROW_CREDIT: [(&str, usize); 4] = [
+    ("DAEMON_ROW_CREDIT", 16_777_216),
+    ("MIN_ROW_CREDIT", 8_192),
+    ("MAX_ROW_CREDIT", 1_048_576),
+    ("CHUNK_ROWS", 1_024),
+];
+/// The RIB's since-render slice maxima, in microseconds per stage.
+const SLICE_MAX: &str = "bgp_rib_actor_slice_max_microseconds";
+/// Histograms whose longest observation in the run the result brackets:
+/// message turns, the work units outside them, and one owed-drain step.
+/// No tree exports the last yet (the README proposes it); a tree without
+/// it records null.
+const TURN_HISTOGRAMS: [(&str, &str); 3] = [
+    ("bgp_rib_actor_turn_duration_seconds", "kind"),
+    ("bgp_rib_actor_work_duration_seconds", "work_unit"),
+    ("bgp_rib_outbound_owed_drain_step_seconds", "scope"),
+];
 
 /// Families a cell can inject.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -214,7 +254,7 @@ impl Trigger {
     fn eor_ordered(self, state: &WireState) -> bool {
         match self {
             Self::Ordinary => state.eors == 1 && state.routes_before_eor == 0,
-            Self::Restart => !state.eor_premature && state.routes_after_eor == 0,
+            Self::Restart => state.eors == 1 && !state.eor_premature && state.routes_after_eor == 0,
         }
     }
 }
@@ -403,10 +443,10 @@ fn flowspec_route(index: usize, attrs: Arc<AttrSet>) -> FlowSpecRoute {
     }
 }
 
-/// One source UPDATE of `family` announcing `range` at `med`.
+/// One source UPDATE of `family` announcing `indices` at `med`.
 fn source_update(
     family: Family,
-    range: std::ops::Range<usize>,
+    indices: impl Iterator<Item = usize>,
     med: u32,
     local_pref: u32,
 ) -> RibUpdate {
@@ -419,18 +459,24 @@ fn source_update(
             return RibUpdate::VpnRoutesReceived {
                 peer,
                 session_id,
-                announced: range.map(|index| vpn_route(index, attrs(index))).collect(),
+                announced: indices
+                    .map(|index| vpn_route(index, attrs(index)))
+                    .collect(),
                 withdrawn: Vec::new(),
             };
         }
         Family::Unicast => {
-            announced = range
+            announced = indices
                 .map(|index| unicast_route(index, attrs(index), SOURCE))
                 .collect();
         }
-        Family::Evpn => evpn = range.map(|index| evpn_route(index, attrs(index))).collect(),
+        Family::Evpn => {
+            evpn = indices
+                .map(|index| evpn_route(index, attrs(index)))
+                .collect()
+        }
         Family::FlowSpec => {
-            flowspec = range
+            flowspec = indices
                 .map(|index| flowspec_route(index, attrs(index)))
                 .collect();
         }
@@ -446,6 +492,38 @@ fn source_update(
         evpn_withdrawn: Vec::new(),
         validated_with: None,
     }
+}
+
+/// One source UPDATE of `family` (unicast or EVPN) withdrawing `indices`.
+fn source_withdrawal(family: Family, indices: &[usize]) -> RibUpdate {
+    let (mut withdrawn, mut evpn_withdrawn) = (Vec::new(), Vec::new());
+    for &index in indices {
+        match family {
+            Family::Evpn => {
+                evpn_withdrawn.push(evpn_route(index, attributes(index, 1, 1)).route.key())
+            }
+            _ => withdrawn.push((Prefix::V4(Ipv4Prefix::new(unicast_prefix(index), 24)), 0)),
+        }
+    }
+    RibUpdate::RoutesReceived {
+        peer: PeerId::from_ipv4(SOURCE),
+        session_id: 1,
+        announced: Vec::new(),
+        withdrawn,
+        flowspec_announced: Vec::new(),
+        flowspec_withdrawn: Vec::new(),
+        evpn_announced: Vec::new(),
+        evpn_withdrawn,
+        validated_with: None,
+    }
+}
+
+/// The churn variant's subset of `0..rows`: every `CHURN_NTH`-th route is
+/// withdrawn, and every other one of those re-announced at `CHURN_VERSION`.
+fn churn_plan(rows: usize) -> (Vec<usize>, Vec<usize>) {
+    let withdrawn: Vec<usize> = (0..rows).step_by(CHURN_NTH).collect();
+    let reannounced = withdrawn.iter().copied().step_by(2).collect();
+    (withdrawn, reannounced)
 }
 
 fn churn_update(sequence: u32) -> RibUpdate {
@@ -862,6 +940,169 @@ struct Instruments {
     /// Whole-table operations live at the sample that first saw a refusal.
     operations_live_at_first_refusal: Option<f64>,
     all_refused_ms: Option<f64>,
+    /// Whole-run maximum of each `bgp_rib_actor_slice_max_microseconds`
+    /// stage over the sampler's reads, and how many reads it took.
+    slice_max_us: BTreeMap<String, f64>,
+    slice_reads: usize,
+}
+
+/// Publish the RIB's since-render slice maxima, take one snapshot, and fold
+/// the published maxima into `into`. Publishing resets the RIB's window, so
+/// the harness publishes only here and keeps the whole-run maximum itself.
+fn fold_slice_maxima(metrics: &BgpMetrics, into: &mut BTreeMap<String, f64>) -> Snapshot {
+    metrics.publish_render_window_maxima();
+    let snapshot = Snapshot::take(metrics);
+    for (labels, value) in snapshot.series(SLICE_MAX).into_iter().flatten() {
+        let stage = labels.get("stage").cloned().unwrap_or_default();
+        let max = into.entry(stage).or_insert(0.0);
+        *max = max.max(*value);
+    }
+    snapshot
+}
+
+/// Per label value: a histogram's sample count and cumulative buckets
+/// `(upper bound in seconds, count)`.
+type Buckets = BTreeMap<String, (u64, Vec<(f64, u64)>)>;
+
+fn buckets(metrics: &BgpMetrics, name: &str, label: &str) -> Buckets {
+    let mut buckets = Buckets::new();
+    for family in metrics.registry().gather() {
+        if family.name() != name {
+            continue;
+        }
+        for metric in family.get_metric() {
+            let key = metric
+                .get_label()
+                .iter()
+                .find(|pair| pair.name() == label)
+                .map_or_else(String::new, |pair| pair.value().to_string());
+            let histogram = metric.get_histogram();
+            let edges = histogram
+                .get_bucket()
+                .iter()
+                .map(|bucket| (bucket.upper_bound(), bucket.cumulative_count()))
+                .collect();
+            buckets.insert(key, (histogram.get_sample_count(), edges));
+        }
+    }
+    buckets
+}
+
+/// Per label value observed between `before` and `after`: the count and
+/// the bucket edges bracketing the longest observation, in ms. It is above
+/// `above_ms` and at most `at_most_ms` (null past the top edge).
+fn longest(before: &Buckets, after: &Buckets) -> Value {
+    let mut out = serde_json::Map::new();
+    for (key, (count, edges)) in after {
+        let (base_count, base_edges) = before.get(key).cloned().unwrap_or_default();
+        let observed = count - base_count;
+        if observed == 0 {
+            continue;
+        }
+        let within =
+            |index: usize| edges[index].1 - base_edges.get(index).map_or(0, |&(_, count)| count);
+        let first_full = (0..edges.len()).find(|&index| within(index) == observed);
+        let above = first_full
+            .unwrap_or(edges.len())
+            .checked_sub(1)
+            .map_or(0.0, |index| edges[index].0 * 1e3);
+        out.insert(
+            key.clone(),
+            json!({
+                "observations": observed,
+                "above_ms": above,
+                "at_most_ms": first_full.map(|index| edges[index].0 * 1e3),
+            }),
+        );
+    }
+    Value::Object(out)
+}
+
+/// Getter reads of the live-operation and credit-rows gauges.
+#[derive(Default)]
+struct GaugeWatch {
+    reads: usize,
+    peak_operations_live: i64,
+    peak_credit_rows: i64,
+    operations_first_ms: Option<f64>,
+    operations_last_ms: Option<f64>,
+}
+
+/// Read both gauges every `GAUGE_WATCH` until `stop`.
+fn watch_gauges(
+    metrics: BgpMetrics,
+    t0: Instant,
+    stop: Arc<AtomicBool>,
+) -> tokio::task::JoinHandle<GaugeWatch> {
+    tokio::spawn(async move {
+        let mut watch = GaugeWatch::default();
+        let mut tick = tokio::time::interval(GAUGE_WATCH);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        while !stop.load(Ordering::Acquire) {
+            tick.tick().await;
+            let operations = metrics.rib_outbound_operations_live();
+            watch.reads += 1;
+            watch.peak_operations_live = watch.peak_operations_live.max(operations);
+            watch.peak_credit_rows = watch
+                .peak_credit_rows
+                .max(metrics.rib_outbound_credit_rows());
+            if operations > 0 {
+                let at_ms = t0.elapsed().as_secs_f64() * 1e3;
+                watch.operations_first_ms.get_or_insert(at_ms);
+                watch.operations_last_ms = Some(at_ms);
+            }
+        }
+        watch
+    })
+}
+
+/// The inbox round trips of one run.
+#[derive(Default)]
+struct RoundTrips {
+    probes: usize,
+    longest_ms: f64,
+    /// When the longest one was sent, in ms from t0.
+    longest_sent_ms: Option<f64>,
+    /// The last probe got no reply within `cap`; `longest_ms` is its wait
+    /// so far and probing stopped there.
+    unfinished: bool,
+}
+
+/// Send one `QueryLocRibCount` every `ROUND_TRIP_EVERY` until `stop` and
+/// keep the longest wait for its reply. Each probe waits at most `cap`, so
+/// the task ends within `cap` of `stop` whether or not the RIB answers.
+fn probe_round_trips(
+    rib: mpsc::Sender<RibUpdate>,
+    t0: Instant,
+    stop: Arc<AtomicBool>,
+    cap: Duration,
+) -> tokio::task::JoinHandle<Result<RoundTrips>> {
+    tokio::spawn(async move {
+        let mut trips = RoundTrips::default();
+        while !stop.load(Ordering::Acquire) {
+            let sent = Instant::now();
+            let (reply, count) = oneshot::channel();
+            let probe = async {
+                rib.send(RibUpdate::QueryLocRibCount { reply }).await?;
+                count.await?;
+                anyhow::Ok(())
+            };
+            let finished = tokio::time::timeout(cap, probe).await;
+            let took = sent.elapsed().as_secs_f64() * 1e3;
+            if took > trips.longest_ms {
+                trips.longest_ms = took;
+                trips.longest_sent_ms = Some(sent.duration_since(t0).as_secs_f64() * 1e3);
+            }
+            if finished.is_err() {
+                trips.unfinished = true;
+                break;
+            }
+            finished??;
+            trips.probes += 1;
+            tokio::time::sleep(ROUND_TRIP_EVERY).await;
+        }
+        Ok(trips)
+    })
 }
 
 /// Sample the instruments until `stop`; watch `watched` peers' refusals.
@@ -879,7 +1120,8 @@ fn sampler(
         let mut refused = vec![false; watched.len()];
         while !stop.load(Ordering::Acquire) {
             let at_ms = start.elapsed().as_secs_f64() * 1e3;
-            let snapshot = Snapshot::take(&metrics);
+            let snapshot = fold_slice_maxima(&metrics, &mut instruments.slice_max_us);
+            instruments.slice_reads += 1;
             let gauge = |name| snapshot.total(name).unwrap_or(0.0);
             let sample = Sample {
                 at_ms,
@@ -960,12 +1202,27 @@ type Churn = (Arc<AtomicBool>, tokio::task::JoinHandle<()>);
 
 /// Churn-free readings of the summed credit gauge, in ms from `t0`.
 struct Quiet {
+    /// When the churn task had stopped.
+    stopped: Instant,
     stopped_ms: f64,
     last_sequence: Option<u32>,
+    /// When the last churn row before the stop had arrived.
+    delivered: Option<Instant>,
     delivered_ms: Option<f64>,
     published_ms: Option<f64>,
     end_ms: f64,
     readings: Vec<f64>,
+}
+
+/// The healthy receiver's gap exclusion: from the later of the churn's stop
+/// and its last row's delivery to the restart, so a slow delivery after the
+/// stop stays in the gap; nothing when that row never arrived.
+fn excluded_window(
+    stopped: Instant,
+    delivered: Option<Instant>,
+    restarted: Instant,
+) -> Option<(Instant, Instant)> {
+    delivered.map(|delivered| (delivered.max(stopped), restarted))
 }
 
 /// Stop the healthy receiver's churn, wait until its last row reached the
@@ -986,7 +1243,8 @@ async fn quiet_window(
     let ms = |at: Instant| at.saturating_duration_since(t0).as_secs_f64() * 1e3;
     churn.0.store(true, Ordering::Release);
     churn.1.await?;
-    let stopped_ms = ms(Instant::now());
+    let stopped = Instant::now();
+    let stopped_ms = ms(stopped);
     let last_sequence = log
         .lock()
         .expect("churn log")
@@ -1010,8 +1268,10 @@ async fn quiet_window(
         tokio::time::sleep(Duration::from_millis(1)).await;
     };
     let mut quiet = Quiet {
+        stopped,
         stopped_ms,
         last_sequence,
+        delivered,
         delivered_ms: delivered.map(ms),
         published_ms: None,
         end_ms: stopped_ms,
@@ -1135,13 +1395,25 @@ fn check_read_hold(pause: Duration) -> Result<()> {
 }
 
 /// Cells 2 and 3: the exhaustion cell and its unaffected peer, or the same
-/// cell behind an RFC 4724 restart.
+/// cell behind an RFC 4724 restart (cell 7). With `churn`, a restart run
+/// also withdraws and re-announces a subset of the burst while the release
+/// drains (`restart-churn`).
 pub async fn exhaust(
     family: Family,
     trigger: Trigger,
+    churn: bool,
     output: &Path,
     options: &Options,
 ) -> Result<bool> {
+    ensure!(
+        !churn || trigger == Trigger::Restart,
+        "the churn variant follows a selection release"
+    );
+    let cell = if churn {
+        "restart-churn"
+    } else {
+        trigger.cell()
+    };
     let wire_family = family.wire()?;
     let (receivers, rows, pause, deadline) = if options.reduced {
         (
@@ -1185,11 +1457,17 @@ pub async fn exhaust(
     specs.push((vec![(Afi::Ipv4, Safi::Unicast)], Some(healthy_policy())));
     fixture.connect(specs, Duration::from_secs(120)).await?;
     eprintln!(
-        "{} {}: {} receivers established",
-        trigger.cell(),
+        "{cell} {}: {} receivers established",
         family.name(),
         receivers + 1
     );
+    let plan = churn.then(|| churn_plan(rows));
+    let reference = Arc::new(match &plan {
+        Some((withdrawn, reannounced)) => {
+            Reference::churned(rows, BURST_VERSION, withdrawn, reannounced, CHURN_VERSION)
+        }
+        None => Reference::uniform(rows, BURST_VERSION),
+    });
     let healthy = receivers;
     // Every outbound peer the RIB divides its credit among: the burst
     // receivers, the healthy one and the sources.
@@ -1201,7 +1479,10 @@ pub async fn exhaust(
     for receiver in &mut fixture.receivers[..receivers] {
         let mut rx = receiver.rx.take().expect("receiver stream");
         let mut stop_rx = stop.1.clone();
-        let state = Arc::new(Mutex::new(WireState::new(wire_family, rows, BURST_VERSION)));
+        let state = Arc::new(Mutex::new(WireState::with_reference(
+            wire_family,
+            Arc::clone(&reference),
+        )));
         let shared = Arc::clone(&state);
         collectors.push((
             state,
@@ -1267,6 +1548,13 @@ pub async fn exhaust(
     }
     // Burst receivers pause their socket reads, acknowledged, before the burst.
     fixture.set_paused(0..receivers, true).await?;
+    // Setup's slice maxima and turn histograms, so the run's own start at t0.
+    let mut setup_slices = BTreeMap::new();
+    drop(fold_slice_maxima(&fixture.metrics, &mut setup_slices));
+    let histograms_before: Vec<Buckets> = TURN_HISTOGRAMS
+        .iter()
+        .map(|(name, label)| buckets(&fixture.metrics, name, label))
+        .collect();
     let t0 = Instant::now();
     let watched: Vec<_> = fixture.receivers[..receivers]
         .iter()
@@ -1342,8 +1630,42 @@ pub async fn exhaust(
     // When the burst's last UPDATE (a restart's End-of-RIB) was sent.
     let release_sent = t0.elapsed();
     eprintln!("burst sent at {release_sent:?}");
+    let watching = Arc::new(AtomicBool::new(false));
+    let gauges = watch_gauges(fixture.metrics.clone(), t0, Arc::clone(&watching));
+    let probing = Arc::new(AtomicBool::new(false));
+    let round_trips = probe_round_trips(
+        fixture.rib.clone(),
+        t0,
+        Arc::clone(&probing),
+        ROUND_TRIP_CAP,
+    );
     let window_start = if restart { t0 + release_sent } else { t0 };
     let churn = churn.take().unwrap_or_else(start_churn);
+
+    // The churn variant: halfway to the churn-free window, with the release
+    // queued ahead of it and every burst reader still paused, withdraw the
+    // planned subset and re-announce half of it at a new version.
+    let burst_churn = match &plan {
+        Some((withdrawn, reannounced)) => {
+            tokio::time::sleep_until(tokio::time::Instant::from_std(
+                t0 + pause.saturating_sub(QUIET_LEAD) / 2,
+            ))
+            .await;
+            let started = t0.elapsed();
+            for chunk in withdrawn.chunks(CHUNK) {
+                fixture.rib.send(source_withdrawal(family, chunk)).await?;
+            }
+            for chunk in reannounced.chunks(CHUNK) {
+                let indices = chunk.iter().copied();
+                fixture
+                    .rib
+                    .send(source_update(family, indices, CHURN_VERSION, 100))
+                    .await?;
+            }
+            Some((started, t0.elapsed()))
+        }
+        None => None,
+    };
 
     tokio::time::sleep_until(tokio::time::Instant::from_std(
         t0 + pause.saturating_sub(QUIET_LEAD),
@@ -1359,6 +1681,8 @@ pub async fn exhaust(
         t0 + pause,
     )
     .await?;
+    // The churn-free window ends where the churn restarts.
+    let restarted = Instant::now();
     let churn = start_churn();
     let resume_issued = t0.elapsed();
     fixture.set_paused(0..receivers, false).await?;
@@ -1380,12 +1704,37 @@ pub async fn exhaust(
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
     eprintln!("settled at {settled:?}");
+    probing.store(true, Ordering::Release);
+    let round_trips_to = t0.elapsed();
+    let round_trips = round_trips.await??;
     tokio::time::sleep(QUIET).await;
     let end = Instant::now();
     churn.0.store(true, Ordering::Release);
     churn.1.await?;
     sampling.store(true, Ordering::Release);
-    let instruments = instruments.await?;
+    watching.store(true, Ordering::Release);
+    let gauges_to = t0.elapsed();
+    let mut instruments = instruments.await?;
+    let gauges = gauges.await?;
+    // The cell-end read: slices that completed after the sampler's last.
+    drop(fold_slice_maxima(
+        &fixture.metrics,
+        &mut instruments.slice_max_us,
+    ));
+    instruments.slice_reads += 1;
+    let turn_longest: Vec<Value> = TURN_HISTOGRAMS
+        .iter()
+        .zip(&histograms_before)
+        .map(|((name, label), before)| {
+            let after = buckets(&fixture.metrics, name, label);
+            // A tree without the metric has no instrument: null, not `{}`.
+            if after.is_empty() {
+                Value::Null
+            } else {
+                longest(before, &after)
+            }
+        })
+        .collect();
     let down = fixture.not_established().await;
     let _ = stop.0.send(true);
     for (_, collector) in &mut collectors {
@@ -1400,24 +1749,39 @@ pub async fn exhaust(
     // settled, lost a route and settled again counts its last settle.
     let mut rows_json = Vec::new();
     let (mut exact, mut ordered, mut missing, mut after_eor, mut resets) = (0, 0, 0, 0, 0);
+    let (mut survivors, mut churned_after_eor, mut duplicates) = (0, 0, 0);
+    let mut reflected = Vec::new();
     let mut latest = Duration::ZERO;
+    // The first and last receiver's End-of-RIB, from t0.
+    let mut eors: Option<(Duration, Duration)> = None;
     for ((state, _), ip) in collectors.iter().zip(&watched) {
         let state = state.lock().expect("wire state");
         exact += usize::from(state.exact());
         ordered += usize::from(trigger.eor_ordered(&state));
         missing += state.missing();
         after_eor += state.routes_after_eor;
+        survivors += state.withdrawn_survivors();
+        churned_after_eor += state.churned_after_eor;
+        duplicates += state.duplicates_before_eor;
+        reflected.push(state.churn_reflected_before_eor);
         resets += state.resets;
         if let Some(at) = state.settled_at {
             latest = latest.max(at.saturating_duration_since(t0));
+        }
+        if let Some(at) = state.eor_at.map(|at| at.saturating_duration_since(t0)) {
+            eors = Some(eors.map_or((at, at), |(first, last)| (first.min(at), last.max(at))));
         }
         rows_json.push(json!({
             "peer": ip.to_string(),
             "exact": state.exact(),
             "missing": state.missing(),
+            "withdrawn_survivors": state.withdrawn_survivors(),
             "eor_seen": state.eor_seen,
             "eor_premature": state.eor_premature,
             "routes_after_eor": state.routes_after_eor,
+            "churned_after_eor": state.churned_after_eor,
+            "churn_reflected_before_eor": state.churn_reflected_before_eor,
+            "duplicates_before_eor": state.duplicates_before_eor,
             "routes_before_eor": state.routes_before_eor,
             "eors": state.eors,
             "announced": state.announced,
@@ -1433,16 +1797,62 @@ pub async fn exhaust(
         (state.arrivals.clone(), state.resets)
     };
     let injected = churn_log.lock().expect("churn log").clone();
-    let unaffected = delivery(&injected, &arrivals, window_start, end);
+    let excluded = excluded_window(quiet.stopped, quiet.delivered, restarted);
+    let unaffected = delivery(&injected, &arrivals, window_start, end, excluded);
     let refused_peers = watched.iter().filter(|ip| refused_by(ip) > 0.0).count();
     let healthy_ip = fixture.receivers[healthy].ip;
     let flaps = snapshot.total("bgp_session_flaps_total");
     let ms = |duration: Duration| duration.as_secs_f64() * 1e3;
     // The healthy receiver's session counts too.
     let resets = resets + churn_resets;
+    let ms_from_t0 = |at: Instant| ms(at.saturating_duration_since(t0));
+    let burst_churn = match (&plan, burst_churn) {
+        (Some((withdrawn, reannounced)), Some((started, sent))) => json!({
+            "rule": format!(
+                "every {CHURN_NTH}th burst route withdrawn, every other one of those \
+                 re-announced at MED {CHURN_VERSION}, sent at (pause - churn-free lead) / 2 \
+                 while the burst readers are paused"
+            ),
+            "withdrawn": withdrawn.len(),
+            "re_announced": reannounced.len(),
+            "started_ms": ms(started),
+            "sent_ms": ms(sent),
+        }),
+        _ => Value::Null,
+    };
+    let actor = json!({
+        "read_every_ms": ms(SAMPLE),
+        "reads": instruments.slice_reads,
+        "window": "t0 (readers paused, before the burst) to the cell end",
+        "slice_max_us": instruments.slice_max_us,
+        "setup_slice_max_us": setup_slices,
+        "turn_longest_ms": turn_longest[0],
+        "work_longest_ms": turn_longest[1],
+        "owed_drain_step_longest_ms": turn_longest[2],
+        "inbox_round_trip": {
+            "from_ms": ms(release_sent),
+            "to_ms": ms(round_trips_to),
+            "every_ms": ms(ROUND_TRIP_EVERY),
+            "probes": round_trips.probes,
+            "longest_ms": round_trips.longest_ms,
+            "longest_sent_ms": round_trips.longest_sent_ms,
+            "unfinished": round_trips.unfinished,
+            "cap_ms": ms(ROUND_TRIP_CAP),
+        },
+    });
+    let drain_gauges = json!({
+        "from_ms": ms(release_sent),
+        "to_ms": ms(gauges_to),
+        "read_every_ms": ms(GAUGE_WATCH),
+        "reads": gauges.reads,
+        "peak_operations_live": gauges.peak_operations_live,
+        "operations_live_first_ms": gauges.operations_first_ms,
+        "operations_live_last_ms": gauges.operations_last_ms,
+        "peak_credit_rows": gauges.peak_credit_rows,
+    });
     let result = json!({
         "schema": "rrtransport-credit/1",
-        "cell": trigger.cell(),
+        "cell": cell,
         "family": family.name(),
         "mode": if options.correctness_only { "correctness" } else { "measured" },
         "shape": {
@@ -1456,6 +1866,7 @@ pub async fn exhaust(
             "receiver_rcvbuf_bytes": RECEIVER_RCVBUF,
         },
         "row_size_of": family.row_size_of(),
+        "row_credit": ROW_CREDIT.iter().copied().collect::<BTreeMap<_, _>>(),
         // The healthy receiver's churn row, which the summed credit gauge
         // may hold on top of the burst receivers'.
         "healthy_row_size_of": Family::Unicast.row_size_of(),
@@ -1469,7 +1880,12 @@ pub async fn exhaust(
             "settled_ms": settled.map(ms),
             "recovery_ms": settled.map(|_| ms(latest)),
             "drain_after_resume_ms": settled.map(|_| ms(latest.saturating_sub(resumed))),
+            "first_eor_ms": eors.map(|(first, _)| ms(first)),
+            "last_eor_ms": eors.map(|(_, last)| ms(last)),
         },
+        "churn": burst_churn,
+        "actor": actor,
+        "drain_gauges": drain_gauges,
         "checks": {
             "final_state_exact": exact == receivers,
             trigger.eor_check(): ordered == receivers,
@@ -1479,6 +1895,11 @@ pub async fn exhaust(
             "exact_receivers": exact,
             "missing_routes": missing,
             "routes_after_eor": after_eor,
+            "withdrawn_survivors": survivors,
+            "churned_after_eor": churned_after_eor,
+            // Per burst receiver, at its End-of-RIB (null without one).
+            "churn_reflected_before_eor": reflected,
+            "duplicates_before_eor": duplicates,
             "stub_resets": resets,
             "not_established": down,
             "session_flaps_total": flaps,
@@ -1511,7 +1932,16 @@ pub async fn exhaust(
         "unaffected": {
             "injected": unaffected.injected,
             "delivered": unaffected.delivered,
+            // Less the harness's own churn-free window, counted in the raw one.
             "max_gap_ms": ms(unaffected.max_gap),
+            "max_gap_raw_ms": ms(unaffected.max_gap_raw),
+            // Null when the last churn row before the window never arrived.
+            "quiet_excluded": excluded.map(|(from, to)| json!({
+                "from_ms": ms_from_t0(from),
+                "to_ms": ms_from_t0(to),
+                "span_ms": ms(to.saturating_duration_since(from)),
+            })),
+            "quiet_lead_ms": ms(QUIET_LEAD),
             "p50_latency_ms": ms(unaffected.p50),
             "p99_latency_ms": ms(unaffected.p99),
             "max_latency_ms": ms(unaffected.max),
@@ -1520,11 +1950,7 @@ pub async fn exhaust(
         "memory": memory_json(&instruments),
         "receivers": rows_json,
     });
-    write_result(
-        output,
-        &format!("{}-{}.json", trigger.cell(), family.name()),
-        &result,
-    )?;
+    write_result(output, &format!("{cell}-{}.json", family.name()), &result)?;
     fixture.close().await?;
     Ok(recorded_pass(&result))
 }
@@ -1738,7 +2164,16 @@ mod tests {
 
     use std::time::Duration;
 
-    use super::{check_read_hold, recorded_pass, Options, Trigger};
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    use rustbgpd_rib::update::RibUpdate;
+
+    use super::{
+        check_read_hold, churn_plan, fold_slice_maxima, longest, recorded_pass, source_withdrawal,
+        Buckets, Family, Options, Snapshot, Trigger, SLICE_MAX,
+    };
     use crate::credit_wire::{Observed, WireFamily, WireState};
 
     fn parse(args: &[&str]) -> Options {
@@ -1789,6 +2224,8 @@ mod tests {
         assert_eq!(run(&[&eor, &route, &eor]), (false, false));
         // Seeded: a route ahead of an ordinary burst's End-of-RIB.
         assert_eq!(run(&[&route, &eor, &route]), (false, false));
+        // Seeded: a restart burst's End-of-RIB twice.
+        assert_eq!(run(&[&route, &eor, &eor]), (false, false));
         assert_ne!(Trigger::Ordinary.eor_check(), Trigger::Restart.eor_check());
         assert_ne!(Trigger::Ordinary.cell(), Trigger::Restart.cell());
     }
@@ -1828,5 +2265,130 @@ mod tests {
         assert!(!recorded_pass(&wire));
         // A result without checks has nothing to pass.
         assert!(!recorded_pass(&json!({})));
+    }
+
+    #[test]
+    fn slice_maxima_survive_the_render_reset() {
+        use rustbgpd_telemetry::metrics::RibActorSliceStage;
+        let metrics = rustbgpd_telemetry::BgpMetrics::new();
+        let mut recorder = metrics.rib_actor_slice_recorder();
+        recorder.observe(RibActorSliceStage::ActorPoll, Duration::from_millis(300));
+        recorder.flush();
+        // Seeded: a plain gather never publishes, so it reads no maximum.
+        let unpublished = Snapshot::take(&metrics);
+        assert_eq!(unpublished.total(SLICE_MAX), Some(0.0));
+        let mut max = BTreeMap::new();
+        drop(fold_slice_maxima(&metrics, &mut max));
+        assert_eq!(max["actor_poll"], 300_000.0);
+        // The next read publishes an empty window; the run's maximum stays.
+        let snapshot = fold_slice_maxima(&metrics, &mut max);
+        assert_eq!(snapshot.total(SLICE_MAX), Some(0.0));
+        assert_eq!(max["actor_poll"], 300_000.0);
+    }
+
+    #[test]
+    fn longest_brackets_only_the_window_observations() {
+        let edges = |counts: [u64; 3]| vec![(0.1, counts[0]), (0.2, counts[1]), (0.5, counts[2])];
+        let before = Buckets::from([("x".to_string(), (1, edges([1, 1, 1])))]);
+        // One more turn in (0.1, 0.2], one in (0.2, 0.5], one past 0.5.
+        let after = Buckets::from([
+            ("x".to_string(), (3, edges([1, 2, 3]))),
+            ("y".to_string(), (1, edges([0, 0, 0]))),
+            ("z".to_string(), (0, edges([0, 0, 0]))),
+        ]);
+        let longest = longest(&before, &after);
+        assert_eq!(
+            longest["x"],
+            json!({"observations": 2, "above_ms": 200.0, "at_most_ms": 500.0})
+        );
+        assert_eq!(
+            longest["y"],
+            json!({"observations": 1, "above_ms": 500.0, "at_most_ms": null})
+        );
+        // A label without observations in the window is left out.
+        assert!(longest.get("z").is_none());
+    }
+
+    #[test]
+    fn seeded_slow_churn_delivery_stays_in_the_gap() {
+        use crate::credit_wire::delivery;
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let injected = [(1, at(0))];
+        // Churn stops at 100 ms; its last row arrives only at 1,000 ms; the
+        // churn restarts at 1,300 ms and arrives at once.
+        let arrivals = [(1, at(90)), (2, at(1_000)), (3, at(1_300))];
+        let gap = |excluded| delivery(&injected, &arrivals, start, at(1_300), excluded).max_gap;
+        let window = super::excluded_window(at(100), Some(at(1_000)), at(1_300));
+        assert_eq!(window, Some((at(1_000), at(1_300))));
+        assert_eq!(gap(window), Duration::from_millis(910));
+        // Undelivered: nothing is excluded.
+        assert_eq!(super::excluded_window(at(100), None, at(1_300)), None);
+    }
+
+    #[tokio::test]
+    async fn round_trip_probe_ends_unfinished_when_the_rib_never_replies() {
+        let (rib, mut inbox) = tokio::sync::mpsc::channel(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        let cap = Duration::from_millis(100);
+        let probe = super::probe_round_trips(rib, Instant::now(), Arc::clone(&stop), cap);
+        // Handshake: the probe is in flight once its query is received;
+        // holding the reply sender, the RIB never answers.
+        let Some(RibUpdate::QueryLocRibCount { reply: _held }) = inbox.recv().await else {
+            panic!("a round-trip query");
+        };
+        stop.store(true, Ordering::Release);
+        let trips = tokio::time::timeout(Duration::from_secs(10), probe)
+            .await
+            .expect("the join ends within the probe cap")
+            .unwrap()
+            .unwrap();
+        assert!(trips.unfinished);
+        assert_eq!(trips.probes, 0);
+        assert!(trips.longest_ms >= 100.0, "{}", trips.longest_ms);
+    }
+
+    #[test]
+    fn row_credit_mirror_matches_the_rib() {
+        let source = include_str!("../../../../crates/rib/src/outbound_credit.rs");
+        for (name, value) in super::ROW_CREDIT {
+            let declaration = format!("const {name}: usize = ");
+            let line = source
+                .lines()
+                .find(|line| line.contains(&declaration))
+                .unwrap_or_else(|| panic!("{name} not declared in outbound_credit.rs"));
+            let literal = line.rsplit(" = ").next().unwrap().trim_end_matches(';');
+            assert_eq!(
+                literal.replace('_', "").parse::<usize>().unwrap(),
+                value,
+                "{name} drifted from the RIB"
+            );
+        }
+    }
+
+    #[test]
+    fn churn_plan_withdraws_every_hundredth_and_reannounces_half() {
+        let (withdrawn, reannounced) = churn_plan(4_096);
+        assert_eq!(withdrawn.len(), 41);
+        assert_eq!(reannounced.len(), 21);
+        assert!(reannounced.iter().all(|index| withdrawn.contains(index)));
+        let RibUpdate::RoutesReceived {
+            withdrawn: prefixes,
+            ..
+        } = source_withdrawal(Family::Unicast, &withdrawn[..2])
+        else {
+            panic!("a route batch");
+        };
+        let indices: Vec<_> = prefixes
+            .iter()
+            .map(|&(prefix, _)| crate::credit_wire::unicast_index(prefix))
+            .collect();
+        assert_eq!(indices, [Some(0), Some(100)]);
+        let RibUpdate::RoutesReceived { evpn_withdrawn, .. } =
+            source_withdrawal(Family::Evpn, &withdrawn[..1])
+        else {
+            panic!("a route batch");
+        };
+        assert_eq!(evpn_withdrawn.len(), 1);
     }
 }

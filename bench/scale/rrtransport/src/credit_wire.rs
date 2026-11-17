@@ -4,7 +4,9 @@
 //! injection log, never the daemon's Adj-RIB-Out, so a storage defect in
 //! the daemon cannot also corrupt the reference it is compared with.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rustbgpd_wire::{
@@ -138,19 +140,82 @@ pub fn observe(
     Ok(observed)
 }
 
+/// The table every burst receiver must end with, shared by all of them.
+#[derive(Debug)]
+pub struct Reference {
+    /// Final MED per route index; 0 = absent.
+    meds: Vec<u32>,
+    /// Routes the harness withdrew (and maybe re-announced) during the
+    /// drain. They may arrive on either side of the End-of-RIB; every other
+    /// route must precede it.
+    churned: Vec<bool>,
+}
+
+impl Reference {
+    /// Routes `0..rows`, every one at `med`.
+    pub fn uniform(rows: usize, med: u32) -> Self {
+        assert_ne!(med, 0, "MED 0 marks an absent route");
+        Self {
+            meds: vec![med; rows],
+            churned: vec![false; rows],
+        }
+    }
+
+    /// `uniform`, then `withdrawn` routes withdrawn and `reannounced` ones
+    /// announced again at `version`.
+    pub fn churned(
+        rows: usize,
+        med: u32,
+        withdrawn: &[usize],
+        reannounced: &[usize],
+        version: u32,
+    ) -> Self {
+        assert_ne!(version, 0, "MED 0 marks an absent route");
+        let mut reference = Self::uniform(rows, med);
+        for &index in withdrawn {
+            reference.meds[index] = 0;
+            reference.churned[index] = true;
+        }
+        for &index in reannounced {
+            reference.meds[index] = version;
+            reference.churned[index] = true;
+        }
+        reference
+    }
+}
+
 /// One burst receiver's decoded table against the harness reference.
 #[derive(Debug)]
 pub struct WireState {
     family: WireFamily,
-    expected: u32,
+    reference: Arc<Reference>,
     /// MED last announced per route index; 0 = absent.
     table: Vec<u32>,
+    /// Routes that differ from the reference.
     mismatch: usize,
+    /// Routes outside the churned set that differ from the reference.
+    stable_mismatch: usize,
     pub eor_seen: bool,
-    /// The family's End-of-RIB arrived while routes were still missing.
+    /// When the first End-of-RIB of the family was decoded.
+    pub eor_at: Option<Instant>,
+    /// The family's End-of-RIB arrived while a route outside the churned
+    /// set was still missing or stale.
     pub eor_premature: bool,
-    /// Burst-family NLRI decoded after the family's End-of-RIB.
+    /// Burst-family NLRI outside the churned set decoded after the
+    /// family's End-of-RIB.
     pub routes_after_eor: u64,
+    /// Churned NLRI decoded after the End-of-RIB: allowed, report-only.
+    pub churned_after_eor: u64,
+    /// First MED announced before the End-of-RIB, per churned route.
+    first_churned: HashMap<usize, u32>,
+    /// At the first End-of-RIB: churned routes whose state before the
+    /// marker already reflected the churn (a withdrawn route never
+    /// announced, a re-announced one first seen at its new MED). Nonzero
+    /// shows the churn reached the RIB before the release sent those rows.
+    pub churn_reflected_before_eor: Option<usize>,
+    /// Announcements before the End-of-RIB that repeat the MED already
+    /// held: report-only.
+    pub duplicates_before_eor: u64,
     /// Burst-family NLRI decoded before the family's first End-of-RIB.
     pub routes_before_eor: u64,
     /// End-of-RIB markers of the family.
@@ -169,16 +234,30 @@ pub struct WireState {
 
 impl WireState {
     /// A receiver that must end holding routes `0..rows` at MED `expected`.
+    #[cfg(test)]
     pub fn new(family: WireFamily, rows: usize, expected: u32) -> Self {
-        assert_ne!(expected, 0, "MED 0 marks an absent route");
+        Self::with_reference(family, Arc::new(Reference::uniform(rows, expected)))
+    }
+
+    /// A receiver that must end holding `reference`.
+    pub fn with_reference(family: WireFamily, reference: Arc<Reference>) -> Self {
+        let rows = reference.meds.len();
+        let absent = reference.meds.iter().filter(|&&med| med == 0).count();
+        let churned = reference.churned.iter().filter(|&&churned| churned).count();
         Self {
             family,
-            expected,
             table: vec![0; rows],
-            mismatch: rows,
+            mismatch: rows - absent,
+            stable_mismatch: rows - churned,
+            reference,
             eor_seen: false,
+            eor_at: None,
             eor_premature: false,
             routes_after_eor: 0,
+            churned_after_eor: 0,
+            first_churned: HashMap::new(),
+            churn_reflected_before_eor: None,
+            duplicates_before_eor: 0,
             routes_before_eor: 0,
             eors: 0,
             messages: 0,
@@ -196,12 +275,20 @@ impl WireState {
             self.outside += 1;
             return;
         };
-        let was = *slot == self.expected;
+        let reference = self.reference.meds[index];
+        let was = *slot == reference;
         *slot = value;
-        let is = value == self.expected;
+        let is = value == reference;
+        let stable = usize::from(!self.reference.churned[index]);
         match (was, is) {
-            (true, false) => self.mismatch += 1,
-            (false, true) => self.mismatch -= 1,
+            (true, false) => {
+                self.mismatch += 1;
+                self.stable_mismatch += stable;
+            }
+            (false, true) => {
+                self.mismatch -= 1;
+                self.stable_mismatch -= stable;
+            }
             _ => {}
         }
     }
@@ -225,24 +312,34 @@ impl WireState {
         self.outside += observed.outside as u64;
         // Only routes inside the burst key space count; others are `outside`.
         let rows = self.table.len();
-        let routes = observed
+        let (mut routes, mut churned) = (0, 0);
+        let indices = observed
             .announced
             .iter()
-            .filter(|(index, _)| *index < rows)
-            .count()
-            + observed
-                .withdrawn
-                .iter()
-                .filter(|&&index| index < rows)
-                .count();
+            .map(|&(index, _)| index)
+            .chain(observed.withdrawn.iter().copied());
+        for index in indices.filter(|&index| index < rows) {
+            routes += 1;
+            churned += u64::from(self.reference.churned[index]);
+        }
         if self.eor_seen {
-            self.routes_after_eor += routes as u64;
+            self.routes_after_eor += routes - churned;
+            self.churned_after_eor += churned;
         } else {
-            self.routes_before_eor += routes as u64;
+            self.routes_before_eor += routes;
         }
         self.eors += u64::from(observed.end_of_rib);
         for &(index, med) in &observed.announced {
             self.announced += 1;
+            if !self.eor_seen && index < rows {
+                let held = self.table[index];
+                self.duplicates_before_eor += u64::from(held != 0 && Some(held) == med);
+                if self.reference.churned[index] {
+                    self.first_churned
+                        .entry(index)
+                        .or_insert(med.unwrap_or(u32::MAX));
+                }
+            }
             // A route without MED can never equal the reference.
             self.set(index, med.unwrap_or(u32::MAX));
         }
@@ -252,7 +349,9 @@ impl WireState {
         }
         if observed.end_of_rib && !self.eor_seen {
             self.eor_seen = true;
-            self.eor_premature = self.mismatch != 0;
+            self.eor_at = Some(now);
+            self.eor_premature = self.stable_mismatch != 0;
+            self.churn_reflected_before_eor = Some(self.churn_reflected());
         }
         self.settled_at = if self.exact() {
             self.settled_at.or(Some(now))
@@ -270,6 +369,28 @@ impl WireState {
 
     pub fn missing(&self) -> usize {
         self.mismatch
+    }
+
+    /// Churned routes whose first announcement so far (none: 0) is already
+    /// their post-churn reference state.
+    fn churn_reflected(&self) -> usize {
+        let churned = self.reference.churned.iter().enumerate();
+        churned
+            .filter(|&(index, &churned)| {
+                churned
+                    && self.first_churned.get(&index).copied().unwrap_or(0)
+                        == self.reference.meds[index]
+            })
+            .count()
+    }
+
+    /// Routes the reference withdrew for good that the receiver still holds.
+    pub fn withdrawn_survivors(&self) -> usize {
+        self.table
+            .iter()
+            .zip(&self.reference.meds)
+            .filter(|&(&held, &med)| med == 0 && held != 0)
+            .count()
     }
 
     /// The decoded-message channel closed while the harness still needed it.
@@ -316,8 +437,11 @@ pub struct Delivery {
     pub injected: usize,
     pub delivered: usize,
     /// Longest interval with no churn arrival, from `start` to the first
-    /// arrival, between arrivals, and from the last arrival to `end`.
+    /// arrival, between arrivals, and from the last arrival to `end`, less
+    /// its overlap with the excluded window.
     pub max_gap: Duration,
+    /// The same without the exclusion.
+    pub max_gap_raw: Duration,
     pub p50: Duration,
     pub p99: Duration,
     pub max: Duration,
@@ -326,11 +450,14 @@ pub struct Delivery {
 /// Each injected sequence counts as delivered at the first arrival of any
 /// sequence at or after it, so coalesced replacements count as delivered
 /// late rather than lost; one still pending at `end` counts as `end`.
+/// `excluded` is the harness's own churn-free window: a gap counts only
+/// its part outside it.
 pub fn delivery(
     injected: &[(u32, Instant)],
     arrivals: &[(u32, Instant)],
     start: Instant,
     end: Instant,
+    excluded: Option<(Instant, Instant)>,
 ) -> Delivery {
     let mut latencies = Vec::with_capacity(injected.len());
     let mut delivered = 0;
@@ -358,16 +485,24 @@ pub fn delivery(
         .filter(|&at| at >= start && at <= end)
         .collect();
     times.sort_unstable();
-    let mut max_gap = Duration::ZERO;
+    let overlap = |from: Instant, to: Instant| {
+        excluded.map_or(Duration::ZERO, |(low, high)| {
+            to.min(high).saturating_duration_since(from.max(low))
+        })
+    };
+    let (mut max_gap, mut max_gap_raw) = (Duration::ZERO, Duration::ZERO);
     let mut previous = start;
     for at in times.into_iter().chain([end]) {
-        max_gap = max_gap.max(at.saturating_duration_since(previous));
+        let gap = at.saturating_duration_since(previous);
+        max_gap_raw = max_gap_raw.max(gap);
+        max_gap = max_gap.max(gap - overlap(previous, at));
         previous = at;
     }
     Delivery {
         injected: injected.len(),
         delivered,
         max_gap,
+        max_gap_raw,
         p50: pick(0.50),
         p99: pick(0.99),
         max: latencies.last().copied().unwrap_or(Duration::ZERO),
@@ -542,7 +677,7 @@ mod tests {
         let injected = [(1, at(0)), (2, at(100)), (3, at(200)), (4, at(300))];
         // Sequence 2 is coalesced into 3; nothing arrives for 1.5 s.
         let arrivals = [(1, at(5)), (3, at(1_700)), (4, at(1_705))];
-        let delivery = delivery(&injected, &arrivals, start, at(1_800));
+        let delivery = delivery(&injected, &arrivals, start, at(1_800), None);
         assert_eq!(delivery.delivered, 4);
         assert_eq!(delivery.max_gap, Duration::from_millis(1_695));
         assert_eq!(delivery.p99, Duration::from_millis(1_600));
@@ -553,9 +688,123 @@ mod tests {
     fn undelivered_churn_counts_to_the_end() {
         let start = Instant::now();
         let injected = [(1, start)];
-        let delivery = delivery(&injected, &[], start, start + Duration::from_secs(3));
+        let delivery = delivery(&injected, &[], start, start + Duration::from_secs(3), None);
         assert_eq!(delivery.delivered, 0);
         assert_eq!(delivery.max_gap, Duration::from_secs(3));
         assert_eq!(delivery.p99, Duration::from_secs(3));
+    }
+
+    /// Routes 0..4 at MED 7; the harness withdrew 1 and 2 during the drain
+    /// and re-announced 2 at MED 9.
+    fn churned_run(steps: &[Observed]) -> WireState {
+        let reference = Reference::churned(ROWS, 7, &[1, 2], &[2], 9);
+        let mut state = WireState::with_reference(WireFamily::Unicast, Arc::new(reference));
+        let now = Instant::now();
+        for step in steps {
+            state.apply_observed(step, now);
+        }
+        state
+    }
+
+    fn withdrawn(indices: impl IntoIterator<Item = usize>) -> Observed {
+        Observed {
+            withdrawn: indices.into_iter().collect(),
+            ..Observed::default()
+        }
+    }
+
+    #[test]
+    fn churned_routes_may_follow_the_end_of_rib() {
+        // The release table, its End-of-RIB, then the churn behind it.
+        let state = churned_run(&[routes(0..ROWS, 7), eor(), withdrawn([1, 2]), routes([2], 9)]);
+        assert_eq!(checks(&state), [true, true, true]);
+        assert_eq!(state.churned_after_eor, 3);
+        assert_eq!(state.withdrawn_survivors(), 0);
+        // Or ahead of it, with the churned routes absent at the marker.
+        let state = churned_run(&[routes([0, 3], 7), routes([2], 9), eor()]);
+        assert_eq!(checks(&state), [true, true, true]);
+        assert_eq!(state.churned_after_eor, 0);
+    }
+
+    #[test]
+    fn seeded_surviving_withdrawn_route_fails_only_final_state() {
+        // Route 1 was never withdrawn on the wire.
+        let state = churned_run(&[routes(0..ROWS, 7), eor(), withdrawn([2]), routes([2], 9)]);
+        assert_eq!(checks(&state), [false, true, true]);
+        assert_eq!(state.withdrawn_survivors(), 1);
+    }
+
+    #[test]
+    fn seeded_stale_reannouncement_fails_only_final_state() {
+        // Route 2 kept its pre-churn version.
+        let state = churned_run(&[routes(0..ROWS, 7), eor(), withdrawn([1])]);
+        assert_eq!(checks(&state), [false, true, true]);
+        assert_eq!(state.withdrawn_survivors(), 0);
+    }
+
+    #[test]
+    fn seeded_unchurned_route_after_eor_fails_only_eor_order() {
+        // Route 3 was never churned, so it belongs before the marker.
+        let state = churned_run(&[routes([0], 7), routes([2], 9), eor(), routes([3], 7)]);
+        assert_eq!(checks(&state), [true, false, true]);
+        assert!(state.eor_premature);
+        assert_eq!(state.routes_after_eor, 1);
+    }
+
+    #[test]
+    fn churn_witness_counts_routes_already_churned_at_the_end_of_rib() {
+        // The release sent every row at MED 7 before the churn reached the
+        // RIB: nothing before the marker reflects it.
+        let late = churned_run(&[routes(0..ROWS, 7), eor(), withdrawn([1, 2]), routes([2], 9)]);
+        assert_eq!(late.churn_reflected_before_eor, Some(0));
+        // The churn reached the RIB first: route 1 never announced, route 2
+        // first seen at MED 9.
+        let early = churned_run(&[routes([0, 3], 7), routes([2], 9), eor()]);
+        assert_eq!(early.churn_reflected_before_eor, Some(2));
+        // Seeded: route 1 announced at 7 and withdrawn before the marker,
+        // route 2 seen at 7 before 9. Neither counts.
+        let mixed = churned_run(&[routes(0..ROWS, 7), withdrawn([1]), routes([2], 9), eor()]);
+        assert_eq!(mixed.churn_reflected_before_eor, Some(0));
+        // No marker, no witness.
+        assert_eq!(
+            churned_run(&[routes([0, 3], 7)]).churn_reflected_before_eor,
+            None
+        );
+    }
+
+    #[test]
+    fn duplicate_announcements_before_the_end_of_rib_are_counted() {
+        let state = run(&[routes(0..ROWS, 7), routes([1], 7), routes([1], 6), eor()]);
+        assert_eq!(state.duplicates_before_eor, 1);
+        // After the marker a repeat is not counted here.
+        let state = run(&[routes(0..ROWS, 7), eor(), routes([1], 7)]);
+        assert_eq!(state.duplicates_before_eor, 0);
+    }
+
+    #[test]
+    fn seeded_second_eor_is_counted() {
+        let state = churned_run(&[routes([0, 3], 7), routes([2], 9), eor(), eor()]);
+        assert_eq!(state.eors, 2);
+        assert!(state.eor_at.is_some());
+    }
+
+    #[test]
+    fn excluded_window_removes_only_its_overlap_from_a_gap() {
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let injected = [(1, at(0))];
+        // Arrivals every 20 ms but for one 400 ms hole.
+        let arrivals = [(1, at(20)), (2, at(40)), (3, at(440)), (4, at(460))];
+        let window = |from, to| Some((at(from), at(to)));
+        let gap = |excluded| delivery(&injected, &arrivals, start, at(480), excluded).max_gap;
+        assert_eq!(gap(None), Duration::from_millis(400));
+        // The hole lies inside the window: what is left is a 20 ms gap.
+        assert_eq!(gap(window(30, 450)), Duration::from_millis(20));
+        // The window covers 300 ms of it: 100 ms still counts.
+        assert_eq!(gap(window(60, 360)), Duration::from_millis(100));
+        // A window elsewhere changes nothing.
+        assert_eq!(gap(window(460, 470)), Duration::from_millis(400));
+        let both = delivery(&injected, &arrivals, start, at(480), window(30, 450));
+        assert_eq!(both.max_gap_raw, Duration::from_millis(400));
     }
 }
