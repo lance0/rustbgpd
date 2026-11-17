@@ -246,8 +246,12 @@ async fn ordinary_ingest_services_readiness_mid_mixed_fanout() {
     assert_mixed_fanout_readiness(false).await;
 }
 
+/// The same fanout after a selection release: the release turn serves the
+/// grouped peers from one shared probe, and the peer-context peers hold the
+/// family in their own Adj-RIB-Out, so the resync ticks after it probe them
+/// one at a time. Readiness is answered between those probes too.
 #[tokio::test(start_paused = true)]
-async fn selection_release_services_readiness_mid_mixed_fanout() {
+async fn selection_release_drain_services_readiness_between_private_receivers() {
     assert_mixed_fanout_readiness(true).await;
 }
 

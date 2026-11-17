@@ -513,6 +513,17 @@ a private (per-peer Adj-RIB-Out) family instead of staging it. It later stages
 that key once, from current state. The owed key is the prefix or NLRI identity,
 never a path ID.
 
+An RFC 4724 selection release is a second source of owed state: it owes the
+released family whole to every receiver that holds the family in its own
+Adj-RIB-Out, and stages nothing toward those receivers in the release turn.
+The owed-key drain then sends each receiver the family, by diff against its
+admitted Adj-RIB-Out, with the family's End-of-RIB behind it. A family still
+behind an RFC 5291 initial-advertisement gate is not owed; the peer's first
+refresh answers with the whole table. The resync tick reads a receiver's
+credit before it absorbs owed state for a waiting End-of-RIB, so a receiver
+that has stopped reading delays only its own table and marker. The
+selection-release replay remains for unicast and VPN group members only.
+
 Each owed key carries a *logged deferral*: a test-build record of (session,
 receiver, AFI/SAFI, key). It opens when the key becomes owed. It closes when the
 key is drained, absorbed or cancelled, or when a resync covers it.
