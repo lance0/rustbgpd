@@ -894,6 +894,8 @@ impl RibManager {
             .inspect(|_| checkpoint())
             .copied()
             .collect();
+        // Per key set a peer may stage: the AFIs it carries.
+        let mut carried_afis = [None, None];
         for peer in peers {
             checkpoint();
             if self.outbound_channel_gone(peer) {
@@ -935,6 +937,7 @@ impl RibManager {
                 ],
                 |key| usize::from(matches!(key, Prefix::V6(_))),
                 |key| crate::manager::outbound_owing::OwedKey::Labeled(*key),
+                &mut carried_afis[usize::from(orr_resolved || peer_add_path)],
             ) {
                 crate::manager::outbound_owing::KeyedPass::Preflight => {
                     if self.outbound_preflight_refused(peer) {

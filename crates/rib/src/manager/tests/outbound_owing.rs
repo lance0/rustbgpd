@@ -3896,6 +3896,74 @@ fn begin_close_flushes_typed_withdrawals_and_moves_only() {
     }
 }
 
+/// A pass whose keys all belong to a family owed whole (a selection release
+/// toward each private receiver) is skipped without visiting the keys per
+/// receiver: the AFIs the pass carries are read once for the pass. A pass
+/// that also carries a key of a streaming AFI still stages that key.
+#[test]
+fn a_keyed_pass_of_a_whole_owed_family_reads_its_keys_once_for_all_receivers() {
+    use super::super::outbound_owing::KeyedPass;
+    let families = [
+        (Afi::Ipv4, Safi::LabeledUnicast),
+        (Afi::Ipv6, Safi::LabeledUnicast),
+    ];
+    let owed = families.map(|family| OwedFamily::of(family).unwrap());
+    let keys: HashSet<_> = (1..=4).map(|index| typed_key(families[0], index)).collect();
+    let mut mixed = keys.clone();
+    let other = typed_key(families[1], 1);
+    mixed.insert(other);
+    let mut manager = manager(64);
+    let visits = std::cell::Cell::new(0);
+    let index = |key: &super::super::outbound_owing::OwedKey| usize::from(key.family() == owed[1]);
+    let counted = |key: &super::super::outbound_owing::OwedKey| {
+        visits.set(visits.get() + 1);
+        index(key)
+    };
+    let (mut carried, mut carried_mixed) = (None, None);
+    let mut sessions = Vec::new();
+    for receiver in 1..=3 {
+        let peer = peer_v4(Ipv4Addr::new(10, 0, 32, receiver));
+        sessions.push(up(&mut manager, peer, families.to_vec()));
+        manager.owe_whole_family(peer, owed[0]);
+        assert!(matches!(
+            manager.owing_keyed_pass(peer, &keys, owed, counted, |key| *key, &mut carried),
+            KeyedPass::Skip
+        ));
+        let KeyedPass::Stage { keys: staged, .. } =
+            manager.owing_keyed_pass(peer, &mixed, owed, index, |key| *key, &mut carried_mixed)
+        else {
+            panic!("the streaming AFI's key is staged")
+        };
+        assert_eq!(staged.iter().copied().collect::<Vec<_>>(), [other]);
+    }
+    assert_eq!(visits.get(), keys.len(), "one read for three receivers");
+}
+
+/// A unicast AFI owed whole stages nothing in a pass, and does not hold a
+/// change of the other AFI: the pass that carries it stages it at once.
+#[test]
+fn a_whole_owed_unicast_afi_does_not_hold_the_other_afis_changes() {
+    let (v4, v6) = ((Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast));
+    let mut manager = manager(64);
+    let mut source = up(&mut manager, peer_v4(SOURCE), vec![v4, v6]);
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 33, 1));
+    let mut rx = up(&mut manager, peer, vec![v4, v6]);
+    send_all(&mut rx);
+    manager.owe_whole_family(peer, OwedFamily::IPV4_UNICAST);
+    typed_received(&mut manager, v4, &[(1, 0)], &[], 0);
+    assert!(send_all(&mut rx).is_empty(), "owed whole: nothing staged");
+    typed_received(&mut manager, v6, &[(1, 0)], &[], 0);
+    let sent = send_all(&mut rx);
+    let announced: Vec<_> = sent
+        .iter()
+        .flat_map(|update| update.announce.iter().map(|route| route.prefix))
+        .collect();
+    assert_eq!(announced, [typed_prefix(Afi::Ipv6, 1)]);
+    assert!(manager.owes(peer, v4));
+    assert!(!manager.owes(peer, v6));
+    send_all(&mut source);
+}
+
 /// A partial pass can leave unnegotiated keys behind its last staged row.
 /// Cancellation must filter that remainder before recording or flipping debt.
 #[test]
@@ -3932,6 +4000,7 @@ fn partial_keyed_pass_only_owes_negotiated_families() {
             families.map(|family| OwedFamily::of(family).unwrap()),
             |key| usize::from(key.family() == OwedFamily::of(families[1]).unwrap()),
             |key| *key,
+            &mut None,
         ) else {
             panic!("one row of credit stages a partial pass")
         };

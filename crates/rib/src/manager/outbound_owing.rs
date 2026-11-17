@@ -1669,7 +1669,9 @@ pub(super) enum WholePass {
 
 impl RibManager {
     /// The P3/P4 gate over a pass's `keys` toward `peer`, whose two AFI
-    /// families are `families` (`index` picks a key's).
+    /// families are `families` (`index` picks a key's). `carried` belongs
+    /// to the pass and this key set: which of the two AFIs the keys carry,
+    /// read once for the first peer that owes one of them whole.
     pub(super) fn owing_keyed_pass<'k, K, S>(
         &mut self,
         peer: PeerId,
@@ -1677,6 +1679,7 @@ impl RibManager {
         families: [OwedFamily; 2],
         index: impl Fn(&K) -> usize,
         owed: impl Fn(&K) -> OwedKey,
+        carried: &mut Option<[bool; 2]>,
     ) -> KeyedPass<'k, std::collections::HashSet<K, S>>
     where
         K: Clone + Eq + Hash,
@@ -1688,6 +1691,21 @@ impl RibManager {
         ];
         if gates.iter().all(|gate| *gate == OwingGate::UNBOUNDED) {
             return KeyedPass::Preflight;
+        }
+        // Every AFI the pass carries is owed whole (a selection release
+        // toward each private receiver): nothing is staged or marked, so
+        // the keys are not visited per peer.
+        if gates.contains(&OwingGate::Whole) {
+            let carried = *carried.get_or_insert_with(|| {
+                let mut carried = [false; 2];
+                for key in keys {
+                    carried[index(key)] = true;
+                }
+                carried
+            });
+            if (0..2).all(|afi| !carried[afi] || gates[afi] == OwingGate::Whole) {
+                return KeyedPass::Skip;
+            }
         }
         let budget = gates
             .iter()
