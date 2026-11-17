@@ -206,18 +206,24 @@ The analyzer prints one `PASS`, `FAIL` or `INVALID` line per cell and never
 stops at the first failure. Timing bars and cell 1's cgroup peak compare
 medians across repetitions; the correctness checks and the witness must hold
 in every run, any candidate OOM fails cell 1, and the candidate's largest
-credit-bytes peak is the one held to its bar. Exit status is 1 on any FAIL,
-else 2 on any INVALID, else 0.
+credit-bytes peak is the one held to its bar. Cell 1 judges the
+candidate-only bars (OOM, credit bytes) before reading the parent, so a
+parent OOM or bad parent run cannot weaken a candidate FAIL. Cell 6 needs the
+candidate's fit and row size in every repetition and reports the median fit.
+Exit status is 1 on any FAIL, else 2 on any INVALID, else 0.
 
 A repetition is a directory the runner wrote `provenance.jsonl` into; each
 invocation appends its binary hash and cell list. The analyzer reads every
 cell a repetition listed. A listed cell that left no result, or only a failure
-marker, is INVALID (a paused-reader OOM marker is the OOM verdict, and a
-result written by a run that then exited nonzero keeps its explicit FAIL). A
-result the directory's provenance does not list is INVALID, so is a
-repetition set that differs between the arms, an arm whose repetitions used
-different binaries, the same binary on both arms, and a result whose `cell`
-or `family` does not match its file name. Measured results must have the
+marker, is INVALID. A paused-reader OOM marker is the OOM verdict even beside
+a result, because that cell writes its result before teardown. Any other
+failure marker beside a result keeps the result only when it records the
+failure (a failed check, an unavailable fit, a dirty probe episode), so an
+explicit FAIL stands; beside a result that records no failure it is INVALID,
+here and in `check`. A result the directory's provenance does not list is
+INVALID, so is a repetition set that differs between the arms, an arm whose
+repetitions used different binaries, the same binary on both arms, and a
+result whose `cell` or `family` does not match its file name. Measured results must have the
 fixed shape on both arms: cell 2 150 receivers, 150,000 rows, a 30 s pause
 and the RFC 4724 trigger; cell 1 150 receivers, 37,500 routes, 240 s, 2 s
 rounds and the 12 GiB limit; cell 6 150 receivers and 150,000 rows; cell 4
@@ -251,8 +257,12 @@ a missing or null one makes that cell INVALID, never PASS.
 | 6 | `fill-<family>.json`, every run of both arms, each family | `mode`; `shape.receivers`, `shape.rows_per_receiver` fixed; candidate `estimate.bytes_per_queued_row` and `row_size_of` |
 | all | `provenance.jsonl` per repetition | `sha256` (one per arm, different between arms) and `cells` |
 
-The runner deletes a cell's previous result and exit marker before it runs
-the cell, so a failed rerun into a used directory leaves nothing stale.
+Before it appends its provenance line, the runner deletes the previous result
+and exit marker of every cell it lists, so a rerun into a used directory that
+fails, is interrupted or stops at the quiet-host gate leaves nothing stale.
+
+A cell's exit status is the outcome of the checks its result records, so the
+paused-reader cell exits nonzero when a receiver is not Established.
 
 Self-tests, no daemon: `cargo test -p rrtransport credit` seeds a dropped
 route, a stale route, an extra route (before and after End-of-RIB), an

@@ -51,11 +51,21 @@ acquire_rustbgpd_host_lock
 ulimit -n 65536 2>/dev/null || ulimit -n "$(ulimit -Hn)"
 
 sha=$(sha256sum "$binary" | cut -d' ' -f1)
-for cell in "${cells[@]}"; do
-    case $cell in
-    probes | exhaust-unicast | exhaust-evpn | paused | fill-unicast | fill-evpn | fill-vpn | fill-flowspec) ;;
-    *) echo "unknown cell $cell" >&2 && exit 2 ;;
+result_of() {
+    case $1 in
+    probes) echo probes.json ;;
+    paused) echo paused-evpn.json ;;
+    exhaust-unicast | exhaust-evpn | fill-unicast | fill-evpn | fill-vpn | fill-flowspec) echo "$1.json" ;;
+    *) return 1 ;;
     esac
+}
+for cell in "${cells[@]}"; do
+    result_of "$cell" >/dev/null || { echo "unknown cell $cell" >&2 && exit 2; }
+done
+# A rerun into a used directory must leave no earlier result or exit marker
+# for any cell it lists, even when it stops before reaching that cell.
+for cell in "${cells[@]}"; do
+    rm -f "$output/$(result_of "$cell")" "$output/$cell-exit.json"
 done
 # One line per invocation: the analyzer treats every cell a line lists as
 # attempted in this directory, and requires one binary per directory.
@@ -67,16 +77,11 @@ echo "rrtransport $sha measured=$measured cells=${cells[*]}"
 status=0
 for cell in "${cells[@]}"; do
     case $cell in
-    probes) args=(credit-probe "$output") limit=64G result=probes.json ;;
-    exhaust-unicast | exhaust-evpn)
-        args=(credit-exhaust "${cell#exhaust-}" "$output") limit=64G result=$cell.json ;;
-    paused) args=(credit-paused "$output") limit=12G result=paused-evpn.json ;;
-    fill-*) args=(credit-fill "${cell#fill-}" "$output") limit=64G result=$cell.json ;;
-    *) echo "unknown cell $cell" >&2 && exit 2 ;;
+    probes) args=(credit-probe "$output") limit=64G ;;
+    exhaust-*) args=(credit-exhaust "${cell#exhaust-}" "$output") limit=64G ;;
+    paused) args=(credit-paused "$output") limit=12G ;;
+    fill-*) args=(credit-fill "${cell#fill-}" "$output") limit=64G ;;
     esac
-    # A rerun into a used directory must not leave an earlier run's result
-    # or exit marker for the analyzer to read.
-    rm -f "$output/$result" "$output/$cell-exit.json"
     if [ $measured = 1 ]; then
         wait_for_rustbgpd_quiet_host "$output/quiet-$cell.tsv"
     fi

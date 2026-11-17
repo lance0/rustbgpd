@@ -861,6 +861,14 @@ fn memory_json(instruments: &Instruments) -> Value {
     })
 }
 
+/// A cell's outcome: every check its result records passed, so the exit
+/// status never disagrees with the result file.
+fn recorded_pass(result: &Value) -> bool {
+    result["checks"].as_object().is_some_and(|checks| {
+        !checks.is_empty() && checks.values().all(|v| v.as_bool() == Some(true))
+    })
+}
+
 fn write_result(output: &Path, name: &str, value: &Value) -> Result<()> {
     std::fs::create_dir_all(output)?;
     let path = output.join(name);
@@ -1117,7 +1125,6 @@ pub async fn exhaust(family: Family, output: &Path, options: &Options) -> Result
     let ms = |duration: Duration| duration.as_secs_f64() * 1e3;
     // The healthy receiver's session counts too.
     let resets = resets + churn_resets;
-    let wire_pass = exact == receivers && ordered == receivers && resets == 0 && down.is_empty();
     let result = json!({
         "schema": "rrtransport-credit/1",
         "cell": "exhaust",
@@ -1181,7 +1188,7 @@ pub async fn exhaust(family: Family, output: &Path, options: &Options) -> Result
     });
     write_result(output, &format!("exhaust-{}.json", family.name()), &result)?;
     fixture.close().await?;
-    Ok(wire_pass)
+    Ok(recorded_pass(&result))
 }
 
 /// Cell 1 (and its instruments): every private EVPN receiver paused while
@@ -1253,7 +1260,7 @@ pub async fn paused(output: &Path, options: &Options) -> Result<bool> {
     write_result(output, "paused-evpn.json", &result)?;
     drop(streams);
     fixture.close().await?;
-    Ok(true)
+    Ok(recorded_pass(&result))
 }
 
 /// Least-squares slope of `y` over `x`, with its standard error.
@@ -1387,7 +1394,9 @@ pub async fn fill(family: Family, output: &Path, options: &Options) -> Result<bo
 
 #[cfg(test)]
 mod tests {
-    use super::Options;
+    use serde_json::json;
+
+    use super::{recorded_pass, Options};
 
     fn parse(args: &[&str]) -> Options {
         Options::parse(&args.iter().map(ToString::to_string).collect::<Vec<_>>()).unwrap()
@@ -1407,5 +1416,19 @@ mod tests {
                 "{args:?} must not be measured"
             );
         }
+    }
+
+    #[test]
+    fn seeded_session_reset_fails_the_recorded_outcome() {
+        // The paused-reader result records a disconnected receiver.
+        let result = json!({"checks": {"no_session_resets": false}, "not_established": ["x"]});
+        assert!(!recorded_pass(&result));
+        assert!(recorded_pass(
+            &json!({"checks": {"no_session_resets": true}})
+        ));
+        let wire = json!({"checks": {"final_state_exact": true, "eor_after_every_route": false}});
+        assert!(!recorded_pass(&wire));
+        // A result without checks has nothing to pass.
+        assert!(!recorded_pass(&json!({})));
     }
 }

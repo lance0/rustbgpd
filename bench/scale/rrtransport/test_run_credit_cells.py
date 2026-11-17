@@ -18,7 +18,9 @@ def executable(path: Path, body: str) -> Path:
 
 
 class Runner(unittest.TestCase):
-    def run_runner(self, root: Path, exit_code: int, *cells: str) -> int:
+    def run_runner(
+        self, root: Path, exit_code: int, *cells: str, body: str = 'exit "$STAND_IN_EXIT"\n'
+    ) -> int:
         shims = root / "bin"
         shims.mkdir(exist_ok=True)
         # The scope launcher runs the command after `--` in place.
@@ -27,7 +29,7 @@ class Runner(unittest.TestCase):
             'while [ "$1" != -- ]; do shift; done; shift; exec "$@"\n',
         )
         # One binary for every call: the exit code comes from the environment.
-        binary = executable(root / "rrtransport", 'exit "$STAND_IN_EXIT"\n')
+        binary = executable(root / "rrtransport", body)
         env = dict(
             os.environ,
             PATH=f"{shims}:{os.environ['PATH']}",
@@ -83,6 +85,23 @@ class Runner(unittest.TestCase):
             )
             self.assertEqual(len({line["sha256"] for line in lines}), 1)
             self.assertEqual({line["measured"] for line in lines}, {0})
+
+    def test_interrupted_rerun_leaves_no_stale_result_for_a_later_cell(self):
+        # The run dies during its first cell. The second cell is listed in
+        # the new provenance line, so its old result must already be gone.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            out = root / "out"
+            out.mkdir()
+            for name in ("probes.json", "fill-vpn.json", "fill-vpn-exit.json"):
+                (out / name).write_text('{"mode": "measured"}')
+            # The stand-in's parent is the runner (the scope shim execs it).
+            body = 'kill -KILL "$PPID"\n'
+            self.assertNotEqual(self.run_runner(root, 0, "probes", "fill-vpn", body=body), 0)
+            lines = (out / "provenance.jsonl").read_text().splitlines()
+            self.assertEqual(json.loads(lines[-1])["cells"], ["probes", "fill-vpn"])
+            for name in ("probes.json", "fill-vpn.json", "fill-vpn-exit.json"):
+                self.assertFalse((out / name).exists(), name)
 
     def test_unknown_cell_is_refused_before_provenance(self):
         # A refused invocation must not list cells it never attempted.

@@ -106,6 +106,42 @@ def number(run: dict, path: str, what: str) -> float:
     return value
 
 
+def same_number(runs: list[dict], path: str, what: str) -> float:
+    """`path` in every run, which must agree: one binary's constant."""
+    values = {number(run, path, f"{what} run {index}") for index, run in enumerate(runs)}
+    if len(values) != 1:
+        raise Invalid(f"{what}: {path} differs between repetitions ({sorted(values)})")
+    return values.pop()
+
+
+def records_failure(run: dict) -> bool:
+    """Whether a result records the failure that made its run exit nonzero:
+    a failed check, an unavailable fit, or a dirty probe episode."""
+    checks = run.get("checks")
+    if isinstance(checks, dict) and any(value is not True for value in checks.values()):
+        return True
+    if (
+        run.get("cell") == "fill"
+        and (run.get("estimate") or {}).get("bytes_per_queued_row") is None
+    ):
+        return True
+    probes = run.get("probes") if run.get("cell") == "probes" else None
+    return isinstance(probes, list) and any(
+        not isinstance(probe, dict) or probe.get("dirty_episodes") != 0 for probe in probes
+    )
+
+
+def explained(run: dict, exit_record: dict | None, what: str) -> dict:
+    """`run`, unless its cell exited nonzero for a reason the result does
+    not record (a teardown error after the result was written)."""
+    if exit_record is not None and not records_failure(run):
+        raise Invalid(
+            f"{what} exited {exit_record.get('exit')} after writing a result that records "
+            "no failure"
+        )
+    return run
+
+
 def result_file(cell: str) -> str:
     return "paused-evpn.json" if cell == "paused" else f"{cell}.json"
 
@@ -169,23 +205,24 @@ class Arm:
                 if result.exists() or marker.exists():
                     raise Invalid(f"{self.name} repetition {rep}: {file} not from a listed run")
                 continue
-            if result.exists():
+            exit_record = read(marker) if marker.exists() else None
+            if cell == "paused" and exit_record is not None and exit_record.get("oom") is True:
+                # `paused` writes its result before teardown, so an OOM kill
+                # can follow a result; the kill is the verdict either way.
+                runs[rep] = {"oom": True}
+            elif result.exists():
                 run = read(result)
                 if run.get("cell") != kind or run.get("family") != family:
                     raise Invalid(
                         f"{self.name} repetition {rep}: {file} holds a "
                         f"{run.get('cell')}/{run.get('family')} result"
                     )
-                runs[rep] = run
-            elif marker.exists():
-                exit_record = read(marker)
-                if cell == "paused" and exit_record.get("oom") is True:
-                    runs[rep] = {"oom": True}
-                else:
-                    raise Invalid(
-                        f"{self.name} repetition {rep}: {cell} exited "
-                        f"{exit_record.get('exit')} without a result"
-                    )
+                runs[rep] = explained(run, exit_record, f"{self.name} repetition {rep}: {cell}")
+            elif exit_record is not None:
+                raise Invalid(
+                    f"{self.name} repetition {rep}: {cell} exited "
+                    f"{exit_record.get('exit')} without a result"
+                )
             else:
                 raise Invalid(f"{self.name} repetition {rep}: {cell} attempted, no result")
         if not runs:
@@ -311,10 +348,17 @@ def cell3(parent: Arm, candidate: Arm, family: str) -> tuple[str, str]:
     return ("FAIL", "; ".join(failures)) if failures else ("PASS", line)
 
 
-def paused_run(run: dict, arm: str) -> bool:
-    """Validate one paused-reader result; True when it was OOM-killed."""
-    if run.get("oom") is True:
-        return True
+def paused_oom(run: dict) -> bool:
+    """An OOM-killed paused-reader run: the runner's marker, or a kill the
+    cgroup counted before the result was written."""
+    return run.get("oom") is True or (run.get("memory") or {}).get("cgroup_oom_kill") not in (
+        None,
+        "0",
+    )
+
+
+def paused_run(run: dict, arm: str) -> None:
+    """Validate one paused-reader result that was not OOM-killed."""
     measured([run], f"{arm} paused-evpn", PAUSED_SHAPE)
     # A receiver that disconnected frees its queued state, so the memory
     # comparison needs proof every session stayed up for the whole run.
@@ -331,34 +375,44 @@ def paused_run(run: dict, arm: str) -> bool:
         raise Invalid(f"{arm}: cgroup limit {limit}, not 12 GiB")
     number(run, "memory.cgroup_memory_peak_bytes", f"{arm} cgroup memory.peak")
     number(run, "memory.vmhwm_kib", f"{arm} VmHWM")
-    return need(run, "memory.cgroup_oom_kill", arm) != "0"
+    need(run, "memory.cgroup_oom_kill", arm)
 
 
 def cell1(parent: Arm, candidate: Arm) -> tuple[str, str]:
     runs = dict(zip(("parent", "candidate"), pair(parent, candidate, "paused"), strict=True))
-    oom = {arm: [paused_run(run, arm) for run in arm_runs] for arm, arm_runs in runs.items()}
-    if any(oom["candidate"]):
+    # The candidate-only bars come first, so no parent evidence can weaken them.
+    if any(paused_oom(run) for run in runs["candidate"]):
         return "FAIL", "candidate OOM in the 12 GiB cgroup"
-    if any(oom["parent"]):
-        raise Invalid("parent OOM: no parent peak to compare against")
-    peaks = {
-        arm: statistics.median(run["memory"]["cgroup_memory_peak_bytes"] for run in arm_runs)
-        for arm, arm_runs in runs.items()
-    }
+    for run in runs["candidate"]:
+        paused_run(run, "candidate")
     credit = max(
         number(run, "memory.peak_credit_bytes", "candidate bgp_rib_outbound_credit_bytes")
         for run in runs["candidate"]
     )
-    row = number(runs["candidate"][0], "row_size_of", "candidate")
+    row = same_number(runs["candidate"], "row_size_of", "candidate paused-evpn")
     credit_bar = CREDIT_TARGET + PEERS * PASS_ROWS * (row + ANNOUNCED_ROW_OVERHEAD)
     failures = []
-    if peaks["candidate"] > peaks["parent"] - CELL1_MARGIN:
-        failures.append(
-            f"candidate cgroup peak {peaks['candidate'] / GIB:.2f} GiB > parent "
-            f"{peaks['parent'] / GIB:.2f} GiB - 1.5 GiB"
-        )
     if credit > credit_bar:
         failures.append(f"credit bytes peak {credit / GIB:.3f} GiB > {credit_bar / GIB:.3f} GiB")
+    try:
+        if any(paused_oom(run) for run in runs["parent"]):
+            raise Invalid("parent OOM: no parent peak to compare against")
+        for run in runs["parent"]:
+            paused_run(run, "parent")
+    except Invalid as error:
+        if failures:
+            return "FAIL", f"{failures[0]} (parent evidence: {error})"
+        raise
+    peaks = {
+        arm: statistics.median(run["memory"]["cgroup_memory_peak_bytes"] for run in arm_runs)
+        for arm, arm_runs in runs.items()
+    }
+    if peaks["candidate"] > peaks["parent"] - CELL1_MARGIN:
+        failures.insert(
+            0,
+            f"candidate cgroup peak {peaks['candidate'] / GIB:.2f} GiB > parent "
+            f"{peaks['parent'] / GIB:.2f} GiB - 1.5 GiB",
+        )
     hwm = max(run["memory"]["vmhwm_kib"] for run in runs["candidate"])
     line = (
         f"median cgroup peak {peaks['candidate'] / GIB:.2f} vs parent "
@@ -413,13 +467,31 @@ def cell6(parent: Arm, candidate: Arm) -> tuple[str, str]:
         cell = f"fill-{family}"
         parent_runs, candidate_runs = pair(parent, candidate, cell)
         measured(parent_runs, f"parent {cell}", FILL_SHAPE)
-        run = measured(candidate_runs, f"candidate {cell}", FILL_SHAPE)[-1]
-        estimate = number(run, "estimate.bytes_per_queued_row", f"candidate {cell}")
-        charged = number(run, "row_size_of", f"candidate {cell}") + ANNOUNCED_ROW_OVERHEAD
-        parent_estimate = (parent_runs[-1].get("estimate") or {}).get("bytes_per_queued_row")
+        measured(candidate_runs, f"candidate {cell}", FILL_SHAPE)
+        # Every candidate repetition needs its fit; the median is reported.
+        estimate = statistics.median(
+            number(run, "estimate.bytes_per_queued_row", f"candidate {cell} run {index}")
+            for index, run in enumerate(candidate_runs)
+        )
+        charged = same_number(candidate_runs, "row_size_of", f"candidate {cell}")
+        charged += ANNOUNCED_ROW_OVERHEAD
+        # The parent's fit is context only: a tree without the credit-rows
+        # gauge has none.
+        parent_fits = [
+            value
+            for run in parent_runs
+            if isinstance(
+                value := (run.get("estimate") or {}).get("bytes_per_queued_row"), int | float
+            )
+        ]
         notes.append(
-            f"{family} {estimate:.0f} B/row vs charge {charged}"
-            + (f" (parent {parent_estimate:.0f})" if parent_estimate is not None else "")
+            f"{family} {estimate:.0f} B/row vs charge {charged:.0f}"
+            + (
+                f" (parent {statistics.median(parent_fits):.0f}, {len(parent_fits)}/"
+                f"{len(parent_runs)} fits)"
+                if parent_fits
+                else ""
+            )
         )
         if estimate > charged * ESTIMATE_RATIO:
             flagged.append(family)
@@ -471,11 +543,16 @@ def check(directory: Path) -> list[tuple[str, str, str]]:
     for family in FAMILIES:
         name = f"exhaust-{family}.json"
         try:
-            # A failure marker without its result is never a passing run.
+            # A failure marker without its result, or beside a result that
+            # records no failure, is never a passing run.
             for marker in sorted(directory.rglob(f"exhaust-{family}-exit.json")):
                 if not (marker.parent / name).exists():
                     raise Invalid(f"{marker.parent}: exhaust-{family} exited without a result")
-            runs = [read(path) for path in sorted(directory.rglob(name))]
+            runs = []
+            for path in sorted(directory.rglob(name)):
+                marker = path.parent / f"exhaust-{family}-exit.json"
+                exit_record = read(marker) if marker.exists() else None
+                runs.append(explained(read(path), exit_record, f"{path.parent}: exhaust-{family}"))
             if not runs:
                 continue
             reason = single_arm_exhaust(runs, "arm", family)

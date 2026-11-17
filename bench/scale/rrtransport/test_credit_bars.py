@@ -518,6 +518,121 @@ class Bars(unittest.TestCase):
         results = self.run_bars(mutate)
         self.assert_only(results, "cell 1 paused-reader evpn", "FAIL", "OOM")
 
+    def test_seeded_oom_after_paused_result_decides_cell1(self):
+        # `paused` writes its result before teardown; an OOM kill after
+        # that leaves a pre-OOM result beside the OOM marker.
+        for side, verdict in (("candidate", "FAIL"), ("parent", "INVALID")):
+
+            def mutate(parent, candidate, side=side):
+                arm = parent if side == "parent" else candidate
+                arm["paused-exit.json"] = {"cell": "paused", "exit": 137, "oom": True}
+
+            with self.subTest(side=side):
+                results = self.run_bars(mutate)
+                self.assert_only(results, "cell 1 paused-reader evpn", verdict, "OOM")
+
+    def test_candidate_oom_is_not_weakened_by_a_bad_parent_run(self):
+        def mutate(parent, candidate):
+            parent["paused-evpn.json"]["not_established"] = ["127.10.1.1: None"]
+            candidate["paused-exit.json"] = {"cell": "paused", "exit": 137, "oom": True}
+
+        results = self.run_bars(mutate)
+        self.assert_only(results, "cell 1 paused-reader evpn", "FAIL", "candidate OOM")
+
+    def test_candidate_credit_failure_survives_a_parent_oom(self):
+        # The credit-bytes bar reads only the candidate.
+        def mutate(parent, candidate):
+            parent["paused-exit.json"] = {"cell": "paused", "exit": 137, "oom": True}
+            candidate["paused-evpn.json"]["memory"]["peak_credit_bytes"] = 4 * GIB
+
+        results = self.run_bars(mutate)
+        self.assert_only(results, "cell 1 paused-reader evpn", "FAIL", "credit bytes peak")
+
+    def test_seeded_unexplained_exit_after_result_is_invalid(self):
+        # A nonzero exit beside a result that records no failure: the run
+        # failed after writing it (teardown), so the result is not evidence.
+        cases = {
+            "exhaust-unicast": ["cell 2 exhaustion unicast", "cell 3 unaffected peer unicast"],
+            "paused": ["cell 1 paused-reader evpn"],
+            "probes": ["cell 4 lag and restart probes"],
+            "fill-vpn": ["cell 6 bytes per queued row"],
+        }
+        for cell, names in cases.items():
+            for side in ("parent", "candidate"):
+
+                def mutate(parent, candidate, cell=cell, side=side):
+                    arm = parent if side == "parent" else candidate
+                    arm[f"{cell}-exit.json"] = {"cell": cell, "exit": 1, "oom": False}
+
+                with self.subTest(cell=cell, side=side):
+                    results = self.run_bars(mutate)
+                    for name in names:
+                        self.assertEqual(results[name][0], "INVALID", results[name])
+                        self.assertIn("records no failure", results[name][1])
+                    others = [v for name, (v, _) in results.items() if name not in names]
+                    self.assertTrue(all(v == "PASS" for v in others), results)
+
+    def test_check_unexplained_exit_after_result_is_invalid(self):
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, "exhaust-unicast.json").write_text(json.dumps(exhaust("unicast")))
+            Path(root, "exhaust-unicast-exit.json").write_text('{"exit": 1}')
+            results = credit_bars.check(Path(root))
+        self.assertEqual(results[0][1], "INVALID", results)
+
+    def test_check_explicit_failure_with_exit_marker_stays_fail(self):
+        with tempfile.TemporaryDirectory() as root:
+            run = exhaust("unicast")
+            run["checks"]["final_state_exact"] = False
+            Path(root, "exhaust-unicast.json").write_text(json.dumps(run))
+            Path(root, "exhaust-unicast-exit.json").write_text('{"exit": 1}')
+            results = credit_bars.check(Path(root))
+        self.assertEqual(results[0][1], "FAIL", results)
+
+    def two_repetitions(self, parent, candidate, cell, file, parent_run, candidate_run):
+        for arm, run in ((parent, parent_run), (candidate, candidate_run)):
+            arm.setdefault(
+                "provenance.jsonl", provenance("parent" if arm is parent else "candidate")
+            )
+            self.second_repetition(arm, [cell], **{file: run})
+
+    def test_seeded_unavailable_fit_in_an_earlier_repetition_is_invalid(self):
+        # Repetition 1 of the candidate has no fit; a good repetition 2
+        # must not stand in for it.
+        def mutate(parent, candidate):
+            candidate["fill-evpn.json"]["estimate"]["bytes_per_queued_row"] = None
+            candidate["fill-evpn-exit.json"] = {"cell": "fill-evpn", "exit": 1, "oom": False}
+            self.two_repetitions(
+                parent,
+                candidate,
+                "fill-evpn",
+                "fill-evpn.json",
+                fill("evpn", 240.0),
+                fill("evpn", 240.0),
+            )
+
+        results = self.run_bars(mutate)
+        self.assert_only(results, "cell 6 bytes per queued row", "INVALID", "bytes_per_queued_row")
+
+    def test_seeded_missing_row_size_in_one_repetition_is_invalid(self):
+        # Cell 6 read only the last repetition, cell 1 only the first; the
+        # defect sits in the one each skipped.
+        for file, cell, name, bad_rep in (
+            ("fill-unicast.json", "fill-unicast", "cell 6 bytes per queued row", 1),
+            ("paused-evpn.json", "paused", "cell 1 paused-reader evpn", 2),
+        ):
+
+            def mutate(parent, candidate, file=file, cell=cell, bad_rep=bad_rep):
+                if cell == "paused":
+                    parent_run, candidate_run = paused(9 * GIB, None), paused(6 * GIB, GIB)
+                else:
+                    parent_run, candidate_run = fill("unicast", 240.0), fill("unicast", 240.0)
+                self.two_repetitions(parent, candidate, cell, file, parent_run, candidate_run)
+                del (candidate[file] if bad_rep == 1 else candidate_run)["row_size_of"]
+
+            with self.subTest(cell=cell):
+                results = self.run_bars(mutate)
+                self.assert_only(results, name, "INVALID", "row_size_of")
+
     def test_correctness_run_is_not_a_measurement(self):
         def mutate(_parent, candidate):
             candidate["exhaust-unicast.json"]["mode"] = "correctness"
