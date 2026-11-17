@@ -625,7 +625,7 @@ fn a_drain_step_sends_one_owed_family_after_a_credit_read() {
     assert_eq!(wires[1].markers(FLOWSPEC), 1);
     assert!(manager.owing(healthy).is_none());
     assert_eq!(wires[0].rows + wires[0].rules, 0, "spent credit: nothing");
-    assert!(wires[0].markers.is_empty());
+    assert_eq!(wires[0].markers, []);
     assert!(manager.owes(stalled, FAMILY) && manager.owes(stalled, FLOWSPEC));
     drop(charge);
     drain(&mut manager, &mut receivers, &mut wires);

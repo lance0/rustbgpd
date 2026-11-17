@@ -301,6 +301,13 @@ impl RibManager {
         target: &EorGraceTarget,
         reason: GrEorGraceReleaseReason,
     ) -> (bool, String, String) {
+        fn labels(families: impl Iterator<Item = (Afi, Safi)>) -> String {
+            let mut labels: Vec<&str> = families
+                .map(|(afi, safi)| super::helpers::afi_safi_label(afi, safi))
+                .collect();
+            labels.sort_unstable();
+            labels.join(",")
+        }
         self.eor_grace_deadlines.remove(target);
         let Some(grace) = self.eor_grace.remove(target) else {
             return (false, String::new(), String::new());
@@ -316,13 +323,6 @@ impl RibManager {
             .record_gr_eor_grace_released(&target.label(), reason);
         if let Some(peer) = grace.peer {
             self.release_eor_hold(peer, EorHold::Grace, EorTrigger::Release);
-        }
-        fn labels(families: impl Iterator<Item = (Afi, Safi)>) -> String {
-            let mut labels: Vec<&str> = families
-                .map(|(afi, safi)| super::helpers::afi_safi_label(afi, safi))
-                .collect();
-            labels.sort_unstable();
-            labels.join(",")
         }
         let pending = held
             .iter()
