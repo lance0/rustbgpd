@@ -762,7 +762,7 @@ impl RibManager {
     /// Whether `family` toward `peer` is held in the peer's own Adj-RIB-Out
     /// and so may owe keys: group-owned and handoff EVPN families keep
     /// slice 1a's path.
-    fn owing_family_in_scope(&self, peer: PeerId, family: OwedFamily) -> bool {
+    pub(super) fn owing_family_in_scope(&self, peer: PeerId, family: OwedFamily) -> bool {
         match family {
             OwedFamily::IPV4_UNICAST | OwedFamily::IPV6_UNICAST => {
                 self.grouped_member_of(peer).is_none()

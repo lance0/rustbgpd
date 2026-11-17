@@ -1747,6 +1747,12 @@ impl RibManager {
             // unlock, and the flush keeps that marker for the peer's refresh.
             // Any other pending marker (a withheld family, or one the writer
             // deferred) is an honest-empty completion and leaves now.
+            if !self.dirty_peers.contains(&peer) && self.owes(peer, family) {
+                // The owed-key drain sends the family and then this marker.
+                self.complete_initial_selection_replay(peer);
+                self.settle_free_eor(peer);
+                continue;
+            }
             if !self.dirty_peers.contains(&peer) {
                 // A late group member may have skipped a frozen row already in
                 // the shared table; unchanged group selection cannot replay it.
@@ -1802,6 +1808,27 @@ impl RibManager {
             }
         }
         self.retire_settled_selection_admission();
+    }
+
+    /// Owe `family` whole to every receiver that holds it in its own
+    /// Adj-RIB-Out and is not dirty or forced (a resync covers those).
+    fn owe_released_family(&mut self, family: (Afi, Safi)) {
+        let Some(owed) = super::outbound_owing::OwedFamily::of(family) else {
+            return;
+        };
+        let peers: Vec<PeerId> = self
+            .peer_sendable_families
+            .iter()
+            .inspect(|_| self.replacement_checkpoint(false))
+            .filter(|(_, families)| families.contains(&family))
+            .map(|(&peer, _)| peer)
+            .collect();
+        for peer in peers {
+            self.replacement_checkpoint(false);
+            if self.owing_peer_in_scope(peer) && self.owing_family_in_scope(peer, owed) {
+                self.owe_whole_family(peer, owed);
+            }
+        }
     }
 
     /// Pending peers wait until release has updated both selection and the
@@ -1901,6 +1928,12 @@ impl RibManager {
         debug_assert!(!self.selection_release_staging);
         self.wake_selection_partial_recovery(family);
         self.selection_release_staging = true;
+        // A receiver that holds this family in its own Adj-RIB-Out owes it
+        // whole from here: the release pass stages nothing toward it, and
+        // the owed-key drain sends it one receiver per resync tick, with the
+        // family's End-of-RIB held behind the debt. The release turn then
+        // does not grow with private receivers x rows.
+        self.owe_released_family(family);
         if family == (Afi::L2Vpn, Safi::Evpn) {
             // Both Stage and Release reach this seam before any admission.
             // A feed must retain its terminal duty while convergence is held.
