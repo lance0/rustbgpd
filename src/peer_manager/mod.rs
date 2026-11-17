@@ -33,8 +33,7 @@ use crate::config::{Config, raw_config_document_bounded};
 use crate::policy_admin::{
     apply_config_event, global_policy_chains_from_config, named_neighbor_set_from_config,
     named_neighbor_sets_from_config, named_peer_group_from_config, named_peer_groups_from_config,
-    named_policies_from_config, named_policy_from_config, neighbor_peer_group_from_config,
-    neighbor_policy_chains_from_config,
+    named_policies_from_config, named_policy_from_config, neighbor_policy_chains_from_config,
 };
 
 mod admission;
@@ -3371,102 +3370,14 @@ impl PeerManager {
             PeerManagerCommand::GetPolicy { name, reply } => {
                 let _ = reply.send(named_policy_from_config(&self.current_config, &name));
             }
-            PeerManagerCommand::SetPolicy {
-                name,
-                definition,
-                reply,
-            } => {
-                let result = self
-                    .apply_policy_change(
-                        ConfigEvent::SetPolicy {
-                            name,
-                            definition,
-                            ack: None,
-                        },
-                        None,
-                    )
-                    .await;
-                let _ = reply.send(result);
-            }
-            PeerManagerCommand::DeletePolicy { name, reply } => {
-                let result = self
-                    .apply_policy_change(ConfigEvent::DeletePolicy { name, ack: None }, None)
-                    .await;
-                let _ = reply.send(result);
-            }
             PeerManagerCommand::ListNeighborSets { reply } => {
                 let _ = reply.send(named_neighbor_sets_from_config(&self.current_config));
             }
             PeerManagerCommand::GetNeighborSet { name, reply } => {
                 let _ = reply.send(named_neighbor_set_from_config(&self.current_config, &name));
             }
-            PeerManagerCommand::SetNeighborSet {
-                name,
-                definition,
-                reply,
-            } => {
-                let result = self
-                    .apply_policy_change(
-                        ConfigEvent::SetNeighborSet {
-                            name,
-                            definition,
-                            ack: None,
-                        },
-                        None,
-                    )
-                    .await;
-                let _ = reply.send(result);
-            }
-            PeerManagerCommand::DeleteNeighborSet { name, reply } => {
-                let result = self
-                    .apply_policy_change(ConfigEvent::DeleteNeighborSet { name, ack: None }, None)
-                    .await;
-                let _ = reply.send(result);
-            }
             PeerManagerCommand::GetGlobalPolicyChains { reply } => {
                 let _ = reply.send(global_policy_chains_from_config(&self.current_config));
-            }
-            PeerManagerCommand::SetGlobalImportChain {
-                policy_names,
-                reply,
-            } => {
-                let result = self
-                    .apply_policy_change(
-                        ConfigEvent::SetGlobalImportChain {
-                            policy_names,
-                            ack: None,
-                        },
-                        None,
-                    )
-                    .await;
-                let _ = reply.send(result);
-            }
-            PeerManagerCommand::SetGlobalExportChain {
-                policy_names,
-                reply,
-            } => {
-                let result = self
-                    .apply_policy_change(
-                        ConfigEvent::SetGlobalExportChain {
-                            policy_names,
-                            ack: None,
-                        },
-                        None,
-                    )
-                    .await;
-                let _ = reply.send(result);
-            }
-            PeerManagerCommand::ClearGlobalImportChain { reply } => {
-                let result = self
-                    .apply_policy_change(ConfigEvent::ClearGlobalImportChain { ack: None }, None)
-                    .await;
-                let _ = reply.send(result);
-            }
-            PeerManagerCommand::ClearGlobalExportChain { reply } => {
-                let result = self
-                    .apply_policy_change(ConfigEvent::ClearGlobalExportChain { ack: None }, None)
-                    .await;
-                let _ = reply.send(result);
             }
             PeerManagerCommand::SetHonorGracefulShutdown { enabled, reply } => {
                 let policy_routes_prior = self.installed_policy_routes_reachability();
@@ -3490,79 +3401,11 @@ impl PeerManager {
                     &peer,
                 ));
             }
-            PeerManagerCommand::SetNeighborImportChain {
-                address,
-                policy_names,
-                reply,
-            } => {
-                let result = self
-                    .apply_policy_change(
-                        ConfigEvent::SetNeighborImportChain {
-                            address,
-                            interface: None,
-                            policy_names,
-                            ack: None,
-                        },
-                        Some(vec![PeerKey::new(address, None)]),
-                    )
-                    .await;
-                let _ = reply.send(result);
-            }
-            PeerManagerCommand::SetNeighborExportChain {
-                address,
-                policy_names,
-                reply,
-            } => {
-                let result = self
-                    .apply_policy_change(
-                        ConfigEvent::SetNeighborExportChain {
-                            address,
-                            interface: None,
-                            policy_names,
-                            ack: None,
-                        },
-                        Some(vec![PeerKey::new(address, None)]),
-                    )
-                    .await;
-                let _ = reply.send(result);
-            }
-            PeerManagerCommand::ClearNeighborImportChain { address, reply } => {
-                let result = self
-                    .apply_policy_change(
-                        ConfigEvent::ClearNeighborImportChain {
-                            address,
-                            interface: None,
-                            ack: None,
-                        },
-                        Some(vec![PeerKey::new(address, None)]),
-                    )
-                    .await;
-                let _ = reply.send(result);
-            }
-            PeerManagerCommand::ClearNeighborExportChain { address, reply } => {
-                let result = self
-                    .apply_policy_change(
-                        ConfigEvent::ClearNeighborExportChain {
-                            address,
-                            interface: None,
-                            ack: None,
-                        },
-                        Some(vec![PeerKey::new(address, None)]),
-                    )
-                    .await;
-                let _ = reply.send(result);
-            }
             PeerManagerCommand::ListPeerGroups { reply } => {
                 let _ = reply.send(named_peer_groups_from_config(&self.current_config));
             }
             PeerManagerCommand::GetPeerGroup { name, reply } => {
                 let _ = reply.send(named_peer_group_from_config(&self.current_config, &name));
-            }
-            PeerManagerCommand::GetNeighborPeerGroupMembership { address, reply } => {
-                let _ = reply.send(neighbor_peer_group_from_config(
-                    &self.current_config,
-                    address,
-                ));
             }
             PeerManagerCommand::ListDynamicRanges { reply } => {
                 let ranges = self

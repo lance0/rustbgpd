@@ -1030,21 +1030,6 @@ pub fn global_policy_chains_from_config(config: &Config) -> PolicyChainAssignmen
     }
 }
 
-/// Return a neighbor's configured peer-group membership. Outer `None` =
-/// neighbor not configured; inner `None` = no membership.
-#[must_use]
-#[allow(
-    clippy::option_option,
-    reason = "the two None levels distinguish absent peer from an ungrouped peer"
-)]
-pub fn neighbor_peer_group_from_config(config: &Config, address: IpAddr) -> Option<Option<String>> {
-    config
-        .neighbors
-        .iter()
-        .find(|neighbor| neighbor.address == address.to_string())
-        .map(|neighbor| neighbor.peer_group.clone())
-}
-
 /// Return the configured per-neighbor named policy chains.
 pub fn neighbor_policy_chains_from_config(
     config: &Config,
@@ -1709,8 +1694,11 @@ peer_group = "fabric"
         .unwrap();
         let address: IpAddr = "2001:db8::1".parse().unwrap();
         assert_eq!(
-            neighbor_peer_group_from_config(&config, address),
-            Some(Some("fabric".to_string()))
+            config
+                .neighbor_record(&PeerKey::new(address, None))
+                .as_deref()
+                .and_then(|neighbor| neighbor.peer_group.as_deref()),
+            Some("fabric")
         );
         assert!(
             neighbor_policy_chains_from_config(&config, &PeerKey::new(address, None)).is_some()

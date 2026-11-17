@@ -1859,9 +1859,6 @@ mod tests {
         tokio::spawn(async move {
             while let Some(cmd) = peer_rx.recv().await {
                 match cmd {
-                    PeerManagerCommand::GetNeighborPeerGroupMembership { reply, .. } => {
-                        let _ = reply.send(Some(Some("old-group".to_string())));
-                    }
                     PeerManagerCommand::OwnedCatalogMutation { mutation, reply } => {
                         memberships_pm.lock().await.push(mutation);
                         let _ = reply.send(OwnedCatalogMutationOutcome::Success);

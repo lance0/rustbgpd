@@ -649,7 +649,7 @@ async fn import_apply_failure_on_established_peer_bails_without_refresh() {
 /// (`is_established && import_apply_failed && needs_refresh`)
 /// gated the failure surface on Established, which let an Idle /
 /// Connect peer with a dropped `UpdateImportPolicy` command
-/// silently return Ok. The caller (`apply_policy_change`) then
+/// silently return Ok. The caller (`apply_policy_change_owned`) then
 /// advanced `current_config`, leaving no retry signal — if the
 /// session task subsequently died before processing the queued
 /// command, the peer would reach Established holding the prior
@@ -801,7 +801,7 @@ async fn import_apply_failure_on_idle_peer_bails_and_sets_pending_refresh() {
     assert!(
         result.is_err(),
         "Idle peer with import-changing intent and session-side apply failure must \
-         surface as Err — silently returning Ok would let `apply_policy_change` \
+         surface as Err — silently returning Ok would let `apply_policy_change_owned` \
          advance current_config with no retry signal, so a subsequently dying \
          session task would leak the stale import policy when the peer establishes. \
          Got: {result:?}"

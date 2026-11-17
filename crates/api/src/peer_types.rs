@@ -1500,22 +1500,6 @@ pub enum PeerManagerCommand {
         /// Reply channel returning the definition if found.
         reply: oneshot::Sender<Option<NamedPolicyDefinition>>,
     },
-    /// Create or replace a named policy definition.
-    SetPolicy {
-        /// Policy definition name.
-        name: String,
-        /// Full replacement definition.
-        definition: NamedPolicyDefinition,
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
-    },
-    /// Delete a named policy definition.
-    DeletePolicy {
-        /// Policy definition name.
-        name: String,
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
-    },
     /// List all named neighbor sets.
     ListNeighborSets {
         /// Reply channel returning all named neighbor sets.
@@ -1528,50 +1512,10 @@ pub enum PeerManagerCommand {
         /// Reply channel returning the definition if found.
         reply: oneshot::Sender<Option<NeighborSetDefinition>>,
     },
-    /// Create or replace a named neighbor set.
-    SetNeighborSet {
-        /// Neighbor-set name.
-        name: String,
-        /// Full replacement definition.
-        definition: NeighborSetDefinition,
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
-    },
-    /// Delete a named neighbor set.
-    DeleteNeighborSet {
-        /// Neighbor-set name.
-        name: String,
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
-    },
     /// Query global named import/export chains.
     GetGlobalPolicyChains {
         /// Reply channel returning configured chain names.
         reply: oneshot::Sender<PolicyChainAssignment>,
-    },
-    /// Replace the global import policy chain.
-    SetGlobalImportChain {
-        /// Ordered policy names.
-        policy_names: Vec<String>,
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
-    },
-    /// Replace the global export policy chain.
-    SetGlobalExportChain {
-        /// Ordered policy names.
-        policy_names: Vec<String>,
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
-    },
-    /// Clear the global import policy chain.
-    ClearGlobalImportChain {
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
-    },
-    /// Clear the global export policy chain.
-    ClearGlobalExportChain {
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
     },
     /// Hot-apply `[global] honor_graceful_shutdown` by recomputing
     /// effective runtime policies for EBGP peers. When the knob already has
@@ -1600,38 +1544,6 @@ pub enum PeerManagerCommand {
         /// exists on that address and interface.
         reply: oneshot::Sender<Option<PolicyChainAssignment>>,
     },
-    /// Replace the per-neighbor import policy chain.
-    SetNeighborImportChain {
-        /// Neighbor address.
-        address: IpAddr,
-        /// Ordered policy names.
-        policy_names: Vec<String>,
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
-    },
-    /// Replace the per-neighbor export policy chain.
-    SetNeighborExportChain {
-        /// Neighbor address.
-        address: IpAddr,
-        /// Ordered policy names.
-        policy_names: Vec<String>,
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
-    },
-    /// Clear the per-neighbor import policy chain.
-    ClearNeighborImportChain {
-        /// Neighbor address.
-        address: IpAddr,
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
-    },
-    /// Clear the per-neighbor export policy chain.
-    ClearNeighborExportChain {
-        /// Neighbor address.
-        address: IpAddr,
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
-    },
     /// List all peer groups.
     ListPeerGroups {
         /// Reply channel returning all peer-group definitions.
@@ -1643,15 +1555,6 @@ pub enum PeerManagerCommand {
         name: String,
         /// Reply channel returning the definition if found.
         reply: oneshot::Sender<Option<PeerGroupDefinition>>,
-    },
-    /// Read a neighbor's current peer-group membership (used by the
-    /// persisted catalog CRUD paths to capture prior state for rollback).
-    GetNeighborPeerGroupMembership {
-        /// Neighbor address.
-        address: IpAddr,
-        /// Outer `None` = neighbor not configured; inner `None` = no
-        /// membership.
-        reply: oneshot::Sender<Option<Option<String>>>,
     },
     /// Shut down all peers and exit the peer manager task.
     Shutdown,

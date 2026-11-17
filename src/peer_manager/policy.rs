@@ -5415,7 +5415,7 @@ impl PeerManager {
         // For non-Established peers the same staleness exists — the
         // session task may eventually drop the queued command (task
         // dies before processing) and reach Established holding the
-        // prior policy. Without bailing, `apply_policy_change` would
+        // prior policy. Without bailing, `apply_policy_change_owned` would
         // advance `current_config`, leaving no signal that the edit
         // didn't actually land.
         //
@@ -5649,7 +5649,7 @@ impl PeerManager {
         // in this peer's AdjRibIn against the new import policy.
         // Driven from here rather than from the SIGHUP-only reload
         // path so dynamic peers, gRPC mutations, and any other call
-        // site that goes through `apply_policy_change` get the same
+        // site that goes through `apply_policy_change_owned` get the same
         // correctness guarantee — the loop above iterates
         // `self.peers`, which includes dynamic peers.
         //
@@ -5666,7 +5666,7 @@ impl PeerManager {
         // would fail.
         //
         // Failure for an Established peer bubbles up to
-        // `apply_policy_change`'s caller — for SIGHUP reloads, that
+        // `apply_policy_change_owned`'s caller — for SIGHUP reloads, that
         // returns acknowledged partial SIGHUP authority so the failure is
         // surfaced rather than logged-and-forgotten. Before bubbling
         // up, set `pending_refresh` so the next operator action
@@ -5777,55 +5777,6 @@ impl PeerManager {
         Ok(())
     }
 
-    pub(super) async fn apply_policy_change(
-        &mut self,
-        event: ConfigEvent,
-        affected_peers: Option<Vec<PeerKey>>,
-    ) -> Result<(), CatalogMutationError> {
-        if let ConfigEvent::DeletePolicy { name, .. } = &event {
-            let refs = policy_references(&self.current_config, name);
-            if !refs.is_empty() {
-                return Err(CatalogMutationError::StillReferenced {
-                    kind: "policy",
-                    name: name.clone(),
-                    references: refs,
-                });
-            }
-        }
-        if let ConfigEvent::DeleteNeighborSet { name, .. } = &event {
-            let refs = neighbor_set_references(&self.current_config, name);
-            if !refs.is_empty() {
-                return Err(CatalogMutationError::StillReferenced {
-                    kind: "neighbor set",
-                    name: name.clone(),
-                    references: refs,
-                });
-            }
-        }
-        // ADR-0096: TOML definitions and .rpol policies share one
-        // namespace; creating a TOML definition that shadows an .rpol
-        // policy would silently change every chain referencing it.
-        if let ConfigEvent::SetPolicy { name, .. } = &event
-            && let Some(entry) = self.current_config.policy.rpol.policies.get(name)
-        {
-            return Err(CatalogMutationError::internal(format!(
-                "policy {name:?} is defined by rpol file {:?}; \
-                 rpol and TOML policies share one namespace",
-                entry.path
-            )));
-        }
-
-        let mut next_config = self.current_config.clone();
-        apply_config_event(&mut next_config, &event).map_err(catalog_config_error)?;
-
-        // Thirteen command arms await this future: keep the refresh state
-        // out of it, and so out of the command-dispatch poll frame.
-        let applied =
-            super::boxed(|| self.refresh_policies_for_config(next_config, affected_peers)).await?;
-        self.publish_policy_config_event(&event, applied);
-        Ok(())
-    }
-
     pub(super) async fn apply_policy_change_owned(
         &mut self,
         event: ConfigEvent,
@@ -5883,7 +5834,7 @@ impl PeerManager {
             return OwnedCatalogMutationOutcome::Success;
         }
         match self
-            .refresh_policies_for_config_classified(next_config, affected_peers, true)
+            .refresh_policies_for_config(next_config, affected_peers)
             .await
         {
             Ok(applied) => {
@@ -5900,35 +5851,6 @@ impl PeerManager {
     /// resolve-first, rollback-capable fan-out as catalog policy edits. Peers
     /// whose import chain materially changed get a Route Refresh inside
     /// `apply_resolved_policy_snapshot`.
-    #[cfg(test)]
-    pub(super) async fn sync_rpol_policies(
-        &mut self,
-        rpol_files: Vec<String>,
-        rpol: rustbgpd_policy::rpol::RpolPolicySet,
-        dataset_bindings: rustbgpd_policy::datasets::DatasetBindings,
-    ) -> Result<(), CatalogMutationError> {
-        // LAN-888: the manager-side config snapshot clone carries the full
-        // prior rpol registry — stamp it so the receipt→resolve gap can't
-        // hide it.
-        let clone_started = Instant::now();
-        let mut next_config = self.current_config.clone();
-        info!(
-            elapsed_ms = u64::try_from(clone_started.elapsed().as_millis()).unwrap_or(u64::MAX),
-            "rpol sync config snapshot cloned"
-        );
-        next_config.policy.rpol_files = rpol_files;
-        next_config.policy.rpol = rpol;
-        // LAN-305: the new registry's `dataset` declarations resolve
-        // through these handles during the chain re-resolution below.
-        next_config.policy.dataset_bindings = dataset_bindings;
-        let applied = self.refresh_policies_for_config(next_config, None).await?;
-        info!(
-            peers = applied,
-            "rpol policy registry replaced; live peer chains re-resolved"
-        );
-        Ok(())
-    }
-
     pub(super) async fn sync_rpol_policies_owned(
         &mut self,
         rpol_files: Vec<String>,
@@ -5948,10 +5870,7 @@ impl PeerManager {
                     .closed_catalog_error(),
             );
         }
-        match self
-            .refresh_policies_for_config_classified(next_config, None, true)
-            .await
-        {
+        match self.refresh_policies_for_config(next_config, None).await {
             Ok(_) => OwnedCatalogMutationOutcome::Success,
             Err(failure) => failure.into_owned_outcome(),
         }
@@ -5970,7 +5889,6 @@ impl PeerManager {
         &mut self,
         next_config: &Config,
         targets: Vec<ResolvedPeerPolicy>,
-        require_clean_convergence: bool,
     ) -> Result<Vec<ResolvedPeerPolicy>, PolicySnapshotFailure> {
         // Nothing precedes the install, so one that never reached the RIB is
         // a clean rejection; an unacknowledged one may have committed.
@@ -5994,7 +5912,7 @@ impl PeerManager {
         match self
             .apply_resolved_policy_snapshot_with_prestage_reads(
                 targets,
-                require_clean_convergence,
+                true,
                 OperatorReadAdmission::Served,
             )
             .await
@@ -6021,21 +5939,6 @@ impl PeerManager {
         &mut self,
         next_config: Config,
         affected_peers: Option<Vec<PeerKey>>,
-    ) -> Result<usize, CatalogMutationError> {
-        self.refresh_policies_for_config_classified(next_config, affected_peers, false)
-            .await
-            .map_err(|failure| CatalogMutationError::internal(failure.message))
-    }
-
-    #[expect(
-        clippy::too_many_lines,
-        reason = "live target resolution, conditional installation, and accepted-generation publication form one policy apply"
-    )]
-    async fn refresh_policies_for_config_classified(
-        &mut self,
-        next_config: Config,
-        affected_peers: Option<Vec<PeerKey>>,
-        require_clean_convergence: bool,
     ) -> Result<usize, PolicySnapshotFailure> {
         let peers: Vec<PeerKey> = affected_peers.map_or_else(
             || self.peers.keys().cloned().collect(),
@@ -6133,11 +6036,7 @@ impl PeerManager {
             "resolved live peer policy chains"
         );
         let applied = self
-            .apply_policy_snapshot_with_conditional_install(
-                &next_config,
-                targets,
-                require_clean_convergence,
-            )
+            .apply_policy_snapshot_with_conditional_install(&next_config, targets)
             .await?;
 
         // ADR-0110 freshness: adopting `next_config` is the accept moment
