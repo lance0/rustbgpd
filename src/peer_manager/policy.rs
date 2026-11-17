@@ -475,6 +475,10 @@ struct PolicySnapshotContext {
     /// itself unwound on failure, since unwinding a restore would reinstall
     /// the candidate it is removing.
     install: rustbgpd_transport::ImportPolicyInstall,
+    /// Sessions this transaction reset because a restored import chain could
+    /// not be refreshed ([`PeerManager::reset_unrefreshable_restore`]), in
+    /// the order they were reset.
+    reset_sessions: Vec<PeerKey>,
 }
 
 /// One peer's policy apply, stopped after its session legs and before its RIB
@@ -541,6 +545,24 @@ fn import_refresh_refusal(peer_key: &PeerKey) -> String {
          under the new chain; disable the neighbor (rbgp neighbor {peer_key} disable), which \
          withdraws its routes, apply the change, then enable it so the peer resends them under \
          the new chain"
+    )
+}
+
+/// The RFC 9003 shutdown communication of a session reset because its peer
+/// cannot be asked to re-evaluate its routes under a restored import chain.
+const RESTORE_RESET_COMMUNICATION: &str = "import policy restored; peer lacks Route Refresh";
+
+/// How a result names the sessions a restore reset.
+pub(super) fn reset_sessions_without_route_refresh(reset_sessions: &[PeerKey]) -> String {
+    let peers = reset_sessions
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "reset {} session(s) that did not negotiate Route Refresh, so each resends its routes \
+         under the restored import policy: {peers}",
+        reset_sessions.len()
     )
 }
 
@@ -1422,6 +1444,8 @@ impl PeerManager {
             OperatorReadAdmission::Fenced {
                 reason: "inline hot updates also restore a rejected generation's session configuration",
             },
+            // A restoring hot update's reset is reported by its log line.
+            None,
         )
         .await
     }
@@ -1473,6 +1497,8 @@ impl PeerManager {
         require_clean_convergence: bool,
         operator_reads: OperatorReadAdmission,
     ) -> Result<Vec<ResolvedPeerPolicy>, PolicySnapshotFailure> {
+        // A forward walk resets no session it applied; only its
+        // compensation can, and that ends the walk in a failure.
         self.apply_resolved_policy_snapshot_as(
             targets,
             require_clean_convergence,
@@ -1480,20 +1506,24 @@ impl PeerManager {
             rustbgpd_transport::ImportPolicyInstall::Change,
         )
         .await
+        .map(|(captured, _)| captured)
     }
 
     /// Replay chains captured as running (`priors` of an earlier snapshot)
     /// after a later step of the same transaction failed. Unlike a forward
     /// apply it is not qualified and never refused: a peer that reconnected
     /// without Route Refresh while holding the candidate still gets its prior
-    /// chain back, and a refresh it cannot answer leaves the restore reported
-    /// as ambiguous rather than unwound to the candidate.
+    /// chain back, and since it cannot be asked to resend its routes under
+    /// that chain, its session is reset instead
+    /// ([`Self::reset_unrefreshable_restore`]). Returns the sessions reset.
+    /// A restore that fails partway is reported as ambiguous, not unwound to
+    /// the candidate.
     pub(super) async fn restore_resolved_policy_snapshot(
         &mut self,
         priors: Vec<ResolvedPeerPolicy>,
         require_clean_convergence: bool,
         operator_reads: OperatorReadAdmission,
-    ) -> Result<Vec<ResolvedPeerPolicy>, PolicySnapshotFailure> {
+    ) -> Result<Vec<PeerKey>, PolicySnapshotFailure> {
         self.apply_resolved_policy_snapshot_as(
             priors,
             require_clean_convergence,
@@ -1501,6 +1531,7 @@ impl PeerManager {
             rustbgpd_transport::ImportPolicyInstall::Restore,
         )
         .await
+        .map(|(_, reset_sessions)| reset_sessions)
     }
 
     async fn apply_resolved_policy_snapshot_as(
@@ -1509,7 +1540,7 @@ impl PeerManager {
         require_clean_convergence: bool,
         operator_reads: OperatorReadAdmission,
         install: rustbgpd_transport::ImportPolicyInstall,
-    ) -> Result<Vec<ResolvedPeerPolicy>, PolicySnapshotFailure> {
+    ) -> Result<(Vec<ResolvedPeerPolicy>, Vec<PeerKey>), PolicySnapshotFailure> {
         let snapshot_started = Instant::now();
         let mut phases = PolicySnapshotPhaseTimings {
             total_targets: targets.len(),
@@ -1520,13 +1551,22 @@ impl PeerManager {
         // serve BFD, link and session events, and a notification that would
         // retire a dynamic peer is held until the walk has ended.
         let owns_actor = self.begin_owned_walk();
+        // The forward RIB budget is anchored by the walk itself (see the
+        // preflight below); the rollback budget by the first compensation.
+        let mut context = PolicySnapshotContext {
+            forward: LazyRibBudget::default(),
+            rollback: LazyRibBudget::default(),
+            clean_state_window: CleanStateQueryWindow::default(),
+            operator_reads,
+            install,
+            reset_sessions: Vec::new(),
+        };
         let outcome = self
             .apply_resolved_policy_snapshot_classified_inner(
                 targets,
                 require_clean_convergence,
                 &mut phases,
-                operator_reads,
-                install,
+                &mut context,
             )
             .await;
         let service = if owns_actor {
@@ -1569,7 +1609,21 @@ impl PeerManager {
             event_service_us = service.service_us,
             "reload generation phase timing"
         );
-        outcome
+        let reset_sessions = context.reset_sessions;
+        match outcome {
+            Ok(applied) => Ok((applied, reset_sessions)),
+            // A compensation can reset a session too; the failure names it.
+            Err(mut failure) => {
+                if !reset_sessions.is_empty() {
+                    failure.message = format!(
+                        "{}; {}",
+                        failure.message,
+                        reset_sessions_without_route_refresh(&reset_sessions)
+                    );
+                }
+                Err(failure)
+            }
+        }
     }
 
     #[expect(
@@ -1581,10 +1635,9 @@ impl PeerManager {
         targets: Vec<ResolvedPeerPolicy>,
         require_clean_convergence: bool,
         phases: &mut PolicySnapshotPhaseTimings,
-        operator_reads: OperatorReadAdmission,
-        install: rustbgpd_transport::ImportPolicyInstall,
+        context: &mut PolicySnapshotContext,
     ) -> Result<Vec<ResolvedPeerPolicy>, PolicySnapshotFailure> {
-        let restore = install == rustbgpd_transport::ImportPolicyInstall::Restore;
+        let restore = context.install == rustbgpd_transport::ImportPolicyInstall::Restore;
         // Preparation includes preflight and session setup, even when it
         // rejects before reaching a destination prestage or commit.
         self.operator_read_seam = super::OperatorReadSeam::Prestage;
@@ -1598,13 +1651,6 @@ impl PeerManager {
         // anchors it at its own first RIB command and renews it after each
         // completed unit. For the walk it bounds a stalled RIB, not the
         // walk's total time.
-        let mut context = PolicySnapshotContext {
-            forward: LazyRibBudget::default(),
-            rollback: LazyRibBudget::default(),
-            clean_state_window: CleanStateQueryWindow::default(),
-            operator_reads,
-            install,
-        };
         if !restore {
             let preflight = self
                 .preflight_import_transitions(
@@ -1634,7 +1680,7 @@ impl PeerManager {
             let captured = self
                 .apply_resolved_policy_snapshot_authoritatively(
                     targets,
-                    &mut context,
+                    context,
                     require_clean_convergence,
                     &mut phases.refresh_count,
                 )
@@ -1643,7 +1689,7 @@ impl PeerManager {
             let captured = captured?;
             let convergence_started = Instant::now();
             let outcome = self
-                .complete_policy_snapshot(captured, &mut context, require_clean_convergence)
+                .complete_policy_snapshot(captured, context, require_clean_convergence)
                 .await;
             phases.convergence_check_us = elapsed_us(convergence_started);
             return outcome;
@@ -1665,7 +1711,7 @@ impl PeerManager {
             let captured = self
                 .apply_resolved_policy_snapshot_authoritatively(
                     targets,
-                    &mut context,
+                    context,
                     require_clean_convergence,
                     &mut phases.refresh_count,
                 )
@@ -1674,7 +1720,7 @@ impl PeerManager {
             let captured = captured?;
             let convergence_started = Instant::now();
             let outcome = self
-                .complete_policy_snapshot(captured, &mut context, require_clean_convergence)
+                .complete_policy_snapshot(captured, context, require_clean_convergence)
                 .await;
             phases.convergence_check_us = elapsed_us(convergence_started);
             return outcome;
@@ -1695,7 +1741,7 @@ impl PeerManager {
         let Some(cohort_result) = self
             .try_apply_export_only_policy_cohort(
                 &cohort,
-                &mut context,
+                context,
                 require_clean_convergence,
                 phases,
             )
@@ -1711,7 +1757,7 @@ impl PeerManager {
             let captured = self
                 .apply_resolved_policy_snapshot_authoritatively(
                     targets,
-                    &mut context,
+                    context,
                     require_clean_convergence,
                     &mut phases.refresh_count,
                 )
@@ -1720,7 +1766,7 @@ impl PeerManager {
             let captured = captured?;
             let convergence_started = Instant::now();
             let outcome = self
-                .complete_policy_snapshot(captured, &mut context, require_clean_convergence)
+                .complete_policy_snapshot(captured, context, require_clean_convergence)
                 .await;
             phases.convergence_check_us = elapsed_us(convergence_started);
             return outcome;
@@ -1736,7 +1782,7 @@ impl PeerManager {
         let authoritative_remainder = self
             .apply_resolved_policy_snapshot_authoritatively(
                 remainder,
-                &mut context,
+                context,
                 require_clean_convergence,
                 &mut phases.refresh_count,
             )
@@ -1754,14 +1800,14 @@ impl PeerManager {
                 );
                 let convergence_started = Instant::now();
                 let outcome = self
-                    .complete_policy_snapshot(captured, &mut context, require_clean_convergence)
+                    .complete_policy_snapshot(captured, context, require_clean_convergence)
                     .await;
                 phases.convergence_check_us = elapsed_us(convergence_started);
                 outcome
             }
             Err(remainder_error) => {
                 let rollback = self
-                    .restore_resolved_policies(captured, &mut context, require_clean_convergence)
+                    .restore_resolved_policies(captured, context, require_clean_convergence)
                     .await;
                 let message = match &rollback {
                     Ok(()) => format!(
@@ -2178,6 +2224,7 @@ impl PeerManager {
                         require_clean_convergence.then_some(&mut context.clean_state_window),
                         Some(&mut context.forward),
                         context.operator_reads,
+                        Some(&mut context.reset_sessions),
                     )
                     .await
                 {
@@ -2328,7 +2375,9 @@ impl PeerManager {
         Ok(applied)
     }
 
-    /// Session policy hot-apply bounded by attention time, not wall time.
+    /// Session policy hot-apply bounded by attention time, not wall time. A
+    /// restore's session reset is admitted under the same bound
+    /// ([`Self::reset_unrefreshable_restore`]).
     ///
     /// The round trip carries no internal timeout;
     /// `await_with_readiness_budget` charges the `PEER_POLICY_UPDATE_TIMEOUT`
@@ -2712,7 +2761,10 @@ impl PeerManager {
                             // evaluated under the wrong chain. Reconcile it the
                             // way the deferred-refresh phase does: fire the
                             // refresh now when Established, otherwise arm
-                            // `pending_refresh` for the retry pipeline.
+                            // `pending_refresh` for the retry pipeline. A
+                            // session that reconnected without Route Refresh
+                            // since accepting the new chain is reset instead
+                            // ([`Self::reset_unrefreshable_restore`]).
                             let refresh_commands = self
                                 .peers
                                 .get(peer_key)
@@ -2733,15 +2785,30 @@ impl PeerManager {
                                 .is_some_and(|state| state.fsm_state == SessionState::Established);
                             self.drain_readiness_queries().await;
                             let refreshed = established
-                                && match self.soft_reset_in(peer_key.clone(), Vec::new()).await {
-                                    Ok(()) => true,
-                                    Err(refresh_error) => {
-                                        warn!(
-                                            peer = %peer_key,
-                                            error = %refresh_error,
-                                            "post-reassert route refresh failed after cohort export apply failure; arming pending refresh"
-                                        );
-                                        false
+                                && {
+                                    let refreshed = self
+                                        .soft_reset_in_reporting_delivery(
+                                            peer_key.clone(),
+                                            Vec::new(),
+                                        )
+                                        .await;
+                                    match self
+                                        .reset_unrefreshable_restore(
+                                            peer_key,
+                                            refreshed,
+                                            &mut context.reset_sessions,
+                                        )
+                                        .await
+                                    {
+                                        Ok(()) => true,
+                                        Err(refresh_failure) => {
+                                            warn!(
+                                                peer = %peer_key,
+                                                error = %refresh_failure.error,
+                                                "post-reassert route refresh failed after cohort export apply failure; arming pending refresh"
+                                            );
+                                            false
+                                        }
                                     }
                                 };
                             if refreshed {
@@ -2975,7 +3042,9 @@ impl PeerManager {
     /// may have taken a long time.
     ///
     /// A failed refresh arms `pending_refresh` and is fatal, exactly as on
-    /// the per-peer path. A positively known-down peer owes nothing: its
+    /// the per-peer path; a restore resets a session that cannot be
+    /// refreshed instead ([`Self::reset_unrefreshable_restore`]). A
+    /// positively known-down peer owes nothing: its
     /// `AdjRibIn` is empty until `PeerUp` installs the accepted session
     /// chain. Under `require_clean_convergence` an ambiguous observation
     /// (`SessionGone` / `TimedOut`) fails closed, as it cannot prove the
@@ -3021,10 +3090,19 @@ impl PeerManager {
         match state {
             StateQueryOutcome::State(state) if state.fsm_state == SessionState::Established => {
                 *refresh_count += 1;
-                let Err(failure) = self
+                let mut refreshed = self
                     .soft_reset_in_reporting_delivery(peer_key.clone(), Vec::new())
-                    .await
-                else {
+                    .await;
+                if context.install == rustbgpd_transport::ImportPolicyInstall::Restore {
+                    refreshed = self
+                        .reset_unrefreshable_restore(
+                            peer_key,
+                            refreshed,
+                            &mut context.reset_sessions,
+                        )
+                        .await;
+                }
+                let Err(failure) = refreshed else {
                     return Ok(());
                 };
                 arm_pending_refresh(self);
@@ -3054,6 +3132,85 @@ impl PeerManager {
                 Ok(())
             }
         }
+    }
+
+    /// A restored import chain whose Route Refresh the session answered
+    /// `Unsupported`: the peer did not negotiate Route Refresh, so it cannot
+    /// be asked to resend the routes it sent while the session held the chain
+    /// being removed. The session has already acknowledged the restored
+    /// chain and keeps it across a reconnect, so an administrative reset
+    /// (Cease/Administrative Reset, sent as a Hard Reset when the peer
+    /// negotiated it) makes the peer resend every route under that chain.
+    /// Every other refresh outcome is returned unchanged.
+    ///
+    /// The actor waits only for the session's command queue to admit the
+    /// reset, under the session hot-apply bound
+    /// ([`Self::hot_apply_session_policy`]), never for the NOTIFICATION, the
+    /// close or the reconnect. A reset
+    /// that is not admitted leaves the session holding what it accepted, so
+    /// it is returned as a failure on a session that may still be up.
+    async fn reset_unrefreshable_restore(
+        &mut self,
+        peer_key: &PeerKey,
+        refreshed: Result<(), super::lifecycle::SoftResetFailure>,
+        reset_sessions: &mut Vec<PeerKey>,
+    ) -> Result<(), super::lifecycle::SoftResetFailure> {
+        let failure = match refreshed {
+            Err(failure) if failure.session == super::lifecycle::SoftResetSession::Unsupported => {
+                failure
+            }
+            other => return other,
+        };
+        let not_admitted = match self
+            .peers
+            .get(peer_key)
+            .map(|managed| managed.handle().commands_sender())
+        {
+            None => "the peer is no longer managed".to_string(),
+            Some(commands) => {
+                let reset = rustbgpd_transport::PeerCommand::AdministrativeReset {
+                    reason: Some(rustbgpd_wire::notification::encode_shutdown_communication(
+                        RESTORE_RESET_COMMUNICATION,
+                    )),
+                };
+                // Queue admission only, under the session hot-apply bound.
+                match self
+                    .hot_apply_session_policy(
+                        async move {
+                            commands
+                                .send(reset)
+                                .await
+                                .map_err(|_| rustbgpd_transport::PeerCommandError::SessionExited)
+                        },
+                        "administrative reset",
+                    )
+                    .await
+                {
+                    Ok(()) => {
+                        warn!(
+                            peer = %peer_key,
+                            reason = "route_refresh_unsupported",
+                            "restored the prior import policy; reset the session because the peer \
+                             did not negotiate Route Refresh, so it resends its routes under the \
+                             restored policy"
+                        );
+                        reset_sessions.push(peer_key.clone());
+                        return Ok(());
+                    }
+                    Err(error) => error.to_string(),
+                }
+            }
+        };
+        Err(super::lifecycle::SoftResetFailure {
+            error: rustbgpd_api::peer_types::PeerLifecycleError::Internal(format!(
+                "{}; the session reset that would make the peer resend its routes under the \
+                 restored import policy was not admitted: {not_admitted}",
+                failure.error
+            )),
+            delivery_began: false,
+            acknowledgement_lost: false,
+            session: super::lifecycle::SoftResetSession::Live,
+        })
     }
 
     /// Fire-and-forget cleanup of a prepared clean-transition destination
@@ -3533,12 +3690,19 @@ impl PeerManager {
 
     /// Returns whether the peer's Route Refresh failed on a session that may
     /// still be up and holding what it accepted: not one positively observed
-    /// down, ending, or without the Route Refresh capability.
+    /// down or ending.
+    ///
+    /// `owes_import`: the session may have judged routes under the import
+    /// chain this rollback removes. Such a peer without the Route Refresh
+    /// capability is reset ([`Self::reset_unrefreshable_restore`]), which
+    /// settles it as a refresh would; a reset that is not admitted is a
+    /// failure. Another peer without the capability is refreshed only for
+    /// intent it carried in, and owes this rollback nothing.
     async fn finish_policy_rollback_refresh(
         &mut self,
         plan: &PolicyRollbackPeerPlan,
-        window: &mut CleanStateQueryWindow,
-        operator_reads: OperatorReadAdmission,
+        owes_import: bool,
+        context: &mut PolicySnapshotContext,
     ) -> bool {
         let Some(refresh_failure) = plan.refresh_failure else {
             return false;
@@ -3566,10 +3730,23 @@ impl PeerManager {
         let pending_after = if !plan.is_established && known_down {
             unrefreshed_pending
         } else {
-            match self
-                .send_policy_rollback_refresh(&plan.peer_key, window, operator_reads)
-                .await
-            {
+            let mut refreshed = self
+                .send_policy_rollback_refresh(
+                    &plan.peer_key,
+                    &mut context.clean_state_window,
+                    context.operator_reads,
+                )
+                .await;
+            if owes_import {
+                refreshed = self
+                    .reset_unrefreshable_restore(
+                        &plan.peer_key,
+                        refreshed,
+                        &mut context.reset_sessions,
+                    )
+                    .await;
+            }
+            match refreshed {
                 Ok(()) => plan
                     .restore_prior_pending
                     .is_some_and(|(pending_refresh, _)| pending_refresh),
@@ -3658,10 +3835,12 @@ impl PeerManager {
     /// the Loc-RIB accepts is not held back for that.
     ///
     /// Returns the peers whose Route Refresh failed
-    /// ([`Self::finish_policy_rollback_refresh`]).
+    /// ([`Self::finish_policy_rollback_refresh`]); `owe_refresh` names the
+    /// peers whose sessions may have judged routes under the removed chain.
     async fn finish_policy_rollback_refreshes(
         &mut self,
         plans: &[PolicyRollbackPeerPlan],
+        owe_refresh: &[PeerKey],
         batch_enqueued: bool,
         context: &mut PolicySnapshotContext,
     ) -> Vec<PeerKey> {
@@ -3672,8 +3851,8 @@ impl PeerManager {
                 && self
                     .finish_policy_rollback_refresh(
                         plan,
-                        &mut context.clean_state_window,
-                        context.operator_reads,
+                        owe_refresh.contains(&plan.peer_key),
+                        context,
                     )
                     .await
             {
@@ -3793,6 +3972,8 @@ impl PeerManager {
                     // rollback's stall detector.
                     None,
                     context.operator_reads,
+                    // Its refresh is deferred into the plan.
+                    None,
                 )
                 .await
             {
@@ -3826,7 +4007,7 @@ impl PeerManager {
             }
         };
         let failed_refreshes = self
-            .finish_policy_rollback_refreshes(&plans, registered.is_some(), context)
+            .finish_policy_rollback_refreshes(&plans, &owe_refresh, registered.is_some(), context)
             .await;
 
         if let Some(registered) = registered {
@@ -3967,7 +4148,8 @@ impl PeerManager {
         // re-evaluates it. A failed one leaves that obligation open: keep it
         // armed, after the RIB receipts above restored the prior flags, and
         // do not report the rollback exact. A peer that never negotiated
-        // Route Refresh cannot be asked; its edit is still rejected as before.
+        // Route Refresh cannot be asked: its session was reset instead, which
+        // fails here only when the reset was not admitted.
         for peer_key in failed_refreshes
             .iter()
             .filter(|peer_key| owe_refresh.contains(peer_key))
@@ -4881,6 +5063,7 @@ impl PeerManager {
         clean_state_window: Option<&mut CleanStateQueryWindow>,
         rib_budget: Option<&mut LazyRibBudget>,
         operator_reads: OperatorReadAdmission,
+        reset_sessions: Option<&mut Vec<PeerKey>>,
     ) -> Result<(), PolicyApplyFailure> {
         let result = self
             .apply_runtime_policies_for_peer_key(
@@ -4893,6 +5076,7 @@ impl PeerManager {
                 clean_state_window,
                 rib_budget,
                 operator_reads,
+                reset_sessions,
             )
             .await;
         self.refresh_rfc8212_policy_metrics(&peer_key);
@@ -4947,6 +5131,7 @@ impl PeerManager {
         clean_state_window: Option<&mut CleanStateQueryWindow>,
         mut rib_budget: Option<&mut LazyRibBudget>,
         operator_reads: OperatorReadAdmission,
+        reset_sessions: Option<&mut Vec<PeerKey>>,
     ) -> Result<(), PolicyApplyFailure> {
         use std::fmt::Write as _;
         let address = peer_key.address;
@@ -5459,11 +5644,25 @@ impl PeerManager {
         // leave the new policy applied to *future* UPDATEs while
         // routes already in AdjRibIn keep flowing under the prior
         // policy until the operator reissues a SetPolicy.
+        //
+        // A restore whose peer did not negotiate Route Refresh resets the
+        // session instead, which already holds the restored chain
+        // (`reset_unrefreshable_restore`).
         if needs_refresh && is_established {
-            if let Err(failure) = self
+            let mut refreshed = self
                 .soft_reset_in_reporting_delivery(peer_key.clone(), Vec::new())
-                .await
-            {
+                .await;
+            if install == rustbgpd_transport::ImportPolicyInstall::Restore {
+                let mut unreported = Vec::new();
+                refreshed = self
+                    .reset_unrefreshable_restore(
+                        &peer_key,
+                        refreshed,
+                        reset_sessions.unwrap_or(&mut unreported),
+                    )
+                    .await;
+            }
+            if let Err(failure) = refreshed {
                 let error = failure.error;
                 match refresh_failure {
                     RefreshFailureHandling::Fatal => {
@@ -6145,6 +6344,7 @@ impl PeerManager {
                     // Honor-only edits change implicit import tails, not the
                     // transport metadata reported alongside live session state.
                     OperatorReadAdmission::Served,
+                    None,
                 )
                 .await
             {
@@ -6265,6 +6465,7 @@ impl PeerManager {
                     // Honor-only edits change implicit import tails, not the
                     // transport metadata reported alongside live session state.
                     OperatorReadAdmission::Served,
+                    None,
                 )
                 .await
             {

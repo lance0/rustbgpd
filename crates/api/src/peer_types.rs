@@ -1100,16 +1100,20 @@ pub enum PeerManagerCommand {
     ///
     /// Unlike a forward apply, a restore is not qualified and its import
     /// installs are never refused: a peer that came up without Route Refresh
-    /// while holding the candidate chain still gets its prior chain back. A
-    /// restore that fails partway is never unwound back to the candidate; it
+    /// while holding the candidate chain still gets its prior chain back.
+    /// Such a peer cannot be asked to resend its routes under that chain, so
+    /// its session is reset once the chain is installed, and the peer resends
+    /// them on reconnect. A restore that fails partway, including a reset the
+    /// session does not admit, is never unwound back to the candidate; it
     /// leaves the restored chains in place and replies
     /// [`PolicySnapshotApplyError::CompensationAmbiguous`]. Never mutates
     /// `current_config`.
     RestoreResolvedPolicySnapshot {
         /// The priors a forward apply returned, one entry per live peer.
         priors: Vec<ResolvedPeerPolicy>,
-        /// Reply carries whether the restore completed.
-        reply: oneshot::Sender<Result<(), PolicySnapshotApplyError>>,
+        /// Reply carries whether the restore completed, and the sessions it
+        /// reset because their peers did not negotiate Route Refresh.
+        reply: oneshot::Sender<Result<Vec<PeerKey>, PolicySnapshotApplyError>>,
     },
     /// Apply resolved import/export policy chains for a live-impact
     /// transaction that may include static neighbors and dynamic ranges.
