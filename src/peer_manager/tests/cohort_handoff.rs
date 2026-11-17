@@ -17,12 +17,19 @@ async fn assert_session_state_query_count(counter: &AtomicUsize, expected: usize
 /// Session model for the LAN-462 import-tolerant cohort tests: acks import,
 /// export, refresh, and state queries while counting each, tracks the live
 /// import chain, and optionally fails one export attempt.
+///
+/// With `loses_route_refresh`, the session models a reconnect without Route
+/// Refresh right after its first import install: every later refresh is
+/// answered `RouteRefreshUnsupported`, and each administrative reset records
+/// how many import chains were installed when it arrived.
 #[derive(Default)]
 struct CohortSessionCounters {
     import_installs: AtomicUsize,
     export_installs: AtomicUsize,
     refreshes: AtomicUsize,
     live_import: Mutex<Option<rustbgpd_policy::PolicyChain>>,
+    loses_route_refresh: bool,
+    resets: Mutex<Vec<usize>>,
 }
 
 fn import_tolerant_cohort_test_session(
@@ -68,7 +75,19 @@ fn import_tolerant_cohort_test_session_with_states(
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
                     counters.refreshes.fetch_add(1, Ordering::SeqCst);
-                    let _ = reply.send(Ok(()));
+                    let _ = reply.send(
+                        if counters.loses_route_refresh
+                            && counters.import_installs.load(Ordering::SeqCst) > 0
+                        {
+                            Err(rustbgpd_transport::PeerCommandError::RouteRefreshUnsupported)
+                        } else {
+                            Ok(())
+                        },
+                    );
+                }
+                PeerCommand::AdministrativeReset { .. } => {
+                    let installed = counters.import_installs.load(Ordering::SeqCst);
+                    counters.resets.lock().unwrap().push(installed);
                 }
                 PeerCommand::QueryState { reply } => {
                     state_queries += 1;
@@ -1121,6 +1140,109 @@ async fn import_tolerant_cohort_export_failure_reasserts_failing_member_import()
         assert_eq!(peer_state.export_policy, None);
         assert!(!peer_state.pending_refresh);
         assert!(!peer_state.pending_export_apply);
+    }
+
+    for peer in [first, failing] {
+        manager.delete_peer(key(peer), false).await.unwrap();
+    }
+}
+
+/// The failing member accepted the candidate import chain, then reconnected
+/// without Route Refresh before its export hot-apply failed. Its prior import
+/// chain is reasserted and, since it cannot be refreshed, its session is
+/// reset after that chain is installed: the rollback completes without
+/// refresh debt and the failure names the reset session.
+#[tokio::test]
+async fn cohort_export_failure_resets_a_failing_member_that_lost_route_refresh() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let first = IpAddr::V4(Ipv4Addr::new(10, 45, 1, 1));
+    let failing = IpAddr::V4(Ipv4Addr::new(10, 45, 1, 2));
+    let first_counters = Arc::new(CohortSessionCounters::default());
+    let failing_counters = Arc::new(CohortSessionCounters {
+        loses_route_refresh: true,
+        ..CohortSessionCounters::default()
+    });
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let _rib_task = tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            if let RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                replacements,
+                reply,
+            } = update
+            {
+                let _ = reply.send(Ok(replacements
+                    .into_iter()
+                    .rev()
+                    .map(
+                        |replacement| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
+                            peer: replacement.peer,
+                        },
+                    )
+                    .collect()));
+            }
+        }
+    });
+    let (_command_tx, command_rx) = mpsc::channel(16);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    insert_test_managed_peer(
+        &mut manager,
+        first,
+        import_tolerant_cohort_test_session(first, Arc::clone(&first_counters), None),
+        false,
+    );
+    insert_test_managed_peer(
+        &mut manager,
+        failing,
+        import_tolerant_cohort_test_session(failing, Arc::clone(&failing_counters), Some(1)),
+        false,
+    );
+
+    let shared_export = deny_policy_chain();
+    let changed_import = validation_policy_chain(ImportValidationDependency::Rpki);
+    let result = manager
+        .apply_resolved_policy_snapshot(
+            [first, failing]
+                .into_iter()
+                .map(|address| ResolvedPeerPolicy {
+                    address,
+                    interface: None,
+                    import_policy: Some(changed_import.clone()),
+                    export_policy: Some(shared_export.clone()),
+                })
+                .collect(),
+        )
+        .await;
+    session_drained(&manager, failing).await;
+
+    let error = result.expect_err("the export failure surfaces");
+    assert!(
+        error.contains("already-applied peers restored")
+            && error.contains(&format!(
+                "reset 1 session(s) that did not negotiate Route Refresh, so each resends its \
+                 routes under the restored import policy: {}",
+                key(failing)
+            )),
+        "the rollback completes and names the reset session: {error}"
+    );
+    assert_eq!(*failing_counters.live_import.lock().unwrap(), None);
+    assert_eq!(
+        *failing_counters.resets.lock().unwrap(),
+        vec![2],
+        "one reset, after the prior import chain was reasserted"
+    );
+    assert!(first_counters.resets.lock().unwrap().is_empty());
+    for peer in [first, failing] {
+        assert!(!manager.peers[&key(peer)].pending_refresh);
     }
 
     for peer in [first, failing] {

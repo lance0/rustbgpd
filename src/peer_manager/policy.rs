@@ -2761,7 +2761,10 @@ impl PeerManager {
                             // evaluated under the wrong chain. Reconcile it the
                             // way the deferred-refresh phase does: fire the
                             // refresh now when Established, otherwise arm
-                            // `pending_refresh` for the retry pipeline.
+                            // `pending_refresh` for the retry pipeline. A
+                            // session that reconnected without Route Refresh
+                            // since accepting the new chain is reset instead
+                            // ([`Self::reset_unrefreshable_restore`]).
                             let refresh_commands = self
                                 .peers
                                 .get(peer_key)
@@ -2782,15 +2785,30 @@ impl PeerManager {
                                 .is_some_and(|state| state.fsm_state == SessionState::Established);
                             self.drain_readiness_queries().await;
                             let refreshed = established
-                                && match self.soft_reset_in(peer_key.clone(), Vec::new()).await {
-                                    Ok(()) => true,
-                                    Err(refresh_error) => {
-                                        warn!(
-                                            peer = %peer_key,
-                                            error = %refresh_error,
-                                            "post-reassert route refresh failed after cohort export apply failure; arming pending refresh"
-                                        );
-                                        false
+                                && {
+                                    let refreshed = self
+                                        .soft_reset_in_reporting_delivery(
+                                            peer_key.clone(),
+                                            Vec::new(),
+                                        )
+                                        .await;
+                                    match self
+                                        .reset_unrefreshable_restore(
+                                            peer_key,
+                                            refreshed,
+                                            &mut context.reset_sessions,
+                                        )
+                                        .await
+                                    {
+                                        Ok(()) => true,
+                                        Err(refresh_failure) => {
+                                            warn!(
+                                                peer = %peer_key,
+                                                error = %refresh_failure.error,
+                                                "post-reassert route refresh failed after cohort export apply failure; arming pending refresh"
+                                            );
+                                            false
+                                        }
                                     }
                                 };
                             if refreshed {
