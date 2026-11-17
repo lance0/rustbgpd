@@ -302,6 +302,14 @@ struct AdjRibOutCommitStats {
     /// Per-peer passes that built a full resync (dirty or force).
     #[cfg(test)]
     resync_builds: usize,
+    /// Owed-drain work: unicast keys a drain, absorption or close flush
+    /// read, the drain steps that read any, and the most one step read.
+    #[cfg(test)]
+    owed_drain_rows_read: usize,
+    #[cfg(test)]
+    owed_drain_steps: usize,
+    #[cfg(test)]
+    owed_drain_step_rows_max: usize,
     /// Distinct keys collected into per-peer VPN resync enumerations.
     #[cfg(test)]
     vpn_resync_key_inserts: usize,
@@ -689,6 +697,9 @@ pub struct RibManager {
     owing_peers: BTreeSet<PeerId>,
     /// Ring position of the owed-key drain: the last peer it visited.
     owing_cursor: Option<PeerId>,
+    /// Per unicast AFI: the keys passes carried while a receiver owed the
+    /// family whole, read by those receivers' cursors (`outbound_owing`).
+    owed_rows: [outbound_owing::OwedRows; 2],
     /// Fixed floor of every owed set's byte cap, for tests and bench builds.
     owing_theta_floor: Option<usize>,
     /// Owed keys and whole families recorded since the last read, so the
@@ -2918,6 +2929,7 @@ impl RibManager {
             outbound_stagings: HashMap::new(),
             owing_peers: BTreeSet::new(),
             owing_cursor: None,
+            owed_rows: Default::default(),
             owing_theta_floor: None,
             #[cfg(test)]
             owing_log: HashMap::new(),

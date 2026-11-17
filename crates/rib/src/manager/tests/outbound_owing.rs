@@ -325,9 +325,10 @@ fn owed_keys_stay_flat_under_fresh_rotation() {
 }
 
 /// The byte cap: a stalled receiver owed more keys than a quarter of its
-/// family (or the floor) owes the family whole instead, and a later drain
-/// sends the family by one diff and clears the flag. Red without the cap:
-/// the set keeps every key.
+/// family (or the floor) owes the family whole instead. For unicast its
+/// set is kept and stops growing, a row cursor covers what changes
+/// afterwards, and the drain sends both in charged steps and clears the
+/// flag. Red without the cap: the set keeps growing with every pass.
 #[test]
 fn oversized_owed_set_flips_to_the_whole_family_and_drains() {
     let mut manager = manager(64).with_owing_theta_floor(256);
@@ -346,8 +347,15 @@ fn oversized_owed_set_flips_to_the_whole_family_and_drains() {
     reference_wire.apply(&send_all(&mut reference_rx));
     let queued = held(&mut stalled_rx);
     assert!(manager.owes_whole(stalled, OwedFamily::IPV4_UNICAST));
-    assert_eq!(owed(&manager, stalled, V4), 0, "the set is dropped");
+    let kept = owed(&manager, stalled, V4);
+    assert_ne!(kept, 0, "the set is kept");
     assert!(!manager.dirty_peers.contains(&stalled));
+    // A later pass is logged for the cursor, not marked into the set.
+    let later = (200..264).map(|key| route(key, 0)).collect();
+    received(&mut manager, later, vec![], vec![], vec![]);
+    send_all(&mut source);
+    reference_wire.apply(&send_all(&mut reference_rx));
+    assert_eq!(owed(&manager, stalled, V4), kept, "the set stops growing");
     stalled_wire.apply(&queued);
     drop(queued);
     drain_owed(&mut manager, stalled, &mut stalled_rx, &mut stalled_wire);
@@ -358,15 +366,16 @@ fn oversized_owed_set_flips_to_the_whole_family_and_drains() {
         &mut reference_rx,
         &mut reference_wire,
     );
-    assert_eq!(stalled_wire.unicast.len(), 200);
+    assert_eq!(stalled_wire.unicast.len(), 264);
     assert_eq!(stalled_wire, reference_wire);
     assert!(!manager.owes_whole(stalled, OwedFamily::IPV4_UNICAST));
 }
 
 /// A whole-family drain whose diff turns out empty (the churn reverted)
-/// still settles the family: one tick clears the flag, drops the owed
-/// state and stops the backlog cadence. Red when only a committed drain
-/// settles: the flag stays and every tick re-enumerates the family.
+/// still settles the family: two steps (the kept set, then the cursor)
+/// clear the flag, drop the owed state and stop the backlog cadence. Red
+/// when only a committed drain settles: the flag stays and every tick
+/// reads the family again.
 #[test]
 fn empty_whole_family_drain_clears_the_flag() {
     let mut manager = manager(8).with_owing_theta_floor(0);
@@ -386,13 +395,15 @@ fn empty_whole_family_drain_clears_the_flag() {
     send_all(&mut source);
     assert!(manager.owes_whole(stalled, OwedFamily::IPV4_UNICAST));
     drop(charge);
+    // One tick at the default poll budget; one per step at a shorter one.
+    manager.resync_dirty_peers_bounded();
     manager.resync_dirty_peers_bounded();
     assert!(
         send_all(&mut stalled_rx)
             .iter()
             .all(|update| update.announce.is_empty())
     );
-    assert!(manager.owing(stalled).is_none(), "one tick settles it");
+    assert!(manager.owing(stalled).is_none(), "two steps settle it");
     assert!(!manager.resync_tick_pending(), "the backlog cadence stops");
 }
 
@@ -2311,7 +2322,9 @@ fn review_p1_owed_exempt_withdrawal_drains_inside_a_selection_hold() {
                     "spent credit owes the withdrawal"
                 );
                 assert!(manager.owes(peer, family));
-                assert_eq!(owed(&manager, peer, family), 2 * usize::from(floor != 0));
+                // Past the byte cap the set keeps the ordinary key and the
+                // withdrawal is logged for the cursor.
+                assert_eq!(owed(&manager, peer, family), 1 + usize::from(floor != 0));
                 let other_afi = if afi == Afi::Ipv4 {
                     Afi::Ipv6
                 } else {
@@ -2335,7 +2348,7 @@ fn review_p1_owed_exempt_withdrawal_drains_inside_a_selection_hold() {
                 assert!(!manager.owing_runnable(), "no second pass inside the hold");
                 assert!(!manager.owing_tick_due());
                 assert!(manager.owes(peer, family), "the ordinary key stays owed");
-                assert_eq!(owed(&manager, peer, family), usize::from(floor != 0));
+                assert_eq!(owed(&manager, peer, family), 1);
 
                 // A whole family keeps its held remainder; later local changes re-arm it.
                 inject_local(&mut manager, rtbh, blackhole);
@@ -2797,8 +2810,9 @@ fn owed_flowspec_revocation_drains_inside_a_selection_hold() {
         }
         assert!(send_all(&mut rx).is_empty(), "one pass per hold");
         let unicast = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 7), 32));
-        // The drain step that absorbs unicast for its End-of-RIB sends that
-        // one family and preserves a drained or rearmed held sibling.
+        // A unicast step sends that one family, its End-of-RIB follows the
+        // step that settles it, and a drained or rearmed held sibling is
+        // preserved.
         for rearm in [false, true] {
             let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8);
             if rearm {
@@ -2816,7 +2830,12 @@ fn owed_flowspec_revocation_drains_inside_a_selection_hold() {
             assert!(send_all(&mut rx).is_empty());
             drop(charge);
             manager.owe_eor(peer, V4);
-            manager.drain_owing_bounded(std::time::Instant::now());
+            assert!(manager.owing_drain_step(
+                peer,
+                OwedFamily::IPV4_UNICAST,
+                super::super::outbound_owing::DrainScope::All,
+                8
+            ));
             let sibling = send_all(&mut rx);
             assert_eq!(
                 sibling
@@ -2909,7 +2928,9 @@ fn only_eligible_whole_debt_waits_on_a_live_latch() {
         (true, true, true),
         (true, false, true),
     ] {
-        let family = if held_family { EVPN } else { V4 };
+        // Unicast owed whole reads a cursor and needs no latch
+        // (`owed_row_cursor`): EVPN stands for the families that do.
+        let family = EVPN;
         let owed_family = OwedFamily::of(family).unwrap();
         let mut manager =
             deferral_manager(vec![EVPN], 8).with_owing_theta_floor(if whole { 0 } else { 1 << 30 });
@@ -2919,21 +2940,7 @@ fn only_eligible_whole_debt_waits_on_a_live_latch() {
         send_all(&mut rx);
         let credit = manager.outbound_credit_handle(peer);
         let charge = crate::outbound_credit::OutboundCharge::new(&credit, 8);
-        received(
-            &mut manager,
-            if held_family {
-                vec![]
-            } else {
-                vec![route(0, 0)]
-            },
-            vec![],
-            if held_family {
-                vec![evpn_route(0, 0)]
-            } else {
-                vec![]
-            },
-            vec![],
-        );
+        received(&mut manager, vec![], vec![], vec![evpn_route(0, 0)], vec![]);
         send_all(&mut source);
         assert!(send_all(&mut rx).is_empty());
         assert!(manager.owes(peer, family));
@@ -3148,50 +3155,61 @@ fn labeled_add_path_pass_budgets_with_the_family_cap() {
 
 /// Whole-family debt that waits only for the receiver's live operation
 /// latch keeps the resync timer armed, so the latch release drains it
-/// with no other activity. Red when such debt does not keep the timer:
-/// the timer disarms and the latch release wakes nothing.
+/// with no other activity. EVPN stands for the families whose whole debt
+/// is one operation; unicast reads a cursor and needs no latch. Red when
+/// such debt does not keep the timer: the timer disarms and the latch
+/// release wakes nothing.
 #[tokio::test(start_paused = true)]
 async fn whole_family_debt_behind_a_latch_drains_when_it_releases() {
     let (tx, rx) = mpsc::channel(64);
-    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
-        .with_outbound_row_credit(4)
-        .with_owing_theta_floor(0);
+    let mut manager = RibManager::new(
+        rx,
+        dummy_query_rx(),
+        None,
+        Some(Ipv4Addr::new(10, 0, 0, 100)),
+        BgpMetrics::new(),
+    )
+    .with_outbound_row_credit(4)
+    .with_owing_theta_floor(0);
     manager.test_force_ungrouped = true;
     let handle = tokio::spawn(manager.run());
     let (source_tx, mut source_rx) = mpsc::channel(64);
-    tx.send(peer_up_message(peer_v4(SOURCE), ipv4_sendable(), source_tx))
+    tx.send(peer_up_message(peer_v4(SOURCE), vec![V4, EVPN], source_tx))
         .await
         .unwrap();
-    let announce = |routes: Vec<Route>| RibUpdate::RoutesReceived {
+    let announce = |routes: Vec<Route>, evpn: Vec<EvpnRibRoute>| RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(SOURCE),
         announced: routes,
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
-        evpn_announced: vec![],
+        evpn_announced: evpn,
         evpn_withdrawn: vec![],
         validated_with: None,
     };
-    tx.send(announce(vec![route(50, 0)])).await.unwrap();
+    tx.send(announce(vec![route(50, 0)], vec![])).await.unwrap();
     actor_barrier(&tx).await;
     let peer = peer_v4(Ipv4Addr::new(10, 0, 29, 1));
     let (peer_tx, mut peer_rx) = mpsc::channel(64);
-    tx.send(peer_up_message(peer, ipv4_sendable(), peer_tx))
+    tx.send(peer_up_message(peer, vec![V4, EVPN], peer_tx))
         .await
         .unwrap();
     actor_barrier(&tx).await;
     // The receiver holds its initial table: the operation latch stays live.
     let dump = held(&mut peer_rx);
     assert!(!dump.is_empty());
-    tx.send(announce((0..4).map(|key| route(key, 0)).collect()))
+    // Four unicast rows spend the credit.
+    tx.send(announce((0..4).map(|key| route(key, 0)).collect(), vec![]))
         .await
         .unwrap();
     actor_barrier(&tx).await;
     let spent = held(&mut peer_rx);
     assert_eq!(rows(&spent), 4);
-    // Owed now, and whole at a zero byte cap.
-    tx.send(announce(vec![route(9, 0)])).await.unwrap();
+    // An EVPN route is owed now, and whole at a zero byte cap.
+    tx.send(announce(vec![], vec![evpn_route(9, 0)]))
+        .await
+        .unwrap();
     actor_barrier(&tx).await;
     while source_rx.try_recv().is_ok() {}
     drop(spent);
@@ -3205,14 +3223,11 @@ async fn whole_family_debt_behind_a_latch_drains_when_it_releases() {
     );
     drop(dump);
     // No query may wake the actor after the latch release.
+    let owed = evpn_route(9, 0).key();
     tokio::time::timeout(Duration::from_millis(50), async {
         loop {
             let update = peer_rx.recv().await.expect("the actor keeps its sender");
-            if update
-                .announce
-                .iter()
-                .any(|route| route.prefix == route_prefix(9))
-            {
+            if update.evpn_announce.iter().any(|route| route.key() == owed) {
                 break;
             }
         }

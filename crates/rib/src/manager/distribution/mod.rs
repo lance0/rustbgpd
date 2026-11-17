@@ -9378,6 +9378,11 @@ impl RibManager {
             })
             .copied()
             .collect();
+        // Receivers that owe a unicast family whole stage and mark nothing
+        // below: the pass logs its keys for their cursors once, here.
+        if !draining {
+            self.log_owed_rows(&best_changed, &all_affected);
+        }
         // FIB install-candidate wake. Route events fire only when the
         // Loc-RIB best `(peer, path_id)` or its payload changes; an
         // equal-cost member added, withdrawn, or re-advertised with a new
@@ -9693,11 +9698,9 @@ impl RibManager {
                         bench_per_client_best_resync.then(std::time::Instant::now);
                     let group_resync_assembles =
                         resync && member_of.is_some_and(|gid| self.group_ribs.contains_key(&gid));
-                    let unicast_whole = whole(super::outbound_owing::OwedFamily::IPV4_UNICAST)
-                        || whole(super::outbound_owing::OwedFamily::IPV6_UNICAST);
-                    let mut effective_prefixes: Cow<'_, HashSet<Prefix>> = if resync
-                        || unicast_whole
-                    {
+                    // Unicast has no whole-family drain: a receiver that
+                    // owes it whole reads a row cursor, as keyed steps.
+                    let mut effective_prefixes: Cow<'_, HashSet<Prefix>> = if resync {
                         let mut capacity = self.loc_rib.len();
                         if let Some(gid) = member_of {
                             if let Some(group) = self.group_ribs.get(&gid) {
@@ -9832,13 +9835,6 @@ impl RibManager {
                         // initial export does.
                         if let Some(history) = self.policy_filtered_routes.get(&peer) {
                             all.extend(history.keys().inspect(|_| checkpoint()).copied());
-                        }
-                        // A whole-family drain enumerates one AFI.
-                        if !resync {
-                            all.retain(|prefix| {
-                                drain_whole
-                                    == Some(super::outbound_owing::OwedFamily::unicast_of(prefix))
-                            });
                         }
                         Cow::Owned(all)
                     } else if let Some(drain) = drain.as_deref_mut() {
@@ -10890,6 +10886,11 @@ impl RibManager {
                     let mut staged_rows = 0usize;
                     let mut unstaged_prefixes: Vec<Prefix> = Vec::new();
                     let mut drain_unstaged: Vec<super::outbound_owing::OwedKey> = Vec::new();
+                    #[cfg(test)]
+                    if draining {
+                        self.adj_rib_out_commit_stats.owed_drain_rows_read +=
+                            staging_prefixes.len();
+                    }
                     for prefix in staging_prefixes {
                         checkpoint();
                         if unicast_budget.is_some_and(|budget| staged_rows >= budget) {

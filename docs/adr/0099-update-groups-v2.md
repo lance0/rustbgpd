@@ -549,6 +549,60 @@ written that operation. An absorption that cannot be admitted for a reason
 other than capacity turns the receiver over to a resync, which carries its
 markers.
 
+**IPv4 and IPv6 unicast owed whole: a row cursor.** A unicast family owed
+whole is not sent as one operation, and no drain step absorbs it for a
+waiting End-of-RIB. Each address family has one list, shared by every
+receiver, of the keys that passes carried while any receiver owed the family
+whole, in the order they last changed; a key that changes again moves to the
+back. A receiver that owes the family whole holds one position in the list.
+A drain step sends the next keys after it, at most 1,024 and at most what
+the receiver's credit allows, by diff against its admitted Adj-RIB-Out, as
+an ordinary envelope charged against that credit, with no operation latch.
+The position moves once the envelope is admitted. A walk that spans turns
+keeps this contract:
+
+- *Current state only.* Each step stages by diff at that moment; a version
+  superseded before its step is never built.
+- *Coverage.* A key that changes behind the position is visited again. One
+  that changes ahead is visited once, at its newer state. A key withdrawn
+  during the walk is withdrawn if the receiver holds it and sends nothing
+  otherwise. A key that returns to the state the receiver holds sends
+  nothing. A second owe leaves the position where it is.
+- *No interleaving.* While the receiver owes the family, a pass stages and
+  marks nothing of it toward that receiver; the pass logs its keys in the
+  list once, however many receivers hold a position.
+- *Marker last.* The End-of-RIB leaves when the position has caught up with
+  the list and the receiver's owed-key set is empty.
+- *Session fence.* A flap, a regroup or a resync drops the position.
+- *Charged.* A receiver that reads nothing is queued at most its credit plus
+  one step.
+
+A selection release starts the position at the end of the list, and the
+release pass that follows carries every key with a candidate and every key
+recorded during the hold. A set that outgrows its byte cap is kept: it stops
+growing, drains ahead of the position in the same charged steps, and the
+position starts at the end of the list. No table is walked to seed it,
+because a row the receiver holds for a key that has left every table is
+named only by that set.
+
+Inside a selection hold the position does not move. Steps read on from a
+second position and send only the rows the hold exempts (local host and
+BLACKHOLE routes, and the withdrawal of a local row the receiver holds); the
+release reads the held rows again.
+
+The list is trimmed behind the slowest position and freed when no receiver
+holds one. A receiver that reads nothing pins it. Once it names more than
+twice the family's Loc-RIB plus 4,096 keys, the slowest receivers are
+resynced instead (the slice 1a path, counted by
+`bgp_rib_outbound_owing_fallback_total`) until it fits.
+
+Three sends for a unicast family still owed stay outside this: a
+ROUTE-REFRESH answer and an operator replay absorb the rest of the walk into
+their own operation, as above, and the shutdown flush sends the withdrawals
+behind the position without moving it. Labeled unicast, VPN, EVPN, FlowSpec,
+BGP-LS and RT-Constrain owed whole keep the whole-family operation and its
+absorption, a stated exception until they move to the same list.
+
 Each owed key carries a *logged deferral*: a test-build record of (session,
 receiver, AFI/SAFI, key). It opens when the key becomes owed. It closes when the
 key is drained, absorbed or cancelled, or when a resync covers it.
