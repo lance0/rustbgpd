@@ -414,7 +414,9 @@ async fn local_cease8_purges_without_notification_gr_for_every_caller() {
 
 /// A Cease/8 raised by the drain before a close ends the session through
 /// `finish_drain_teardown`, for every command that drains; it gets the same
-/// RFC 4724 §4 / RFC 8538 §4 session end as any other local Cease/8.
+/// RFC 4724 §4 / RFC 8538 §4 session end as any other local Cease/8, except
+/// that an administrative reset sends it as a Hard Reset under the N bit and
+/// so never retains (see `admin_reset_retention.rs`).
 /// Mutation-red: without the latch in the shared Cease/8 teardown, every
 /// N-bit-less command queues `PeerGracefulRestart`.
 #[tokio::test]
@@ -452,7 +454,11 @@ async fn close_drain_cease8_purges_without_notification_gr() {
             );
             assert!(!session.notification_teardown, "{path}: latch cleared");
             got.push((path, notification_gr, session_ends(&mut rib_rx)));
-            want.push((path, notification_gr, notification_end(notification_gr)));
+            want.push((
+                path,
+                notification_gr,
+                notification_end(notification_gr && path != "reset"),
+            ));
         }
     }
     assert_eq!(got, want);

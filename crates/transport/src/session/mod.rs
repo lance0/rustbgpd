@@ -689,6 +689,11 @@ pub(crate) struct PeerSession {
     /// carried it is down, so retained routes would point into a dead link.
     /// Skip GR/LLGR retention on this teardown.
     suppress_gr_retention: bool,
+    /// An administrative reset is draining before its close: a Cease/8 the
+    /// drain raises goes out as a Hard Reset when the N bit was negotiated,
+    /// so the reset leaves neither side's routes retained (RFC 8538 §3.1,
+    /// §4). Without the N bit the plain Cease/8 already purges them.
+    hard_reset_drain: bool,
     /// The current TCP connection, if any (fast external failover).
     connection: Option<ConnectionStamp>,
     /// The previous connection while its routes are retained under GR/LLGR,
@@ -2632,6 +2637,7 @@ impl PeerSession {
             received_hard_reset: false,
             sent_hard_reset: false,
             suppress_gr_retention: false,
+            hard_reset_drain: false,
             connection,
             gr_retained_connection: crate::handle::RetainedConnectionState::default(),
             established,
@@ -3031,9 +3037,17 @@ impl PeerSession {
             shutdown_reason,
             failure_cause: (direction == SessionNotificationDirection::Sent
                 && notification.code == NotificationCode::Cease
-                && notification.subcode == cease_subcode::OUT_OF_RESOURCES)
-                .then_some(self.pending_outbound_teardown_cause)
-                .flatten(),
+                && (notification.subcode == cease_subcode::OUT_OF_RESOURCES
+                    || (notification.subcode == cease_subcode::HARD_RESET
+                        && notification.data.get(..2)
+                            == Some(
+                                &[
+                                    NotificationCode::Cease.as_u8(),
+                                    cease_subcode::OUT_OF_RESOURCES,
+                                ][..],
+                            ))))
+            .then_some(self.pending_outbound_teardown_cause)
+            .flatten(),
         };
 
         if let Err(e) = tx.try_send(event) {

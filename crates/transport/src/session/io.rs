@@ -649,11 +649,28 @@ impl PeerSession {
         self.session_telemetry_metric_lease.latch_down_reason(
             rustbgpd_telemetry::reason_labels::SessionDownReason::LocalNotification,
         );
-        let notif = rustbgpd_wire::NotificationMessage::new(
-            NotificationCode::Cease,
-            cease_subcode::OUT_OF_RESOURCES,
-            bytes::Bytes::new(),
-        );
+        let notification_gr = self
+            .negotiated
+            .as_deref()
+            .or(self.fsm.negotiated())
+            .is_some_and(|negotiated| negotiated.peer_notification_gr);
+        let notif = if self.hard_reset_drain && notification_gr {
+            self.sent_hard_reset = true;
+            rustbgpd_wire::NotificationMessage::new(
+                NotificationCode::Cease,
+                cease_subcode::HARD_RESET,
+                bytes::Bytes::from(vec![
+                    NotificationCode::Cease.as_u8(),
+                    cease_subcode::OUT_OF_RESOURCES,
+                ]),
+            )
+        } else {
+            rustbgpd_wire::NotificationMessage::new(
+                NotificationCode::Cease,
+                cease_subcode::OUT_OF_RESOURCES,
+                bytes::Bytes::new(),
+            )
+        };
         self.log_notification(SessionNotificationDirection::Sent, &notif, None);
         self.record_notification_cause(SessionNotificationDirection::Sent, &notif, None);
         self.set_last_error(cause.to_string());
@@ -665,12 +682,13 @@ impl PeerSession {
         // this only fails if we already dropped the writer (e.g. a
         // double-trigger race). Either way, proceed with teardown.
         self.emit_notification_event(SessionNotificationDirection::Sent, &notif, None);
+        let subcode = notif.subcode;
         let _ = self.enqueue_priority(&Message::Notification(notif));
         self.config.neighbor_counters.record_notification_sent();
         self.metrics.record_notification_sent(
             &self.peer_label,
             &NotificationCode::Cease.as_u8().to_string(),
-            &cease_subcode::OUT_OF_RESOURCES.to_string(),
+            &subcode.to_string(),
         );
         self.metrics
             .record_message_sent(&self.peer_label, "notification");
