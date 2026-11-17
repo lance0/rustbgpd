@@ -417,3 +417,82 @@ async fn other_teardowns_still_retain_under_notification_gr() {
         "(cause, wire Cease subcode, session ends, routes retained as stale)"
     );
 }
+
+/// A final stop marks only its own teardown as a Hard Reset. When the same
+/// session is started and re-established afterwards, the shutdown that
+/// daemon shutdown sends, and a stop for a peer expected back, still send a
+/// plain Cease/Administrative Shutdown and retain the routes, for GR and LLGR.
+/// Mutation-red: if `manual_stop` left the Hard Reset marking set, the later
+/// shutdown sends a Hard Reset, queues `PeerDown`, and keeps nothing.
+#[tokio::test(start_paused = true)]
+async fn a_restarted_session_after_a_final_stop_keeps_graceful_teardowns() {
+    let mut got = Vec::new();
+    let mut want = Vec::new();
+    for retention in [Retention::Gr, Retention::Llgr] {
+        for command in ["shutdown", "reconnect stop"] {
+            let (mut rib, mut session, mut peer) = session_with_one_route(retention, true).await;
+            let rib_peer = session.rib_peer();
+            let _ = session
+                .handle_command(PeerCommand::Stop { reason: None })
+                .await;
+            rib.release().await;
+            let stop_wire = read_until_notification(&mut peer).await.subcode;
+
+            let (client, mut peer) = connected_stream_pair().await;
+            session.test_install_stream(client);
+            let _ = session.handle_command(PeerCommand::Start).await;
+            session
+                .drive_fsm(Event::OpenReceived(rustbgpd_wire::OpenMessage {
+                    version: 4,
+                    my_as: 65002,
+                    hold_time: 90,
+                    bgp_identifier: Ipv4Addr::new(10, 0, 0, 2),
+                    capabilities: vec![
+                        Capability::MultiProtocol {
+                            afi: Afi::Ipv4,
+                            safi: Safi::Unicast,
+                        },
+                        Capability::FourOctetAs { asn: 65002 },
+                    ],
+                }))
+                .await;
+            session.drive_fsm(Event::KeepaliveReceived).await;
+            assert_eq!(session.fsm.state(), SessionState::Established);
+            retain(&mut session, retention, true);
+            receive(&mut session, first());
+            session.process_read_buffer().await;
+            rib.release().await;
+
+            let command_sent = if command == "shutdown" {
+                PeerCommand::Shutdown
+            } else {
+                PeerCommand::StopForReconnect { reason: None }
+            };
+            let _ = session.handle_command(command_sent).await;
+            rib.release().await;
+            got.push((
+                retention,
+                command,
+                stop_wire,
+                read_until_notification(&mut peer).await.subcode,
+                rib.ends.clone(),
+                rib.retained_stale(rib_peer).await,
+                rib.loc_rib_count().await,
+            ));
+            want.push((
+                retention,
+                command,
+                cease_subcode::HARD_RESET,
+                cease_subcode::ADMINISTRATIVE_SHUTDOWN,
+                vec![("PeerDown", 1), ("PeerGracefulRestart", 1)],
+                1,
+                1,
+            ));
+        }
+    }
+    assert_eq!(
+        got, want,
+        "(retention, command, final stop wire subcode, later wire subcode, session ends, \
+         routes retained as stale, Loc-RIB routes)"
+    );
+}
