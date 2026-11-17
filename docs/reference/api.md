@@ -991,6 +991,15 @@ confirmed, or a restart boot-reverts from the retained journal. A gNMI
 `CommitSetRollbackDuration` re-arms the automatic rollback: status returns to
 `PENDING` at the new deadline, and a retry that fails again reports the failed
 status again.
+A rollback that moves import policy restores the prior chains rather than
+applying them as a new edit, so a peer that lost Route Refresh inside the
+confirm window does not block it: that one session is reset (Cease/Administrative
+Reset) once the prior chain is installed, and the peer resends its routes under
+it. The rollback still succeeds, and the abort's `human_text` and the status
+record name each reset peer. A restore that fails partway is never undone back
+to the candidate; it fences the daemon for supervised recovery (exit 70, then a
+boot revert from the retained journal) instead of reporting `ABORT_FAILED` or
+`AUTO_REVERT_FAILED`.
 
 Abort and timer rollback do not depend on the runtime snapshot token. The
 token is a Plan→Apply change detector for callers: it covers the runtime config

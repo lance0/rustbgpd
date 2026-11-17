@@ -66,9 +66,10 @@ use crate::fib_table_control::{
 use crate::gnmi_set_bridge;
 use crate::peer_manager::{
     InternalCommand, PlannedTransactionConfig, TransactionConfigRollbackToken,
-    TransactionConfigScope,
+    TransactionConfigScope, reset_sessions_without_route_refresh,
 };
 use crate::reload::transaction_config_snapshot_accepted;
+use rustbgpd_transport::ImportPolicyInstall;
 
 const CONFIG_TRANSACTION_COORDINATOR_ACQUIRE_TIMEOUT: Duration = Duration::from_mins(10);
 /// How long the confirm-window auto-revert may queue for the coordinator past
@@ -616,6 +617,7 @@ impl ConfigTransactionController {
                     "typed config transaction staging is unavailable".to_string(),
                 )
             })?;
+            // A history rollback is a forward edit: it stays qualified.
             apply_config_transaction_locked_with_preloaded(
                 &self.deps,
                 request,
@@ -623,8 +625,10 @@ impl ConfigTransactionController {
                 Some(peer_mgr_internal_tx),
                 progress,
                 true,
+                ImportPolicyInstall::Change,
             )
             .await
+            .map(|(response, _)| response)
             .map_err(ApplyFailure::into_apply_error)
         } else {
             self.apply_locked(request, None, progress, true).await
@@ -1218,10 +1222,11 @@ impl ConfigTransactionController {
             self.peer_mgr_internal_tx.as_ref(),
             progress,
             verify_external_inputs,
+            ImportPolicyInstall::Change,
         )
         .await
         {
-            Ok(response) => response,
+            Ok((response, _)) => response,
             Err(failure) => {
                 if let Some(reason) = failure.fence_reason {
                     // LAN-277: the apply failed somewhere the daemon cannot
@@ -1419,23 +1424,25 @@ impl ConfigTransactionController {
         let pending = self.matching_pending(&confirm_id).await?;
         progress.begin_settling();
         match self.rollback_pending_locked(&pending, progress).await {
-            Ok(response) => {
+            Ok((response, reset_sessions)) => {
+                let outcome = rollback_outcome(
+                    "Aborted confirmed config transaction and restored the previous runtime config",
+                    &reset_sessions,
+                );
                 self.remove_pending_after_rollback(
-                        &confirm_id,
-                        proto::ConfigTransactionConfirmationStatus::Aborted,
-                        response.runtime_snapshot_token.clone(),
-                        "Aborted confirmed config transaction and restored the previous runtime config.",
-                        true,
-                    )
-                    .await?;
+                    &confirm_id,
+                    proto::ConfigTransactionConfirmationStatus::Aborted,
+                    response.runtime_snapshot_token.clone(),
+                    outcome.clone(),
+                    true,
+                )
+                .await?;
                 self.metrics
                     .record_config_transaction_lifecycle("abort", "success");
                 Ok(proto::AbortConfigTransactionResponse {
                     confirmation: self.last_confirmation().await,
                     runtime_snapshot_token: response.runtime_snapshot_token,
-                    human_text:
-                        "Aborted confirmed config transaction and restored the previous runtime config.\n"
-                            .to_string(),
+                    human_text: format!("{outcome}\n"),
                 })
             }
             Err(error) => {
@@ -2012,15 +2019,19 @@ impl ConfigTransactionController {
                     .rollback_pending_locked(&pending, &progress)
                     .await
                 {
-                    Ok(response) => {
-                        controller.remove_pending_after_rollback(
-                        &confirm_id,
-                        proto::ConfigTransactionConfirmationStatus::AutoReverted,
-                        response.runtime_snapshot_token,
-                        "Confirmed config transaction timed out and was automatically rolled back.",
-                        false,
-                    )
-                    .await?;
+                    Ok((response, reset_sessions)) => {
+                        controller
+                            .remove_pending_after_rollback(
+                                &confirm_id,
+                                proto::ConfigTransactionConfirmationStatus::AutoReverted,
+                                response.runtime_snapshot_token,
+                                rollback_outcome(
+                                    "Confirmed config transaction timed out and was automatically rolled back",
+                                    &reset_sessions,
+                                ),
+                                false,
+                            )
+                            .await?;
                         controller
                             .metrics
                             .record_config_transaction_lifecycle("auto_revert", "success");
@@ -2108,11 +2119,15 @@ impl ConfigTransactionController {
         Ok(pending)
     }
 
+    /// Roll a pending confirmed transaction back to its prior snapshot.
+    /// Returns the response and the sessions the rollback reset because
+    /// their peers did not negotiate Route Refresh.
     async fn rollback_pending_locked(
         &self,
         pending: &PendingConfirmedTransaction,
         progress: &RuntimeConfigMutationProgress,
-    ) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
+    ) -> Result<(proto::ConfigTransactionApplyResponse, Vec<PeerKey>), ConfigTransactionApplyError>
+    {
         // No expected runtime snapshot token: that token is a caller's
         // Plan→Apply change detector and hashes the live update-group
         // membership alongside the config, so any session going up or down
@@ -2138,6 +2153,10 @@ impl ConfigTransactionController {
                 "typed config transaction staging is unavailable".to_string(),
             )
         })?;
+        // The rollback restores the chains the candidate replaced; it is
+        // not a forward edit, so it is not refused for a peer that lost
+        // Route Refresh inside the confirm window, and it is never unwound
+        // back to the candidate.
         let result = apply_config_transaction_locked_with_preloaded(
             &self.deps,
             request,
@@ -2145,9 +2164,21 @@ impl ConfigTransactionController {
             Some(peer_mgr_internal_tx),
             progress,
             true,
+            ImportPolicyInstall::Restore,
         )
         .await;
-        let response = result.map_err(ApplyFailure::into_apply_error)?;
+        let (response, reset_sessions) = result.map_err(ApplyFailure::into_apply_error)?;
+        if !reset_sessions.is_empty() {
+            warn!(
+                confirm_id = %pending.confirm_id,
+                reset_sessions = %reset_sessions
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                "confirmed config transaction rollback reset sessions that did not negotiate Route Refresh"
+            );
+        }
         // A rollback whose re-apply plan did not commit leaves the
         // aborted/expired candidate running — that is a rollback failure,
         // not a success, and the caller must record AbortFailed /
@@ -2157,7 +2188,7 @@ impl ConfigTransactionController {
             Ok(
                 proto::ConfigTransactionPlanStatus::Noop
                 | proto::ConfigTransactionPlanStatus::Committable,
-            ) => Ok(response),
+            ) => Ok((response, reset_sessions)),
             Ok(proto::ConfigTransactionPlanStatus::Rejected) => {
                 Err(ConfigTransactionApplyError::FailedPrecondition(format!(
                     "confirmed-transaction rollback was rejected; the unconfirmed candidate is still running: {}",
@@ -2217,7 +2248,7 @@ impl ConfigTransactionController {
         confirm_id: &str,
         status: proto::ConfigTransactionConfirmationStatus,
         runtime_snapshot_token: String,
-        human_text: &'static str,
+        human_text: String,
         abort_timer: bool,
     ) -> Result<(), ConfigTransactionApplyError> {
         let matched = self.matching_pending(confirm_id).await?;
@@ -2254,7 +2285,7 @@ impl ConfigTransactionController {
             deadline_unix_seconds: pending.deadline_unix_seconds,
             committed_sections: pending.committed_sections,
             runtime_snapshot_token,
-            human_text: human_text.to_string(),
+            human_text,
         });
         drop(state);
         self.hand_off_v3(residue_cleanup, "confirmed rollback");
@@ -2586,6 +2617,8 @@ async fn apply_config_transaction_with_internal(
     })?
 }
 
+/// A forward edit: it stays qualified, and resets no session when it
+/// succeeds.
 async fn apply_config_transaction_locked(
     deps: &FibTableControlDeps,
     request: proto::ApplyConfigTransactionRequest,
@@ -2600,10 +2633,16 @@ async fn apply_config_transaction_locked(
         peer_mgr_internal_tx,
         progress,
         verify_external_inputs,
+        ImportPolicyInstall::Change,
     )
     .await
+    .map(|(response, _)| response)
 }
 
+/// Apply a config transaction. `install` is `Restore` only for the rollback
+/// of a pending commit-confirmed transaction; it reaches the live-policy
+/// family, which restores the prior chains instead of applying a forward
+/// edit. Returns the response and the sessions a restore reset.
 #[expect(
     clippy::too_many_lines,
     reason = "planning, typed-candidate verification, and family dispatch share one transaction boundary"
@@ -2615,7 +2654,8 @@ async fn apply_config_transaction_locked_with_preloaded(
     peer_mgr_internal_tx: Option<&mpsc::Sender<InternalCommand>>,
     progress: &RuntimeConfigMutationProgress,
     verify_external_inputs: bool,
-) -> Result<proto::ConfigTransactionApplyResponse, ApplyFailure> {
+    install: ImportPolicyInstall,
+) -> Result<(proto::ConfigTransactionApplyResponse, Vec<PeerKey>), ApplyFailure> {
     let (plan, candidate, typed_plan) = if let Some(planned) = preloaded {
         (planned.plan, planned.candidate, true)
     } else {
@@ -2669,25 +2709,28 @@ async fn apply_config_transaction_locked_with_preloaded(
 
     match plan.status {
         RuntimeConfigTransactionStatus::Noop => {
-            return Ok(proto::ConfigTransactionApplyResponse {
-                status: proto::ConfigTransactionPlanStatus::Noop.into(),
-                runtime_snapshot_token: plan.runtime_snapshot_token,
-                committed_sections: Vec::new(),
-                human_text: "No changes.\n".to_string(),
-                confirmation: None,
-                update_group_impact: Some(rustbgpd_api::update_group_impact_to_proto(
-                    plan.update_group_impact,
-                )),
-            });
+            return Ok((
+                proto::ConfigTransactionApplyResponse {
+                    status: proto::ConfigTransactionPlanStatus::Noop.into(),
+                    runtime_snapshot_token: plan.runtime_snapshot_token,
+                    committed_sections: Vec::new(),
+                    human_text: "No changes.\n".to_string(),
+                    confirmation: None,
+                    update_group_impact: Some(rustbgpd_api::update_group_impact_to_proto(
+                        plan.update_group_impact,
+                    )),
+                },
+                Vec::new(),
+            ));
         }
         RuntimeConfigTransactionStatus::Rejected => {
-            return Ok(rejected_response(plan.runtime_snapshot_token));
+            return Ok((rejected_response(plan.runtime_snapshot_token), Vec::new()));
         }
         RuntimeConfigTransactionStatus::Committable => {}
     }
 
     let Some(family) = apply_family(&plan.supported_sections) else {
-        return Ok(rejected_response(plan.runtime_snapshot_token));
+        return Ok((rejected_response(plan.runtime_snapshot_token), Vec::new()));
     };
 
     let peer_mgr_internal_tx = peer_mgr_internal_tx.ok_or_else(|| {
@@ -2773,11 +2816,12 @@ async fn apply_config_transaction_locked_with_preloaded(
         plan.supported_sections,
         post_commit_runtime_snapshot_token,
         update_group_impact,
+        install,
         progress,
     )
     .await;
-    let mut response = match committed {
-        Ok(response) => response,
+    let (mut response, reset_sessions) = match committed {
+        Ok(committed) => committed,
         Err(error) => {
             if error.fence_reason.is_none() {
                 dispatch_configured_owner_publication(
@@ -2837,7 +2881,7 @@ async fn apply_config_transaction_locked_with_preloaded(
             reason,
         )
     })?;
-    Ok(response)
+    Ok((response, reset_sessions))
 }
 
 #[expect(
@@ -2854,8 +2898,9 @@ async fn commit_apply_family(
     supported_sections: Vec<String>,
     post_commit_runtime_snapshot_token: String,
     update_group_impact: proto::UpdateGroupImpactPlan,
+    install: ImportPolicyInstall,
     progress: &RuntimeConfigMutationProgress,
-) -> Result<proto::ConfigTransactionApplyResponse, ApplyFailure> {
+) -> Result<(proto::ConfigTransactionApplyResponse, Vec<PeerKey>), ApplyFailure> {
     // ADR-0113 deliberately INVERTS ADR-0076's apply-live-before-persist
     // order for outbound prefix maxima. Applying a raise or removal first
     // would admit routes above the old maximum, and a later persistence
@@ -2878,6 +2923,7 @@ async fn commit_apply_family(
         supported_sections,
         post_commit_runtime_snapshot_token,
         update_group_impact,
+        install,
         progress,
     ))
     .await;
@@ -2924,12 +2970,12 @@ async fn prepare_outbound_prefix_limit_transaction(
 async fn finish_outbound_prefix_limit_transaction(
     deps: &FibTableControlDeps,
     prepared: Option<u64>,
-    committed: &Result<proto::ConfigTransactionApplyResponse, ApplyFailure>,
+    committed: &Result<(proto::ConfigTransactionApplyResponse, Vec<PeerKey>), ApplyFailure>,
 ) -> Result<(), ApplyFailure> {
     let (Some(rib_tx), Some(txn)) = (deps.rib_tx.as_ref(), prepared) else {
         return Ok(());
     };
-    let activate = committed.as_ref().is_ok_and(|response| {
+    let activate = committed.as_ref().is_ok_and(|(response, _)| {
         response.status == i32::from(proto::ConfigTransactionPlanStatus::Committable)
     });
     let outcome = crate::reload::finish_outbound_prefix_limits(rib_tx, txn, activate).await;
@@ -2960,9 +3006,13 @@ async fn commit_apply_family_inner(
     supported_sections: Vec<String>,
     post_commit_runtime_snapshot_token: String,
     update_group_impact: proto::UpdateGroupImpactPlan,
+    install: ImportPolicyInstall,
     progress: &RuntimeConfigMutationProgress,
-) -> Result<proto::ConfigTransactionApplyResponse, ApplyFailure> {
-    match family {
+) -> Result<(proto::ConfigTransactionApplyResponse, Vec<PeerKey>), ApplyFailure> {
+    // Only the live-policy family restores import chains; the others carry
+    // no import qualification for `install` to relax.
+    let mut reset_sessions = Vec::new();
+    let response = match family {
         ApplyFamily::FibTables => {
             commit_fib_transaction(
                 deps,
@@ -3019,15 +3069,17 @@ async fn commit_apply_family_inner(
             ))
         }
         ApplyFamily::LivePolicyImpact => {
-            let refreshed = commit_live_policy_impact_locked(
+            let (refreshed, reset) = commit_live_policy_impact_locked(
                 &deps.peer_mgr_tx,
                 peer_mgr_internal_tx,
                 config_tx,
                 candidate_toml,
                 &candidate,
+                install,
                 progress,
             )
             .await?;
+            reset_sessions = reset;
             Ok(committable_response(
                 post_commit_runtime_snapshot_token,
                 supported_sections,
@@ -3072,7 +3124,8 @@ async fn commit_apply_family_inner(
                 Some(update_group_impact),
             ))
         }
-    }
+    };
+    response.map(|response| (response, reset_sessions))
 }
 
 #[expect(
@@ -4542,6 +4595,20 @@ fn peer_lifecycle_error_to_apply_error(error: PeerLifecycleError) -> ConfigTrans
             ConfigTransactionApplyError::FailedPrecondition(error.to_string())
         }
         PeerLifecycleError::Internal(message) => ConfigTransactionApplyError::Internal(message),
+    }
+}
+
+/// The outcome of a completed commit-confirm rollback, naming the sessions
+/// it reset. A reset session is part of a successful rollback: the prior
+/// config is live, and the peer resends its routes under it.
+fn rollback_outcome(summary: &str, reset_sessions: &[PeerKey]) -> String {
+    if reset_sessions.is_empty() {
+        format!("{summary}.")
+    } else {
+        format!(
+            "{summary}; {}.",
+            reset_sessions_without_route_refresh(reset_sessions)
+        )
     }
 }
 

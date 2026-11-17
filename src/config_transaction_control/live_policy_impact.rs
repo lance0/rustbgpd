@@ -2,10 +2,11 @@ use tokio::sync::{mpsc, oneshot};
 
 use rustbgpd_api::peer_types::{
     ConfigEvent, DynamicRangeTarget, PeerKey, PeerManagerCommand, PolicySnapshotApplyError,
-    ResolvedPeerPolicy,
+    ResolvedPeerPolicy, RestoredPolicySnapshot,
 };
 use rustbgpd_api::runtime_config_settlement::RuntimeConfigFenceReason;
 use rustbgpd_api::server::ConfigTransactionApplyError;
+use rustbgpd_transport::ImportPolicyInstall;
 
 use crate::config::{Config, diff_config};
 use crate::peer_manager::{
@@ -23,15 +24,24 @@ use super::{
 /// affected static neighbors' resolved chains to their live sessions
 /// (capturing priors), publish the staged candidate, and roll back live +
 /// snapshot on a publication failure. Returns the number of live sessions
-/// re-evaluated.
+/// re-evaluated and the sessions reset.
+///
+/// `install` is `Restore` only when a commit-confirmed transaction rolls
+/// back (abort, gNMI cancel, auto-revert): the candidate here is the prior
+/// config, and its chains are restored like a publication rollback's, not
+/// applied as a forward edit. A restore is not qualified, so a peer that lost
+/// Route Refresh inside the confirm window still gets its prior chain back,
+/// and its session is reset. A restore that fails partway is never unwound
+/// to the candidate it removes; it fences.
 pub(super) async fn commit_live_policy_impact_locked(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     peer_mgr_internal_tx: &mpsc::Sender<InternalCommand>,
     config_tx: &mpsc::Sender<ConfigEvent>,
     candidate_toml: String,
     candidate: &Config,
+    install: ImportPolicyInstall,
     progress: &RuntimeConfigMutationProgress,
-) -> Result<usize, ApplyFailure> {
+) -> Result<(usize, Vec<PeerKey>), ApplyFailure> {
     let permit = reserve_persist_permit(config_tx, progress).await?;
     progress.begin_mutation();
     let staged = stage_candidate_config(permit, candidate_toml, progress).await?;
@@ -55,13 +65,32 @@ pub(super) async fn commit_live_policy_impact_locked(
         }
     };
 
-    let priors = match send_apply_policy_impact_snapshot(peer_mgr_tx, targets).await {
-        Ok(priors) => priors,
+    let applied = match install {
+        ImportPolicyInstall::Change => send_apply_policy_impact_snapshot(peer_mgr_tx, targets)
+            .await
+            .map(|priors| RestoredPolicySnapshot {
+                priors,
+                reset_sessions: Vec::new(),
+            }),
+        ImportPolicyInstall::Restore => {
+            send_restore_resolved_policy_snapshot(
+                peer_mgr_tx,
+                targets.static_targets,
+                targets.dynamic_ranges,
+            )
+            .await
+        }
+    };
+    let RestoredPolicySnapshot {
+        priors,
+        reset_sessions,
+    } = match applied {
+        Ok(applied) => applied,
         Err(error) => {
-            // The peer-manager command self-heals its live mutations on a
+            // The forward command self-heals its live mutations on a
             // mid-fanout failure, so only the staged snapshot needs rollback.
-            // A lost reply or a failed self-heal is fenced instead: its live
-            // mutations are unknown.
+            // A lost reply, a failed self-heal or a restore that failed
+            // partway is fenced instead: its live mutations are unknown.
             progress.begin_settling();
             return Err(rollback_snapshot_after_error(
                 peer_mgr_internal_tx,
@@ -88,7 +117,7 @@ pub(super) async fn commit_live_policy_impact_locked(
     }
     // Ambiguous-persistence window (a): candidate durable on disk from here on.
     commit_config_snapshot_stage(peer_mgr_tx).await?;
-    Ok(priors.len())
+    Ok((priors.len(), reset_sessions))
 }
 
 #[derive(Default)]
@@ -220,19 +249,21 @@ async fn send_apply_policy_impact_snapshot(
         .map_err(snapshot_apply_error)
 }
 
-/// Send `RestoreResolvedPolicySnapshot` to put the captured prior chains
-/// back during rollback. A restore is not qualified like the forward apply,
-/// so a peer whose session changed since the apply still gets its prior
-/// chain. Returns the sessions the restore reset because their peers did not
-/// negotiate Route Refresh.
+/// Send `RestoreResolvedPolicySnapshot` to put prior chains back during a
+/// rollback. A restore is not qualified like the forward apply, so a peer
+/// whose session changed since the apply still gets its prior chain. Returns
+/// the chains the restore replaced and the sessions it reset because their
+/// peers did not negotiate Route Refresh.
 async fn send_restore_resolved_policy_snapshot(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     priors: Vec<ResolvedPeerPolicy>,
-) -> Result<Vec<PeerKey>, ConfigTransactionApplyError> {
+    dynamic_ranges: Vec<DynamicRangeTarget>,
+) -> Result<RestoredPolicySnapshot, ConfigTransactionApplyError> {
     let (reply_tx, reply_rx) = oneshot::channel();
     peer_mgr_tx
         .send(PeerManagerCommand::RestoreResolvedPolicySnapshot {
             priors,
+            dynamic_ranges,
             reply: reply_tx,
         })
         .await
@@ -280,7 +311,9 @@ async fn rollback_live_policy_and_snapshot(
     // staged, which refuses every dynamic accept: a reset dynamic peer that
     // reconnects before the snapshot is restored is dropped, never accepted
     // under the candidate's chains.
-    let live_rollback = send_restore_resolved_policy_snapshot(peer_mgr_tx, priors).await;
+    let live_rollback = send_restore_resolved_policy_snapshot(peer_mgr_tx, priors, Vec::new())
+        .await
+        .map(|restored| restored.reset_sessions);
     let snapshot_rollback = restore_preloaded_config_snapshot(peer_mgr_internal_tx, rollback).await;
     match (live_rollback, snapshot_rollback) {
         (Ok(reset_sessions), Ok(())) if reset_sessions.is_empty() => original,

@@ -8,6 +8,7 @@ use rustbgpd_api::peer_types::{
     CatalogMutationError, ConfigEvent, DynamicRangeTarget, HonorKnobPartial,
     ImportValidationDependency, OwnedCatalogMutationOutcome, PeerGroupDefinition, PeerKey,
     PeerManagerNeighborConfig, PolicySnapshotApplyError, ResolvedPeerPolicy,
+    RestoredPolicySnapshot,
 };
 use rustbgpd_api::runtime_config_settlement::RuntimeConfigPolicyFailureCode;
 use rustbgpd_fsm::SessionState;
@@ -553,7 +554,7 @@ fn import_refresh_refusal(peer_key: &PeerKey) -> String {
 const RESTORE_RESET_COMMUNICATION: &str = "import policy restored; peer lacks Route Refresh";
 
 /// How a result names the sessions a restore reset.
-pub(super) fn reset_sessions_without_route_refresh(reset_sessions: &[PeerKey]) -> String {
+pub(crate) fn reset_sessions_without_route_refresh(reset_sessions: &[PeerKey]) -> String {
     let peers = reset_sessions
         .iter()
         .map(ToString::to_string)
@@ -1515,15 +1516,15 @@ impl PeerManager {
     /// without Route Refresh while holding the candidate still gets its prior
     /// chain back, and since it cannot be asked to resend its routes under
     /// that chain, its session is reset instead
-    /// ([`Self::reset_unrefreshable_restore`]). Returns the sessions reset.
-    /// A restore that fails partway is reported as ambiguous, not unwound to
-    /// the candidate.
+    /// ([`Self::reset_unrefreshable_restore`]). Returns the chains the
+    /// restore replaced and the sessions it reset. A restore that fails
+    /// partway is reported as ambiguous, not unwound to the candidate.
     pub(super) async fn restore_resolved_policy_snapshot(
         &mut self,
         priors: Vec<ResolvedPeerPolicy>,
         require_clean_convergence: bool,
         operator_reads: OperatorReadAdmission,
-    ) -> Result<Vec<PeerKey>, PolicySnapshotFailure> {
+    ) -> Result<RestoredPolicySnapshot, PolicySnapshotFailure> {
         self.apply_resolved_policy_snapshot_as(
             priors,
             require_clean_convergence,
@@ -1531,7 +1532,10 @@ impl PeerManager {
             rustbgpd_transport::ImportPolicyInstall::Restore,
         )
         .await
-        .map(|(_, reset_sessions)| reset_sessions)
+        .map(|(priors, reset_sessions)| RestoredPolicySnapshot {
+            priors,
+            reset_sessions,
+        })
     }
 
     async fn apply_resolved_policy_snapshot_as(
@@ -3516,10 +3520,43 @@ impl PeerManager {
         static_targets: Vec<ResolvedPeerPolicy>,
         dynamic_ranges: Vec<DynamicRangeTarget>,
     ) -> Result<Vec<ResolvedPeerPolicy>, PolicySnapshotApplyError> {
+        let targets = self.resolve_policy_impact_targets(static_targets, &dynamic_ranges)?;
+        self.apply_resolved_policy_snapshot_with_prestage_reads(
+            targets,
+            false,
+            OperatorReadAdmission::Served,
+        )
+        .await
+        .map_err(PolicySnapshotFailure::into_apply_error)
+    }
+
+    /// Restore the chains a config transaction rolls back to: the captured
+    /// priors of a publication rollback, or the prior config's chains of a
+    /// commit-confirmed abort, cancel or auto-revert. Targets resolve as for
+    /// [`Self::apply_policy_impact_snapshot`]; the walk then restores
+    /// ([`Self::restore_resolved_policy_snapshot`]) instead of applying.
+    pub(super) async fn restore_policy_impact_snapshot(
+        &mut self,
+        priors: Vec<ResolvedPeerPolicy>,
+        dynamic_ranges: Vec<DynamicRangeTarget>,
+    ) -> Result<RestoredPolicySnapshot, PolicySnapshotApplyError> {
+        let targets = self.resolve_policy_impact_targets(priors, &dynamic_ranges)?;
+        self.restore_resolved_policy_snapshot(targets, false, OperatorReadAdmission::Served)
+            .await
+            .map_err(PolicySnapshotFailure::into_apply_error)
+    }
+
+    /// The concrete peers a live-impact transaction targets. Nothing is
+    /// touched before this returns, so a failure has no effect.
+    fn resolve_policy_impact_targets(
+        &self,
+        static_targets: Vec<ResolvedPeerPolicy>,
+        dynamic_ranges: &[DynamicRangeTarget],
+    ) -> Result<Vec<ResolvedPeerPolicy>, PolicySnapshotApplyError> {
         // ADR-0142: an interface-only neighbor's target names its interface
         // with an unspecified address; it applies to the bound peer, and an
         // unbound neighbor takes the chains when it binds.
-        let mut static_targets: Vec<ResolvedPeerPolicy> = static_targets
+        let mut targets: Vec<ResolvedPeerPolicy> = static_targets
             .into_iter()
             .filter_map(|mut target| {
                 if !target.address.is_unspecified() {
@@ -3531,16 +3568,10 @@ impl PeerManager {
             })
             .collect();
         let mut dynamic_targets = self
-            .resolve_dynamic_policy_targets(&dynamic_ranges)
+            .resolve_dynamic_policy_targets(dynamic_ranges)
             .map_err(PolicySnapshotApplyError::NoEffect)?;
-        static_targets.append(&mut dynamic_targets);
-        self.apply_resolved_policy_snapshot_with_prestage_reads(
-            static_targets,
-            false,
-            OperatorReadAdmission::Served,
-        )
-        .await
-        .map_err(PolicySnapshotFailure::into_apply_error)
+        targets.append(&mut dynamic_targets);
+        Ok(targets)
     }
 
     fn resolve_dynamic_policy_targets(

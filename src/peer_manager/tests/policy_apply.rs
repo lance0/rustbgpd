@@ -1242,8 +1242,10 @@ async fn actor_honor_toggle_reaps_clean_success_but_retains_partial_batch_histor
     );
 }
 
-#[tokio::test]
-async fn apply_policy_impact_snapshot_expands_dynamic_range_targets() {
+/// A manager whose current config gives dynamic range `10.30.0.0/16` a
+/// `deny` import chain, with one accepted dynamic peer of that range still
+/// holding `prior`. Returns the manager, the peer and `prior`.
+fn dynamic_range_policy_manager() -> (PeerManager, IpAddr, PolicyChain) {
     let mut mgr = live_policy_test_manager();
     let candidate_toml = tier_authorized_uds_test_config(
         r#"
@@ -1296,19 +1298,25 @@ remote_asn = 65030
         });
         managed.import_policy = Some(prior.clone());
     }
+    (mgr, peer, prior)
+}
 
-    let priors = mgr
-        .apply_policy_impact_snapshot(
-            Vec::new(),
-            vec![DynamicRangeTarget {
-                addr: IpAddr::V4(Ipv4Addr::new(10, 30, 0, 0)),
-                prefix_len: 16,
-                peer_group: "ix".to_string(),
-            }],
-        )
-        .await
-        .expect("dynamic policy impact apply must succeed");
+fn dynamic_range_target() -> DynamicRangeTarget {
+    DynamicRangeTarget {
+        addr: IpAddr::V4(Ipv4Addr::new(10, 30, 0, 0)),
+        prefix_len: 16,
+        peer_group: "ix".to_string(),
+    }
+}
 
+/// The dynamic peer's priors were captured and the current config's `deny`
+/// peer-group chain is now installed.
+fn assert_dynamic_range_target_resolved(
+    mgr: &PeerManager,
+    peer: IpAddr,
+    prior: PolicyChain,
+    priors: &[rustbgpd_api::peer_types::ResolvedPeerPolicy],
+) {
     assert_eq!(priors.len(), 1);
     assert_eq!(priors[0].address, peer);
     assert_eq!(
@@ -1327,8 +1335,41 @@ remote_asn = 65030
     assert_eq!(
         applied_action,
         Some(rustbgpd_policy::PolicyAction::Deny),
-        "dynamic peer must resolve the candidate peer-group policy"
+        "dynamic peer must resolve the current peer-group policy"
     );
+}
+
+#[tokio::test]
+async fn apply_policy_impact_snapshot_expands_dynamic_range_targets() {
+    let (mut mgr, peer, prior) = dynamic_range_policy_manager();
+    let priors = mgr
+        .apply_policy_impact_snapshot(Vec::new(), vec![dynamic_range_target()])
+        .await
+        .expect("dynamic policy impact apply must succeed");
+    assert_dynamic_range_target_resolved(&mgr, peer, prior, &priors);
+}
+
+/// A commit-confirmed rollback restores dynamic peers too: the restore
+/// expands the ranges it is given against the staged (prior) config, the
+/// same way the forward apply does.
+#[tokio::test]
+async fn restore_policy_impact_snapshot_expands_dynamic_range_targets() {
+    let (mut mgr, peer, prior) = dynamic_range_policy_manager();
+    let (reply, response) = oneshot::channel();
+    let _ = Box::pin(
+        mgr.dispatch_command(PeerManagerCommand::RestoreResolvedPolicySnapshot {
+            priors: Vec::new(),
+            dynamic_ranges: vec![dynamic_range_target()],
+            reply,
+        }),
+    )
+    .await;
+    let restored = response
+        .await
+        .unwrap()
+        .expect("dynamic policy impact restore must succeed");
+    assert_dynamic_range_target_resolved(&mgr, peer, prior, &restored.priors);
+    assert_eq!(restored.reset_sessions, Vec::<PeerKey>::new());
 }
 
 /// ADR-0112: an Established peer that never negotiated Route Refresh cannot
@@ -2687,7 +2728,8 @@ async fn restore_replay_resets_a_peer_without_route_refresh() {
             OperatorReadAdmission::Served,
         )
         .await
-        .unwrap_or_else(|failure| panic!("the reset makes the restore exact: {failure:?}"));
+        .unwrap_or_else(|failure| panic!("the reset makes the restore exact: {failure:?}"))
+        .reset_sessions;
     session_drained(&mgr, addr).await;
 
     assert_eq!(reset, vec![key(addr)]);
@@ -2777,7 +2819,11 @@ async fn config_rollback_resets_the_peer_that_lost_route_refresh() {
 
     let (reply, response) = oneshot::channel();
     let _ = Box::pin(
-        mgr.dispatch_command(PeerManagerCommand::RestoreResolvedPolicySnapshot { priors, reply }),
+        mgr.dispatch_command(PeerManagerCommand::RestoreResolvedPolicySnapshot {
+            priors,
+            dynamic_ranges: Vec::new(),
+            reply,
+        }),
     )
     .await;
     let outcome = response.await.unwrap();
@@ -2793,7 +2839,10 @@ async fn config_rollback_resets_the_peer_that_lost_route_refresh() {
         vec![2],
         "one reset, after the prior chain was installed: {outcome:?}"
     );
-    assert_eq!(outcome, Ok(vec![key(addr)]));
+    assert_eq!(
+        outcome.map(|restored| restored.reset_sessions),
+        Ok(vec![key(addr)])
+    );
     assert_eq!(mgr.peers[&key(addr)].import_policy, Some(prior));
 
     drop(mgr);
@@ -2826,7 +2875,8 @@ async fn export_only_restore_resets_no_session() {
             OperatorReadAdmission::Served,
         )
         .await
-        .unwrap_or_else(|failure| panic!("an export-only restore completes: {failure:?}"));
+        .unwrap_or_else(|failure| panic!("an export-only restore completes: {failure:?}"))
+        .reset_sessions;
     session_drained(&mgr, addr).await;
 
     assert_eq!(reset, Vec::<PeerKey>::new());
@@ -2878,7 +2928,8 @@ async fn restore_resets_only_the_peer_without_route_refresh() {
             OperatorReadAdmission::Served,
         )
         .await
-        .unwrap_or_else(|failure| panic!("the restore completes: {failure:?}"));
+        .unwrap_or_else(|failure| panic!("the restore completes: {failure:?}"))
+        .reset_sessions;
     session_drained(&mgr, capable).await;
     session_drained(&mgr, incapable).await;
 

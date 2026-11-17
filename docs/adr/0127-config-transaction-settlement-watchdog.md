@@ -562,3 +562,13 @@ The live chains are still restored before the config snapshot. While the
 candidate snapshot is staged the actor refuses every dynamic accept, so a
 reset dynamic peer that reconnects before the snapshot is restored is
 dropped, not accepted under the candidate's chains.
+
+The rollback of a pending commit-confirmed live policy transaction (abort, gNMI
+cancel, timeout auto-revert) takes the same restore (ADR-0076 amendment of the
+same date). It stages the prior snapshot before the restore, so the same
+accept refusal covers a dynamic peer it resets. Its restore failing partway is
+a compensation failure: `KnownDivergence`, where the forward re-apply it
+replaces put the candidate back and settled as `ABORT_FAILED` or
+`AUTO_REVERT_FAILED`. If the rollback's own publication fails, the chains it
+replaced are restored the same way, which puts the candidate back and leaves
+the transaction pending as before.

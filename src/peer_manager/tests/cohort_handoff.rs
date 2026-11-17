@@ -3831,7 +3831,8 @@ impl FailedCohortRestore {
                 false,
                 OperatorReadAdmission::Served,
             )
-            .await;
+            .await
+            .map(|restored| restored.reset_sessions);
         Self {
             outcome,
             manager,

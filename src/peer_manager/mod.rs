@@ -56,6 +56,7 @@ mod reconcile;
 mod recovery;
 mod retained_dynamic;
 mod rotation;
+pub(crate) use policy::reset_sessions_without_route_refresh;
 pub(crate) use rotation::TCP_AO_AWAITING_PEER_PREFIX;
 mod snapshot;
 #[cfg(target_os = "linux")]
@@ -3095,20 +3096,18 @@ impl PeerManager {
                 .map_err(policy::PolicySnapshotFailure::into_apply_error);
                 let _ = reply.send(result);
             }
-            PeerManagerCommand::RestoreResolvedPolicySnapshot { priors, reply } => {
-                // A config transaction's publication failed: put back the
-                // chains its forward apply replaced, before the staged config
-                // is restored. Reads report each source's current values.
-                // The reply names the sessions the restore reset.
-                let result = boxed(|| {
-                    self.restore_resolved_policy_snapshot(
-                        priors,
-                        false,
-                        OperatorReadAdmission::Served,
-                    )
-                })
-                .await
-                .map_err(policy::PolicySnapshotFailure::into_apply_error);
+            PeerManagerCommand::RestoreResolvedPolicySnapshot {
+                priors,
+                dynamic_ranges,
+                reply,
+            } => {
+                // A config transaction rolls back: its publication failed, or
+                // a commit-confirmed candidate was aborted, canceled or timed
+                // out. Put back the chains it replaced while its snapshot is
+                // staged. Reads report each source's current values. The
+                // reply names the chains replaced and the sessions reset.
+                let result =
+                    boxed(|| self.restore_policy_impact_snapshot(priors, dynamic_ranges)).await;
                 let _ = reply.send(result);
             }
             PeerManagerCommand::ApplyPolicyImpactSnapshot {
