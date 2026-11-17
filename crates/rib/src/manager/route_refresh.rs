@@ -1095,19 +1095,31 @@ impl RibManager {
             // leaves them owed and defers the answer.
             Some(operation) => {
                 let refresh = matches!(replay_kind, FamilyReplayKind::PeerRefresh { .. });
+                let owed = refresh && self.owes(peer, family);
                 if refresh && self.absorb_owed_family(peer, family, operation).is_err() {
                     None
-                } else if let Some(slot) = operation.slot() {
-                    Some((Some(operation), Some(slot)))
                 } else {
-                    // The absorption took the last slot, and the answer is
-                    // deferred with no resync. A marker that waited only for
-                    // those keys is offered now; a full writer leaves it to
-                    // the marker retry, as the deferral leaves the answer.
-                    if refresh {
-                        self.settle_free_eor(peer);
+                    // The absorbed keys were the rest of the family's initial
+                    // table (all of it after a selection release), so an
+                    // End-of-RIB that waited only for them goes out here,
+                    // ahead of the answer: RFC 7313 section 4 allows no BoRR
+                    // before it, and the answer then carries its markers.
+                    if owed && self.eor.owes(peer, family) {
+                        self.settle_free_eor_in(peer, family, operation);
                     }
-                    None
+                    if let Some(slot) = operation.slot() {
+                        Some((Some(operation), Some(slot)))
+                    } else {
+                        // The absorption took the last slot, and the answer
+                        // is deferred with no resync. A marker that waited
+                        // only for those keys is offered now; a full writer
+                        // leaves it to the marker retry, as the deferral
+                        // leaves the answer.
+                        if refresh {
+                            self.settle_free_eor(peer);
+                        }
+                        None
+                    }
                 }
             }
         };

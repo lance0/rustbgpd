@@ -17,7 +17,7 @@ use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{Afi, Safi};
 
 use super::RibManager;
-use super::eor_hold::{EorHold, EorTrigger};
+use super::eor_hold::EorTrigger;
 use super::evpn_recovery::EvpnCompleteFeed;
 
 /// Process-wide ceiling across every typed identity retained while route
@@ -1717,27 +1717,12 @@ impl RibManager {
             if self.dirty_peers.contains(&peer) {
                 continue;
             }
-            // An ORF gate withholds the table until the peer's refresh. A
-            // sendable family held by this gate already recorded its table
-            // obligation at registration or unlock, and the flush keeps
-            // that marker for the peer's refresh. Any other pending marker
-            // (a withheld family, or one the writer deferred) is an
-            // honest-empty completion and leaves now.
-            let orf_gated = self
-                .peer_orf_pending
-                .get(&peer)
-                .is_some_and(|gated| gated.contains(&family));
-            let private = super::outbound_owing::OwedFamily::of(family)
-                .is_some_and(|owed| self.owing_family_in_scope(peer, owed));
-            if private && !orf_gated {
-                // The owed-key drain sends the family and then this marker;
-                // a family that owes nothing any more sends it now.
-                self.settle_free_eor(peer);
-                continue;
-            }
             // A late group member may have skipped a frozen row already in
             // the shared table; unchanged group selection cannot replay it.
-            if !orf_gated && (family != (Afi::L2Vpn, Safi::Evpn) || !evpn_coverage_required) {
+            // The replay is a no-operation for a family the peer holds in
+            // its own Adj-RIB-Out (owed at release) and for one behind an
+            // ORF gate, whose table waits for the peer's refresh.
+            if family != (Afi::L2Vpn, Safi::Evpn) || !evpn_coverage_required {
                 let outcome = self.send_route_refresh_response_inner(
                     peer,
                     family.0,
@@ -1749,7 +1734,19 @@ impl RibManager {
                     continue;
                 }
             }
-            self.release_eor_hold(peer, EorHold::Selection, EorTrigger::Release);
+            // A family the release owed to this peer keeps its marker for
+            // the owed-key drain, which sends the table first and reads the
+            // peer's credit before it does. Otherwise this family's marker
+            // leaves now, and only this family's: the settle absorbs what a
+            // family owes ahead of its marker, and another family the peer
+            // still owes must not be staged in this turn. An ORF-gated
+            // sendable family recorded its table obligation at registration
+            // or unlock and keeps its marker for the peer's refresh; any
+            // other pending marker (a withheld family, or one the writer
+            // deferred) is an honest-empty completion.
+            if !self.owes(peer, family) {
+                self.settle_eor_of(peer, &[family], EorTrigger::Release);
+            }
         }
         let refresh_peers: Vec<_> = self
             .selection_deferred_refresh
@@ -1923,8 +1920,13 @@ impl RibManager {
         // A receiver that holds this family in its own Adj-RIB-Out owes it
         // whole from here: the release pass stages nothing toward it, and
         // the owed-key drain sends it one receiver per resync tick, with the
-        // family's End-of-RIB held behind the debt. The release turn then
-        // does not grow with private receivers x rows.
+        // family's End-of-RIB held behind the debt. A unicast, labeled or
+        // VPN pass does not visit the released keys for such a receiver
+        // either, so its share of the release turn does not grow with the
+        // table. Still per receiver times rows in this turn: a pending
+        // resync of a dirty or forced receiver, the candidate scan of an
+        // Add-Path, ORR or per-client-best receiver, and a deferred
+        // ROUTE-REFRESH answer.
         self.owe_released_family(family);
         if family == (Afi::L2Vpn, Safi::Evpn) {
             // Both Stage and Release reach this seam before any admission.
