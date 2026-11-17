@@ -11,11 +11,17 @@
   §5.1, §5.2), as is a Cease / Out of Resources raised while the teardown
   drains queued output. A disable that finds the session Idle or reconnecting
   purges routes still retained from an earlier session loss. A dynamic peer
-  removed because a config rollback left no range that admits it is
-  handled like a deleted peer.
+  removed because a config rollback left no range that admits it, and an
+  interface-only (unnumbered) neighbor removed from the configuration, are
+  handled like a deleted peer. The session-crash and maximum-prefix latches
+  stop the peer the same way; a maximum-prefix breach already sent its own
+  Cease as a Hard Reset.
   **Operator-visible:** such peers see subcode 9 instead of 2, and the
   NOTIFICATION event and `bgp_notifications_sent_total` report subcode 9.
   Daemon shutdown, a neighbor rebuilt by a reload and a dynamic peer bounced
   onto new peer-group configuration still send a plain Cease /
-  Administrative Shutdown and keep their retention.
+  Administrative Shutdown and keep their retention. With the N bit, a
+  reload or config transaction that fails after removing peers has already
+  hard-reset them, so restoring them on rollback is a full session flap
+  rather than a graceful-restart resume.
   See [Enable / disable a peer](../docs/reference/operations.md#enable--disable-a-peer).

@@ -4065,8 +4065,11 @@ negotiated RFC 8538 Notification Graceful Restart receives Cease / Hard Reset
 wrapping the Administrative Shutdown, so it does not keep rustbgpd's routes
 as stale; the peer's own routes are removed from the RIB, including any still
 retained from an earlier session loss. The same applies to a peer removed by
-a config reload, and to a dynamic peer removed because a config rollback
-left no range that admits it.
+a config reload, to an interface-only neighbor removed from the
+configuration, and to a dynamic peer removed because a config rollback left
+no range that admits it. A reload or config transaction that fails after
+removing peers has already sent them that Hard Reset, so restoring them on
+rollback is a full session flap, not a graceful-restart resume.
 
 ### Manage dynamic-neighbor ranges at runtime
 
@@ -4332,7 +4335,9 @@ and `bgp_notifications_sent_total` report the on-wire subcode 9 in that case.
 A Cease / Out of Resources raised while the disable drains queued output is
 wrapped the same way. Routes still retained from an earlier session loss are
 purged when the disable finds the session Idle or reconnecting. A config
-`admin_down` disables the same way.
+`admin_down`, the session-crash latch and the max-prefix latch disable the
+same way; a max-prefix breach already sends its own Cease as a Hard Reset
+under the N bit.
 
 ### Reset a peer session
 
