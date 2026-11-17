@@ -1479,7 +1479,12 @@ peers pass `interface` as for the sibling RPCs.
   teardown event or session-down sample is emitted because no session exists.
 - When the peer negotiated RFC 8538 Notification Graceful Restart, the reset
   is sent as Cease / Hard Reset wrapping the Administrative Reset and its
-  communication, so neither side retains stale routes across the bounce.
+  communication, so neither side retains stale routes across the bounce. A
+  Cease / Out of Resources raised while the reset drains queued output is
+  wrapped in the Hard Reset the same way.
+- Routes still retained under graceful restart or LLGR from an earlier
+  session loss are purged when the reset finds the session `Idle`,
+  `Connect`, `Active`, `OpenSent` or `OpenConfirm`.
 - An Established active-primary teardown increments
   `bgp_session_down_total{reason="local_notification"}`. Pre-established
   resets do not create an Established-session down sample.

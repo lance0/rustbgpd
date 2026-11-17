@@ -4332,11 +4332,14 @@ any NOTIFICATION backoff and starts the connection immediately; it emits no
 teardown event or session-down sample because no session exists. An accepted
 dynamic peer is removed on Idle and must dial in again; its next connection
 uses the current dynamic-range configuration. Unknown peers fail with
-`NOT_FOUND` and disabled peers with `FAILED_PRECONDITION`. Routes are not
-retained across an Established bounce: peers that negotiated RFC 8538
-Notification Graceful Restart receive a Cease / Hard Reset wrapping the
-Administrative Reset. The sent event therefore reports the on-wire subcode 9
-in that case rather than the inner Administrative Reset subcode 4. Only an
+`NOT_FOUND` and disabled peers with `FAILED_PRECONDITION`. A reset never
+leaves the peer's routes retained under graceful restart or LLGR. Peers that
+negotiated RFC 8538 Notification Graceful Restart receive a Cease / Hard Reset
+wrapping the Administrative Reset; if draining queued output before the close
+raises Cease / Out of Resources instead, that is wrapped in the Hard Reset.
+The sent event therefore reports the on-wire subcode 9 in that case rather
+than the inner subcode. Routes still retained from an earlier session loss
+are purged when the reset finds the session Idle or reconnecting. Only an
 Established active-primary teardown increments
 `bgp_session_down_total{reason="local_notification"}`.
 
