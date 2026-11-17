@@ -532,10 +532,22 @@ another in its own Adj-RIB-Out, and the release of the first does not absorb
 the second. A ROUTE-REFRESH for a family still owed absorbs the owed table
 into the answer's operation, sends the End-of-RIB that waited only for it,
 and then the answer between BoRR and EoRR, because RFC 7313 section 4 allows
-no BoRR before that End-of-RIB. The other releases of an End-of-RIB hold (a
-grace window ending, the RT-Constrain membership and ORF caps, a pass that
-cancels a family's last owed key) still absorb every family the receiver
-owes in their own turn, without reading its credit.
+no BoRR before that End-of-RIB.
+
+Every other release of an End-of-RIB hold (a grace window ending, the
+RT-Constrain membership hold and its cap, the ORF cap, a pass that cancels a
+family's last owed key) follows the same rule. It sends the markers whose
+family owes nothing and stages no routes; a family the receiver is still
+owed keeps its End-of-RIB for the drain. Grace windows share a deadline and
+end together, so a release that absorbed would stage receivers times rows in
+one turn, past the credit of a receiver that has stopped reading. Only the
+drain step absorbs a family for its waiting End-of-RIB, after it has read
+the receiver's credit, and one family per step: the family's table and its
+End-of-RIB go out in one operation, and the receiver's next owed family
+waits for a later step, which for a whole family runs once the session has
+written that operation. An absorption that cannot be admitted for a reason
+other than capacity turns the receiver over to a resync, which carries its
+markers.
 
 Each owed key carries a *logged deferral*: a test-build record of (session,
 receiver, AFI/SAFI, key). It opens when the key becomes owed. It closes when the

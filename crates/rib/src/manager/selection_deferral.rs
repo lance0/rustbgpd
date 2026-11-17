@@ -1737,16 +1737,12 @@ impl RibManager {
             // A family the release owed to this peer keeps its marker for
             // the owed-key drain, which sends the table first and reads the
             // peer's credit before it does. Otherwise this family's marker
-            // leaves now, and only this family's: the settle absorbs what a
-            // family owes ahead of its marker, and another family the peer
-            // still owes must not be staged in this turn. An ORF-gated
-            // sendable family recorded its table obligation at registration
-            // or unlock and keeps its marker for the peer's refresh; any
-            // other pending marker (a withheld family, or one the writer
-            // deferred) is an honest-empty completion.
-            if !self.owes(peer, family) {
-                self.settle_eor_of(peer, &[family], EorTrigger::Release);
-            }
+            // leaves now. An ORF-gated sendable family recorded its table
+            // obligation at registration or unlock and keeps its marker for
+            // the peer's refresh; any other pending marker (a withheld
+            // family, or one the writer deferred) is an honest-empty
+            // completion.
+            self.settle_eor_of(peer, &[family], EorTrigger::Release);
         }
         let refresh_peers: Vec<_> = self
             .selection_deferred_refresh

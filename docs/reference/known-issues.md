@@ -63,14 +63,16 @@ resolved.
     (production RIB and transport, in-process, over loopback). Fixed on main
     after v0.83.0 for that shape: the longest gap seen by an unrelated peer
     was 0.38–0.52 s, at the cost of a 9.7% higher memory peak for unicast.
-  - Other End-of-RIB hold releases, still on main (fix in progress): replay
-    grace window expiry and replay-complete, route-target-membership
-    releases and the ORF cap still send each private receiver's owed
-    families inside the releasing turn, without reading outbound credit, so
-    the work grows with receivers × rows. The evidence is work counts in
-    unit-level probes, not timings. A planned restart that uses the
-    [replay grace window](configuration.md#planned-restart-end-of-rib-grace-window)
-    can therefore still produce a long turn.
+  - Other End-of-RIB hold releases, v0.83.0 and earlier: replay grace
+    window expiry and replay-complete, route-target-membership releases and
+    the ORF cap sent each private receiver's owed families inside the
+    releasing turn, without reading outbound credit, so the work grew with
+    receivers × rows. Fixed on main after v0.83.0: these releases send only
+    the End-of-RIB markers whose table is complete, and the resync ticks
+    deliver each owed family, one family of one receiver per step, after
+    reading that receiver's credit. The evidence is work counts in
+    unit-level tests, not timings. Each owed family still goes out as one
+    operation, like the whole-family sends below.
   - Ordinary UPDATE bursts, still on main and not yet attributed: 150,000
     routes sent at once as ordinary UPDATEs toward 150 private receivers
     delayed an unrelated peer's updates by 27–34 s. Paced at one
@@ -128,7 +130,8 @@ resolved.
   holds its table, or after selection and grace have both ended, so in
   that tail a deleted RTBH not yet withdrawn stays until End-of-RIB. The end
   of a hold is not transmission: the released End-of-RIB is queued behind
-  earlier updates to the peer, and a full outbound queue or a pending resync
+  earlier updates to the peer, and a full outbound queue, a pending resync
+  or a table the resync ticks still owe the peer after a selection release
   can delay it further. Prompt revocation is therefore not guaranteed when
   an operator deletes such an RTBH during the hold: the end of the grace
   window is not a withdrawal deadline, and rustbgpd sets no deadline of its
