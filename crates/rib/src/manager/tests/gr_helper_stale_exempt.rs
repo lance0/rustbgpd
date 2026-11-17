@@ -266,6 +266,7 @@ fn assert_deleted_exempt_leaves_helper_within_hold(
     let mut markers = apply(&mut new_rx, &mut peer_rib, Some(kept_key));
     for _ in 0..4 {
         manager.distribute_changes(&HashSet::new(), &HashSet::new());
+        manager.resync_dirty_peers_bounded();
         markers += apply(&mut new_rx, &mut peer_rib, Some(kept_key));
     }
     assert!(!manager.selection_deferred(FAMILY));

@@ -384,6 +384,7 @@ async fn assert_mixed_fanout_readiness(selection_release: bool) {
         tokio::time::advance(std::time::Duration::from_secs(1)).await;
         manager.expire_selection_deferral();
         assert_eq!(manager.loc_rib.len(), 1);
+        drain_resync_ticks(&mut manager);
     }
 
     assert_eq!(

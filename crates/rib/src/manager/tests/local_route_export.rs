@@ -1699,6 +1699,7 @@ fn injected_flowspec_is_exported_during_selection_deferral() {
     // Each family's release must keep the other family's marker held until
     // that family's own selection has been sent.
     manager.expire_selection_deferral();
+    drain_resync_ticks(&mut manager);
     assert!(!manager.selection_deferred(FLOWSPEC));
     assert_eq!(
         received_flowspec_selected(&mut manager, source),
@@ -2282,6 +2283,7 @@ fn injected_unicast_is_exported_during_selection_deferral() {
         assert!(deferred_unicast_drain(&mut late_rx).is_empty());
 
         manager.expire_selection_deferral();
+        drain_resync_ticks(&mut manager);
         for prefix in hosts {
             assert_eq!(
                 manager.loc_rib.get(&prefix).unwrap().peer,
@@ -2625,6 +2627,7 @@ fn dormant_selection_arming_replays_frozen_routes_to_late_joiners() {
             assert!(!explanation.already_advertised);
         }
         let mut released = HashSet::new();
+        let mut replay = Vec::new();
         for (afi, safi) in deferred_unicast_families() {
             manager.handle_update(RibUpdate::EndOfRib {
                 peer: waiter,
@@ -2633,6 +2636,14 @@ fn dormant_selection_arming_replays_frozen_routes_to_late_joiners() {
                 safi,
             });
             released.insert((afi, safi));
+            for _ in 0..4 {
+                manager.resync_dirty_peers_bounded();
+                replay.extend(
+                    deferred_unicast_drain(&mut late_rx)
+                        .into_iter()
+                        .map(delivered),
+                );
+            }
             let expected = all
                 .iter()
                 .copied()
@@ -2642,10 +2653,11 @@ fn dormant_selection_arming_replays_frozen_routes_to_late_joiners() {
         }
         // The session sends what it got; a credit-refused replay is
         // completed by the resync ticks.
-        let mut replay: Vec<_> = deferred_unicast_drain(&mut late_rx)
-            .into_iter()
-            .map(delivered)
-            .collect();
+        replay.extend(
+            deferred_unicast_drain(&mut late_rx)
+                .into_iter()
+                .map(delivered),
+        );
         for _ in 0..4 {
             manager.resync_dirty_peers_bounded();
             replay.extend(
@@ -2946,7 +2958,16 @@ fn injected_unicast_replaces_frozen_received_selection_without_fallback() {
         for prefix in hosts {
             assert_eq!(manager.loc_rib.get(&prefix).unwrap().peer, source);
         }
-        let released = deferred_unicast_drain(&mut rx);
+        // One family's table per tick; the session writes it before the next.
+        // One family's table per tick; the session writes it before the next.
+        let mut released: Vec<_> = deferred_unicast_drain(&mut rx)
+            .into_iter()
+            .map(delivered)
+            .collect();
+        for _ in 0..4 {
+            manager.resync_dirty_peers_bounded();
+            released.extend(deferred_unicast_drain(&mut rx).into_iter().map(delivered));
+        }
         assert_eq!(
             released
                 .iter()

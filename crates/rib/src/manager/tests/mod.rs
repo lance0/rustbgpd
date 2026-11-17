@@ -1314,6 +1314,16 @@ fn drain_route_chunks(manager: &mut RibManager) {
     while manager.process_next_route_chunk() {}
 }
 
+/// Run resync ticks while the actor would keep its resync timer armed.
+fn drain_resync_ticks(manager: &mut RibManager) {
+    for _ in 0..64 {
+        if !manager.resync_tick_pending() {
+            return;
+        }
+        manager.resync_dirty_peers_bounded();
+    }
+}
+
 /// Load-bearing break: the coalesced outbound pass a drained route batch
 /// performs is bounded by changed prefixes times peers, while the chunk ahead
 /// of it is bounded by a prefix count. Fusing their timings back together —

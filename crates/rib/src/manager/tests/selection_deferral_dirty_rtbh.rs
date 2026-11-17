@@ -2353,6 +2353,7 @@ fn assert_late_waiter_private_counts(ipv6: bool, refuse_capture: bool, fresh_cha
             afi: family.0,
             safi: family.1,
         });
+        drain_resync_ticks(&mut manager);
         let updates = apply_wire(&mut fresh_rx, &mut fresh_wire);
         assert_eq!(
             updates
@@ -2480,6 +2481,7 @@ fn assert_late_waiter_private_counts(ipv6: bool, refuse_capture: bool, fresh_cha
     });
     apply_wire(&mut rx, &mut wire);
     manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    drain_resync_ticks(&mut manager);
     apply_wire(&mut rx, &mut wire);
     assert_eq!(wire.len(), if refuse_capture { 2 } else { 1 });
     assert!(!wire.keys().any(|key| key.0 == removed_prefix));
