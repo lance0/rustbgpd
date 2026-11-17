@@ -108,10 +108,40 @@ def histogram(above, at_most, observations=1):
     return {"observations": observations, "above_ms": above, "at_most_ms": at_most}
 
 
-# Cell 7 bar 6 in rows: 150 x (credit +/- one 1,024-row pass), the bound
-# and the witness that owed rows were charged.
+# Cell 7 bar 6 in rows: the bound, 150 x (credit + one 1,024-row pass).
 RELEASE_ROW_BOUND = 150 * (ROW_CREDIT + 1_024)
-RELEASE_ROW_FLOOR = 150 * (ROW_CREDIT - 1_024)
+# The held read of a clean full-shape release, as measured on a cursor-drain
+# tree: rows held toward the paused receivers, the charge, and the bytes the
+# sessions already encoded (writers plus the receivers' kernel queues) at
+# 202 B a row. Held may exceed the charge by those bytes over 202 B.
+CLEAN_HELD = 12_029_952
+CLEAN_CHARGED = 9_879_552
+HELD_QUEUED = 455_788_668
+HELD_WRITER = 97_717_500
+ROW_BYTES = 202
+HELD_SLACK = HELD_QUEUED // ROW_BYTES
+# The same tree with every fourth cursor envelope admitted uncharged.
+QUARTER_HELD = 11_993_088
+QUARTER_CHARGED = 7_382_016
+QUARTER_QUEUED = 455_779_196
+QUARTER_SLACK = QUARTER_QUEUED // ROW_BYTES
+
+
+def held(charged=CLEAN_CHARGED, advertised=CLEAN_HELD, queued=HELD_QUEUED):
+    """A held read: `advertised` rows handed toward the paused receivers,
+    none read, `charged` before and after."""
+    return {
+        "at_ms": 29_700.0,
+        "advertised_rows": advertised,
+        "read_rows": 0,
+        "charged_before": charged,
+        "charged_after": charged,
+        "writer_bytes": HELD_WRITER,
+        "socket_bytes": queued - HELD_WRITER,
+        "socket_ends": 300,
+    }
+
+
 # The same bound at a byte-credit tree's credit, report-only there.
 RELEASE_BYTE_BOUND = {
     "unicast": 150 * (BYTE_CREDIT + 1_024 * 250),
@@ -139,8 +169,18 @@ def release(family, churn=False):
             "last_eor_ms": 31_000.0,
         },
         "checks": {name: True for name in credit_bars.RESTART_WIRE_CHECKS},
-        "wire": {"churn_reflected_before_eor": [0] * 150, "duplicates_before_eor": 0},
-        "witness": {"peak_credit_rows": 150.0 * ROW_CREDIT, "peak_credit_bytes": None},
+        "wire": {
+            "churn_reflected_before_eor": [0] * 150,
+            "duplicates_before_eor": 0,
+            "min_row_bytes": ROW_BYTES,
+            "max_row_bytes": ROW_BYTES,
+            "max_rows_per_update": 1,
+        },
+        "witness": {
+            "peak_credit_rows": 150.0 * ROW_CREDIT,
+            "peak_credit_bytes": None,
+            "held": held(),
+        },
         "actor": {
             "slice_max_us": {"actor_poll": 120_000.0, "other": 9_000.0},
             "turn_longest_ms": {"end_of_rib": histogram(100.0, 200.0)},
@@ -687,19 +727,25 @@ class Bars(unittest.TestCase):
                 self.assertIn("byte credit gauge present", results[cell][1])
 
         # A row/row pair swapped: the uncharged parent tree, judged as the
-        # candidate, fails cell 7's credit witness.
+        # candidate, fails cell 7's charge witness where the candidate drains
+        # by cursor (unicast); EVPN's witness is report-only.
         def uncharged_parent_swapped(parent, candidate):
             for family in credit_bars.FAMILIES:
                 for kind in ("restart", "restart-churn"):
-                    parent[f"{kind}-{family}.json"]["drain_gauges"]["peak_credit_rows"] = 0
+                    run = parent[f"{kind}-{family}.json"]
+                    run["drain_gauges"]["peak_credit_rows"] = 0
+                    run["witness"]["held"].update(charged_before=0, charged_after=0)
             swap(parent, candidate)
 
         results = self.run_bars(uncharged_parent_swapped)
         for kind in ("selection release", "release under churn"):
-            for family in credit_bars.FAMILIES:
-                cell = f"cell 7 {kind} {family}"
-                self.assertEqual(results[cell][0], "FAIL", results[cell])
-                self.assertIn("owed rows not charged", results[cell][1])
+            cell = f"cell 7 {kind} unicast"
+            self.assertEqual(results[cell][0], "FAIL", results[cell])
+            self.assertIn("owed rows not charged", results[cell][1])
+            cell = f"cell 7 {kind} evpn"
+            self.assertEqual(results[cell][0], "PASS", results[cell])
+            self.assertIn("charge witness report-only: evpn", results[cell][1])
+            self.assertIn("would fail", results[cell][1])
 
     def test_drain_after_resume_is_reported_not_gated(self):
         # The candidate drains 3.1x slower after resume, yet recovery (which
@@ -1498,20 +1544,165 @@ class Bars(unittest.TestCase):
                 self.assertEqual(results["cell 7 selection release unicast"][0], verdict, results)
 
     def test_seeded_uncharged_owed_rows_fail(self):
-        # 150,000 rows owed to each paused receiver against a 109,655-row
-        # credit: the summed peak must reach 150 x (credit - one pass).
+        # Held toward the paused receivers against charged, whatever the
+        # peak: the measured clean read passes; the measured read with
+        # every fourth cursor envelope uncharged, or nothing charged, fails.
+        cases = (
+            (held(), "PASS"),
+            (held(QUARTER_CHARGED, QUARTER_HELD, QUARTER_QUEUED), "FAIL"),
+            (held(0), "FAIL"),
+            # The slack boundary: held may exceed the charge by the slack.
+            (held(CLEAN_HELD - HELD_SLACK), "PASS"),
+            (held(CLEAN_HELD - HELD_SLACK - 1), "FAIL"),
+        )
+        for file in ("restart-unicast.json", "restart-churn-unicast.json"):
+            line = "cell 7 " + (
+                "release under churn unicast" if "churn" in file else "selection release unicast"
+            )
+            for record, verdict in cases:
+
+                def change(run, record=record):
+                    run["witness"]["held"] = record
+                    run["drain_gauges"]["peak_credit_rows"] = record["charged_after"]
+
+                with self.subTest(file=file, record=record):
+                    results = self.release_defect(file, change)
+                    if verdict == "PASS":
+                        self.assertTrue(all(v == "PASS" for v, _ in results.values()), results)
+                        self.assertIn("report-only: credit not reached", results[line][1])
+                    else:
+                        self.assert_only(results, line, "FAIL", "owed rows not charged")
+        # The arithmetic is in the line: no churn or pass term in the slack.
+        results = self.release_defect(
+            "restart-churn-unicast.json",
+            lambda run: run["witness"].update(
+                held=held(QUARTER_CHARGED, QUARTER_HELD, QUARTER_QUEUED)
+            ),
+        )
+        gap = QUARTER_HELD - QUARTER_CHARGED
+        self.assertIn(
+            f"held exceeds charged by {gap} > slack (held {QUARTER_HELD} = {QUARTER_HELD} "
+            f"advertised - 0 read, charged {QUARTER_CHARGED}; slack {QUARTER_SLACK} = "
+            f"{QUARTER_QUEUED} queued bytes / 202 B a row)",
+            results["cell 7 release under churn unicast"][1],
+        )
+        margin = HELD_SLACK - (CLEAN_HELD - CLEAN_CHARGED)
+        results = self.run_bars()
+        self.assertIn(f"margin {margin}", results["cell 7 selection release unicast"][1])
+
+    def test_held_read_without_power_or_uniform_rows_is_invalid(self):
         line = "cell 7 selection release unicast"
-        for peak, verdict in ((0, "FAIL"), (RELEASE_ROW_FLOOR - 1, "FAIL"), (RELEASE_ROW_FLOOR, "PASS")):
-
-            def change(run, peak=peak):
-                run["drain_gauges"]["peak_credit_rows"] = peak
-
-            with self.subTest(peak=peak):
+        cases = (
+            # Nothing staged, or held within the slack: a missing charge
+            # cannot show.
+            (lambda run: run["witness"].update(held=held(0, 0, 0)), "has no power"),
+            (lambda run: run["witness"].update(held=held(0, HELD_SLACK)), "has no power"),
+            # Rows sharing an UPDATE, or of different sizes, make the
+            # divisor no one row's size.
+            (lambda run: run["wire"].update(max_rows_per_update=2), "row size not uniform"),
+            (lambda run: run["wire"].update(max_row_bytes=205), "row size not uniform"),
+            (lambda run: run["wire"].update(min_row_bytes=70), "row size not uniform"),
+            # The read timed out.
+            (
+                lambda run: run["witness"].update(held={"unavailable": "no reply within 5000 ms"}),
+                "held read unavailable: no reply within 5000 ms",
+            ),
+            # The kernel queues of no connection, or of the wrong ones.
+            (lambda run: run["witness"]["held"].update(socket_ends=0), "connection ends"),
+            (lambda run: run["witness"]["held"].update(socket_ends=301), "connection ends"),
+            (lambda run: run["witness"]["held"].update(socket_bytes=None), "socket_bytes"),
+        )
+        for change, reason in cases:
+            with self.subTest(reason=reason):
                 results = self.release_defect("restart-unicast.json", change)
-                if verdict == "PASS":
-                    self.assertTrue(all(v == "PASS" for v, _ in results.values()), results)
-                else:
-                    self.assert_only(results, line, "FAIL", "owed rows not charged")
+                self.assert_only(results, line, "INVALID", reason)
+        # One row over the slack has power (and, uncharged, fails); a 1%
+        # spread of row sizes is uniform.
+        results = self.release_defect(
+            "restart-unicast.json", lambda run: run["witness"].update(held=held(0, HELD_SLACK + 1))
+        )
+        self.assert_only(results, line, "FAIL", "owed rows not charged")
+        results = self.release_defect(
+            "restart-unicast.json", lambda run: run["wire"].update(max_row_bytes=204)
+        )
+        self.assertTrue(all(v == "PASS" for v, _ in results.values()), results)
+
+    def test_evpn_charge_witness_is_report_only(self):
+        # EVPN is not drained by cursor: nothing charged, an idle read or a
+        # missing read leaves the line as its other bars say.
+        for change in (
+            lambda run: run["witness"].update(held=held(0)),
+            lambda run: run["witness"].update(held=held(0, 0, 0)),
+            lambda run: run["witness"].pop("held"),
+        ):
+            results = self.release_defect("restart-evpn.json", change)
+            verdict, reason = results["cell 7 selection release evpn"]
+            self.assertEqual(verdict, "PASS", reason)
+            self.assertIn("charge witness report-only: evpn is not drained by cursor", reason)
+
+    def test_held_read_must_be_tight_and_inside_the_pause(self):
+        line = "cell 7 selection release unicast"
+        spread = 150 * 1_024
+        for change, reason in (
+            (lambda h: h.update(charged_before=h["charged_after"] - spread - 1), "not tight"),
+            # A charge that fell across the read: as loose as one that rose.
+            (lambda h: h.update(charged_before=h["charged_after"] + spread + 1), "not tight"),
+            (lambda h: h.update(at_ms=30_006.0), "not between"),
+            (lambda h: h.update(at_ms=39.0), "not between"),
+        ):
+
+            def mutate(run, change=change):
+                change(run["witness"]["held"])
+
+            with self.subTest(reason=reason):
+                results = self.release_defect("restart-unicast.json", mutate)
+                self.assert_only(results, line, "INVALID", reason)
+        # A spread of exactly one pass a receiver, either way, is tight.
+        for sign in (-1, 1):
+            results = self.release_defect(
+                "restart-unicast.json",
+                lambda run, sign=sign: run["witness"]["held"].update(
+                    charged_before=run["witness"]["held"]["charged_after"] + sign * spread
+                ),
+            )
+            self.assertTrue(all(v == "PASS" for v, _ in results.values()), results)
+
+    def test_charged_peak_short_of_the_credit_passes_alone(self):
+        # The witness on one run: a charged drain short of the credit
+        # passes, a peak over the upper bound fails, and a run without each
+        # held field is INVALID.
+        run = credit_bars.measured([release("unicast", churn=True)], "run")[0]
+        for peak, failed in ((CLEAN_CHARGED, False), (RELEASE_ROW_BOUND + 1, True)):
+            run["drain_gauges"]["peak_credit_rows"] = peak
+            with self.subTest(peak=peak):
+                failure, undecided, _ = credit_bars.credit_bar(run, "run", "unicast")
+                self.assertIsNone(undecided)
+                self.assertEqual(failure is not None, failed, failure)
+        fields = [f"witness.held.{key}" for key in held()] + [
+            "witness.held",
+            "wire.min_row_bytes",
+            "wire.max_row_bytes",
+            "wire.max_rows_per_update",
+        ]
+        # A run without the held read still fails the upper bound.
+        missing = copy.deepcopy(run)
+        missing["drain_gauges"]["peak_credit_rows"] = RELEASE_ROW_BOUND + 1
+        del missing["witness"]["held"]
+        failure, undecided, _ = credit_bars.credit_bar(missing, "run", "unicast")
+        self.assertIn(f"> {RELEASE_ROW_BOUND}", failure)
+        self.assertIn("witness.held", undecided)
+        run["drain_gauges"]["peak_credit_rows"] = CLEAN_CHARGED
+        for field in fields:
+            missing = copy.deepcopy(run)
+            *parents, leaf = field.split(".")
+            node = missing
+            for key in parents:
+                node = node[key]
+            del node[leaf]
+            with self.subTest(missing=field):
+                failure, undecided, _ = credit_bars.credit_bar(missing, "run", "unicast")
+                self.assertIsNone(failure)
+                self.assertIn(field, undecided)
 
     def test_seeded_dead_gauge_watch_is_invalid(self):
         # 33,000 ms watched at 1 ms: at least 16,500 reads.
@@ -1528,21 +1719,32 @@ class Bars(unittest.TestCase):
                 else:
                     self.assert_only(results, line, "INVALID", "the gauge watch did not run")
 
-    def test_credit_witness_is_report_only_where_rows_fit_the_credit(self):
-        # The reduced shape: 4,096 rows per receiver under a 1,048,576-row
-        # credit, so nothing need be charged at the credit.
+    def test_reduced_release_reports_the_charge_witness(self):
+        # The reduced shape, judged by `check`: bar 6 is reported, never
+        # gated. A whole-table release charges nothing: 8,192 rows held,
+        # 827,415 bytes in the kernel queues at 202 B a row (4,096 rows).
         run = release("unicast")
         run["mode"] = "correctness"
         run["shape"].update(receivers=4, rows_per_receiver=4_096, registered_peers=7)
         run["drain_gauges"].update(peak_credit_rows=0, peak_operations_live=0)
+        run["witness"]["held"] = {
+            "at_ms": 204.0,
+            "advertised_rows": 8_192,
+            "read_rows": 0,
+            "charged_before": 0,
+            "charged_after": 0,
+            "writer_bytes": 0,
+            "socket_bytes": 827_415,
+            "socket_ends": 8,
+        }
         with tempfile.TemporaryDirectory() as root:
             Path(root, "restart-unicast.json").write_text(json.dumps(run))
             ((_, verdict, reason),) = credit_bars.check(Path(root))
         self.assertEqual(verdict, "PASS", reason)
         self.assertIn(
-            "bar 6 within: credit rows peak 0 (bound 4198400) over 30000 reads; live whole-table "
-            "operations peak 0; credit witness not applicable, report-only: 4096 rows per "
-            "receiver <= per-peer credit 1048576",
+            "bar 6 would FAIL: run 0: owed rows not charged: held exceeds charged by 8192 > "
+            "slack (held 8192 = 8192 advertised - 0 read, charged 0; slack 4096 = 827415 queued "
+            "bytes / 202 B a row)",
             reason,
         )
 
@@ -1777,6 +1979,20 @@ class Bars(unittest.TestCase):
             with self.subTest(gap=gap):
                 results = self.release_defect("restart-evpn.json", change)
                 self.assertEqual(results[cell][0], verdict, results[cell])
+
+    def test_unavailable_churn_free_window_is_invalid(self):
+        # The raw gap would pass with nothing excluded; an unavailable
+        # window must not read as that.
+        why = "no RIB reply within 5000 ms of the window's end"
+
+        def change(run):
+            run["unaffected"].update(
+                quiet_excluded={"unavailable": why}, max_gap_ms=330.0, max_gap_raw_ms=330.0
+            )
+
+        results = self.release_defect("restart-evpn.json", change)
+        cell = "cell 7 selection release evpn"
+        self.assert_only(results, cell, "INVALID", f"churn-free window unavailable: {why}")
 
     def test_seeded_fail_outranks_another_runs_missing_instrument(self):
         def mutate(parent, candidate):

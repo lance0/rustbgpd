@@ -223,6 +223,12 @@ pub struct WireState {
     pub messages: u64,
     pub announced: u64,
     pub withdrawals: u64,
+    /// The fewest and most wire bytes per announced row over every UPDATE
+    /// that announced one: the message less its withdrawn routes, divided by
+    /// its announced routes, rounded down.
+    pub row_bytes: Option<(u64, u64)>,
+    /// The most announced rows any one UPDATE carried.
+    pub max_rows_per_update: u64,
     pub outside: u64,
     pub decode_failures: u64,
     /// Session ended (decoded-message channel closed) or a NOTIFICATION
@@ -263,6 +269,8 @@ impl WireState {
             messages: 0,
             announced: 0,
             withdrawals: 0,
+            row_bytes: None,
+            max_rows_per_update: 0,
             outside: 0,
             decode_failures: 0,
             resets: 0,
@@ -300,7 +308,17 @@ impl WireState {
             Message::Update(update) => {
                 self.messages += 1;
                 match observe(update, self.family) {
-                    Ok(observed) => self.apply_observed(&observed, now),
+                    Ok(observed) => {
+                        if let Ok(rows @ 1..) = u64::try_from(observed.announced.len()) {
+                            // Header, both length fields, attributes, NLRI.
+                            let bytes = 19 + 4 + update.path_attributes.len() + update.nlri.len();
+                            let per_row = bytes as u64 / rows;
+                            let (min, max) = self.row_bytes.unwrap_or((per_row, per_row));
+                            self.row_bytes = Some((min.min(per_row), max.max(per_row)));
+                            self.max_rows_per_update = self.max_rows_per_update.max(rows);
+                        }
+                        self.apply_observed(&observed, now);
+                    }
                     Err(_) => self.decode_failures += 1,
                 }
             }
@@ -549,6 +567,65 @@ mod tests {
             state.apply_observed(step, now);
         }
         state
+    }
+
+    #[test]
+    fn row_bytes_and_rows_per_update_follow_the_encoded_messages() {
+        let entry = |index| rustbgpd_wire::Ipv4NlriEntry {
+            path_id: 0,
+            prefix: rustbgpd_wire::Ipv4Prefix::new(unicast_prefix(index), 24),
+        };
+        let attributes = [
+            PathAttribute::Origin(rustbgpd_wire::Origin::Igp),
+            PathAttribute::NextHop(Ipv4Addr::new(127, 0, 0, 1)),
+            PathAttribute::Med(7),
+        ];
+        let update = |announced: &[usize], withdrawn: &[usize]| {
+            let announced: Vec<_> = announced.iter().map(|&index| entry(index)).collect();
+            let withdrawn: Vec<_> = withdrawn.iter().map(|&index| entry(index)).collect();
+            Message::Update(UpdateMessage::build(
+                &announced,
+                &withdrawn,
+                &attributes,
+                true,
+                false,
+                rustbgpd_wire::Ipv4UnicastMode::Body,
+            ))
+        };
+        let length = |message: &Message| {
+            rustbgpd_wire::encode_message(message)
+                .expect("encodes")
+                .len() as u64
+        };
+        let mut state = WireState::new(WireFamily::Unicast, ROWS, 7);
+        let now = Instant::now();
+        // A withdrawal alone counts no row; its bytes never count.
+        state.apply(&update(&[], &[0, 1, 2]), now);
+        assert_eq!((state.row_bytes, state.max_rows_per_update), (None, 0));
+        let one = update(&[0], &[1, 2, 3]);
+        let withdrawn_bytes = 3 * 4;
+        let single = length(&one) - withdrawn_bytes;
+        state.apply(&one, now);
+        assert_eq!(
+            (state.row_bytes, state.max_rows_per_update),
+            (Some((single, single)), 1)
+        );
+        // Two rows sharing attributes in one UPDATE: fewer bytes a row, and
+        // the release witness's divisor is no longer one row's size.
+        let two = update(&[1, 2], &[]);
+        state.apply(&two, now);
+        let packed = length(&two) / 2;
+        assert!(packed < single);
+        assert_eq!(
+            (state.row_bytes, state.max_rows_per_update),
+            (Some((packed, single)), 2)
+        );
+        // A later single-row UPDATE moves neither bound.
+        state.apply(&update(&[3], &[]), now);
+        assert_eq!(
+            (state.row_bytes, state.max_rows_per_update),
+            (Some((packed, single)), 2)
+        );
     }
 
     #[test]
