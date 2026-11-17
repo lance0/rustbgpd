@@ -94,7 +94,8 @@ resolved.
   holds its table, or after selection and grace have both ended, so in
   that tail a deleted RTBH not yet withdrawn stays until End-of-RIB. The end
   of a hold is not transmission: the released End-of-RIB is queued behind
-  earlier updates to the peer, and a full outbound queue or a pending resync
+  earlier updates to the peer, and a full outbound queue, a pending resync
+  or a table the resync ticks still owe the peer after a selection release
   can delay it further. Prompt revocation is therefore not guaranteed when
   an operator deletes such an RTBH during the hold: the end of the grace
   window is not a withdrawal deadline, and rustbgpd sets no deadline of its

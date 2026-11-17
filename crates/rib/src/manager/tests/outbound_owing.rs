@@ -2797,7 +2797,8 @@ fn owed_flowspec_revocation_drains_inside_a_selection_hold() {
         }
         assert!(send_all(&mut rx).is_empty(), "one pass per hold");
         let unicast = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 7), 32));
-        // Absorbing unicast must preserve a drained or rearmed held sibling.
+        // The drain step that absorbs unicast for its End-of-RIB sends that
+        // one family and preserves a drained or rearmed held sibling.
         for rearm in [false, true] {
             let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8);
             if rearm {
@@ -2815,7 +2816,7 @@ fn owed_flowspec_revocation_drains_inside_a_selection_hold() {
             assert!(send_all(&mut rx).is_empty());
             drop(charge);
             manager.owe_eor(peer, V4);
-            manager.settle_eor_now(peer);
+            manager.drain_owing_bounded(std::time::Instant::now());
             let sibling = send_all(&mut rx);
             assert_eq!(
                 sibling
@@ -2965,11 +2966,12 @@ fn only_eligible_whole_debt_waits_on_a_live_latch() {
     }
 }
 
-/// An absorption that cannot be admitted (here the session has no export
-/// encoder) escalates the peer to a resync and keeps its End-of-RIB
-/// pending: the marker never goes out ahead of the routes the peer was
-/// owed in that family. Red when the failed absorption reports success:
-/// the End-of-RIB is sent at once.
+/// The drain step's absorption for a waiting End-of-RIB, when it cannot be
+/// admitted (here the session has no export encoder), escalates the peer to
+/// a resync and keeps every End-of-RIB pending: no marker goes out ahead of
+/// the routes the peer was owed, and a hold release before the resync
+/// sends none either. Red when the failed absorption reports success: the
+/// End-of-RIB is sent at once.
 #[test]
 fn a_failed_absorption_keeps_the_end_of_rib() {
     let families = [V4, (Afi::Ipv6, Safi::Unicast)];
@@ -2988,7 +2990,7 @@ fn a_failed_absorption_keeps_the_end_of_rib() {
         manager.owe_eor(peer, family);
     }
     let encoder = manager.peer_export_encoders.remove(&peer).unwrap();
-    manager.settle_eor_now(peer);
+    manager.drain_owing_bounded(std::time::Instant::now());
     assert!(
         send_all(&mut rx)
             .iter()

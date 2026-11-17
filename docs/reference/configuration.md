@@ -2636,7 +2636,13 @@ gr_eor_grace_time = 25   # off by default
   release is timer-driven: rustbgpd does not know whether replay finished, and
   a route not re-injected by then is removed by the helper at that End-of-RIB.
   When listed controllers have not signalled (below), the release is a WARN
-  log whose `awaiting` field names them.
+  log whose `awaiting` field names them. Either release log lists the held
+  families in `held_families` and, in `pending_families`, those whose
+  End-of-RIB did not leave with the release because their table is still
+  owed to the neighbor (a resync, or the released table of a receiver
+  outside an update group after a selection release). Such an End-of-RIB
+  follows its table from the resync ticks, later still for a neighbor that
+  has stopped reading.
 - **Replay-complete signal.** List the controllers in `[global]
   gr_eor_replay_owners`. Each one reads the daemon incarnation
   (`CheckLiveness`) before it replays, re-adds its full desired state, then

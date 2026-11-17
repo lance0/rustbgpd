@@ -2283,7 +2283,20 @@ fn injected_unicast_is_exported_during_selection_deferral() {
         assert!(deferred_unicast_drain(&mut late_rx).is_empty());
 
         manager.expire_selection_deferral();
-        drain_resync_ticks(&mut manager);
+        // A private receiver is owed both families. The drain sends one
+        // family per step, and a receiver's next step waits for its session
+        // to write the one before.
+        let mut released = [Vec::new(), Vec::new()];
+        for _ in 0..8 {
+            manager.resync_dirty_peers_bounded();
+            for (rx, sent) in [&mut target_rx, &mut late_rx]
+                .into_iter()
+                .zip(&mut released)
+            {
+                sent.extend(deferred_unicast_drain(rx).into_iter().map(delivered));
+            }
+        }
+        assert!(!manager.resync_tick_pending());
         for prefix in hosts {
             assert_eq!(
                 manager.loc_rib.get(&prefix).unwrap().peer,
@@ -2291,8 +2304,7 @@ fn injected_unicast_is_exported_during_selection_deferral() {
                 "received index survives the window"
             );
         }
-        for rx in [&mut target_rx, &mut late_rx] {
-            let updates = deferred_unicast_drain(rx);
+        for updates in released {
             for family in deferred_unicast_families() {
                 let mut terminal = false;
                 let mut count = 0;

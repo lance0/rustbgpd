@@ -15,7 +15,10 @@
 //!   drain then runs one family-scoped resync under an operation latch.
 //! - Every barrier (End-of-RIB, a refresh's markers, a replay terminal)
 //!   first absorbs its family's owed keys into the same operation, so no
-//!   owed key of that family is left behind the marker.
+//!   owed key of that family is left behind the marker. A refresh answer
+//!   and a replay absorb in their own operation; an End-of-RIB a hold
+//!   release freed waits for the drain, which reads the peer's credit and
+//!   absorbs one family per step.
 //! - A key no source still offers and the peer does not hold is cancelled
 //!   (the keep-set below mirrors the resync enumeration).
 
@@ -1327,23 +1330,28 @@ impl RibManager {
         if rows >= limit || self.outbound_channel_full(peer) {
             return false;
         }
-        let mut progressed = false;
-        if !self.outbound_operation_live(peer) && self.eor_waits_on_owed_keys(peer) {
-            let before = self.eor.families(peer).count();
-            self.release_eor_hold(peer, EorHold::OwedKeys, EorTrigger::Release);
-            progressed |= self.eor.families(peer).count() < before;
+        // One family per step: a waiting marker's family is absorbed whole
+        // behind this credit read, and the peer's next owed family waits
+        // for its next step and a fresh read.
+        if !self.outbound_operation_live(peer)
+            && self.eor_waits_on_owed_keys(peer)
+            && self.absorb_owed_eor(peer)
+        {
+            return true;
         }
+        // An absorption that did not send its marker may still have used
+        // credit.
         let rows = self
             .outbound_credit
             .get(&peer)
             .map_or(limit, |entry| entry.credit.rows());
         if rows >= limit || self.outbound_channel_full(peer) {
-            return progressed;
+            return false;
         }
         let Some((family, scope)) = self.next_owed_family(peer) else {
-            return progressed;
+            return false;
         };
-        self.owing_drain_step(peer, family, scope, limit - rows) || progressed
+        self.owing_drain_step(peer, family, scope, limit - rows)
     }
 
     /// One drain step of `family`'s `scope` toward `peer` within `budget`

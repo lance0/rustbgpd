@@ -9,6 +9,10 @@
 //! leaves from the call that finds its hold set empty: a release of a hold
 //! ([`RibManager::release_eor_hold`], [`RibManager::release_eor_orf_table`])
 //! or the admission of the table it follows ([`RibManager::settle_eor`]).
+//! A release stages no routes: a marker whose family still owes keys stays
+//! behind [`EorHold::OwedKeys`] for the owed-key drain, which reads the
+//! peer's credit and absorbs one family per step
+//! ([`RibManager::absorb_owed_eor`]).
 //!
 //! The obligation stores the reasons nothing else owns: the ORF table hold,
 //! the RT-Constrain membership hold and a refused send. The other reasons
@@ -554,13 +558,48 @@ impl RibManager {
             .collect()
     }
 
-    /// Whether an owed marker of `peer` waits only for its family's owed
-    /// keys to be absorbed, as the owed-key drain sees it.
-    pub(super) fn eor_waits_on_owed_keys(&self, peer: PeerId) -> bool {
+    /// The first owed marker of `peer` that waits only for its family's
+    /// owed keys to be absorbed, as the owed-key drain sees it.
+    fn eor_waiting_on_owed_keys(&self, peer: PeerId) -> Option<(Afi, Safi)> {
         let owed_keys = HoldSet::EMPTY.with(EorHold::OwedKeys);
-        self.eor.families(peer).any(|family| {
+        self.eor.families(peer).find(|&family| {
             self.owes(peer, family) && self.eor_free_for(peer, family, Offer::Retry, owed_keys)
         })
+    }
+
+    /// Whether an owed marker of `peer` waits only for its family's owed
+    /// keys to be absorbed.
+    pub(super) fn eor_waits_on_owed_keys(&self, peer: PeerId) -> bool {
+        self.eor_waiting_on_owed_keys(peer).is_some()
+    }
+
+    /// One step of the owed-key drain for a marker that waits only for its
+    /// family's owed keys: absorb that one family into an operation of its
+    /// own and send the marker behind it. The caller read `peer`'s credit;
+    /// no hold release stages an owed family. Returns whether the marker
+    /// left. A refusal for capacity leaves the family and its marker owed
+    /// for a later step; any other refusal escalates the peer to a resync,
+    /// which carries the marker.
+    pub(super) fn absorb_owed_eor(&mut self, peer: PeerId) -> bool {
+        let Some(family) = self.eor_waiting_on_owed_keys(peer) else {
+            return false;
+        };
+        let Some(mut operation) = self
+            .begin_outbound_operation(peer, 2)
+            .ok()
+            .filter(|operation| operation.reserved() == 2)
+        else {
+            debug!(%peer, ?family, "End-of-RIB waits to absorb owed keys: a whole-table update is still live or the channel is full");
+            return false;
+        };
+        if self
+            .absorb_owed_family(peer, family, &mut operation)
+            .is_err()
+        {
+            return false;
+        }
+        self.settle_free_eor_in(peer, family, &mut operation);
+        !self.eor.owes(peer, family)
     }
 
     /// Whether the polling lanes may send `family`'s marker to `peer` as a
@@ -571,9 +610,9 @@ impl RibManager {
 
     /// Send the owed markers of `peer` that nothing holds for this
     /// `trigger`. A family that owes keys sends its marker only behind
-    /// them: a release opens one operation that absorbs them and then
-    /// sends the marker; inside another operation, or refused, the marker
-    /// stays owed and the owed-key drain retries it.
+    /// them, and this call stages no routes: that marker stays owed until
+    /// the owed-key drain absorbs the family ([`Self::absorb_owed_eor`]).
+    /// A refused marker marks the peer dirty, so its resync carries it.
     pub(super) fn settle_eor(&mut self, peer: PeerId, trigger: EorTrigger<'_>) {
         let (offer, operation) = trigger.offer();
         self.settle_eor_as(peer, None, offer, operation, false);
@@ -593,18 +632,17 @@ impl RibManager {
 
     /// A resync of `peer` was admitted while a
     /// selection gate still held a family's marker, and that gate is now
-    /// released: the marker follows the table as a plain marker, even while
-    /// the peer stays dirty for another deferred family. A refused marker
-    /// waits for the tick's marker retry; the table is not sent again.
+    /// released: the marker follows the table, even while the peer stays
+    /// dirty for another deferred family. A refused marker waits for the
+    /// tick's marker retry; the table is not sent again.
     pub(super) fn settle_eor_behind_resync(&mut self, peer: PeerId) {
         self.settle_eor_as(peer, None, Offer::Table, None, true);
     }
 
     /// A release from inside a refresh answer that absorbed a family's owed
-    /// keys and was then deferred: send the markers nothing holds, and start
-    /// nothing else. A family that still owes keys waits for the owed-key
-    /// drain, and a refused marker for the tick's marker retry, with no
-    /// resync.
+    /// keys and was then deferred, or from the shutdown flush: send the
+    /// markers nothing holds. A refused marker waits for the tick's marker
+    /// retry, with no resync.
     pub(super) fn settle_free_eor(&mut self, peer: PeerId) {
         self.settle_eor_as(peer, None, Offer::Release, None, true);
     }
@@ -621,75 +659,31 @@ impl RibManager {
         self.settle_eor_as(peer, Some(&[family]), Offer::Release, Some(operation), true);
     }
 
+    /// Send the markers of `peer` (of `only`, when given) that no hold
+    /// keeps from this `offer`, owed keys included, on a slot of
+    /// `operation` or as a marker of their own. `retry_refused` leaves a
+    /// refused marker to the tick's marker retry; otherwise the refusal
+    /// marks the peer dirty.
     fn settle_eor_as(
         &mut self,
         peer: PeerId,
         only: Option<&[(Afi, Safi)]>,
         offer: Offer,
         operation: Option<&mut OutboundOperation>,
-        plain: bool,
+        retry_refused: bool,
     ) {
-        // Owed keys do not keep a marker out: this call absorbs them,
-        // unless it must start no operation of its own.
-        let owed_keys = if plain {
-            HoldSet::EMPTY
-        } else {
-            HoldSet::EMPTY.with(EorHold::OwedKeys)
-        };
-        let mut ready: Vec<(Afi, Safi)> = self
+        let families: Vec<(Afi, Safi)> = self
             .eor
             .families(peer)
             .filter(|family| only.is_none_or(|only| only.contains(family)))
-            .filter(|&family| self.eor_free_for(peer, family, offer, owed_keys))
+            .filter(|&family| self.eor_free_for(peer, family, offer, HoldSet::EMPTY))
             .collect();
-        if ready.is_empty() {
+        if families.is_empty() {
             return;
         }
         let Some(tx) = self.outbound_peers.get(&peer).cloned() else {
             return;
         };
-        let owed: Vec<(Afi, Safi)> = ready
-            .iter()
-            .copied()
-            .filter(|&family| self.owes(peer, family))
-            .collect();
-        let mut own_operation = None;
-        let operation = if owed.is_empty() {
-            operation
-        } else if operation.is_some() {
-            ready.retain(|family| !owed.contains(family));
-            operation
-        } else {
-            let envelopes = owed.len() + 1;
-            if let Some(mut absorbing) = self
-                .begin_outbound_operation(peer, envelopes)
-                .ok()
-                .filter(|operation| operation.reserved() == envelopes)
-            {
-                for &family in &owed {
-                    if self
-                        .absorb_owed_family(peer, family, &mut absorbing)
-                        .is_err()
-                    {
-                        ready.retain(|kept| *kept != family);
-                    }
-                }
-                // One failed absorption escalates every family to the
-                // resync; no later marker may overtake that fallback.
-                if self.dirty_peers.contains(&peer) || self.force_outbound_peers.contains(&peer) {
-                    return;
-                }
-                Some(own_operation.insert(absorbing))
-            } else {
-                debug!(%peer, ?owed, "End-of-RIB waits to absorb owed keys: a whole-table update is still live or the channel is full");
-                ready.retain(|family| !owed.contains(family));
-                None
-            }
-        };
-        if ready.is_empty() {
-            return;
-        }
-        let families = ready;
         let marker_only = self.evpn_feed_is_current(peer);
         let sent = self.send_eor_markers(
             peer,
@@ -715,7 +709,7 @@ impl RibManager {
                 warn!(%peer, "outbound channel full — `EoR` still deferred");
             }
             self.metrics.record_outbound_eor_deferral(&peer.label());
-            if !plain && !marker_only {
+            if !retry_refused && !marker_only {
                 self.mark_outbound_dirty(peer);
             }
         }
