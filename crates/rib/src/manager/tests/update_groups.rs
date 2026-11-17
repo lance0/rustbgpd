@@ -421,7 +421,7 @@ async fn assert_mixed_fanout_readiness(selection_release: bool) {
 }
 
 /// A minimal deny-one-prefix statement (everything else unset).
-fn deny_statement(prefix: Ipv4Prefix) -> PolicyStatement {
+pub(super) fn deny_statement(prefix: Ipv4Prefix) -> PolicyStatement {
     PolicyStatement {
         prefix: Some(Prefix::V4(prefix)),
         ge: None,

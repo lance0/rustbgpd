@@ -4155,7 +4155,7 @@ impl RibManager {
         // executor handoff). No policy transition is pending: ingest owner.
         self.with_ingest_readiness(|manager| {
             let before = manager.grouped_member_of(peer);
-            let mut evpn_feed = manager.recompute_update_group(peer);
+            let mut evpn_feed = manager.recompute_update_group_for_pass(peer);
             let key_stable = before.is_some() && before == manager.grouped_member_of(peer);
             if !key_stable {
                 manager.mark_outbound_dirty_with_evpn_feed(peer, &mut evpn_feed);
@@ -4259,7 +4259,7 @@ impl RibManager {
         // policy transition is pending: ingest owner, as the slow-peer seam.
         self.with_ingest_readiness(|manager| {
             let mut evpn_feed = if manager.update_groups.members.contains_key(&peer) {
-                manager.recompute_update_group(peer)
+                manager.recompute_update_group_for_pass(peer)
             } else {
                 None
             };

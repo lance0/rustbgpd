@@ -49,6 +49,53 @@ pub(in crate::manager) struct EvpnFeedSeal {
     /// minted with no proof and no receipt, and current only while the
     /// member stays clean on the same table.
     clean_replay: bool,
+    /// A clean member's regroup ([`RibManager::clean_evpn_regroup_eligible`]):
+    /// built with no proof of actual OLD, which this basis can still
+    /// produce if the feed's admission is missed.
+    clean_regroup: Option<std::sync::Arc<CleanRegroupBasis>>,
+}
+
+/// What a clean member's regroup feed keeps in place of a proof of actual
+/// OLD, for the one actor turn that builds and commits it. The member was
+/// admitted exactly its eligible OLD projection, and the feed is the
+/// difference between that and its NEW projection, so actual OLD is the NEW
+/// projection less `fresh`, plus `withdrawn`. Nothing reads OLD again: the
+/// last leaver retires it before the commit runs.
+pub(in crate::manager) struct CleanRegroupBasis {
+    session_id: u64,
+    outbound: mpsc::Sender<OutboundRouteUpdate>,
+    provenance: ProvenanceHandle,
+    group_id: usize,
+    table_stamp: u64,
+    /// Announced keys the member did not hold in OLD, in key order.
+    fresh: Vec<EvpnRouteKey>,
+    /// Keys the member held in OLD that NEW does not give it.
+    withdrawn: Vec<EvpnRouteKey>,
+    /// The feed's envelope was admitted, or proved a no-op: the wire has
+    /// left OLD, so the basis no longer describes it.
+    admitted: std::sync::atomic::AtomicBool,
+    /// The pass that was handed the feed settled it: admitted, captured or
+    /// reset.
+    settled: std::sync::atomic::AtomicBool,
+}
+
+impl CleanRegroupBasis {
+    /// Whether the member held `key` before the regroup. Asked only of the
+    /// feed's own announced and withdrawn keys, and of NEW's eligible rows.
+    fn prior_admitted(&self, key: &EvpnRouteKey) -> bool {
+        self.fresh.binary_search(key).is_err()
+    }
+}
+
+impl Drop for CleanRegroupBasis {
+    fn drop(&mut self) {
+        // A feed dropped outside a pass would leave a dirty member with
+        // neither a proof nor a reset.
+        debug_assert!(
+            *self.settled.get_mut() || std::thread::panicking(),
+            "a clean regroup feed must reach a distribution pass in its turn"
+        );
+    }
 }
 
 impl EvpnFeedSeal {
@@ -61,6 +108,41 @@ impl EvpnFeedSeal {
     /// Whether this replays a clean member's projection with no proof.
     pub(in crate::manager) fn is_clean_replay(&self) -> bool {
         self.clean_replay
+    }
+
+    /// Record what a clean regroup feed into this seal's table announced
+    /// that the member did not hold, and what it withdraws.
+    fn keep_clean_regroup_basis(
+        &mut self,
+        mut fresh: Vec<EvpnRouteKey>,
+        mut withdrawn: Vec<EvpnRouteKey>,
+    ) -> Option<()> {
+        let EvpnFeedTarget::Grouped {
+            group_id,
+            table_stamp,
+        } = self.target
+        else {
+            return None;
+        };
+        fresh.sort_unstable();
+        withdrawn.sort_unstable();
+        self.clean_regroup = Some(std::sync::Arc::new(CleanRegroupBasis {
+            session_id: self.session_id,
+            outbound: self.outbound.clone(),
+            provenance: self.provenance,
+            group_id,
+            table_stamp,
+            fresh,
+            withdrawn,
+            admitted: false.into(),
+            settled: false.into(),
+        }));
+        Some(())
+    }
+
+    /// The basis of a clean member's regroup built with no proof.
+    pub(in crate::manager) fn clean_regroup(&self) -> Option<&std::sync::Arc<CleanRegroupBasis>> {
+        self.clean_regroup.as_ref()
     }
 }
 
@@ -300,12 +382,16 @@ impl RibManager {
         key: &EvpnRouteKey,
         stage: Option<&super::update_groups::EvpnGroupStageOutput>,
         clean_replay: bool,
+        clean_regroup: Option<&CleanRegroupBasis>,
     ) -> Option<bool> {
         if let Some(proof) = self
             .evpn_recovery_handle(peer)
             .and_then(|handle| self.evpn_recovery.proof(handle).ok().flatten())
         {
             return Some(proof.contains(key));
+        }
+        if let Some(basis) = clean_regroup {
+            return Some(basis.prior_admitted(key));
         }
         if clean_replay {
             // Every candidate of a clean replay is an eligible row of the
@@ -345,6 +431,7 @@ impl RibManager {
         withdraw: &[EvpnRouteKey],
         stage: Option<&super::update_groups::EvpnGroupStageOutput>,
         clean_replay: bool,
+        clean_regroup: Option<&CleanRegroupBasis>,
     ) -> Option<usize> {
         let mut count = self
             .evpn_recovery_handle(peer)
@@ -355,7 +442,7 @@ impl RibManager {
             self.replacement_checkpoint(false);
             let key = route.key();
             if previous != Some(key)
-                && !self.evpn_prior_admitted(peer, &key, stage, clean_replay)?
+                && !self.evpn_prior_admitted(peer, &key, stage, clean_replay, clean_regroup)?
             {
                 count = count.checked_add(1)?;
             }
@@ -366,7 +453,7 @@ impl RibManager {
             if announce
                 .binary_search_by_key(key, EvpnRibRoute::key)
                 .is_err()
-                && self.evpn_prior_admitted(peer, key, stage, clean_replay)?
+                && self.evpn_prior_admitted(peer, key, stage, clean_replay, clean_regroup)?
             {
                 count = count.checked_sub(1)?;
             }
@@ -423,6 +510,9 @@ impl RibManager {
                 .get(&peer)
                 .is_some_and(|tx| !tx.is_closed() && tx.same_channel(&seal.outbound))
             && self.evpn_recovery_handle(peer) == Some(seal.provenance)
+            // A proof captured under a proofless feed was not taken from
+            // actual OLD: the feed's basis no longer stands.
+            && (seal.clean_regroup.is_none() || self.evpn_recovery.is_dormant(seal.provenance))
             && self
                 .evpn_completion_record(peer)
                 .and_then(|record| record.evpn_feed_completion.as_ref())
@@ -516,6 +606,7 @@ impl RibManager {
             required_markers: 0,
             sparse_keys: None,
             clean_replay: false,
+            clean_regroup: None,
         })
     }
 
@@ -569,6 +660,7 @@ impl RibManager {
             required_markers: 0,
             sparse_keys: Some(std::sync::Arc::clone(staged_keys)),
             clean_replay: false,
+            clean_regroup: None,
         })
     }
 
@@ -625,6 +717,9 @@ impl RibManager {
     ) -> bool {
         if seal.clean_replay {
             return self.complete_clean_evpn_replay(peer, &seal, admitted_markers);
+        }
+        if seal.clean_regroup.is_some() {
+            return self.complete_clean_evpn_regroup(peer, &seal, admitted_markers);
         }
         if !self.evpn_feed_seal_is_current(peer, &seal) {
             return false;
@@ -721,6 +816,166 @@ impl RibManager {
             self.mark_outbound_dirty(peer);
         }
         installed
+    }
+
+    /// A clean member's regroup feed was admitted, or proved a no-op: its
+    /// admitted set is now its eligible NEW projection, so there is no proof
+    /// to match and none to release. The receipt completes and settles as
+    /// the proof cycle's does. A terminal marker left owed needs a proof past
+    /// this turn, which is captured here from that projection.
+    fn complete_clean_evpn_regroup(
+        &mut self,
+        peer: PeerId,
+        seal: &EvpnFeedSeal,
+        admitted_markers: u8,
+    ) -> bool {
+        let basis = seal.clean_regroup.as_ref().expect("clean regroup seal");
+        // From here the basis no longer describes the wire.
+        basis
+            .admitted
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let current = self.evpn_feed_seal_is_current(peer, seal);
+        #[cfg(test)]
+        let current = current
+            && !std::mem::take(&mut self.adj_rib_out_commit_stats.fail_evpn_feed_completion);
+        if !current {
+            // The envelope cannot be undone and nothing records what it
+            // admitted: never guess, reset.
+            self.reset_clean_evpn_regroup(peer, seal.provenance);
+            return false;
+        }
+        let inherited = self
+            .evpn_completion_record(peer)
+            .and_then(|record| record.evpn_feed_completion.as_ref())
+            .map_or(0, |completion| completion.owed_markers);
+        let pending_eor = self.eor.owes(peer, EVPN_FAMILY);
+        let owed_markers =
+            (inherited | seal.required_markers | if pending_eor { EVPN_EOR } else { 0 })
+                & !admitted_markers;
+        if !self.replace_evpn_feed_completion(
+            peer,
+            Some(EvpnFeedCompletion {
+                provenance: seal.provenance,
+                target: seal.target,
+                revision: seal.revision,
+                complete: true,
+                owed_markers,
+            }),
+        ) {
+            self.reset_clean_evpn_regroup(peer, seal.provenance);
+            return false;
+        }
+        if owed_markers != 0 {
+            // A refused capture leaves the member dirty behind a reset.
+            return self.capture_shared_evpn_admitted(peer);
+        }
+        self.try_settle_evpn_feed(peer);
+        true
+    }
+
+    /// A proofless regroup lost the fence that makes its basis usable. No
+    /// withdrawal set can be trusted, so the generation-fenced session
+    /// reset owns recovery, as after any failed admission invariant.
+    fn reset_clean_evpn_regroup(&mut self, peer: PeerId, handle: ProvenanceHandle) {
+        self.evpn_recovery.fail_admission(handle);
+        self.invalidate_evpn_feed_completion(peer);
+        self.mark_outbound_dirty_inner(peer, false);
+        self.retry_evpn_recovery_reset(peer);
+    }
+
+    /// Settle a clean regroup feed after the pass that was handed it: one
+    /// site for a refused commit, a member the pass skipped and a feed it
+    /// never attempted. An admitted feed needs nothing. Otherwise nothing
+    /// was sent and the member still holds actual OLD, which is captured
+    /// from the basis while NEW is the table the feed walked. A member that
+    /// lost that fence, or whose capture the ledger refuses, is reset.
+    pub(in crate::manager) fn settle_clean_evpn_regroup(
+        &mut self,
+        peer: PeerId,
+        basis: &CleanRegroupBasis,
+    ) {
+        use std::sync::atomic::Ordering;
+        basis.settled.store(true, Ordering::Relaxed);
+        if basis.admitted.load(Ordering::Relaxed)
+            || self.outbound_session_ids.get(&peer) != Some(&basis.session_id)
+            || !self
+                .outbound_peers
+                .get(&peer)
+                .is_some_and(|tx| tx.same_channel(&basis.outbound))
+            || self.evpn_recovery_handle(peer) != Some(basis.provenance)
+        {
+            // Admitted, or the session that owned the feed is gone and its
+            // teardown retired the record.
+            return;
+        }
+        let handle = basis.provenance;
+        if self.evpn_recovery_reset_pending(peer) {
+            self.retry_evpn_recovery_reset(peer);
+            return;
+        }
+        let fenced = self.evpn_recovery.is_dormant(handle)
+            && self.evpn_grouped_member_of(peer) == Some(basis.group_id)
+            && self.group_ribs.get(&basis.group_id).is_some_and(|group| {
+                group.evpn_table_stamp == basis.table_stamp && group.members.contains(&peer)
+            });
+        if !fenced {
+            self.reset_clean_evpn_regroup(peer, handle);
+            return;
+        }
+        // Table-sized, like the capture it replaces: take the lane if no
+        // owner holds it.
+        let captured =
+            self.with_ingest_readiness(|manager| manager.walk_clean_evpn_regroup(peer, basis));
+        if captured && !self.dirty_peers.contains(&peer) {
+            // A proof is released only by the resync that heals it.
+            self.mark_outbound_dirty_inner(peer, false);
+        }
+    }
+
+    fn walk_clean_evpn_regroup(&mut self, peer: PeerId, basis: &CleanRegroupBasis) -> bool {
+        let handle = basis.provenance;
+        if self.evpn_recovery.begin_capture(handle) != Ok(true) {
+            self.reset_clean_evpn_regroup(peer, handle);
+            return false;
+        }
+        let readiness = self.replacement_readiness.clone();
+        let checkpoint = std::cell::RefCell::new(|| {
+            super::replacement_readiness_checkpoint_at(&readiness, "capture_evpn", false);
+        });
+        let mut ledger_checkpoint = |force| {
+            super::replacement_readiness_checkpoint_at(&readiness, "capture_evpn", force);
+        };
+        let filter = self.member_rt_filter(peer);
+        let group = &self.group_ribs[&basis.group_id];
+        // The feed's own view of NEW: no exact rejection hides a row, since
+        // every row the member did not hold is in `fresh`.
+        let actual = group
+            .evpn_member_projection_with_checkpoint(
+                peer,
+                self.cluster_id,
+                filter.as_ref(),
+                None,
+                || checkpoint.borrow_mut()(),
+            )
+            .map(EvpnRibRoute::key)
+            .filter(|key| basis.prior_admitted(key))
+            .chain(basis.withdrawn.iter().copied());
+        if !capture_admitted_keys(
+            &mut self.evpn_recovery,
+            handle,
+            actual,
+            &mut ledger_checkpoint,
+        ) || self
+            .evpn_recovery
+            .seal_capture_with_checkpoint(handle, &mut |force| {
+                super::replacement_readiness_checkpoint(&self.replacement_readiness, force);
+            })
+            != Ok(true)
+        {
+            self.refuse_evpn_capture(peer, handle);
+            return false;
+        }
+        true
     }
 
     /// Extend an existing full private inventory with proof-owned withdrawals
@@ -959,11 +1214,54 @@ impl RibManager {
         old_is_clean: bool,
         old_deltas: &[super::update_groups::EvpnGroupDelta],
     ) -> Option<EvpnCompleteFeed> {
+        self.build_complete_evpn_feed(
+            peer,
+            destination,
+            old_group,
+            old_is_clean,
+            old_deltas,
+            false,
+        )
+    }
+
+    /// The feed of a clean member moving from `old_group` to `destination`
+    /// with no proof captured ([`Self::clean_evpn_regroup_eligible`]): the
+    /// clean diff of the two projections, carrying the basis from which
+    /// [`Self::settle_clean_evpn_regroup`] can still capture actual OLD.
+    /// `None` when no feed can be built, with the receipt the attempt minted
+    /// removed again: the member had none, and it has not been captured yet.
+    pub(in crate::manager) fn prepare_clean_regroup_evpn_feed(
+        &mut self,
+        peer: PeerId,
+        destination: usize,
+        old_group: usize,
+    ) -> Option<EvpnCompleteFeed> {
+        let feed =
+            self.build_complete_evpn_feed(peer, destination, Some(old_group), true, &[], true);
+        if feed.is_none() {
+            self.replace_evpn_feed_completion(peer, None);
+        }
+        feed
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "both projections are walked at one seam while OLD is still installed"
+    )]
+    fn build_complete_evpn_feed(
+        &mut self,
+        peer: PeerId,
+        destination: usize,
+        old_group: Option<usize>,
+        old_is_clean: bool,
+        old_deltas: &[super::update_groups::EvpnGroupDelta],
+        clean_regroup: bool,
+    ) -> Option<EvpnCompleteFeed> {
         #[cfg(test)]
         {
             self.evpn_complete_feed_builds += 1;
         }
-        let seal = self.complete_evpn_feed_seal(peer, destination)?;
+        let mut seal = self.complete_evpn_feed_seal(peer, destination)?;
         let provenance = seal.provenance;
         let group = self.group_ribs.get(&destination)?;
         let readiness = self.replacement_readiness.clone();
@@ -1015,13 +1313,18 @@ impl RibManager {
         };
         let mut announce = Vec::new();
         let mut withdraw = Vec::new();
+        let mut fresh = Vec::new();
         for route in group.table.iter_evpn() {
             checkpoint();
             let key = route.key();
-            if current(&key).is_some()
-                && prior(&key).is_none_or(|old| !super::helpers::evpn_routes_equal(old, route))
-            {
-                announce.push(route.clone());
+            if current(&key).is_some() {
+                let old = prior(&key);
+                if old.is_none_or(|old| !super::helpers::evpn_routes_equal(old, route)) {
+                    announce.push(route.clone());
+                    if clean_regroup && old.is_none() {
+                        fresh.push(key);
+                    }
+                }
             }
         }
         if !old_is_clean {
@@ -1056,11 +1359,41 @@ impl RibManager {
                 }
             }
         }
+        if clean_regroup {
+            seal.keep_clean_regroup_basis(fresh, withdraw.clone())?;
+        }
         Some(EvpnCompleteFeed {
             seal,
             announce,
             withdraw,
         })
+    }
+
+    /// Whether `peer`, a member of an owned group about to move to
+    /// `destination`, may skip the capture of actual OLD: its admitted set
+    /// is its eligible OLD projection, `destination` is an installed owned
+    /// table, and its writer can take the feed's whole-table operation now.
+    /// An installed owned table is never a destination still being
+    /// prestaged, which a join would discard and rebuild under the feed:
+    /// only the join-time build makes a table own EVPN.
+    /// The writer and selection checks only avoid building a feed that would
+    /// be refused; a refused feed is still settled from its basis. Every
+    /// other member takes the captured-proof cycle.
+    pub(in crate::manager) fn clean_evpn_regroup_eligible(
+        &self,
+        peer: PeerId,
+        destination: usize,
+    ) -> bool {
+        self.clean_evpn_member(peer).is_some()
+            && self
+                .group_ribs
+                .get(&destination)
+                .is_some_and(|group| group.owns_evpn_routes() && group.evpn_table_stamp != 0)
+            && !self.selection_deferred(EVPN_FAMILY)
+            && !self.selection_resync_held(peer)
+            && !self.outbound_channel_full(peer)
+            && !self.outbound_operation_live(peer)
+            && self.peer_export_encoders.contains_key(&peer)
     }
 
     /// The seal of a complete feed into `destination`, with its receipt
@@ -1104,6 +1437,7 @@ impl RibManager {
             required_markers: 0,
             sparse_keys: None,
             clean_replay: false,
+            clean_regroup: None,
         })
     }
 
@@ -1238,6 +1572,7 @@ impl RibManager {
                 required_markers: 0,
                 sparse_keys: None,
                 clean_replay: true,
+                clean_regroup: None,
             },
             announce,
             withdraw: Vec::new(),
@@ -1810,6 +2145,7 @@ impl RibManager {
         peer: PeerId,
         announce: &mut std::sync::Arc<Vec<EvpnRibRoute>>,
         withdraw: &mut Vec<EvpnRouteKey>,
+        clean_regroup: bool,
     ) -> bool {
         if self.evpn_recovery_reset_pending(peer) {
             self.retry_evpn_recovery_reset(peer);
@@ -1821,8 +2157,10 @@ impl RibManager {
         if self.evpn_recovery.is_dormant(handle) {
             // Ordinary clean deltas need no recovery key allocation. G2's
             // capture seam must run before a missed projection can advance.
+            // A clean regroup's current seal carries that capture's basis.
             return self.evpn_grouped_member_of(peer).is_none()
-                || !self.dirty_peers.contains(&peer);
+                || !self.dirty_peers.contains(&peer)
+                || clean_regroup;
         }
         let Ok(Some(proof)) = self.evpn_recovery.proof(handle) else {
             self.evpn_recovery.fail_admission(handle);

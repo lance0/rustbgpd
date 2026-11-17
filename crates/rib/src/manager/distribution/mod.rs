@@ -4042,10 +4042,16 @@ impl RibManager {
                 refused_withdrawals = true;
             }
         }
+        // The basis of a clean regroup's seal, which stands in for a proof.
+        let evpn_clean_regroup = batch
+            .evpn_complete_feed
+            .as_ref()
+            .and_then(|seal| seal.clean_regroup().cloned());
         if !self.reserve_evpn_recovery_admission(
             peer,
             &mut batch.evpn_announce,
             &mut batch.evpn_withdraw,
+            evpn_clean_regroup.is_some(),
         ) {
             batch.retire_with(
                 &mut || checkpoint(),
@@ -4656,8 +4662,14 @@ impl RibManager {
                     &source_excluded,
                     &previously_advertised,
                     |key| {
-                        self.evpn_prior_admitted(peer, key, evpn_stage, evpn_clean_replay)
-                            .unwrap_or(false)
+                        self.evpn_prior_admitted(
+                            peer,
+                            key,
+                            evpn_stage,
+                            evpn_clean_replay,
+                            evpn_clean_regroup.as_deref(),
+                        )
+                        .unwrap_or(false)
                     },
                 );
                 group_prior = previously_advertised;
@@ -4873,6 +4885,7 @@ impl RibManager {
                 &evpn_withdraw,
                 evpn_stage,
                 evpn_clean_replay,
+                evpn_clean_regroup.as_deref(),
             ) else {
                 if let Some(handle) = self.evpn_recovery_handle(peer) {
                     self.evpn_recovery.fail_admission(handle);
@@ -5932,7 +5945,7 @@ impl RibManager {
             // and ungrouped peers (per-peer equality-suppressed diff) —
             // takes the dirty resync exactly as before.
             let before = manager.grouped_member_of(peer);
-            let mut evpn_feed = manager.recompute_update_group(peer);
+            let mut evpn_feed = manager.recompute_update_group_for_pass(peer);
             manager.create_installed_export_counters([peer]);
             let key_stable = before.is_some() && before == manager.grouped_member_of(peer);
             if !key_stable {
@@ -6819,7 +6832,7 @@ impl RibManager {
             }
             let member_started = std::time::Instant::now();
             let before = self.grouped_member_of(peer);
-            let mut evpn_feed = self.recompute_update_group(peer);
+            let mut evpn_feed = self.recompute_update_group_for_pass(peer);
             let key_stable = before.is_some() && before == self.grouped_member_of(peer);
             if !key_stable {
                 self.mark_outbound_dirty_with_evpn_feed(peer, &mut evpn_feed);
@@ -9322,6 +9335,12 @@ impl RibManager {
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
         checkpoint();
+        // Feeds built with no proof of actual OLD: each is settled after the
+        // member loop, whatever became of its commit.
+        let clean_evpn_regroups: Vec<_> = evpn_feeds
+            .iter()
+            .filter_map(|(&peer, feed)| Some((peer, feed.seal.clean_regroup()?.clone())))
+            .collect();
 
         // An owed-key drain carries no route change: none of a pass's
         // preamble side effects apply to it.
@@ -11863,6 +11882,9 @@ impl RibManager {
             super::with_executor_handoff(distribute_peers);
         } else {
             distribute_peers();
+        }
+        for (peer, basis) in clean_evpn_regroups {
+            self.settle_clean_evpn_regroup(peer, &basis);
         }
         // Shared cleanup is owned when it releases inventory: an owned pass,
         // more memoized source attribute sets than staged prefixes (several
