@@ -1811,7 +1811,8 @@ impl RibManager {
     }
 
     /// Owe `family` whole to every receiver that holds it in its own
-    /// Adj-RIB-Out and is not dirty or forced (a resync covers those).
+    /// Adj-RIB-Out, is not dirty or forced (a resync covers those) and is
+    /// not waiting for the peer's first refresh behind an ORF gate.
     fn owe_released_family(&mut self, family: (Afi, Safi)) {
         let Some(owed) = super::outbound_owing::OwedFamily::of(family) else {
             return;
@@ -1825,7 +1826,18 @@ impl RibManager {
             .collect();
         for peer in peers {
             self.replacement_checkpoint(false);
-            if self.owing_peer_in_scope(peer) && self.owing_family_in_scope(peer, owed) {
+            // An RFC 5291 gate withholds the family until the peer's first
+            // refresh, whose answer is the whole table: nothing is owed
+            // before it, and a debt the gate cannot drain would hold the
+            // marker of a peer that never refreshes.
+            let orf_gated = self
+                .peer_orf_pending
+                .get(&peer)
+                .is_some_and(|gated| gated.contains(&family));
+            if !orf_gated
+                && self.owing_peer_in_scope(peer)
+                && self.owing_family_in_scope(peer, owed)
+            {
                 self.owe_whole_family(peer, owed);
             }
         }
