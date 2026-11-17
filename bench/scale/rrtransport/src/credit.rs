@@ -26,7 +26,7 @@
 //!   one family; bytes per queued row is the slope of allocated bytes over
 //!   the credit-rows gauge before the first refusal.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -87,6 +87,13 @@ const QUIET_LEAD: Duration = Duration::from_millis(300);
 const QUIET_SETTLE: Duration = Duration::from_millis(20);
 /// Gauge readings inside the churn-free window.
 const QUIET_READ_EVERY: Duration = Duration::from_millis(10);
+/// The longest the churn-free window's RIB waits may run past its end: the
+/// churn task's stop (its last send can wait on the RIB's channel) and the
+/// queries that republish the gauges. A RIB that stops serving its update
+/// channel would otherwise hold the window, and the readers' resume behind
+/// it, forever; a window at the cap is recorded as unavailable (bar 3 and
+/// the exhaustion plateau INVALID).
+const QUIET_CAP: Duration = Duration::from_secs(5);
 /// Hold time of every receiver session, both ends.
 const HOLD_SECS: u16 = 90;
 /// The receiver stubs' own read timeout. A stub's deadline runs from its
@@ -128,8 +135,7 @@ const ROW_CREDIT: [(&str, usize); 4] = [
 const SLICE_MAX: &str = "bgp_rib_actor_slice_max_microseconds";
 /// Histograms whose longest observation in the run the result brackets:
 /// message turns, the work units outside them, and one owed-drain step.
-/// No tree exports the last yet (the README proposes it); a tree without
-/// it records null.
+/// A tree without the last records null.
 const TURN_HISTOGRAMS: [(&str, &str); 3] = [
     ("bgp_rib_actor_turn_duration_seconds", "kind"),
     ("bgp_rib_actor_work_duration_seconds", "work_unit"),
@@ -307,12 +313,15 @@ impl Options {
 
 fn attributes(index: usize, med: u32, local_pref: u32) -> Arc<AttrSet> {
     let index = u32::try_from(index).expect("index fits u32");
-    // Distinct attributes per route: one UPDATE a route, about 180 bytes on
-    // the wire, so a paused receiver's socket and writer budget absorb only
-    // a small part of the burst and the rest stays charged to the credit.
+    // Distinct attributes per route: one UPDATE a route, 202 bytes on the
+    // wire for unicast, so a paused receiver's socket and writer budget
+    // absorb only a small part of the burst and the rest stays charged to
+    // the credit. The high half carries `index >> 16`, so routes 65,536
+    // apart never share attributes (and an UPDATE) at the full shape; the
+    // release witness divides queued bytes by one row's size (README).
     let path = (0..8).map(|hop| 64_496 + hop).collect();
     let communities = (0..24)
-        .map(|tag| (65_000 << 16) | ((index + tag) & 0xffff))
+        .map(|tag| ((65_000 + (index >> 16)) << 16) | ((index + tag) & 0xffff))
         .collect();
     AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
@@ -681,6 +690,8 @@ type ReceiverSpec = (Vec<(Afi, Safi)>, Option<PolicyChain>);
 /// One receiver: its daemon-side session and its harness-side stub.
 struct Receiver {
     ip: Ipv4Addr,
+    /// The stub's listening address: one end of its session's connection.
+    listen: SocketAddr,
     session: PeerHandle,
     io: PeerIoControl,
     rx: Option<mpsc::Receiver<Message>>,
@@ -756,10 +767,10 @@ impl Fixture {
             );
             drop(guard);
             session.start().await?;
-            pending.push((ip, session, handshake));
+            pending.push((ip, address, session, handshake));
         }
         let until = tokio::time::Instant::now() + deadline;
-        for (ip, session, handshake) in pending {
+        for (ip, listen, session, handshake) in pending {
             let stub = tokio::time::timeout_at(until, handshake)
                 .await
                 .with_context(|| format!("receiver {ip}: handshake timed out"))???;
@@ -780,6 +791,7 @@ impl Fixture {
             }
             self.receivers.push(Receiver {
                 ip,
+                listen,
                 session,
                 io: stub.io_control,
                 rx: Some(stub.rx),
@@ -1212,6 +1224,23 @@ struct Quiet {
     published_ms: Option<f64>,
     end_ms: f64,
     readings: Vec<f64>,
+    /// Why the window has no evidence: a RIB wait reached `QUIET_CAP`.
+    unavailable: Option<String>,
+}
+
+/// Stop the churn task by `deadline`. Past it, its send is waiting on a RIB
+/// that stopped serving its channel: abort it and wait for the abort, so a
+/// send that completes at the deadline cannot log a row after a restarted
+/// task read its next sequence, and return false.
+async fn stop_churn(churn: Churn, deadline: tokio::time::Instant) -> Result<bool> {
+    let (stop, mut task) = churn;
+    stop.store(true, Ordering::Release);
+    if let Ok(joined) = tokio::time::timeout_at(deadline, &mut task).await {
+        joined?;
+        return Ok(true);
+    }
+    crate::rr1000_support::abort_and_join([task]).await?;
+    Ok(false)
 }
 
 /// The healthy receiver's gap exclusion: from the later of the churn's stop
@@ -1225,12 +1254,35 @@ fn excluded_window(
     delivered.map(|delivered| (delivered.max(stopped), restarted))
 }
 
+/// `unaffected.quiet_excluded`, in ms from `t0`: null when the last churn
+/// row before the window never arrived, and `unavailable`, never null, when
+/// a RIB wait in the window reached its cap, so an unknown span cannot read
+/// as nothing excluded.
+fn quiet_excluded_json(quiet: &Quiet, excluded: Option<(Instant, Instant)>, t0: Instant) -> Value {
+    let ms = |at: Instant| at.saturating_duration_since(t0).as_secs_f64() * 1e3;
+    match (&quiet.unavailable, excluded) {
+        (Some(why), _) => json!({"unavailable": why}),
+        (None, Some((from, to))) => json!({
+            "from_ms": ms(from),
+            "to_ms": ms(to),
+            "span_ms": to.saturating_duration_since(from).as_secs_f64() * 1e3,
+        }),
+        (None, None) => Value::Null,
+    }
+}
+
 /// Stop the healthy receiver's churn, wait until its last row reached the
 /// receiver, make the RIB republish its gauges, then read the summed credit
 /// gauge until `until`. The RIB publishes the gauge once per turn and holds
 /// it until its next turn, and the 20 ms churn is nearly every turn, so
 /// outside this window nothing bounds how many samples carry the churn row
-/// (README).
+/// (README). The RIB waits end within `cap` of `until`, however late the
+/// window starts; past it the window is unavailable and the cell goes on to
+/// resume its readers.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the window's churn, RIB, gauges, logs and time bounds are the caller's own state"
+)]
 async fn quiet_window(
     churn: Churn,
     rib: &mpsc::Sender<RibUpdate>,
@@ -1239,10 +1291,19 @@ async fn quiet_window(
     received: &Mutex<ChurnState>,
     t0: Instant,
     until: Instant,
+    cap: Duration,
 ) -> Result<Quiet> {
     let ms = |at: Instant| at.saturating_duration_since(t0).as_secs_f64() * 1e3;
-    churn.0.store(true, Ordering::Release);
-    churn.1.await?;
+    // Anchored to the window's end: a window that starts late, behind a
+    // held read at its own cap, gets only what remains of `cap`.
+    let cap_at = tokio::time::Instant::from_std(until) + cap;
+    let unavailable = || {
+        format!(
+            "no RIB reply within {} ms of the window's end",
+            cap.as_millis()
+        )
+    };
+    let joined = stop_churn(churn, cap_at).await?;
     let stopped = Instant::now();
     let stopped_ms = ms(stopped);
     let last_sequence = log
@@ -1251,6 +1312,10 @@ async fn quiet_window(
         .last()
         .map(|&(sequence, _)| sequence);
     let delivered = loop {
+        // A churn the cap stopped has no last row to wait for.
+        if !joined {
+            break None;
+        }
         let arrived = last_sequence.is_none_or(|last| {
             received
                 .lock()
@@ -1276,18 +1341,21 @@ async fn quiet_window(
         published_ms: None,
         end_ms: stopped_ms,
         readings: Vec::new(),
+        unavailable: (!joined).then(unavailable),
     };
     if delivered.is_some() {
-        tokio::time::sleep(QUIET_SETTLE).await;
-        // Each query is one RIB turn. The second is served only after the
-        // first turn ended and the next one began by publishing the gauges.
-        for _ in 0..2 {
-            let (reply, count) = oneshot::channel();
-            rib.send(RibUpdate::QueryLocRibCount { reply }).await?;
-            count.await?;
+        let published = async {
+            tokio::time::sleep(QUIET_SETTLE).await;
+            published_credit_rows(rib, metrics).await
+        };
+        match tokio::time::timeout_at(cap_at, published).await {
+            Ok(published) => {
+                published?;
+                quiet.published_ms = Some(ms(Instant::now()));
+            }
+            Err(_) => quiet.unavailable = Some(unavailable()),
         }
-        quiet.published_ms = Some(ms(Instant::now()));
-        while Instant::now() < until {
+        while quiet.unavailable.is_none() && Instant::now() < until {
             let snapshot = Snapshot::take(metrics);
             let rows = snapshot
                 .total("bgp_rib_outbound_credit_rows")
@@ -1302,6 +1370,145 @@ async fn quiet_window(
     }
     quiet.end_ms = ms(Instant::now());
     Ok(quiet)
+}
+
+/// Publish the RIB's gauges, then read the summed credit-rows gauge. Each
+/// query is one RIB turn; the second is served only after the first turn
+/// ended and the next began by publishing the gauges.
+async fn published_credit_rows(rib: &mpsc::Sender<RibUpdate>, metrics: &BgpMetrics) -> Result<f64> {
+    for _ in 0..2 {
+        let (reply, count) = oneshot::channel();
+        rib.send(RibUpdate::QueryLocRibCount { reply }).await?;
+        count.await?;
+    }
+    Ok(Snapshot::take(metrics)
+        .total("bgp_rib_outbound_credit_rows")
+        .unwrap_or(0.0))
+}
+
+/// Bytes queued in the kernel on the established connections with an end
+/// at one of `listeners` (the receiver stubs' listening addresses), from a
+/// `/proc/net/tcp` table, and how many connection ends matched. The table
+/// covers this process's whole network namespace, so connections are picked
+/// by address and port, both ends: each end's send queue (written, not yet
+/// acknowledged) plus receive queue (arrived, not yet read). On loopback
+/// that is every written byte a paused reader has not read.
+fn socket_queue_bytes(table: &str, listeners: &HashSet<SocketAddr>) -> Result<(u64, usize)> {
+    let endpoint = |field: &str| -> Result<SocketAddr> {
+        let (address, port) = field.split_once(':').context("tcp endpoint")?;
+        let ip = Ipv4Addr::from(u32::from_str_radix(address, 16)?.to_le_bytes());
+        Ok(SocketAddr::new(
+            IpAddr::V4(ip),
+            u16::from_str_radix(port, 16)?,
+        ))
+    };
+    let (mut bytes, mut ends) = (0, 0);
+    for line in table.lines().skip(1) {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        ensure!(fields.len() > 4, "short /proc/net/tcp line: {line}");
+        // State 01 is ESTABLISHED.
+        let ours =
+            listeners.contains(&endpoint(fields[1])?) || listeners.contains(&endpoint(fields[2])?);
+        if fields[3] != "01" || !ours {
+            continue;
+        }
+        let (tx, rx) = fields[4].split_once(':').context("tcp queues")?;
+        bytes += u64::from_str_radix(tx, 16)? + u64::from_str_radix(rx, 16)?;
+        ends += 1;
+    }
+    Ok((bytes, ends))
+}
+
+/// The longest the release cells' held read, its queries and their replies
+/// included, may take. A RIB that stops serving its update channel would
+/// otherwise hold the read, and the readers' resume behind it, forever; a
+/// read at the cap is recorded as unavailable (bar 6 INVALID).
+const HELD_READ_CAP: Duration = Duration::from_secs(5);
+
+/// Rows the RIB has handed toward the paused burst receivers and they have
+/// not read, read without the credit gauge: every receiver's Adj-RIB-Out
+/// count of the burst family less the rows the receivers decoded. Unicast
+/// asks `QueryAdvertisedCount` for every receiver at once (O(1) a private
+/// peer: `AdjRibOut::len`); EVPN has no O(1) per-family count, so it reads
+/// `QueryBmpPeerStats`, which walks every peer's Adj-RIB-Out in one turn.
+/// Beside it, the credit gauge published before and after those queries,
+/// the session writers' queued bytes and the kernel queues of the
+/// receivers' connections (null when the table is unreadable or no
+/// connection matches).
+async fn held_snapshot(
+    rib: &mpsc::Sender<RibUpdate>,
+    metrics: &BgpMetrics,
+    receivers: &[(Ipv4Addr, SocketAddr)],
+    family: Family,
+    read: u64,
+    t0: Instant,
+) -> Result<Value> {
+    let charged_before = published_credit_rows(rib, metrics).await?;
+    let at = t0.elapsed();
+    let mut advertised = 0;
+    if family == Family::Unicast {
+        let mut replies = Vec::with_capacity(receivers.len());
+        for &(ip, _) in receivers {
+            let (reply, count) = oneshot::channel();
+            let peer = PeerId::from_ipv4(ip);
+            rib.send(RibUpdate::QueryAdvertisedCount { peer, reply })
+                .await?;
+            replies.push(count);
+        }
+        for count in replies {
+            advertised += u64::try_from(count.await?)?;
+        }
+    } else {
+        let (reply, stats) = oneshot::channel();
+        rib.send(RibUpdate::QueryBmpPeerStats { reply }).await?;
+        let stats = stats.await?;
+        for &(ip, _) in receivers {
+            advertised += stats
+                .adj_rib_out_post
+                .get(&PeerId::from_ipv4(ip))
+                .and_then(|counts| counts.iter().find(|(key, _)| *key == family.afi_safi()))
+                .map_or(0, |&(_, count)| count);
+        }
+    }
+    let charged_after = published_credit_rows(rib, metrics).await?;
+    let writer = Snapshot::take(metrics)
+        .total("bgp_outbound_writer_bytes")
+        .unwrap_or(0.0);
+    let listeners = receivers.iter().map(|&(_, listen)| listen).collect();
+    let sockets = std::fs::read_to_string("/proc/self/net/tcp")
+        .ok()
+        .and_then(|table| socket_queue_bytes(&table, &listeners).ok())
+        .filter(|&(_, ends)| ends > 0);
+    Ok(json!({
+        "at_ms": at.as_secs_f64() * 1e3,
+        "advertised_rows": advertised,
+        "read_rows": read,
+        "charged_before": charged_before,
+        "charged_after": charged_after,
+        "writer_bytes": writer,
+        "socket_bytes": sockets.map(|(bytes, _)| bytes),
+        "socket_ends": sockets.map(|(_, ends)| ends),
+    }))
+}
+
+/// `held_snapshot` within `cap`; past it, the read is unavailable and the
+/// cell goes on to resume its readers.
+async fn held_read(
+    rib: &mpsc::Sender<RibUpdate>,
+    metrics: &BgpMetrics,
+    receivers: &[(Ipv4Addr, SocketAddr)],
+    family: Family,
+    read: u64,
+    t0: Instant,
+    cap: Duration,
+) -> Result<Value> {
+    let snapshot = held_snapshot(rib, metrics, receivers, family, read, t0);
+    match tokio::time::timeout(cap, snapshot).await {
+        Ok(held) => held,
+        Err(_) => Ok(json!({
+            "unavailable": format!("no reply within {} ms", cap.as_millis()),
+        })),
+    }
 }
 
 /// The lowest and highest of `values`.
@@ -1361,6 +1568,7 @@ fn plateau_json(instruments: &Instruments, quiet: &Quiet, resume_issued_ms: f64)
             "read_every_ms": QUIET_READ_EVERY.as_secs_f64() * 1e3,
             "min": threshold,
             "max": quiet_range.map(|(_, high)| high),
+            "unavailable": quiet.unavailable,
         },
     })
 }
@@ -1671,6 +1879,24 @@ pub async fn exhaust(
         t0 + pause.saturating_sub(QUIET_LEAD),
     ))
     .await;
+    // A release cell's held payload, read with every burst reader paused.
+    let held = if restart {
+        let ends: Vec<_> = fixture.receivers[..receivers]
+            .iter()
+            .map(|r| (r.ip, r.listen))
+            .collect();
+        let read = collectors
+            .iter()
+            .map(|(state, _)| {
+                let state = state.lock().expect("wire state");
+                state.announced + state.withdrawals
+            })
+            .sum();
+        let (metrics, cap) = (&fixture.metrics, HELD_READ_CAP);
+        Some(held_read(&rib, metrics, &ends, family, read, t0, cap).await?)
+    } else {
+        None
+    };
     let quiet = quiet_window(
         churn,
         &rib,
@@ -1679,6 +1905,7 @@ pub async fn exhaust(
         &churn_state,
         t0,
         t0 + pause,
+        QUIET_CAP,
     )
     .await?;
     // The churn-free window ends where the churn restarts.
@@ -1709,8 +1936,9 @@ pub async fn exhaust(
     let round_trips = round_trips.await??;
     tokio::time::sleep(QUIET).await;
     let end = Instant::now();
-    churn.0.store(true, Ordering::Release);
-    churn.1.await?;
+    if !stop_churn(churn, tokio::time::Instant::now() + QUIET_CAP).await? {
+        eprintln!("churn stop unfinished within {QUIET_CAP:?}: the RIB is not serving its channel");
+    }
     sampling.store(true, Ordering::Release);
     watching.store(true, Ordering::Release);
     let gauges_to = t0.elapsed();
@@ -1750,6 +1978,7 @@ pub async fn exhaust(
     let mut rows_json = Vec::new();
     let (mut exact, mut ordered, mut missing, mut after_eor, mut resets) = (0, 0, 0, 0, 0);
     let (mut survivors, mut churned_after_eor, mut duplicates) = (0, 0, 0);
+    let (mut row_bytes, mut rows_per_update): (Option<(u64, u64)>, u64) = (None, 0);
     let mut reflected = Vec::new();
     let mut latest = Duration::ZERO;
     // The first and last receiver's End-of-RIB, from t0.
@@ -1763,6 +1992,11 @@ pub async fn exhaust(
         survivors += state.withdrawn_survivors();
         churned_after_eor += state.churned_after_eor;
         duplicates += state.duplicates_before_eor;
+        if let Some((min, max)) = state.row_bytes {
+            let (low, high) = row_bytes.unwrap_or((min, max));
+            row_bytes = Some((low.min(min), high.max(max)));
+        }
+        rows_per_update = rows_per_update.max(state.max_rows_per_update);
         reflected.push(state.churn_reflected_before_eor);
         resets += state.resets;
         if let Some(at) = state.settled_at {
@@ -1788,6 +2022,9 @@ pub async fn exhaust(
             "withdrawals": state.withdrawals,
             "outside": state.outside,
             "decode_failures": state.decode_failures,
+            "min_row_bytes": state.row_bytes.map(|(min, _)| min),
+            "max_row_bytes": state.row_bytes.map(|(_, max)| max),
+            "max_rows_per_update": state.max_rows_per_update,
             "resets": state.resets,
             "credit_refusals": refused_by(ip),
         }));
@@ -1805,7 +2042,6 @@ pub async fn exhaust(
     let ms = |duration: Duration| duration.as_secs_f64() * 1e3;
     // The healthy receiver's session counts too.
     let resets = resets + churn_resets;
-    let ms_from_t0 = |at: Instant| ms(at.saturating_duration_since(t0));
     let burst_churn = match (&plan, burst_churn) {
         (Some((withdrawn, reannounced)), Some((started, sent))) => json!({
             "rule": format!(
@@ -1900,6 +2136,11 @@ pub async fn exhaust(
             // Per burst receiver, at its End-of-RIB (null without one).
             "churn_reflected_before_eor": reflected,
             "duplicates_before_eor": duplicates,
+            // The fewest and most wire bytes per announced burst row, and
+            // the most announced rows in one UPDATE, on any receiver.
+            "min_row_bytes": row_bytes.map(|(min, _)| min),
+            "max_row_bytes": row_bytes.map(|(_, max)| max),
+            "max_rows_per_update": rows_per_update,
             "stub_resets": resets,
             "not_established": down,
             "session_flaps_total": flaps,
@@ -1928,6 +2169,7 @@ pub async fn exhaust(
             "all_refused_ms": instruments.all_refused_ms,
             "owing_flips_total": snapshot.total("bgp_rib_outbound_owing_flips_total"),
             "owing_fallback_total": snapshot.total("bgp_rib_outbound_owing_fallback_total"),
+            "held": held,
         },
         "unaffected": {
             "injected": unaffected.injected,
@@ -1935,12 +2177,7 @@ pub async fn exhaust(
             // Less the harness's own churn-free window, counted in the raw one.
             "max_gap_ms": ms(unaffected.max_gap),
             "max_gap_raw_ms": ms(unaffected.max_gap_raw),
-            // Null when the last churn row before the window never arrived.
-            "quiet_excluded": excluded.map(|(from, to)| json!({
-                "from_ms": ms_from_t0(from),
-                "to_ms": ms_from_t0(to),
-                "span_ms": ms(to.saturating_duration_since(from)),
-            })),
+            "quiet_excluded": quiet_excluded_json(&quiet, excluded, t0),
             "quiet_lead_ms": ms(QUIET_LEAD),
             "p50_latency_ms": ms(unaffected.p50),
             "p99_latency_ms": ms(unaffected.p99),
@@ -2170,14 +2407,242 @@ mod tests {
 
     use rustbgpd_rib::update::RibUpdate;
 
+    use std::sync::Mutex;
+
     use super::{
-        check_read_hold, churn_plan, fold_slice_maxima, longest, recorded_pass, source_withdrawal,
-        Buckets, Family, Options, Snapshot, Trigger, SLICE_MAX,
+        attributes, check_read_hold, churn_plan, fold_slice_maxima, held_read, longest,
+        quiet_excluded_json, quiet_window, recorded_pass, socket_queue_bytes, source_withdrawal,
+        stop_churn, Buckets, Churn, Family, Options, Snapshot, Trigger, HELD_READ_CAP, QUIET_CAP,
+        QUIET_LEAD, SLICE_MAX,
     };
     use crate::credit_wire::{Observed, WireFamily, WireState};
 
     fn parse(args: &[&str]) -> Options {
         Options::parse(&args.iter().map(ToString::to_string).collect::<Vec<_>>()).unwrap()
+    }
+
+    #[test]
+    fn socket_queues_sum_both_ends_of_the_receivers_connections_only() {
+        // The stub listens on 127.10.1.1:179; its session runs to
+        // 127.0.0.1:40000, both ends established (01). A listener (0A), the
+        // same receiver address on another port (another process's
+        // connection in the namespace) and an unrelated connection do not
+        // count.
+        let table = [
+            "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when",
+            "   0: 01010A7F:00B3 0100007F:9C40 01 00000010:00000020 00:00000000",
+            "   1: 0100007F:9C40 01010A7F:00B3 01 00000100:00000000 00:00000000",
+            "   2: 01010A7F:00B3 00000000:0000 0A 00000005:00000005 00:00000000",
+            "   3: 01010A7F:00B4 0100007F:9C41 01 00002000:00002000 00:00000000",
+            "   4: 0100007F:1F90 0200007F:9C42 01 00001000:00001000 00:00000000",
+        ]
+        .join("\n");
+        let listen = "127.10.1.1:179".parse().unwrap();
+        let listeners = [listen].into_iter().collect();
+        assert_eq!(
+            socket_queue_bytes(&table, &listeners).unwrap(),
+            (0x10 + 0x20 + 0x100, 2)
+        );
+        // No listener matched: zero ends, which the cell records as null.
+        assert_eq!(
+            socket_queue_bytes(&table, &Default::default()).unwrap(),
+            (0, 0)
+        );
+        assert!(socket_queue_bytes("header\n  0: short", &listeners).is_err());
+    }
+
+    #[tokio::test]
+    async fn held_read_is_unavailable_when_the_rib_never_replies() {
+        // A RIB that never serves its channel: the read ends at its cap,
+        // well inside the test's own.
+        let (rib, _queue) = tokio::sync::mpsc::channel(4);
+        let metrics = rustbgpd_telemetry::BgpMetrics::new();
+        let cap = std::time::Duration::from_millis(50);
+        let started = std::time::Instant::now();
+        let read = held_read(&rib, &metrics, &[], Family::Unicast, 0, started, cap);
+        let held = tokio::time::timeout(std::time::Duration::from_secs(5), read)
+            .await
+            .expect("the held read ends at its cap")
+            .unwrap();
+        assert_eq!(
+            held,
+            serde_json::json!({"unavailable": "no reply within 50 ms"})
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_rib_still_reaches_the_readers_resume_within_the_caps() {
+        // The cell's order before it resumes its readers: the held read,
+        // then the churn-free window. The RIB never serves its channel, in
+        // paused time: each wait ends at its cap, not the test's own. One
+        // clock: `t0` and the window's end come from tokio's paused clock.
+        let metrics = rustbgpd_telemetry::BgpMetrics::new();
+        let (log, received) = (Mutex::default(), Mutex::default());
+        let cap = QUIET_CAP;
+        // Returns the window and when it started and ended, from its end.
+        let window = |churn: Churn, rib: tokio::sync::mpsc::Sender<RibUpdate>, lead, late| {
+            let (metrics, log, received) = (&metrics, &log, &received);
+            async move {
+                let t0 = tokio::time::Instant::now();
+                let until = t0 + lead;
+                if late {
+                    let read = held_read(
+                        &rib,
+                        metrics,
+                        &[],
+                        Family::Unicast,
+                        0,
+                        t0.into(),
+                        HELD_READ_CAP,
+                    );
+                    let held = read.await.unwrap();
+                    assert!(held.get("unavailable").is_some(), "{held}");
+                }
+                let entered = tokio::time::Instant::now();
+                let quiet = quiet_window(
+                    churn,
+                    &rib,
+                    metrics,
+                    log,
+                    received,
+                    t0.into(),
+                    until.into(),
+                    cap,
+                );
+                let quiet = tokio::time::timeout(4 * (HELD_READ_CAP + cap), quiet)
+                    .await
+                    .expect("the churn-free window ends at its cap")
+                    .unwrap();
+                let ended = tokio::time::Instant::now();
+                (quiet, entered.checked_duration_since(until), ended - until)
+            }
+        };
+        // The churn task's send waits on the RIB's full channel.
+        let stuck = || {
+            let (rib, queue) = tokio::sync::mpsc::channel(1);
+            let sender = rib.clone();
+            let task = tokio::spawn(async move {
+                for _ in 0..2 {
+                    let (reply, _count) = tokio::sync::oneshot::channel();
+                    let _ = sender.send(RibUpdate::QueryLocRibCount { reply }).await;
+                }
+            });
+            ((Arc::new(AtomicBool::new(false)), task), rib, queue)
+        };
+        // The churn stops; the queries that republish the gauges go
+        // unanswered.
+        let stopped = || {
+            let (rib, queue) = tokio::sync::mpsc::channel(8);
+            let churn = (Arc::new(AtomicBool::new(false)), tokio::spawn(async {}));
+            (churn, rib, queue)
+        };
+
+        // On time, the window's waits get the full cap past its end. Late,
+        // behind a held read at its cap, they get only what remains of it:
+        // 0.3 s here, none when the read ended at the cap itself.
+        let late = HELD_READ_CAP.checked_sub(QUIET_LEAD).unwrap();
+        for (lead, held, entered) in [
+            (QUIET_LEAD, true, Some(late)),
+            (Duration::ZERO, true, Some(cap)),
+            (QUIET_LEAD, false, None),
+        ] {
+            let (churn, rib, _queue) = stuck();
+            let (quiet, at, ended) = window(churn, rib, lead, held).await;
+            assert_eq!(
+                (at, ended),
+                (entered, cap),
+                "lead {lead:?}, held read {held}"
+            );
+            assert!(quiet.unavailable.is_some() && quiet.delivered.is_none());
+            assert!(quiet.readings.is_empty());
+            let excluded = quiet_excluded_json(&quiet, None, Instant::now());
+            assert!(excluded["unavailable"].is_string(), "{excluded}");
+
+            let (churn, rib, _queue) = stopped();
+            let (quiet, at, ended) = window(churn, rib, lead, held).await;
+            assert_eq!(
+                (at, ended),
+                (entered, cap),
+                "lead {lead:?}, held read {held}"
+            );
+            assert!(quiet.unavailable.is_some() && quiet.delivered.is_some());
+            assert!(quiet.published_ms.is_none() && quiet.readings.is_empty());
+            let excluded = super::excluded_window(quiet.stopped, quiet.delivered, Instant::now());
+            let excluded = quiet_excluded_json(&quiet, excluded, Instant::now());
+            assert!(excluded["unavailable"].is_string(), "{excluded}");
+        }
+    }
+
+    #[test]
+    fn a_churn_send_completing_at_the_stop_deadline_logs_before_the_restart() {
+        // The old churn task has logged row 1; its send of row 2 completes
+        // as the stop's deadline passes, and its poll is still running when
+        // the stop aborts it. The poll is held by a handshake: a worker that
+        // parks while the stop is pending releases it, so a stop that waits
+        // for the aborted task lets it finish; a stop that returns at once
+        // leaves it held until the restart has read its next sequence.
+        let stop = Arc::new(AtomicBool::new(false));
+        let returned = Arc::new(AtomicBool::new(false));
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release = Arc::new(Mutex::new(Some(release_tx)));
+        let runtime = {
+            let (stop, returned, release) = (stop.clone(), returned.clone(), release.clone());
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .on_thread_park(move || {
+                    if stop.load(Ordering::Acquire) && !returned.load(Ordering::Acquire) {
+                        if let Some(release) = release.lock().unwrap().take() {
+                            release.send(()).unwrap();
+                        }
+                    }
+                })
+                .build()
+                .unwrap()
+        };
+        let log = Arc::new(Mutex::new(Vec::<(u32, Instant)>::new()));
+        runtime.block_on(async {
+            let (sending_tx, sending_rx) = std::sync::mpsc::channel();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let task_log = Arc::clone(&log);
+            let task = tokio::spawn(async move {
+                task_log.lock().unwrap().push((1, Instant::now()));
+                sending_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                task_log.lock().unwrap().push((2, Instant::now()));
+                done_tx.send(()).unwrap();
+            });
+            sending_rx.recv().unwrap();
+            let churn: Churn = (Arc::clone(&stop), task);
+            // Already passed, so the stop aborts on its first poll.
+            let deadline = tokio::time::Instant::now() - Duration::from_secs(1);
+            let returned = Arc::clone(&returned);
+            let joined = tokio::spawn(async move {
+                let joined = stop_churn(churn, deadline).await;
+                returned.store(true, Ordering::Release);
+                joined
+            });
+            assert!(!joined.await.unwrap().unwrap());
+            // The restart reads its next sequence, as `start_churn` does.
+            let next = log.lock().unwrap().last().map_or(1, |&(last, _)| last + 1);
+            if let Some(release) = release.lock().unwrap().take() {
+                release.send(()).unwrap();
+            }
+            done_rx.recv().unwrap();
+            log.lock().unwrap().push((next, Instant::now()));
+        });
+        let sequences: Vec<u32> = log.lock().unwrap().iter().map(|&(s, _)| s).collect();
+        assert_eq!(sequences, [1, 2, 3]);
+    }
+
+    #[test]
+    fn burst_attributes_are_distinct_across_the_full_shape() {
+        // Rows sharing attributes share an UPDATE, which shrinks the bytes
+        // a row and inflates the release witness's slack.
+        let distinct: std::collections::HashSet<_> = (0..150_000)
+            .map(|index| attributes(index, 7, 100))
+            .collect();
+        assert_eq!(distinct.len(), 150_000);
     }
 
     #[test]

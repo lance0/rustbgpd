@@ -17,3 +17,6 @@ rustbgpd-wire.workspace = true
 serde_json.workspace = true
 tikv-jemallocator.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

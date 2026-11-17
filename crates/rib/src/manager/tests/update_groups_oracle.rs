@@ -3446,28 +3446,35 @@ async fn run_vpn_swap_case(
         oracle
             .drain_before_recovery(C, RecoveryPath::QueueDeferral)
             .await;
-        // One slot admits one owed family per tick. Keep the same two-second
-        // deadline while returning credit between real timer retries.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        loop {
-            oracle.quiesce().await;
-            oracle.drain_available();
-            if !oracle.peer_outbound_deferred(C).await {
+    }
+    // A paced tick can leave other receivers owed. Advance through the retry
+    // deadlines individually so their replies reach the streams before folding.
+    let timeout = if mode.jam {
+        Duration::from_secs(2)
+    } else {
+        Duration::from_millis(1300)
+    };
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        oracle.quiesce().await;
+        oracle.drain_available();
+        let mut pending = None;
+        for peer in [A, B, C, D, E] {
+            if oracle.peer_outbound_deferred(peer).await {
+                pending = Some(peer);
                 break;
             }
-            let now = tokio::time::Instant::now();
-            assert!(
-                now < deadline,
-                "C still owes exports after its retry deadline"
-            );
-            tokio::time::advance(DIRTY_RESYNC_BACKLOG_INTERVAL.min(deadline - now)).await;
         }
+        let Some(peer) = pending else { break };
+        let now = tokio::time::Instant::now();
+        assert!(
+            now < deadline,
+            "{peer} still owes exports after its retry deadline"
+        );
+        tokio::time::advance(DIRTY_RESYNC_BACKLOG_INTERVAL.min(deadline - now)).await;
+    }
+    if mode.jam {
         oracle.end_recovery(C).await;
-    } else {
-        // A small row credit can leave a peer dirty for its resync tick.
-        oracle.quiesce().await;
-        tokio::time::advance(Duration::from_millis(1300)).await;
-        oracle.quiesce().await;
     }
     let streams = oracle.finish().await;
     (fold(&streams), fold_vpn_paths(&streams), evals)
