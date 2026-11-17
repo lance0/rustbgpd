@@ -196,13 +196,7 @@ impl PeerSession {
     async fn administrative_reset(&mut self, reason: Option<bytes::Bytes>) {
         if self.fsm.state() == SessionState::Idle {
             info!(peer = %self.peer_label, "administrative reset requested while idle");
-            if let Some(retained) = self.gr_retained_connection.get() {
-                self.gr_retained_connection.set(None);
-                let _ = self.send_to_rib(RibUpdate::PeerDown {
-                    peer: self.rib_peer(),
-                    session_id: retained.session_id,
-                });
-            }
+            self.purge_retained_routes();
             self.clear_reconnect_streak();
             if !self.stop_requested {
                 self.start_after_rib_admission().await;
@@ -211,6 +205,37 @@ impl PeerSession {
             info!(peer = %self.peer_label, "administrative reset requested");
             self.drive_fsm(Event::AdministrativeReset { reason }).await;
         }
+    }
+
+    /// Purge the routes an earlier close left retained under GR/LLGR.
+    fn purge_retained_routes(&mut self) {
+        if let Some(retained) = self.gr_retained_connection.get() {
+            self.gr_retained_connection.set(None);
+            let _ = self.send_to_rib(RibUpdate::PeerDown {
+                peer: self.rib_peer(),
+                session_id: retained.session_id,
+            });
+        }
+    }
+
+    /// `ManualStop`. A final stop (`hard_reset`: a disable or a deletion)
+    /// never leaves the peer's routes retained: under the N bit its Cease,
+    /// or a Cease/8 its drain raises, goes out as a Hard Reset (RFC 8538
+    /// §5.1), and routes an earlier close left retained are purged. A stop
+    /// for a peer expected back sends a plain Cease, so both sides may retain.
+    async fn manual_stop(&mut self, reason: Option<bytes::Bytes>, hard_reset: bool) {
+        self.stop_requested = true;
+        self.reconnect_timer = None;
+        if hard_reset {
+            self.purge_retained_routes();
+        }
+        self.hard_reset_teardown = hard_reset;
+        if self.drain_outbound_before_close().await {
+            self.finish_drain_teardown().await;
+        } else {
+            self.drive_fsm(Event::ManualStop { reason }).await;
+        }
+        self.hard_reset_teardown = false;
     }
 
     /// Enqueue one plain ROUTE-REFRESH for a negotiated family.
@@ -1549,13 +1574,11 @@ impl PeerSession {
                 ControlFlow::Continue(())
             }
             PeerCommand::Stop { reason } => {
-                self.stop_requested = true;
-                self.reconnect_timer = None;
-                if self.drain_outbound_before_close().await {
-                    self.finish_drain_teardown().await;
-                } else {
-                    self.drive_fsm(Event::ManualStop { reason }).await;
-                }
+                self.manual_stop(reason, true).await;
+                ControlFlow::Continue(())
+            }
+            PeerCommand::StopForReconnect { reason } => {
+                self.manual_stop(reason, false).await;
                 ControlFlow::Continue(())
             }
             PeerCommand::BfdDown => {
@@ -1670,9 +1693,9 @@ impl PeerSession {
                 // subcode 4) through the FSM, which closes TCP and arms the
                 // ordinary reconnect timer on the Idle transition because
                 // `stop_requested` is deliberately left alone.
-                self.hard_reset_drain = true;
+                self.hard_reset_teardown = true;
                 let drain_raised_cease = self.drain_outbound_before_close().await;
-                self.hard_reset_drain = false;
+                self.hard_reset_teardown = false;
                 if drain_raised_cease {
                     // The drain raised a Cease/8 (a Hard Reset under the N
                     // bit), but this is still the operator's reset: it clears

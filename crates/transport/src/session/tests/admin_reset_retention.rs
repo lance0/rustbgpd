@@ -1,9 +1,11 @@
-//! An administrative reset (`rbgp neighbor reset`) never leaves the peer's
+//! An administrative reset (`rbgp neighbor reset`) and a final stop (a
+//! disable, a config `admin_down` or a deletion) never leave the peer's
 //! routes retained under Graceful Restart or Long-Lived Graceful Restart,
-//! whatever the session's state when the reset arrives, N bit or not. Other
+//! whatever the session's state when they arrive, N bit or not. Other
 //! teardowns keep their retention. A real `RibManager` answers what stays
 //! retained; the clock is paused, so no restart or stale timer runs out.
 use super::abort_handoff::{GatedRib, established, first, receive, tcp_fails};
+use super::rib_park::counter;
 use super::run_loop::negotiate_graceful_restart;
 use super::*;
 
@@ -63,17 +65,24 @@ async fn queue_unadmittable_update(session: &PeerSession) {
         .unwrap();
 }
 
-/// The reset's close drain raises Cease/8. With the N bit a plain Cease/8 is
-/// a graceful NOTIFICATION that both sides must answer with retention (RFC
-/// 8538 §4), so the reset sends it as a Hard Reset carrying the Cease/8
-/// (§3.1): the session ends with `PeerDown` and the route is gone. Without
-/// the N bit the plain Cease/8 already purges (RFC 4724 §4).
+/// The close drain of a reset or a final stop raises Cease/8. With the N bit
+/// a plain Cease/8 is a graceful NOTIFICATION that both sides must answer
+/// with retention (RFC 8538 §4), so it is sent as a Hard Reset carrying the
+/// Cease/8 (§3.1): the session ends with `PeerDown` and the route is gone.
+/// Without the N bit the plain Cease/8 already purges (RFC 4724 §4).
 /// Mutation-red: without the Hard Reset, the N-bit case sends a plain 6/8,
 /// queues `PeerGracefulRestart`, and keeps the route as stale.
 #[tokio::test(start_paused = true)]
-async fn a_reset_whose_close_drain_raises_cease_8_never_retains() {
+async fn a_reset_or_stop_whose_close_drain_raises_cease_8_never_retains() {
     let mut got = Vec::new();
-    for notification_gr in [false, true] {
+    let mut want = Vec::new();
+    let cause = Some(crate::handle::SessionFailureCause::ExportSnapshotMissing);
+    for (command, notification_gr) in [
+        ("reset", false),
+        ("reset", true),
+        ("stop", false),
+        ("stop", true),
+    ] {
         let (mut rib, mut session, mut peer) =
             session_with_one_route(Retention::Gr, notification_gr).await;
         let rib_peer = session.rib_peer();
@@ -81,14 +90,18 @@ async fn a_reset_whose_close_drain_raises_cease_8_never_retains() {
         session.session_event_tx = Some(event_tx);
         queue_unadmittable_update(&session).await;
 
-        let _ = session
-            .handle_command(PeerCommand::AdministrativeReset { reason: None })
-            .await;
+        let command_sent = if command == "reset" {
+            PeerCommand::AdministrativeReset { reason: None }
+        } else {
+            PeerCommand::Stop { reason: None }
+        };
+        let _ = session.handle_command(command_sent).await;
         rib.release().await;
 
         let wire = read_until_notification(&mut peer).await;
         let event = events.try_recv().expect("the sent NOTIFICATION event");
         got.push((
+            command,
             notification_gr,
             wire.subcode,
             wire.data.to_vec(),
@@ -99,39 +112,126 @@ async fn a_reset_whose_close_drain_raises_cease_8_never_retains() {
             event.subcode,
             event.failure_cause,
         ));
-    }
-    let cause = Some(crate::handle::SessionFailureCause::ExportSnapshotMissing);
-    assert_eq!(
-        got,
-        vec![
+        let (subcode, data) = if notification_gr {
             (
-                false,
-                cease_subcode::OUT_OF_RESOURCES,
-                vec![],
-                vec![("PeerDown", 1)],
-                0,
-                0,
-                1,
-                cease_subcode::OUT_OF_RESOURCES,
-                cause,
-            ),
-            (
-                true,
                 cease_subcode::HARD_RESET,
                 vec![
                     NotificationCode::Cease.as_u8(),
-                    cease_subcode::OUT_OF_RESOURCES
+                    cease_subcode::OUT_OF_RESOURCES,
                 ],
-                vec![("PeerDown", 1)],
-                0,
-                0,
-                1,
-                cease_subcode::HARD_RESET,
-                cause,
-            ),
-        ],
-        "(N bit, wire subcode, wire data, session ends, routes retained as stale, \
-         Loc-RIB routes, NOTIFICATIONs sent, event subcode, event failure cause)"
+            )
+        } else {
+            (cease_subcode::OUT_OF_RESOURCES, vec![])
+        };
+        want.push((
+            command,
+            notification_gr,
+            subcode,
+            data,
+            vec![("PeerDown", 1)],
+            0,
+            0,
+            1,
+            subcode,
+            cause,
+        ));
+    }
+    assert_eq!(
+        got, want,
+        "(command, N bit, wire subcode, wire data, session ends, routes retained as \
+         stale, Loc-RIB routes, NOTIFICATIONs sent, event subcode, event failure cause)"
+    );
+}
+
+/// A final stop (`rbgp neighbor disable`, a config `admin_down`, a deletion)
+/// of a peer that negotiated the N bit ends the session for good on both
+/// sides: Cease / Hard Reset wrapping the Administrative Shutdown and any RFC
+/// 9003 communication (RFC 8538 §5.1, §5.2), then `PeerDown`, for GR and
+/// LLGR. The event and the sent-NOTIFICATION metric report the outer
+/// subcode. Without the N bit the plain Cease/2 is unchanged and already
+/// purges (RFC 4724 §4).
+/// Mutation-red: without the Hard Reset, the N-bit cases send a plain 6/2,
+/// queue `PeerGracefulRestart`, and keep the route as stale.
+#[tokio::test(start_paused = true)]
+async fn a_final_stop_hard_resets_under_notification_gr() {
+    let communication = rustbgpd_wire::notification::encode_shutdown_communication("maintenance");
+    let mut got = Vec::new();
+    let mut want = Vec::new();
+    for retention in [Retention::Gr, Retention::Llgr] {
+        for notification_gr in [true, false] {
+            for reason in [None, Some(communication.clone())] {
+                let (mut rib, mut session, mut peer) =
+                    session_with_one_route(retention, notification_gr).await;
+                let rib_peer = session.rib_peer();
+                let (event_tx, mut events) = mpsc::channel(8);
+                session.session_event_tx = Some(event_tx);
+
+                let _ = session
+                    .handle_command(PeerCommand::Stop {
+                        reason: reason.clone(),
+                    })
+                    .await;
+                rib.release().await;
+
+                let wire = read_until_notification(&mut peer).await;
+                let event = events.try_recv().expect("the sent NOTIFICATION event");
+                let (metrics, label) = (session.metrics.clone(), session.peer_label.clone());
+                let sent = |subcode: u8| {
+                    counter(
+                        &metrics,
+                        "bgp_notifications_sent_total",
+                        &[
+                            ("peer", &label),
+                            ("code", "6"),
+                            ("subcode", &subcode.to_string()),
+                        ],
+                    )
+                };
+                got.push((
+                    retention,
+                    notification_gr,
+                    reason.is_some(),
+                    wire.subcode,
+                    wire.data.to_vec(),
+                    event.subcode,
+                    event.shutdown_reason,
+                    sent(wire.subcode),
+                    rib.ends.clone(),
+                    rib.retained_stale(rib_peer).await,
+                    rib.loc_rib_count().await,
+                ));
+                let inner = reason.clone().unwrap_or_default().to_vec();
+                let (subcode, data) = if notification_gr {
+                    let mut data = vec![
+                        NotificationCode::Cease.as_u8(),
+                        cease_subcode::ADMINISTRATIVE_SHUTDOWN,
+                    ];
+                    data.extend_from_slice(&inner);
+                    (cease_subcode::HARD_RESET, data)
+                } else {
+                    (cease_subcode::ADMINISTRATIVE_SHUTDOWN, inner)
+                };
+                want.push((
+                    retention,
+                    notification_gr,
+                    reason.is_some(),
+                    subcode,
+                    data,
+                    subcode,
+                    reason.is_some().then(|| "maintenance".to_string()),
+                    1.0,
+                    vec![("PeerDown", 1)],
+                    0,
+                    0,
+                ));
+            }
+        }
+    }
+    assert_eq!(
+        got, want,
+        "(retention, N bit, reason, wire subcode, wire data, event subcode, event \
+         communication, sent metric at the wire subcode, session ends, routes retained \
+         as stale, Loc-RIB routes)"
     );
 }
 
@@ -173,17 +273,22 @@ async fn enter(session: &mut PeerSession, state: SessionState) -> Option<TcpStre
 }
 
 /// A session lost to a TCP failure leaves its routes retained (GR or LLGR).
-/// A reset that reaches the session afterwards, in Idle or while it
-/// reconnects, purges them and still brings the session back: from Idle it
-/// starts a connection, from the other states it returns to Idle with the
-/// reconnect timer armed.
-/// Mutation-red: without the purge in the Idle reset, the Idle cases keep
-/// the route as stale.
+/// A reset or a final stop that reaches the session afterwards, in Idle or
+/// while it reconnects, purges them. A reset still brings the session back:
+/// from Idle it starts a connection, from the other states it returns to
+/// Idle with the reconnect timer armed. A stop leaves it Idle.
+/// Mutation-red: without the purge in the Idle reset, the Idle reset cases
+/// keep the route as stale; without the stop's purge, every stop case does.
 #[tokio::test(start_paused = true)]
-async fn a_reset_in_any_state_purges_routes_retained_by_an_earlier_close() {
+async fn a_reset_or_stop_in_any_state_purges_routes_retained_by_an_earlier_close() {
     let mut got = Vec::new();
     let mut want = Vec::new();
-    for retention in [Retention::Gr, Retention::Llgr] {
+    for (command, retention) in [
+        ("reset", Retention::Gr),
+        ("reset", Retention::Llgr),
+        ("stop", Retention::Gr),
+        ("stop", Retention::Llgr),
+    ] {
         for state in [
             SessionState::Idle,
             SessionState::Connect,
@@ -203,12 +308,16 @@ async fn a_reset_in_any_state_purges_routes_retained_by_an_earlier_close() {
             let _replacement = enter(&mut session, state).await;
             assert_eq!(session.fsm.state(), state);
 
-            let _ = session
-                .handle_command(PeerCommand::AdministrativeReset { reason: None })
-                .await;
+            let command_sent = if command == "reset" {
+                PeerCommand::AdministrativeReset { reason: None }
+            } else {
+                PeerCommand::Stop { reason: None }
+            };
+            let _ = session.handle_command(command_sent).await;
             rib.release().await;
 
             got.push((
+                command,
                 retention,
                 state,
                 rib.retained_stale(rib_peer).await,
@@ -216,30 +325,43 @@ async fn a_reset_in_any_state_purges_routes_retained_by_an_earlier_close() {
                 session.fsm.state(),
                 session.reconnect_timer.is_some(),
             ));
-            let (after, timer) = if state == SessionState::Idle {
+            let (after, timer) = if command == "stop" {
+                (SessionState::Idle, false)
+            } else if state == SessionState::Idle {
                 (SessionState::Connect, false)
             } else {
                 (SessionState::Idle, true)
             };
-            want.push((retention, state, 0, 0, after, timer));
+            want.push((command, retention, state, 0, 0, after, timer));
         }
     }
     assert_eq!(
         got, want,
-        "(retention, state at reset, routes retained as stale, Loc-RIB routes, \
-         state after, reconnect timer armed)"
+        "(command, retention, state at the command, routes retained as stale, \
+         Loc-RIB routes, state after, reconnect timer armed)"
     );
 }
 
-/// Guard: every teardown that is not an administrative reset keeps its
-/// retention under the N bit: a TCP loss, a hold-timer expiry, a graceful
-/// NOTIFICATION from the peer, and a local Cease/8 raised by the close drain
-/// of an administrative stop.
+/// Guard: every teardown that is not an administrative reset or a final stop
+/// keeps its retention under the N bit: a TCP loss, a hold-timer expiry, a
+/// graceful NOTIFICATION from the peer, a stop for a peer expected back (a
+/// dynamic peer bounced onto new configuration) with or without a Cease/8
+/// raised by its close drain, and the shutdown that daemon shutdown and a
+/// changed peer's delete-then-re-add send. Those last ones send a plain
+/// Cease/Administrative Shutdown.
 #[tokio::test(start_paused = true)]
 async fn other_teardowns_still_retain_under_notification_gr() {
+    let causes = [
+        "tcp loss",
+        "hold timer",
+        "peer notification",
+        "reconnect stop",
+        "reconnect stop drain",
+        "shutdown",
+    ];
     let mut got = Vec::new();
-    for cause in ["tcp loss", "hold timer", "peer notification", "stop drain"] {
-        let (mut rib, mut session, _peer) = session_with_one_route(Retention::Gr, true).await;
+    for cause in causes {
+        let (mut rib, mut session, mut peer) = session_with_one_route(Retention::Gr, true).await;
         let rib_peer = session.rib_peer();
         match cause {
             "tcp loss" => tcp_fails(&mut session).await,
@@ -253,21 +375,45 @@ async fn other_teardowns_still_retain_under_notification_gr() {
                     )))
                     .await;
             }
-            _ => {
+            "reconnect stop" => {
+                let _ = session
+                    .handle_command(PeerCommand::StopForReconnect { reason: None })
+                    .await;
+            }
+            "reconnect stop drain" => {
                 queue_unadmittable_update(&session).await;
                 let _ = session
-                    .handle_command(PeerCommand::Stop { reason: None })
+                    .handle_command(PeerCommand::StopForReconnect { reason: None })
                     .await;
+            }
+            _ => {
+                let _ = session.handle_command(PeerCommand::Shutdown).await;
             }
         }
         rib.release().await;
-        got.push((cause, rib.ends.clone(), rib.retained_stale(rib_peer).await));
+        let wire = if matches!(cause, "reconnect stop" | "shutdown") {
+            Some(read_until_notification(&mut peer).await.subcode)
+        } else {
+            None
+        };
+        got.push((
+            cause,
+            wire,
+            rib.ends.clone(),
+            rib.retained_stale(rib_peer).await,
+        ));
     }
     assert_eq!(
         got,
-        ["tcp loss", "hold timer", "peer notification", "stop drain"]
-            .map(|cause| (cause, vec![("PeerGracefulRestart", 1)], 1))
+        causes
+            .map(|cause| (
+                cause,
+                matches!(cause, "reconnect stop" | "shutdown")
+                    .then_some(cease_subcode::ADMINISTRATIVE_SHUTDOWN),
+                vec![("PeerGracefulRestart", 1)],
+                1
+            ))
             .to_vec(),
-        "(cause, session ends, routes retained as stale)"
+        "(cause, wire Cease subcode, session ends, routes retained as stale)"
     );
 }

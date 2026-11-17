@@ -1808,10 +1808,10 @@ async fn bounce_dynamic_peers_signals_only_matching_enabled_dynamic_sessions() {
 
     assert_eq!(outcome.signaled, 1, "{outcome:?}");
     assert!(outcome.failures.is_empty(), "{outcome:?}");
-    wait_counter(&matched_counters.stop, 1).await;
-    assert_eq!(static_counters.stop.load(Ordering::SeqCst), 0);
-    assert_eq!(other_range_counters.stop.load(Ordering::SeqCst), 0);
-    assert_eq!(disabled_counters.stop.load(Ordering::SeqCst), 0);
+    wait_counter(&matched_counters.stop_for_reconnect, 1).await;
+    for counters in [&static_counters, &other_range_counters, &disabled_counters] {
+        assert_eq!(counters.stop_for_reconnect.load(Ordering::SeqCst), 0);
+    }
     assert_eq!(
         mgr.peers[&key(disabled_addr)].max_prefix_restart_seconds,
         Some(30)
@@ -1888,7 +1888,7 @@ async fn bounce_dynamic_peers_reports_signaling_failures_per_peer() {
         "{:?}",
         outcome.failures
     );
-    wait_counter(&live_counters.stop, 1).await;
+    wait_counter(&live_counters.stop_for_reconnect, 1).await;
     // The unsignalable peer stays managed; it keeps its running config until
     // it reconnects (or its session-task exit drives BackToIdle).
     assert!(mgr.peers.contains_key(&key(dead_addr)));

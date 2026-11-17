@@ -912,6 +912,7 @@ struct FakePeerCounters {
     activate_max_prefix_metrics: AtomicU32,
     shutdown: AtomicU32,
     stop: AtomicU32,
+    stop_for_reconnect: AtomicU32,
     purge_reset: AtomicU32,
     administrative_reset: AtomicU32,
     /// The session establishes after reporting its state and before a
@@ -1206,6 +1207,10 @@ fn fake_peer_handle_with_route_refresh_reply(
                 }
                 PeerCommand::Stop { .. } => {
                     counters.stop.fetch_add(1, Ordering::SeqCst);
+                    break;
+                }
+                PeerCommand::StopForReconnect { .. } => {
+                    counters.stop_for_reconnect.fetch_add(1, Ordering::SeqCst);
                     break;
                 }
                 PeerCommand::PurgeReset => {

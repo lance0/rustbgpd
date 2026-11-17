@@ -767,10 +767,6 @@ impl PeerSession {
 
     /// Preserve the FSM's teardown actions while supplying a transport-level
     /// diagnostic that requires the original received PDU.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "FSM event and teardown action batching stays together to preserve ordering invariants"
-    )]
     pub(super) async fn drive_fsm_with_notification(
         &mut self,
         initial_event: Event,
@@ -788,19 +784,24 @@ impl PeerSession {
                 event = event.name(),
                 "FSM event"
             );
-            let bfd_notification_gr = matches!(event, Event::BfdDown)
-                && self
-                    .negotiated
+            // RFC 8538 §5.1, §5.2: under the N bit, these Ceases end the
+            // session for good, so they go out as a Hard Reset wrapping the
+            // original code, subcode and data (with any shutdown
+            // communication). A stop for a peer expected back stays plain.
+            let hard_reset_subcode = match &event {
+                Event::BfdDown => Some(cease_subcode::BFD_DOWN),
+                Event::AdministrativeReset { .. } => Some(cease_subcode::ADMINISTRATIVE_RESET),
+                Event::ManualStop { .. } if self.hard_reset_teardown => {
+                    Some(cease_subcode::ADMINISTRATIVE_SHUTDOWN)
+                }
+                _ => None,
+            }
+            .filter(|_| {
+                self.negotiated
                     .as_deref()
                     .or(self.fsm.negotiated())
-                    .is_some_and(|negotiated| negotiated.peer_notification_gr);
-            let administrative_reset_notification_gr =
-                matches!(&event, Event::AdministrativeReset { .. })
-                    && self
-                        .negotiated
-                        .as_deref()
-                        .or(self.fsm.negotiated())
-                        .is_some_and(|negotiated| negotiated.peer_notification_gr);
+                    .is_some_and(|negotiated| negotiated.peer_notification_gr)
+            });
             let actions = self.fsm.handle_event(event.clone());
             // The FSM changes state only here.
             self.established
@@ -813,32 +814,15 @@ impl PeerSession {
             {
                 *original = replacement;
             }
-            if bfd_notification_gr {
+            if let Some(subcode) = hard_reset_subcode {
                 for action in &mut actions {
                     if let Action::SendNotification(notification) = action
                         && notification.code == NotificationCode::Cease
-                        && notification.subcode == cease_subcode::BFD_DOWN
-                    {
-                        *notification = rustbgpd_wire::NotificationMessage::new(
-                            NotificationCode::Cease,
-                            cease_subcode::HARD_RESET,
-                            Bytes::from(vec![
-                                NotificationCode::Cease.as_u8(),
-                                cease_subcode::BFD_DOWN,
-                            ]),
-                        );
-                    }
-                }
-            }
-            if administrative_reset_notification_gr {
-                for action in &mut actions {
-                    if let Action::SendNotification(notification) = action
-                        && notification.code == NotificationCode::Cease
-                        && notification.subcode == cease_subcode::ADMINISTRATIVE_RESET
+                        && notification.subcode == subcode
                     {
                         let mut hard_reset_data = Vec::with_capacity(notification.data.len() + 2);
                         hard_reset_data.push(NotificationCode::Cease.as_u8());
-                        hard_reset_data.push(cease_subcode::ADMINISTRATIVE_RESET);
+                        hard_reset_data.push(subcode);
                         hard_reset_data.extend_from_slice(&notification.data);
                         *notification = rustbgpd_wire::NotificationMessage::new(
                             NotificationCode::Cease,

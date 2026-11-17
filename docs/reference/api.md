@@ -1193,11 +1193,11 @@ added at runtime.
 | RPC | Description |
 |-----|-------------|
 | `AddNeighbor` | Add a peer dynamically through the presence-aware intent (starts session immediately); waits for the atomic config-file update and leaves no runtime change on persistence failure |
-| `DeleteNeighbor` | Remove a peer and tear down its session; waits for the atomic config-file update and rolls runtime back on persistence failure |
+| `DeleteNeighbor` | Remove a peer and tear down its session (Cease / Administrative Shutdown, inside a Cease / Hard Reset when the peer negotiated RFC 8538 Notification GR); waits for the atomic config-file update and rolls runtime back on persistence failure |
 | `ListNeighbors` | List all peers with session state and counters |
 | `GetNeighborState` | Get detailed state for a single peer |
 | `EnableNeighbor` | Re-enable a previously disabled peer |
-| `DisableNeighbor` | Administratively disable a peer (sends NOTIFICATION) |
+| `DisableNeighbor` | Administratively disable a peer (sends NOTIFICATION: Cease / Administrative Shutdown, inside a Cease / Hard Reset when the peer negotiated RFC 8538 Notification GR) |
 | `SoftResetIn` | Request inbound route refresh (RFC 2918/7313) for one or more families |
 | `RefreshOutbound` | Re-emit one peer's current exportable outbound inventory across all negotiated families, without resetting the session |
 | `ReplayOutbound` | Schedule one Established peer's negotiated IPv4/IPv6 unicast replay with terminal UPDATE EoRs; outside the v1 contract |

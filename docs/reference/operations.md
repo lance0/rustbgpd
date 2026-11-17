@@ -4060,7 +4060,13 @@ without contacting the daemon.
 rbgp neighbor 10.0.0.5 delete
 ```
 
-Sends NOTIFICATION, tears down the session, removes from config.
+Sends NOTIFICATION, tears down the session, removes from config. A peer that
+negotiated RFC 8538 Notification Graceful Restart receives Cease / Hard Reset
+wrapping the Administrative Shutdown, so it does not keep rustbgpd's routes
+as stale; the peer's own routes are removed from the RIB, including any still
+retained from an earlier session loss. The same applies to a peer removed by
+a config reload, and to a dynamic peer removed because a config rollback
+left no range that admits it.
 
 ### Manage dynamic-neighbor ranges at runtime
 
@@ -4315,6 +4321,18 @@ connecting or up, `enable` changes nothing. It sends no NOTIFICATION and
 keeps the backoff streak, because RFC 4271 §8.2.2 ignores a start event
 outside Idle. To restart a peer that is retrying in `Connect` or `Active`
 right away, run `rbgp neighbor <addr> reset` and then `enable`.
+
+`disable` sends Cease / Administrative Shutdown with the optional reason as
+its RFC 9003 shutdown communication, and the peer stays down until `enable`.
+When the peer negotiated RFC 8538 Notification Graceful Restart, the
+NOTIFICATION goes out as Cease / Hard Reset wrapping the Administrative
+Shutdown and its communication (RFC 8538 §5.2), so neither side keeps the
+other's routes as stale while the peer is down. The sent NOTIFICATION event
+and `bgp_notifications_sent_total` report the on-wire subcode 9 in that case.
+A Cease / Out of Resources raised while the disable drains queued output is
+wrapped the same way. Routes still retained from an earlier session loss are
+purged when the disable finds the session Idle or reconnecting. A config
+`admin_down` disables the same way.
 
 ### Reset a peer session
 

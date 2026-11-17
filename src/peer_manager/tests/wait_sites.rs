@@ -2766,10 +2766,10 @@ const BARE_SESSION_WAIT_FNS: &[(&str, usize, &str)] = &[
         PREDATES_SESSION_INVENTORY,
     ),
     (
-        "lifecycle.rs::stop_until",
+        "lifecycle.rs::stop_and_shutdown_handle_until",
         1,
-        "an owned future: the unnumbered reconcile round polls a detached peer's stop chain \
-         under await_session_sweep",
+        "an owned future: callers poll a detached peer's stop chain under \
+         await_session_sweep, inside the shutdown's own deadline",
     ),
     (
         "lifecycle.rs::provision_new_peer_session",

@@ -696,9 +696,20 @@ pub enum PeerCommand {
         /// The replaced session's consecutive NOTIFICATION teardowns.
         notification_idle_failures: u32,
     },
-    /// Gracefully tear down the session (`ManualStop`).
-    /// Optional reason is included in the Cease NOTIFICATION (RFC 9003).
+    /// Tear down the session for good (`ManualStop`): a disable or a
+    /// deletion. Optional reason is included in the Cease NOTIFICATION (RFC
+    /// 9003). When the peer negotiated the RFC 8538 N bit the Cease goes out
+    /// as a Hard Reset, and routes retained from an earlier session loss are
+    /// purged, so neither side keeps the other's routes.
     Stop {
+        /// Shutdown communication reason (pre-encoded), or None.
+        reason: Option<Bytes>,
+    },
+    /// [`Self::Stop`] for a peer expected to reconnect at once, such as a
+    /// dynamic peer bounced onto new peer-group configuration: a plain
+    /// Cease/Administrative Shutdown, so both sides may retain routes under
+    /// Notification Graceful Restart.
+    StopForReconnect {
         /// Shutdown communication reason (pre-encoded), or None.
         reason: Option<Bytes>,
     },

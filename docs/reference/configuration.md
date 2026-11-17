@@ -1677,8 +1677,9 @@ admin_down_reason = "quarantined pending abuse review"
 At startup, and whenever the neighbor is added, the peer is added disabled. It
 makes no connection attempts, refuses inbound connections and reads 0 in
 `bgp_peer_admin_enabled`. On `SIGHUP`, setting the key on a running peer sends
-Cease/Administrative Shutdown carrying `admin_down_reason`, and clearing it
-enables the peer. The [reload matrix](reload-matrix.md#administrative-state)
+Cease/Administrative Shutdown carrying `admin_down_reason` (inside a Cease /
+Hard Reset when the peer negotiated RFC 8538 Notification Graceful Restart),
+and clearing it enables the peer. The [reload matrix](reload-matrix.md#administrative-state)
 classifies both.
 
 The runtime `rbgp neighbor <addr> enable|disable` toggle stays transient (it

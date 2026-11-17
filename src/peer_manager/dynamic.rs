@@ -579,10 +579,14 @@ impl PeerManager {
                     )
                     .await;
                 }
-                let _ = Self::shutdown_handle_bounded_owned(
+                // No range admits the peer any more: it is de-configured,
+                // so its session ends for good, as a deleted peer's does.
+                let _ = Self::stop_and_shutdown_handle_until(
                     address,
                     "dynamic rollback primary",
                     handle,
+                    Some(super::lifecycle::FinalStop(None)),
+                    tokio::time::Instant::now() + super::PEER_LIFECYCLE_COMMAND_TIMEOUT,
                 )
                 .await;
             });

@@ -76,7 +76,7 @@ async fn rib_park() -> RibPark {
     }
 }
 
-fn counter(metrics: &BgpMetrics, name: &str, labels: &[(&str, &str)]) -> f64 {
+pub(super) fn counter(metrics: &BgpMetrics, name: &str, labels: &[(&str, &str)]) -> f64 {
     metrics
         .registry()
         .gather()
