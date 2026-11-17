@@ -220,16 +220,18 @@ async fn send_apply_policy_impact_snapshot(
         .map_err(snapshot_apply_error)
 }
 
-/// Send `ApplyResolvedPolicySnapshot` and return the captured prior chains.
-/// Used in reverse to restore captured priors during rollback.
-async fn send_apply_resolved_policy_snapshot(
+/// Send `RestoreResolvedPolicySnapshot` to put the captured prior chains
+/// back during rollback. A restore is not qualified like the forward apply,
+/// so a peer whose session changed since the apply still gets its prior
+/// chain.
+async fn send_restore_resolved_policy_snapshot(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    targets: Vec<ResolvedPeerPolicy>,
-) -> Result<Vec<ResolvedPeerPolicy>, ConfigTransactionApplyError> {
+    priors: Vec<ResolvedPeerPolicy>,
+) -> Result<(), ConfigTransactionApplyError> {
     let (reply_tx, reply_rx) = oneshot::channel();
     peer_mgr_tx
-        .send(PeerManagerCommand::ApplyResolvedPolicySnapshot {
-            targets,
+        .send(PeerManagerCommand::RestoreResolvedPolicySnapshot {
+            priors,
             reply: reply_tx,
         })
         .await
@@ -240,7 +242,7 @@ async fn send_apply_resolved_policy_snapshot(
         .await
         .map_err(|_| ConfigTransactionApplyError::RecoveryRequired {
             reason: RuntimeConfigFenceReason::AcknowledgementLost,
-            message: "peer manager accepted resolved-policy apply but dropped its reply"
+            message: "peer manager accepted resolved-policy restore but dropped its reply"
                 .to_string(),
         })?
         .map_err(snapshot_apply_error)
@@ -273,9 +275,7 @@ async fn rollback_live_policy_and_snapshot(
     if original.fence_reason.is_some() {
         return original;
     }
-    let live_rollback = send_apply_resolved_policy_snapshot(peer_mgr_tx, priors)
-        .await
-        .map(|_| ());
+    let live_rollback = send_restore_resolved_policy_snapshot(peer_mgr_tx, priors).await;
     let snapshot_rollback = restore_preloaded_config_snapshot(peer_mgr_internal_tx, rollback).await;
     match (live_rollback, snapshot_rollback) {
         (Ok(()), Ok(())) => original,

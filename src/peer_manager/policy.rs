@@ -2025,6 +2025,17 @@ impl PeerManager {
         address: IpAddr,
         apply_error: &PolicyApplyFailure,
     ) -> PolicySnapshotFailure {
+        // A restore is never refused and never unwound, so its failure is
+        // ambiguous whatever the failing step.
+        if context.install == rustbgpd_transport::ImportPolicyInstall::Restore {
+            return PolicySnapshotFailure::ambiguous_code(
+                apply_error.code,
+                format!(
+                    "failed to restore the prior policy of {address}: {apply_error}; the \
+                     restored chains are left in place"
+                ),
+            );
+        }
         let mut applied = applied;
         // A session that refused its install, or a qualification that refused
         // it first, changed nothing: that target, the last captured, owes no
@@ -2037,15 +2048,6 @@ impl PeerManager {
                     format!("failed to apply resolved policy to {address}: {apply_error}"),
                 );
             }
-        }
-        if context.install == rustbgpd_transport::ImportPolicyInstall::Restore {
-            return PolicySnapshotFailure::ambiguous_code(
-                apply_error.code,
-                format!(
-                    "failed to restore the prior policy of {address}: {apply_error}; the \
-                     restored chains are left in place"
-                ),
-            );
         }
         match self
             .restore_resolved_policies(applied, context, require_clean_convergence)

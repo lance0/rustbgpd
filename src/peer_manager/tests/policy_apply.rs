@@ -2704,6 +2704,90 @@ async fn restore_replay_reinstalls_the_prior_chain_on_a_peer_without_route_refre
     rib.await.unwrap();
 }
 
+/// A config transaction's live apply moves a peer's import chain; the peer
+/// then reconnects without Route Refresh, and the transaction's publication
+/// fails. The rollback command restores the prior chain on that peer: a
+/// restore is not qualified, so the capability loss cannot keep the
+/// candidate installed. The refresh the peer cannot answer leaves the
+/// restore ambiguous, which fences the transaction.
+///
+/// The capability is lost when the forward apply's own Route Refresh is
+/// answered, so the rollback always observes it. Load-bearing: rolling back
+/// through the forward `ApplyResolvedPolicySnapshot` rejects the restore at
+/// its preflight, and the candidate stays installed.
+#[tokio::test]
+async fn config_rollback_restores_the_prior_chain_after_the_peer_loses_route_refresh() {
+    use rustbgpd_api::peer_types::{PolicySnapshotApplyError, ResolvedPeerPolicy};
+
+    let (mut mgr, rib_rx) = rfc8212_status_manager();
+    let rib = spawn_rfc8212_rib_stub(rib_rx, 0);
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let prior = validation_policy_chain(ImportValidationDependency::Rpki);
+    let candidate = deny_policy_chain();
+    let installed = InstalledImports::default();
+    let refreshes = Arc::new(AtomicUsize::new(0));
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        import_recording_handle(
+            addr,
+            true,
+            0,
+            true,
+            Some(prior.clone()),
+            Arc::clone(&installed),
+            Arc::clone(&refreshes),
+        ),
+        false,
+    );
+    mgr.peers.get_mut(&key(addr)).unwrap().import_policy = Some(prior.clone());
+
+    let (reply, response) = oneshot::channel();
+    let _ = Box::pin(
+        mgr.dispatch_command(PeerManagerCommand::ApplyPolicyImpactSnapshot {
+            static_targets: vec![ResolvedPeerPolicy {
+                address: addr,
+                interface: None,
+                import_policy: Some(candidate.clone()),
+                export_policy: None,
+            }],
+            dynamic_ranges: Vec::new(),
+            reply,
+        }),
+    )
+    .await;
+    let priors = response
+        .await
+        .unwrap()
+        .expect("the forward apply takes the candidate");
+    assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+    assert_eq!(*installed.lock().unwrap(), vec![Some(candidate.clone())]);
+
+    let (reply, response) = oneshot::channel();
+    let _ = Box::pin(
+        mgr.dispatch_command(PeerManagerCommand::RestoreResolvedPolicySnapshot { priors, reply }),
+    )
+    .await;
+    let outcome = response.await.unwrap();
+
+    assert_eq!(
+        *installed.lock().unwrap(),
+        vec![Some(candidate), Some(prior.clone())],
+        "the rollback reinstalls the prior chain: {outcome:?}"
+    );
+    assert!(
+        matches!(
+            outcome,
+            Err(PolicySnapshotApplyError::CompensationAmbiguous(_))
+        ),
+        "{outcome:?}"
+    );
+    assert_eq!(mgr.peers[&key(addr)].import_policy, Some(prior));
+
+    drop(mgr);
+    rib.await.unwrap();
+}
+
 /// The owned hot update's probe sees the peer down; the session comes up
 /// without Route Refresh and refuses the install. Nothing changed, so the
 /// update is `RejectedNoEffect`, not known divergence that would fence a

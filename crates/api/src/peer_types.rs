@@ -731,8 +731,9 @@ pub struct DynamicPeerBounceOutcome {
 /// Resolved import/export policy chains for one live peer session.
 ///
 /// Carried by [`PeerManagerCommand::ApplyResolvedPolicySnapshot`]. The same
-/// shape is reused for the captured PRIOR chains the command returns, so a
-/// rollback is just `ApplyResolvedPolicySnapshot` of the priors.
+/// shape is reused for the captured PRIOR chains a forward apply returns,
+/// which a rollback hands back through
+/// [`PeerManagerCommand::RestoreResolvedPolicySnapshot`].
 #[derive(Clone, Debug)]
 pub struct ResolvedPeerPolicy {
     /// Peer address (with `interface` for IPv6 link-local) identifying the live session.
@@ -745,8 +746,9 @@ pub struct ResolvedPeerPolicy {
     pub export_policy: Option<PolicyChain>,
 }
 
-/// A failed [`PeerManagerCommand::ApplyResolvedPolicySnapshot`] or
-/// [`PeerManagerCommand::ApplyPolicyImpactSnapshot`], classified by what it
+/// A failed [`PeerManagerCommand::ApplyResolvedPolicySnapshot`],
+/// [`PeerManagerCommand::ApplyPolicyImpactSnapshot`] or
+/// [`PeerManagerCommand::RestoreResolvedPolicySnapshot`], classified by what it
 /// left on the live sessions, so the caller can settle without parsing text.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PolicySnapshotApplyError {
@@ -1072,17 +1074,17 @@ pub enum PeerManagerCommand {
     /// Apply resolved import/export policy chains to a set of live
     /// peer sessions, returning each peer's PRIOR chains for rollback.
     ///
-    /// Used by the ADR-0076 live-impact policy executor to commit policy /
-    /// neighbor-set / peer-group / global-chain edits that reshape existing
-    /// peers' resolved policy. Each target's prior chains are captured before the
+    /// The forward apply over concrete peers: the same qualified path
+    /// [`PeerManagerCommand::ApplyPolicyImpactSnapshot`] takes once it has
+    /// expanded its dynamic ranges. Each target's prior chains are captured before the
     /// new ones are hot-applied through the same per-peer path SIGHUP uses. The
     /// command is rollback-capable at the peer-manager layer: on the first
     /// per-peer apply failure it attempts to restore the peers it already
     /// changed (reverse order). A successful restore leaves nothing mutated; a
     /// compound rollback failure is included in the returned `Err` and may
     /// leave per-peer retry intent armed. On success it returns the captured
-    /// priors; the executor replays them through this same command to roll back
-    /// after a later persistence failure. Targets not currently live
+    /// priors, which a later rollback hands to
+    /// [`PeerManagerCommand::RestoreResolvedPolicySnapshot`]. Targets not currently live
     /// (e.g. a dynamic peer that disconnected) are skipped and absent from the
     /// returned priors. Never mutates `current_config` — snapshot staging owns
     /// that, keeping a single token-advance point.
@@ -1091,6 +1093,23 @@ pub enum PeerManagerCommand {
         targets: Vec<ResolvedPeerPolicy>,
         /// Reply returns the captured prior chains (the rollback token).
         reply: oneshot::Sender<Result<Vec<ResolvedPeerPolicy>, PolicySnapshotApplyError>>,
+    },
+    /// Put back the prior chains a forward policy apply returned, after a
+    /// later step of the same config transaction failed (a publication
+    /// failure).
+    ///
+    /// Unlike a forward apply, a restore is not qualified and its import
+    /// installs are never refused: a peer that came up without Route Refresh
+    /// while holding the candidate chain still gets its prior chain back. A
+    /// restore that fails partway is never unwound back to the candidate; it
+    /// leaves the restored chains in place and replies
+    /// [`PolicySnapshotApplyError::CompensationAmbiguous`]. Never mutates
+    /// `current_config`.
+    RestoreResolvedPolicySnapshot {
+        /// The priors a forward apply returned, one entry per live peer.
+        priors: Vec<ResolvedPeerPolicy>,
+        /// Reply carries whether the restore completed.
+        reply: oneshot::Sender<Result<(), PolicySnapshotApplyError>>,
     },
     /// Apply resolved import/export policy chains for a live-impact
     /// transaction that may include static neighbors and dynamic ranges.

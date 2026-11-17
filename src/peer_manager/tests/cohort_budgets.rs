@@ -188,7 +188,6 @@ async fn assert_api_policy_reads(entry: ApiPolicyEntry) {
             ));
         })
     } else {
-        let (reply, response) = oneshot::channel();
         let targets = peers
             .into_iter()
             .map(|address| ResolvedPeerPolicy {
@@ -198,21 +197,32 @@ async fn assert_api_policy_reads(entry: ApiPolicyEntry) {
                 export_policy: Some(deny_policy_chain()),
             })
             .collect();
-        let command = match entry {
-            ApiPolicyEntry::LiveImpact => PeerManagerCommand::ApplyPolicyImpactSnapshot {
-                static_targets: targets,
-                dynamic_ranges: Vec::new(),
-                reply,
-            },
-            ApiPolicyEntry::PublicationCompensation => {
-                PeerManagerCommand::ApplyResolvedPolicySnapshot { targets, reply }
-            }
-            ApiPolicyEntry::Catalog => unreachable!("catalog command is handled above"),
-        };
-        command_tx.send(command).await.unwrap();
-        tokio::spawn(async move {
-            assert_eq!(response.await.unwrap().unwrap().len(), 2);
-        })
+        if matches!(entry, ApiPolicyEntry::PublicationCompensation) {
+            let (reply, response) = oneshot::channel();
+            command_tx
+                .send(PeerManagerCommand::RestoreResolvedPolicySnapshot {
+                    priors: targets,
+                    reply,
+                })
+                .await
+                .unwrap();
+            tokio::spawn(async move {
+                response.await.unwrap().unwrap();
+            })
+        } else {
+            let (reply, response) = oneshot::channel();
+            command_tx
+                .send(PeerManagerCommand::ApplyPolicyImpactSnapshot {
+                    static_targets: targets,
+                    dynamic_ranges: Vec::new(),
+                    reply,
+                })
+                .await
+                .unwrap();
+            tokio::spawn(async move {
+                assert_eq!(response.await.unwrap().unwrap().len(), 2);
+            })
+        }
     };
     tokio::time::timeout(Duration::from_secs(5), held_rx)
         .await
