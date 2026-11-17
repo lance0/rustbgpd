@@ -306,12 +306,15 @@ impl Options {
 
 fn attributes(index: usize, med: u32, local_pref: u32) -> Arc<AttrSet> {
     let index = u32::try_from(index).expect("index fits u32");
-    // Distinct attributes per route: one UPDATE a route, about 180 bytes on
-    // the wire, so a paused receiver's socket and writer budget absorb only
-    // a small part of the burst and the rest stays charged to the credit.
+    // Distinct attributes per route: one UPDATE a route, 202 bytes on the
+    // wire for unicast, so a paused receiver's socket and writer budget
+    // absorb only a small part of the burst and the rest stays charged to
+    // the credit. The high half carries `index >> 16`, so routes 65,536
+    // apart never share attributes (and an UPDATE) at the full shape; the
+    // release witness divides queued bytes by one row's size (README).
     let path = (0..8).map(|hop| 64_496 + hop).collect();
     let communities = (0..24)
-        .map(|tag| (65_000 << 16) | ((index + tag) & 0xffff))
+        .map(|tag| ((65_000 + (index >> 16)) << 16) | ((index + tag) & 0xffff))
         .collect();
     AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
@@ -680,6 +683,8 @@ type ReceiverSpec = (Vec<(Afi, Safi)>, Option<PolicyChain>);
 /// One receiver: its daemon-side session and its harness-side stub.
 struct Receiver {
     ip: Ipv4Addr,
+    /// The stub's listening address: one end of its session's connection.
+    listen: SocketAddr,
     session: PeerHandle,
     io: PeerIoControl,
     rx: Option<mpsc::Receiver<Message>>,
@@ -755,10 +760,10 @@ impl Fixture {
             );
             drop(guard);
             session.start().await?;
-            pending.push((ip, session, handshake));
+            pending.push((ip, address, session, handshake));
         }
         let until = tokio::time::Instant::now() + deadline;
-        for (ip, session, handshake) in pending {
+        for (ip, listen, session, handshake) in pending {
             let stub = tokio::time::timeout_at(until, handshake)
                 .await
                 .with_context(|| format!("receiver {ip}: handshake timed out"))???;
@@ -779,6 +784,7 @@ impl Fixture {
             }
             self.receivers.push(Receiver {
                 ip,
+                listen,
                 session,
                 io: stub.io_control,
                 rx: Some(stub.rx),
@@ -1317,66 +1323,99 @@ async fn published_credit_rows(rib: &mpsc::Sender<RibUpdate>, metrics: &BgpMetri
         .unwrap_or(0.0))
 }
 
-/// Bytes queued in the kernel on every established TCP connection with an
-/// endpoint in `ips`, from a `/proc/net/tcp` table of this process's network
-/// namespace: send queue (written, not yet acknowledged) plus receive queue
-/// (arrived, not yet read), both ends. On loopback that is every written
-/// byte a paused reader has not read.
-fn socket_queue_bytes(table: &str, ips: &HashSet<Ipv4Addr>) -> Result<u64> {
-    let endpoint = |field: &str| -> Result<Ipv4Addr> {
-        let (address, _) = field.split_once(':').context("tcp endpoint")?;
-        Ok(Ipv4Addr::from(
-            u32::from_str_radix(address, 16)?.to_le_bytes(),
+/// Bytes queued in the kernel on the established connections with an end
+/// at one of `listeners` (the receiver stubs' listening addresses), from a
+/// `/proc/net/tcp` table, and how many connection ends matched. The table
+/// covers this process's whole network namespace, so connections are picked
+/// by address and port, both ends: each end's send queue (written, not yet
+/// acknowledged) plus receive queue (arrived, not yet read). On loopback
+/// that is every written byte a paused reader has not read.
+fn socket_queue_bytes(table: &str, listeners: &HashSet<SocketAddr>) -> Result<(u64, usize)> {
+    let endpoint = |field: &str| -> Result<SocketAddr> {
+        let (address, port) = field.split_once(':').context("tcp endpoint")?;
+        let ip = Ipv4Addr::from(u32::from_str_radix(address, 16)?.to_le_bytes());
+        Ok(SocketAddr::new(
+            IpAddr::V4(ip),
+            u16::from_str_radix(port, 16)?,
         ))
     };
-    let mut bytes = 0;
+    let (mut bytes, mut ends) = (0, 0);
     for line in table.lines().skip(1) {
         let fields: Vec<&str> = line.split_whitespace().collect();
         ensure!(fields.len() > 4, "short /proc/net/tcp line: {line}");
         // State 01 is ESTABLISHED.
-        let ours = ips.contains(&endpoint(fields[1])?) || ips.contains(&endpoint(fields[2])?);
+        let ours =
+            listeners.contains(&endpoint(fields[1])?) || listeners.contains(&endpoint(fields[2])?);
         if fields[3] != "01" || !ours {
             continue;
         }
         let (tx, rx) = fields[4].split_once(':').context("tcp queues")?;
         bytes += u64::from_str_radix(tx, 16)? + u64::from_str_radix(rx, 16)?;
+        ends += 1;
     }
-    Ok(bytes)
+    Ok((bytes, ends))
 }
+
+/// The longest the release cells' held read, its queries and their replies
+/// included, may take. A RIB that stops serving its update channel would
+/// otherwise hold the read, and the readers' resume behind it, forever; a
+/// read at the cap is recorded as unavailable (bar 6 INVALID).
+const HELD_READ_CAP: Duration = Duration::from_secs(5);
 
 /// Rows the RIB has handed toward the paused burst receivers and they have
 /// not read, read without the credit gauge: every receiver's Adj-RIB-Out
-/// count of the burst family from one RIB turn (`QueryBmpPeerStats`) less
-/// the rows the receivers decoded. Beside it, the credit gauge published
-/// before and after that turn, the session writers' queued bytes and the
-/// kernel queues of the receivers' connections.
+/// count of the burst family less the rows the receivers decoded. Unicast
+/// asks `QueryAdvertisedCount` for every receiver at once (O(1) a private
+/// peer: `AdjRibOut::len`); EVPN has no O(1) per-family count, so it reads
+/// `QueryBmpPeerStats`, which walks every peer's Adj-RIB-Out in one turn.
+/// Beside it, the credit gauge published before and after those queries,
+/// the session writers' queued bytes and the kernel queues of the
+/// receivers' connections (null when the table is unreadable or no
+/// connection matches).
 async fn held_snapshot(
     rib: &mpsc::Sender<RibUpdate>,
     metrics: &BgpMetrics,
-    receivers: &[Ipv4Addr],
-    family: (Afi, Safi),
+    receivers: &[(Ipv4Addr, SocketAddr)],
+    family: Family,
     read: u64,
     t0: Instant,
 ) -> Result<Value> {
     let charged_before = published_credit_rows(rib, metrics).await?;
     let at = t0.elapsed();
-    let (reply, stats) = oneshot::channel();
-    rib.send(RibUpdate::QueryBmpPeerStats { reply }).await?;
-    let stats = stats.await?;
-    let charged_after = published_credit_rows(rib, metrics).await?;
     let mut advertised = 0;
-    for &ip in receivers {
-        advertised += stats
-            .adj_rib_out_post
-            .get(&PeerId::from_ipv4(ip))
-            .and_then(|counts| counts.iter().find(|(key, _)| *key == family))
-            .map_or(0, |&(_, count)| count);
+    if family == Family::Unicast {
+        let mut replies = Vec::with_capacity(receivers.len());
+        for &(ip, _) in receivers {
+            let (reply, count) = oneshot::channel();
+            let peer = PeerId::from_ipv4(ip);
+            rib.send(RibUpdate::QueryAdvertisedCount { peer, reply })
+                .await?;
+            replies.push(count);
+        }
+        for count in replies {
+            advertised += u64::try_from(count.await?)?;
+        }
+    } else {
+        let (reply, stats) = oneshot::channel();
+        rib.send(RibUpdate::QueryBmpPeerStats { reply }).await?;
+        let stats = stats.await?;
+        for &(ip, _) in receivers {
+            advertised += stats
+                .adj_rib_out_post
+                .get(&PeerId::from_ipv4(ip))
+                .and_then(|counts| counts.iter().find(|(key, _)| *key == family.afi_safi()))
+                .map_or(0, |&(_, count)| count);
+        }
     }
+    let charged_after = published_credit_rows(rib, metrics).await?;
     let writer = Snapshot::take(metrics)
         .total("bgp_outbound_writer_bytes")
         .unwrap_or(0.0);
-    let ips = receivers.iter().copied().collect();
-    let table = std::fs::read_to_string("/proc/self/net/tcp")?;
+    let listeners = receivers.iter().map(|&(_, listen)| listen).collect();
+    let sockets = std::fs::read_to_string("/proc/self/net/tcp")
+        .ok()
+        .and_then(|table| socket_queue_bytes(&table, &listeners).ok())
+        .filter(|&(_, ends)| ends > 0);
     Ok(json!({
         "at_ms": at.as_secs_f64() * 1e3,
         "advertised_rows": advertised,
@@ -1384,8 +1423,29 @@ async fn held_snapshot(
         "charged_before": charged_before,
         "charged_after": charged_after,
         "writer_bytes": writer,
-        "socket_bytes": socket_queue_bytes(&table, &ips)?,
+        "socket_bytes": sockets.map(|(bytes, _)| bytes),
+        "socket_ends": sockets.map(|(_, ends)| ends),
     }))
+}
+
+/// `held_snapshot` within `cap`; past it, the read is unavailable and the
+/// cell goes on to resume its readers.
+async fn held_read(
+    rib: &mpsc::Sender<RibUpdate>,
+    metrics: &BgpMetrics,
+    receivers: &[(Ipv4Addr, SocketAddr)],
+    family: Family,
+    read: u64,
+    t0: Instant,
+    cap: Duration,
+) -> Result<Value> {
+    let snapshot = held_snapshot(rib, metrics, receivers, family, read, t0);
+    match tokio::time::timeout(cap, snapshot).await {
+        Ok(held) => held,
+        Err(_) => Ok(json!({
+            "unavailable": format!("no reply within {} ms", cap.as_millis()),
+        })),
+    }
 }
 
 /// The lowest and highest of `values`.
@@ -1757,9 +1817,9 @@ pub async fn exhaust(
     .await;
     // A release cell's held payload, read with every burst reader paused.
     let held = if restart {
-        let ips: Vec<_> = fixture.receivers[..receivers]
+        let ends: Vec<_> = fixture.receivers[..receivers]
             .iter()
-            .map(|r| r.ip)
+            .map(|r| (r.ip, r.listen))
             .collect();
         let read = collectors
             .iter()
@@ -1768,7 +1828,8 @@ pub async fn exhaust(
                 state.announced + state.withdrawals
             })
             .sum();
-        Some(held_snapshot(&rib, &fixture.metrics, &ips, burst_family, read, t0).await?)
+        let (metrics, cap) = (&fixture.metrics, HELD_READ_CAP);
+        Some(held_read(&rib, metrics, &ends, family, read, t0, cap).await?)
     } else {
         None
     };
@@ -1851,7 +1912,7 @@ pub async fn exhaust(
     let mut rows_json = Vec::new();
     let (mut exact, mut ordered, mut missing, mut after_eor, mut resets) = (0, 0, 0, 0, 0);
     let (mut survivors, mut churned_after_eor, mut duplicates) = (0, 0, 0);
-    let mut min_row_bytes: Option<u64> = None;
+    let (mut row_bytes, mut rows_per_update): (Option<(u64, u64)>, u64) = (None, 0);
     let mut reflected = Vec::new();
     let mut latest = Duration::ZERO;
     // The first and last receiver's End-of-RIB, from t0.
@@ -1865,7 +1926,11 @@ pub async fn exhaust(
         survivors += state.withdrawn_survivors();
         churned_after_eor += state.churned_after_eor;
         duplicates += state.duplicates_before_eor;
-        min_row_bytes = min_row_bytes.into_iter().chain(state.min_row_bytes).min();
+        if let Some((min, max)) = state.row_bytes {
+            let (low, high) = row_bytes.unwrap_or((min, max));
+            row_bytes = Some((low.min(min), high.max(max)));
+        }
+        rows_per_update = rows_per_update.max(state.max_rows_per_update);
         reflected.push(state.churn_reflected_before_eor);
         resets += state.resets;
         if let Some(at) = state.settled_at {
@@ -1891,6 +1956,9 @@ pub async fn exhaust(
             "withdrawals": state.withdrawals,
             "outside": state.outside,
             "decode_failures": state.decode_failures,
+            "min_row_bytes": state.row_bytes.map(|(min, _)| min),
+            "max_row_bytes": state.row_bytes.map(|(_, max)| max),
+            "max_rows_per_update": state.max_rows_per_update,
             "resets": state.resets,
             "credit_refusals": refused_by(ip),
         }));
@@ -2003,8 +2071,11 @@ pub async fn exhaust(
             // Per burst receiver, at its End-of-RIB (null without one).
             "churn_reflected_before_eor": reflected,
             "duplicates_before_eor": duplicates,
-            // The fewest wire bytes per announced burst row on any receiver.
-            "min_row_bytes": min_row_bytes,
+            // The fewest and most wire bytes per announced burst row, and
+            // the most announced rows in one UPDATE, on any receiver.
+            "min_row_bytes": row_bytes.map(|(min, _)| min),
+            "max_row_bytes": row_bytes.map(|(_, max)| max),
+            "max_rows_per_update": rows_per_update,
             "stub_resets": resets,
             "not_established": down,
             "session_flaps_total": flaps,
@@ -2277,8 +2348,9 @@ mod tests {
     use rustbgpd_rib::update::RibUpdate;
 
     use super::{
-        check_read_hold, churn_plan, fold_slice_maxima, longest, recorded_pass, socket_queue_bytes,
-        source_withdrawal, Buckets, Family, Options, Snapshot, Trigger, SLICE_MAX,
+        attributes, check_read_hold, churn_plan, fold_slice_maxima, held_read, longest,
+        recorded_pass, socket_queue_bytes, source_withdrawal, Buckets, Family, Options, Snapshot,
+        Trigger, SLICE_MAX,
     };
     use crate::credit_wire::{Observed, WireFamily, WireState};
 
@@ -2287,26 +2359,62 @@ mod tests {
     }
 
     #[test]
-    fn socket_queues_sum_both_ends_of_the_receivers_established_connections() {
-        // 127.10.1.1:179 <-> 127.0.0.1:40000 both ways, established (01),
-        // a listener (0A) and an unrelated connection.
+    fn socket_queues_sum_both_ends_of_the_receivers_connections_only() {
+        // The stub listens on 127.10.1.1:179; its session runs to
+        // 127.0.0.1:40000, both ends established (01). A listener (0A), the
+        // same receiver address on another port (another process's
+        // connection in the namespace) and an unrelated connection do not
+        // count.
         let table = [
             "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when",
             "   0: 01010A7F:00B3 0100007F:9C40 01 00000010:00000020 00:00000000",
             "   1: 0100007F:9C40 01010A7F:00B3 01 00000100:00000000 00:00000000",
-            "   2: 01010A7F:00B4 00000000:0000 0A 00000005:00000005 00:00000000",
-            "   3: 0100007F:1F90 0200007F:9C41 01 00001000:00001000 00:00000000",
+            "   2: 01010A7F:00B3 00000000:0000 0A 00000005:00000005 00:00000000",
+            "   3: 01010A7F:00B4 0100007F:9C41 01 00002000:00002000 00:00000000",
+            "   4: 0100007F:1F90 0200007F:9C42 01 00001000:00001000 00:00000000",
         ]
         .join("\n");
-        let ips = [std::net::Ipv4Addr::new(127, 10, 1, 1)]
-            .into_iter()
-            .collect();
+        let listen = "127.10.1.1:179".parse().unwrap();
+        let listeners = [listen].into_iter().collect();
         assert_eq!(
-            socket_queue_bytes(&table, &ips).unwrap(),
-            0x10 + 0x20 + 0x100
+            socket_queue_bytes(&table, &listeners).unwrap(),
+            (0x10 + 0x20 + 0x100, 2)
         );
-        assert_eq!(socket_queue_bytes(&table, &Default::default()).unwrap(), 0);
-        assert!(socket_queue_bytes("header\n  0: short", &ips).is_err());
+        // No listener matched: zero ends, which the cell records as null.
+        assert_eq!(
+            socket_queue_bytes(&table, &Default::default()).unwrap(),
+            (0, 0)
+        );
+        assert!(socket_queue_bytes("header\n  0: short", &listeners).is_err());
+    }
+
+    #[tokio::test]
+    async fn held_read_is_unavailable_when_the_rib_never_replies() {
+        // A RIB that never serves its channel: the read ends at its cap,
+        // well inside the test's own.
+        let (rib, _queue) = tokio::sync::mpsc::channel(4);
+        let metrics = rustbgpd_telemetry::BgpMetrics::new();
+        let cap = std::time::Duration::from_millis(50);
+        let started = std::time::Instant::now();
+        let read = held_read(&rib, &metrics, &[], Family::Unicast, 0, started, cap);
+        let held = tokio::time::timeout(std::time::Duration::from_secs(5), read)
+            .await
+            .expect("the held read ends at its cap")
+            .unwrap();
+        assert_eq!(
+            held,
+            serde_json::json!({"unavailable": "no reply within 50 ms"})
+        );
+    }
+
+    #[test]
+    fn burst_attributes_are_distinct_across_the_full_shape() {
+        // Rows sharing attributes share an UPDATE, which shrinks the bytes
+        // a row and inflates the release witness's slack.
+        let distinct: std::collections::HashSet<_> = (0..150_000)
+            .map(|index| attributes(index, 7, 100))
+            .collect();
+        assert_eq!(distinct.len(), 150_000);
     }
 
     #[test]

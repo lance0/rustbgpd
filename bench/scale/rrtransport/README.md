@@ -372,25 +372,39 @@ and patches nothing. What each recorded number measures:
   (`witness.peak_credit_bytes`, every 250 ms): the harness has no getter for
   it.
 - `witness.held` (release cells; null elsewhere): one read with every burst
-  reader paused, just before the churn-free window (`at_ms`). It does not
-  read the credit gauge to find the held rows: `advertised_rows` sums every
-  burst receiver's Adj-RIB-Out count of the burst family from one RIB turn
-  (`QueryBmpPeerStats`; the RIB records a row there when it admits the
-  envelope carrying it), and `read_rows` sums the rows the receivers
-  decoded. `charged_before` and `charged_after` are the summed credit-rows
-  gauge, republished, before and after that turn. `writer_bytes` is
+  reader paused, just before the churn-free window (`at_ms`), bounded at
+  5 s; past that it records only `unavailable` and the cell resumes its
+  readers. It does not read the credit gauge to find the held rows:
+  `advertised_rows` sums every burst receiver's Adj-RIB-Out count of the
+  burst family (the RIB records a row there when it admits the envelope
+  carrying it), and `read_rows` sums the rows the receivers decoded. For
+  unicast the counts are one `QueryAdvertisedCount` a receiver, all queued
+  at once (O(1) a private peer); EVPN has no O(1) per-family count, so it
+  reads `QueryBmpPeerStats`, which walks every peer's Adj-RIB-Out in one
+  turn. `charged_before` and `charged_after` are the summed credit-rows
+  gauge, republished, before and after those queries. `writer_bytes` is
   `bgp_outbound_writer_bytes` (encoded, not yet written to a socket) and
   `socket_bytes` the send and receive queues of the burst receivers'
-  established connections in `/proc/self/net/tcp` (written, not yet read).
-  A session drops an envelope, and its charge, once it has encoded it, so
-  those bytes are the held rows the charge no longer covers. The count is
-  of routes, not rows: in the churn variant a route withdrawn while held
-  leaves its announcement and its withdrawal uncounted, and a re-announced
-  one counts once, so held can be short by up to two rows a withdrawal and
-  one a re-announcement.
-- `wire.min_row_bytes`: over every UPDATE a burst receiver decoded that
-  announced a row, the fewest bytes per announced row (the message less its
-  withdrawn routes), rounded down.
+  connections in `/proc/self/net/tcp` (written, not yet read), picked by
+  the stub's listening address and port at either end; `socket_ends` is how
+  many connection ends matched (null, with `socket_bytes`, when none did or
+  the table was unreadable). Those receive queues are the harness
+  receivers' kernel buffers: decoded-row credit, the session writers'
+  buffers and kernel socket memory are separate terms. A session drops an
+  envelope, and its charge, once it has encoded it, so those bytes are the
+  held rows the charge no longer covers. The count is of routes, not rows:
+  in the churn variant a route withdrawn while held is in no Adj-RIB-Out
+  count while its announcement and withdrawal may both still be charged,
+  and a re-announced one counts once against up to two charged rows. Churn
+  can therefore only lower held against the charge, by up to receivers ×
+  (2 × `churn.withdrawn` + `churn.re_announced`) rows, which loosens the
+  witness in that cell and never trips it.
+- `wire.min_row_bytes` and `wire.max_row_bytes`: over every UPDATE a burst
+  receiver decoded that announced a row, the fewest and most bytes per
+  announced row (the message less its withdrawn routes), rounded down;
+  `wire.max_rows_per_update` is the most announced rows in one UPDATE. Each
+  receiver's entry under `receivers` records the same three. The burst's
+  attributes differ per route, so each UPDATE carries one row.
 - `actor.inbox_round_trip`: from the release (`from_ms`) until every burst
   receiver is exact (`to_ms`), one `QueryLocRibCount` (a length read)
   through the RIB's update channel every 10 ms, sent from the harness
@@ -427,15 +441,31 @@ The cell-7 bars read the candidate's measured fixed-shape runs only:
   of its window (INVALID otherwise); for unicast,
   `drain_gauges.peak_operations_live` is 0; and the summed credit-rows peak
   is at most receivers × (per-peer row credit + one pass): 150 × (109,655 +
-  1,024). Every row held toward the paused receivers must be charged
-  (`witness.held`): held = `advertised_rows` − `read_rows` may exceed the
-  charge (`charged_after`) by at most the rows the sessions already
-  encoded, (`writer_bytes` + `socket_bytes`) / `wire.min_row_bytes`
-  rounded down, plus receivers × (one pass + `churn.withdrawn`, the
-  churn variant's withdrawals, which are smaller on the wire), or FAIL
-  "owed rows not charged". A charge that moved more than receivers × one
-  pass across the held read is INVALID ("not tight"), as is a read outside
-  the pause. The witness does not ask the charge to reach the credit:
+  1,024). For a family the candidate drains by row cursor (unicast), every
+  row held toward the paused receivers must be charged (`witness.held`):
+  held = `advertised_rows` − `read_rows` may exceed the charge
+  (`charged_after`) by at most the rows the sessions already encoded,
+  (`writer_bytes` + `socket_bytes`) / `wire.min_row_bytes` rounded down,
+  or FAIL "owed rows not charged". Nothing else is added to that slack: an
+  envelope part encoded is both charged and queued, and rows admitted after
+  the held read are charged and held nowhere, which only loosen the check.
+  The read is INVALID when it is unavailable, outside the pause, not tight
+  (the charge moved by more than receivers × one pass either way across
+  it), when `socket_ends` is not 2 × receivers, when the row size is not
+  uniform (an UPDATE carried more than one announced row, or
+  `wire.max_row_bytes` exceeds `wire.min_row_bytes` by more than 1%), and
+  when held fits the slack: there a missing charge cannot show. Measured on
+  one cursor-drain tree (correctness-only runs), the witness detects a
+  missing charge above about 106,000 rows (1.1% of the charge) at 150 ×
+  150k: a clean read held 12,029,952 rows against a 9,879,552-row charge
+  with a slack of 2,256,379 (margin 105,979; 106,636 under churn), and the
+  same tree held 4,611,072 rows over its charge (4,458,496 under churn) with
+  every fourth cursor envelope uncharged and 11,959,296 (11,979,776) with
+  nothing charged, both FAIL.
+  An owed EVPN family is not drained by cursor and its whole-table
+  operations charge no rows by design, so for EVPN the witness is
+  report-only: its line carries no charging verdict either way. The
+  witness does not ask the charge to reach the credit:
   backpressure can stop a charged drain short of it. One cursor-drain tree
   peaked at about 150 × 67,000 rows at the fixed 30 s pause, still staging
   when the readers resumed, and held exactly 150 × 109,655 when paused
@@ -551,7 +581,7 @@ absolute), with 150 receivers among 153 registered peers, 150,000 rows, a
 | 4 | zero dirty episodes in every candidate probe cell |
 | 6 | report-only |
 | 7 owed-drain step | every candidate release run's longest owed-drain step ≤ 50 ms (INVALID on a tree without the histogram: no instrument) |
-| 7 per kind and family | exact wire state, one End-of-RIB after the table, zero resets; churn variant: both kinds of churn, sent between the release and the resume, and on every receiver a churned route already in its post-churn state before its End-of-RIB; longest actor turn ≤ 250 ms (PASS needs the poll and the inbox round trip within it); healthy gap ≤ 1 s; unicast live whole-table operations 0 from the release on; credit-rows peak ≤ 150 × (per-peer credit + one pass); rows held toward the paused receivers no more than the charge plus the rows already encoded, one pass and the churn withdrawals each; byte bound report-only |
+| 7 per kind and family | exact wire state, one End-of-RIB after the table, zero resets; churn variant: both kinds of churn, sent between the release and the resume, and on every receiver a churned route already in its post-churn state before its End-of-RIB; longest actor turn ≤ 250 ms (PASS needs the poll and the inbox round trip within it); healthy gap ≤ 1 s; unicast live whole-table operations 0 from the release on; credit-rows peak ≤ 150 × (per-peer credit + one pass); unicast rows held toward the paused receivers no more than the charge plus the rows already encoded (EVPN report-only); byte bound report-only |
 
 **INVALID** means the evidence cannot support a verdict: a missing result,
 a correctness-only or reduced run offered as a measurement, a missing
@@ -571,7 +601,7 @@ a missing or null one makes that cell INVALID, never PASS.
 | 3 | `exhaust-<family>.json`, every run of both arms | `mode`; `unaffected.injected` and `unaffected.delivered` (nonzero), `unaffected.p99_latency_ms`, `unaffected.max_gap_ms`; candidate `unaffected.max_gap_raw_ms`, `unaffected.quiet_lead_ms` and `unaffected.quiet_excluded` (present; null or with `from_ms`, `to_ms`, `span_ms`) |
 | 4 | `probes.json`, every run of both arms | `mode`; `probes` = the fixed 9 cells (`cell`, `shape`, `peers`, `stall_ms`; restart `table`), each candidate cell with `dirty_episodes` |
 | 6 | `fill-<family>.json`, every run of both arms, each family | `mode`; `shape.receivers`, `shape.rows_per_receiver` fixed; candidate `estimate.bytes_per_queued_row` and `row_size_of` |
-| 7 | `restart-<family>.json` and `restart-churn-<family>.json`, every candidate run | `mode`; `shape.receivers`, `shape.rows_per_receiver`, `shape.pause_ms`, `shape.trigger`, `shape.registered_peers` fixed; `checks.final_state_exact`, `checks.eor_after_every_route`, `checks.no_session_resets`; `actor.slice_max_us.actor_poll`, `actor.turn_longest_ms`, `actor.work_longest_ms`, `actor.inbox_round_trip.longest_ms`, `probes` and `unfinished`; `witness` (an object; `witness.peak_credit_bytes` and `row_size_of` on a byte-credit tree); `row_credit` (all four constants); `drain_gauges` `from_ms`, `to_ms`, `read_every_ms`, `reads`, `peak_credit_rows`, `peak_operations_live`; `witness.held` `at_ms`, `advertised_rows`, `read_rows`, `charged_before`, `charged_after`, `writer_bytes`, `socket_bytes`, `wire.min_row_bytes` and `cell` (row-credit trees); `unaffected` as cell 3's candidate; churn variant `churn.withdrawn`, `churn.re_announced`, `churn.started_ms`, `churn.sent_ms`, `timing.release_sent_ms`, `timing.resumed_ms`, `timing.last_eor_ms`, `wire.churn_reflected_before_eor` (one count per receiver); the step line `actor.owed_drain_step_longest_ms` |
+| 7 | `restart-<family>.json` and `restart-churn-<family>.json`, every candidate run | `mode`; `shape.receivers`, `shape.rows_per_receiver`, `shape.pause_ms`, `shape.trigger`, `shape.registered_peers` fixed; `checks.final_state_exact`, `checks.eor_after_every_route`, `checks.no_session_resets`; `actor.slice_max_us.actor_poll`, `actor.turn_longest_ms`, `actor.work_longest_ms`, `actor.inbox_round_trip.longest_ms`, `probes` and `unfinished`; `witness` (an object; `witness.peak_credit_bytes` and `row_size_of` on a byte-credit tree); `row_credit` (all four constants); `drain_gauges` `from_ms`, `to_ms`, `read_every_ms`, `reads`, `peak_credit_rows`, `peak_operations_live`; unicast `witness.held` `at_ms`, `advertised_rows`, `read_rows`, `charged_before`, `charged_after`, `writer_bytes`, `socket_bytes`, `socket_ends`, and `wire.min_row_bytes`, `wire.max_row_bytes`, `wire.max_rows_per_update` (row-credit trees); `unaffected` as cell 3's candidate; churn variant `churn.withdrawn`, `churn.re_announced`, `churn.started_ms`, `churn.sent_ms`, `timing.release_sent_ms`, `timing.resumed_ms`, `timing.last_eor_ms`, `wire.churn_reflected_before_eor` (one count per receiver); the step line `actor.owed_drain_step_longest_ms` |
 | all | `provenance.jsonl` per repetition | `sha256` (one per arm, different between arms) and `cells` |
 
 Before it appends its provenance line, the runner deletes the previous result
@@ -590,8 +620,11 @@ stale re-announcement and a route outside the churn after the End-of-RIB;
 it also checks the churn witness and duplicate count, the gap exclusion and
 where it starts, that a plain registry read misses the since-render slice
 maximum the harness keeps, the histogram brackets, that a round-trip probe
-the RIB never answers ends at its cap as unfinished, and that the mirrored
-row-credit constants match the RIB's.
+the RIB never answers ends at its cap as unfinished, and so does a held
+read, that the kernel queues counted are only the receivers' connections
+(by listening address and port, both ends), that the burst's attributes
+are distinct across the full shape, the per-row wire size bounds and rows
+per UPDATE, and that the mirrored row-credit constants match the RIB's.
 `python3 -m unittest discover -s
 bench/scale/rrtransport -p 'test_*.py'` seeds each bar's defect into the
 analyzer and checks that only that cell changes verdict (owe-whole flips
@@ -600,9 +633,13 @@ so are a null owed-drain step instrument, a long poll with no provably long
 turn, a dead turn or gauge instrument, a long inbox round trip under a short
 poll, an unfinished probe, churn outside the drain or behind every
 receiver's End-of-RIB, an over-wide excluded window, a byte-credit release
-bound, a result without the `row_credit` record and a held read that is
-not tight or outside the pause; held rows with nothing or half of them
-charged FAIL while a charged drain short of the credit passes; a FAIL survives another run's missing instrument or another
+bound, a result without the `row_credit` record, and a held read that is
+unavailable, not tight either way, outside the pause, idle or within its
+slack, over the wrong connections or with rows not one an UPDATE of one
+size; the measured unicast reads with every fourth cursor envelope or
+every envelope uncharged FAIL while the measured clean read and a charged
+drain short of the credit pass, and EVPN's witness is report-only; a FAIL
+survives another run's missing instrument or another
 repetition's missing or wrong-shape result, and a missing repetition keeps
 cell 7 from passing),
 removes each required field in turn, and drives the runner with a stand-in binary to check that a
