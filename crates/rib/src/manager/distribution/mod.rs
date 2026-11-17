@@ -9094,8 +9094,9 @@ impl RibManager {
 
     /// [`Self::distribute_changes`] for the resync tick's sliced pass, which
     /// hides withheld dirty peers until it restores them, so it leaves the
-    /// stale exempt flush to the tick.
-    pub(super) fn distribute_changes_without_stale_flush(&mut self) {
+    /// stale exempt flush to the tick. Returns whether the pass built a
+    /// whole-table resync, whether or not its commit was then admitted.
+    pub(super) fn distribute_changes_without_stale_flush(&mut self) -> bool {
         self.distribute_changes_inner(
             &HashSet::new(),
             &HashSet::new(),
@@ -9103,7 +9104,7 @@ impl RibManager {
             false,
             HashMap::new(),
             None,
-        );
+        )
     }
 
     pub(super) fn distribute_changes(
@@ -9227,13 +9228,13 @@ impl RibManager {
         advertised_generation_already_advanced: bool,
         evpn_feeds: HashMap<PeerId, super::evpn_recovery::EvpnCompleteFeed>,
         targets: Option<&HashSet<PeerId>>,
-    ) {
+    ) -> bool {
         if self.selection_release_staging
             && best_changed.is_empty()
             && all_affected.is_empty()
             && evpn_feeds.is_empty()
         {
-            return;
+            return false;
         }
         let pass = |manager: &mut Self, owned: bool| {
             manager.distribute_changes_with_readiness::<false>(
@@ -9245,22 +9246,23 @@ impl RibManager {
                 targets,
                 owned,
                 None,
-            );
+            )
         };
         // A replay pass, or one whose shared staging refreshes a group's
         // rejection inventory, owns its shared preparation and retirement;
         // keep executor opportunities across the whole pass. Clean
         // incremental fanout keeps its synchronous fast path.
-        if self.dirty_peers.is_empty()
+        let built = if self.dirty_peers.is_empty()
             && self.force_outbound_peers.is_empty()
             && !self.shared_rejection_work(best_changed, all_affected, targets)
         {
-            pass(self, false);
+            pass(self, false)
         } else {
-            super::with_executor_handoff(|| pass(self, true));
-        }
+            super::with_executor_handoff(|| pass(self, true))
+        };
         // No member body is open any more.
         self.settle_eor_after_pass();
+        built
     }
 
     /// Whether shared staging refreshes a per-client-best group's denial
@@ -9294,7 +9296,7 @@ impl RibManager {
         targets: &HashSet<PeerId>,
         drain: &mut super::outbound_owing::OwingDrain,
     ) {
-        self.distribute_changes_with_readiness::<true>(
+        let _ = self.distribute_changes_with_readiness::<true>(
             empty,
             empty,
             false,
@@ -9324,7 +9326,7 @@ impl RibManager {
         targets: Option<&HashSet<PeerId>>,
         owned: bool,
         drain: Option<&mut super::outbound_owing::OwingDrain>,
-    ) {
+    ) -> bool {
         // The two callers fix the mode; ordinary passes carry no drain state.
         debug_assert_eq!(DRAINING, drain.is_some());
         let mut drain = if DRAINING { drain } else { None };
@@ -9407,7 +9409,7 @@ impl RibManager {
         {
             drop(readiness);
             self.finish_readiness_owner(prep_installed);
-            return;
+            return false;
         }
 
         // Group-table commits and member-local exact-export overlay changes
@@ -9491,6 +9493,9 @@ impl RibManager {
         // member transactions. A genuine outer owner remains unchanged.
         drop(readiness);
         self.finish_readiness_owner(prep_installed);
+        // Whether a member's whole-table resync was built: past every
+        // preflight refusal, whatever its commit then meets.
+        let mut resync_built = false;
         let distribute_peers = || {
             // The unicast AFIs this pass carries, read once for the first
             // peer that owes one of them whole.
@@ -9690,6 +9695,7 @@ impl RibManager {
                         complete_evpn_feed =
                             self.prepare_complete_evpn_feed(peer, gid, None, false);
                     }
+                    resync_built |= resync;
                     #[cfg(test)]
                     if resync {
                         self.adj_rib_out_commit_stats.resync_builds = self
@@ -12017,5 +12023,6 @@ impl RibManager {
         } else {
             retire();
         }
+        resync_built
     }
 }

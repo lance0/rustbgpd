@@ -4389,23 +4389,31 @@ impl RibManager {
             // This unit is where a receiver the owed-row cap evicted is
             // built; it stays marked while it stays dirty.
             let evicted = self.owed_row_evicted.remove(&last);
-            self.distribute_changes_without_stale_flush();
+            let built = self.distribute_changes_without_stale_flush();
             let still_dirty = self.dirty_peers.contains(&last);
             if evicted && still_dirty {
                 self.owed_row_evicted.insert(last);
             }
-            // Refused (a live whole-table operation, a full channel), the
-            // unit built nothing: it is no backlog, and the release of what
-            // refused it wakes the tick.
             let ran = evicted && (!still_dirty || self.selection_partial_caught_up(last));
             self.dirty_peers.extend(withheld);
             self.dirty_since.extend(withheld_since);
             self.force_outbound_peers.extend(withheld_force);
             // An evicted receiver's resync is a whole table whatever the
             // poll budget says: it is the tick's last unit, so the actor
-            // loop takes queued input before the next receiver's.
+            // loop takes queued input before the next receiver's. Refused
+            // before anything was built (a live whole-table operation, a
+            // full channel), the unit is no backlog and the tick goes on;
+            // the release of what refused it wakes the tick. Refused after
+            // the build (its commit was not admitted), the unit still ends
+            // the tick, and the receiver waits for the ordinary retry, as
+            // any dirty peer whose send failed: a backlog re-arm would
+            // rebuild its table at that cadence for as long as the refusal
+            // lasts.
             if ran {
                 return true;
+            }
+            if evicted && built {
+                return recovered;
             }
             let unattempted_remain = self
                 .dirty_peers

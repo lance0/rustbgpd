@@ -2285,6 +2285,154 @@ fn a_refused_evicted_receiver_leaves_the_tick_at_its_ordinary_interval() {
     assert_settled(&manager, &receivers, &expected, "refused, then run");
 }
 
+/// The dirty peer the next resync tick selects first.
+fn next_unit(manager: &RibManager) -> PeerId {
+    let cursor = manager.dirty_resync_cursor;
+    let after = manager
+        .dirty_peers
+        .iter()
+        .find(|peer| cursor.is_none_or(|cursor| **peer > cursor));
+    *after
+        .or_else(|| manager.dirty_peers.iter().next())
+        .expect("a dirty peer")
+}
+
+/// Commits of `peer` refused for want of an exact export encoder.
+fn missing_encoder_refusals(manager: &RibManager, peer: PeerId) -> f64 {
+    let label = peer.label();
+    manager
+        .metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .filter(|family| family.name() == "bgp_outbound_commit_refusals_total")
+        .flat_map(|family| family.get_metric().to_vec())
+        .filter(|metric| {
+            let labels = metric.get_label();
+            labels
+                .iter()
+                .any(|l| l.name() == "peer" && l.value() == label)
+                && labels
+                    .iter()
+                    .any(|l| l.name() == "reason" && l.value() == "missing_encoder")
+        })
+        .map(|metric| metric.get_counter().get_value())
+        .sum()
+}
+
+/// Work count: a unit refused after its whole table was built (its commit
+/// finds no exact export encoder) still ends the tick, whatever the poll
+/// budget says. The tick that refuses the first of three evicted receivers
+/// builds that table alone; the other two are built one a tick after it,
+/// and the refused receiver stays dirty and marked until its commit is
+/// admitted. Red when only an admitted unit ends the tick: the refused
+/// unit leaves the receiver dirty, and the same tick goes on to build the
+/// next evicted receiver's table.
+#[test]
+fn a_unit_refused_after_its_build_still_ends_the_tick() {
+    const STALLED: usize = 3;
+    let (mut manager, mut receivers, expected) = evict_stalled(3);
+    manager.flush_poll_budget = Duration::from_secs(3600);
+    // The receiver that keeps up takes no step meanwhile.
+    let charge = crate::outbound_credit::OutboundCharge::new(
+        &manager.outbound_credit_handle(receivers[0].peer),
+        CREDIT,
+    );
+    let refused = next_unit(&manager);
+    assert!(manager.owed_row_evicted.contains(&refused));
+    let encoder = manager
+        .peer_export_encoders
+        .remove(&refused)
+        .expect("an exact export encoder");
+    let builds = manager.adj_rib_out_commit_stats.resync_builds;
+    manager.resync_dirty_peers_bounded();
+    assert_eq!(
+        manager.adj_rib_out_commit_stats.resync_builds - builds,
+        1,
+        "one whole table a tick, admitted or not"
+    );
+    assert_eq!(missing_encoder_refusals(&manager, refused), 1.0);
+    assert_eq!(manager.owed_row_evicted.len(), STALLED, "none was admitted");
+    assert!(manager.dirty_peers.contains(&refused));
+    // The other two follow, one a tick; the refused receiver waits.
+    for unit in 1..STALLED {
+        manager.resync_dirty_peers_bounded();
+        assert_eq!(
+            manager.adj_rib_out_commit_stats.resync_builds - builds,
+            1 + unit
+        );
+        assert_eq!(manager.owed_row_evicted.len(), STALLED - unit);
+        assert!(manager.owed_row_evicted.contains(&refused));
+    }
+    assert_eq!(missing_encoder_refusals(&manager, refused), 1.0);
+    manager.peer_export_encoders.insert(refused, encoder);
+    drop(charge);
+    drain(&mut manager, &mut receivers);
+    assert!(manager.owed_row_evicted.is_empty());
+    for receiver in &mut receivers {
+        receiver.write();
+    }
+    assert_settled(&manager, &receivers, &expected, "refused after its build");
+}
+
+/// A unit refused after its build waits for the ordinary retry, as any
+/// dirty peer whose send failed. With nothing else pending the tick reports
+/// no backlog, so the timer re-arms at its ordinary interval, and each
+/// retry builds the table once more until the commit is admitted. Red when
+/// a built-then-refused unit is reported as a backlog: the timer re-arms at
+/// the backlog cadence and rebuilds the receiver's whole table at that
+/// cadence for as long as the refusal lasts.
+#[test]
+fn a_unit_refused_after_its_build_retries_at_the_ordinary_interval() {
+    let (mut manager, mut receivers, expected) = evict_stalled(1);
+    let peer = receivers[1].peer;
+    receivers[1].write();
+    // The receiver that keeps up finishes first: nothing else is pending.
+    let latch = manager
+        .begin_outbound_operation(peer, 1)
+        .expect("a live whole-table operation");
+    for _ in 0..1000 {
+        manager.resync_dirty_peers_bounded();
+        receivers[0].write();
+    }
+    assert!(!manager.owes(receivers[0].peer, V4));
+    assert_eq!(manager.owed_rows[0].len(), 0);
+    drop(latch);
+    let encoder = manager
+        .peer_export_encoders
+        .remove(&peer)
+        .expect("an exact export encoder");
+    let builds = manager.adj_rib_out_commit_stats.resync_builds;
+    for (retry, refusals) in [(1, 1.0), (2, 2.0)] {
+        assert!(
+            !manager.resync_dirty_peers_bounded(),
+            "a unit refused after its build was reported as a backlog"
+        );
+        assert_eq!(
+            manager.adj_rib_out_commit_stats.resync_builds - builds,
+            retry
+        );
+        assert_eq!(missing_encoder_refusals(&manager, peer), refusals);
+        assert!(manager.resync_tick_pending(), "the receiver is retried");
+        assert!(manager.dirty_peers.contains(&peer));
+        assert!(manager.owed_row_evicted.contains(&peer));
+    }
+    manager.peer_export_encoders.insert(peer, encoder);
+    assert!(manager.resync_dirty_peers_bounded(), "the unit ran");
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds - builds, 3);
+    assert!(manager.owed_row_evicted.is_empty());
+    drain(&mut manager, &mut receivers);
+    for receiver in &mut receivers {
+        receiver.write();
+    }
+    assert_settled(
+        &manager,
+        &receivers,
+        &expected,
+        "refused after its build, then run",
+    );
+}
+
 /// Work count: receivers tied at one position are evicted in one pass
 /// with a fixed number of scans of the owing receivers, whatever their
 /// number. Red when each eviction looks for the slowest receiver and trims
