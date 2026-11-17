@@ -1527,13 +1527,14 @@ async fn policy_route_series_retire_only_when_a_staged_snapshot_commits() {
     let rollback = stage_rx.await.unwrap().unwrap();
 
     let (apply_tx, apply_rx) = oneshot::channel();
-    tx.send(PeerManagerCommand::ApplyResolvedPolicySnapshot {
-        targets: vec![ResolvedPeerPolicy {
+    tx.send(PeerManagerCommand::ApplyPolicyImpactSnapshot {
+        static_targets: vec![ResolvedPeerPolicy {
             address,
             interface: None,
             import_policy: Some(named_deny_policy_chain(&[Some("staged-new")])),
             export_policy: None,
         }],
+        dynamic_ranges: Vec::new(),
         reply: apply_tx,
     })
     .await
@@ -1561,13 +1562,14 @@ async fn policy_route_series_retire_only_when_a_staged_snapshot_commits() {
     );
 
     let (reset_tx, reset_rx) = oneshot::channel();
-    tx.send(PeerManagerCommand::ApplyResolvedPolicySnapshot {
-        targets: vec![ResolvedPeerPolicy {
+    tx.send(PeerManagerCommand::ApplyPolicyImpactSnapshot {
+        static_targets: vec![ResolvedPeerPolicy {
             address,
             interface: None,
             import_policy: Some(named_deny_policy_chain(&[Some("staged-old")])),
             export_policy: None,
         }],
+        dynamic_ranges: Vec::new(),
         reply: reset_tx,
     })
     .await
@@ -1585,13 +1587,14 @@ async fn policy_route_series_retire_only_when_a_staged_snapshot_commits() {
         .unwrap();
     stage_rx.await.unwrap().unwrap();
     let (apply_tx, apply_rx) = oneshot::channel();
-    tx.send(PeerManagerCommand::ApplyResolvedPolicySnapshot {
-        targets: vec![ResolvedPeerPolicy {
+    tx.send(PeerManagerCommand::ApplyPolicyImpactSnapshot {
+        static_targets: vec![ResolvedPeerPolicy {
             address,
             interface: None,
             import_policy: Some(named_deny_policy_chain(&[Some("staged-new")])),
             export_policy: None,
         }],
+        dynamic_ranges: Vec::new(),
         reply: apply_tx,
     })
     .await

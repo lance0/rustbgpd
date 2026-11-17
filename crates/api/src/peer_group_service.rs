@@ -1739,11 +1739,9 @@ mod tests {
                     PeerManagerCommand::GetPeerGroup { reply, .. } => {
                         let _ = reply.send(Some(prior_for_pm.clone()));
                     }
-                    PeerManagerCommand::SetPeerGroup {
-                        definition, reply, ..
-                    } => {
-                        set_definitions_pm.lock().await.push(definition);
-                        let _ = reply.send(Ok(()));
+                    PeerManagerCommand::OwnedCatalogMutation { mutation, reply } => {
+                        set_definitions_pm.lock().await.push(mutation);
+                        let _ = reply.send(OwnedCatalogMutationOutcome::Success);
                     }
                     _ => panic!("unexpected peer-manager command"),
                 }
@@ -1808,15 +1806,9 @@ mod tests {
                     PeerManagerCommand::GetPeerGroup { reply, .. } => {
                         let _ = reply.send(Some(prior_for_pm.clone()));
                     }
-                    PeerManagerCommand::DeletePeerGroup { name, reply } => {
-                        assert_eq!(name, "rs-clients");
-                        let _ = reply.send(Ok(()));
-                    }
-                    PeerManagerCommand::SetPeerGroup {
-                        definition, reply, ..
-                    } => {
-                        set_definitions_pm.lock().await.push(definition);
-                        let _ = reply.send(Ok(()));
+                    PeerManagerCommand::OwnedCatalogMutation { mutation, reply } => {
+                        set_definitions_pm.lock().await.push(mutation);
+                        let _ = reply.send(OwnedCatalogMutationOutcome::Success);
                     }
                     _ => panic!("unexpected peer-manager command"),
                 }
@@ -1870,11 +1862,9 @@ mod tests {
                     PeerManagerCommand::GetNeighborPeerGroupMembership { reply, .. } => {
                         let _ = reply.send(Some(Some("old-group".to_string())));
                     }
-                    PeerManagerCommand::SetNeighborPeerGroup {
-                        peer_group, reply, ..
-                    } => {
-                        memberships_pm.lock().await.push(peer_group);
-                        let _ = reply.send(Ok(()));
+                    PeerManagerCommand::OwnedCatalogMutation { mutation, reply } => {
+                        memberships_pm.lock().await.push(mutation);
+                        let _ = reply.send(OwnedCatalogMutationOutcome::Success);
                     }
                     _ => panic!("unexpected peer-manager command"),
                 }

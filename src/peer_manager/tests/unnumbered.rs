@@ -6728,17 +6728,26 @@ async fn a_combined_group_edit_applies_the_policy_to_a_member_that_does_not_rebi
         "new chain installed"
     );
 
-    // The legacy path: back to no chain, with another knob.
+    // Back to no chain, with another knob.
     definition.hold_time = Some(50);
     definition.export_policy_chain = Vec::new();
     let (reply, outcome) = oneshot::channel();
-    let _ = Box::pin(h.mgr.dispatch_command(PeerManagerCommand::SetPeerGroup {
-        name: "fabric".to_string(),
-        definition,
-        reply,
-    }))
+    let _ = Box::pin(
+        h.mgr
+            .dispatch_command(PeerManagerCommand::OwnedCatalogMutation {
+                mutation: OwnedCatalogMutation::SetPeerGroup {
+                    name: "fabric".to_string(),
+                    definition: Box::new(definition),
+                },
+                reply,
+            }),
+    )
     .await;
-    outcome.await.unwrap().expect("applied");
+    let outcome = outcome.await.unwrap();
+    assert!(
+        matches!(outcome, OwnedCatalogMutationOutcome::Success),
+        "{outcome:?}"
+    );
     h.reconcile().await;
     assert_eq!(h.session(&key), session, "not rebound");
     assert!(h.mgr.peers[&key].export_policy.is_none(), "chain removed");

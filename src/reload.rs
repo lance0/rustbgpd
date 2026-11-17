@@ -8165,8 +8165,6 @@ hold_time = 90
             PeerManagerCommand::DeleteNeighborSet { name, .. } => {
                 format!("DeleteNeighborSet({name})")
             }
-            PeerManagerCommand::SetPeerGroup { name, .. } => format!("SetPeerGroup({name})"),
-            PeerManagerCommand::DeletePeerGroup { name, .. } => format!("DeletePeerGroup({name})"),
             PeerManagerCommand::SetGlobalImportChain { policy_names, .. } => {
                 format!("SetGlobalImportChain({})", policy_names.join(","))
             }
@@ -10684,8 +10682,6 @@ import_policy_chain = ["origin-guard"]
                     | PeerManagerCommand::DeletePolicy { reply, .. }
                     | PeerManagerCommand::SetNeighborSet { reply, .. }
                     | PeerManagerCommand::DeleteNeighborSet { reply, .. }
-                    | PeerManagerCommand::SetPeerGroup { reply, .. }
-                    | PeerManagerCommand::DeletePeerGroup { reply, .. }
                     | PeerManagerCommand::SetGlobalImportChain { reply, .. }
                     | PeerManagerCommand::SetGlobalExportChain { reply, .. }
                     | PeerManagerCommand::ClearGlobalImportChain { reply }

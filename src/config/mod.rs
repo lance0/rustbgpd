@@ -6975,7 +6975,7 @@ fn attribute_chain_move_reasons(
 ///   surfaced here too for visibility).
 /// - **Peer-group field edits.** The neighbor's peer-group is in
 ///   `peer_groups.changed`/`added`/`removed`; field edits like
-///   `hold_time` flow down via `apply_peer_group_change`'s
+///   `hold_time` flow down via `apply_peer_group_change_owned`'s
 ///   delete-and-readd path.
 /// - **Named policy / neighbor-set / global-chain edits.**
 ///   Attributed to the specific name where the change was the
