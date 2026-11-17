@@ -10,6 +10,10 @@
   **Operator-visible:** these receivers get the released table over the ticks
   that follow the release, each still before its own End-of-RIB; a receiver
   that has stopped reading delays only its own table and End-of-RIB. Unicast
-  and VPN update-group members are served in the release turn as before. An
-  owed FlowSpec family is sent as a diff, so a rule the receiver already holds
-  unchanged is not announced again.
+  and VPN update-group members are served in the release turn as before; a
+  receiver that is a group member for one released family and holds another
+  itself gets the second from the ticks. An owed FlowSpec family is sent as a
+  diff, so a rule the receiver already holds unchanged is not announced again.
+  A ROUTE-REFRESH for a family the receiver is still owed is answered as
+  before: the table, its End-of-RIB, then the refreshed table between BoRR
+  and EoRR.
