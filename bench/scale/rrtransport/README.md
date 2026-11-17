@@ -496,8 +496,23 @@ attempted the cell and left no result, or a result of the wrong mode or
 shape, is undecided evidence in the same way: a FAIL in another run still
 stands, and when nothing failed the line is INVALID, never PASS.
 
-A mixed-family release cell and a release by deferral-timer expiry are not
-part of this harness.
+Two opt-in cells exercise release ordering with two continuously reading
+loopback receivers and 64 routes per family (16 with `--reduced`).
+
+- `release-mixed` negotiates IPv4 unicast and EVPN on both receivers. It
+  verifies their shared unicast group, sends each source End-of-RIB in
+  turn, and reads the whole-family debt counter after each release. Unicast
+  adds zero debts and EVPN adds one for each receiver.
+- `release-timer` leaves the IPv4 source End-of-RIB outstanding. It checks
+  that the selection gate still has its waiter after ingest and that the
+  RIB recorded a timer release. Both private receivers must get the exact
+  table followed by one End-of-RIB.
+
+Each JSON file records the receiver observations and `release_ms`, from
+the post-ingest observation to the last family End-of-RIB. This includes
+the remaining deferral interval in the timer cell. A missing marker leaves
+the duration null. The `analyze` and `check` commands print these cells as
+REPORT. Their checks do not change the campaign verdict.
 
 **Cell 6.** Method: the least-squares slope of jemalloc allocated bytes over
 `bgp_rib_outbound_credit_rows`, sampled every 50 ms with every reader paused,
