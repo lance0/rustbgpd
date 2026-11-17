@@ -344,8 +344,10 @@ fn operator_query_wait_buckets() -> Vec<f64> {
 const OWED_DRAIN_STEP_SCOPES: [&str; 3] = ["cursor", "keyed", "whole"];
 
 /// The shared actor buckets plus 250 ms, so the 50 ms step bound and the
-/// 250 ms turn bound are both exact edges.
-fn owed_drain_step_buckets() -> Vec<f64> {
+/// 250 ms turn bound are both exact edges. Used by the owed-drain step,
+/// actor turn and actor work histograms; the other actor families keep the
+/// shared layout.
+fn actor_buckets_with_250ms() -> Vec<f64> {
     let mut buckets = RIB_ACTOR_DURATION_BUCKETS.to_vec();
     buckets.push(0.250);
     buckets.sort_by(f64::total_cmp);
@@ -1935,7 +1937,7 @@ impl BgpMetrics {
                 "bgp_rib_outbound_owed_drain_step_seconds",
                 "Wall-clock duration of one owed-route drain step toward one receiver on the RIB actor, by scope: cursor (up to 1,024 unicast keys of a family owed whole, a charged ordinary envelope), keyed (up to 1,024 keys of an owed-key set), whole (one whole-family pass of a labeled-unicast, VPN, EVPN, FlowSpec, BGP-LS or RT-Constrain family, including one absorbed for a waiting End-of-RIB).",
             )
-            .buckets(owed_drain_step_buckets()),
+            .buckets(actor_buckets_with_250ms()),
             &["scope"],
         )
         .expect("valid metric definition");
@@ -2099,7 +2101,7 @@ impl BgpMetrics {
                 "bgp_rib_actor_work_duration_seconds",
                 "Wall-clock duration of RIB actor work components: `route_chunk` covers chunk construction and processing excluding its drained-batch tail, `distribute_flush` covers one outbound pass for a distribution window (one route batch plus any already-queued unicast route messages that joined it, so one observation can cover many UPDATE messages) including its internal readiness servicing, `exact_export_retire` covers the rejection retirement when that window settles, `attribute_gc` covers deadline-triggered attribute collection outside ingest chunks, and `flowspec_validation` covers a receive-side validation slice including completed selection/distribution. Correlate with readiness waits; component durations do not bound probe latency or cover all actor work.",
             )
-            .buckets(RIB_ACTOR_DURATION_BUCKETS.to_vec()),
+            .buckets(actor_buckets_with_250ms()),
             &["work_unit"],
         )
         .expect("valid metric definition");
@@ -2112,7 +2114,7 @@ impl BgpMetrics {
                 "bgp_rib_actor_turn_duration_seconds",
                 "Wall-clock duration of one RIB actor turn: the synchronous handling of one inbound RIB message, by message kind. A turn never yields, so it is one actor poll's share; readiness queries answered at checkpoints inside the turn are included. Operator summaries answered from a synchronous replacement's frozen projection are not observed as query; their time belongs to whichever turn or work unit holds the replacement. VPN, BGP-LS, labeled and RTC routes are processed and distributed inside their routes turn; unicast, FlowSpec and EVPN routes are only admitted there, and their chunks and distribution windows are bgp_rib_actor_work_duration_seconds route_chunk and distribute_flush units. Later policy-transition polls are in bgp_rib_policy_transition_actor_poll_duration_seconds. Other timer expiries (GR/LLGR stale sweeps, refresh windows, End-of-RIB holds, selection deferral, conditional advertisement), dirty-resync ticks, destination pre-staging and deferred initial dumps are not message turns and no histogram covers the whole unit (see bgp_rib_actor_slice_seconds). Answers which message kind holds the actor.",
             )
-            .buckets(RIB_ACTOR_DURATION_BUCKETS.to_vec()),
+            .buckets(actor_buckets_with_250ms()),
             &["kind"],
         )
         .expect("valid metric definition");
@@ -9833,7 +9835,14 @@ mod tests {
         let m = BgpMetrics::new();
         let observed =
             gathered_histogram_series(&m, "bgp_rib_actor_work_duration_seconds", "work_unit");
-        let expected_buckets = RIB_ACTOR_DURATION_BUCKETS.map(f64::to_bits).to_vec();
+        let expected_buckets: Vec<u64> = actor_buckets_with_250ms()
+            .into_iter()
+            .map(f64::to_bits)
+            .collect();
+        assert!(
+            expected_buckets.contains(&0.250_f64.to_bits()),
+            "250 ms edge"
+        );
 
         assert_eq!(
             observed.keys().map(String::as_str).collect::<Vec<_>>(),
@@ -9873,7 +9882,7 @@ mod tests {
             observed.keys().map(String::as_str).collect::<Vec<_>>(),
             ["cursor", "keyed", "whole"]
         );
-        let edges: Vec<u64> = owed_drain_step_buckets()
+        let edges: Vec<u64> = actor_buckets_with_250ms()
             .into_iter()
             .map(f64::to_bits)
             .collect();
@@ -9896,7 +9905,14 @@ mod tests {
     fn rib_actor_turn_histogram_registers_closed_zeroed_labels_and_actor_buckets() {
         let m = BgpMetrics::new();
         let observed = gathered_histogram_series(&m, "bgp_rib_actor_turn_duration_seconds", "kind");
-        let expected_buckets = RIB_ACTOR_DURATION_BUCKETS.map(f64::to_bits).to_vec();
+        let expected_buckets: Vec<u64> = actor_buckets_with_250ms()
+            .into_iter()
+            .map(f64::to_bits)
+            .collect();
+        assert!(
+            expected_buckets.contains(&0.250_f64.to_bits()),
+            "250 ms edge"
+        );
 
         let mut kinds = RibActorTurnKind::ALL.map(RibActorTurnKind::as_str).to_vec();
         kinds.sort_unstable();
