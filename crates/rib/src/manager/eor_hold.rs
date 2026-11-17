@@ -567,12 +567,6 @@ impl RibManager {
         })
     }
 
-    /// Whether an owed marker of `peer` waits only for its family's owed
-    /// keys to be absorbed.
-    pub(super) fn eor_waits_on_owed_keys(&self, peer: PeerId) -> bool {
-        self.eor_waiting_on_owed_keys(peer).is_some()
-    }
-
     /// One step of the owed-key drain for a marker that waits only for its
     /// family's owed keys: absorb that one family into an operation of its
     /// own and send the marker behind it. The caller read `peer`'s credit;

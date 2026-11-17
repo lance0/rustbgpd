@@ -1214,9 +1214,10 @@ impl RibManager {
     }
 
     /// Whether `peer` has owed work the resync tick can run: a runnable
-    /// family (a whole family needs its latch free), or an End-of-RIB that
-    /// waits for an absorption with the latch free. Credit is not part of
-    /// it: the tick polls for returned credit.
+    /// family (a whole family needs its latch free). An End-of-RIB that
+    /// waits only for its family's owed keys is covered: no ORF gate and no
+    /// armed selection gate holds it, so that family drains whole. Credit
+    /// is not part of it: the tick polls for returned credit.
     fn owing_peer_runnable(&self, peer: PeerId) -> bool {
         if self.dirty_peers.contains(&peer) || self.force_outbound_peers.contains(&peer) {
             return false;
@@ -1228,7 +1229,7 @@ impl RibManager {
         OwedFamily::ALL.iter().any(|&family| {
             self.owed_family_drainable(peer, owing, family, latch_free)
                 .is_some()
-        }) || (latch_free && self.eor_waits_on_owed_keys(peer))
+        })
     }
 
     /// Whether any peer has owed work the resync tick can run.
@@ -1240,9 +1241,8 @@ impl RibManager {
     }
 
     /// Whether some owing peer could make progress this tick: it has credit,
-    /// channel room and runnable work (an End-of-RIB that waits on an
-    /// absorption with its latch free included). Read before taking the
-    /// tick's executor handoff.
+    /// channel room and runnable work. Read before taking the tick's
+    /// executor handoff.
     pub(super) fn owing_tick_due(&self) -> bool {
         let limit = self.outbound_row_credit();
         self.owing_peers.iter().any(|&peer| {
@@ -1333,10 +1333,7 @@ impl RibManager {
         // One family per step: a waiting marker's family is absorbed whole
         // behind this credit read, and the peer's next owed family waits
         // for its next step and a fresh read.
-        if !self.outbound_operation_live(peer)
-            && self.eor_waits_on_owed_keys(peer)
-            && self.absorb_owed_eor(peer)
-        {
+        if !self.outbound_operation_live(peer) && self.absorb_owed_eor(peer) {
             return true;
         }
         // An absorption that did not send its marker may still have used
