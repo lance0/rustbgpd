@@ -619,7 +619,8 @@ fn credit_main(mode: &str, args: &[String]) -> Result<()> {
             &options(rest)?,
         ))?,
         ("credit-probe", [output, rest @ ..]) => {
-            credit_probe::run(Path::new(output), credit::Options::parse(rest)?.reduced)?
+            let options = credit::Options::parse(rest)?;
+            credit_probe::run(Path::new(output), options.reduced, options.correctness_only)?
         }
         _ => bail!("bad {mode} arguments; run without arguments for usage"),
     };

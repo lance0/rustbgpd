@@ -7,7 +7,9 @@
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Duration, Instant};
 
-use rustbgpd_wire::{Afi, EvpnRoute, Message, PathAttribute, Prefix, Safi, UpdateMessage};
+use rustbgpd_wire::{
+    Afi, EvpnRoute, Message, PathAttribute, Prefix, RouteDistinguisher, Safi, UpdateMessage,
+};
 
 /// First burst prefix, `10.0.0.0/24`; route `i` is the `i`-th /24 after it,
 /// up to `13.255.255.0/24` (262,144 routes), all inside [`BURST_RANGE`].
@@ -36,10 +38,20 @@ pub fn unicast_prefix(index: usize) -> Ipv4Addr {
     Ipv4Addr::from(UNICAST_BASE + (u32::try_from(index).expect("index fits u32") << 8))
 }
 
-/// Burst route index of an EVPN IMET route: its Ethernet tag minus one.
+/// Route distinguisher of every burst EVPN route.
+pub const EVPN_RD: RouteDistinguisher = RouteDistinguisher([0, 0, 0xfc, 0x00, 0, 0, 0, 1]);
+/// Originator IP of every burst EVPN route: the restarting source.
+pub const EVPN_ORIGINATOR: Ipv4Addr = Ipv4Addr::new(127, 254, 0, 1);
+
+/// Burst route index of an EVPN IMET route: its Ethernet tag minus one, for
+/// the burst's own RD and originator only. The tag alone is not the key.
 pub fn evpn_index(route: &EvpnRoute) -> Option<usize> {
     match route {
-        EvpnRoute::Imet(imet) => (imet.ethernet_tag.0 as usize).checked_sub(1),
+        EvpnRoute::Imet(imet)
+            if imet.rd == EVPN_RD && imet.originator_ip == IpAddr::V4(EVPN_ORIGINATOR) =>
+        {
+            (imet.ethernet_tag.0 as usize).checked_sub(1)
+        }
         _ => None,
     }
 }
@@ -241,8 +253,10 @@ impl WireState {
     }
 
     /// The decoded table equals the reference and its End-of-RIB arrived.
+    /// Every route at its reference MED and nothing else: no route outside
+    /// the burst key space and no undecodable UPDATE.
     pub fn exact(&self) -> bool {
-        self.mismatch == 0 && self.eor_seen
+        self.mismatch == 0 && self.eor_seen && self.outside == 0 && self.decode_failures == 0
     }
 
     pub fn missing(&self) -> usize {
@@ -429,6 +443,51 @@ mod tests {
         let mut state = run(&[routes(0..ROWS, 7), eor()]);
         state.closed();
         assert_eq!(checks(&state), [true, true, false]);
+    }
+
+    #[test]
+    fn seeded_extra_route_fails_only_final_state() {
+        let extra = Observed {
+            outside: 1,
+            ..Observed::default()
+        };
+        let state = run(&[routes(0..ROWS, 7), extra, eor()]);
+        assert_eq!(checks(&state), [false, true, true]);
+        assert!(state.settled_at.is_none());
+    }
+
+    #[test]
+    fn seeded_extra_route_after_eor_fails_final_state() {
+        let extra = Observed {
+            outside: 1,
+            ..Observed::default()
+        };
+        let state = run(&[routes(0..ROWS, 7), eor(), extra]);
+        assert!(!state.exact());
+    }
+
+    #[test]
+    fn seeded_decode_failure_fails_final_state() {
+        let mut state = run(&[routes(0..ROWS, 7), eor()]);
+        state.decode_failures = 1;
+        assert_eq!(checks(&state), [false, true, true]);
+    }
+
+    fn imet(rd: RouteDistinguisher, originator: Ipv4Addr, tag: u32) -> EvpnRoute {
+        EvpnRoute::Imet(rustbgpd_wire::EvpnImet {
+            rd,
+            ethernet_tag: rustbgpd_wire::EthernetTagId(tag),
+            originator_ip: IpAddr::V4(originator),
+        })
+    }
+
+    #[test]
+    fn seeded_foreign_imet_key_is_outside() {
+        assert_eq!(evpn_index(&imet(EVPN_RD, EVPN_ORIGINATOR, 5)), Some(4));
+        let other_rd = RouteDistinguisher([0, 0, 0xfc, 0x00, 0, 0, 0, 2]);
+        assert_eq!(evpn_index(&imet(other_rd, EVPN_ORIGINATOR, 5)), None);
+        let other_originator = Ipv4Addr::new(127, 254, 0, 9);
+        assert_eq!(evpn_index(&imet(EVPN_RD, other_originator, 5)), None);
     }
 
     #[test]

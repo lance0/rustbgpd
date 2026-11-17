@@ -45,7 +45,7 @@ exec > >(tee -a "$output/runner.log") 2>&1
 acquire_rustbgpd_host_lock
 # shellcheck source=bench/scale/host-quiet.sh
 . "$here/../host-quiet.sh"
-ulimit -n 65536
+ulimit -n 65536 2>/dev/null || ulimit -n "$(ulimit -Hn)"
 
 sha=$(sha256sum "$binary" | cut -d' ' -f1)
 printf '{"binary": "%s", "sha256": "%s", "measured": %s, "started": "%s"}\n' \
@@ -55,12 +55,16 @@ echo "rrtransport $sha measured=$measured cells=${cells[*]}"
 status=0
 for cell in "${cells[@]}"; do
     case $cell in
-    probes) args=(credit-probe "$output") limit=64G ;;
-    exhaust-unicast | exhaust-evpn) args=(credit-exhaust "${cell#exhaust-}" "$output") limit=64G ;;
-    paused) args=(credit-paused "$output") limit=12G ;;
-    fill-*) args=(credit-fill "${cell#fill-}" "$output") limit=64G ;;
+    probes) args=(credit-probe "$output") limit=64G result=probes.json ;;
+    exhaust-unicast | exhaust-evpn)
+        args=(credit-exhaust "${cell#exhaust-}" "$output") limit=64G result=$cell.json ;;
+    paused) args=(credit-paused "$output") limit=12G result=paused-evpn.json ;;
+    fill-*) args=(credit-fill "${cell#fill-}" "$output") limit=64G result=$cell.json ;;
     *) echo "unknown cell $cell" >&2 && exit 2 ;;
     esac
+    # A rerun into a used directory must not leave an earlier run's result
+    # or exit marker for the analyzer to read.
+    rm -f "$output/$result" "$output/$cell-exit.json"
     if [ $measured = 1 ]; then
         wait_for_rustbgpd_quiet_host "$output/quiet-$cell.tsv"
     fi

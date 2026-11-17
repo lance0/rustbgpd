@@ -296,14 +296,15 @@ fn restart_during_dump(peers: usize) -> Value {
         manager.bench_drain_primary_updates();
     }
     let joined = Instant::now();
-    let mut receivers = manager.bench_register_peers(
-        peers,
-        Some(&peer_context_export_chain()),
-        true,
-        CHANNEL_CAP,
-        fanout_bench_export_encoder,
-    );
+    let mut receivers = join_undrained(&mut manager, &tx, peers);
     let join_ms = joined.elapsed().as_secs_f64() * 1e3;
+    // The tail must queue behind each receiver's initial table: every
+    // receiver still holds its initial-table envelopes here.
+    let initial_envelopes = receivers.iter().map(mpsc::Receiver::len).min().unwrap_or(0);
+    assert!(
+        initial_envelopes > 0,
+        "initial tables were drained before the tail"
+    );
     let mut episodes = Episodes::default();
     let mut peak_envelopes = 0;
     let tail = Instant::now();
@@ -316,7 +317,22 @@ fn restart_during_dump(peers: usize) -> Value {
             peak_envelopes.max(receivers.iter().map(mpsc::Receiver::len).max().unwrap_or(0));
     }
     let tail_ms = tail.elapsed().as_secs_f64() * 1e3;
-    let peak_rows = drain_rows(&mut receivers);
+    // Every receiver must still hold its whole initial table behind which
+    // the tail queued.
+    let mut least = usize::MAX;
+    let mut peak_rows = 0;
+    for rx in &mut receivers {
+        let mut queued = 0;
+        while let Ok(envelope) = rx.try_recv() {
+            queued += rows(&envelope);
+        }
+        least = least.min(queued);
+        peak_rows = peak_rows.max(queued);
+    }
+    assert!(
+        least >= DUMP + DUMP / 2,
+        "a receiver queued {least} rows, fewer than its initial table"
+    );
     json!({
         "cell": "restart_during_dump",
         "peers": peers,
@@ -327,13 +343,60 @@ fn restart_during_dump(peers: usize) -> Value {
         "total_ms": started.elapsed().as_secs_f64() * 1e3,
         "peak_queued_envelopes": peak_envelopes,
         "peak_queued_rows_per_receiver": peak_rows,
+        "initial_envelopes_queued_at_tail": initial_envelopes,
         "dirty_episodes": episodes.count,
         "ungrouped_peers": manager.bench_adj_rib_out_fanout_receipt().ungrouped_peers,
     })
 }
 
+/// Register `peers` private RR clients through the production `PeerUp`
+/// path, leaving every initial-table envelope queued (unlike
+/// `bench_register_peers`, which drains them).
+fn join_undrained(
+    manager: &mut RibManager,
+    tx: &mpsc::Sender<RibUpdate>,
+    peers: usize,
+) -> Vec<mpsc::Receiver<OutboundRouteUpdate>> {
+    let mut receivers = Vec::with_capacity(peers);
+    for index in 0..peers {
+        let peer = RibManager::bench_peer_address(index);
+        let session_id = u64::try_from(index).expect("index fits u64") + 1;
+        let (outbound_tx, outbound_rx) = mpsc::channel(CHANNEL_CAP);
+        tx.try_send(RibUpdate::SetPeerExportEncoder {
+            peer,
+            session_id,
+            encoder: fanout_bench_export_encoder(),
+        })
+        .expect("registration fits the channel");
+        tx.try_send(RibUpdate::PeerUp {
+            supersedes: None,
+            peer,
+            session_id,
+            peer_asn: 64_512,
+            peer_router_id: Ipv4Addr::new(192, 0, 2, 1),
+            outbound_tx,
+            export_policy: Some(peer_context_export_chain()),
+            sendable_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            is_ebgp: false,
+            route_reflector_client: true,
+            orr_vantage: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            add_path_send_families: Vec::new(),
+            add_path_send_max: 0,
+            negotiated_orf_recv: Vec::new(),
+            negotiated_llgr_families: Vec::new(),
+        })
+        .expect("registration fits the channel");
+        manager.bench_drain_primary_updates();
+        manager.bench_complete_deferred_registrations();
+        receivers.push(outbound_rx);
+    }
+    receivers
+}
+
 /// Run every probe cell and write `probes.json`.
-pub fn run(output: &Path, reduced: bool) -> Result<bool> {
+pub fn run(output: &Path, reduced: bool, correctness_only: bool) -> Result<bool> {
     let fleets: &[usize] = if reduced { &[16] } else { &[150, 1_000] };
     let stalls: &[Duration] = if reduced {
         &[Duration::from_millis(200)]
@@ -357,7 +420,7 @@ pub fn run(output: &Path, reduced: bool) -> Result<bool> {
     let result = json!({
         "schema": "rrtransport-credit/1",
         "cell": "probes",
-        "mode": if reduced { "correctness" } else { "measured" },
+        "mode": if reduced || correctness_only { "correctness" } else { "measured" },
         "probes": cells,
     });
     std::fs::create_dir_all(output)?;

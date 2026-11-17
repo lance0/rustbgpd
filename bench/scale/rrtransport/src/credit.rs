@@ -51,10 +51,11 @@ use tokio::sync::{mpsc, watch};
 
 use crate::credit_wire::{
     delivery, unicast_prefix, ChurnState, WireFamily, WireState, BURST_RANGE, CHURN_PREFIX,
+    EVPN_ORIGINATOR, EVPN_RD,
 };
 use crate::rr1000_support::rss_kib;
 
-const SOURCE: Ipv4Addr = Ipv4Addr::new(127, 254, 0, 1);
+const SOURCE: Ipv4Addr = EVPN_ORIGINATOR;
 const CHURN_SOURCE: Ipv4Addr = Ipv4Addr::new(127, 254, 0, 2);
 const CLUSTER: Ipv4Addr = Ipv4Addr::new(127, 255, 0, 1);
 const LOCAL_AS: u32 = 64_512;
@@ -220,9 +221,9 @@ fn unicast_route(index: usize, attrs: Arc<AttrSet>, source: Ipv4Addr) -> Route {
 fn evpn_route(index: usize, attrs: Arc<AttrSet>) -> EvpnRibRoute {
     EvpnRibRoute {
         route: EvpnRoute::Imet(EvpnImet {
-            rd: RouteDistinguisher([0, 0, 0xfc, 0x00, 0, 0, 0, 1]),
+            rd: EVPN_RD,
             ethernet_tag: EthernetTagId(u32::try_from(index + 1).expect("tag fits u32")),
-            originator_ip: IpAddr::V4(SOURCE),
+            originator_ip: IpAddr::V4(EVPN_ORIGINATOR),
         }),
         next_hop: IpAddr::V4(SOURCE),
         link_local_next_hop: None,
@@ -1112,6 +1113,8 @@ pub async fn exhaust(family: Family, output: &Path, options: &Options) -> Result
     let healthy_ip = fixture.receivers[healthy].ip;
     let flaps = snapshot.total("bgp_session_flaps_total");
     let ms = |duration: Duration| duration.as_secs_f64() * 1e3;
+    // The healthy receiver's session counts too.
+    let resets = resets + churn_resets;
     let wire_pass = exact == receivers && ordered == receivers && resets == 0 && down.is_empty();
     let result = json!({
         "schema": "rrtransport-credit/1",

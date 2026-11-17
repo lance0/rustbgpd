@@ -110,7 +110,7 @@ never from the daemon's Adj-RIB-Out.
 | 1 | `credit-paused` | 150 private EVPN receivers, all socket reads paused; one source re-announces 37,500 routes every 2 s with alternating `LOCAL_PREF` for 240 s | cgroup `memory.peak`, VmRSS/VmHWM, jemalloc allocated, credit-rows and (when present) credit-bytes peaks |
 | 2 | `credit-exhaust unicast\|evpn` | RFC 4724 restart burst: selection deferred, 150 private receivers paused for 30 s while the restarting source sends 150,000 routes and its End-of-RIB | refusal witness, exact final wire state, End-of-RIB order, session resets, recovery time |
 | 3 | same run as cell 2 | one more receiver that gets none of the burst, only a separate source's single route replaced every 20 ms | max delivery gap and latency quantiles at that receiver |
-| 4 | `credit-probe` | in-process healthy-lag cells (unicast and EVPN, 150 and 1,000 peers, 0.5 s and 2 s stalls) and the 150-peer restart-during-dump probe | dirty episodes and queued rows per receiver |
+| 4 | `credit-probe` | in-process healthy-lag cells (unicast and EVPN, 150 and 1,000 peers, 0.5 s and 2 s stalls) and the 150-peer restart-during-dump probe, whose receivers join through the production `PeerUp` path and keep their 150,000-row initial tables queued while the 50,000-row tail arrives | dirty episodes and queued rows per receiver |
 | 6 | `credit-fill unicast\|evpn\|vpn\|flowspec` | 150 paused private receivers (unicast and VPN through the same peer-context policy); one source sends 150,000 fresh routes of the family; FlowSpec rules carry a prefix, 16 ports and 8 length ranges | bytes per queued row (report-only) |
 
 Cell 5 (Criterion) is not part of this harness.
@@ -122,10 +122,11 @@ small part of the burst; the rest stays queued against the credit. The
 selection gate holds every burst End-of-RIB until the release's rows are
 admitted, so the order check covers rows the credit refused and the RIB sent
 later. Checks, per burst receiver: the final decoded table equals the
-injected one (every route present at its MED, nothing withdrawn, nothing
-outside), the End-of-RIB arrives after the last route and nothing follows it,
+injected one (every route present at its MED, nothing withdrawn, no
+route outside the burst keys, no undecodable UPDATE; an EVPN route counts only
+with the burst's RD and originator), the End-of-RIB arrives after the last route and nothing follows it,
 and the session never ends (stub stream open, no NOTIFICATION, transport still
-Established). Recovery runs from the first burst UPDATE to the moment every
+Established; the healthy receiver's session counts too). Recovery runs from the first burst UPDATE to the moment every
 burst receiver is exact with its End-of-RIB, on the harness clock; it includes
 the fixed 30 s pause. `drain_after_resume_ms` reports the part after the
 readers resume.
@@ -216,10 +217,29 @@ one run per arm. Exit status is 1 on any FAIL, else 2 on any INVALID, else 0.
 a correctness-only or reduced run offered as a measurement, a missing
 refusal witness, a missing instrument (cgroup peak, VmHWM, the candidate's
 credit-bytes gauge), a cell-1 scope without the 12 GiB limit or the swap
-fence, or a parent OOM. An INVALID cell is not a product result.
+fence, a cell-1 receiver that disconnected (it frees its queued state), or a
+parent OOM. An INVALID cell is not a product result. A wire FAIL stands
+without a recovery time: a run that never settled is FAIL, not INVALID.
+
+Every field below must be present and non-null in each run the cell reads;
+a missing or null one makes that cell INVALID, never PASS.
+
+| Cell | Result file | Required fields |
+| --- | --- | --- |
+| 1 | `paused-evpn.json`, each arm (or `paused-exit.json` with `oom`) | `mode` = `measured`; `checks.no_session_resets` = true; `not_established` empty; `memory.cgroup_swap_max` = `0`; `memory.cgroup_memory_max` = 12 GiB; `memory.cgroup_memory_peak_bytes`; `memory.vmhwm_kib`; `memory.cgroup_oom_kill`; candidate `memory.peak_credit_bytes` and `row_size_of` |
+| 2 | `exhaust-<family>.json`, every run of both arms | `mode`; `witness.refused_receivers`, `witness.owing_flips_total`, `witness.receivers`; `checks.final_state_exact`, `checks.eor_after_every_route`, `checks.no_session_resets`; `timing.recovery_ms` once every wire check passed |
+| 3 | `exhaust-<family>.json`, every run of both arms | `mode`; `unaffected.injected` and `unaffected.delivered` (nonzero), `unaffected.p99_latency_ms`, `unaffected.max_gap_ms` |
+| 4 | `probes.json`, candidate | `mode`; `probes` with exactly 9 cells, each with `dirty_episodes` |
+| 6 | `fill-<family>.json`, candidate, each family | `mode`; `estimate.bytes_per_queued_row`; `row_size_of` (a parent figure is shown only from a measured run) |
+
+The runner deletes a cell's previous result and exit marker before it runs
+the cell, so a failed rerun into a used directory leaves nothing stale.
 
 Self-tests, no daemon: `cargo test -p rrtransport credit` seeds a dropped
-route, a stale route, a route after End-of-RIB and a session reset into the
-wire checker; `python3 -m unittest discover -s bench/scale/rrtransport -p
-'test_*.py'` seeds each bar's defect into the analyzer and checks that only
-that cell changes verdict.
+route, a stale route, an extra route (before and after End-of-RIB), an
+undecodable UPDATE, a foreign IMET key, a route after End-of-RIB and a session
+reset into the wire checker; `python3 -m unittest discover -s
+bench/scale/rrtransport -p 'test_*.py'` seeds each bar's defect into the
+analyzer and checks that only that cell changes verdict, removes each required
+field in turn, and drives the runner with a stand-in binary to check that a
+rerun clears stale results.

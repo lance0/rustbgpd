@@ -35,6 +35,8 @@ def paused(peak, credit_bytes):
         "cell": "paused",
         "mode": "measured",
         "row_size_of": 144,
+        "checks": {"no_session_resets": True},
+        "not_established": [],
         "memory": {
             "cgroup_memory_peak_bytes": peak,
             "cgroup_memory_max": str(12 * GIB),
@@ -179,6 +181,115 @@ class Bars(unittest.TestCase):
             witness["owing_flips_total"] = 149.0
 
         self.assertEqual(self.run_bars(mutate)["cell 2 exhaustion unicast"][0], "INVALID")
+
+    def test_seeded_dropped_route_without_settlement_is_fail(self):
+        # A run that never settles has no recovery time; the wire FAIL must
+        # survive instead of becoming INVALID in the timing math.
+        def mutate(_parent, candidate):
+            run = candidate["exhaust-unicast.json"]
+            run["checks"]["final_state_exact"] = False
+            run["timing"]["recovery_ms"] = None
+
+        results = self.run_bars(mutate)
+        self.assert_only(results, "cell 2 exhaustion unicast", "FAIL", "final_state_exact failed")
+
+    def test_seeded_disconnected_paused_receiver_is_invalid(self):
+        def mutate(_parent, candidate):
+            run = candidate["paused-evpn.json"]
+            run["checks"]["no_session_resets"] = False
+            run["not_established"] = ["127.10.1.1: None"]
+
+        results = self.run_bars(mutate)
+        self.assert_only(results, "cell 1 paused-reader evpn", "INVALID", "session reset")
+
+    def test_seeded_not_established_paused_receiver_is_invalid(self):
+        def mutate(parent, _candidate):
+            parent["paused-evpn.json"]["not_established"] = ["127.10.1.1: None"]
+
+        results = self.run_bars(mutate)
+        self.assert_only(results, "cell 1 paused-reader evpn", "INVALID", "not Established")
+
+    def test_seeded_correctness_fill_is_invalid(self):
+        def mutate(_parent, candidate):
+            candidate["fill-vpn.json"]["mode"] = "correctness"
+
+        results = self.run_bars(mutate)
+        self.assert_only(results, "cell 6 bytes per queued row", "INVALID", "not measured")
+
+    def test_every_required_field_missing_is_invalid(self):
+        # Each loader's required fields: deleting or nulling any one of them
+        # gives that cell INVALID, never PASS and never an exception.
+        required = {
+            "paused-evpn.json": (
+                "cell 1 paused-reader evpn",
+                [
+                    "mode",
+                    "checks.no_session_resets",
+                    "not_established",
+                    "memory.cgroup_swap_max",
+                    "memory.cgroup_memory_max",
+                    "memory.cgroup_memory_peak_bytes",
+                    "memory.vmhwm_kib",
+                    "memory.cgroup_oom_kill",
+                    "memory.peak_credit_bytes",
+                    "row_size_of",
+                ],
+            ),
+            "exhaust-unicast.json": (
+                "cell 2 exhaustion unicast",
+                [
+                    "mode",
+                    "witness.refused_receivers",
+                    "witness.owing_flips_total",
+                    "witness.receivers",
+                    "checks.final_state_exact",
+                    "checks.eor_after_every_route",
+                    "checks.no_session_resets",
+                    "timing.recovery_ms",
+                ],
+            ),
+            "exhaust-evpn.json": (
+                "cell 3 unaffected peer evpn",
+                [
+                    "mode",
+                    "unaffected.injected",
+                    "unaffected.delivered",
+                    "unaffected.p99_latency_ms",
+                    "unaffected.max_gap_ms",
+                ],
+            ),
+            "probes.json": ("cell 4 lag and restart probes", ["mode", "probes"]),
+            "fill-flowspec.json": (
+                "cell 6 bytes per queued row",
+                ["mode", "estimate.bytes_per_queued_row", "row_size_of"],
+            ),
+        }
+        for file, (cell, fields) in required.items():
+            for field in fields:
+                for removal in ("delete", "null"):
+
+                    def mutate(_parent, candidate, file=file, field=field, removal=removal):
+                        *parents, leaf = field.split(".")
+                        node = candidate[file]
+                        for key in parents:
+                            node = node[key]
+                        if removal == "delete":
+                            del node[leaf]
+                        else:
+                            node[leaf] = None
+
+                    with self.subTest(file=file, field=field, removal=removal):
+                        results = self.run_bars(mutate)
+                        self.assertEqual(results[cell][0], "INVALID", results[cell])
+
+    def test_null_probe_dirty_count_is_invalid(self):
+        def mutate(_parent, candidate):
+            run = candidate["probes.json"]
+            run["probes"] = copy.deepcopy(run["probes"])
+            run["probes"][0]["dirty_episodes"] = None
+
+        results = self.run_bars(mutate)
+        self.assert_only(results, "cell 4 lag and restart probes", "INVALID", "dirty_episodes")
 
     def test_witness_is_never_pass_when_absent(self):
         def mutate(_parent, candidate):

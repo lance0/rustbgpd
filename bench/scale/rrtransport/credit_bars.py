@@ -62,9 +62,20 @@ def load(directory: Path, name: str) -> list[dict]:
     return runs
 
 
-def require(value, what: str):
-    if value is None:
-        raise Invalid(f"missing instrument {what}")
+def need(run: dict, path: str, what: str):
+    """The value at dotted `path`; a missing or null field is INVALID."""
+    value = run
+    for key in path.split("."):
+        value = value.get(key) if isinstance(value, dict) else None
+        if value is None:
+            raise Invalid(f"missing instrument {what}: {path}")
+    return value
+
+
+def number(run: dict, path: str, what: str) -> float:
+    value = need(run, path, what)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise Invalid(f"{what}: {path} is not a number ({value!r})")
     return value
 
 
@@ -78,31 +89,40 @@ def measured(runs: list[dict], what: str) -> list[dict]:
 
 
 def single_arm_exhaust(runs: list[dict], arm: str, family: str) -> str | None:
-    """Raise INVALID for a missing witness; return a FAIL reason or None."""
+    """Raise INVALID for a missing witness in any run, then return the first
+    wire FAIL reason, or None when every run passed its wire checks."""
     for index, run in enumerate(runs):
-        witness = run.get("witness") or {}
-        refused = witness.get("refused_receivers")
-        flips = witness.get("owing_flips_total")
-        receivers = witness.get("receivers")
-        if refused is None or flips is None or receivers is None:
-            raise Invalid(f"{arm} run {index}: missing refusal witness")
+        what = f"{arm} run {index}"
+        refused = number(run, "witness.refused_receivers", what)
+        flips = number(run, "witness.owing_flips_total", what)
+        receivers = number(run, "witness.receivers", what)
         # Past its credit a private family either refuses the send or owes
         # its keys; this shape's owed sets outgrow their cap, so each burst
         # receiver flips to owing the family whole. Either signal on every
         # receiver is the witness.
-        if refused < receivers and flips < receivers:
+        if receivers <= 0 or (refused < receivers and flips < receivers):
             raise Invalid(
-                f"{arm} run {index}: credit exhaustion witnessed on {refused}/{receivers} "
+                f"{what}: credit exhaustion witnessed on {refused}/{receivers} "
                 f"receivers by refusal and {flips:.0f} owe-whole flips; the cell never "
                 "exhausted credit"
             )
-        checks = run.get("checks") or {}
         for check in WIRE_CHECKS:
-            if checks.get(check) is not True:
+            need(run, f"checks.{check}", what)
+    for index, run in enumerate(runs):
+        for check in WIRE_CHECKS:
+            if run["checks"][check] is not True:
                 return f"{arm} run {index}: {check} failed"
-        if require(run.get("timing", {}).get("recovery_ms"), f"{family} recovery_ms") <= 0:
-            raise Invalid(f"{arm} run {index}: nonpositive recovery")
     return None
+
+
+def recovery(runs: list[dict], arm: str) -> float:
+    values = []
+    for index, run in enumerate(runs):
+        value = number(run, "timing.recovery_ms", f"{arm} run {index}")
+        if value <= 0:
+            raise Invalid(f"{arm} run {index}: nonpositive recovery")
+        values.append(value)
+    return statistics.median(values)
 
 
 def cell2(parent: Path, candidate: Path, family: str) -> tuple[str, str]:
@@ -116,19 +136,18 @@ def cell2(parent: Path, candidate: Path, family: str) -> tuple[str, str]:
         for arm, runs in arms.items()
         if (reason := single_arm_exhaust(runs, arm, family)) is not None
     ]
-    recovery = {
-        arm: statistics.median(run["timing"]["recovery_ms"] for run in runs)
-        for arm, runs in arms.items()
-    }
-    bar = max(recovery["parent"] * RECOVERY_RATIO, recovery["parent"] + RECOVERY_SLACK_MS)
-    line = (
-        f"recovery candidate {recovery['candidate']:.0f} ms vs bar {bar:.0f} ms "
-        f"(parent {recovery['parent']:.0f} ms)"
-    )
-    if recovery["candidate"] > bar:
-        failures.append(f"recovery over bar: {line}")
+    # A run that never settled has no recovery time; its wire FAIL stands
+    # without any timing comparison.
     if failures:
         return "FAIL", "; ".join(failures)
+    times = {arm: recovery(runs, arm) for arm, runs in arms.items()}
+    bar = max(times["parent"] * RECOVERY_RATIO, times["parent"] + RECOVERY_SLACK_MS)
+    line = (
+        f"recovery candidate {times['candidate']:.0f} ms vs bar {bar:.0f} ms "
+        f"(parent {times['parent']:.0f} ms)"
+    )
+    if times["candidate"] > bar:
+        return "FAIL", f"recovery over bar: {line}"
     return "PASS", f"refusal witnessed on both arms; wire exact, ordered, no resets; {line}"
 
 
@@ -138,19 +157,20 @@ def cell3(parent: Path, candidate: Path, family: str) -> tuple[str, str]:
         "parent": measured(load(parent, name), f"parent {name}"),
         "candidate": measured(load(candidate, name), f"candidate {name}"),
     }
-    p99 = {}
+    p99, gaps = {}, []
     for arm, runs in arms.items():
         values = []
-        for run in runs:
-            unaffected = require(run.get("unaffected"), f"{arm} unaffected-peer record")
-            if not unaffected.get("injected") or not unaffected.get("delivered"):
-                raise Invalid(f"{arm}: the healthy receiver got no churn")
-            values.append(require(unaffected.get("p99_latency_ms"), f"{arm} p99_latency_ms"))
+        for index, run in enumerate(runs):
+            what = f"{arm} run {index}"
+            if not number(run, "unaffected.injected", what) or not number(
+                run, "unaffected.delivered", what
+            ):
+                raise Invalid(f"{what}: the healthy receiver got no churn")
+            values.append(number(run, "unaffected.p99_latency_ms", what))
+            gap = number(run, "unaffected.max_gap_ms", what)
+            if arm == "candidate":
+                gaps.append(gap)
         p99[arm] = statistics.median(values)
-    gaps = [
-        require(run["unaffected"].get("max_gap_ms"), "candidate max_gap_ms")
-        for run in arms["candidate"]
-    ]
     failures = []
     if max(gaps) > MAX_GAP_MS:
         failures.append(f"candidate delivery gap {max(gaps):.0f} ms > {MAX_GAP_MS:.0f} ms")
@@ -172,16 +192,25 @@ def paused(directory: Path, arm: str) -> dict:
     runs = measured(load(directory, "paused-evpn.json"), f"{arm} paused-evpn.json")
     if len(runs) != 1:
         raise Invalid(f"{arm}: expected one paused-reader run, found {len(runs)}")
-    memory = runs[0].get("memory") or {}
-    if memory.get("cgroup_swap_max") != "0":
-        raise Invalid(f"{arm}: swap not fenced (memory.swap.max={memory.get('cgroup_swap_max')})")
-    if memory.get("cgroup_memory_max") != str(CELL1_CGROUP_MAX):
-        raise Invalid(f"{arm}: cgroup limit {memory.get('cgroup_memory_max')}, not 12 GiB")
-    require(memory.get("cgroup_memory_peak_bytes"), f"{arm} cgroup memory.peak")
-    require(memory.get("vmhwm_kib"), f"{arm} VmHWM")
-    if memory.get("cgroup_oom_kill") not in (None, "0"):
+    run = runs[0]
+    # A receiver that disconnected frees its queued state, so the memory
+    # comparison needs proof every session stayed up for the whole run.
+    if need(run, "checks.no_session_resets", arm) is not True:
+        raise Invalid(f"{arm}: a paused receiver's session reset; its memory is not comparable")
+    down = need(run, "not_established", arm)
+    if down:
+        raise Invalid(f"{arm}: receivers not Established at the end: {down}")
+    swap = need(run, "memory.cgroup_swap_max", arm)
+    if swap != "0":
+        raise Invalid(f"{arm}: swap not fenced (memory.swap.max={swap})")
+    limit = need(run, "memory.cgroup_memory_max", arm)
+    if limit != str(CELL1_CGROUP_MAX):
+        raise Invalid(f"{arm}: cgroup limit {limit}, not 12 GiB")
+    number(run, "memory.cgroup_memory_peak_bytes", f"{arm} cgroup memory.peak")
+    number(run, "memory.vmhwm_kib", f"{arm} VmHWM")
+    if need(run, "memory.cgroup_oom_kill", arm) != "0":
         return {"oom": True}
-    return {"oom": False, "memory": memory, "row_size_of": runs[0].get("row_size_of")}
+    return {"oom": False, "run": run}
 
 
 def cell1(parent: Path, candidate: Path) -> tuple[str, str]:
@@ -190,12 +219,10 @@ def cell1(parent: Path, candidate: Path) -> tuple[str, str]:
         return "FAIL", "candidate OOM in the 12 GiB cgroup"
     if arms["parent"]["oom"]:
         raise Invalid("parent OOM: no parent peak to compare against")
-    peaks = {arm: data["memory"]["cgroup_memory_peak_bytes"] for arm, data in arms.items()}
-    credit = require(
-        arms["candidate"]["memory"].get("peak_credit_bytes"),
-        "candidate bgp_rib_outbound_credit_bytes",
-    )
-    row = require(arms["candidate"]["row_size_of"], "candidate row_size_of")
+    peaks = {arm: data["run"]["memory"]["cgroup_memory_peak_bytes"] for arm, data in arms.items()}
+    run = arms["candidate"]["run"]
+    credit = number(run, "memory.peak_credit_bytes", "candidate bgp_rib_outbound_credit_bytes")
+    row = number(run, "row_size_of", "candidate")
     credit_bar = CREDIT_TARGET + PEERS * PASS_ROWS * (row + ANNOUNCED_ROW_OVERHEAD)
     failures = []
     if peaks["candidate"] > peaks["parent"] - CELL1_MARGIN:
@@ -208,23 +235,27 @@ def cell1(parent: Path, candidate: Path) -> tuple[str, str]:
     line = (
         f"cgroup peak {peaks['candidate'] / GIB:.2f} vs parent {peaks['parent'] / GIB:.2f} GiB; "
         f"credit bytes peak {credit / GIB:.3f} GiB (bar {credit_bar / GIB:.3f}); "
-        f"VmHWM {arms['candidate']['memory']['vmhwm_kib'] / 2**20:.2f} GiB"
+        f"VmHWM {run['memory']['vmhwm_kib'] / 2**20:.2f} GiB"
     )
     return ("FAIL", "; ".join(failures)) if failures else ("PASS", line)
 
 
 def cell4(parent: Path, candidate: Path) -> tuple[str, str]:
     runs = measured(load(candidate, "probes.json"), "candidate probes.json")
-    parent_runs = load(parent, "probes.json")
-    probes = [probe for run in runs for probe in run.get("probes", [])]
-    if len(probes) < PROBE_CELLS * len(runs):
-        raise Invalid(f"{len(probes)} probe cells, expected {PROBE_CELLS} per run")
-    dirty = [p for p in probes if require(p.get("dirty_episodes"), "dirty_episodes") != 0]
+    probes = []
+    for index, run in enumerate(runs):
+        cells = need(run, "probes", f"candidate probes run {index}")
+        if not isinstance(cells, list) or len(cells) != PROBE_CELLS:
+            raise Invalid(f"candidate probes run {index}: expected {PROBE_CELLS} probe cells")
+        probes += cells
+    dirty = [p for p in probes if number(p, "dirty_episodes", "candidate probe") != 0]
     parent_dirty = sum(
-        probe.get("dirty_episodes") or 0 for run in parent_runs for probe in run.get("probes", [])
+        probe.get("dirty_episodes") or 0
+        for run in load(parent, "probes.json")
+        for probe in run.get("probes") or []
     )
     if dirty:
-        cells = ", ".join(f"{p['cell']}/{p.get('shape', '')}/{p['peers']}" for p in dirty)
+        cells = ", ".join(f"{p.get('cell')}/{p.get('shape', '')}/{p.get('peers')}" for p in dirty)
         return "FAIL", f"dirty episodes in {cells}"
     return "PASS", f"0 dirty episodes in {len(probes)} probe cells (parent total {parent_dirty})"
 
@@ -232,16 +263,15 @@ def cell4(parent: Path, candidate: Path) -> tuple[str, str]:
 def cell6(parent: Path, candidate: Path) -> tuple[str, str]:
     notes, flagged = [], []
     for family in FILL_FAMILIES:
-        runs = load(candidate, f"fill-{family}.json")
-        if not runs:
-            raise Invalid(f"no candidate fill-{family}.json")
-        estimate = require(runs[-1].get("estimate", {}).get("bytes_per_queued_row"), family)
-        charged = require(runs[-1].get("row_size_of"), f"{family} row_size_of") + (
-            ANNOUNCED_ROW_OVERHEAD
-        )
-        parent_runs = load(parent, f"fill-{family}.json")
+        name = f"fill-{family}.json"
+        run = measured(load(candidate, name), f"candidate {name}")[-1]
+        estimate = number(run, "estimate.bytes_per_queued_row", f"candidate {name}")
+        charged = number(run, "row_size_of", f"candidate {name}") + ANNOUNCED_ROW_OVERHEAD
+        parent_runs = [r for r in load(parent, name) if r.get("mode") == "measured"]
         parent_estimate = (
-            parent_runs[-1].get("estimate", {}).get("bytes_per_queued_row") if parent_runs else None
+            (parent_runs[-1].get("estimate") or {}).get("bytes_per_queued_row")
+            if parent_runs
+            else None
         )
         notes.append(
             f"{family} {estimate:.0f} B/row vs charge {charged}"
