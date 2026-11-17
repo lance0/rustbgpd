@@ -27,6 +27,9 @@ use rustbgpd_wire::{
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 
+mod credit;
+mod credit_probe;
+mod credit_wire;
 mod rr1000;
 mod rr1000_support;
 
@@ -579,10 +582,53 @@ fn main() -> Result<()> {
             startup_gate_from_env()?;
             rr1000_support::runtime(12)?.block_on(rr1000::run(output, true))
         }
+        [mode, rest @ ..] if mode.starts_with("credit-") => credit_main(mode, rest),
         _ => bail!(
-            "usage: rrtransport smoke | rrtransport rr1000 <output-dir> | rrtransport rrtiny <output-dir>"
+            "usage: rrtransport smoke | rrtransport rr1000 <output-dir> | rrtransport rrtiny <output-dir>\n\
+             \x20      rrtransport credit-exhaust <unicast|evpn> <output-dir> [--reduced] [--correctness-only] [--pause-ms N]\n\
+             \x20      rrtransport credit-paused <output-dir> [--reduced] [--correctness-only] [--seconds N]\n\
+             \x20      rrtransport credit-fill <unicast|evpn|vpn|flowspec> <output-dir> [--reduced] [--correctness-only]\n\
+             \x20      rrtransport credit-probe <output-dir> [--reduced]"
         ),
     }
+}
+
+/// The outbound-credit cells; `Ok` only when the run's own checks passed.
+fn credit_main(mode: &str, args: &[String]) -> Result<()> {
+    // The daemon side (RIB, sessions) and the observing harness run on
+    // separate runtimes; see `credit::Options::daemon`.
+    let daemon = rr1000_support::runtime(12)?;
+    let harness = rr1000_support::runtime(4)?;
+    let options = |rest: &[String]| -> Result<credit::Options> {
+        let mut options = credit::Options::parse(rest)?;
+        options.daemon = Some(daemon.handle().clone());
+        Ok(options)
+    };
+    let passed = match (mode, args) {
+        ("credit-exhaust", [family, output, rest @ ..]) => harness.block_on(credit::exhaust(
+            credit::Family::parse(family)?,
+            Path::new(output),
+            &options(rest)?,
+        ))?,
+        ("credit-paused", [output, rest @ ..]) => {
+            harness.block_on(credit::paused(Path::new(output), &options(rest)?))?
+        }
+        ("credit-fill", [family, output, rest @ ..]) => harness.block_on(credit::fill(
+            credit::Family::parse(family)?,
+            Path::new(output),
+            &options(rest)?,
+        ))?,
+        ("credit-probe", [output, rest @ ..]) => {
+            let options = credit::Options::parse(rest)?;
+            credit_probe::run(Path::new(output), options.reduced, options.correctness_only)?
+        }
+        _ => bail!("bad {mode} arguments; run without arguments for usage"),
+    };
+    ensure!(
+        passed,
+        "{mode}: the run's own checks failed; see its result file"
+    );
+    Ok(())
 }
 
 #[cfg(test)]

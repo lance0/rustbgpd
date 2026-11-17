@@ -605,6 +605,11 @@ jobs:
           bash bench/scale/compare-recovery-memory.sh --check-controls
           cargo clippy --locked -p rrtransport --all-targets -- -D warnings
           cargo run --locked -p rrtransport -- smoke
+          credit_smoke=$(mktemp -d)
+          cargo run --locked -p rrtransport -- credit-exhaust unicast "$credit_smoke" --reduced
+          cargo run --locked -p rrtransport -- credit-exhaust evpn "$credit_smoke" --reduced
+          python3 -m unittest discover -s bench/scale/rrtransport -p 'test_*.py'
+          shellcheck -x bench/scale/rrtransport/run-credit-cells.sh
           rrtransport_receipt=$(mktemp -d)
           bench/scale/rrtransport/run-receipt.sh --real-smoke "$rrtransport_receipt"
           bash bench/tests/test-rrtransport-receipt.sh

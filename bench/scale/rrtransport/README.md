@@ -92,3 +92,183 @@ CI correctness fixture does not apply these performance ceilings.
 CI never runs the scale shape. It runs the original smoke, a 4×100 real-TCP
 fixture through the same scale collector/verifier/RSS seams, and destructive
 parser/mechanics fixtures.
+
+## Outbound-credit cells
+
+`rrtransport credit-*` runs the cells that qualify a change to the RIB's
+per-peer outbound credit. A production `RibManager` drives production
+transport sessions over TCP loopback to the same synthetic receivers as the
+smoke; sources inject through `RibUpdate`. The harness never sets the credit:
+each cell runs at the default credit of the tree the binary was built from,
+and it reads only metrics that exist on every tree it compares. It records
+`bgp_rib_outbound_credit_bytes` when the tree exports it and never needs it
+to run. Every wire reference comes from the harness's own injection log,
+never from the daemon's Adj-RIB-Out.
+
+| Cell | Mode | Shape | What it records |
+| --- | --- | --- | --- |
+| 1 | `credit-paused` | 150 private EVPN receivers, all socket reads paused; one source re-announces 37,500 routes every 2 s with alternating `LOCAL_PREF` for 240 s | cgroup `memory.peak`, VmRSS/VmHWM, jemalloc allocated, credit-rows and (when present) credit-bytes peaks |
+| 2 | `credit-exhaust unicast\|evpn` | RFC 4724 restart burst: selection deferred, 150 private receivers paused for 30 s while the restarting source sends 150,000 routes and its End-of-RIB | refusal witness, exact final wire state, End-of-RIB order, session resets, recovery time |
+| 3 | same run as cell 2 | one more receiver that gets none of the burst, only a separate source's single route replaced every 20 ms | max delivery gap and latency quantiles at that receiver |
+| 4 | `credit-probe` | in-process healthy-lag cells (unicast and EVPN, 150 and 1,000 peers, 0.5 s and 2 s stalls) and the 150-peer restart-during-dump probe, whose receivers join through the production `PeerUp` path and keep their 150,000-row initial tables queued while the 50,000-row tail arrives | dirty episodes and queued rows per receiver |
+| 6 | `credit-fill unicast\|evpn\|vpn\|flowspec` | 150 paused private receivers (unicast and VPN through the same peer-context policy); one source sends 150,000 fresh routes of the family; FlowSpec rules carry a prefix, 16 ports and 8 length ranges | bytes per queued row (report-only) |
+
+Cell 5 (Criterion) is not part of this harness.
+
+**Cell 2.** The burst routes carry distinct attributes (one UPDATE a route,
+about 180 bytes on the wire) and the receivers' sockets have a 16 KiB receive
+buffer, so a paused receiver's kernel buffers and writer budget absorb only a
+small part of the burst; the rest stays queued against the credit. The
+selection gate holds every burst End-of-RIB until the release's rows are
+admitted, so the order check covers rows the credit refused and the RIB sent
+later. Checks, per burst receiver: the final decoded table equals the
+injected one (every route present at its MED, nothing withdrawn, no
+route outside the burst keys, no undecodable UPDATE; an EVPN route counts only
+with the burst's RD and originator), the End-of-RIB arrives after the last route and nothing follows it,
+and the session never ends (stub stream open, no NOTIFICATION, transport still
+Established; the healthy receiver's session counts too). Recovery runs from the first burst UPDATE to the moment every
+burst receiver is exact with its End-of-RIB, on the harness clock; it includes
+the fixed 30 s pause. `drain_after_resume_ms` reports the part after the
+readers resume.
+
+**Refusal witness.** Past its credit a private family either refuses the
+send, counted per peer by
+`bgp_outbound_commit_refusals_total{reason="outbound_credit"}`, or records
+the keys the peer is owed and stays clean. The owing path admits a key only
+when the peer's credit is spent (or its channel is full, which a 4,096-slot
+channel of 1,024-row envelopes cannot reach here), and in this shape every
+burst receiver's owed set outgrows its cap and flips to owing the family
+whole, counted by `bgp_rib_outbound_owing_flips_total`. Both metrics exist on
+every tree the cells compare. The witness holds when every burst receiver
+shows a credit refusal, or when the owe-whole flips reach the number of burst
+receivers; otherwise the cell is INVALID, never PASS. The refusal reason also
+counts a refusal behind a live whole-table operation, so the result records
+`operations_live_at_first_refusal`. On the tree this harness landed on, the
+full shapes exhaust credit through the owing path: 150 flips, no refusals.
+
+The credit-rows, credit-bytes, dirty-peer and live-operation gauges are
+sampled by the RIB once per run-loop iteration. When one RIB unit spans the
+cell (as the RFC 4724 release did on that tree, together with the drain of
+the owed families), they read 0 throughout, so cell 2 reports their peaks but
+no bar reads them.
+
+**Cell 6.** Method: the least-squares slope of jemalloc allocated bytes over
+`bgp_rib_outbound_credit_rows`, sampled every 50 ms with every reader paused,
+using samples before the first credit refusal and between 10% and 90% of the
+pre-refusal credit-rows peak. Each queued fresh row adds its envelope row and
+its Adj-RIB-Out entry, the terms the candidate charges. Error terms: the
+source's own Adj-RIB-In and Loc-RIB growth, shared by 150 receivers (about
+1/150 of a row's source cost each); encoded frames in the writer budget (at
+most about 0.6 MiB a receiver, filled first); and allocator noise, reported as
+the slope's standard error. The analyzer compares the estimate with the
+candidate's charge (row element plus 146 bytes) and flags a family more than
+25% above it.
+
+### Running
+
+Build one binary per arm from its own tree (the candidate tree must contain
+this harness), and check that the two differ:
+
+```sh
+CARGO_INCREMENTAL=0 cargo build --locked --profile scale -p rrtransport
+sha256sum target/scale/rrtransport
+```
+
+Correctness first, a few minutes, no timing (reduced shape: 4 receivers,
+4,096 rows; credit is not reached, so the witness reads INVALID by design):
+
+```sh
+bench/scale/rrtransport/run-credit-cells.sh --reduced PARENT_BIN /abs/out/parent-smoke
+python3 bench/scale/rrtransport/credit_bars.py check /abs/out/parent-smoke
+```
+
+`--correctness-only` without `--reduced` runs the full shapes untimed, for
+example to show that cell 2 reaches refusal on a tree. A `--pause-ms` or
+`--seconds` override on the binary also marks its result correctness-only:
+only the fixed shape is a measurement.
+
+One arm's full set takes about 15 minutes of cells plus the quiet-host
+gate before each (at least a minute each on a quiet host); an A/A, ABBA and
+confirmation schedule is about two hours. The measured run holds the host lock, passes the quiet-host gate before each
+cell, and runs each cell in its own systemd user scope with swap fenced (12
+GiB for cell 1, 64 GiB otherwise). Lay repetitions out as subdirectories of
+one directory per arm, for example in ABBA order:
+
+```sh
+bench/scale/rrtransport/run-credit-cells.sh PARENT_BIN /abs/out/parent/1
+bench/scale/rrtransport/run-credit-cells.sh CANDIDATE_BIN /abs/out/candidate/1
+bench/scale/rrtransport/run-credit-cells.sh CANDIDATE_BIN /abs/out/candidate/2
+bench/scale/rrtransport/run-credit-cells.sh PARENT_BIN /abs/out/parent/2
+python3 bench/scale/rrtransport/credit_bars.py analyze /abs/out/parent /abs/out/candidate
+```
+
+The analyzer prints one `PASS`, `FAIL` or `INVALID` line per cell and never
+stops at the first failure. Timing bars and cell 1's cgroup peak compare
+medians across repetitions; the correctness checks and the witness must hold
+in every run, any candidate OOM fails cell 1, and the candidate's largest
+credit-bytes peak is the one held to its bar. Cell 1 judges the
+candidate-only bars (OOM, credit bytes) before reading the parent, so a
+parent OOM or bad parent run cannot weaken a candidate FAIL. Cell 6 needs the
+candidate's fit and row size in every repetition and reports the median fit.
+Exit status is 1 on any FAIL, else 2 on any INVALID, else 0.
+
+A repetition is a directory the runner wrote `provenance.jsonl` into; each
+invocation appends its binary hash and cell list. The analyzer reads every
+cell a repetition listed. A listed cell that left no result, or only a failure
+marker, is INVALID. A paused-reader OOM marker is the OOM verdict even beside
+a result, because that cell writes its result before teardown. Any other
+failure marker beside a result keeps the result only when it records the
+failure (a failed check, an unavailable fit, a dirty probe episode), so an
+explicit FAIL stands; beside a result that records no failure it is INVALID,
+here and in `check`. A result the directory's provenance does not list is
+INVALID, so is a repetition set that differs between the arms, an arm whose
+repetitions used different binaries, the same binary on both arms, and a
+result whose `cell` or `family` does not match its file name. Measured results must have the
+fixed shape on both arms: cell 2 150 receivers, 150,000 rows, a 30 s pause
+and the RFC 4724 trigger; cell 1 150 receivers, 37,500 routes, 240 s, 2 s
+rounds and the 12 GiB limit; cell 6 150 receivers and 150,000 rows; cell 4
+the fixed 9 probe cells.
+
+| Cell | Bar |
+| --- | --- |
+| 1 | no OOM; candidate cgroup peak ≤ parent peak − 1.5 GiB; candidate credit-bytes peak ≤ 2 GiB + 150 × one 1,024-row pass |
+| 2 | witness on both arms; exact wire state, End-of-RIB order and zero resets in every run; recovery ≤ max(parent × 1.25, parent + 2 s) |
+| 3 | no candidate delivery gap over 1 s; candidate p99 ≤ parent p99 × 1.10 |
+| 4 | zero dirty episodes in every candidate probe cell |
+| 6 | report-only |
+
+**INVALID** means the evidence cannot support a verdict: a missing result,
+a correctness-only or reduced run offered as a measurement, a missing
+refusal witness, a missing instrument (cgroup peak, VmHWM, the candidate's
+credit-bytes gauge), a cell-1 scope without the 12 GiB limit or the swap
+fence, a cell-1 receiver that disconnected (it frees its queued state), or a
+parent OOM. An INVALID cell is not a product result. A wire FAIL stands
+without a recovery time: a run that never settled is FAIL, not INVALID.
+
+Every field below must be present and non-null in each run the cell reads;
+a missing or null one makes that cell INVALID, never PASS.
+
+| Cell | Result file | Required fields |
+| --- | --- | --- |
+| 1 | `paused-evpn.json`, every repetition of both arms (or `paused-exit.json` with `oom`) | `mode` = `measured`; `shape.receivers`, `shape.routes`, `shape.seconds`, `shape.round_ms` fixed; `checks.no_session_resets` = true; `not_established` empty; `memory.cgroup_swap_max` = `0`; `memory.cgroup_memory_max` = 12 GiB; `memory.cgroup_memory_peak_bytes`; `memory.vmhwm_kib`; `memory.cgroup_oom_kill`; candidate `memory.peak_credit_bytes` and `row_size_of` |
+| 2 | `exhaust-<family>.json`, every run of both arms | `mode`; `shape.receivers`, `shape.rows_per_receiver`, `shape.pause_ms`, `shape.trigger` fixed; `witness.refused_receivers`, `witness.owing_flips_total`, `witness.receivers`; `checks.final_state_exact`, `checks.eor_after_every_route`, `checks.no_session_resets`; `timing.recovery_ms` once every wire check passed |
+| 3 | `exhaust-<family>.json`, every run of both arms | `mode`; `unaffected.injected` and `unaffected.delivered` (nonzero), `unaffected.p99_latency_ms`, `unaffected.max_gap_ms` |
+| 4 | `probes.json`, every run of both arms | `mode`; `probes` = the fixed 9 cells (`cell`, `shape`, `peers`, `stall_ms`; restart `table`), each candidate cell with `dirty_episodes` |
+| 6 | `fill-<family>.json`, every run of both arms, each family | `mode`; `shape.receivers`, `shape.rows_per_receiver` fixed; candidate `estimate.bytes_per_queued_row` and `row_size_of` |
+| all | `provenance.jsonl` per repetition | `sha256` (one per arm, different between arms) and `cells` |
+
+Before it appends its provenance line, the runner deletes the previous result
+and exit marker of every cell it lists, so a rerun into a used directory that
+fails, is interrupted or stops at the quiet-host gate leaves nothing stale.
+
+A cell's exit status is the outcome of the checks its result records, so the
+paused-reader cell exits nonzero when a receiver is not Established.
+
+Self-tests, no daemon: `cargo test -p rrtransport credit` seeds a dropped
+route, a stale route, an extra route (before and after End-of-RIB), an
+undecodable UPDATE, a foreign IMET key, a route after End-of-RIB and a session
+reset into the wire checker; `python3 -m unittest discover -s
+bench/scale/rrtransport -p 'test_*.py'` seeds each bar's defect into the
+analyzer and checks that only that cell changes verdict, removes each required
+field in turn, and drives the runner with a stand-in binary to check that a
+rerun clears stale results.

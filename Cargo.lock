@@ -3100,6 +3100,7 @@ dependencies = [
  "rustbgpd-telemetry",
  "rustbgpd-transport",
  "rustbgpd-wire",
+ "serde_json",
  "tikv-jemallocator",
  "tokio",
 ]

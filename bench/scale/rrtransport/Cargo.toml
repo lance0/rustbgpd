@@ -14,5 +14,6 @@ rustbgpd-rib.workspace = true
 rustbgpd-telemetry = { workspace = true, features = ["jemalloc"] }
 rustbgpd-transport = { workspace = true, features = ["bench-internals"] }
 rustbgpd-wire.workspace = true
+serde_json.workspace = true
 tikv-jemallocator.workspace = true
 tokio.workspace = true
