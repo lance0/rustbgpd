@@ -1119,14 +1119,20 @@ async fn set_peer_group_policy_only_change_reaches_live_dynamic_peers() {
 
     let manager_task = tokio::spawn(mgr.run());
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(PeerManagerCommand::SetPeerGroup {
-        name: "ix-members".to_string(),
-        definition: next_group,
+    tx.send(PeerManagerCommand::OwnedCatalogMutation {
+        mutation: OwnedCatalogMutation::SetPeerGroup {
+            name: "ix-members".to_string(),
+            definition: Box::new(next_group),
+        },
         reply: reply_tx,
     })
     .await
     .unwrap();
-    reply_rx.await.unwrap().unwrap();
+    let outcome = reply_rx.await.unwrap();
+    assert!(
+        matches!(outcome, OwnedCatalogMutationOutcome::Success),
+        "{outcome:?}"
+    );
 
     assert_eq!(
         counters.query_state.load(Ordering::SeqCst),
@@ -1174,17 +1180,18 @@ async fn set_peer_group_rejects_an_unparseable_orr_vantage_on_apply() {
 
     let manager_task = tokio::spawn(mgr.run());
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(PeerManagerCommand::SetPeerGroup {
-        name: "ix-members".to_string(),
-        definition,
+    tx.send(PeerManagerCommand::OwnedCatalogMutation {
+        mutation: OwnedCatalogMutation::SetPeerGroup {
+            name: "ix-members".to_string(),
+            definition: Box::new(definition),
+        },
         reply: reply_tx,
     })
     .await
     .unwrap();
-    let error = reply_rx
-        .await
-        .unwrap()
-        .expect_err("an unparseable orr_vantage must not apply");
+    let OwnedCatalogMutationOutcome::RejectedNoEffect(error) = reply_rx.await.unwrap() else {
+        panic!("an unparseable orr_vantage must not apply");
+    };
     let message = format!("{error:?}");
     assert!(
         matches!(error, CatalogMutationError::Invalid(_)),
@@ -1923,16 +1930,20 @@ async fn missing_policy_catalog_references_return_not_found_errors() {
     assert!(reply_rx.await.unwrap().is_ok(), "AddPeer must succeed");
 
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(PeerManagerCommand::SetNeighborPeerGroup {
-        address: addr,
-        peer_group: "missing-group".to_string(),
+    tx.send(PeerManagerCommand::OwnedCatalogMutation {
+        mutation: OwnedCatalogMutation::SetNeighborPeerGroup {
+            address: addr,
+            interface: None,
+            peer_group: "missing-group".to_string(),
+        },
         reply: reply_tx,
     })
     .await
     .unwrap();
     assert!(matches!(
         reply_rx.await.unwrap(),
-        Err(CatalogMutationError::NotFound(message)) if message.contains("missing-group")
+        OwnedCatalogMutationOutcome::RejectedNoEffect(CatalogMutationError::NotFound(message))
+            if message.contains("missing-group")
     ));
 
     tx.send(PeerManagerCommand::Shutdown).await.unwrap();

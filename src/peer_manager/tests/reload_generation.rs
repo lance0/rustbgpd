@@ -6797,9 +6797,9 @@ async fn dataset_generation_long_export_keeps_clean_state_retry_window() {
 }
 
 /// Runtime `SetPeerGroup` on a group a bound interface-only peer uses: a
-/// policy-only edit reaches the bound session in place, and an edit that
-/// changes its session settings is accepted on both catalog paths; the port
-/// reconcile rebinds the member (`a_peer_group_rpc_rebinds_only_the_changed_members`).
+/// policy-only edit reaches the bound session in place, and edits that
+/// change its session settings are accepted; the port reconcile rebinds the
+/// member (`a_peer_group_rpc_rebinds_only_the_changed_members`).
 #[tokio::test]
 async fn set_peer_group_accepts_session_edits_and_applies_policy_to_a_bound_peer() {
     let fixture = RsFixture::new();
@@ -6824,32 +6824,50 @@ async fn set_peer_group_accepts_session_edits_and_applies_policy_to_a_bound_peer
     let _ = Box::pin(
         harness
             .mgr
-            .dispatch_command(PeerManagerCommand::SetPeerGroup {
-                name: "members".to_string(),
-                definition: policy_only.clone(),
+            .dispatch_command(PeerManagerCommand::OwnedCatalogMutation {
+                mutation: rustbgpd_api::peer_types::OwnedCatalogMutation::SetPeerGroup {
+                    name: "members".to_string(),
+                    definition: Box::new(policy_only.clone()),
+                },
                 reply,
             }),
     )
     .await;
-    outcome.await.unwrap().expect("policy-only edit applies");
+    let outcome = outcome.await.unwrap();
+    assert!(
+        matches!(
+            outcome,
+            rustbgpd_api::peer_types::OwnedCatalogMutationOutcome::Success
+        ),
+        "policy-only edit applies: {outcome:?}"
+    );
     assert_eq!(harness.mgr.peers[&bound].session_id(), session, "no flap");
     assert_eq!(harness.export_med_of(&bound), Some(30));
 
-    // A session knob. Mutation-red: with the old refusal both paths reject.
+    // A session knob. Mutation-red: with the old refusal it is rejected.
     let mut session_edit = policy_only.clone();
     session_edit.hold_time = Some(60);
     let (reply, outcome) = oneshot::channel();
     let _ = Box::pin(
         harness
             .mgr
-            .dispatch_command(PeerManagerCommand::SetPeerGroup {
-                name: "members".to_string(),
-                definition: session_edit,
+            .dispatch_command(PeerManagerCommand::OwnedCatalogMutation {
+                mutation: rustbgpd_api::peer_types::OwnedCatalogMutation::SetPeerGroup {
+                    name: "members".to_string(),
+                    definition: Box::new(session_edit),
+                },
                 reply,
             }),
     )
     .await;
-    outcome.await.unwrap().expect("session edit accepted");
+    let outcome = outcome.await.unwrap();
+    assert!(
+        matches!(
+            outcome,
+            rustbgpd_api::peer_types::OwnedCatalogMutationOutcome::Success
+        ),
+        "session edit accepted: {outcome:?}"
+    );
     assert_eq!(
         harness.mgr.current_config.peer_groups["members"].hold_time,
         Some(60)

@@ -730,7 +730,7 @@ pub struct DynamicPeerBounceOutcome {
 
 /// Resolved import/export policy chains for one live peer session.
 ///
-/// Carried by [`PeerManagerCommand::ApplyResolvedPolicySnapshot`]. The same
+/// Carried by [`PeerManagerCommand::ApplyPolicyImpactSnapshot`]. The same
 /// shape is reused for the captured PRIOR chains a forward apply returns,
 /// which a rollback hands back through
 /// [`PeerManagerCommand::RestoreResolvedPolicySnapshot`].
@@ -758,8 +758,7 @@ pub struct RestoredPolicySnapshot {
     pub reset_sessions: Vec<PeerKey>,
 }
 
-/// A failed [`PeerManagerCommand::ApplyResolvedPolicySnapshot`],
-/// [`PeerManagerCommand::ApplyPolicyImpactSnapshot`] or
+/// A failed [`PeerManagerCommand::ApplyPolicyImpactSnapshot`] or
 /// [`PeerManagerCommand::RestoreResolvedPolicySnapshot`], classified by what it
 /// left on the live sessions, so the caller can settle without parsing text.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1083,29 +1082,6 @@ pub enum PeerManagerCommand {
         /// Reply returns the redacted effective config TOML.
         reply: oneshot::Sender<Result<String, String>>,
     },
-    /// Apply resolved import/export policy chains to a set of live
-    /// peer sessions, returning each peer's PRIOR chains for rollback.
-    ///
-    /// The forward apply over concrete peers: the same qualified path
-    /// [`PeerManagerCommand::ApplyPolicyImpactSnapshot`] takes once it has
-    /// expanded its dynamic ranges. Each target's prior chains are captured before the
-    /// new ones are hot-applied through the same per-peer path SIGHUP uses. The
-    /// command is rollback-capable at the peer-manager layer: on the first
-    /// per-peer apply failure it attempts to restore the peers it already
-    /// changed (reverse order). A successful restore leaves nothing mutated; a
-    /// compound rollback failure is included in the returned `Err` and may
-    /// leave per-peer retry intent armed. On success it returns the captured
-    /// priors, which a later rollback hands to
-    /// [`PeerManagerCommand::RestoreResolvedPolicySnapshot`]. Targets not currently live
-    /// (e.g. a dynamic peer that disconnected) are skipped and absent from the
-    /// returned priors. Never mutates `current_config` — snapshot staging owns
-    /// that, keeping a single token-advance point.
-    ApplyResolvedPolicySnapshot {
-        /// Resolved chains to apply, one entry per concrete live peer.
-        targets: Vec<ResolvedPeerPolicy>,
-        /// Reply returns the captured prior chains (the rollback token).
-        reply: oneshot::Sender<Result<Vec<ResolvedPeerPolicy>, PolicySnapshotApplyError>>,
-    },
     /// Put back the prior chains a forward policy apply returned, after a
     /// later step of the same config transaction failed (a publication
     /// failure).
@@ -1144,9 +1120,17 @@ pub enum PeerManagerCommand {
     /// `static_targets` are already resolved by the transaction controller.
     /// `dynamic_ranges` are expanded inside the peer-manager actor against live
     /// dynamic peers whose stored accepted-range attribution matches the target.
-    /// The expanded concrete target set is then committed through the same
-    /// rollback-capable apply/restore path as
-    /// [`PeerManagerCommand::ApplyResolvedPolicySnapshot`].
+    /// Each expanded target's prior chains are captured before the new ones
+    /// are hot-applied through the same per-peer path SIGHUP uses. On the
+    /// first per-peer apply failure the command attempts to restore the peers
+    /// it already changed (reverse order). A successful restore leaves nothing
+    /// mutated; a compound rollback failure is included in the returned `Err`
+    /// and may leave per-peer retry intent armed. On success it returns the
+    /// captured priors, which a later rollback hands to
+    /// [`PeerManagerCommand::RestoreResolvedPolicySnapshot`]. Targets not
+    /// currently live (e.g. a dynamic peer that disconnected) are skipped and
+    /// absent from the returned priors. Never mutates `current_config`;
+    /// snapshot staging owns that, keeping a single token-advance point.
     ApplyPolicyImpactSnapshot {
         /// Concrete static-neighbor targets.
         static_targets: Vec<ResolvedPeerPolicy>,
@@ -1659,38 +1643,6 @@ pub enum PeerManagerCommand {
         name: String,
         /// Reply channel returning the definition if found.
         reply: oneshot::Sender<Option<PeerGroupDefinition>>,
-    },
-    /// Create or replace a peer group.
-    SetPeerGroup {
-        /// Peer-group name.
-        name: String,
-        /// Full replacement definition.
-        definition: PeerGroupDefinition,
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
-    },
-    /// Delete a peer group.
-    DeletePeerGroup {
-        /// Peer-group name.
-        name: String,
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
-    },
-    /// Assign a neighbor to a peer group.
-    SetNeighborPeerGroup {
-        /// Neighbor address.
-        address: IpAddr,
-        /// Peer-group name.
-        peer_group: String,
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
-    },
-    /// Clear a neighbor's peer-group membership.
-    ClearNeighborPeerGroup {
-        /// Neighbor address.
-        address: IpAddr,
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
     },
     /// Read a neighbor's current peer-group membership (used by the
     /// persisted catalog CRUD paths to capture prior state for rollback).

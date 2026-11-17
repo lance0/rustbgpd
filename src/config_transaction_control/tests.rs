@@ -820,14 +820,6 @@ fn runtime_config_coordinator_inventory_is_complete_and_closed() {
     let commit = owned_peer_group_body.find("staged.commit_typed()").unwrap();
     assert!(gate < mutating && mutating < stage && stage < actor);
     assert!(actor < settling && settling < commit);
-    for legacy in [
-        "PeerManagerCommand::SetPeerGroup",
-        "PeerManagerCommand::DeletePeerGroup",
-        "PeerManagerCommand::SetNeighborPeerGroup",
-        "PeerManagerCommand::ClearNeighborPeerGroup",
-    ] {
-        assert!(!peer_group.contains(legacy), "PeerGroup4 bypass: {legacy}");
-    }
     assert_eq!(
         peer_manager
             .matches("PeerManagerCommand::OwnedCatalogMutation")
@@ -2540,9 +2532,6 @@ async fn fake_live_policy_peer_manager(
                             reset_sessions: Vec::new(),
                         }),
                 );
-            }
-            PeerManagerCommand::ApplyResolvedPolicySnapshot { .. } => {
-                panic!("a live-policy rollback must restore its priors, not re-apply them forward")
             }
             _ => panic!("unexpected peer-manager command in live-policy transaction test"),
         }
