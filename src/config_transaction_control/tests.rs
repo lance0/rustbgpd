@@ -2525,7 +2525,14 @@ async fn fake_live_policy_peer_manager(
             PeerManagerCommand::RestoreResolvedPolicySnapshot { priors, reply } => {
                 apply_calls.lock().await.push(priors);
                 dynamic_calls.lock().await.push(Vec::new());
-                let _ = reply.send(apply_results.lock().await.pop_front().unwrap_or(Ok(())));
+                let _ = reply.send(
+                    apply_results
+                        .lock()
+                        .await
+                        .pop_front()
+                        .unwrap_or(Ok(()))
+                        .map(|()| Vec::new()),
+                );
             }
             PeerManagerCommand::ApplyResolvedPolicySnapshot { .. } => {
                 panic!("a live-policy rollback must restore its priors, not re-apply them forward")
@@ -6236,6 +6243,99 @@ async fn confirm_timeout_auto_revert_survives_session_drop_inside_confirm_window
         .await;
     assert_config_transaction_lifecycle_metric(&window.controller, "auto_revert", "success", 1.0);
     assert_config_transaction_lifecycle_metric(&window.controller, "auto_revert", "failure", 0.0);
+}
+
+/// A transaction moves an Established peer's import chain live; the peer
+/// then reconnects without Route Refresh, and publication fails. The
+/// rollback, run by the real controller and peer manager, reinstalls the
+/// prior chain and resets that one session after the install, so the peer
+/// resends its routes under the prior chain. The outcome is exact but
+/// visible to the peer: an unfenced `INTERNAL` naming the peer, not the clean
+/// `FAILED_PRECONDITION` and not a recovery fence.
+///
+/// The capability is lost when the forward apply's own Route Refresh is
+/// answered, so the rollback always observes it.
+#[tokio::test]
+async fn publication_rollback_resets_a_session_that_lost_route_refresh() {
+    let previous_toml = live_policy_toml("permit");
+    let candidate_toml = live_policy_toml("deny");
+    let current = Config::load_toml_with_diagnostics(&previous_toml, "reset current")
+        .expect("current config must parse");
+    let resolved = current.resolved_neighbors().expect("neighbors resolve");
+    let (rib_tx, rib_rx) = mpsc::channel(128);
+    let (_query_tx, query_rx) = mpsc::channel(1);
+    tokio::spawn(
+        rustbgpd_rib::RibManager::new(rib_rx, query_rx, None, None, BgpMetrics::new()).run(),
+    );
+    let (peer_tx, peer_rx) = mpsc::channel(64);
+    let (internal_tx, internal_rx) = mpsc::channel(1);
+    let mut peer_manager = crate::peer_manager::PeerManager::new_with_config(
+        peer_rx,
+        internal_rx,
+        current.global.asn,
+        current.global.router_id.parse().unwrap(),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx.clone(),
+        None,
+        None,
+        current,
+    );
+    let acks = peer_manager.install_established_policy_test_peer_losing_route_refresh(
+        resolved.into_iter().next().unwrap(),
+        1,
+    );
+    tokio::spawn(peer_manager.run());
+
+    let planned = plan_candidate(&peer_tx, candidate_toml.clone(), String::new(), true)
+        .await
+        .expect("real plan must succeed");
+    let (config_tx, config_rx) = mpsc::channel(8);
+    tokio::spawn(reject_config_transaction_publishes(config_rx));
+    let controller = ConfigTransactionController::new(
+        deps_value(None, peer_tx.clone(), Some(config_tx), Vec::new()),
+        BgpMetrics::new(),
+    )
+    .with_preloaded_planner(internal_tx);
+
+    let err = controller
+        .clone()
+        .apply(proto::ApplyConfigTransactionRequest {
+            candidate_toml,
+            expected_runtime_snapshot_token: planned.runtime_snapshot_token,
+            client_request_id: String::new(),
+            comment: String::new(),
+            confirm_id: String::new(),
+            confirm_timeout_seconds: 0,
+        })
+        .await
+        .expect_err("an unpublished candidate is rolled back");
+
+    let chains = acks.import_chains();
+    assert_eq!(chains.len(), 2, "candidate, then the prior chain: {err:?}");
+    let resets = tokio::time::timeout(Duration::from_secs(5), acks.resets_after(1))
+        .await
+        .unwrap_or_else(|_| panic!("the session must be reset: {err:?}"));
+    assert_eq!(
+        resets,
+        vec![2],
+        "one reset, after the prior chain was installed: {err:?}"
+    );
+    assert!(
+        matches!(&err, ConfigTransactionApplyError::Internal(message)
+            if message.contains("persist rejected by test")
+                && message.contains("10.0.0.2")
+                && message.contains("did not negotiate Route Refresh")),
+        "a rollback that reset a session is an unfenced INTERNAL naming it: {err:?}"
+    );
+    let runtime = crate::reload::runtime_config_snapshot(&peer_tx)
+        .await
+        .expect("real peer manager must return its runtime config");
+    assert_snapshot_matches_config(
+        &crate::config::persisted_config_document(&runtime).unwrap(),
+        &previous_toml,
+    );
 }
 
 #[tokio::test]
@@ -12036,7 +12136,7 @@ async fn enumerated_live_policy_peer(
             }
             PeerManagerCommand::RestoreResolvedPolicySnapshot { priors, reply } => {
                 *live.lock().await = priors;
-                if transaction_test_reply(reply, Ok(()), fault).await {
+                if transaction_test_reply(reply, Ok(Vec::new()), fault).await {
                     schedule.restored(TransactionTestActor::Peer);
                 }
             }

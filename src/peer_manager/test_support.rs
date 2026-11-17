@@ -18,6 +18,15 @@ pub(crate) struct EstablishedPolicyPeerAcks {
     route_refreshes: Arc<AtomicU32>,
     exited: Arc<AtomicBool>,
     exit_notify: Arc<Notify>,
+    /// Report a negotiated session that has Route Refresh until the first
+    /// refresh is answered, and lacks it afterwards: the peer reconnected
+    /// without the capability after taking the chain.
+    lose_route_refresh: bool,
+    import_chains: Arc<std::sync::Mutex<Vec<Option<rustbgpd_policy::PolicyChain>>>>,
+    /// For each administrative reset, how many import chains the session had
+    /// installed when the reset arrived.
+    resets: Arc<std::sync::Mutex<Vec<usize>>>,
+    reset_notify: Arc<Notify>,
 }
 
 impl EstablishedPolicyPeerAcks {
@@ -31,6 +40,26 @@ impl EstablishedPolicyPeerAcks {
 
     pub(crate) fn export_updates(&self) -> u32 {
         self.export_updates.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn import_chains(&self) -> Vec<Option<rustbgpd_policy::PolicyChain>> {
+        self.import_chains.lock().unwrap().clone()
+    }
+
+    /// The resets the session has handled, once it has handled `count`. A
+    /// reset is only admitted to the session's queue, so this is the
+    /// handshake that orders a read after it.
+    pub(crate) async fn resets_after(&self, count: usize) -> Vec<usize> {
+        loop {
+            let notified = self.reset_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let resets = self.resets.lock().unwrap().clone();
+            if resets.len() >= count {
+                return resets;
+            }
+            notified.await;
+        }
     }
 
     pub(crate) fn route_refreshes(&self) -> u32 {
@@ -52,13 +81,36 @@ impl EstablishedPolicyPeerAcks {
     }
 }
 
+/// The negotiated session a capability-reporting test session answers with.
+fn negotiated_session(route_refresh: bool) -> rustbgpd_transport::NegotiatedSessionState {
+    rustbgpd_transport::NegotiatedSessionState {
+        local_address: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        hold_time: 90,
+        keepalive_interval: 30,
+        remote_router_id: Ipv4Addr::new(192, 0, 2, 1),
+        four_octet_as: true,
+        families: vec![(rustbgpd_wire::Afi::Ipv4, rustbgpd_wire::Safi::Unicast)],
+        add_path_receive_families: Vec::new(),
+        peer_route_refresh: route_refresh,
+        peer_enhanced_route_refresh: false,
+        peer_extended_message: false,
+        outbound_max_message_bytes: rustbgpd_wire::MAX_MESSAGE_LEN,
+        graceful_restart: None,
+    }
+}
+
 fn established_policy_handle(peer: IpAddr, acks: EstablishedPolicyPeerAcks) -> PeerHandle {
     let (command_tx, mut command_rx) = mpsc::channel(8);
     let task = tokio::spawn(async move {
+        let mut route_refresh = true;
+        let mut current_import = None;
         while let Some(command) = command_rx.recv().await {
             match command {
                 PeerCommand::QueryState { reply } => {
                     acks.state_queries.fetch_add(1, Ordering::SeqCst);
+                    let negotiated_session = acks
+                        .lose_route_refresh
+                        .then(|| negotiated_session(route_refresh));
                     let _ = reply.send(PeerSessionState {
                         fsm_state: SessionState::Established,
                         peer_ip: peer,
@@ -71,7 +123,7 @@ fn established_policy_handle(peer: IpAddr, acks: EstablishedPolicyPeerAcks) -> P
                         negotiated_hold_time: None,
                         four_octet_as: None,
                         remote_router_id: Some(Ipv4Addr::UNSPECIFIED),
-                        negotiated_session: None,
+                        negotiated_session,
                         local_role: None,
                         remote_role: None,
                         role_negotiated: false,
@@ -97,8 +149,22 @@ fn established_policy_handle(peer: IpAddr, acks: EstablishedPolicyPeerAcks) -> P
                         notification_idle_failures: 0,
                     });
                 }
-                PeerCommand::UpdateImportPolicy { reply, .. } => {
+                PeerCommand::UpdateImportPolicy {
+                    policy,
+                    install,
+                    reply,
+                } => {
                     acks.import_updates.fetch_add(1, Ordering::SeqCst);
+                    let policy = policy.map(|chain| *chain);
+                    let changed = current_import.as_ref() != Some(&policy);
+                    if acks.lose_route_refresh && install.refused(true, route_refresh, changed) {
+                        let _ = reply.send(Err(
+                            rustbgpd_transport::PeerCommandError::RouteRefreshUnsupported,
+                        ));
+                        continue;
+                    }
+                    acks.import_chains.lock().unwrap().push(policy.clone());
+                    current_import = Some(policy);
                     let _ = reply.send(Ok(()));
                 }
                 PeerCommand::UpdateExportPolicy { reply, .. } => {
@@ -107,7 +173,19 @@ fn established_policy_handle(peer: IpAddr, acks: EstablishedPolicyPeerAcks) -> P
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
                     acks.route_refreshes.fetch_add(1, Ordering::SeqCst);
+                    if !route_refresh {
+                        let _ = reply.send(Err(
+                            rustbgpd_transport::PeerCommandError::RouteRefreshUnsupported,
+                        ));
+                        continue;
+                    }
+                    route_refresh = !acks.lose_route_refresh;
                     let _ = reply.send(Ok(()));
+                }
+                PeerCommand::AdministrativeReset { .. } => {
+                    let installed = acks.import_chains.lock().unwrap().len();
+                    acks.resets.lock().unwrap().push(installed);
+                    acks.reset_notify.notify_waiters();
                 }
                 PeerCommand::Shutdown | PeerCommand::Stop { .. } | PeerCommand::CollisionDump => {
                     break;
@@ -132,9 +210,31 @@ impl PeerManager {
         resolved: ResolvedNeighbor,
         session_id: u64,
     ) -> EstablishedPolicyPeerAcks {
+        self.install_established_policy_test_peer_with(resolved, session_id, false)
+    }
+
+    /// Like [`Self::install_established_policy_test_peer`], but the session
+    /// loses Route Refresh once it has answered its first refresh.
+    pub(crate) fn install_established_policy_test_peer_losing_route_refresh(
+        &mut self,
+        resolved: ResolvedNeighbor,
+        session_id: u64,
+    ) -> EstablishedPolicyPeerAcks {
+        self.install_established_policy_test_peer_with(resolved, session_id, true)
+    }
+
+    fn install_established_policy_test_peer_with(
+        &mut self,
+        resolved: ResolvedNeighbor,
+        session_id: u64,
+        lose_route_refresh: bool,
+    ) -> EstablishedPolicyPeerAcks {
         let peer = resolved.transport_config.remote_addr.ip();
         let key = rustbgpd_api::peer_types::PeerKey::new(peer, None);
-        let acks = EstablishedPolicyPeerAcks::default();
+        let acks = EstablishedPolicyPeerAcks {
+            lose_route_refresh,
+            ..EstablishedPolicyPeerAcks::default()
+        };
         let handle = established_policy_handle(peer, acks.clone());
         let remote_asn = resolved.transport_config.peer.remote_asn;
         let hold_time = resolved.transport_config.peer.hold_time;

@@ -1,7 +1,7 @@
 use tokio::sync::{mpsc, oneshot};
 
 use rustbgpd_api::peer_types::{
-    ConfigEvent, DynamicRangeTarget, PeerManagerCommand, PolicySnapshotApplyError,
+    ConfigEvent, DynamicRangeTarget, PeerKey, PeerManagerCommand, PolicySnapshotApplyError,
     ResolvedPeerPolicy,
 };
 use rustbgpd_api::runtime_config_settlement::RuntimeConfigFenceReason;
@@ -223,11 +223,12 @@ async fn send_apply_policy_impact_snapshot(
 /// Send `RestoreResolvedPolicySnapshot` to put the captured prior chains
 /// back during rollback. A restore is not qualified like the forward apply,
 /// so a peer whose session changed since the apply still gets its prior
-/// chain.
+/// chain. Returns the sessions the restore reset because their peers did not
+/// negotiate Route Refresh.
 async fn send_restore_resolved_policy_snapshot(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     priors: Vec<ResolvedPeerPolicy>,
-) -> Result<(), ConfigTransactionApplyError> {
+) -> Result<Vec<PeerKey>, ConfigTransactionApplyError> {
     let (reply_tx, reply_rx) = oneshot::channel();
     peer_mgr_tx
         .send(PeerManagerCommand::RestoreResolvedPolicySnapshot {
@@ -275,10 +276,28 @@ async fn rollback_live_policy_and_snapshot(
     if original.fence_reason.is_some() {
         return original;
     }
+    // The live chains are restored while the candidate snapshot is still
+    // staged, which refuses every dynamic accept: a reset dynamic peer that
+    // reconnects before the snapshot is restored is dropped, never accepted
+    // under the candidate's chains.
     let live_rollback = send_restore_resolved_policy_snapshot(peer_mgr_tx, priors).await;
     let snapshot_rollback = restore_preloaded_config_snapshot(peer_mgr_internal_tx, rollback).await;
     match (live_rollback, snapshot_rollback) {
-        (Ok(()), Ok(())) => original,
+        (Ok(reset_sessions), Ok(())) if reset_sessions.is_empty() => original,
+        // Exact, but not without effect: each reset session flapped, which
+        // its peer saw, so this is not the clean no-effect refusal.
+        (Ok(reset_sessions), Ok(())) => ConfigTransactionApplyError::Internal(format!(
+            "{}; the prior live policy was restored, and {} session(s) that did not \
+                 negotiate Route Refresh were reset so each resends its routes under it: {}",
+            original.error,
+            reset_sessions.len(),
+            reset_sessions
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+        .into(),
         (live_result, snapshot_result) => combine_rollback_errors(
             &original.error,
             "live policy rollback",

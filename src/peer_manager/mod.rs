@@ -3099,6 +3099,7 @@ impl PeerManager {
                 // A config transaction's publication failed: put back the
                 // chains its forward apply replaced, before the staged config
                 // is restored. Reads report each source's current values.
+                // The reply names the sessions the restore reset.
                 let result = boxed(|| {
                     self.restore_resolved_policy_snapshot(
                         priors,
@@ -3107,7 +3108,6 @@ impl PeerManager {
                     )
                 })
                 .await
-                .map(drop)
                 .map_err(policy::PolicySnapshotFailure::into_apply_error);
                 let _ = reply.send(result);
             }
