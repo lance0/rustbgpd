@@ -4356,19 +4356,27 @@ fn check_flowspec_family_release(family: (Afi, Safi), case: FamilyReleaseCase) {
                 ))
                 .collect::<Vec<_>>()
         );
-        let route = sent
-            .iter()
-            .position(|update| {
-                update.flowspec_announce.iter().any(|route| {
-                    route.selection_key() == key && route.extended_communities().contains(&discard)
-                })
+        let route = sent.iter().position(|update| {
+            update.flowspec_announce.iter().any(|route| {
+                route.selection_key() == key && route.extended_communities().contains(&discard)
             })
-            .expect("the restored discard is announced");
+        });
+        // The withdrawal never left (the writer was full and the family was
+        // owed), so the peer still holds the rule: an owed drain announces
+        // nothing for it, and a forced resync sends it again.
+        assert_eq!(
+            route.is_some(),
+            case != FamilyReleaseCase::OwedRereceive,
+            "{case:?}"
+        );
         let marker = sent
             .iter()
             .position(|update| update.end_of_rib.contains(&family))
             .expect("the family marker is sent");
-        assert!(route <= marker, "the marker follows the restored discard");
+        assert!(
+            route.is_none_or(|route| route <= marker),
+            "the marker follows the restored discard"
+        );
     } else {
         assert!(
             sent.iter()
