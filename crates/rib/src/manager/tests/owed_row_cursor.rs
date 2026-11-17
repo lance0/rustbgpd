@@ -149,34 +149,39 @@ impl Wire {
     /// their credit.
     fn write(&mut self, rx: &mut mpsc::Receiver<OutboundRouteUpdate>) {
         while let Ok(update) = rx.try_recv() {
-            let rows = update.announce.len() + update.unicast_withdrawals().count();
-            if rows != 0 {
-                self.uncharged += usize::from(update.credit.is_none());
-                self.latched += usize::from(update.latch.is_some());
-                self.envelope_rows_max = self.envelope_rows_max.max(rows);
-                if self.markers != 0 {
-                    self.rows_after_marker += rows;
-                }
-            }
-            for (prefix, _) in update.unicast_withdrawals() {
-                assert!(
-                    self.table.remove(prefix).is_some(),
-                    "withdrawal of {prefix}, which the receiver does not hold"
-                );
-                self.withdrawn.push(*prefix);
-            }
-            for route in update.announce.iter() {
-                let attributes = format!("{:?}", route.attributes);
-                self.paths.push((route.prefix, attributes.clone()));
-                self.table.insert(route.prefix, attributes);
-                self.announced.push(route.prefix);
-            }
-            self.markers += update
-                .end_of_rib
-                .iter()
-                .filter(|family| **family == V4)
-                .count();
+            self.apply(&update);
         }
+    }
+
+    /// Write one envelope.
+    fn apply(&mut self, update: &OutboundRouteUpdate) {
+        let rows = update.announce.len() + update.unicast_withdrawals().count();
+        if rows != 0 {
+            self.uncharged += usize::from(update.credit.is_none());
+            self.latched += usize::from(update.latch.is_some());
+            self.envelope_rows_max = self.envelope_rows_max.max(rows);
+            if self.markers != 0 {
+                self.rows_after_marker += rows;
+            }
+        }
+        for (prefix, _) in update.unicast_withdrawals() {
+            assert!(
+                self.table.remove(prefix).is_some(),
+                "withdrawal of {prefix}, which the receiver does not hold"
+            );
+            self.withdrawn.push(*prefix);
+        }
+        for route in update.announce.iter() {
+            let attributes = format!("{:?}", route.attributes);
+            self.paths.push((route.prefix, attributes.clone()));
+            self.table.insert(route.prefix, attributes);
+            self.announced.push(route.prefix);
+        }
+        self.markers += update
+            .end_of_rib
+            .iter()
+            .filter(|family| **family == V4)
+            .count();
     }
 
     fn count(&self, index: u32) -> (usize, usize) {
@@ -1564,6 +1569,155 @@ fn an_evicted_receivers_mark_ends_with_its_session_or_its_group() {
     assert_eq!(receivers[1].wire.markers, 1);
     assert_eq!(receivers[1].wire.rows_after_marker, 0);
     assert!(!manager.dirty_peers.contains(&peer));
+}
+
+/// Observations of the owed-drain step histogram, every scope.
+fn drain_steps_observed(manager: &RibManager) -> u64 {
+    manager
+        .metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .filter(|family| family.name() == "bgp_rib_outbound_owed_drain_step_seconds")
+        .flat_map(|family| family.get_metric().to_vec())
+        .map(|metric| metric.get_histogram().get_sample_count())
+        .sum()
+}
+
+/// Work count: a tick resyncs at most one evicted receiver, however much
+/// of its poll budget is left: that resync is a whole table, and the tick
+/// ends with it. The unit is not a drain step and is observed under no
+/// scope of the step histogram. Red when the tick goes on to the next
+/// evicted receiver while its budget lasts: one tick builds all three.
+#[test]
+fn a_tick_resyncs_one_evicted_receiver_whatever_its_budget() {
+    const STALLED: usize = 3;
+    let (mut manager, mut receivers, expected) = evict_stalled(3);
+    // A budget no unit uses up.
+    manager.flush_poll_budget = Duration::from_secs(3600);
+    // The receiver that keeps up takes no step meanwhile.
+    let charge = crate::outbound_credit::OutboundCharge::new(
+        &manager.outbound_credit_handle(receivers[0].peer),
+        CREDIT,
+    );
+    let builds = manager.adj_rib_out_commit_stats.resync_builds;
+    let observed = drain_steps_observed(&manager);
+    for unit in 1..=STALLED {
+        manager.resync_dirty_peers_bounded();
+        assert_eq!(
+            manager.adj_rib_out_commit_stats.resync_builds - builds,
+            unit,
+            "one evicted receiver a tick"
+        );
+        assert_eq!(manager.owed_row_evicted.len(), STALLED - unit);
+    }
+    assert_eq!(
+        drain_steps_observed(&manager),
+        observed,
+        "a fallback resync is not a drain step"
+    );
+    drop(charge);
+    drain(&mut manager, &mut receivers);
+    assert_settled(&manager, &receivers, &expected, "one a tick");
+}
+
+/// The actor loop takes queued input between two evicted receivers'
+/// resyncs. Three receivers wait for the tick, whose poll budget no unit
+/// uses up. When the first has its table the other two have nothing, and
+/// an update is queued: it runs before the second receiver's resync, so
+/// that resync and the third carry the new state ahead of their End-of-RIB,
+/// while the first receiver is sent it as an ordinary update after its
+/// own. Red when a tick resyncs every evicted receiver its budget allows:
+/// all three have their tables before the loop reads its queue.
+#[tokio::test(start_paused = true)]
+async fn queued_input_runs_between_two_evicted_receivers_resyncs() {
+    let (mut manager, mut receivers, mut expected) = evict_stalled(3);
+    for receiver in &mut receivers {
+        receiver.write();
+    }
+    manager.flush_poll_budget = Duration::from_secs(3600);
+    let (tx, rx) = mpsc::channel(8);
+    manager.rx = rx;
+    let actor = tokio::spawn(manager.run());
+    // The first unit: one evicted receiver is sent its table.
+    let first = {
+        let [_, a, b, c] = &mut receivers[..] else {
+            panic!("four receivers");
+        };
+        let (index, update) = tokio::select! {
+            update = a.rx.recv() => (1, update),
+            update = b.rx.recv() => (2, update),
+            update = c.rx.recv() => (3, update),
+        };
+        receivers[index]
+            .wire
+            .apply(&update.expect("the session is up"));
+        index
+    };
+    receivers[first].write();
+    assert_eq!(receivers[first].wire.table.len(), expected.len());
+    for (index, receiver) in receivers.iter().enumerate().skip(1) {
+        assert!(
+            index == first || receiver.rx.is_empty(),
+            "receiver {index} was resynced in the first receiver's tick"
+        );
+    }
+    // Queued behind the first unit, ahead of the second.
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: peer_v4(SOURCE),
+        announced: vec![route(5, 9)],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    })
+    .await
+    .unwrap();
+    expected[5] = (5, 9);
+    for _ in 0..200 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        for receiver in &mut receivers {
+            receiver.write();
+        }
+    }
+    for (index, receiver) in receivers.iter().enumerate() {
+        assert_eq!(receiver.wire.table, table(&expected), "receiver {index}");
+        assert_eq!(receiver.wire.markers, 1, "receiver {index}");
+        if index != 0 {
+            // The update ran after the first table, which had ended with
+            // its marker, and before the other two, which carried it.
+            let after = usize::from(index == first);
+            assert_eq!(receiver.wire.rows_after_marker, after, "receiver {index}");
+        }
+    }
+    drop(tx);
+    actor.abort();
+}
+
+/// A deleted neighbor leaves nothing behind: an evicted receiver that is
+/// deleted before the tick reaches it, with no session end first, is no
+/// longer marked, dirty or owed an End-of-RIB, and the tick has nothing to
+/// build. Red when the mark outlives the receiver's owed state.
+#[test]
+fn a_deleted_evicted_receiver_leaves_no_mark_and_no_end_of_rib() {
+    let (mut manager, mut receivers, expected) = evict_stalled(1);
+    let gone = receivers.pop().unwrap();
+    assert!(manager.eor_pending(gone.peer).contains(&V4));
+    let builds = manager.adj_rib_out_commit_stats.resync_builds;
+    manager.handle_update(RibUpdate::PeerDeleted {
+        peer: gone.peer,
+        label: None,
+        keep_series: false,
+    });
+    assert!(manager.owed_row_evicted.is_empty());
+    assert!(!manager.dirty_peers.contains(&gone.peer));
+    assert!(manager.eor_pending(gone.peer).is_empty(), "no marker owed");
+    drain(&mut manager, &mut receivers);
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
+    assert_settled(&manager, &receivers, &expected, "deleted");
 }
 
 fn second_path(index: u32, med: u32) -> Route {

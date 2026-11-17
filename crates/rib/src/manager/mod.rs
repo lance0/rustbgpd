@@ -4393,6 +4393,12 @@ impl RibManager {
             self.dirty_peers.extend(withheld);
             self.dirty_since.extend(withheld_since);
             self.force_outbound_peers.extend(withheld_force);
+            // An evicted receiver's resync is a whole table whatever the
+            // poll budget says: it is the tick's last unit, so the actor
+            // loop takes queued input before the next receiver's.
+            if evicted {
+                return true;
+            }
             let unattempted_remain = self
                 .dirty_peers
                 .iter()
