@@ -286,13 +286,13 @@ async fn flowspec_mutations_preserve_family_scope_and_global_defaults() {
             "l3vpn_ipv4_flowspec",
             proto::AddressFamily::L3vpnIpv4Flowspec,
             "192.0.2.0/24",
-            "44407:40",
+            "64500:40",
         ),
         (
             "l3vpn-ipv6-flowspec",
             proto::AddressFamily::L3vpnIpv6Flowspec,
             "2001:db8::/48",
-            "44407:40",
+            "64500:40",
         ),
     ] {
         let component = format!("dest={prefix}");
@@ -306,11 +306,11 @@ async fn flowspec_mutations_preserve_family_scope_and_global_defaults() {
                 "--rd",
                 rd,
                 "--route-target",
-                "44407:777",
+                "64500:777",
                 "--route-target",
                 "0.65000:9",
             ]);
-            vec!["44407:777".to_string(), "0.65000:9".to_string()]
+            vec!["64500:777".to_string(), "0.65000:9".to_string()]
         };
         let run = |args: &[&str]| {
             Command::new(env!("CARGO_BIN_EXE_rbgp"))
@@ -377,9 +377,9 @@ async fn flowspec_add_rejects_vpn_scope_on_non_vpn_families_before_rpc() {
     let server = test_support::spawn_mock_server(None).await;
     for family in ["ipv4_flowspec", "ipv6-flowspec", "ipv4_unicast"] {
         for scope in [
-            vec!["--rd", "44407:40"],
-            vec!["--route-target", "44407:777"],
-            vec!["--rd", "44407:40", "--route-target", "44407:777"],
+            vec!["--rd", "64500:40"],
+            vec!["--route-target", "64500:777"],
+            vec!["--rd", "64500:40", "--route-target", "64500:777"],
         ] {
             let mut args = vec!["flowspec", "add", "--match", "port==80", "--action", "drop"];
             args.extend(["--family", family]);
@@ -407,7 +407,7 @@ async fn flowspec_delete_rejects_vpn_scope_on_non_vpn_families_before_rpc() {
     let server = test_support::spawn_mock_server(None).await;
     for family in ["ipv4_flowspec", "ipv6-flowspec", "ipv4_unicast"] {
         let mut args = vec![
-            "flowspec", "delete", "--match", "port==80", "--rd", "44407:40",
+            "flowspec", "delete", "--match", "port==80", "--rd", "64500:40",
         ];
         args.extend(["--family", family]);
         let output = Command::new(env!("CARGO_BIN_EXE_rbgp"))
