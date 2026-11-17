@@ -4,6 +4,7 @@
 //! injection log, never the daemon's Adj-RIB-Out, so a storage defect in
 //! the daemon cannot also corrupt the reference it is compared with.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -205,6 +206,16 @@ pub struct WireState {
     pub routes_after_eor: u64,
     /// Churned NLRI decoded after the End-of-RIB: allowed, report-only.
     pub churned_after_eor: u64,
+    /// First MED announced before the End-of-RIB, per churned route.
+    first_churned: HashMap<usize, u32>,
+    /// At the first End-of-RIB: churned routes whose state before the
+    /// marker already reflected the churn (a withdrawn route never
+    /// announced, a re-announced one first seen at its new MED). Nonzero
+    /// shows the churn reached the RIB before the release sent those rows.
+    pub churn_reflected_before_eor: Option<usize>,
+    /// Announcements before the End-of-RIB that repeat the MED already
+    /// held: report-only.
+    pub duplicates_before_eor: u64,
     /// Burst-family NLRI decoded before the family's first End-of-RIB.
     pub routes_before_eor: u64,
     /// End-of-RIB markers of the family.
@@ -244,6 +255,9 @@ impl WireState {
             eor_premature: false,
             routes_after_eor: 0,
             churned_after_eor: 0,
+            first_churned: HashMap::new(),
+            churn_reflected_before_eor: None,
+            duplicates_before_eor: 0,
             routes_before_eor: 0,
             eors: 0,
             messages: 0,
@@ -317,6 +331,15 @@ impl WireState {
         self.eors += u64::from(observed.end_of_rib);
         for &(index, med) in &observed.announced {
             self.announced += 1;
+            if !self.eor_seen && index < rows {
+                let held = self.table[index];
+                self.duplicates_before_eor += u64::from(held != 0 && Some(held) == med);
+                if self.reference.churned[index] {
+                    self.first_churned
+                        .entry(index)
+                        .or_insert(med.unwrap_or(u32::MAX));
+                }
+            }
             // A route without MED can never equal the reference.
             self.set(index, med.unwrap_or(u32::MAX));
         }
@@ -328,6 +351,7 @@ impl WireState {
             self.eor_seen = true;
             self.eor_at = Some(now);
             self.eor_premature = self.stable_mismatch != 0;
+            self.churn_reflected_before_eor = Some(self.churn_reflected());
         }
         self.settled_at = if self.exact() {
             self.settled_at.or(Some(now))
@@ -345,6 +369,19 @@ impl WireState {
 
     pub fn missing(&self) -> usize {
         self.mismatch
+    }
+
+    /// Churned routes whose first announcement so far (none: 0) is already
+    /// their post-churn reference state.
+    fn churn_reflected(&self) -> usize {
+        let churned = self.reference.churned.iter().enumerate();
+        churned
+            .filter(|&(index, &churned)| {
+                churned
+                    && self.first_churned.get(&index).copied().unwrap_or(0)
+                        == self.reference.meds[index]
+            })
+            .count()
     }
 
     /// Routes the reference withdrew for good that the receiver still holds.
@@ -712,6 +749,36 @@ mod tests {
         assert_eq!(checks(&state), [true, false, true]);
         assert!(state.eor_premature);
         assert_eq!(state.routes_after_eor, 1);
+    }
+
+    #[test]
+    fn churn_witness_counts_routes_already_churned_at_the_end_of_rib() {
+        // The release sent every row at MED 7 before the churn reached the
+        // RIB: nothing before the marker reflects it.
+        let late = churned_run(&[routes(0..ROWS, 7), eor(), withdrawn([1, 2]), routes([2], 9)]);
+        assert_eq!(late.churn_reflected_before_eor, Some(0));
+        // The churn reached the RIB first: route 1 never announced, route 2
+        // first seen at MED 9.
+        let early = churned_run(&[routes([0, 3], 7), routes([2], 9), eor()]);
+        assert_eq!(early.churn_reflected_before_eor, Some(2));
+        // Seeded: route 1 announced at 7 and withdrawn before the marker,
+        // route 2 seen at 7 before 9. Neither counts.
+        let mixed = churned_run(&[routes(0..ROWS, 7), withdrawn([1]), routes([2], 9), eor()]);
+        assert_eq!(mixed.churn_reflected_before_eor, Some(0));
+        // No marker, no witness.
+        assert_eq!(
+            churned_run(&[routes([0, 3], 7)]).churn_reflected_before_eor,
+            None
+        );
+    }
+
+    #[test]
+    fn duplicate_announcements_before_the_end_of_rib_are_counted() {
+        let state = run(&[routes(0..ROWS, 7), routes([1], 7), routes([1], 6), eor()]);
+        assert_eq!(state.duplicates_before_eor, 1);
+        // After the marker a repeat is not counted here.
+        let state = run(&[routes(0..ROWS, 7), eor(), routes([1], 7)]);
+        assert_eq!(state.duplicates_before_eor, 0);
     }
 
     #[test]

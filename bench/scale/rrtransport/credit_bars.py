@@ -54,8 +54,8 @@ RECOVERY_SLACK_MS = 2_000.0
 DRAIN_AFTER_RESUME_MAX_MS = 60_000.0
 # Cell 7: the RFC 4724 selection release and its owed drain. Absolute bars
 # on the candidate: the longest owed-drain step, the longest RIB actor turn,
-# and the summed credit gauge against receivers x (per-peer credit + one
-# 1,024-row pass); unicast keeps no whole-table operation live.
+# and the summed credit-rows gauge within receivers x (per-peer credit +/-
+# one pass); unicast keeps no whole-table operation live.
 OWED_STEP_MAX_MS = 50.0
 ACTOR_TURN_MAX_MS = 250.0
 RELEASE_TRIGGER = "rfc4724_selection_release"
@@ -93,9 +93,15 @@ ORDINARY_TRIGGER = "ordinary_announce_burst"
 # credit, per-peer floor, per-peer ceiling), in the unit of the gauge the
 # tree exports: bytes where `bgp_rib_outbound_credit_bytes` exists, else rows.
 # The clamps bind outside the fixed shape (under 16 or over 1,024 registered
-# peers), which `check` can read, such as the reduced shape's 7.
+# peers), which `check` can read, such as the reduced shape's 7. A row-credit
+# tree's constants come from the run's `row_credit` record, which the harness
+# mirrors from the RIB (a harness test fails when they drift).
 BYTE_CREDIT = (CREDIT_TARGET, 2 << 20, 256 << 20)
-ROW_CREDIT = (16_777_216, 8_192, 1_048_576)
+ROW_CREDIT_KEYS = ("DAEMON_ROW_CREDIT", "MIN_ROW_CREDIT", "MAX_ROW_CREDIT")
+# Cell 7: the inbox round-trip probe runs on both arms; bar 2 PASS needs it
+# within the turn bar too. The excluded churn-free window may span at most
+# this many times its configured length.
+EXCLUDED_SPAN_RATIO = 2.0
 
 # The fixed qualification shapes. A measured result with any other shape is
 # not campaign evidence.
@@ -296,19 +302,37 @@ def measured(runs: list[dict], what: str, shape: dict | None = None) -> list[dic
     return runs
 
 
+def witness_of(run: dict, what: str) -> dict:
+    witness = need(run, "witness", what)
+    if not isinstance(witness, dict):
+        raise Invalid(f"{what}: witness is not an object ({witness!r})")
+    return witness
+
+
+def per_peer(run: dict, credit: tuple, what: str) -> int:
+    """`credit` (daemon-wide, floor, ceiling) per peer at the run's
+    registered peers."""
+    peers = number(run, "shape.registered_peers", what)
+    if peers <= 0:
+        raise Invalid(f"{what}: {peers} registered peers")
+    return min(max(int(credit[0]) // int(peers), credit[1]), credit[2])
+
+
+def row_credit(run: dict, what: str) -> tuple[int, int]:
+    """The run's per-peer row credit and rows in one ordinary pass, from the
+    RIB constants the harness recorded."""
+    credit = tuple(int(number(run, f"row_credit.{key}", what)) for key in ROW_CREDIT_KEYS)
+    return per_peer(run, credit, what), int(number(run, "row_credit.CHUNK_ROWS", what))
+
+
 def credit_unit(run: dict, what: str) -> tuple[str, int, float]:
     """The summed credit gauge's unit (bytes where the tree exports
     `bgp_rib_outbound_credit_bytes`, else rows), the per-peer credit in it
     at the run's registered peers, and one burst row's charge."""
-    peers = number(run, "shape.registered_peers", what)
-    if peers <= 0:
-        raise Invalid(f"{what}: {peers} registered peers")
-    if need(run, "witness", what).get("peak_credit_bytes") is not None:
-        credit, row = BYTE_CREDIT, number(run, "row_size_of", what) + ANNOUNCED_ROW_OVERHEAD
-        unit = "bytes"
-    else:
-        unit, credit, row = "rows", ROW_CREDIT, 1
-    return unit, min(max(credit[0] // int(peers), credit[1]), credit[2]), row
+    if witness_of(run, what).get("peak_credit_bytes") is not None:
+        row = number(run, "row_size_of", what) + ANNOUNCED_ROW_OVERHEAD
+        return "bytes", per_peer(run, BYTE_CREDIT, what), row
+    return "rows", row_credit(run, what)[0], 1
 
 
 def exhaustion(run: dict, what: str) -> str:
@@ -456,16 +480,17 @@ def exhaust_runs(parent: Arm, candidate: Arm, family: str) -> dict[str, list[dic
         "parent": measured(runs[0], f"parent {cell}", EXHAUST_SHAPE),
         "candidate": measured(runs[1], f"candidate {cell}", EXHAUST_SHAPE),
     }
-    # Arm identity: the parent is a row-credit tree and the candidate a
-    # byte-credit one, so two builds of one tree cannot pass as the pair.
+    # Arm identity: the parent is a row-credit tree, so a parent with the
+    # byte gauge (a byte-credit candidate in the parent's place) is not the
+    # pair. The candidate may charge rows or bytes; two builds of one tree
+    # are caught by the binary hashes (`verdicts`).
     for arm, arm_runs in arms.items():
         for index, run in enumerate(arm_runs):
-            present = (run.get("witness") or {}).get("peak_credit_bytes") is not None
-            if present != (arm == "candidate"):
+            what = f"{arm} {cell} run {index}"
+            if arm == "parent" and witness_of(run, what).get("peak_credit_bytes") is not None:
                 raise Invalid(
-                    f"{arm} {cell} run {index}: byte credit gauge "
-                    f"{'present' if present else 'absent'}; the parent must lack "
-                    "bgp_rib_outbound_credit_bytes and the candidate must export it"
+                    f"{what}: byte credit gauge present; the parent must lack "
+                    "bgp_rib_outbound_credit_bytes"
                 )
     # Arms are comparable only over the same actual pause.
     pauses = [
@@ -539,9 +564,23 @@ def healthy_gap(run: dict, what: str) -> tuple[float, str]:
         raise Invalid(f"{what}: the healthy receiver got no churn")
     gap = number(run, "unaffected.max_gap_ms", what)
     raw = number(run, "unaffected.max_gap_raw_ms", what)
+    if "quiet_excluded" not in run["unaffected"]:
+        raise Invalid(f"missing instrument {what}: unaffected.quiet_excluded")
+    if run["unaffected"]["quiet_excluded"] is None:
+        # The last churn row before the window never arrived: nothing is
+        # excluded, so the gap is the raw one.
+        if gap != raw:
+            raise Invalid(f"{what}: nothing excluded, yet max gap {gap} ms is not raw {raw} ms")
+        return gap, f"max gap {gap:.0f} ms (nothing excluded: the held churn row never arrived)"
     start = number(run, "unaffected.quiet_excluded.from_ms", what)
     end = number(run, "unaffected.quiet_excluded.to_ms", what)
     span = number(run, "unaffected.quiet_excluded.span_ms", what)
+    lead = number(run, "unaffected.quiet_lead_ms", what)
+    if span > lead * EXCLUDED_SPAN_RATIO:
+        raise Invalid(
+            f"{what}: excluded churn-free window {span:.0f} ms is over "
+            f"{EXCLUDED_SPAN_RATIO:g} x its configured {lead:.0f} ms: it could hide a stall"
+        )
     return gap, (
         f"max gap {gap:.0f} ms ({raw:.0f} ms before excluding the {span:.0f} ms churn-free "
         f"window {start:.0f}-{end:.0f} ms)"
@@ -728,24 +767,63 @@ def cell6(parent: Arm, candidate: Arm) -> tuple[str, str]:
     return "PASS", "report-only: " + "; ".join(notes) + tail
 
 
-def churn_inside_drain(run: dict, what: str) -> str:
-    """The churn variant's withdrawals and re-announcements must have been
-    sent after the release and before the last receiver's End-of-RIB, or the
-    run did not churn during the drain: INVALID."""
+def full_release_shape(run: dict) -> bool:
+    """Whether a release run has the fixed shape's receivers, rows and pause,
+    measured or not: where the drain is long enough for its witnesses."""
+    shape = run.get("shape") if isinstance(run.get("shape"), dict) else {}
+    return all(shape.get(key) == RELEASE_SHAPE[key] for key in ("receivers", "rows_per_receiver"))
+
+
+def churn_in_drain(run: dict, what: str, gate: bool) -> str:
+    """The churn variant: both withdrawals and re-announcements, sent after
+    the release and before the readers resumed, and on the wire, per burst
+    receiver, churned routes whose state before its End-of-RIB already
+    reflected the churn (the RIB had the churn before the release sent
+    those rows). With `gate`, a receiver without one is INVALID: the churn
+    did not land in the drain; otherwise the count is reported only."""
     withdrawn = number(run, "churn.withdrawn", what)
     again = number(run, "churn.re_announced", what)
+    if withdrawn < 1 or again < 1:
+        raise Invalid(
+            f"{what}: {withdrawn:.0f} withdrawn and {again:.0f} re-announced; the churn "
+            "variant needs both"
+        )
     started = number(run, "churn.started_ms", what)
     sent = number(run, "churn.sent_ms", what)
     release = number(run, "timing.release_sent_ms", what)
+    resumed = number(run, "timing.resumed_ms", what)
+    # Necessary, not sufficient: the last End-of-RIB is decoded after the
+    # resume, so only the wire witness below shows the churn in the drain.
     last = number(run, "timing.last_eor_ms", what)
-    if withdrawn < 1 or not release <= started <= sent < last:
+    if not release <= started <= sent < min(resumed, last):
         raise Invalid(
-            f"{what}: {withdrawn:.0f} withdrawals sent {started:.0f}-{sent:.0f} ms, not inside "
-            f"the drain from the {release:.0f} ms release to the {last:.0f} ms last End-of-RIB"
+            f"{what}: churn sent {started:.0f}-{sent:.0f} ms, not between the {release:.0f} ms "
+            f"release and the {resumed:.0f} ms resume and before the {last:.0f} ms last "
+            "End-of-RIB"
         )
+    receivers = number(run, "shape.receivers", what)
+    reflected = need(run, "wire.churn_reflected_before_eor", what)
+    if not isinstance(reflected, list) or len(reflected) != receivers:
+        raise Invalid(f"{what}: wire.churn_reflected_before_eor is not one count per receiver")
+    counts = [
+        value if isinstance(value, int) and not isinstance(value, bool) else 0
+        for value in reflected
+    ]
+    short = sum(1 for count in counts if count < 1)
+    line = (
+        f"churned routes already in their post-churn state before the End-of-RIB on "
+        f"{receivers - short:.0f}/{receivers:.0f} receivers (fewest {min(counts, default=0)})"
+    )
+    if short and gate:
+        raise Invalid(
+            f"{what}: churn did not land in the drain: {line}; every burst receiver needs one"
+        )
+    duplicates = (run.get("wire") or {}).get("duplicates_before_eor")
     return (
         f"{withdrawn:.0f} withdrawn and {again:.0f} re-announced at {started:.0f}-{sent:.0f} ms, "
-        f"inside the drain ({release:.0f}-{last:.0f} ms)"
+        f"between the release ({release:.0f} ms) and the resume ({resumed:.0f} ms); {line}"
+        + ("" if gate else " (report-only: not the full shape)")
+        + f"; duplicate announcements before the End-of-RIB {duplicates} (report-only)"
     )
 
 
@@ -764,32 +842,150 @@ def longest_bounds(run: dict, path: str, what: str) -> list[tuple[str, float, fl
     return bounds
 
 
-def turn_bar(run: dict, what: str) -> tuple[str | None, str | None, str]:
-    """Bar 2 for one run: (FAIL reason, undecided reason, reading). A poll
-    holds whole turns, so a longest poll within the bar passes every turn;
-    a turn or work unit whose bucket lies above the bar fails; anything
-    else is undecided, since a poll can hold many turns and resync ticks
-    have no turn instrument."""
+# One bar on one run: (FAIL reason, undecided reason, reading).
+Bar = tuple[str | None, str | None, str]
+
+
+def turn_bar(run: dict, what: str) -> Bar:
+    """Bar 2 for one run. A turn or work unit whose bucket lies above the
+    bar fails. A pass needs both instruments within it: the longest poll
+    (which holds whole turns, so it bounds every turn) and the longest
+    inbox round trip (which a drain that yields without serving the RIB's
+    update channel stretches). A poll within the bar with a longer round
+    trip, a longer poll with no turn provably over it, a dead poll
+    instrument and a window without an `end_of_rib` turn are undecided."""
     poll = number(run, "actor.slice_max_us.actor_poll", what) / 1e3
-    over, top = [], []
+    trip = number(run, "actor.inbox_round_trip.longest_ms", what)
+    probes = number(run, "actor.inbox_round_trip.probes", what)
+    over, top, labels = [], [], set()
     for path in ("actor.turn_longest_ms", "actor.work_longest_ms"):
         for label, above, at_most in longest_bounds(run, path, what):
             if above >= ACTOR_TURN_MAX_MS:
                 over.append(f"{label} over {above:.0f} ms")
             top.append((above, at_most, label))
+            if path == "actor.turn_longest_ms":
+                labels.add(label)
     worst = max(top, default=(0.0, 0.0, "none"))
     reading = (
-        f"longest actor poll {poll:.1f} ms; longest turn or work unit {worst[2]} in "
+        f"longest actor poll {poll:.1f} ms; longest inbox round trip {trip:.1f} ms over "
+        f"{probes:.0f} probes; longest turn or work unit {worst[2]} in "
         f"({worst[0]:.0f}, {'inf' if worst[1] is None else f'{worst[1]:.0f}'}] ms"
     )
     if over:
         return f"{what}: {', '.join(over)} > {ACTOR_TURN_MAX_MS:.0f} ms ({reading})", None, reading
-    if poll <= ACTOR_TURN_MAX_MS:
-        return None, None, reading
-    return None, (
-        f"{what}: longest actor poll {poll:.1f} ms > {ACTOR_TURN_MAX_MS:.0f} ms but no turn is "
-        f"provably over it ({reading}): a poll can hold many turns"
-    ), reading
+    if poll <= 0 or probes < 1:
+        return None, f"{what}: dead instrument ({reading})", reading
+    if "end_of_rib" not in labels:
+        return None, f"{what}: no end_of_rib turn observed in the run window ({reading})", reading
+    if poll > ACTOR_TURN_MAX_MS:
+        return None, (
+            f"{what}: longest actor poll {poll:.1f} ms > {ACTOR_TURN_MAX_MS:.0f} ms but no turn "
+            f"is provably over it ({reading}): a poll can hold many turns"
+        ), reading
+    if trip > ACTOR_TURN_MAX_MS:
+        return None, (
+            f"{what}: instruments disagree: longest actor poll {poll:.1f} ms is within "
+            f"{ACTOR_TURN_MAX_MS:.0f} ms but an inbox round trip took {trip:.1f} ms ({reading})"
+        ), reading
+    return None, None, reading
+
+
+def credit_bar(run: dict, what: str, family: str) -> Bar:
+    """Bar 6 for one run. The 1 ms gauge watch must have run (reads over at
+    least half its window). In rows: the peak at most receivers x (per-peer
+    credit + one pass), and, where each paused receiver is owed more rows
+    than its credit, at least receivers x (credit - one pass), or owed rows
+    went uncharged. A byte-credit tree's byte bound reads the 250 ms sampler
+    and is report-only: the rows bound can still FAIL it, nothing PASSes it.
+    Unicast keeps no whole-table operation live."""
+    receivers = number(run, "shape.receivers", what)
+    owed = number(run, "shape.rows_per_receiver", what)
+    start = number(run, "drain_gauges.from_ms", what)
+    end = number(run, "drain_gauges.to_ms", what)
+    every = number(run, "drain_gauges.read_every_ms", what)
+    reads = number(run, "drain_gauges.reads", what)
+    if every <= 0 or end <= start or reads < (end - start) / every / 2:
+        return None, (
+            f"{what}: {reads:.0f} gauge reads over the {end - start:.0f} ms watch, fewer than "
+            f"half of one every {every:g} ms: the gauge watch did not run"
+        ), ""
+    rows = number(run, "drain_gauges.peak_credit_rows", what)
+    limit, pass_rows = row_credit(run, what)
+    bound, floor = receivers * (limit + pass_rows), receivers * (limit - pass_rows)
+    failures = []
+    if rows > bound:
+        failures.append(
+            f"{what}: credit rows peak {rows:.0f} > {bound:.0f} = {receivers:.0f} x "
+            f"({limit} + {pass_rows})"
+        )
+    operations = number(run, "drain_gauges.peak_operations_live", what)
+    if family == "unicast" and operations != 0:
+        failures.append(
+            f"{what}: {operations:.0f} live whole-table operations during the drain, not 0"
+        )
+    reading = (
+        f"credit rows peak {rows:.0f} (bound {bound:.0f}) over {reads:.0f} reads; live "
+        f"whole-table operations peak {operations:.0f}"
+        + ("" if family == "unicast" else " (report-only: the gauge is unlabeled)")
+    )
+    unit, byte_limit, row = credit_unit(run, what)
+    undecided = None
+    if unit == "bytes":
+        peak = number(run, "witness.peak_credit_bytes", what)
+        byte_bound = receivers * (byte_limit + PASS_ROWS * row)
+        reading += (
+            f"; report-only: credit bytes peak {peak:.0f} vs {byte_bound:.0f} = "
+            f"{receivers:.0f} x ({byte_limit} + {PASS_ROWS} x {row:.0f}), read every 250 ms"
+        )
+        undecided = (
+            f"{what}: byte credit: the bar 6 byte bound is report-only (250 ms sampler) and "
+            f"the row witness does not apply, so bar 6 cannot pass ({reading})"
+        )
+    elif owed > limit:
+        if rows < floor:
+            failures.append(
+                f"{what}: owed rows not charged: credit rows peak {rows:.0f} < {floor:.0f} = "
+                f"{receivers:.0f} x ({limit} - {pass_rows}) with {owed:.0f} rows owed to each "
+                "paused receiver"
+            )
+        reading += f"; credit witness: peak at least {floor:.0f}"
+    else:
+        reading += (
+            f"; credit witness not applicable, report-only: {owed:.0f} rows per receiver "
+            f"<= per-peer credit {limit}"
+        )
+    return ("; ".join(failures) or None), undecided, reading
+
+
+def release_run(run: dict, what: str, kind: str, family: str) -> tuple[list, list, list]:
+    """Every cell-7 bar on one run, each on its own, so one bar's missing
+    instrument never hides another's FAIL: (failures, undecided, readings)."""
+
+    def wire() -> Bar:
+        for check in RESTART_WIRE_CHECKS:
+            if need(run, f"checks.{check}", what) is not True:
+                return f"{what}: {check} failed", None, ""
+        return None, None, ""
+
+    def gap() -> Bar:
+        value, note = healthy_gap(run, what)
+        failure = f"{what}: healthy delivery gap {value:.0f} ms > {MAX_GAP_MS:.0f} ms"
+        return (failure if value > MAX_GAP_MS else None), None, note
+
+    bars = [wire, lambda: turn_bar(run, what), gap, lambda: credit_bar(run, what, family)]
+    if kind == "restart-churn":
+        bars.insert(1, lambda: (None, None, churn_in_drain(run, what, gate=True)))
+    failures, undecided, readings = [], [], []
+    for bar in bars:
+        try:
+            failure, open_question, reading = bar()
+        except Invalid as error:
+            undecided.append(str(error))
+            continue
+        failures += [failure] if failure else []
+        undecided += [open_question] if open_question else []
+        readings += [reading] if reading else []
+    return failures, undecided, readings
 
 
 def release_runs(candidate: Arm, cell: str) -> list[dict]:
@@ -797,45 +993,17 @@ def release_runs(candidate: Arm, cell: str) -> list[dict]:
 
 
 def cell7(candidate: Arm, kind: str, family: str) -> tuple[str, str]:
-    """Bars 2, 3, 4 and 6 on the candidate's release runs of one kind."""
+    """Bars 2, 3, 4 and 6 on the candidate's release runs of one kind. A
+    FAIL in any bar of any run outranks every undecided one."""
     cell = f"{kind}-{family}"
-    runs = release_runs(candidate, cell)
     failures, undecided, notes = [], [], []
-    wire = wire_failure(runs, f"candidate {cell}", RESTART_WIRE_CHECKS)
-    if wire is not None:
-        failures.append(wire)
-    for index, run in enumerate(runs):
-        what = f"candidate {cell} run {index}"
-        if kind == "restart-churn" and wire is None:
-            notes.append(churn_inside_drain(run, what))
-        failure, open_question, reading = turn_bar(run, what)
-        failures += [failure] if failure else []
-        undecided += [open_question] if open_question else []
-        gap, note = healthy_gap(run, what)
-        if gap > MAX_GAP_MS:
-            failures.append(f"{what}: healthy delivery gap {gap:.0f} ms > {MAX_GAP_MS:.0f} ms")
-        unit, limit, row = credit_unit(run, what)
-        receivers = number(run, "shape.receivers", what)
-        bound = receivers * (limit + PASS_ROWS * row)
-        if unit == "bytes":
-            peak = number(run, "witness.peak_credit_bytes", what)
-        else:
-            peak = number(run, "drain_gauges.peak_credit_rows", what)
-        if peak > bound:
-            failures.append(
-                f"{what}: credit {unit} peak {peak:.0f} > {bound:.0f} = {receivers:.0f} x "
-                f"({limit} + {PASS_ROWS} x {row:.0f})"
-            )
-        operations = number(run, "drain_gauges.peak_operations_live", what)
-        if family == "unicast" and operations != 0:
-            failures.append(
-                f"{what}: {operations:.0f} live whole-table operations during the drain, not 0"
-            )
-        notes.append(
-            f"{reading}; {note}; credit {unit} peak {peak:.0f} (bound {bound:.0f}); live "
-            f"whole-table operations peak {operations:.0f}"
-            + ("" if family == "unicast" else " (report-only: the gauge is unlabeled)")
+    for index, run in enumerate(release_runs(candidate, cell)):
+        run_failures, run_undecided, readings = release_run(
+            run, f"candidate {cell} run {index}", kind, family
         )
+        failures += run_failures
+        undecided += run_undecided
+        notes.append("; ".join(readings))
     if failures:
         return "FAIL", "; ".join(failures + undecided)
     if undecided:
@@ -845,30 +1013,38 @@ def cell7(candidate: Arm, kind: str, family: str) -> tuple[str, str]:
 
 def cell7_step(candidate: Arm) -> tuple[str, str]:
     """Bar 1 over every release run: the longest owed-drain step."""
-    failures, undecided, longest = [], [], 0.0
+    failures, undecided = [], []
     for kind, _ in RELEASE_KINDS:
         for family in FAMILIES:
             cell = f"{kind}-{family}"
             for index, run in enumerate(release_runs(candidate, cell)):
                 what = f"candidate {cell} run {index}"
-                if (run.get("actor") or {}).get("owed_drain_step_longest_ms") is None:
-                    raise Invalid(
-                        f"{what}: no instrument: no product metric times one owed-drain step "
-                        "(actor.owed_drain_step_longest_ms is null)"
-                    )
-                bounds = longest_bounds(run, "actor.owed_drain_step_longest_ms", what)
-                if not bounds:
-                    raise Invalid(f"{what}: no owed-drain step observed")
+                try:
+                    if (run.get("actor") or {}).get("owed_drain_step_longest_ms") is None:
+                        raise Invalid(
+                            f"{what}: no instrument: no product metric times one owed-drain "
+                            "step (actor.owed_drain_step_longest_ms is null)"
+                        )
+                    bounds = longest_bounds(run, "actor.owed_drain_step_longest_ms", what)
+                    if not bounds:
+                        raise Invalid(f"{what}: no owed-drain step observed")
+                except Invalid as error:
+                    undecided.append(str(error))
+                    continue
                 for label, above, at_most in bounds:
-                    longest = max(longest, above)
                     if above >= OWED_STEP_MAX_MS:
                         failures.append(f"{what}: {label} step over {above:.0f} ms")
                     elif at_most is None or at_most > OWED_STEP_MAX_MS:
-                        undecided.append(f"{what}: {label} step in ({above:.0f}, {at_most}] ms")
+                        undecided.append(
+                            f"{what}: {label} step in ({above:.0f}, {at_most}] ms: bucket "
+                            "resolution cannot judge 50 ms"
+                        )
     if failures:
-        return "FAIL", f"owed-drain step over {OWED_STEP_MAX_MS:.0f} ms: " + "; ".join(failures)
+        return "FAIL", (
+            f"owed-drain step over {OWED_STEP_MAX_MS:.0f} ms: " + "; ".join(failures + undecided)
+        )
     if undecided:
-        raise Invalid("bucket resolution cannot judge 50 ms: " + "; ".join(undecided))
+        raise Invalid("; ".join(undecided))
     return "PASS", f"every owed-drain step at most {OWED_STEP_MAX_MS:.0f} ms"
 
 
@@ -913,26 +1089,29 @@ def verdicts(parent_dir: Path, candidate_dir: Path) -> list[tuple[str, str, str]
             verdict, reason = evaluate()
         except Invalid as error:
             verdict, reason = "INVALID", str(error)
-        except (KeyError, TypeError, ValueError) as error:
+        except (AttributeError, KeyError, TypeError, ValueError) as error:
             verdict, reason = "INVALID", f"malformed result: {error!r}"
         results.append((name, verdict, reason))
     return results
 
 
-def release_readings(run: dict) -> str:
-    """Report-only: what `check` shows of a release run's instruments; the
-    bars on them are cell 7's."""
-    actor = run.get("actor") or {}
-    gauges = run.get("drain_gauges") or {}
-    poll = (actor.get("slice_max_us") or {}).get("actor_poll")
-    step = actor.get("owed_drain_step_longest_ms")
-    return (
-        "report-only: longest actor poll "
-        + ("not recorded" if poll is None else f"{poll / 1e3:.1f} ms")
-        + f"; owed-drain step {'no instrument' if step is None else step}"
-        + f"; live operations peak {gauges.get('peak_operations_live', 'not recorded')}"
-        + f"; credit rows peak {gauges.get('peak_credit_rows', 'not recorded')}"
-    )
+def release_readings(run: dict, what: str, family: str) -> str:
+    """Report-only: what cell 7's bars 2 and 6 would say of a release run;
+    `analyze` judges them on the candidate's measured runs."""
+    parts = []
+    for name, bar in (
+        ("bar 2", lambda: turn_bar(run, what)),
+        ("bar 6", lambda: credit_bar(run, what, family)),
+    ):
+        try:
+            failure, open_question, reading = bar()
+            verdict = "would FAIL" if failure else "undecided" if open_question else "within"
+            parts.append(f"{name} {verdict}: {failure or open_question or reading}")
+        except Invalid as error:
+            parts.append(f"{name} not judged: {error}")
+    step = (run.get("actor") or {}).get("owed_drain_step_longest_ms")
+    parts.append(f"owed-drain step {'no instrument' if step is None else step}")
+    return "report-only: " + "; ".join(parts)
 
 
 def check(directory: Path) -> list[tuple[str, str, str]]:
@@ -965,10 +1144,15 @@ def check(directory: Path) -> list[tuple[str, str, str]]:
                 else:
                     # No witness: a selection release spends no ordinary credit.
                     reason = wire_failure(runs, "arm", RESTART_WIRE_CHECKS)
-                    notes = [release_readings(run) for run in runs]
+                    notes = [
+                        release_readings(run, f"run {index}", family)
+                        for index, run in enumerate(runs)
+                    ]
                     if kind == "restart-churn" and reason is None:
                         notes = [
-                            churn_inside_drain(run, f"run {index}") + "; " + note
+                            churn_in_drain(run, f"run {index}", full_release_shape(run))
+                            + "; "
+                            + note
                             for index, (run, note) in enumerate(zip(runs, notes, strict=True))
                         ]
                     passed = "wire exact, ordered, no resets (no exhaustion witness); " + (

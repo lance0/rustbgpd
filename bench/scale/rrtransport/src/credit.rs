@@ -104,6 +104,21 @@ const CHURN_VERSION: u32 = 9;
 /// gauges from the release on. The RIB publishes both once per run-loop
 /// iteration; a getter read costs one atomic load.
 const GAUGE_WATCH: Duration = Duration::from_millis(1);
+/// Period of the inbox round-trip probe from the release until the burst
+/// receivers settle: one `QueryLocRibCount` (a length read) through the
+/// RIB's update channel, so a drain that yields without serving that
+/// channel shows as a long round trip.
+const ROUND_TRIP_EVERY: Duration = Duration::from_millis(10);
+/// The RIB's row-credit constants, crate-private in
+/// `crates/rib/src/outbound_credit.rs`: daemon-wide credit, per-peer floor
+/// and ceiling, and one ordinary pass. Results record them so the analyzer
+/// reads them from the run; a test fails when they drift from the RIB's.
+const ROW_CREDIT: [(&str, usize); 4] = [
+    ("DAEMON_ROW_CREDIT", 16_777_216),
+    ("MIN_ROW_CREDIT", 8_192),
+    ("MAX_ROW_CREDIT", 1_048_576),
+    ("CHUNK_ROWS", 1_024),
+];
 /// The RIB's since-render slice maxima, in microseconds per stage.
 const SLICE_MAX: &str = "bgp_rib_actor_slice_max_microseconds";
 /// Histograms whose longest observation in the run the result brackets:
@@ -1036,6 +1051,41 @@ fn watch_gauges(
     })
 }
 
+/// The inbox round trips of one run.
+#[derive(Default)]
+struct RoundTrips {
+    probes: usize,
+    longest_ms: f64,
+    /// When the longest one was sent, in ms from t0.
+    longest_sent_ms: Option<f64>,
+}
+
+/// Send one `QueryLocRibCount` every `ROUND_TRIP_EVERY` until `stop` and
+/// keep the longest wait for its reply.
+fn probe_round_trips(
+    rib: mpsc::Sender<RibUpdate>,
+    t0: Instant,
+    stop: Arc<AtomicBool>,
+) -> tokio::task::JoinHandle<Result<RoundTrips>> {
+    tokio::spawn(async move {
+        let mut trips = RoundTrips::default();
+        while !stop.load(Ordering::Acquire) {
+            let sent = Instant::now();
+            let (reply, count) = oneshot::channel();
+            rib.send(RibUpdate::QueryLocRibCount { reply }).await?;
+            count.await?;
+            let took = sent.elapsed().as_secs_f64() * 1e3;
+            trips.probes += 1;
+            if took > trips.longest_ms {
+                trips.longest_ms = took;
+                trips.longest_sent_ms = Some(sent.duration_since(t0).as_secs_f64() * 1e3);
+            }
+            tokio::time::sleep(ROUND_TRIP_EVERY).await;
+        }
+        Ok(trips)
+    })
+}
+
 /// Sample the instruments until `stop`; watch `watched` peers' refusals.
 fn sampler(
     metrics: BgpMetrics,
@@ -1133,14 +1183,27 @@ type Churn = (Arc<AtomicBool>, tokio::task::JoinHandle<()>);
 
 /// Churn-free readings of the summed credit gauge, in ms from `t0`.
 struct Quiet {
-    /// When the churn task had stopped: the window's start.
+    /// When the churn task had stopped.
     stopped: Instant,
     stopped_ms: f64,
     last_sequence: Option<u32>,
+    /// When the last churn row before the stop had arrived.
+    delivered: Option<Instant>,
     delivered_ms: Option<f64>,
     published_ms: Option<f64>,
     end_ms: f64,
     readings: Vec<f64>,
+}
+
+/// The healthy receiver's gap exclusion: from the later of the churn's stop
+/// and its last row's delivery to the restart, so a slow delivery after the
+/// stop stays in the gap; nothing when that row never arrived.
+fn excluded_window(
+    stopped: Instant,
+    delivered: Option<Instant>,
+    restarted: Instant,
+) -> Option<(Instant, Instant)> {
+    delivered.map(|delivered| (delivered.max(stopped), restarted))
 }
 
 /// Stop the healthy receiver's churn, wait until its last row reached the
@@ -1189,6 +1252,7 @@ async fn quiet_window(
         stopped,
         stopped_ms,
         last_sequence,
+        delivered,
         delivered_ms: delivered.map(ms),
         published_ms: None,
         end_ms: stopped_ms,
@@ -1549,6 +1613,8 @@ pub async fn exhaust(
     eprintln!("burst sent at {release_sent:?}");
     let watching = Arc::new(AtomicBool::new(false));
     let gauges = watch_gauges(fixture.metrics.clone(), t0, Arc::clone(&watching));
+    let probing = Arc::new(AtomicBool::new(false));
+    let round_trips = probe_round_trips(fixture.rib.clone(), t0, Arc::clone(&probing));
     let window_start = if restart { t0 + release_sent } else { t0 };
     let churn = churn.take().unwrap_or_else(start_churn);
 
@@ -1614,12 +1680,16 @@ pub async fn exhaust(
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
     eprintln!("settled at {settled:?}");
+    probing.store(true, Ordering::Release);
+    let round_trips_to = t0.elapsed();
+    let round_trips = round_trips.await??;
     tokio::time::sleep(QUIET).await;
     let end = Instant::now();
     churn.0.store(true, Ordering::Release);
     churn.1.await?;
     sampling.store(true, Ordering::Release);
     watching.store(true, Ordering::Release);
+    let gauges_to = t0.elapsed();
     let mut instruments = instruments.await?;
     let gauges = gauges.await?;
     // The cell-end read: slices that completed after the sampler's last.
@@ -1655,7 +1725,8 @@ pub async fn exhaust(
     // settled, lost a route and settled again counts its last settle.
     let mut rows_json = Vec::new();
     let (mut exact, mut ordered, mut missing, mut after_eor, mut resets) = (0, 0, 0, 0, 0);
-    let (mut survivors, mut churned_after_eor) = (0, 0);
+    let (mut survivors, mut churned_after_eor, mut duplicates) = (0, 0, 0);
+    let mut reflected = Vec::new();
     let mut latest = Duration::ZERO;
     // The first and last receiver's End-of-RIB, from t0.
     let mut eors: Option<(Duration, Duration)> = None;
@@ -1667,6 +1738,8 @@ pub async fn exhaust(
         after_eor += state.routes_after_eor;
         survivors += state.withdrawn_survivors();
         churned_after_eor += state.churned_after_eor;
+        duplicates += state.duplicates_before_eor;
+        reflected.push(state.churn_reflected_before_eor);
         resets += state.resets;
         if let Some(at) = state.settled_at {
             latest = latest.max(at.saturating_duration_since(t0));
@@ -1683,6 +1756,8 @@ pub async fn exhaust(
             "eor_premature": state.eor_premature,
             "routes_after_eor": state.routes_after_eor,
             "churned_after_eor": state.churned_after_eor,
+            "churn_reflected_before_eor": state.churn_reflected_before_eor,
+            "duplicates_before_eor": state.duplicates_before_eor,
             "routes_before_eor": state.routes_before_eor,
             "eors": state.eors,
             "announced": state.announced,
@@ -1698,8 +1773,8 @@ pub async fn exhaust(
         (state.arrivals.clone(), state.resets)
     };
     let injected = churn_log.lock().expect("churn log").clone();
-    let excluded = (quiet.stopped, restarted);
-    let unaffected = delivery(&injected, &arrivals, window_start, end, Some(excluded));
+    let excluded = excluded_window(quiet.stopped, quiet.delivered, restarted);
+    let unaffected = delivery(&injected, &arrivals, window_start, end, excluded);
     let refused_peers = watched.iter().filter(|ip| refused_by(ip) > 0.0).count();
     let healthy_ip = fixture.receivers[healthy].ip;
     let flaps = snapshot.total("bgp_session_flaps_total");
@@ -1730,9 +1805,18 @@ pub async fn exhaust(
         "turn_longest_ms": turn_longest[0],
         "work_longest_ms": turn_longest[1],
         "owed_drain_step_longest_ms": turn_longest[2],
+        "inbox_round_trip": {
+            "from_ms": ms(release_sent),
+            "to_ms": ms(round_trips_to),
+            "every_ms": ms(ROUND_TRIP_EVERY),
+            "probes": round_trips.probes,
+            "longest_ms": round_trips.longest_ms,
+            "longest_sent_ms": round_trips.longest_sent_ms,
+        },
     });
     let drain_gauges = json!({
         "from_ms": ms(release_sent),
+        "to_ms": ms(gauges_to),
         "read_every_ms": ms(GAUGE_WATCH),
         "reads": gauges.reads,
         "peak_operations_live": gauges.peak_operations_live,
@@ -1756,6 +1840,7 @@ pub async fn exhaust(
             "receiver_rcvbuf_bytes": RECEIVER_RCVBUF,
         },
         "row_size_of": family.row_size_of(),
+        "row_credit": ROW_CREDIT.iter().copied().collect::<BTreeMap<_, _>>(),
         // The healthy receiver's churn row, which the summed credit gauge
         // may hold on top of the burst receivers'.
         "healthy_row_size_of": Family::Unicast.row_size_of(),
@@ -1786,6 +1871,9 @@ pub async fn exhaust(
             "routes_after_eor": after_eor,
             "withdrawn_survivors": survivors,
             "churned_after_eor": churned_after_eor,
+            // Per burst receiver, at its End-of-RIB (null without one).
+            "churn_reflected_before_eor": reflected,
+            "duplicates_before_eor": duplicates,
             "stub_resets": resets,
             "not_established": down,
             "session_flaps_total": flaps,
@@ -1821,11 +1909,13 @@ pub async fn exhaust(
             // Less the harness's own churn-free window, counted in the raw one.
             "max_gap_ms": ms(unaffected.max_gap),
             "max_gap_raw_ms": ms(unaffected.max_gap_raw),
-            "quiet_excluded": {
-                "from_ms": ms_from_t0(excluded.0),
-                "to_ms": ms_from_t0(excluded.1),
-                "span_ms": ms(excluded.1.saturating_duration_since(excluded.0)),
-            },
+            // Null when the last churn row before the window never arrived.
+            "quiet_excluded": excluded.map(|(from, to)| json!({
+                "from_ms": ms_from_t0(from),
+                "to_ms": ms_from_t0(to),
+                "span_ms": ms(to.saturating_duration_since(from)),
+            })),
+            "quiet_lead_ms": ms(QUIET_LEAD),
             "p50_latency_ms": ms(unaffected.p50),
             "p99_latency_ms": ms(unaffected.p99),
             "max_latency_ms": ms(unaffected.max),
@@ -2189,6 +2279,41 @@ mod tests {
         );
         // A label without observations in the window is left out.
         assert!(longest.get("z").is_none());
+    }
+
+    #[test]
+    fn seeded_slow_churn_delivery_stays_in_the_gap() {
+        use crate::credit_wire::delivery;
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let injected = [(1, at(0))];
+        // Churn stops at 100 ms; its last row arrives only at 1,000 ms; the
+        // churn restarts at 1,300 ms and arrives at once.
+        let arrivals = [(1, at(90)), (2, at(1_000)), (3, at(1_300))];
+        let gap = |excluded| delivery(&injected, &arrivals, start, at(1_300), excluded).max_gap;
+        let window = super::excluded_window(at(100), Some(at(1_000)), at(1_300));
+        assert_eq!(window, Some((at(1_000), at(1_300))));
+        assert_eq!(gap(window), Duration::from_millis(910));
+        // Undelivered: nothing is excluded.
+        assert_eq!(super::excluded_window(at(100), None, at(1_300)), None);
+    }
+
+    #[test]
+    fn row_credit_mirror_matches_the_rib() {
+        let source = include_str!("../../../../crates/rib/src/outbound_credit.rs");
+        for (name, value) in super::ROW_CREDIT {
+            let declaration = format!("const {name}: usize = ");
+            let line = source
+                .lines()
+                .find(|line| line.contains(&declaration))
+                .unwrap_or_else(|| panic!("{name} not declared in outbound_credit.rs"));
+            let literal = line.rsplit(" = ").next().unwrap().trim_end_matches(';');
+            assert_eq!(
+                literal.replace('_', "").parse::<usize>().unwrap(),
+                value,
+                "{name} drifted from the RIB"
+            );
+        }
     }
 
     #[test]
