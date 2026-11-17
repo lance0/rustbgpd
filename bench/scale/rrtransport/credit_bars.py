@@ -54,8 +54,9 @@ RECOVERY_SLACK_MS = 2_000.0
 DRAIN_AFTER_RESUME_MAX_MS = 60_000.0
 # Cell 7: the RFC 4724 selection release and its owed drain. Absolute bars
 # on the candidate: the longest owed-drain step, the longest RIB actor turn,
-# and the summed credit-rows gauge within receivers x (per-peer credit +/-
-# one pass); unicast keeps no whole-table operation live.
+# the summed credit-rows gauge at most receivers x (per-peer credit + one
+# pass), and every row held toward the paused receivers charged; unicast
+# keeps no whole-table operation live.
 OWED_STEP_MAX_MS = 50.0
 ACTOR_TURN_MAX_MS = 250.0
 RELEASE_TRIGGER = "rfc4724_selection_release"
@@ -913,16 +914,74 @@ def turn_bar(run: dict, what: str) -> Bar:
     return None, None, reading
 
 
+def held_witness(run: dict, what: str, pass_rows: int) -> tuple[str | None, str]:
+    """Whether every row the RIB handed toward the paused receivers and they
+    have not read is charged, from `witness.held`, read with every burst
+    reader paused and without the credit gauge: held = the receivers'
+    Adj-RIB-Out rows of the burst family in one RIB turn less the rows they
+    decoded. Rows leave the charge only once their session has encoded them
+    to its writer or the socket, so held may exceed the charge by those
+    bytes (writer gauge plus the connections' kernel queues) over the
+    fewest wire bytes of an announced row, by the churn variant's
+    withdrawals (smaller rows), and by one pass a receiver. The charge is
+    the gauge published after that turn: rows admitted meanwhile are charged
+    there and held nowhere, so a spread over one pass a receiver is
+    INVALID."""
+    held = need(run, "witness.held", what)
+    if not isinstance(held, dict):
+        raise Invalid(f"{what}: witness.held is not an object ({held!r})")
+    receivers = number(run, "shape.receivers", what)
+    advertised = number(run, "witness.held.advertised_rows", what)
+    read = number(run, "witness.held.read_rows", what)
+    before = number(run, "witness.held.charged_before", what)
+    charged = number(run, "witness.held.charged_after", what)
+    queued = number(run, "witness.held.writer_bytes", what) + number(
+        run, "witness.held.socket_bytes", what
+    )
+    row_bytes = number(run, "wire.min_row_bytes", what)
+    at = number(run, "witness.held.at_ms", what)
+    release = number(run, "timing.release_sent_ms", what)
+    resumed = number(run, "timing.resumed_ms", what)
+    if not release <= at < resumed:
+        raise Invalid(
+            f"{what}: held read at {at:.0f} ms, not between the {release:.0f} ms release and "
+            f"the {resumed:.0f} ms resume"
+        )
+    if row_bytes < 1:
+        raise Invalid(f"{what}: wire.min_row_bytes is {row_bytes:.0f}")
+    if charged - before > receivers * pass_rows:
+        raise Invalid(
+            f"{what}: charge moved {before:.0f} -> {charged:.0f} across the held read, over "
+            f"{receivers:.0f} x {pass_rows}: the snapshot is not tight"
+        )
+    churn = need(run, "cell", what) == "restart-churn"
+    withdrawn = number(run, "churn.withdrawn", what) if churn else 0
+    written = queued // row_bytes
+    slack = written + receivers * (withdrawn + pass_rows)
+    gap = advertised - read - charged
+    arithmetic = (
+        f"held {advertised - read:.0f} = {advertised:.0f} advertised - {read:.0f} read, charged "
+        f"{charged:.0f}; slack {slack:.0f} = {queued:.0f} queued bytes / {row_bytes:.0f} B a row "
+        f"+ {receivers:.0f} x ({withdrawn:.0f} withdrawn + {pass_rows})"
+    )
+    if gap > slack:
+        return (
+            f"{what}: owed rows not charged: held exceeds charged by {gap:.0f} > slack ({arithmetic})"
+        ), arithmetic
+    return None, arithmetic
+
+
 def credit_bar(run: dict, what: str, family: str) -> Bar:
     """Bar 6 for one run. The 1 ms gauge watch must have run (reads over at
     least half its window). In rows: the peak at most receivers x (per-peer
-    credit + one pass), and, where each paused receiver is owed more rows
-    than its credit, at least receivers x (credit - one pass), or owed rows
-    went uncharged. A byte-credit tree's byte bound reads the 250 ms sampler
-    and is report-only: the rows bound can still FAIL it, nothing PASSes it.
-    Unicast keeps no whole-table operation live."""
+    credit + one pass), and every row held toward the paused receivers
+    charged (`held_witness`), or owed rows went uncharged. Backpressure may
+    stop a charged drain short of the credit, so whether the peak reached
+    receivers x (credit - one pass) is reported only. A byte-credit tree's
+    byte bound reads the
+    250 ms sampler and is report-only: the rows bound can still FAIL it,
+    nothing PASSes it. Unicast keeps no whole-table operation live."""
     receivers = number(run, "shape.receivers", what)
-    owed = number(run, "shape.rows_per_receiver", what)
     start = number(run, "drain_gauges.from_ms", what)
     end = number(run, "drain_gauges.to_ms", what)
     every = number(run, "drain_gauges.read_every_ms", what)
@@ -934,7 +993,7 @@ def credit_bar(run: dict, what: str, family: str) -> Bar:
         ), ""
     rows = number(run, "drain_gauges.peak_credit_rows", what)
     limit, pass_rows = row_credit(run, what)
-    bound, floor = receivers * (limit + pass_rows), receivers * (limit - pass_rows)
+    bound, credit_floor = receivers * (limit + pass_rows), receivers * (limit - pass_rows)
     failures = []
     if rows > bound:
         failures.append(
@@ -964,18 +1023,17 @@ def credit_bar(run: dict, what: str, family: str) -> Bar:
             f"{what}: byte credit: the bar 6 byte bound is report-only (250 ms sampler) and "
             f"the row witness does not apply, so bar 6 cannot pass ({reading})"
         )
-    elif owed > limit:
-        if rows < floor:
-            failures.append(
-                f"{what}: owed rows not charged: credit rows peak {rows:.0f} < {floor:.0f} = "
-                f"{receivers:.0f} x ({limit} - {pass_rows}) with {owed:.0f} rows owed to each "
-                "paused receiver"
-            )
-        reading += f"; credit witness: peak at least {floor:.0f}"
     else:
+        # A missing held read leaves the other bar 6 checks standing.
+        try:
+            failure, arithmetic = held_witness(run, what, pass_rows)
+        except Invalid as error:
+            failure, undecided, arithmetic = None, str(error), "not judged"
+        failures += [failure] if failure else []
+        reached = "reached" if rows >= credit_floor else "not reached"
         reading += (
-            f"; credit witness not applicable, report-only: {owed:.0f} rows per receiver "
-            f"<= per-peer credit {limit}"
+            f"; charge witness: {arithmetic}; report-only: credit {reached}, "
+            f"{credit_floor:.0f} = {receivers:.0f} x ({limit} - {pass_rows})"
         )
     return ("; ".join(failures) or None), undecided, reading
 

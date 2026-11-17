@@ -108,10 +108,33 @@ def histogram(above, at_most, observations=1):
     return {"observations": observations, "above_ms": above, "at_most_ms": at_most}
 
 
-# Cell 7 bar 6 in rows: 150 x (credit +/- one 1,024-row pass), the bound
-# and the witness that owed rows were charged.
+# Cell 7 bar 6 in rows: 150 x (credit + one 1,024-row pass), the bound, and
+# 150 x (credit - one pass), reported as the credit reached.
 RELEASE_ROW_BOUND = 150 * (ROW_CREDIT + 1_024)
 RELEASE_ROW_FLOOR = 150 * (ROW_CREDIT - 1_024)
+# The held read of a clean release: every receiver at its credit, a full
+# writer and 1 MB in each connection's kernel queues, 200 B a row on the
+# wire. Held may exceed the charge by the queued bytes over 200 B (the rows
+# the sessions already encoded), plus one pass a receiver (and the churn
+# variant's 1,500 withdrawals each).
+HELD_QUEUED = 150 * (655_358 + 1_000_000)
+HELD_WRITTEN = HELD_QUEUED // 200
+HELD_SLACK = HELD_WRITTEN + 150 * 1_024
+HELD_CHURN_SLACK = HELD_SLACK + 150 * 1_500
+
+
+def held(charged, advertised=None):
+    """A held read: `advertised` rows handed toward the paused receivers
+    (the charge plus the rows the sessions encoded, by default), none read."""
+    return {
+        "at_ms": 29_700.0,
+        "advertised_rows": charged + HELD_WRITTEN if advertised is None else advertised,
+        "read_rows": 0,
+        "charged_before": charged,
+        "charged_after": charged,
+        "writer_bytes": 150 * 655_358,
+        "socket_bytes": 150 * 1_000_000,
+    }
 # The same bound at a byte-credit tree's credit, report-only there.
 RELEASE_BYTE_BOUND = {
     "unicast": 150 * (BYTE_CREDIT + 1_024 * 250),
@@ -139,8 +162,16 @@ def release(family, churn=False):
             "last_eor_ms": 31_000.0,
         },
         "checks": {name: True for name in credit_bars.RESTART_WIRE_CHECKS},
-        "wire": {"churn_reflected_before_eor": [0] * 150, "duplicates_before_eor": 0},
-        "witness": {"peak_credit_rows": 150.0 * ROW_CREDIT, "peak_credit_bytes": None},
+        "wire": {
+            "churn_reflected_before_eor": [0] * 150,
+            "duplicates_before_eor": 0,
+            "min_row_bytes": 200,
+        },
+        "witness": {
+            "peak_credit_rows": 150.0 * ROW_CREDIT,
+            "peak_credit_bytes": None,
+            "held": held(150 * ROW_CREDIT),
+        },
         "actor": {
             "slice_max_us": {"actor_poll": 120_000.0, "other": 9_000.0},
             "turn_longest_ms": {"end_of_rib": histogram(100.0, 200.0)},
@@ -691,7 +722,9 @@ class Bars(unittest.TestCase):
         def uncharged_parent_swapped(parent, candidate):
             for family in credit_bars.FAMILIES:
                 for kind in ("restart", "restart-churn"):
-                    parent[f"{kind}-{family}.json"]["drain_gauges"]["peak_credit_rows"] = 0
+                    run = parent[f"{kind}-{family}.json"]
+                    run["drain_gauges"]["peak_credit_rows"] = 0
+                    run["witness"]["held"].update(charged_before=0, charged_after=0)
             swap(parent, candidate)
 
         results = self.run_bars(uncharged_parent_swapped)
@@ -1498,20 +1531,112 @@ class Bars(unittest.TestCase):
                 self.assertEqual(results["cell 7 selection release unicast"][0], verdict, results)
 
     def test_seeded_uncharged_owed_rows_fail(self):
-        # 150,000 rows owed to each paused receiver against a 109,655-row
-        # credit: the summed peak must reach 150 x (credit - one pass).
-        line = "cell 7 selection release unicast"
-        for peak, verdict in ((0, "FAIL"), (RELEASE_ROW_FLOOR - 1, "FAIL"), (RELEASE_ROW_FLOOR, "PASS")):
+        # Held toward the paused receivers against charged, whatever the
+        # peak: a charged drain stopped short of the credit (150 x ~67,000,
+        # as one cursor-drain tree at the 30 s pause) passes; held with
+        # nothing charged, or with half of it charged, fails.
+        per = 67_160
+        cases = (
+            ("restart-unicast.json", held(150 * per), "PASS"),
+            ("restart-unicast.json", held(0, advertised=150 * per + HELD_WRITTEN), "FAIL"),
+            ("restart-unicast.json", held(150 * per // 2, advertised=150 * per), "FAIL"),
+            ("restart-unicast.json", held(0, advertised=HELD_SLACK), "PASS"),
+            ("restart-unicast.json", held(0, advertised=HELD_SLACK + 1), "FAIL"),
+            ("restart-churn-unicast.json", held(0, advertised=HELD_CHURN_SLACK), "PASS"),
+            ("restart-churn-unicast.json", held(0, advertised=HELD_CHURN_SLACK + 1), "FAIL"),
+            ("restart-churn-unicast.json", held(150 * per // 2, advertised=150 * per), "FAIL"),
+            ("restart-churn-unicast.json", held(150 * per), "PASS"),
+        )
+        for file, record, verdict in cases:
+            line = "cell 7 " + (
+                "release under churn unicast" if "churn" in file else "selection release unicast"
+            )
 
-            def change(run, peak=peak):
-                run["drain_gauges"]["peak_credit_rows"] = peak
+            def change(run, record=record):
+                run["witness"]["held"] = record
+                run["drain_gauges"]["peak_credit_rows"] = record["charged_after"]
 
-            with self.subTest(peak=peak):
-                results = self.release_defect("restart-unicast.json", change)
+            with self.subTest(file=file, record=record):
+                results = self.release_defect(file, change)
                 if verdict == "PASS":
                     self.assertTrue(all(v == "PASS" for v, _ in results.values()), results)
+                    reached = "reached" if record["charged_after"] >= RELEASE_ROW_FLOOR else "not"
+                    self.assertIn(f"report-only: credit {reached}", results[line][1])
                 else:
                     self.assert_only(results, line, "FAIL", "owed rows not charged")
+        # The arithmetic is in the line.
+        results = self.release_defect(
+            "restart-unicast.json",
+            lambda run: run["witness"].update(held=held(5_037_000, advertised=10_074_000)),
+        )
+        self.assertIn(
+            f"held exceeds charged by 5037000 > slack (held 10074000 = 10074000 advertised - 0 "
+            f"read, charged 5037000; slack {HELD_SLACK} = {HELD_QUEUED} queued bytes / 200 B a "
+            "row + 150 x (0 withdrawn + 1024))",
+            results["cell 7 selection release unicast"][1],
+        )
+
+    def test_held_read_must_be_tight_and_inside_the_pause(self):
+        line = "cell 7 selection release unicast"
+        for change, reason in (
+            (lambda h: h.update(charged_before=h["charged_after"] - 150 * 1_024 - 1), "not tight"),
+            (lambda h: h.update(at_ms=30_006.0), "not between"),
+            (lambda h: h.update(at_ms=39.0), "not between"),
+        ):
+
+            def mutate(run, change=change):
+                change(run["witness"]["held"])
+
+            with self.subTest(reason=reason):
+                results = self.release_defect("restart-unicast.json", mutate)
+                self.assert_only(results, line, "INVALID", reason)
+        # A spread of exactly one pass a receiver is tight.
+        results = self.release_defect(
+            "restart-unicast.json",
+            lambda run: run["witness"]["held"].update(
+                charged_before=run["witness"]["held"]["charged_after"] - 150 * 1_024
+            ),
+        )
+        self.assertTrue(all(v == "PASS" for v, _ in results.values()), results)
+
+    def test_charged_peak_short_of_the_credit_passes_alone(self):
+        # The witness on one run: a charged drain short of the credit
+        # passes, a peak over the upper bound fails, and a run without each
+        # held field (or the churn variant without its withdrawals) is
+        # INVALID.
+        run = credit_bars.measured([release("unicast", churn=True)], "run")[0]
+        run["witness"]["held"] = held(10_104_832)
+        for peak, failed in ((10_104_832, False), (RELEASE_ROW_BOUND + 1, True)):
+            run["drain_gauges"]["peak_credit_rows"] = peak
+            with self.subTest(peak=peak):
+                failure, undecided, _ = credit_bars.credit_bar(run, "run", "unicast")
+                self.assertIsNone(undecided)
+                self.assertEqual(failure is not None, failed, failure)
+        fields = [f"witness.held.{key}" for key in held(0)] + [
+            "witness.held",
+            "wire.min_row_bytes",
+            "churn.withdrawn",
+            "cell",
+        ]
+        # A run without the held read still fails the upper bound.
+        missing = copy.deepcopy(run)
+        missing["drain_gauges"]["peak_credit_rows"] = RELEASE_ROW_BOUND + 1
+        del missing["witness"]["held"]
+        failure, undecided, _ = credit_bars.credit_bar(missing, "run", "unicast")
+        self.assertIn(f"> {RELEASE_ROW_BOUND}", failure)
+        self.assertIn("witness.held", undecided)
+        run["drain_gauges"]["peak_credit_rows"] = 10_104_832
+        for field in fields:
+            missing = copy.deepcopy(run)
+            *parents, leaf = field.split(".")
+            node = missing
+            for key in parents:
+                node = node[key]
+            del node[leaf]
+            with self.subTest(missing=field):
+                failure, undecided, _ = credit_bars.credit_bar(missing, "run", "unicast")
+                self.assertIsNone(failure)
+                self.assertIn(field, undecided)
 
     def test_seeded_dead_gauge_watch_is_invalid(self):
         # 33,000 ms watched at 1 ms: at least 16,500 reads.
@@ -1535,14 +1660,26 @@ class Bars(unittest.TestCase):
         run["mode"] = "correctness"
         run["shape"].update(receivers=4, rows_per_receiver=4_096, registered_peers=7)
         run["drain_gauges"].update(peak_credit_rows=0, peak_operations_live=0)
+        # A reduced read: 8,192 rows held, 827,415 bytes in the kernel
+        # queues at 202 B a row (4,096 rows), nothing charged.
+        run["wire"]["min_row_bytes"] = 202
+        run["witness"]["held"] = {
+            "at_ms": 204.0,
+            "advertised_rows": 8_192,
+            "read_rows": 0,
+            "charged_before": 0,
+            "charged_after": 0,
+            "writer_bytes": 0,
+            "socket_bytes": 827_415,
+        }
         with tempfile.TemporaryDirectory() as root:
             Path(root, "restart-unicast.json").write_text(json.dumps(run))
             ((_, verdict, reason),) = credit_bars.check(Path(root))
         self.assertEqual(verdict, "PASS", reason)
         self.assertIn(
             "bar 6 within: credit rows peak 0 (bound 4198400) over 30000 reads; live whole-table "
-            "operations peak 0; credit witness not applicable, report-only: 4096 rows per "
-            "receiver <= per-peer credit 1048576",
+            "operations peak 0; charge witness: held 8192 = 8192 advertised - 0 read, charged 0; "
+            "slack 8192 = 827415 queued bytes / 202 B a row + 4 x (0 withdrawn + 1024)",
             reason,
         )
 

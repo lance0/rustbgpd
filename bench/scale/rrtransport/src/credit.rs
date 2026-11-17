@@ -26,7 +26,7 @@
 //!   one family; bytes per queued row is the slope of allocated bytes over
 //!   the credit-rows gauge before the first refusal.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -128,8 +128,7 @@ const ROW_CREDIT: [(&str, usize); 4] = [
 const SLICE_MAX: &str = "bgp_rib_actor_slice_max_microseconds";
 /// Histograms whose longest observation in the run the result brackets:
 /// message turns, the work units outside them, and one owed-drain step.
-/// No tree exports the last yet (the README proposes it); a tree without
-/// it records null.
+/// A tree without the last records null.
 const TURN_HISTOGRAMS: [(&str, &str); 3] = [
     ("bgp_rib_actor_turn_duration_seconds", "kind"),
     ("bgp_rib_actor_work_duration_seconds", "work_unit"),
@@ -1304,6 +1303,91 @@ async fn quiet_window(
     Ok(quiet)
 }
 
+/// Publish the RIB's gauges, then read the summed credit-rows gauge. Each
+/// query is one RIB turn; the second is served only after the first turn
+/// ended and the next began by publishing the gauges.
+async fn published_credit_rows(rib: &mpsc::Sender<RibUpdate>, metrics: &BgpMetrics) -> Result<f64> {
+    for _ in 0..2 {
+        let (reply, count) = oneshot::channel();
+        rib.send(RibUpdate::QueryLocRibCount { reply }).await?;
+        count.await?;
+    }
+    Ok(Snapshot::take(metrics)
+        .total("bgp_rib_outbound_credit_rows")
+        .unwrap_or(0.0))
+}
+
+/// Bytes queued in the kernel on every established TCP connection with an
+/// endpoint in `ips`, from a `/proc/net/tcp` table of this process's network
+/// namespace: send queue (written, not yet acknowledged) plus receive queue
+/// (arrived, not yet read), both ends. On loopback that is every written
+/// byte a paused reader has not read.
+fn socket_queue_bytes(table: &str, ips: &HashSet<Ipv4Addr>) -> Result<u64> {
+    let endpoint = |field: &str| -> Result<Ipv4Addr> {
+        let (address, _) = field.split_once(':').context("tcp endpoint")?;
+        Ok(Ipv4Addr::from(
+            u32::from_str_radix(address, 16)?.to_le_bytes(),
+        ))
+    };
+    let mut bytes = 0;
+    for line in table.lines().skip(1) {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        ensure!(fields.len() > 4, "short /proc/net/tcp line: {line}");
+        // State 01 is ESTABLISHED.
+        let ours = ips.contains(&endpoint(fields[1])?) || ips.contains(&endpoint(fields[2])?);
+        if fields[3] != "01" || !ours {
+            continue;
+        }
+        let (tx, rx) = fields[4].split_once(':').context("tcp queues")?;
+        bytes += u64::from_str_radix(tx, 16)? + u64::from_str_radix(rx, 16)?;
+    }
+    Ok(bytes)
+}
+
+/// Rows the RIB has handed toward the paused burst receivers and they have
+/// not read, read without the credit gauge: every receiver's Adj-RIB-Out
+/// count of the burst family from one RIB turn (`QueryBmpPeerStats`) less
+/// the rows the receivers decoded. Beside it, the credit gauge published
+/// before and after that turn, the session writers' queued bytes and the
+/// kernel queues of the receivers' connections.
+async fn held_snapshot(
+    rib: &mpsc::Sender<RibUpdate>,
+    metrics: &BgpMetrics,
+    receivers: &[Ipv4Addr],
+    family: (Afi, Safi),
+    read: u64,
+    t0: Instant,
+) -> Result<Value> {
+    let charged_before = published_credit_rows(rib, metrics).await?;
+    let at = t0.elapsed();
+    let (reply, stats) = oneshot::channel();
+    rib.send(RibUpdate::QueryBmpPeerStats { reply }).await?;
+    let stats = stats.await?;
+    let charged_after = published_credit_rows(rib, metrics).await?;
+    let mut advertised = 0;
+    for &ip in receivers {
+        advertised += stats
+            .adj_rib_out_post
+            .get(&PeerId::from_ipv4(ip))
+            .and_then(|counts| counts.iter().find(|(key, _)| *key == family))
+            .map_or(0, |&(_, count)| count);
+    }
+    let writer = Snapshot::take(metrics)
+        .total("bgp_outbound_writer_bytes")
+        .unwrap_or(0.0);
+    let ips = receivers.iter().copied().collect();
+    let table = std::fs::read_to_string("/proc/self/net/tcp")?;
+    Ok(json!({
+        "at_ms": at.as_secs_f64() * 1e3,
+        "advertised_rows": advertised,
+        "read_rows": read,
+        "charged_before": charged_before,
+        "charged_after": charged_after,
+        "writer_bytes": writer,
+        "socket_bytes": socket_queue_bytes(&table, &ips)?,
+    }))
+}
+
 /// The lowest and highest of `values`.
 fn range(values: impl Iterator<Item = f64>) -> Option<(f64, f64)> {
     values.fold(None, |range, value| {
@@ -1671,6 +1755,23 @@ pub async fn exhaust(
         t0 + pause.saturating_sub(QUIET_LEAD),
     ))
     .await;
+    // A release cell's held payload, read with every burst reader paused.
+    let held = if restart {
+        let ips: Vec<_> = fixture.receivers[..receivers]
+            .iter()
+            .map(|r| r.ip)
+            .collect();
+        let read = collectors
+            .iter()
+            .map(|(state, _)| {
+                let state = state.lock().expect("wire state");
+                state.announced + state.withdrawals
+            })
+            .sum();
+        Some(held_snapshot(&rib, &fixture.metrics, &ips, burst_family, read, t0).await?)
+    } else {
+        None
+    };
     let quiet = quiet_window(
         churn,
         &rib,
@@ -1750,6 +1851,7 @@ pub async fn exhaust(
     let mut rows_json = Vec::new();
     let (mut exact, mut ordered, mut missing, mut after_eor, mut resets) = (0, 0, 0, 0, 0);
     let (mut survivors, mut churned_after_eor, mut duplicates) = (0, 0, 0);
+    let mut min_row_bytes: Option<u64> = None;
     let mut reflected = Vec::new();
     let mut latest = Duration::ZERO;
     // The first and last receiver's End-of-RIB, from t0.
@@ -1763,6 +1865,7 @@ pub async fn exhaust(
         survivors += state.withdrawn_survivors();
         churned_after_eor += state.churned_after_eor;
         duplicates += state.duplicates_before_eor;
+        min_row_bytes = min_row_bytes.into_iter().chain(state.min_row_bytes).min();
         reflected.push(state.churn_reflected_before_eor);
         resets += state.resets;
         if let Some(at) = state.settled_at {
@@ -1900,6 +2003,8 @@ pub async fn exhaust(
             // Per burst receiver, at its End-of-RIB (null without one).
             "churn_reflected_before_eor": reflected,
             "duplicates_before_eor": duplicates,
+            // The fewest wire bytes per announced burst row on any receiver.
+            "min_row_bytes": min_row_bytes,
             "stub_resets": resets,
             "not_established": down,
             "session_flaps_total": flaps,
@@ -1928,6 +2033,7 @@ pub async fn exhaust(
             "all_refused_ms": instruments.all_refused_ms,
             "owing_flips_total": snapshot.total("bgp_rib_outbound_owing_flips_total"),
             "owing_fallback_total": snapshot.total("bgp_rib_outbound_owing_fallback_total"),
+            "held": held,
         },
         "unaffected": {
             "injected": unaffected.injected,
@@ -2171,13 +2277,36 @@ mod tests {
     use rustbgpd_rib::update::RibUpdate;
 
     use super::{
-        check_read_hold, churn_plan, fold_slice_maxima, longest, recorded_pass, source_withdrawal,
-        Buckets, Family, Options, Snapshot, Trigger, SLICE_MAX,
+        check_read_hold, churn_plan, fold_slice_maxima, longest, recorded_pass, socket_queue_bytes,
+        source_withdrawal, Buckets, Family, Options, Snapshot, Trigger, SLICE_MAX,
     };
     use crate::credit_wire::{Observed, WireFamily, WireState};
 
     fn parse(args: &[&str]) -> Options {
         Options::parse(&args.iter().map(ToString::to_string).collect::<Vec<_>>()).unwrap()
+    }
+
+    #[test]
+    fn socket_queues_sum_both_ends_of_the_receivers_established_connections() {
+        // 127.10.1.1:179 <-> 127.0.0.1:40000 both ways, established (01),
+        // a listener (0A) and an unrelated connection.
+        let table = [
+            "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when",
+            "   0: 01010A7F:00B3 0100007F:9C40 01 00000010:00000020 00:00000000",
+            "   1: 0100007F:9C40 01010A7F:00B3 01 00000100:00000000 00:00000000",
+            "   2: 01010A7F:00B4 00000000:0000 0A 00000005:00000005 00:00000000",
+            "   3: 0100007F:1F90 0200007F:9C41 01 00001000:00001000 00:00000000",
+        ]
+        .join("\n");
+        let ips = [std::net::Ipv4Addr::new(127, 10, 1, 1)]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            socket_queue_bytes(&table, &ips).unwrap(),
+            0x10 + 0x20 + 0x100
+        );
+        assert_eq!(socket_queue_bytes(&table, &Default::default()).unwrap(), 0);
+        assert!(socket_queue_bytes("header\n  0: short", &ips).is_err());
     }
 
     #[test]

@@ -223,6 +223,10 @@ pub struct WireState {
     pub messages: u64,
     pub announced: u64,
     pub withdrawals: u64,
+    /// The fewest wire bytes per announced row over every UPDATE that
+    /// announced one: the message less its withdrawn routes, divided by its
+    /// announced routes, rounded down.
+    pub min_row_bytes: Option<u64>,
     pub outside: u64,
     pub decode_failures: u64,
     /// Session ended (decoded-message channel closed) or a NOTIFICATION
@@ -263,6 +267,7 @@ impl WireState {
             messages: 0,
             announced: 0,
             withdrawals: 0,
+            min_row_bytes: None,
             outside: 0,
             decode_failures: 0,
             resets: 0,
@@ -300,7 +305,16 @@ impl WireState {
             Message::Update(update) => {
                 self.messages += 1;
                 match observe(update, self.family) {
-                    Ok(observed) => self.apply_observed(&observed, now),
+                    Ok(observed) => {
+                        if let Ok(rows @ 1..) = u64::try_from(observed.announced.len()) {
+                            // Header, both length fields, attributes, NLRI.
+                            let bytes = 19 + 4 + update.path_attributes.len() + update.nlri.len();
+                            let per_row = bytes as u64 / rows;
+                            self.min_row_bytes =
+                                Some(self.min_row_bytes.map_or(per_row, |min| min.min(per_row)));
+                        }
+                        self.apply_observed(&observed, now);
+                    }
                     Err(_) => self.decode_failures += 1,
                 }
             }
@@ -549,6 +563,51 @@ mod tests {
             state.apply_observed(step, now);
         }
         state
+    }
+
+    #[test]
+    fn min_row_bytes_is_the_encoded_message_per_announced_row() {
+        let entry = |index| rustbgpd_wire::Ipv4NlriEntry {
+            path_id: 0,
+            prefix: rustbgpd_wire::Ipv4Prefix::new(unicast_prefix(index), 24),
+        };
+        let attributes = [
+            PathAttribute::Origin(rustbgpd_wire::Origin::Igp),
+            PathAttribute::NextHop(Ipv4Addr::new(127, 0, 0, 1)),
+            PathAttribute::Med(7),
+        ];
+        let update = |announced: &[usize], withdrawn: &[usize]| {
+            let announced: Vec<_> = announced.iter().map(|&index| entry(index)).collect();
+            let withdrawn: Vec<_> = withdrawn.iter().map(|&index| entry(index)).collect();
+            Message::Update(UpdateMessage::build(
+                &announced,
+                &withdrawn,
+                &attributes,
+                true,
+                false,
+                rustbgpd_wire::Ipv4UnicastMode::Body,
+            ))
+        };
+        let length = |message: &Message| {
+            rustbgpd_wire::encode_message(message)
+                .expect("encodes")
+                .len() as u64
+        };
+        let mut state = WireState::new(WireFamily::Unicast, ROWS, 7);
+        let now = Instant::now();
+        // A withdrawal alone counts no row; its bytes never count.
+        state.apply(&update(&[], &[0, 1, 2]), now);
+        assert_eq!(state.min_row_bytes, None);
+        let one = update(&[0], &[1, 2, 3]);
+        let withdrawn_bytes = 3 * 4;
+        state.apply(&one, now);
+        assert_eq!(state.min_row_bytes, Some(length(&one) - withdrawn_bytes));
+        let two = update(&[1, 2], &[]);
+        state.apply(&two, now);
+        assert_eq!(state.min_row_bytes, Some(length(&two) / 2));
+        // A larger per-row size later does not raise the minimum.
+        state.apply(&update(&[3], &[]), now);
+        assert_eq!(state.min_row_bytes, Some(length(&two) / 2));
     }
 
     #[test]
