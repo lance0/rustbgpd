@@ -715,6 +715,21 @@ impl RibManager {
             lens.flowspec_vpn,
         );
 
+        // The FlowSpec families this pass carries, read once: a receiver's
+        // gate below then costs the same however many rules changed.
+        let mut changed_families: Vec<(Afi, Safi)> = Vec::new();
+        for key in &changed_keys {
+            checkpoint();
+            let family = key.family();
+            if !changed_families.contains(&family) {
+                changed_families.push(family);
+            }
+        }
+        let carried: Vec<_> = crate::manager::outbound_owing::OwedFamily::ALL
+            .into_iter()
+            .filter(|owed| owed.is_flowspec() && changed_families.contains(&owed.afi_safis()[0]))
+            .collect();
+
         // Shares each modified attribute set across the rules and peers
         // of this pass, as unicast and EVPN export do.
         let mut export_memo = super::ExportMemo::default();
@@ -735,28 +750,20 @@ impl RibManager {
             let llgr = self.peer_advertised_llgr_families.get(&peer).cloned();
             // Only a change in a FlowSpec family the peer negotiated can
             // reach it.
-            if !changed_keys.iter().any(|key| {
-                sendable
-                    .as_ref()
-                    .is_some_and(|families| families.contains(&key.family()))
-            }) {
+            let carried_to_peer: Vec<_> = carried
+                .iter()
+                .copied()
+                .filter(|owed| {
+                    sendable
+                        .as_ref()
+                        .is_some_and(|families| families.contains(&owed.afi_safis()[0]))
+                })
+                .collect();
+            if carried_to_peer.is_empty() {
                 continue;
             }
 
-            let whole_pass = self.owing_whole_pass(
-                peer,
-                &crate::manager::outbound_owing::OwedFamily::ALL
-                    .into_iter()
-                    .filter(|owed| {
-                        let family = owed.afi_safis()[0];
-                        owed.is_flowspec()
-                            && changed_keys.iter().any(|key| key.family() == family)
-                            && sendable
-                                .as_ref()
-                                .is_some_and(|families| families.contains(&family))
-                    })
-                    .collect::<Vec<_>>(),
-            );
+            let whole_pass = self.owing_whole_pass(peer, &carried_to_peer);
             match whole_pass {
                 crate::manager::outbound_owing::WholePass::Preflight => {
                     if self.outbound_preflight_refused(peer) {

@@ -528,6 +528,91 @@ fn release_turn_work_per_private_receiver_does_not_grow_with_rows() {
     assert!(large / 24 < 50, "{} checkpoints per receiver", large / 24);
 }
 
+/// The same bound for an IPv4 `FlowSpec` release toward receivers that
+/// negotiated all four `FlowSpec` families: 24 more receivers cost the same
+/// at 50 rules as at 200. Red when the release pass reads the changed rules
+/// once per receiver to find the families it carries.
+#[test]
+fn flowspec_release_turn_work_per_receiver_does_not_grow_with_rules() {
+    use crate::manager::slice_timing::checkpoints;
+    let families = [
+        FLOWSPEC,
+        (Afi::Ipv6, Safi::FlowSpec),
+        (Afi::Ipv4, Safi::FlowSpecVpn),
+        (Afi::Ipv6, Safi::FlowSpecVpn),
+    ];
+    let work = |rules: u8, count: u8| {
+        let waiter = peer_v4(WAITER);
+        let (_tx, rx) = mpsc::channel(8);
+        let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+            .with_selection_deferral(crate::SelectionDeferralConfig {
+                timeout: Duration::from_mins(2),
+                waiters: vec![crate::SelectionDeferralWaiterConfig {
+                    peer: waiter.into(),
+                    families: vec![FLOWSPEC],
+                }],
+            });
+        super::arm_selection_waiter(&mut manager, waiter, &[FLOWSPEC]);
+        let up = |manager: &mut RibManager, peer: PeerId, session_id: u64| {
+            let (tx, rx) = mpsc::channel(4096);
+            let mut up = super::lifecycle::test_peer_up(peer, session_id, tx);
+            if let RibUpdate::PeerUp {
+                sendable_families, ..
+            } = &mut up
+            {
+                *sendable_families = families.to_vec();
+            }
+            manager.handle_update(up);
+            rx
+        };
+        std::mem::forget(up(&mut manager, peer_v4(SOURCE), 0));
+        manager.handle_update(RibUpdate::RoutesReceived {
+            peer: peer_v4(SOURCE),
+            session_id: 0,
+            announced: vec![],
+            withdrawn: vec![],
+            flowspec_announced: (0..rules)
+                .map(|index| {
+                    let mut rule = crate::test_support::make_flowspec_route(SOURCE);
+                    rule.rule.components =
+                        vec![rustbgpd_wire::FlowSpecComponent::DestinationPrefix(
+                            rustbgpd_wire::FlowSpecPrefix::V4(Ipv4Prefix::new(
+                                Ipv4Addr::new(198, 18, index, 0),
+                                24,
+                            )),
+                        )];
+                    rule
+                })
+                .collect(),
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        });
+        drain_route_chunks(&mut manager);
+        assert_eq!(manager.loc_rib.flowspec_len(), 0, "selection is deferred");
+        let receivers: Vec<_> = (0..count)
+            .map(|index| up(&mut manager, peer_v4(receiver(index)), u64::from(index) + 1))
+            .collect();
+        let before: usize = checkpoints().values().sum();
+        manager.expire_selection_deferral();
+        let after: usize = checkpoints().values().sum();
+        assert_eq!(manager.loc_rib.flowspec_len(), usize::from(rules));
+        for index in 0..count {
+            assert!(manager.owes(peer_v4(receiver(index)), FLOWSPEC));
+        }
+        drop(receivers);
+        after - before
+    };
+    let added = |rules| work(rules, 32) - work(rules, 8);
+    let (small, large) = (added(50), added(200));
+    assert_eq!(
+        small, large,
+        "24 more receivers cost the same at 50 rules and at 200"
+    );
+    assert!(large / 24 < 50, "{} checkpoints per receiver", large / 24);
+}
+
 const FLOWSPEC: (Afi, Safi) = (Afi::Ipv4, Safi::FlowSpec);
 
 /// Eight receivers that are update-group members for IPv4 unicast and hold
