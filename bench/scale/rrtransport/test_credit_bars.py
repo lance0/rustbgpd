@@ -78,13 +78,69 @@ def exhaust(family, recovery_ms=20_000.0, p99=5.0, gap=60.0, candidate=False):
                 high=FULL["candidate"] + 250 if candidate else FULL["parent"] + 1,
             ),
         },
-        "unaffected": {
-            "injected": 1_000,
-            "delivered": 1_000,
-            "max_gap_ms": gap,
-            "p99_latency_ms": p99,
-        },
+        "unaffected": unaffected(gap, p99),
     }
+
+
+def unaffected(gap=60.0, p99=5.0):
+    """The healthy receiver: its longest gap outside the churn-free window,
+    which by itself held no delivery for 300 ms."""
+    return {
+        "injected": 1_000,
+        "delivered": 1_000,
+        "max_gap_ms": gap,
+        "max_gap_raw_ms": 330.0,
+        "quiet_excluded": {"from_ms": 79_700.0, "to_ms": 80_000.0, "span_ms": 300.0},
+        "p99_latency_ms": p99,
+    }
+
+
+def histogram(above, at_most, observations=1):
+    return {"observations": observations, "above_ms": above, "at_most_ms": at_most}
+
+
+# Cell 7 bar 6 at the candidate's byte credit: 150 x (credit + one
+# 1,024-row pass) for a unicast (250-byte) or EVPN (290-byte) row.
+RELEASE_CREDIT_BOUND = {
+    "unicast": 150 * (BYTE_CREDIT + 1_024 * 250),
+    "evpn": 150 * (BYTE_CREDIT + 1_024 * 290),
+}
+
+
+def release(family, churn=False, candidate=True):
+    """A clean selection release (or the same under churn): the candidate's
+    future owed-drain step instrument, its turns, gauges and churn timing all
+    inside their bars."""
+    run = {
+        "cell": "restart-churn" if churn else "restart",
+        "family": family,
+        "mode": "measured",
+        "row_size_of": 104 if family == "unicast" else 144,
+        "healthy_row_size_of": 104,
+        "shape": dict(credit_bars.RELEASE_SHAPE),
+        "timing": {"release_sent_ms": 40.0, "first_eor_ms": 30_400.0, "last_eor_ms": 31_000.0},
+        "checks": {name: True for name in credit_bars.RESTART_WIRE_CHECKS},
+        "witness": {
+            "peak_credit_rows": 0.0,
+            "peak_credit_bytes": 2_000_000_000.0 if candidate else None,
+        },
+        "actor": {
+            "slice_max_us": {"actor_poll": 120_000.0, "other": 9_000.0},
+            "turn_longest_ms": {"end_of_rib": histogram(100.0, 200.0)},
+            "work_longest_ms": {"distribute_flush": histogram(25.0, 50.0, 400)},
+            "owed_drain_step_longest_ms": {"whole": histogram(25.0, 50.0, 900)},
+        },
+        "drain_gauges": {"peak_operations_live": 0, "peak_credit_rows": 0},
+        "unaffected": unaffected(),
+    }
+    if churn:
+        run["churn"] = {
+            "withdrawn": 1_500,
+            "re_announced": 750,
+            "started_ms": 14_850.0,
+            "sent_ms": 14_870.0,
+        }
+    return run
 
 
 def paused(peak, credit_bytes):
@@ -146,12 +202,21 @@ def arm(candidate):
     }
     for family in credit_bars.FILL_FAMILIES:
         files[f"fill-{family}.json"] = fill(family, 240.0)
+    for family in credit_bars.FAMILIES:
+        files[f"restart-{family}.json"] = release(family, candidate=candidate)
+        files[f"restart-churn-{family}.json"] = release(family, True, candidate)
     return files
 
 
-ALL_CELLS = ["probes", "exhaust-unicast", "exhaust-evpn", "paused"] + [
-    f"fill-{family}" for family in credit_bars.FILL_FAMILIES
+RELEASE_CELLS = [
+    f"{kind}-{family}" for kind, _ in credit_bars.RELEASE_KINDS for family in credit_bars.FAMILIES
 ]
+ALL_CELLS = (
+    ["probes", "exhaust-unicast", "exhaust-evpn", "paused"]
+    + [f"fill-{family}" for family in credit_bars.FILL_FAMILIES]
+    + RELEASE_CELLS
+)
+CELL_COUNT = 12
 
 
 def provenance(sha, cells=None):
@@ -193,7 +258,7 @@ class Bars(unittest.TestCase):
 
     def test_clean_pair_passes_every_cell(self):
         results = self.run_bars()
-        self.assertEqual(len(results), 7)
+        self.assertEqual(len(results), CELL_COUNT)
         self.assertTrue(all(v == "PASS" for v, _ in results.values()), results)
 
     def wire_defect(self, check):
@@ -216,20 +281,55 @@ class Bars(unittest.TestCase):
         results = self.wire_defect("no_session_resets")
         self.assert_only(results, "cell 2 exhaustion unicast", "FAIL", "no_session_resets failed")
 
-    def test_seeded_over_long_recovery(self):
+    def test_recovery_over_the_old_rule_is_report_only(self):
         def mutate(_parent, candidate):
-            # Parent 20 s: bar is max(25 s, 22 s) = 25 s.
+            # Parent 20 s: the old rule is max(25 s, 22 s) = 25 s.
             candidate["exhaust-evpn.json"]["timing"]["recovery_ms"] = 25_001.0
 
-        results = self.run_bars(mutate)
-        self.assert_only(results, "cell 2 exhaustion evpn", "FAIL", "recovery over bar")
+        verdict, reason = self.run_bars(mutate)["cell 2 exhaustion evpn"]
+        self.assertEqual(verdict, "PASS", reason)
+        self.assertIn(
+            "report-only, not a bar: recovery candidate 25001 ms vs parent 20000 ms "
+            "(ratio 1.25; the old rule would allow 25000 ms)",
+            reason,
+        )
 
     def test_recovery_slack_applies_to_short_parent(self):
         def mutate(parent, candidate):
             parent["exhaust-evpn.json"]["timing"]["recovery_ms"] = 4_000.0
             candidate["exhaust-evpn.json"]["timing"]["recovery_ms"] = 5_999.0
 
-        self.assertEqual(self.run_bars(mutate)["cell 2 exhaustion evpn"][0], "PASS")
+        verdict, reason = self.run_bars(mutate)["cell 2 exhaustion evpn"]
+        self.assertEqual(verdict, "PASS", reason)
+        self.assertIn("the old rule would allow 6000 ms", reason)
+
+    def test_seeded_slow_drain_after_resume(self):
+        # Bar 5: absolute, every candidate run; the parent's drain is no bar.
+        for drain, verdict in ((60_000.0, "PASS"), (60_001.0, "FAIL")):
+
+            def mutate(parent, candidate, drain=drain):
+                parent["exhaust-unicast.json"]["timing"]["drain_after_resume_ms"] = 90_000.0
+                candidate["exhaust-unicast.json"]["timing"]["drain_after_resume_ms"] = drain
+
+            with self.subTest(drain=drain):
+                results = self.run_bars(mutate)
+                if verdict == "FAIL":
+                    self.assert_only(
+                        results, "cell 2 exhaustion unicast", "FAIL", "drain after resume over bar"
+                    )
+                else:
+                    self.assertTrue(all(v == "PASS" for v, _ in results.values()), results)
+
+    def test_seeded_slow_drain_in_a_later_repetition(self):
+        def mutate(parent, candidate):
+            slow = exhaust("evpn", candidate=True)
+            slow["timing"]["drain_after_resume_ms"] = 61_000.0
+            self.two_repetitions(
+                parent, candidate, "exhaust-evpn", "exhaust-evpn.json", exhaust("evpn"), slow
+            )
+
+        results = self.run_bars(mutate)
+        self.assert_only(results, "cell 2 exhaustion evpn", "FAIL", "drain after resume 61000 ms")
 
     def test_seeded_delivery_gap(self):
         def mutate(_parent, candidate):
@@ -533,13 +633,14 @@ class Bars(unittest.TestCase):
             reason,
         )
 
-    def test_drain_report_rides_a_recovery_fail(self):
-        def mutate(_parent, candidate):
-            candidate["exhaust-evpn.json"]["timing"]["recovery_ms"] = 25_001.0
-            candidate["exhaust-evpn.json"]["timing"]["drain_after_resume_ms"] = None
+    def test_parent_without_a_drain_time_keeps_the_report_only(self):
+        # A parent built from an older harness may lack the drain; only the
+        # candidate's is the bar.
+        def mutate(parent, _candidate):
+            parent["exhaust-evpn.json"]["timing"]["drain_after_resume_ms"] = None
 
         verdict, reason = self.run_bars(mutate)["cell 2 exhaustion evpn"]
-        self.assertEqual(verdict, "FAIL", reason)
+        self.assertEqual(verdict, "PASS", reason)
         self.assertIn("drain after resume: not recorded in every run", reason)
 
     def test_seeded_later_repetition_without_witness_is_invalid(self):
@@ -734,6 +835,7 @@ class Bars(unittest.TestCase):
                     "checks.one_eor_before_burst",
                     "checks.no_session_resets",
                     "timing.recovery_ms",
+                    "timing.drain_after_resume_ms",
                 ],
             ),
             "exhaust-evpn.json": (
@@ -744,12 +846,54 @@ class Bars(unittest.TestCase):
                     "unaffected.delivered",
                     "unaffected.p99_latency_ms",
                     "unaffected.max_gap_ms",
+                    "unaffected.max_gap_raw_ms",
+                    "unaffected.quiet_excluded.from_ms",
+                    "unaffected.quiet_excluded.to_ms",
+                    "unaffected.quiet_excluded.span_ms",
                 ],
             ),
             "probes.json": ("cell 4 lag and restart probes", ["mode", "probes"]),
             "fill-flowspec.json": (
                 "cell 6 bytes per queued row",
                 ["mode", "estimate.bytes_per_queued_row", "row_size_of"],
+            ),
+            "restart-unicast.json": (
+                "cell 7 selection release unicast",
+                [
+                    "mode",
+                    "shape.receivers",
+                    "shape.rows_per_receiver",
+                    "shape.pause_ms",
+                    "shape.trigger",
+                    "shape.registered_peers",
+                    "checks.final_state_exact",
+                    "checks.eor_after_every_route",
+                    "checks.no_session_resets",
+                    "actor.slice_max_us.actor_poll",
+                    "actor.turn_longest_ms",
+                    "actor.work_longest_ms",
+                    "drain_gauges.peak_operations_live",
+                    "witness",
+                    "row_size_of",
+                    "unaffected.max_gap_ms",
+                    "unaffected.quiet_excluded.span_ms",
+                ],
+            ),
+            "restart-churn-evpn.json": (
+                "cell 7 release under churn evpn",
+                [
+                    "churn.withdrawn",
+                    "churn.re_announced",
+                    "churn.started_ms",
+                    "churn.sent_ms",
+                    "timing.release_sent_ms",
+                    "timing.last_eor_ms",
+                    "drain_gauges.peak_operations_live",
+                ],
+            ),
+            "restart-churn-unicast.json": (
+                "cell 7 release owed-drain step",
+                ["actor.owed_drain_step_longest_ms"],
             ),
         }
         for file, (cell, fields) in required.items():
@@ -1133,9 +1277,190 @@ class Bars(unittest.TestCase):
             candidate["paused-evpn.json"]["memory"]["cgroup_memory_peak_bytes"] = 9 * GIB
 
         results = self.run_bars(mutate)
-        self.assertEqual(len(results), 7)
+        self.assertEqual(len(results), CELL_COUNT)
         failed = [name for name, (verdict, _) in results.items() if verdict == "FAIL"]
         self.assertEqual(len(failed), 5, results)
+
+    def release_defect(self, file, change):
+        def mutate(_parent, candidate):
+            change(candidate[file])
+
+        return self.run_bars(mutate)
+
+    def test_harness_without_an_owed_drain_step_instrument_is_invalid(self):
+        # What this harness records on a tree without the proposed metric.
+        def change(run):
+            run["actor"]["owed_drain_step_longest_ms"] = None
+
+        results = self.release_defect("restart-evpn.json", change)
+        self.assert_only(results, "cell 7 release owed-drain step", "INVALID", "no instrument")
+
+    def test_seeded_owed_drain_step_over_50_ms(self):
+        cases = (
+            (histogram(50.0, 100.0), "FAIL", "step over 50 ms"),
+            (histogram(25.0, 100.0), "INVALID", "bucket resolution cannot judge 50 ms"),
+            (histogram(25.0, None), "INVALID", "bucket resolution cannot judge 50 ms"),
+            ({}, "INVALID", "no owed-drain step observed"),
+        )
+        for entry, verdict, reason in cases:
+
+            def change(run, entry=entry):
+                steps = {"whole": histogram(25.0, 50.0), "keyed": entry} if entry else {}
+                run["actor"]["owed_drain_step_longest_ms"] = steps
+
+            with self.subTest(entry=entry):
+                results = self.release_defect("restart-churn-unicast.json", change)
+                self.assert_only(results, "cell 7 release owed-drain step", verdict, reason)
+
+    def test_seeded_long_actor_turn(self):
+        line = "cell 7 selection release unicast"
+        # A poll at the bar passes every turn inside it.
+        results = self.release_defect(
+            "restart-unicast.json",
+            lambda run: run["actor"]["slice_max_us"].update(actor_poll=250_000.0),
+        )
+        self.assertTrue(all(v == "PASS" for v, _ in results.values()), results)
+
+        def long_turn(run):
+            run["actor"]["slice_max_us"]["actor_poll"] = 1_200_000.0
+            run["actor"]["turn_longest_ms"]["end_of_rib"] = histogram(500.0, 1_000.0)
+
+        results = self.release_defect("restart-unicast.json", long_turn)
+        self.assert_only(results, line, "FAIL", "end_of_rib over 500 ms > 250 ms")
+
+        def long_work_unit(run):
+            run["actor"]["slice_max_us"]["actor_poll"] = 600_000.0
+            run["actor"]["work_longest_ms"]["distribute_flush"] = histogram(500.0, 1_000.0)
+
+        results = self.release_defect("restart-unicast.json", long_work_unit)
+        self.assert_only(results, line, "FAIL", "distribute_flush over 500 ms")
+
+        # A long poll whose turns all sit at or under 200 ms: no turn
+        # instrument can tell, so no verdict.
+        results = self.release_defect(
+            "restart-unicast.json",
+            lambda run: run["actor"]["slice_max_us"].update(actor_poll=250_001.0),
+        )
+        self.assert_only(results, line, "INVALID", "no turn is provably over it")
+
+    def test_seeded_live_unicast_operation_during_the_drain(self):
+        def change(run):
+            run["drain_gauges"]["peak_operations_live"] = 1
+
+        results = self.release_defect("restart-churn-unicast.json", change)
+        self.assert_only(
+            results,
+            "cell 7 release under churn unicast",
+            "FAIL",
+            "1 live whole-table operations during the drain",
+        )
+        # The gauge is unlabeled and the bar names unicast: EVPN reports it.
+        results = self.release_defect("restart-evpn.json", change)
+        self.assertTrue(all(v == "PASS" for v, _ in results.values()), results)
+        self.assertIn(
+            "live whole-table operations peak 1 (report-only",
+            results["cell 7 selection release evpn"][1],
+        )
+
+    def test_seeded_credit_over_the_release_bound(self):
+        bound = RELEASE_CREDIT_BOUND["evpn"]
+        for peak, verdict in ((bound, "PASS"), (bound + 1, "FAIL")):
+
+            def change(run, peak=peak):
+                run["witness"]["peak_credit_bytes"] = float(peak)
+
+            with self.subTest(peak=peak):
+                results = self.release_defect("restart-churn-evpn.json", change)
+                if verdict == "PASS":
+                    self.assertTrue(all(v == "PASS" for v, _ in results.values()), results)
+                else:
+                    self.assert_only(
+                        results,
+                        "cell 7 release under churn evpn",
+                        "FAIL",
+                        f"credit bytes peak {bound + 1} > {bound}",
+                    )
+
+    def test_release_credit_bound_on_a_row_credit_tree(self):
+        # Without the byte gauge the bound is in rows, from the getter peak.
+        bound = 150 * (16_777_216 // 153 + 1_024)
+
+        def change(run, peak):
+            run["witness"]["peak_credit_bytes"] = None
+            run["drain_gauges"]["peak_credit_rows"] = peak
+
+        for peak, verdict in ((bound, "PASS"), (bound + 1, "FAIL")):
+            with self.subTest(peak=peak):
+                results = self.release_defect(
+                    "restart-unicast.json", lambda run, peak=peak: change(run, peak)
+                )
+                self.assertEqual(results["cell 7 selection release unicast"][0], verdict, results)
+
+    def test_seeded_release_wire_defect_and_gap(self):
+        def wire(run):
+            run["checks"]["eor_after_every_route"] = False
+
+        results = self.release_defect("restart-evpn.json", wire)
+        self.assert_only(
+            results, "cell 7 selection release evpn", "FAIL", "eor_after_every_route failed"
+        )
+
+        def gap(run):
+            run["unaffected"]["max_gap_ms"] = 1_001.0
+
+        results = self.release_defect("restart-churn-evpn.json", gap)
+        self.assert_only(
+            results, "cell 7 release under churn evpn", "FAIL", "healthy delivery gap 1001 ms"
+        )
+
+    def test_seeded_churn_outside_the_drain_is_invalid(self):
+        cases = {
+            "before the release": {"started_ms": 30.0},
+            "after the last End-of-RIB": {"sent_ms": 31_000.0},
+            "no withdrawal": {"withdrawn": 0},
+        }
+        for name, fields in cases.items():
+
+            def change(run, fields=fields):
+                run["churn"].update(fields)
+
+            with self.subTest(name):
+                results = self.release_defect("restart-churn-unicast.json", change)
+                self.assert_only(
+                    results, "cell 7 release under churn unicast", "INVALID", "not inside the drain"
+                )
+
+    def test_correctness_release_run_is_not_a_measurement(self):
+        def change(run):
+            run["mode"] = "correctness"
+
+        results = self.release_defect("restart-evpn.json", change)
+        self.assertEqual(results["cell 7 selection release evpn"][0], "INVALID")
+        self.assertEqual(results["cell 7 release owed-drain step"][0], "INVALID")
+
+    def test_check_reads_the_churn_variant(self):
+        run = release("unicast", churn=True)
+        run["mode"] = "correctness"
+        run["actor"]["owed_drain_step_longest_ms"] = None
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, "restart-churn-unicast.json").write_text(json.dumps(run))
+            (name, verdict, reason), = credit_bars.check(Path(root))
+            self.assertEqual((name, verdict), ("restart burst under churn unicast", "PASS"))
+            self.assertIn("inside the drain (40-31000 ms)", reason)
+            self.assertIn("longest actor poll 120.0 ms; owed-drain step no instrument", reason)
+            run["churn"]["sent_ms"] = 31_000.0
+            Path(root, "restart-churn-unicast.json").write_text(json.dumps(run))
+            (_, verdict, reason), = credit_bars.check(Path(root))
+            self.assertEqual(verdict, "INVALID", reason)
+
+    def test_excluded_churn_free_window_is_reported(self):
+        verdict, reason = self.run_bars()["cell 3 unaffected peer unicast"]
+        self.assertEqual(verdict, "PASS", reason)
+        self.assertIn(
+            "max gap 60 ms (330 ms before excluding the 300 ms churn-free window "
+            "79700-80000 ms)",
+            reason,
+        )
 
     def test_exit_status(self):
         self.assertEqual(credit_bars.report([("a", "PASS", "")]), 0)

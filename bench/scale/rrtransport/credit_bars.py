@@ -22,7 +22,9 @@ else 2 when any is INVALID, else 0.
 ``check`` applies the single-arm parts (wire checks and exhaustion witness)
 to one result set, measured or not, for correctness runs. It also applies
 the wire checks to any ``restart-<family>.json`` (the RFC 4724 restart
-burst), which no campaign bar reads.
+burst) and ``restart-churn-<family>.json`` (the same with churn during its
+drain, whose timing it checks), and reports their instruments; their bars
+are cell 7's, which ``analyze`` judges on the candidate alone.
 """
 
 from __future__ import annotations
@@ -43,9 +45,29 @@ PASS_ROWS = 1_024
 PEERS = 150
 # The candidate charges each announced row its element plus this.
 ANNOUNCED_ROW_OVERHEAD = 146
-# Cell 2: recovery <= max(parent x 1.25, parent + 2 s).
+# Cell 2, report-only since the drain bar replaced it: recovery against
+# max(parent x 1.25, parent + 2 s).
 RECOVERY_RATIO = 1.25
 RECOVERY_SLACK_MS = 2_000.0
+# Cell 2: every burst receiver exact this soon after the readers resume, in
+# every candidate run.
+DRAIN_AFTER_RESUME_MAX_MS = 60_000.0
+# Cell 7: the RFC 4724 selection release and its owed drain. Absolute bars
+# on the candidate: the longest owed-drain step, the longest RIB actor turn,
+# and the summed credit gauge against receivers x (per-peer credit + one
+# 1,024-row pass); unicast keeps no whole-table operation live.
+OWED_STEP_MAX_MS = 50.0
+ACTOR_TURN_MAX_MS = 250.0
+RELEASE_TRIGGER = "rfc4724_selection_release"
+RELEASE_SHAPE = {
+    "receivers": 150,
+    "rows_per_receiver": 150_000,
+    "pause_ms": 30_000,
+    "trigger": RELEASE_TRIGGER,
+    "registered_peers": 153,
+}
+# (cell prefix, line label): the plain release and the release under churn.
+RELEASE_KINDS = (("restart", "selection release"), ("restart-churn", "release under churn"))
 # Cell 2: fewest sampler samples on the exhaustion plateau. The fixed shape
 # reaches the row tree's credit at the 108th 500 ms chunk (about 53.5 s) and
 # the byte tree's earlier, leaving 26 s or more, about 100 samples at 250 ms,
@@ -176,7 +198,7 @@ def identity(cell: str) -> tuple[str, str | None]:
         return "paused", "evpn"
     if cell == "probes":
         return "probes", None
-    kind, family = cell.split("-", 1)
+    kind, family = cell.rsplit("-", 1)
     return kind, family
 
 
@@ -274,6 +296,21 @@ def measured(runs: list[dict], what: str, shape: dict | None = None) -> list[dic
     return runs
 
 
+def credit_unit(run: dict, what: str) -> tuple[str, int, float]:
+    """The summed credit gauge's unit (bytes where the tree exports
+    `bgp_rib_outbound_credit_bytes`, else rows), the per-peer credit in it
+    at the run's registered peers, and one burst row's charge."""
+    peers = number(run, "shape.registered_peers", what)
+    if peers <= 0:
+        raise Invalid(f"{what}: {peers} registered peers")
+    if need(run, "witness", what).get("peak_credit_bytes") is not None:
+        credit, row = BYTE_CREDIT, number(run, "row_size_of", what) + ANNOUNCED_ROW_OVERHEAD
+        unit = "bytes"
+    else:
+        unit, credit, row = "rows", ROW_CREDIT, 1
+    return unit, min(max(credit[0] // int(peers), credit[1]), credit[2]), row
+
+
 def exhaustion(run: dict, what: str) -> str:
     """What witnessed that every burst receiver spent its ordinary credit in
     `run`; INVALID when nothing did."""
@@ -321,15 +358,11 @@ def exhaustion(run: dict, what: str) -> str:
     # it by more than one healthy row. Anything else is INVALID. Credit
     # refusals are reported but are no witness: the same reason counts a
     # refusal for a live whole-table operation with nothing charged.
-    if run["witness"].get("peak_credit_bytes") is not None:
-        unit, peak, credit = "bytes", number(run, "witness.peak_credit_bytes", what), BYTE_CREDIT
-        row = number(run, "row_size_of", what) + ANNOUNCED_ROW_OVERHEAD
-    else:
-        unit, peak, credit, row = "rows", rows, ROW_CREDIT, 1
+    unit, limit, row = credit_unit(run, what)
+    peak = number(run, "witness.peak_credit_bytes", what) if unit == "bytes" else rows
     healthy = 1 if unit == "rows" else (
         number(run, "healthy_row_size_of", what) + ANNOUNCED_ROW_OVERHEAD
     )
-    limit = min(max(credit[0] // int(peers), credit[1]), credit[2])
     full = -(-limit // int(row))
     expected = receivers * full * row
     shape = f"{receivers} receivers x {full} rows at credit {limit} {unit}"
@@ -456,18 +489,27 @@ def cell2(parent: Arm, candidate: Arm, family: str) -> tuple[str, str]:
     # without any timing comparison.
     if failures:
         return "FAIL", "; ".join(failures)
-    times = {arm: recovery(runs, arm) for arm, runs in arms.items()}
-    bar = max(times["parent"] * RECOVERY_RATIO, times["parent"] + RECOVERY_SLACK_MS)
-    line = (
-        f"recovery candidate {times['candidate']:.0f} ms vs bar {bar:.0f} ms "
-        f"(parent {times['parent']:.0f} ms)"
+    # The bar: every candidate run exact within 60 s of the resume. The
+    # parent-relative rules on recovery and on the drain are report-only.
+    drain = max(
+        number(run, "timing.drain_after_resume_ms", f"candidate run {index}")
+        for index, run in enumerate(arms["candidate"])
     )
-    report = drain_report(arms)
-    if times["candidate"] > bar:
-        return "FAIL", f"recovery over bar: {line}; {report}"
-    line += "; " + report
+    times = {arm: recovery(runs, arm) for arm, runs in arms.items()}
+    rule = max(times["parent"] * RECOVERY_RATIO, times["parent"] + RECOVERY_SLACK_MS)
+    report = (
+        f"report-only, not a bar: recovery candidate {times['candidate']:.0f} ms vs parent "
+        f"{times['parent']:.0f} ms (ratio {times['candidate'] / times['parent']:.2f}; the old "
+        f"rule would allow {rule:.0f} ms); {drain_report(arms)}"
+    )
+    line = f"drain after resume {drain:.0f} ms (bar {DRAIN_AFTER_RESUME_MAX_MS:.0f} ms)"
+    if drain > DRAIN_AFTER_RESUME_MAX_MS:
+        return "FAIL", f"drain after resume over bar: {line}; {report}"
     witnessed = "; ".join(f"{arm} {witness}" for arm, (_, witness) in single.items())
-    return "PASS", f"exhaustion witnessed ({witnessed}); wire exact, ordered, no resets; {line}"
+    return (
+        "PASS",
+        f"exhaustion witnessed ({witnessed}); wire exact, ordered, no resets; {line}; {report}",
+    )
 
 
 def drain_report(arms: dict[str, list[dict]]) -> str:
@@ -488,6 +530,24 @@ def drain_report(arms: dict[str, list[dict]]) -> str:
     )
 
 
+def healthy_gap(run: dict, what: str) -> tuple[float, str]:
+    """The healthy receiver's longest delivery gap, outside the harness's
+    own churn-free window, and a note naming the window it excluded."""
+    if not number(run, "unaffected.injected", what) or not number(
+        run, "unaffected.delivered", what
+    ):
+        raise Invalid(f"{what}: the healthy receiver got no churn")
+    gap = number(run, "unaffected.max_gap_ms", what)
+    raw = number(run, "unaffected.max_gap_raw_ms", what)
+    start = number(run, "unaffected.quiet_excluded.from_ms", what)
+    end = number(run, "unaffected.quiet_excluded.to_ms", what)
+    span = number(run, "unaffected.quiet_excluded.span_ms", what)
+    return gap, (
+        f"max gap {gap:.0f} ms ({raw:.0f} ms before excluding the {span:.0f} ms churn-free "
+        f"window {start:.0f}-{end:.0f} ms)"
+    )
+
+
 def cell3(parent: Arm, candidate: Arm, family: str) -> tuple[str, str]:
     arms = exhaust_runs(parent, candidate, family)
     p99, gaps = {}, []
@@ -500,21 +560,20 @@ def cell3(parent: Arm, candidate: Arm, family: str) -> tuple[str, str]:
             ):
                 raise Invalid(f"{what}: the healthy receiver got no churn")
             values.append(number(run, "unaffected.p99_latency_ms", what))
-            gap = number(run, "unaffected.max_gap_ms", what)
             if arm == "candidate":
-                gaps.append(gap)
+                gaps.append(healthy_gap(run, what))
+            else:
+                number(run, "unaffected.max_gap_ms", what)
         p99[arm] = statistics.median(values)
+    gap, note = max(gaps)
     failures = []
-    if max(gaps) > MAX_GAP_MS:
-        failures.append(f"candidate delivery gap {max(gaps):.0f} ms > {MAX_GAP_MS:.0f} ms")
+    if gap > MAX_GAP_MS:
+        failures.append(f"candidate delivery gap {gap:.0f} ms > {MAX_GAP_MS:.0f} ms ({note})")
     if p99["candidate"] > p99["parent"] * P99_RATIO:
         failures.append(
             f"candidate p99 {p99['candidate']:.1f} ms > parent {p99['parent']:.1f} ms x {P99_RATIO}"
         )
-    line = (
-        f"max gap {max(gaps):.0f} ms; p99 {p99['candidate']:.1f} ms vs parent "
-        f"{p99['parent']:.1f} ms"
-    )
+    line = f"{note}; p99 {p99['candidate']:.1f} ms vs parent {p99['parent']:.1f} ms"
     return ("FAIL", "; ".join(failures)) if failures else ("PASS", line)
 
 
@@ -669,6 +728,150 @@ def cell6(parent: Arm, candidate: Arm) -> tuple[str, str]:
     return "PASS", "report-only: " + "; ".join(notes) + tail
 
 
+def churn_inside_drain(run: dict, what: str) -> str:
+    """The churn variant's withdrawals and re-announcements must have been
+    sent after the release and before the last receiver's End-of-RIB, or the
+    run did not churn during the drain: INVALID."""
+    withdrawn = number(run, "churn.withdrawn", what)
+    again = number(run, "churn.re_announced", what)
+    started = number(run, "churn.started_ms", what)
+    sent = number(run, "churn.sent_ms", what)
+    release = number(run, "timing.release_sent_ms", what)
+    last = number(run, "timing.last_eor_ms", what)
+    if withdrawn < 1 or not release <= started <= sent < last:
+        raise Invalid(
+            f"{what}: {withdrawn:.0f} withdrawals sent {started:.0f}-{sent:.0f} ms, not inside "
+            f"the drain from the {release:.0f} ms release to the {last:.0f} ms last End-of-RIB"
+        )
+    return (
+        f"{withdrawn:.0f} withdrawn and {again:.0f} re-announced at {started:.0f}-{sent:.0f} ms, "
+        f"inside the drain ({release:.0f}-{last:.0f} ms)"
+    )
+
+
+def longest_bounds(run: dict, path: str, what: str) -> list[tuple[str, float, float | None]]:
+    """Per label, the bucket edges around a histogram's longest observation
+    in the run: (label, above ms, at most ms or None past the top edge)."""
+    entries = need(run, path, what)
+    if not isinstance(entries, dict):
+        raise Invalid(f"{what}: {path} is not an object")
+    bounds = []
+    for label, entry in entries.items():
+        at_most = entry.get("at_most_ms") if isinstance(entry, dict) else None
+        if at_most is not None and (isinstance(at_most, bool) or not isinstance(at_most, int | float)):
+            raise Invalid(f"{what}: {path}.{label}.at_most_ms is not a number")
+        bounds.append((label, number(entry, "above_ms", f"{what} {path}.{label}"), at_most))
+    return bounds
+
+
+def turn_bar(run: dict, what: str) -> tuple[str | None, str | None, str]:
+    """Bar 2 for one run: (FAIL reason, undecided reason, reading). A poll
+    holds whole turns, so a longest poll within the bar passes every turn;
+    a turn or work unit whose bucket lies above the bar fails; anything
+    else is undecided, since a poll can hold many turns and resync ticks
+    have no turn instrument."""
+    poll = number(run, "actor.slice_max_us.actor_poll", what) / 1e3
+    over, top = [], []
+    for path in ("actor.turn_longest_ms", "actor.work_longest_ms"):
+        for label, above, at_most in longest_bounds(run, path, what):
+            if above >= ACTOR_TURN_MAX_MS:
+                over.append(f"{label} over {above:.0f} ms")
+            top.append((above, at_most, label))
+    worst = max(top, default=(0.0, 0.0, "none"))
+    reading = (
+        f"longest actor poll {poll:.1f} ms; longest turn or work unit {worst[2]} in "
+        f"({worst[0]:.0f}, {'inf' if worst[1] is None else f'{worst[1]:.0f}'}] ms"
+    )
+    if over:
+        return f"{what}: {', '.join(over)} > {ACTOR_TURN_MAX_MS:.0f} ms ({reading})", None, reading
+    if poll <= ACTOR_TURN_MAX_MS:
+        return None, None, reading
+    return None, (
+        f"{what}: longest actor poll {poll:.1f} ms > {ACTOR_TURN_MAX_MS:.0f} ms but no turn is "
+        f"provably over it ({reading}): a poll can hold many turns"
+    ), reading
+
+
+def release_runs(candidate: Arm, cell: str) -> list[dict]:
+    return measured(list(candidate.runs(cell).values()), f"candidate {cell}", RELEASE_SHAPE)
+
+
+def cell7(candidate: Arm, kind: str, family: str) -> tuple[str, str]:
+    """Bars 2, 3, 4 and 6 on the candidate's release runs of one kind."""
+    cell = f"{kind}-{family}"
+    runs = release_runs(candidate, cell)
+    failures, undecided, notes = [], [], []
+    wire = wire_failure(runs, f"candidate {cell}", RESTART_WIRE_CHECKS)
+    if wire is not None:
+        failures.append(wire)
+    for index, run in enumerate(runs):
+        what = f"candidate {cell} run {index}"
+        if kind == "restart-churn" and wire is None:
+            notes.append(churn_inside_drain(run, what))
+        failure, open_question, reading = turn_bar(run, what)
+        failures += [failure] if failure else []
+        undecided += [open_question] if open_question else []
+        gap, note = healthy_gap(run, what)
+        if gap > MAX_GAP_MS:
+            failures.append(f"{what}: healthy delivery gap {gap:.0f} ms > {MAX_GAP_MS:.0f} ms")
+        unit, limit, row = credit_unit(run, what)
+        receivers = number(run, "shape.receivers", what)
+        bound = receivers * (limit + PASS_ROWS * row)
+        if unit == "bytes":
+            peak = number(run, "witness.peak_credit_bytes", what)
+        else:
+            peak = number(run, "drain_gauges.peak_credit_rows", what)
+        if peak > bound:
+            failures.append(
+                f"{what}: credit {unit} peak {peak:.0f} > {bound:.0f} = {receivers:.0f} x "
+                f"({limit} + {PASS_ROWS} x {row:.0f})"
+            )
+        operations = number(run, "drain_gauges.peak_operations_live", what)
+        if family == "unicast" and operations != 0:
+            failures.append(
+                f"{what}: {operations:.0f} live whole-table operations during the drain, not 0"
+            )
+        notes.append(
+            f"{reading}; {note}; credit {unit} peak {peak:.0f} (bound {bound:.0f}); live "
+            f"whole-table operations peak {operations:.0f}"
+            + ("" if family == "unicast" else " (report-only: the gauge is unlabeled)")
+        )
+    if failures:
+        return "FAIL", "; ".join(failures + undecided)
+    if undecided:
+        raise Invalid("; ".join(undecided))
+    return "PASS", "wire exact, ordered, no resets; " + "; ".join(notes)
+
+
+def cell7_step(candidate: Arm) -> tuple[str, str]:
+    """Bar 1 over every release run: the longest owed-drain step."""
+    failures, undecided, longest = [], [], 0.0
+    for kind, _ in RELEASE_KINDS:
+        for family in FAMILIES:
+            cell = f"{kind}-{family}"
+            for index, run in enumerate(release_runs(candidate, cell)):
+                what = f"candidate {cell} run {index}"
+                if (run.get("actor") or {}).get("owed_drain_step_longest_ms") is None:
+                    raise Invalid(
+                        f"{what}: no instrument: no product metric times one owed-drain step "
+                        "(actor.owed_drain_step_longest_ms is null)"
+                    )
+                bounds = longest_bounds(run, "actor.owed_drain_step_longest_ms", what)
+                if not bounds:
+                    raise Invalid(f"{what}: no owed-drain step observed")
+                for label, above, at_most in bounds:
+                    longest = max(longest, above)
+                    if above >= OWED_STEP_MAX_MS:
+                        failures.append(f"{what}: {label} step over {above:.0f} ms")
+                    elif at_most is None or at_most > OWED_STEP_MAX_MS:
+                        undecided.append(f"{what}: {label} step in ({above:.0f}, {at_most}] ms")
+    if failures:
+        return "FAIL", f"owed-drain step over {OWED_STEP_MAX_MS:.0f} ms: " + "; ".join(failures)
+    if undecided:
+        raise Invalid("bucket resolution cannot judge 50 ms: " + "; ".join(undecided))
+    return "PASS", f"every owed-drain step at most {OWED_STEP_MAX_MS:.0f} ms"
+
+
 CELLS = (
     ["cell 1 paused-reader evpn"]
     + [
@@ -677,6 +880,8 @@ CELLS = (
         for n, kind in ((2, "exhaustion"), (3, "unaffected peer"))
     ]
     + ["cell 4 lag and restart probes", "cell 6 bytes per queued row"]
+    + ["cell 7 release owed-drain step"]
+    + [f"cell 7 {label} {family}" for _, label in RELEASE_KINDS for family in FAMILIES]
 )
 
 
@@ -696,6 +901,12 @@ def verdicts(parent_dir: Path, candidate_dir: Path) -> list[tuple[str, str, str]
         )
     cells.append(("cell 4 lag and restart probes", lambda: cell4(parent, candidate)))
     cells.append(("cell 6 bytes per queued row", lambda: cell6(parent, candidate)))
+    cells.append(("cell 7 release owed-drain step", lambda: cell7_step(candidate)))
+    for kind, label in RELEASE_KINDS:
+        for family in FAMILIES:
+            cells.append(
+                (f"cell 7 {label} {family}", lambda k=kind, f=family: cell7(candidate, k, f))
+            )
     results = []
     for name, evaluate in cells:
         try:
@@ -708,9 +919,30 @@ def verdicts(parent_dir: Path, candidate_dir: Path) -> list[tuple[str, str, str]
     return results
 
 
+def release_readings(run: dict) -> str:
+    """Report-only: what `check` shows of a release run's instruments; the
+    bars on them are cell 7's."""
+    actor = run.get("actor") or {}
+    gauges = run.get("drain_gauges") or {}
+    poll = (actor.get("slice_max_us") or {}).get("actor_poll")
+    step = actor.get("owed_drain_step_longest_ms")
+    return (
+        "report-only: longest actor poll "
+        + ("not recorded" if poll is None else f"{poll / 1e3:.1f} ms")
+        + f"; owed-drain step {'no instrument' if step is None else step}"
+        + f"; live operations peak {gauges.get('peak_operations_live', 'not recorded')}"
+        + f"; credit rows peak {gauges.get('peak_credit_rows', 'not recorded')}"
+    )
+
+
 def check(directory: Path) -> list[tuple[str, str, str]]:
     results = []
-    for kind, label in (("exhaust", "exhaustion"), ("restart", "restart burst")):
+    kinds = (
+        ("exhaust", "exhaustion"),
+        ("restart", "restart burst"),
+        ("restart-churn", "restart burst under churn"),
+    )
+    for kind, label in kinds:
         for family in FAMILIES:
             cell = f"{kind}-{family}"
             name = f"{cell}.json"
@@ -733,7 +965,15 @@ def check(directory: Path) -> list[tuple[str, str, str]]:
                 else:
                     # No witness: a selection release spends no ordinary credit.
                     reason = wire_failure(runs, "arm", RESTART_WIRE_CHECKS)
-                    passed = "wire exact, ordered, no resets (no exhaustion witness)"
+                    notes = [release_readings(run) for run in runs]
+                    if kind == "restart-churn" and reason is None:
+                        notes = [
+                            churn_inside_drain(run, f"run {index}") + "; " + note
+                            for index, (run, note) in enumerate(zip(runs, notes, strict=True))
+                        ]
+                    passed = "wire exact, ordered, no resets (no exhaustion witness); " + (
+                        "; ".join(notes)
+                    )
                 verdict, reason = ("FAIL", reason) if reason else ("PASS", passed)
             except Invalid as error:
                 verdict, reason = "INVALID", str(error)

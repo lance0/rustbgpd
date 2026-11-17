@@ -116,9 +116,13 @@ class Runner(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             body = 'echo "$1 $2" >>"$(dirname "$0")/calls"\n'
-            self.assertEqual(self.run_runner(root, 0, "restart-evpn", "exhaust-evpn", body=body), 0)
+            cells = ("restart-evpn", "exhaust-evpn", "restart-churn-unicast")
+            self.assertEqual(self.run_runner(root, 0, *cells, body=body), 0)
             calls = (root / "calls").read_text().splitlines()
-            self.assertEqual(calls, ["credit-restart evpn", "credit-exhaust evpn"])
+            self.assertEqual(
+                calls,
+                ["credit-restart evpn", "credit-exhaust evpn", "credit-restart-churn unicast"],
+            )
 
 
 if __name__ == "__main__":
