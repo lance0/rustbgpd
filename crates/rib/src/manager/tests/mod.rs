@@ -1770,6 +1770,7 @@ mod selection_deferral_recording;
 mod selection_deferral_rtc_join;
 mod selection_deferral_startup;
 mod selection_deferral_startup_gate_edges;
+mod selection_release_drain;
 mod session_export_policy;
 mod slice_timing;
 mod stalled_receiver_oracle;
