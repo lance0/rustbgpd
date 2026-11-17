@@ -1280,3 +1280,103 @@ fn empty_family_deferred_restore_handles_departure_and_replacement() {
         }
     }
 }
+
+/// Loc-RIB EVPN keys enumerated into resync key sets while every member of a
+/// fleet holding `ROWS` rows is regrouped, one member per paced command.
+fn resync_evpn_key_work(moved: usize, owned: bool) -> usize {
+    const ROWS: u32 = 16;
+    let mut fleet = evpn_fleet(moved, ROWS, owned);
+    let visits = Arc::new(AtomicUsize::new(0));
+    fleet.manager.replacement_readiness_test_hook = Some(Arc::new({
+        let visits = Arc::clone(&visits);
+        move |stage| {
+            if stage == "resync_evpn_key" {
+                visits.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }));
+    let deferred = fleet.batch();
+    assert_eq!(deferred, fleet.members);
+    let per_command = fleet.walk(deferred, Some(ONE_PER_COMMAND), |_, _| {});
+    assert_eq!(per_command, vec![1; moved]);
+    assert!(
+        fleet.manager.dirty_peers.is_empty(),
+        "every resync committed"
+    );
+    for (index, events) in drain_events(&mut fleet.outputs).iter().enumerate() {
+        let rows = end_state(events);
+        assert_eq!(rows.len(), ROWS as usize, "receiver {index}");
+        assert!(
+            rows.values()
+                .all(|route| route.communities().contains(&TAGGED)),
+            "receiver {index} holds the new chain's rows"
+        );
+    }
+    visits.load(Ordering::Relaxed)
+}
+
+/// A group-owned member's resync stages EVPN from its complete feed, so it
+/// enumerates no Loc-RIB EVPN key; a private member's resync enumerates the
+/// table once. Neither grows with the members moved before it.
+#[test]
+fn owned_member_resync_enumerates_no_evpn_key() {
+    let counts: Vec<_> = [8, 32]
+        .into_iter()
+        .map(|moved| {
+            (
+                moved,
+                resync_evpn_key_work(moved, true),
+                resync_evpn_key_work(moved, false),
+            )
+        })
+        .collect();
+    eprintln!("resync EVPN keys (members, owned, private): {counts:?}");
+    assert_eq!(counts, vec![(8, 0, 8 * 16), (32, 0, 32 * 16)]);
+}
+
+/// The resync of a group-owned member builds no EVPN key set, but a table
+/// that holds EVPN rows is still not an empty resync. When the member's
+/// complete feed cannot be sealed, the resync sends nothing and keeps its
+/// duty: a dirty member is not taken off the dirty list and re-marked, which
+/// would restart its dirty age, and a forced replay keeps its request.
+#[test]
+fn owned_member_resync_without_a_feed_is_not_an_empty_resync() {
+    for forced in [false, true] {
+        let mut fleet = evpn_fleet(2, 4, true);
+        let peer = fleet.members[0];
+        let gid = fleet.manager.evpn_grouped_member_of(peer).unwrap();
+        if forced {
+            fleet.manager.force_outbound_peers.insert(peer);
+        } else {
+            assert!(fleet.manager.mark_outbound_dirty(peer));
+        }
+        let dirty_since = fleet.manager.dirty_since.get(&peer).copied();
+        // No feed can be sealed against an unstamped table.
+        fleet
+            .manager
+            .group_ribs
+            .get_mut(&gid)
+            .unwrap()
+            .evpn_table_stamp = 0;
+        fleet
+            .manager
+            .distribute_changes(&HashSet::new(), &HashSet::new());
+        if forced {
+            assert!(
+                fleet.manager.force_outbound_peers.contains(&peer),
+                "the forced replay was not delivered"
+            );
+        } else {
+            assert!(fleet.manager.dirty_peers.contains(&peer));
+            assert_eq!(
+                fleet.manager.dirty_since.get(&peer).copied(),
+                dirty_since,
+                "the member stayed dirty throughout"
+            );
+        }
+        assert!(
+            fleet.outputs[0].try_recv().is_err(),
+            "forced={forced}: nothing was sent"
+        );
+    }
+}

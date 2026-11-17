@@ -9941,7 +9941,20 @@ impl RibManager {
                         HashSet::new()
                     };
 
-                    let mut effective_evpn_keys: HashSet<rustbgpd_wire::EvpnRouteKey> = if resync
+                    // A group-owned member's resync stages EVPN from its
+                    // complete feed, never from this key set, so it enumerates
+                    // no key. The empty-resync exit below still needs to know
+                    // whether the set would have held one.
+                    let owned_evpn_scope = resync
+                        && evpn_group_owned
+                        && !self.selection_deferred((Afi::L2Vpn, Safi::Evpn))
+                        && (self.loc_rib.evpn_len() != 0
+                            || self
+                                .adj_ribs_out
+                                .get(&peer)
+                                .is_some_and(|rib_out| rib_out.evpn_len() != 0));
+                    let mut effective_evpn_keys: HashSet<rustbgpd_wire::EvpnRouteKey> = if (resync
+                        && !evpn_group_owned)
                         || whole(super::outbound_owing::OwedFamily::EVPN)
                     {
                         self.replacement_checkpoint(true);
@@ -9950,10 +9963,18 @@ impl RibManager {
                                 + self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::evpn_len),
                         );
                         self.replacement_checkpoint(true);
+                        #[cfg(test)]
+                        let row_observer = self.replacement_readiness_test_hook.as_ref();
                         all.extend(
                             self.loc_rib
                                 .iter_evpn()
-                                .inspect(|_| checkpoint())
+                                .inspect(|_| {
+                                    checkpoint();
+                                    #[cfg(test)]
+                                    if let Some(observer) = row_observer {
+                                        observer("resync_evpn_key");
+                                    }
+                                })
                                 .map(crate::route::EvpnRibRoute::key),
                         );
                         if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
@@ -10390,6 +10411,7 @@ impl RibManager {
                                 }))
                         && effective_flowspec_rules.is_empty()
                         && effective_evpn_keys.is_empty()
+                        && !owned_evpn_scope
                         && effective_bgpls_keys.is_empty()
                         && effective_l3vpn_keys.is_empty()
                         && !grouped_vpn_live
