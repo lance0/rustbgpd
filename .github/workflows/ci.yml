@@ -613,6 +613,12 @@ jobs:
           restart_smoke=$(mktemp -d)
           cargo run --locked -p rrtransport -- credit-restart unicast "$restart_smoke" --reduced
           cargo run --locked -p rrtransport -- credit-restart evpn "$restart_smoke" --reduced
+          # The same release with withdrawals and re-announcements sent while
+          # the readers are paused. At this reduced shape the release may drain
+          # before the churn reaches the RIB, so `check` gates the churn's
+          # timing and only reports its wire witness (gated at the full shape).
+          cargo run --locked -p rrtransport -- credit-restart-churn unicast "$restart_smoke" --reduced
+          cargo run --locked -p rrtransport -- credit-restart-churn evpn "$restart_smoke" --reduced
           python3 bench/scale/rrtransport/credit_bars.py check "$restart_smoke"
           python3 -m unittest discover -s bench/scale/rrtransport -p 'test_*.py'
           shellcheck -x bench/scale/rrtransport/run-credit-cells.sh
