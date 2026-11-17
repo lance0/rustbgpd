@@ -12,9 +12,14 @@
 //!   its private rows and their estimated bytes (`PrivateFamilies::bytes`),
 //!   released when the envelope drops. A new ordinary envelope is admitted
 //!   only while the peer's live bytes are below its credit, so a peer with
-//!   no live rows is always admitted; a refusal marks the peer dirty,
-//!   exactly like a full channel, and the resync timer retries from current
-//!   state.
+//!   no live rows is always admitted. The bytes estimate queued work, not
+//!   measured memory: `size_of` does not see heap payloads such as
+//!   `FlowSpec` components or BGP-LS attributes, so those families are
+//!   undercounted. A spent credit makes a peer owe the keys of a private
+//!   family under owed-key management (the peer is not dirty, forced or
+//!   closing) and the peer stays clean; otherwise, or when a commit is
+//!   refused anyway, the refusal marks the peer dirty, exactly like a full
+//!   channel, and the resync timer retries from current state.
 //! - **One whole-table operation per peer** (initial dump, refresh or replay
 //!   response, dirty or forced resync, complete EVPN feed, operator replay).
 //!   Every envelope of one operation holds a clone of its [`OperationLatch`];
@@ -58,7 +63,8 @@ use crate::update::OutboundRouteUpdate;
 /// sparse fanout both mean these are not universal stall times. At P = 150
 /// a peer's 14.3 MB holds 57,000 unicast announcements, 1.15 times the
 /// 50,000 a receiver queued when 150 peers restarted during a
-/// 100,000-route source dump; past its credit a peer owes keys instead of
+/// 100,000-route source dump, but only 49,367 EVPN ones, so in that shape
+/// EVPN binds slightly; past its credit a peer owes keys instead of
 /// queuing rows.
 ///
 /// Bound: charged bytes ≤ `max(D, P · MIN_CREDIT_BYTES)` plus, per peer,
@@ -168,6 +174,8 @@ impl Drop for OutboundCharge {
     fn drop(&mut self) {
         let before = self.credit.rows.fetch_sub(self.rows, Ordering::Release);
         debug_assert!(before >= self.rows, "outbound credit released twice");
+        // Two separate releases: a concurrent reader may briefly see rows
+        // released and bytes not yet, which only delays one admission.
         let before = self.credit.bytes.fetch_sub(self.bytes, Ordering::Release);
         debug_assert!(before >= self.bytes, "outbound credit released twice");
     }
