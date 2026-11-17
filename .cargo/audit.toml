@@ -24,11 +24,10 @@ ignore = [
     "RUSTSEC-2024-0436",
     # RUSTSEC-2026-0543 — `chrono` unmaintained, all versions affected.
     # Informational, no security vulnerability; alternatives are `jiff`
-    # and `time`. Remaining chains: direct in the MRT writer; transitive
-    # through rmcp and schemars; a dev-dependency through bgpkit-parser.
-    # Revisit when rmcp and schemars drop chrono and the MRT writer has
-    # moved off it, or when a real vulnerability is published against
-    # chrono. Tracked under the "Unmaintained-crate advisory ignores"
-    # bullet in docs/project/roadmap.md.
+    # and `time`. Remaining chains: rmcp and its schemars/chrono04 feature
+    # in the MCP server, and bgpkit-parser/parser in differential tests.
+    # Revisit when both paths are gone or when a real vulnerability is
+    # published against chrono. Tracked under "Unmaintained-crate advisory
+    # ignores" in docs/project/roadmap.md.
     "RUSTSEC-2026-0543",
 ]
