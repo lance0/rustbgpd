@@ -421,7 +421,15 @@ daemon to boot-revert. Session churn is not one of the causes: abort and timer
 rollback restore the recorded pre-commit snapshot without checking a runtime
 snapshot token, so peers flapping, dynamic peers arriving or expiring, or an
 operator disabling a neighbor inside the window cannot make the rollback fail.
-(A caller's own Plan→Apply token does go stale on those events; re-plan.) A
+(A caller's own Plan→Apply token does go stale on those events; re-plan.)
+Losing Route Refresh inside the window does not block it either: the rollback
+restores the prior import policy and resets each Established session whose
+peer did not negotiate Route Refresh, so the peer resends its routes under
+that policy. `rbgp config abort` and `rbgp config status` name each reset peer,
+and the rollback logs a warning with them. A policy restore that fails partway
+is not undone back to the candidate: the daemon fences and exits 70, and the
+restart boot-reverts from the retained journal (see the
+[settlement watchdog guide](../how-to/settlement-watchdog.md)). A
 rollback failure therefore points at the apply path itself — persistence
 unavailable, or the prior snapshot no longer committable — and the abort error
 and the daemon log carry the reason. A confirmed apply that itself fails without proof of a

@@ -5373,7 +5373,13 @@ until `rbgp config confirm <id>` (or `ConfirmConfigTransaction`) makes it
 permanent. `rbgp config abort <id>` rolls it back immediately, and an
 expired timer automatically re-applies the pre-commit runtime snapshot through
 the same transaction executor. That rollback does not check a runtime snapshot
-token, so session flaps inside the window cannot block it. While a confirmed
+token, so session flaps inside the window cannot block it. It restores import
+policy rather than applying it as a new edit, so a peer that lost Route Refresh
+inside the window cannot block it either: that session is reset once the prior
+policy is installed, the peer resends its routes under it, and the abort result
+and `rbgp config status` name the peer. A policy restore that fails partway
+fences the daemon (exit 70, boot revert from the retained journal) instead of
+reporting `abort_failed` / `auto_revert_failed`. While a confirmed
 transaction is applying or pending, persisted runtime config mutators such as static/dynamic neighbor CRUD,
 policy/peer-group CRUD, FIB-table CRUD, and another config transaction are
 rejected with `FAILED_PRECONDITION`; SIGHUP reload is skipped and logged until

@@ -746,6 +746,18 @@ pub struct ResolvedPeerPolicy {
     pub export_policy: Option<PolicyChain>,
 }
 
+/// A completed [`PeerManagerCommand::RestoreResolvedPolicySnapshot`].
+#[derive(Clone, Debug)]
+pub struct RestoredPolicySnapshot {
+    /// The chains the restore replaced, one entry per live peer, in the
+    /// shape a forward apply returns: restoring them puts back what the
+    /// restore removed.
+    pub priors: Vec<ResolvedPeerPolicy>,
+    /// Sessions the restore reset because their peers did not negotiate
+    /// Route Refresh, in the order they were reset.
+    pub reset_sessions: Vec<PeerKey>,
+}
+
 /// A failed [`PeerManagerCommand::ApplyResolvedPolicySnapshot`],
 /// [`PeerManagerCommand::ApplyPolicyImpactSnapshot`] or
 /// [`PeerManagerCommand::RestoreResolvedPolicySnapshot`], classified by what it
@@ -1108,12 +1120,23 @@ pub enum PeerManagerCommand {
     /// leaves the restored chains in place and replies
     /// [`PolicySnapshotApplyError::CompensationAmbiguous`]. Never mutates
     /// `current_config`.
+    ///
+    /// A commit-confirmed abort, gNMI cancel or timeout auto-revert restores
+    /// the prior config's chains the same way: `priors` then holds the prior
+    /// config's resolved static targets (an interface-only neighbor by its
+    /// interface with an unspecified address, as in
+    /// [`PeerManagerCommand::ApplyPolicyImpactSnapshot`]) and
+    /// `dynamic_ranges` the ranges whose accepted peers are expanded against
+    /// the staged prior config.
     RestoreResolvedPolicySnapshot {
-        /// The priors a forward apply returned, one entry per live peer.
+        /// The chains to put back, one entry per live peer.
         priors: Vec<ResolvedPeerPolicy>,
-        /// Reply carries whether the restore completed, and the sessions it
-        /// reset because their peers did not negotiate Route Refresh.
-        reply: oneshot::Sender<Result<Vec<PeerKey>, PolicySnapshotApplyError>>,
+        /// Dynamic-range selectors to expand against live dynamic peers;
+        /// empty for a publication rollback, whose priors are concrete.
+        dynamic_ranges: Vec<DynamicRangeTarget>,
+        /// Reply carries whether the restore completed, the chains it
+        /// replaced, and the sessions it reset.
+        reply: oneshot::Sender<Result<RestoredPolicySnapshot, PolicySnapshotApplyError>>,
     },
     /// Apply resolved import/export policy chains for a live-impact
     /// transaction that may include static neighbors and dynamic ranges.
