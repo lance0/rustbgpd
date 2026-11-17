@@ -4868,6 +4868,86 @@ fn a_forced_family_release_keeps_a_rereceived_bgpls_vpn_route() {
     );
 }
 
+/// A reflected rule the receiver holds is withdrawn behind a full writer,
+/// which leaves the family owed, and its iBGP source announces it again
+/// from a session with another BGP identifier (`changed`) or the same one.
+/// The session derives `ORIGINATOR_ID` from that identifier, so the drain
+/// must announce the rule again when it changed, and only then. Red when
+/// the drain compares the held rule by source peer and attributes alone:
+/// the receiver keeps the obsolete `ORIGINATOR_ID`.
+#[test]
+fn an_owed_flowspec_drain_reannounces_a_rule_whose_source_identifier_changed() {
+    let family = (Afi::Ipv4, Safi::FlowSpec);
+    for changed in [true, false] {
+        let mut manager = manager(64);
+        let _source = up(&mut manager, peer_v4(SOURCE), vec![family]);
+        let peer = peer_v4(Ipv4Addr::new(10, 0, 38, 2));
+        let mut output = up_session(&mut manager, peer, 0, vec![family], 4);
+        send_all(&mut output);
+        let mut rule = make_flowspec_route(SOURCE);
+        rule.origin_type = crate::RouteOrigin::Ibgp;
+        rule.peer_router_id = Ipv4Addr::new(10, 0, 0, 1);
+        rule.attributes = AttrSet::new(vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath { segments: vec![] }),
+            PathAttribute::LocalPref(100),
+        ]);
+        let key = rule.selection_key();
+        receive_discard_rule(&mut manager, &rule, false);
+        let initial = send_all(&mut output);
+        assert_eq!(
+            initial
+                .iter()
+                .map(|update| update.flowspec_announce.len())
+                .sum::<usize>(),
+            1
+        );
+
+        let sender = manager.outbound_peers[&peer].clone();
+        while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
+        receive_discard_rule(&mut manager, &rule, true);
+        assert!(manager.adj_ribs_out[&peer].get_flowspec(&key).is_some());
+        assert!(manager.owes_whole(peer, OwedFamily::of(family).unwrap()));
+        if changed {
+            rule.peer_router_id = Ipv4Addr::new(10, 0, 0, 2);
+        }
+        receive_discard_rule(&mut manager, &rule, false);
+
+        let mut sent = send_all(&mut output);
+        for _ in 0..8 {
+            manager.resync_dirty_peers_bounded();
+            sent.extend(send_all(&mut output));
+        }
+        assert!(manager.owing(peer).is_none(), "changed {changed}");
+        assert!(
+            sent.iter()
+                .all(|update| update.flowspec_withdraw.is_empty()),
+            "changed {changed}: the rule is replaced, not withdrawn"
+        );
+        let announced: Vec<_> = sent
+            .iter()
+            .flat_map(|update| &update.flowspec_announce)
+            .map(|route| (route.selection_key(), route.peer_router_id))
+            .collect();
+        assert_eq!(
+            announced,
+            if changed {
+                vec![(key.clone(), Ipv4Addr::new(10, 0, 0, 2))]
+            } else {
+                vec![]
+            },
+            "changed {changed}"
+        );
+        assert_eq!(
+            manager.adj_ribs_out[&peer]
+                .get_flowspec(&key)
+                .map(|held| held.peer_router_id),
+            Some(rule.peer_router_id),
+            "changed {changed}"
+        );
+    }
+}
+
 #[test]
 fn family_release_controls_preserve_deletes_and_ordinary_recovery() {
     for case in [

@@ -11146,9 +11146,7 @@ impl RibManager {
                                 checkpoint();
                                 !rib_out
                                     .get_flowspec(&route.selection_key())
-                                    .is_some_and(|old| {
-                                        old.peer == route.peer && old.attributes == route.attributes
-                                    })
+                                    .is_some_and(|old| old.same_advertisement(route))
                             });
                         }
                     }
