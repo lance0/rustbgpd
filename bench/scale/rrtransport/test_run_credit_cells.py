@@ -26,11 +26,13 @@ class Runner(unittest.TestCase):
             shims / "systemd-run",
             'while [ "$1" != -- ]; do shift; done; shift; exec "$@"\n',
         )
-        binary = executable(root / "rrtransport", f"exit {exit_code}\n")
+        # One binary for every call: the exit code comes from the environment.
+        binary = executable(root / "rrtransport", 'exit "$STAND_IN_EXIT"\n')
         env = dict(
             os.environ,
             PATH=f"{shims}:{os.environ['PATH']}",
             RUSTBGPD_HOST_LOCK=str(root / "host.lock"),
+            STAND_IN_EXIT=str(exit_code),
         )
         return subprocess.run(
             ["bash", str(RUNNER), "--correctness-only", str(binary), str(root / "out"), *cells],
@@ -64,6 +66,32 @@ class Runner(unittest.TestCase):
             (out / "paused-exit.json").write_text('{"oom": true}')
             self.assertEqual(self.run_runner(root, 0, "paused"), 0)
             self.assertFalse((out / "paused-exit.json").exists())
+
+    def test_seeded_provenance_lists_every_invocation(self):
+        # Without a per-invocation cell list the analyzer cannot tell an
+        # attempted cell that left nothing from one never run.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.assertEqual(self.run_runner(root, 0, "paused"), 0)
+            self.assertEqual(self.run_runner(root, 1, "fill-vpn", "probes"), 1)
+            lines = [
+                json.loads(line)
+                for line in (root / "out" / "provenance.jsonl").read_text().splitlines()
+            ]
+            self.assertEqual(
+                [line["cells"] for line in lines], [["paused"], ["fill-vpn", "probes"]]
+            )
+            self.assertEqual(len({line["sha256"] for line in lines}), 1)
+            self.assertEqual({line["measured"] for line in lines}, {0})
+
+    def test_unknown_cell_is_refused_before_provenance(self):
+        # A refused invocation must not list cells it never attempted.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.assertEqual(self.run_runner(root, 0, "probes"), 0)
+            self.assertEqual(self.run_runner(root, 0, "paused", "bogus"), 2)
+            lines = (root / "out" / "provenance.jsonl").read_text().splitlines()
+            self.assertEqual([json.loads(line)["cells"] for line in lines], [["probes"]])
 
 
 if __name__ == "__main__":

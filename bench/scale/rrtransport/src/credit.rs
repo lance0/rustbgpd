@@ -170,8 +170,10 @@ impl Options {
                 _ => bail!("unknown option {arg}"),
             }
         }
-        // A reduced shape is never a measurement.
-        options.correctness_only |= options.reduced;
+        // Only the fixed shape is a measurement: a reduced shape or any
+        // pause or duration override marks the result correctness-only.
+        options.correctness_only |=
+            options.reduced || options.pause.is_some() || options.seconds.is_some();
         Ok(options)
     }
 }
@@ -1381,4 +1383,29 @@ pub async fn fill(family: Family, output: &Path, options: &Options) -> Result<bo
     fixture.close().await?;
     // A reduced shape may never queue enough rows to fit; it checks plumbing.
     Ok(fit.is_some() || options.reduced)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Options;
+
+    fn parse(args: &[&str]) -> Options {
+        Options::parse(&args.iter().map(ToString::to_string).collect::<Vec<_>>()).unwrap()
+    }
+
+    #[test]
+    fn only_the_fixed_shape_is_measured() {
+        assert!(!parse(&[]).correctness_only);
+        for args in [
+            &["--reduced"][..],
+            &["--correctness-only"],
+            &["--seconds", "1"],
+            &["--pause-ms", "500"],
+        ] {
+            assert!(
+                parse(args).correctness_only,
+                "{args:?} must not be measured"
+            );
+        }
+    }
 }

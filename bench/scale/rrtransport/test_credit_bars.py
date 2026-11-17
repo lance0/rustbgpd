@@ -18,6 +18,7 @@ def exhaust(family, recovery_ms=20_000.0, p99=5.0, gap=60.0):
         "family": family,
         "mode": "measured",
         "row_size_of": 104 if family == "unicast" else 144,
+        "shape": dict(credit_bars.EXHAUST_SHAPE),
         "timing": {"recovery_ms": recovery_ms},
         "checks": {name: True for name in credit_bars.WIRE_CHECKS},
         "witness": {"refused_receivers": 150, "owing_flips_total": 0.0, "receivers": 150},
@@ -33,8 +34,10 @@ def exhaust(family, recovery_ms=20_000.0, p99=5.0, gap=60.0):
 def paused(peak, credit_bytes):
     return {
         "cell": "paused",
+        "family": "evpn",
         "mode": "measured",
         "row_size_of": 144,
+        "shape": dict(credit_bars.PAUSED_SHAPE),
         "checks": {"no_session_resets": True},
         "not_established": [],
         "memory": {
@@ -49,8 +52,21 @@ def paused(peak, credit_bytes):
 
 
 def probes():
-    cells = [{"cell": "lag_stall", "shape": "s", "peers": 150, "dirty_episodes": 0}] * 8
-    cells.append({"cell": "restart_during_dump", "peers": 150, "dirty_episodes": 0})
+    cells = [
+        {
+            "cell": "lag_stall",
+            "shape": shape,
+            "peers": peers,
+            "stall_ms": stall,
+            "dirty_episodes": 0,
+        }
+        for shape in ("unicast_private", "evpn_private")
+        for peers in (150, 1_000)
+        for stall in (500, 2_000)
+    ]
+    cells.append(
+        {"cell": "restart_during_dump", "peers": 150, "table": 100_000, "dirty_episodes": 0}
+    )
     return {"cell": "probes", "mode": "measured", "probes": cells}
 
 
@@ -60,6 +76,7 @@ def fill(family, estimate):
         "family": family,
         "mode": "measured",
         "row_size_of": 104,
+        "shape": dict(credit_bars.FILL_SHAPE),
         "estimate": {"bytes_per_queued_row": estimate},
     }
 
@@ -76,6 +93,15 @@ def arm(candidate):
     return files
 
 
+ALL_CELLS = ["probes", "exhaust-unicast", "exhaust-evpn", "paused"] + [
+    f"fill-{family}" for family in credit_bars.FILL_FAMILIES
+]
+
+
+def provenance(sha, cells=None):
+    return [{"sha256": sha, "measured": 1, "cells": list(cells or ALL_CELLS)}]
+
+
 class Bars(unittest.TestCase):
     def run_bars(self, mutate=None):
         parent, candidate = arm(False), arm(True)
@@ -83,11 +109,19 @@ class Bars(unittest.TestCase):
             mutate(parent, candidate)
         with tempfile.TemporaryDirectory() as root:
             for name, files in (("parent", parent), ("candidate", candidate)):
-                directory = Path(root, name)
-                directory.mkdir()
+                if files is None:
+                    continue
+                files.setdefault("provenance.jsonl", provenance(name))
                 for file, value in files.items():
-                    if value is not None:
-                        Path(directory, file).write_text(json.dumps(value))
+                    # Unprefixed files belong to repetition 1.
+                    path = Path(root, name, file if "/" in file else f"1/{file}")
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    if value is None:
+                        continue
+                    if file.endswith(".jsonl"):
+                        path.write_text("".join(json.dumps(line) + "\n" for line in value))
+                    else:
+                        path.write_text(json.dumps(value))
             return {
                 name: (verdict, reason)
                 for name, verdict, reason in credit_bars.verdicts(
@@ -290,6 +324,156 @@ class Bars(unittest.TestCase):
 
         results = self.run_bars(mutate)
         self.assert_only(results, "cell 4 lag and restart probes", "INVALID", "dirty_episodes")
+
+    def second_repetition(self, arm, cells, **files):
+        arm["2/provenance.jsonl"] = provenance(arm["provenance.jsonl"][0]["sha256"], cells)
+        for file, value in files.items():
+            arm[f"2/{file}"] = value
+
+    def test_seeded_failed_repetition_without_result_is_invalid(self):
+        # Repetition 2 of the candidate died before writing its result; the
+        # good repetition 1 must not stand in for it.
+        def mutate(parent, candidate):
+            parent.setdefault("provenance.jsonl", provenance("parent"))
+            candidate.setdefault("provenance.jsonl", provenance("candidate"))
+            self.second_repetition(
+                parent, ["exhaust-unicast"], **{"exhaust-unicast.json": exhaust("unicast")}
+            )
+            self.second_repetition(
+                candidate,
+                ["exhaust-unicast"],
+                **{"exhaust-unicast-exit.json": {"cell": "exhaust-unicast", "exit": 1}},
+            )
+
+        results = self.run_bars(mutate)
+        for cell in ("cell 2 exhaustion unicast", "cell 3 unaffected peer unicast"):
+            self.assertEqual(results[cell][0], "INVALID", results[cell])
+            self.assertIn(
+                "repetition 2: exhaust-unicast exited 1 without a result", results[cell][1]
+            )
+        others = [v for name, (v, _) in results.items() if "unicast" not in name]
+        self.assertTrue(all(v == "PASS" for v in others), results)
+
+    def test_seeded_attempted_repetition_with_nothing_is_invalid(self):
+        def mutate(parent, candidate):
+            parent.setdefault("provenance.jsonl", provenance("parent"))
+            candidate.setdefault("provenance.jsonl", provenance("candidate"))
+            self.second_repetition(parent, ["fill-vpn"], **{"fill-vpn.json": fill("vpn", 240.0)})
+            self.second_repetition(candidate, ["fill-vpn"])
+
+        results = self.run_bars(mutate)
+        self.assert_only(
+            results, "cell 6 bytes per queued row", "INVALID", "fill-vpn attempted, no result"
+        )
+
+    def test_explicit_wire_failure_with_exit_marker_stays_fail(self):
+        def mutate(_parent, candidate):
+            candidate["exhaust-evpn.json"]["checks"]["final_state_exact"] = False
+            candidate["exhaust-evpn-exit.json"] = {"cell": "exhaust-evpn", "exit": 1}
+
+        results = self.run_bars(mutate)
+        self.assert_only(results, "cell 2 exhaustion evpn", "FAIL", "final_state_exact failed")
+
+    def test_seeded_mismatched_repetition_sets_are_invalid(self):
+        def mutate(parent, _candidate):
+            parent.setdefault("provenance.jsonl", provenance("parent"))
+            self.second_repetition(parent, ["probes"], **{"probes.json": probes()})
+
+        results = self.run_bars(mutate)
+        self.assert_only(
+            results, "cell 4 lag and restart probes", "INVALID", "differ from candidate"
+        )
+
+    def test_seeded_missing_arm_is_invalid(self):
+        def mutate(parent, _candidate):
+            parent.clear()
+            parent["provenance.jsonl"] = None
+
+        results = self.run_bars(mutate)
+        self.assertTrue(all(v == "INVALID" for v, _ in results.values()), results)
+
+    def test_seeded_two_binaries_in_one_arm_are_invalid(self):
+        def mutate(_parent, candidate):
+            candidate["provenance.jsonl"] = provenance("candidate") + provenance("other")
+
+        results = self.run_bars(mutate)
+        self.assertTrue(all(v == "INVALID" for v, _ in results.values()), results)
+        self.assertIn("more than one harness binary", results["cell 4 lag and restart probes"][1])
+
+    def test_seeded_same_binary_on_both_arms_is_invalid(self):
+        def mutate(parent, candidate):
+            parent["provenance.jsonl"] = provenance("same")
+            candidate["provenance.jsonl"] = provenance("same")
+
+        results = self.run_bars(mutate)
+        self.assertTrue(all(v == "INVALID" for v, _ in results.values()), results)
+
+    def test_seeded_mixed_family_is_invalid(self):
+        def mutate(_parent, candidate):
+            candidate["exhaust-unicast.json"]["family"] = "evpn"
+
+        results = self.run_bars(mutate)
+        self.assertEqual(results["cell 2 exhaustion unicast"][0], "INVALID")
+        self.assertIn("holds a exhaust/evpn result", results["cell 2 exhaustion unicast"][1])
+
+    def test_seeded_stray_result_is_invalid(self):
+        # A result left in a repetition whose runs never listed the cell.
+        def mutate(_parent, candidate):
+            candidate["provenance.jsonl"] = provenance(
+                "candidate", [c for c in ALL_CELLS if c != "fill-evpn"]
+            )
+
+        results = self.run_bars(mutate)
+        self.assert_only(results, "cell 6 bytes per queued row", "INVALID", "not from a listed run")
+
+    def test_seeded_short_paused_run_is_invalid(self):
+        def mutate(_parent, candidate):
+            candidate["paused-evpn.json"]["shape"]["seconds"] = 1
+
+        results = self.run_bars(mutate)
+        self.assert_only(results, "cell 1 paused-reader evpn", "INVALID", "shape.seconds is 1")
+
+    def test_seeded_non_qualification_shapes_are_invalid(self):
+        cases = {
+            ("exhaust-unicast.json", "rows_per_receiver"): ("cell 2 exhaustion unicast", 4_096),
+            ("exhaust-evpn.json", "receivers"): ("cell 2 exhaustion evpn", 4),
+            ("exhaust-evpn.json", "pause_ms"): ("cell 2 exhaustion evpn", 500.0),
+            ("paused-evpn.json", "receivers"): ("cell 1 paused-reader evpn", 4),
+            ("paused-evpn.json", "routes"): ("cell 1 paused-reader evpn", 2_000),
+            ("fill-unicast.json", "rows_per_receiver"): ("cell 6 bytes per queued row", 8_192),
+        }
+        for (file, key), (cell, value) in cases.items():
+            for side in ("parent", "candidate"):
+
+                def mutate(parent, candidate, file=file, key=key, value=value, side=side):
+                    (parent if side == "parent" else candidate)[file]["shape"][key] = value
+
+                with self.subTest(file=file, key=key, side=side):
+                    results = self.run_bars(mutate)
+                    self.assertEqual(results[cell][0], "INVALID", results[cell])
+                    self.assertIn(f"shape.{key}", results[cell][1])
+
+    def test_seeded_wrong_probe_shape_is_invalid(self):
+        def mutate(_parent, candidate):
+            run = candidate["probes.json"]
+            run["probes"] = copy.deepcopy(run["probes"])
+            run["probes"][0]["peers"] = 16
+
+        results = self.run_bars(mutate)
+        self.assert_only(results, "cell 4 lag and restart probes", "INVALID", "fixed 9-cell set")
+
+    def test_paused_cgroup_limit_mismatch_is_invalid(self):
+        def mutate(parent, _candidate):
+            parent["paused-evpn.json"]["memory"]["cgroup_memory_max"] = str(64 * GIB)
+
+        results = self.run_bars(mutate)
+        self.assert_only(results, "cell 1 paused-reader evpn", "INVALID", "not 12 GiB")
+
+    def test_check_marker_without_result_is_invalid(self):
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, "exhaust-unicast-exit.json").write_text('{"exit": 1}')
+            results = credit_bars.check(Path(root))
+        self.assertEqual(results[0][1], "INVALID")
 
     def test_witness_is_never_pass_when_absent(self):
         def mutate(_parent, candidate):

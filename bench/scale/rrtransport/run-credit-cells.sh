@@ -12,7 +12,10 @@
 # gate before every cell; --correctness-only skips the gate and marks every
 # result unusable for a timing bar. A cell that dies leaves
 # `<cell>-exit.json`; a paused-reader cell killed by SIGKILL inside its
-# limit is recorded as an OOM.
+# limit is recorded as an OOM. Each invocation appends the binary hash and
+# its cell list to `provenance.jsonl`, which tells the analyzer what this
+# directory attempted. Use one directory per repetition and one binary per
+# directory.
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -48,8 +51,17 @@ acquire_rustbgpd_host_lock
 ulimit -n 65536 2>/dev/null || ulimit -n "$(ulimit -Hn)"
 
 sha=$(sha256sum "$binary" | cut -d' ' -f1)
-printf '{"binary": "%s", "sha256": "%s", "measured": %s, "started": "%s"}\n' \
-    "$binary" "$sha" "$measured" "$(date -u +%FT%TZ)" >"$output/provenance.json"
+for cell in "${cells[@]}"; do
+    case $cell in
+    probes | exhaust-unicast | exhaust-evpn | paused | fill-unicast | fill-evpn | fill-vpn | fill-flowspec) ;;
+    *) echo "unknown cell $cell" >&2 && exit 2 ;;
+    esac
+done
+# One line per invocation: the analyzer treats every cell a line lists as
+# attempted in this directory, and requires one binary per directory.
+listed=$(printf '"%s",' "${cells[@]}")
+printf '{"binary": "%s", "sha256": "%s", "measured": %s, "started": "%s", "cells": [%s]}\n' \
+    "$binary" "$sha" "$measured" "$(date -u +%FT%TZ)" "${listed%,}" >>"$output/provenance.jsonl"
 echo "rrtransport $sha measured=$measured cells=${cells[*]}"
 
 status=0

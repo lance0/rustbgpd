@@ -183,7 +183,9 @@ python3 bench/scale/rrtransport/credit_bars.py check /abs/out/parent-smoke
 ```
 
 `--correctness-only` without `--reduced` runs the full shapes untimed, for
-example to show that cell 2 reaches refusal on a tree.
+example to show that cell 2 reaches refusal on a tree. A `--pause-ms` or
+`--seconds` override on the binary also marks its result correctness-only:
+only the fixed shape is a measurement.
 
 One arm's full set takes about 15 minutes of cells plus the quiet-host
 gate before each (at least a minute each on a quiet host); an A/A, ABBA and
@@ -201,9 +203,25 @@ python3 bench/scale/rrtransport/credit_bars.py analyze /abs/out/parent /abs/out/
 ```
 
 The analyzer prints one `PASS`, `FAIL` or `INVALID` line per cell and never
-stops at the first failure. Timing bars compare medians across repetitions;
-the correctness checks and the witness must hold in every run. Cell 1 expects
-one run per arm. Exit status is 1 on any FAIL, else 2 on any INVALID, else 0.
+stops at the first failure. Timing bars and cell 1's cgroup peak compare
+medians across repetitions; the correctness checks and the witness must hold
+in every run, any candidate OOM fails cell 1, and the candidate's largest
+credit-bytes peak is the one held to its bar. Exit status is 1 on any FAIL,
+else 2 on any INVALID, else 0.
+
+A repetition is a directory the runner wrote `provenance.jsonl` into; each
+invocation appends its binary hash and cell list. The analyzer reads every
+cell a repetition listed. A listed cell that left no result, or only a failure
+marker, is INVALID (a paused-reader OOM marker is the OOM verdict, and a
+result written by a run that then exited nonzero keeps its explicit FAIL). A
+result the directory's provenance does not list is INVALID, so is a
+repetition set that differs between the arms, an arm whose repetitions used
+different binaries, the same binary on both arms, and a result whose `cell`
+or `family` does not match its file name. Measured results must have the
+fixed shape on both arms: cell 2 150 receivers, 150,000 rows, a 30 s pause
+and the RFC 4724 trigger; cell 1 150 receivers, 37,500 routes, 240 s, 2 s
+rounds and the 12 GiB limit; cell 6 150 receivers and 150,000 rows; cell 4
+the fixed 9 probe cells.
 
 | Cell | Bar |
 | --- | --- |
@@ -226,11 +244,12 @@ a missing or null one makes that cell INVALID, never PASS.
 
 | Cell | Result file | Required fields |
 | --- | --- | --- |
-| 1 | `paused-evpn.json`, each arm (or `paused-exit.json` with `oom`) | `mode` = `measured`; `checks.no_session_resets` = true; `not_established` empty; `memory.cgroup_swap_max` = `0`; `memory.cgroup_memory_max` = 12 GiB; `memory.cgroup_memory_peak_bytes`; `memory.vmhwm_kib`; `memory.cgroup_oom_kill`; candidate `memory.peak_credit_bytes` and `row_size_of` |
-| 2 | `exhaust-<family>.json`, every run of both arms | `mode`; `witness.refused_receivers`, `witness.owing_flips_total`, `witness.receivers`; `checks.final_state_exact`, `checks.eor_after_every_route`, `checks.no_session_resets`; `timing.recovery_ms` once every wire check passed |
+| 1 | `paused-evpn.json`, every repetition of both arms (or `paused-exit.json` with `oom`) | `mode` = `measured`; `shape.receivers`, `shape.routes`, `shape.seconds`, `shape.round_ms` fixed; `checks.no_session_resets` = true; `not_established` empty; `memory.cgroup_swap_max` = `0`; `memory.cgroup_memory_max` = 12 GiB; `memory.cgroup_memory_peak_bytes`; `memory.vmhwm_kib`; `memory.cgroup_oom_kill`; candidate `memory.peak_credit_bytes` and `row_size_of` |
+| 2 | `exhaust-<family>.json`, every run of both arms | `mode`; `shape.receivers`, `shape.rows_per_receiver`, `shape.pause_ms`, `shape.trigger` fixed; `witness.refused_receivers`, `witness.owing_flips_total`, `witness.receivers`; `checks.final_state_exact`, `checks.eor_after_every_route`, `checks.no_session_resets`; `timing.recovery_ms` once every wire check passed |
 | 3 | `exhaust-<family>.json`, every run of both arms | `mode`; `unaffected.injected` and `unaffected.delivered` (nonzero), `unaffected.p99_latency_ms`, `unaffected.max_gap_ms` |
-| 4 | `probes.json`, candidate | `mode`; `probes` with exactly 9 cells, each with `dirty_episodes` |
-| 6 | `fill-<family>.json`, candidate, each family | `mode`; `estimate.bytes_per_queued_row`; `row_size_of` (a parent figure is shown only from a measured run) |
+| 4 | `probes.json`, every run of both arms | `mode`; `probes` = the fixed 9 cells (`cell`, `shape`, `peers`, `stall_ms`; restart `table`), each candidate cell with `dirty_episodes` |
+| 6 | `fill-<family>.json`, every run of both arms, each family | `mode`; `shape.receivers`, `shape.rows_per_receiver` fixed; candidate `estimate.bytes_per_queued_row` and `row_size_of` |
+| all | `provenance.jsonl` per repetition | `sha256` (one per arm, different between arms) and `cells` |
 
 The runner deletes a cell's previous result and exit marker before it runs
 the cell, so a failed rerun into a used directory leaves nothing stale.
