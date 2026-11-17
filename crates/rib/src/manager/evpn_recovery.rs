@@ -87,6 +87,15 @@ impl CleanRegroupBasis {
     }
 }
 
+#[cfg(test)]
+impl CleanRegroupBasis {
+    /// Let a test drop the feed without handing it to a pass.
+    pub(in crate::manager) fn abandon_for_test(&self) {
+        self.settled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 impl Drop for CleanRegroupBasis {
     fn drop(&mut self) {
         // A feed dropped outside a pass would leave a dirty member with
@@ -975,6 +984,18 @@ impl RibManager {
             self.refuse_evpn_capture(peer, handle);
             return false;
         }
+        // The proof cycle re-based the admitted count on its proof at every
+        // regroup. The proofless commit adds its delta to the count kept
+        // from the member's envelopes, so the two must already agree.
+        debug_assert_eq!(
+            self.evpn_recovery
+                .proof(handle)
+                .ok()
+                .flatten()
+                .map(EvpnProofView::len),
+            Some(self.evpn_admitted_count(peer)),
+            "a clean member's admitted count is its admitted set"
+        );
         true
     }
 
@@ -1727,6 +1748,26 @@ impl RibManager {
         })
     }
 
+    /// Whether `peer` is a clean regroup's mover that no pass has settled:
+    /// dirty in an owned group, with a dormant handle and a receipt that
+    /// never completed. That state is legitimate only between a regroup and
+    /// the end of the pass that received its feed, where
+    /// [`Self::settle_clean_evpn_regroup`] opens the ledger capture itself.
+    /// Any capture that meets it found a mover whose feed never reached a
+    /// pass. Every other dirty grouped member holds its proof, and a
+    /// receipt behind an owed marker is complete.
+    fn unsettled_clean_evpn_regroup(&self, peer: PeerId, handle: ProvenanceHandle) -> bool {
+        self.dirty_peers.contains(&peer)
+            && self.evpn_recovery.is_dormant(handle)
+            && self
+                .evpn_completion_record(peer)
+                .and_then(|record| record.evpn_feed_completion.as_ref())
+                .is_some_and(|completion| {
+                    !completion.complete
+                        && matches!(completion.target, EvpnFeedTarget::Grouped { .. })
+                })
+    }
+
     /// Register `peer` and open its capture. `Err` carries the answer of a
     /// capture that needs no walk: an existing proof, or a refusal.
     fn begin_evpn_capture(
@@ -1745,6 +1786,12 @@ impl RibManager {
         let handle = self
             .evpn_recovery_handle(peer)
             .expect("registered EVPN owner");
+        if !private && self.unsettled_clean_evpn_regroup(peer, handle) {
+            // The table this capture would walk is NEW, not what the member
+            // holds, and the basis that could tell them apart is gone.
+            self.reset_clean_evpn_regroup(peer, handle);
+            return Err(false);
+        }
         match self.evpn_recovery.begin_capture(handle) {
             Ok(false) => {
                 if self

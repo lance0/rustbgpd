@@ -120,7 +120,9 @@ fn clean_regroup_proof_work(members: usize) -> Vec<(usize, usize, bool)> {
 /// Per clean mover: zero capture checkpoints, one feed build and a ledger
 /// whose charge and peak never move, whatever the fleet size. The proof
 /// cycle passes capture checkpoints for every table row and raises the
-/// member's ledger peak.
+/// member's ledger peak. Each paced command here applies one mover; several
+/// movers in one pass are covered by
+/// `several_movers_in_one_pass_settle_each_missed_admission`.
 #[test]
 fn clean_owned_regroup_takes_no_proof_cycle() {
     assert_eq!(clean_regroup_proof_work(8), vec![(0, 1, true); 8]);
@@ -355,7 +357,14 @@ fn clean_regroup_envelopes_equal_the_proof_cycle() {
         assert_eq!(envelopes.len(), 1, "one envelope per mover");
         assert_eq!(*count, expected_new()[index].len());
     }
-    assert_eq!(clean, regroup(true));
+    // The proof cycle re-bases the admitted count on its proof at the
+    // regroup; the proofless commit adds a delta to the count it had. The
+    // two agree because a clean member's count is its admitted set.
+    let proof_cycle = regroup(true);
+    for (clean, proof_cycle) in clean.iter().zip(&proof_cycle) {
+        assert_eq!(clean.1, proof_cycle.1, "admitted count");
+    }
+    assert_eq!(clean, proof_cycle);
 }
 
 /// A regroup between two groups that export the same values has nothing to
@@ -725,6 +734,18 @@ fn regroup_state(
 /// Every condition of eligibility refuses the proofless path on its own,
 /// and the member then takes exactly the path the registration seam takes:
 /// the same feed, proof, receipt and dirty state.
+///
+/// This pins the predicate and the fallback's state, not what each clause
+/// prevents. The clean-member clauses (dirty, proof, reset, End-of-RIB,
+/// private row) guard the basis itself: without them the feed would diff
+/// against a projection the member does not hold. The destination clauses
+/// keep the feed on a table a join cannot replace. The selection-held clause
+/// keeps the gate's salvage of exempt withdrawals in the turn it runs today.
+/// The remaining writer and selection clauses only avoid a feed whose commit
+/// is certain to be refused: relaxing one costs a capture after the pass
+/// instead of before the move, and nothing on the wire. The clean member's
+/// open-writer clause is shared with the clean refresh and is equally benign
+/// here, so it has no case of its own.
 #[test]
 #[expect(
     clippy::too_many_lines,
@@ -899,32 +920,316 @@ fn registration_seam_captures_an_eligible_member() {
     assert_eq!(proof_keys(&fleet.manager, peer), Some(held));
 }
 
-/// A proof that appears under a proofless feed was not taken from actual
-/// OLD: here a capture run by hand, and the one a staging of NEW takes of
-/// its dirty members before it moves the table. The seal is no longer
-/// current, the commit is refused, and the pass resets the member rather
-/// than trust either record.
+/// No capture may begin for a mover between its regroup and the end of its
+/// pass: the table it would walk is NEW. A staging of NEW, which captures
+/// its dirty members first, and a capture run by hand are both refused and
+/// reset the member with nothing captured. A proof written straight into
+/// the ledger makes the seal stale, so the commit is refused and the pass
+/// resets the member rather than trust either record.
 #[test]
-fn proof_captured_under_a_proofless_feed_refuses_it_and_resets() {
-    for staged in [false, true] {
+fn capture_under_a_proofless_feed_is_refused_and_resets() {
+    #[derive(Clone, Copy, Debug)]
+    enum Capture {
+        Staging,
+        ByHand,
+        Ledger,
+    }
+    for capture in [Capture::Staging, Capture::ByHand, Capture::Ledger] {
         let (mut fleet, peer, new) = pair();
         let resets = record_resets(&mut fleet.manager);
-        regroup_with(&mut fleet, peer, |manager, peer, feed| {
-            if staged {
-                stage(manager, new, &changed_row(1));
-            } else {
-                assert!(manager.capture_shared_evpn_admitted(peer));
-            }
-            assert!(held_proof(manager, peer).is_some());
-            assert!(!manager.evpn_feed_seal_is_current(peer, &feed.as_ref().unwrap().seal));
+        let work = super::work_scaling::checkpoints_in(|| {
+            regroup_with(&mut fleet, peer, |manager, peer, feed| {
+                let seal = &feed.as_ref().unwrap().seal;
+                match capture {
+                    Capture::Staging => {
+                        stage(manager, new, &changed_row(1));
+                        assert!(manager.evpn_recovery_reset_pending(peer));
+                    }
+                    Capture::ByHand => {
+                        assert!(!manager.capture_shared_evpn_admitted(peer));
+                        assert!(manager.evpn_recovery_reset_pending(peer));
+                    }
+                    Capture::Ledger => {
+                        let handle = manager.evpn_recovery_handle(peer).unwrap();
+                        assert_eq!(manager.evpn_recovery.begin_capture(handle), Ok(true));
+                        assert_eq!(manager.evpn_recovery.seal_capture(handle), Ok(true));
+                        assert!(held_proof(manager, peer).is_some());
+                        assert!(!manager.evpn_recovery_reset_pending(peer));
+                    }
+                }
+                assert!(!manager.evpn_feed_seal_is_current(peer, seal));
+            });
         });
+        assert_eq!(work.get("capture_evpn"), None, "{capture:?}");
         assert!(fleet.manager.evpn_recovery_reset_pending(peer));
         assert_eq!(held_proof(&fleet.manager, peer), None);
-        assert_eq!(resets.lock().unwrap().len(), 1, "staged={staged}");
+        assert_eq!(resets.lock().unwrap().len(), 1, "{capture:?}");
         for update in drain(&mut fleet.outputs[1]) {
             assert!(update.evpn_announce.is_empty() && update.evpn_withdraw.is_empty());
         }
     }
+}
+
+/// A proofless feed that never reaches a pass leaves its mover dirty with
+/// neither a proof nor a reset. Debug builds refuse to drop such a feed;
+/// should one be lost anyway, the next capture for that member (a staging
+/// of its table, another regroup, a refresh answer) would walk NEW as
+/// though it were what the member holds. It resets the member instead:
+/// nothing is captured, and no EVPN route or marker follows.
+#[test]
+fn lost_proofless_feed_resets_at_the_next_capture() {
+    #[derive(Clone, Copy, Debug)]
+    enum Site {
+        Staging,
+        Regroup,
+        Refresh,
+    }
+    for site in [Site::Staging, Site::Regroup, Site::Refresh] {
+        let (mut fleet, peer, new) = pair();
+        let resets = record_resets(&mut fleet.manager);
+        let manager = &mut fleet.manager;
+        let mut feed = manager.recompute_update_group_for_pass(peer);
+        manager.mark_outbound_dirty_with_evpn_feed(peer, &mut feed);
+        feed.unwrap()
+            .seal
+            .clean_regroup()
+            .unwrap()
+            .abandon_for_test();
+        assert!(manager.dirty_peers.contains(&peer));
+        assert_eq!(held_proof(manager, peer), None);
+        assert!(!manager.evpn_recovery_reset_pending(peer));
+        drain(&mut fleet.outputs[1]);
+
+        let work = super::work_scaling::checkpoints_in(|| match site {
+            Site::Staging => {
+                stage(manager, new, &changed_row(1));
+            }
+            Site::Regroup => {
+                manager
+                    .export_chains
+                    .insert(peer, Some(community_chain(0xFC00_0003)));
+                assert!(manager.recompute_update_group(peer).is_none());
+                assert_eq!(manager.evpn_grouped_member_of(peer), Some(new));
+            }
+            Site::Refresh => manager.send_route_refresh_response(peer, EVPN.0, EVPN.1),
+        });
+        assert_eq!(work.get("capture_evpn"), None, "{site:?}");
+        assert!(manager.evpn_recovery_reset_pending(peer), "{site:?}");
+        assert_eq!(held_proof(manager, peer), None, "{site:?}");
+        assert!(manager.dirty_peers.contains(&peer), "{site:?}");
+        {
+            let requests = resets.lock().unwrap();
+            assert_eq!(requests.len(), 1, "{site:?}");
+            assert_eq!(
+                requests[0].cause,
+                EvpnRecoveryExhaustionCause::AdmissionInvariant
+            );
+        }
+        manager.resync_dirty_peers_bounded();
+        manager.retry_eor_markers_bounded();
+        for update in drain(&mut fleet.outputs[1]) {
+            assert!(
+                update.evpn_announce.is_empty() && update.evpn_withdraw.is_empty(),
+                "{site:?}"
+            );
+            assert!(!update.end_of_rib.contains(&EVPN), "{site:?}");
+            assert!(update.refresh_markers.is_empty(), "{site:?}");
+        }
+    }
+}
+
+/// An exact-export encoder that closes the receiver's end of the channel
+/// when the commit takes its snapshot: after the commit checked its seal and
+/// reserved its slot, before the envelope is enqueued.
+struct CloseOnSnapshot {
+    encoder: Arc<dyn crate::update::ExactExportEncoder>,
+    receiver: std::sync::Mutex<Option<mpsc::Receiver<OutboundRouteUpdate>>>,
+}
+
+impl crate::update::ExactExportEncoder for CloseOnSnapshot {
+    fn owner_id(&self) -> u64 {
+        self.encoder.owner_id()
+    }
+
+    fn snapshot(&self) -> Arc<dyn crate::update::ExactExportSnapshot> {
+        self.receiver.lock().unwrap().take();
+        self.encoder.snapshot()
+    }
+}
+
+/// Completion checks the seal again, after the enqueue. A channel that
+/// closes inside the commit leaves an admitted envelope the completion
+/// cannot vouch for: the member is reset, and the pass does not capture OLD
+/// over a wire that may have left it.
+#[test]
+fn seal_that_goes_stale_inside_the_commit_resets_at_completion() {
+    let (mut fleet, peer, _new) = pair();
+    let resets = record_resets(&mut fleet.manager);
+    let (_sender, idle) = mpsc::channel(1);
+    let receiver = std::mem::replace(&mut fleet.outputs[1], idle);
+    let closing = Arc::new(CloseOnSnapshot {
+        encoder: Arc::clone(&fleet.manager.peer_export_encoders[&peer]),
+        receiver: std::sync::Mutex::new(Some(receiver)),
+    });
+    fleet
+        .manager
+        .peer_export_encoders
+        .insert(peer, closing.clone());
+    let work = super::work_scaling::checkpoints_in(|| {
+        regroup_with(&mut fleet, peer, |manager, peer, feed| {
+            assert!(manager.evpn_feed_seal_is_current(peer, &feed.as_ref().unwrap().seal));
+        });
+    });
+    assert!(closing.receiver.lock().unwrap().is_none(), "the commit ran");
+    assert!(fleet.manager.outbound_peers[&peer].is_closed());
+    assert_eq!(work.get("capture_evpn"), None);
+    assert!(fleet.manager.evpn_recovery_reset_pending(peer));
+    assert_eq!(held_proof(&fleet.manager, peer), None);
+    assert!(
+        !fleet.manager.has_evpn_feed_completion(peer) || !fleet.manager.evpn_feed_is_current(peer)
+    );
+    assert_eq!(
+        resets.lock().unwrap()[0].cause,
+        EvpnRecoveryExhaustionCause::AdmissionInvariant
+    );
+}
+
+/// The paced loop's shape by hand: every member regroups, then one pass
+/// takes all the feeds. `missed` movers have their writer filled between
+/// the loop and the pass; with `gate`, the pass skips every dirty member
+/// instead (a selection release is staging). Each basis is settled after
+/// the other movers joined NEW and the last of them retired OLD.
+fn fleet_pass(missed: &[usize], gate: bool) {
+    let context = format!("missed={missed:?} gate={gate}");
+    let Divergent {
+        mut fleet,
+        old,
+        new,
+    } = divergent();
+    let members = fleet.members.clone();
+    let resets = record_resets(&mut fleet.manager);
+    let mut feeds = HashMap::new();
+    for &peer in &members {
+        let manager = &mut fleet.manager;
+        manager.export_chains.insert(peer, Some(fleet.next.clone()));
+        let mut feed = manager.recompute_update_group_for_pass(peer);
+        manager.mark_outbound_dirty_with_evpn_feed(peer, &mut feed);
+        let feed = feed.expect("a feed per mover");
+        assert!(feed.seal.clean_regroup().is_some(), "{context}");
+        feeds.insert(peer, feed);
+    }
+    assert!(!fleet.manager.group_ribs.contains_key(&old), "{context}");
+    for &index in missed {
+        fill(&fleet.manager, members[index]);
+    }
+    fleet.manager.selection_release_staging = gate;
+    fleet
+        .manager
+        .distribute_changes_with_evpn_feeds(feeds, false);
+    fleet.manager.selection_release_staging = false;
+    let wire_after = |updates: &[OutboundRouteUpdate], index: usize, context: &str| {
+        let mut wire: HashSet<_> = expected_old()[index].iter().copied().collect();
+        for update in updates {
+            for key in &update.evpn_withdraw {
+                assert!(wire.remove(key), "{context}: withdrew {key:?} unheld");
+            }
+            wire.extend(update.evpn_announce.iter().map(EvpnRibRoute::key));
+        }
+        let mut wire: Vec<_> = wire.into_iter().collect();
+        wire.sort_unstable();
+        wire
+    };
+    for (index, &peer) in members.iter().enumerate() {
+        let context = format!("{context} member={index}");
+        let manager = &fleet.manager;
+        assert_eq!(manager.evpn_grouped_member_of(peer), Some(new), "{context}");
+        let updates = drain(&mut fleet.outputs[index]);
+        if gate || missed.contains(&index) {
+            assert_eq!(
+                proof_keys(manager, peer),
+                Some(expected_old()[index].clone()),
+                "{context}"
+            );
+            assert!(manager.dirty_peers.contains(&peer), "{context}");
+            assert_eq!(
+                manager.evpn_admitted_count(peer),
+                expected_old()[index].len(),
+                "{context}"
+            );
+            assert_eq!(
+                wire_after(&updates, index, &context),
+                expected_old()[index],
+                "{context}: nothing was sent"
+            );
+        } else {
+            assert_eq!(proof_keys(manager, peer), None, "{context}");
+            assert!(!manager.dirty_peers.contains(&peer), "{context}");
+            assert_eq!(
+                wire_after(&updates, index, &context),
+                expected_new()[index],
+                "{context}"
+            );
+            assert_eq!(
+                manager.evpn_admitted_count(peer),
+                expected_new()[index].len(),
+                "{context}"
+            );
+        }
+        assert_proof_only_while_owed(manager, peer);
+    }
+    fleet.manager.resync_dirty_peers_bounded();
+    for (index, &peer) in members.iter().enumerate() {
+        if !(gate || missed.contains(&index)) {
+            continue;
+        }
+        let context = format!("{context} member={index} healed");
+        let updates = drain(&mut fleet.outputs[index]);
+        assert_eq!(
+            wire_after(&updates, index, &context),
+            expected_new()[index],
+            "{context}"
+        );
+        assert_eq!(proof_keys(&fleet.manager, peer), None, "{context}");
+        assert!(!fleet.manager.dirty_peers.contains(&peer), "{context}");
+        assert_eq!(
+            fleet.manager.evpn_admitted_count(peer),
+            expected_new()[index].len(),
+            "{context}"
+        );
+    }
+    assert!(resets.lock().unwrap().is_empty(), "{context}");
+}
+
+/// Three movers in one pass, for every subset whose admission is missed and
+/// for a pass that skips them all: each missed mover's proof is its own
+/// actual OLD, each admitted mover is clean on NEW, the resync heals the
+/// missed ones onto NEW with no unheld withdrawal, and nothing resets.
+#[test]
+fn several_movers_in_one_pass_settle_each_missed_admission() {
+    for missed in [&[0][..], &[1], &[2], &[0, 1], &[1, 2], &[0, 2], &[0, 1, 2]] {
+        fleet_pass(missed, false);
+    }
+    fleet_pass(&[], true);
+}
+
+/// A basis with many fresh keys. The group table iterates in hash order,
+/// and the basis is searched by key, so it must be kept in key order: an
+/// unsorted one would count fresh keys as held and capture them as OLD.
+#[test]
+fn basis_with_many_fresh_keys_reconstructs_actual_old() {
+    let mut fleet = evpn_fleet(2, 40, true);
+    let peer = fleet.members[1];
+    // OLD loses rows 5..=40; the memberless prepared destination keeps them.
+    fleet
+        .manager
+        .process_evpn_withdraw_chunk(fleet.source, (5..=40).map(key).collect());
+    drain(&mut fleet.outputs[1]);
+    assert_eq!(fleet.manager.evpn_admitted_count(peer), 4);
+    regroup_with(&mut fleet, peer, |manager, peer, feed| {
+        assert!(feed.as_ref().unwrap().seal.clean_regroup().is_some());
+        fill(manager, peer);
+    });
+    assert_eq!(proof_keys(&fleet.manager, peer), Some(keys(&[1, 2, 3, 4])));
 }
 
 /// An admitted envelope whose completion then fails cannot be undone, and

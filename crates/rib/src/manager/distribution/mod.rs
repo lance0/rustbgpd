@@ -11906,7 +11906,17 @@ impl RibManager {
             distribute_peers();
         }
         for (peer, basis) in clean_evpn_regroups {
+            let started = std::time::Instant::now();
             self.settle_clean_evpn_regroup(peer, &basis);
+            // A missed mover's capture is part of its share of this pass:
+            // the paced walk budgets the next command from it.
+            if let Some(Some(share)) = self
+                .paced_member_costs
+                .as_mut()
+                .and_then(|costs| costs.get_mut(&peer))
+            {
+                *share += started.elapsed();
+            }
         }
         // Shared cleanup is owned when it releases inventory: an owned pass,
         // more memoized source attribute sets than staged prefixes (several
