@@ -103,12 +103,22 @@ resolved.
     operation outside the outbound credit, in one RIB turn that grows with
     the table; only the resync tick runs it, one receiver per unit, and no
     update pass does. One large withdrawal, a peer loss or a selection
-    release does not cause it. Until then the list of changed routes such a
-    receiver holds back is at most two to four times the family's table
-    plus the routes of one update, at about 105 bytes a route: an estimated
-    30 MB at 150,000 routes when updates are small against the table and
-    65 MB after a selection release, and 210 MB and 425 MB at 1,000,000
-    routes.
+    release does not cause it. Every receiver that far behind is marked in
+    the same update pass. While they are resynced, the other receivers'
+    steps still run on every tick, but for about 25 ms per resync, so their
+    tables arrive more slowly, not later than the resyncs. A ROUTE-REFRESH
+    from a receiver waiting for that resync is answered after it, behind
+    the initial End-of-RIB, with its BoRR and EoRR. Until then the list of
+    changed routes such a receiver holds back is, between updates, at most
+    twice the most routes one update accounted for plus 4,096 (two to four
+    times the family's table), and the routes of one update more while that
+    update runs. At a modeled 126 bytes a route (two ordered-map entries at
+    their worst node fill, not a daemon measurement) that is about 38 MB at
+    150,000 routes when updates are small against the table and 76 MB after
+    a selection release, and 253 MB and 505 MB at 1,000,000 routes. A
+    receiver's own owed routes, kept when they exceed the keyed threshold,
+    stay owed until all are sent: updates that arrive meanwhile go to the
+    shared list, and the End-of-RIB follows both.
   - Whole-family sends of the other families, still on main: labeled
     unicast, VPN, EVPN, FlowSpec, BGP-LS and RT-Constrain owed whole still
     go out as one operation per receiver that is not charged against the
