@@ -151,6 +151,10 @@ pub struct WireState {
     pub eor_premature: bool,
     /// Burst-family NLRI decoded after the family's End-of-RIB.
     pub routes_after_eor: u64,
+    /// Burst-family NLRI decoded before the family's first End-of-RIB.
+    pub routes_before_eor: u64,
+    /// End-of-RIB markers of the family.
+    pub eors: u64,
     pub messages: u64,
     pub announced: u64,
     pub withdrawals: u64,
@@ -175,6 +179,8 @@ impl WireState {
             eor_seen: false,
             eor_premature: false,
             routes_after_eor: 0,
+            routes_before_eor: 0,
+            eors: 0,
             messages: 0,
             announced: 0,
             withdrawals: 0,
@@ -231,7 +237,10 @@ impl WireState {
                 .count();
         if self.eor_seen {
             self.routes_after_eor += routes as u64;
+        } else {
+            self.routes_before_eor += routes as u64;
         }
+        self.eors += u64::from(observed.end_of_rib);
         for &(index, med) in &observed.announced {
             self.announced += 1;
             // A route without MED can never equal the reference.

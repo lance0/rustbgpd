@@ -4,7 +4,8 @@
 #   run-credit-cells.sh [--correctness-only] [--reduced] BINARY OUTPUT_DIR [CELL...]
 #
 # CELL is any of: probes exhaust-unicast exhaust-evpn paused fill-unicast
-# fill-evpn fill-vpn fill-flowspec (default: all, in that order). Each cell
+# fill-evpn fill-vpn fill-flowspec (default: all, in that order), or the
+# report-only restart-unicast and restart-evpn (RFC 4724 bursts). Each cell
 # runs in its own systemd user scope with swap fenced (memory.swap.max=0);
 # the paused-reader cell gets the fixed 12 GiB limit its bar names, the
 # others a 64 GiB safety limit. The runner holds the shared host lock for
@@ -28,7 +29,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 [ $# -ge 2 ] || {
-    sed -n '2,15p' "$0" >&2
+    sed -n '2,16p' "$0" >&2
     exit 2
 }
 binary=$(realpath "$1")
@@ -55,7 +56,8 @@ result_of() {
     case $1 in
     probes) echo probes.json ;;
     paused) echo paused-evpn.json ;;
-    exhaust-unicast | exhaust-evpn | fill-unicast | fill-evpn | fill-vpn | fill-flowspec) echo "$1.json" ;;
+    exhaust-unicast | exhaust-evpn | restart-unicast | restart-evpn) echo "$1.json" ;;
+    fill-unicast | fill-evpn | fill-vpn | fill-flowspec) echo "$1.json" ;;
     *) return 1 ;;
     esac
 }
@@ -79,6 +81,7 @@ for cell in "${cells[@]}"; do
     case $cell in
     probes) args=(credit-probe "$output") limit=64G ;;
     exhaust-*) args=(credit-exhaust "${cell#exhaust-}" "$output") limit=64G ;;
+    restart-*) args=(credit-restart "${cell#restart-}" "$output") limit=64G ;;
     paused) args=(credit-paused "$output") limit=12G ;;
     fill-*) args=(credit-fill "${cell#fill-}" "$output") limit=64G ;;
     esac
