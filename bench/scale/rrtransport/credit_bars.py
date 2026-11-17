@@ -19,8 +19,10 @@ Every cell gets one ``PASS``, ``FAIL`` or ``INVALID`` line; the analyzer
 never stops at the first failing cell. Exit status: 1 when any cell FAILs,
 else 2 when any is INVALID, else 0.
 
-``check`` applies the single-arm parts (wire checks and refusal witness) to
-one result set, measured or not, for correctness runs.
+``check`` applies the single-arm parts (wire checks and exhaustion witness)
+to one result set, measured or not, for correctness runs. It also applies
+the wire checks to any ``restart-<family>.json`` (the RFC 4724 restart
+burst), which no campaign bar reads.
 """
 
 from __future__ import annotations
@@ -51,15 +53,26 @@ P99_RATIO = 1.10
 ESTIMATE_RATIO = 1.25
 FAMILIES = ("unicast", "evpn")
 FILL_FAMILIES = ("unicast", "evpn", "vpn", "flowspec")
-WIRE_CHECKS = ("final_state_exact", "eor_after_every_route", "no_session_resets")
+WIRE_CHECKS = ("final_state_exact", "one_eor_before_burst", "no_session_resets")
+RESTART_WIRE_CHECKS = ("final_state_exact", "eor_after_every_route", "no_session_resets")
+# Cell 2's trigger. A selection release owes every private receiver its
+# family whole and spends no ordinary credit, so it cannot witness exhaustion.
+ORDINARY_TRIGGER = "ordinary_announce_burst"
+# Cell 2 witness: each tree's per-peer ordinary credit, as (daemon-wide
+# credit, per-peer floor, per-peer ceiling), in the unit of the gauge the
+# tree exports: bytes where `bgp_rib_outbound_credit_bytes` exists, else rows.
+BYTE_CREDIT = (CREDIT_TARGET, 2 << 20, 256 << 20)
+ROW_CREDIT = (16_777_216, 8_192, 1_048_576)
 
 # The fixed qualification shapes. A measured result with any other shape is
 # not campaign evidence.
 EXHAUST_SHAPE = {
     "receivers": 150,
     "rows_per_receiver": 150_000,
-    "pause_ms": 30_000,
-    "trigger": "rfc4724_selection_release",
+    "pause_ms": 80_000,
+    "burst_interval_ms": 500,
+    "trigger": ORDINARY_TRIGGER,
+    "registered_peers": 153,
 }
 PAUSED_SHAPE = {"receivers": 150, "routes": 37_500, "seconds": 240, "round_ms": 2_000}
 FILL_SHAPE = {"receivers": 150, "rows_per_receiver": 150_000}
@@ -250,31 +263,58 @@ def measured(runs: list[dict], what: str, shape: dict | None = None) -> list[dic
     return runs
 
 
-def single_arm_exhaust(runs: list[dict], arm: str, family: str) -> str | None:
-    """Raise INVALID for a missing witness in any run, then return the first
-    wire FAIL reason, or None when every run passed its wire checks."""
+def exhaustion(run: dict, what: str) -> str:
+    """What witnessed that every burst receiver spent its ordinary credit in
+    `run`; INVALID when nothing did."""
+    if need(run, "shape.trigger", what) != ORDINARY_TRIGGER:
+        raise Invalid(
+            f"{what}: trigger {run['shape']['trigger']!r} is not {ORDINARY_TRIGGER!r}; "
+            "it cannot exhaust ordinary credit"
+        )
+    receivers = number(run, "witness.receivers", what)
+    refused = number(run, "witness.refused_receivers", what)
+    peers = number(run, "shape.registered_peers", what)
+    rows = number(run, "witness.peak_credit_rows", what)
+    if receivers <= 0 or peers < receivers:
+        raise Invalid(f"{what}: {receivers} burst receivers among {peers} registered peers")
+    # The gauge sums every peer. Admission stops at a peer's credit (within
+    # one row), so a sum at receivers x credit means every one reached it.
+    if run["witness"].get("peak_credit_bytes") is not None:
+        unit, peak, credit = "bytes", number(run, "witness.peak_credit_bytes", what), BYTE_CREDIT
+    else:
+        unit, peak, credit = "rows", rows, ROW_CREDIT
+    limit = min(max(credit[0] // int(peers), credit[1]), credit[2])
+    if peak >= receivers * limit:
+        return f"credit gauge peak {peak:.0f} {unit} >= {receivers} x {limit}"
+    if refused >= receivers:
+        return f"credit refusals on {refused}/{receivers} receivers"
+    flips = run["witness"].get("owing_flips_total")
+    raise Invalid(
+        f"{what}: credit gauge peak {peak:.0f} {unit} < {receivers} x {limit} and credit "
+        f"refusals on {refused}/{receivers} receivers ({flips} owe-whole flips are not a "
+        "witness); the cell never exhausted credit"
+    )
+
+
+def wire_failure(runs: list[dict], arm: str, checks: tuple[str, ...]) -> str | None:
+    """The first wire FAIL reason, or None when every run passed `checks`;
+    INVALID when a run lacks one."""
     for index, run in enumerate(runs):
-        what = f"{arm} run {index}"
-        refused = number(run, "witness.refused_receivers", what)
-        flips = number(run, "witness.owing_flips_total", what)
-        receivers = number(run, "witness.receivers", what)
-        # Past its credit a private family either refuses the send or owes
-        # its keys; this shape's owed sets outgrow their cap, so each burst
-        # receiver flips to owing the family whole. Either signal on every
-        # receiver is the witness.
-        if receivers <= 0 or (refused < receivers and flips < receivers):
-            raise Invalid(
-                f"{what}: credit exhaustion witnessed on {refused}/{receivers} "
-                f"receivers by refusal and {flips:.0f} owe-whole flips; the cell never "
-                "exhausted credit"
-            )
-        for check in WIRE_CHECKS:
-            need(run, f"checks.{check}", what)
+        for check in checks:
+            need(run, f"checks.{check}", f"{arm} run {index}")
     for index, run in enumerate(runs):
-        for check in WIRE_CHECKS:
+        for check in checks:
             if run["checks"][check] is not True:
                 return f"{arm} run {index}: {check} failed"
     return None
+
+
+def single_arm_exhaust(runs: list[dict], arm: str) -> tuple[str | None, str]:
+    """Raise INVALID for a missing witness in any run, then return the first
+    wire FAIL reason (None when every run passed its wire checks) and the
+    weakest run's witness."""
+    witnesses = [exhaustion(run, f"{arm} run {index}") for index, run in enumerate(runs)]
+    return wire_failure(runs, arm, WIRE_CHECKS), witnesses[0]
 
 
 def recovery(runs: list[dict], arm: str) -> float:
@@ -298,11 +338,8 @@ def exhaust_runs(parent: Arm, candidate: Arm, family: str) -> dict[str, list[dic
 
 def cell2(parent: Arm, candidate: Arm, family: str) -> tuple[str, str]:
     arms = exhaust_runs(parent, candidate, family)
-    failures = [
-        reason
-        for arm, runs in arms.items()
-        if (reason := single_arm_exhaust(runs, arm, family)) is not None
-    ]
+    single = {arm: single_arm_exhaust(runs, arm) for arm, runs in arms.items()}
+    failures = [reason for reason, _ in single.values() if reason is not None]
     # A run that never settled has no recovery time; its wire FAIL stands
     # without any timing comparison.
     if failures:
@@ -315,7 +352,8 @@ def cell2(parent: Arm, candidate: Arm, family: str) -> tuple[str, str]:
     )
     if times["candidate"] > bar:
         return "FAIL", f"recovery over bar: {line}"
-    return "PASS", f"refusal witnessed on both arms; wire exact, ordered, no resets; {line}"
+    witnessed = "; ".join(f"{arm} {witness}" for arm, (_, witness) in single.items())
+    return "PASS", f"exhaustion witnessed ({witnessed}); wire exact, ordered, no resets; {line}"
 
 
 def cell3(parent: Arm, candidate: Arm, family: str) -> tuple[str, str]:
@@ -540,27 +578,34 @@ def verdicts(parent_dir: Path, candidate_dir: Path) -> list[tuple[str, str, str]
 
 def check(directory: Path) -> list[tuple[str, str, str]]:
     results = []
-    for family in FAMILIES:
-        name = f"exhaust-{family}.json"
-        try:
-            # A failure marker without its result, or beside a result that
-            # records no failure, is never a passing run.
-            for marker in sorted(directory.rglob(f"exhaust-{family}-exit.json")):
-                if not (marker.parent / name).exists():
-                    raise Invalid(f"{marker.parent}: exhaust-{family} exited without a result")
-            runs = []
-            for path in sorted(directory.rglob(name)):
-                marker = path.parent / f"exhaust-{family}-exit.json"
-                exit_record = read(marker) if marker.exists() else None
-                runs.append(explained(read(path), exit_record, f"{path.parent}: exhaust-{family}"))
-            if not runs:
-                continue
-            reason = single_arm_exhaust(runs, "arm", family)
-            verdict = "FAIL" if reason else "PASS"
-            reason = reason or "refusal witnessed; wire exact, ordered, no resets"
-        except Invalid as error:
-            verdict, reason = "INVALID", str(error)
-        results.append((f"exhaustion {family}", verdict, reason))
+    for kind, label in (("exhaust", "exhaustion"), ("restart", "restart burst")):
+        for family in FAMILIES:
+            cell = f"{kind}-{family}"
+            name = f"{cell}.json"
+            try:
+                # A failure marker without its result, or beside a result that
+                # records no failure, is never a passing run.
+                for marker in sorted(directory.rglob(f"{cell}-exit.json")):
+                    if not (marker.parent / name).exists():
+                        raise Invalid(f"{marker.parent}: {cell} exited without a result")
+                runs = []
+                for path in sorted(directory.rglob(name)):
+                    marker = path.parent / f"{cell}-exit.json"
+                    exit_record = read(marker) if marker.exists() else None
+                    runs.append(explained(read(path), exit_record, f"{path.parent}: {cell}"))
+                if not runs:
+                    continue
+                if kind == "exhaust":
+                    reason, witness = single_arm_exhaust(runs, "arm")
+                    passed = f"{witness}; wire exact, ordered, no resets"
+                else:
+                    # No witness: a selection release spends no ordinary credit.
+                    reason = wire_failure(runs, "arm", RESTART_WIRE_CHECKS)
+                    passed = "wire exact, ordered, no resets (no exhaustion witness)"
+                verdict, reason = ("FAIL", reason) if reason else ("PASS", passed)
+            except Invalid as error:
+                verdict, reason = "INVALID", str(error)
+            results.append((f"{label} {family}", verdict, reason))
     return results
 
 

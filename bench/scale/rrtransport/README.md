@@ -108,8 +108,9 @@ never from the daemon's Adj-RIB-Out.
 | Cell | Mode | Shape | What it records |
 | --- | --- | --- | --- |
 | 1 | `credit-paused` | 150 private EVPN receivers, all socket reads paused; one source re-announces 37,500 routes every 2 s with alternating `LOCAL_PREF` for 240 s | cgroup `memory.peak`, VmRSS/VmHWM, jemalloc allocated, credit-rows and (when present) credit-bytes peaks |
-| 2 | `credit-exhaust unicast\|evpn` | RFC 4724 restart burst: selection deferred, 150 private receivers paused for 30 s while the restarting source sends 150,000 routes and its End-of-RIB | refusal witness, exact final wire state, End-of-RIB order, session resets, recovery time |
+| 2 | `credit-exhaust unicast\|evpn` | ordinary announce burst: 150 private receivers, already past their End-of-RIB, paused for 80 s while an established source sends 150,000 fresh routes, one 1,024-route UPDATE every 500 ms | exhaustion witness, exact final wire state, End-of-RIB order, session resets, recovery time |
 | 3 | same run as cell 2 | one more receiver that gets none of the burst, only a separate source's single route replaced every 20 ms | max delivery gap and latency quantiles at that receiver |
+| report-only | `credit-restart unicast\|evpn` | the cell 2 fixture behind an RFC 4724 restart: selection deferred, 150 private receivers paused for 30 s while the restarting source sends 150,000 routes at once and its End-of-RIB | exact final wire state, End-of-RIB order, session resets, recovery time, the same unaffected receiver; no witness |
 | 4 | `credit-probe` | in-process healthy-lag cells (unicast and EVPN, 150 and 1,000 peers, 0.5 s and 2 s stalls) and the 150-peer restart-during-dump probe, whose receivers join through the production `PeerUp` path and keep their 150,000-row initial tables queued while the 50,000-row tail arrives | dirty episodes and queued rows per receiver |
 | 6 | `credit-fill unicast\|evpn\|vpn\|flowspec` | 150 paused private receivers (unicast and VPN through the same peer-context policy); one source sends 150,000 fresh routes of the family; FlowSpec rules carry a prefix, 16 ports and 8 length ranges | bytes per queued row (report-only) |
 
@@ -118,39 +119,60 @@ Cell 5 (Criterion) is not part of this harness.
 **Cell 2.** The burst routes carry distinct attributes (one UPDATE a route,
 about 180 bytes on the wire) and the receivers' sockets have a 16 KiB receive
 buffer, so a paused receiver's kernel buffers and writer budget absorb only a
-small part of the burst; the rest stays queued against the credit. The
-selection gate holds every burst End-of-RIB until the release's rows are
-admitted, so the order check covers rows the credit refused and the RIB sent
-later. Checks, per burst receiver: the final decoded table equals the
-injected one (every route present at its MED, nothing withdrawn, no
-route outside the burst keys, no undecodable UPDATE; an EVPN route counts only
-with the burst's RD and originator), the End-of-RIB arrives after the last route and nothing follows it,
-and the session never ends (stub stream open, no NOTIFICATION, transport still
-Established; the healthy receiver's session counts too). Recovery runs from the first burst UPDATE to the moment every
-burst receiver is exact with its End-of-RIB, on the harness clock; it includes
-the fixed 30 s pause. `drain_after_resume_ms` reports the part after the
-readers resume.
+small part of the burst; the rest stays queued against the credit. The source
+is established and not restarting, so every burst route reaches each receiver
+through an ordinary pass: the path that charges the receiver's credit and,
+once the credit is spent, records the keys the receiver is owed. Checks, per
+burst receiver: the final decoded table equals the injected one (every route
+present at its MED, nothing withdrawn, no route outside the burst keys, no
+undecodable UPDATE; an EVPN route counts only with the burst's RD and
+originator), exactly one End-of-RIB arrives and it precedes every burst route
+(the receiver's initial one; the harness waits for it before pausing), and
+the session never ends (stub stream open, no NOTIFICATION, transport still
+Established; the healthy receiver's session counts too). Recovery runs from
+the first burst UPDATE to the moment every burst receiver is exact, on the
+harness clock; it includes the paced burst (73.5 s) and the rest of the fixed
+80 s pause. `drain_after_resume_ms` reports the part after the readers
+resume.
 
-**Refusal witness.** Past its credit a private family either refuses the
-send, counted per peer by
-`bgp_outbound_commit_refusals_total{reason="outbound_credit"}`, or records
-the keys the peer is owed and stays clean. The owing path admits a key only
-when the peer's credit is spent (or its channel is full, which a 4,096-slot
-channel of 1,024-row envelopes cannot reach here), and in this shape every
-burst receiver's owed set outgrows its cap and flips to owing the family
-whole, counted by `bgp_rib_outbound_owing_flips_total`. Both metrics exist on
-every tree the cells compare. The witness holds when every burst receiver
-shows a credit refusal, or when the owe-whole flips reach the number of burst
-receivers; otherwise the cell is INVALID, never PASS. The refusal reason also
-counts a refusal behind a live whole-table operation, so the result records
-`operations_live_at_first_refusal`. On the tree this harness landed on, the
-full shapes exhaust credit through the owing path: 150 flips, no refusals.
+The burst is paced because the RIB is serial: sent at once, 150,000 routes
+toward 150 private receivers occupy it for tens of seconds on any tree, with
+the readers paused or not, and the healthy receiver's churn waits behind them
+in the RIB's queue. That delay measures the backlog, not the credit. One
+1,024-route UPDATE every 500 ms is about half the rate the RIB stages them,
+so the queue stays short and cell 3 shows what spent credit costs a healthy
+peer. The pause must stay below the receivers' 90 s hold time: a stub
+counts its hold time across a read pause.
+
+**Exhaustion witness.** The cell must show that every burst receiver spent
+its ordinary credit. The result records the peak of the credit gauge, summed
+over peers: `bgp_rib_outbound_credit_bytes` on a tree that exports it, else
+`bgp_rib_outbound_credit_rows`. The analyzer compares that peak with the
+number of burst receivers times the tree's per-peer credit at the cell's 153
+registered peers (the burst receivers, the healthy one and the two sources):
+2 GiB / 153 = 14,035,840 bytes on a byte-credit tree, 16,777,216 / 153 =
+109,655 rows on a row-credit tree. Admission stops within one row of a
+peer's credit, so a sum at that product means every burst receiver reached
+it. A credit refusal on every burst receiver
+(`bgp_outbound_commit_refusals_total{reason="outbound_credit"}`) is accepted
+too; a clean peer past its credit owes keys instead of refusing, so the full
+shapes show none. Without either the cell is INVALID, never PASS, and the
+verdict line names what it counted.
+
+Owe-whole flips (`bgp_rib_outbound_owing_flips_total`) are recorded but are
+not a witness. An RFC 4724 selection release owes its family whole to every
+private receiver by design, one flip per receiver at any table size, and
+delivers it as an uncharged whole-table operation: a 4-receiver, 4,096-route
+restart burst shows 4 flips with no credit in use. That is why the restart
+burst is no longer cell 2. `credit-restart` keeps it as a wire and recovery
+check (routes before the held End-of-RIB, nothing after it); `credit_bars.py
+check` reads its `restart-<family>.json` and no campaign bar does. A result
+whose `shape.trigger` is not `ordinary_announce_burst` is INVALID as cell 2.
 
 The credit-rows, credit-bytes, dirty-peer and live-operation gauges are
-sampled by the RIB once per run-loop iteration. When one RIB unit spans the
-cell (as the RFC 4724 release did on that tree, together with the drain of
-the owed families), they read 0 throughout, so cell 2 reports their peaks but
-no bar reads them.
+sampled by the RIB once per run-loop iteration, so a RIB unit that spans a
+whole cell would hide them; the paced burst gives the RIB an iteration per
+UPDATE.
 
 **Cell 6.** Method: the least-squares slope of jemalloc allocated bytes over
 `bgp_rib_outbound_credit_rows`, sampled every 50 ms with every reader paused,
@@ -183,7 +205,9 @@ python3 bench/scale/rrtransport/credit_bars.py check /abs/out/parent-smoke
 ```
 
 `--correctness-only` without `--reduced` runs the full shapes untimed, for
-example to show that cell 2 reaches refusal on a tree. A `--pause-ms` or
+example to show that cell 2 exhausts credit on a tree. The restart burst is
+not in the default cell list; name `restart-unicast` or `restart-evpn` to
+run it. A `--pause-ms` or
 `--seconds` override on the binary also marks its result correctness-only:
 only the fixed shape is a measurement.
 
@@ -224,8 +248,9 @@ here and in `check`. A result the directory's provenance does not list is
 INVALID, so is a repetition set that differs between the arms, an arm whose
 repetitions used different binaries, the same binary on both arms, and a
 result whose `cell` or `family` does not match its file name. Measured results must have the
-fixed shape on both arms: cell 2 150 receivers, 150,000 rows, a 30 s pause
-and the RFC 4724 trigger; cell 1 150 receivers, 37,500 routes, 240 s, 2 s
+fixed shape on both arms: cell 2 150 receivers among 153 registered peers,
+150,000 rows, an 80 s pause, a 500 ms UPDATE interval and the ordinary
+trigger; cell 1 150 receivers, 37,500 routes, 240 s, 2 s
 rounds and the 12 GiB limit; cell 6 150 receivers and 150,000 rows; cell 4
 the fixed 9 probe cells.
 
@@ -239,7 +264,7 @@ the fixed 9 probe cells.
 
 **INVALID** means the evidence cannot support a verdict: a missing result,
 a correctness-only or reduced run offered as a measurement, a missing
-refusal witness, a missing instrument (cgroup peak, VmHWM, the candidate's
+exhaustion witness, a missing instrument (cgroup peak, VmHWM, the candidate's
 credit-bytes gauge), a cell-1 scope without the 12 GiB limit or the swap
 fence, a cell-1 receiver that disconnected (it frees its queued state), or a
 parent OOM. An INVALID cell is not a product result. A wire FAIL stands
@@ -251,7 +276,7 @@ a missing or null one makes that cell INVALID, never PASS.
 | Cell | Result file | Required fields |
 | --- | --- | --- |
 | 1 | `paused-evpn.json`, every repetition of both arms (or `paused-exit.json` with `oom`) | `mode` = `measured`; `shape.receivers`, `shape.routes`, `shape.seconds`, `shape.round_ms` fixed; `checks.no_session_resets` = true; `not_established` empty; `memory.cgroup_swap_max` = `0`; `memory.cgroup_memory_max` = 12 GiB; `memory.cgroup_memory_peak_bytes`; `memory.vmhwm_kib`; `memory.cgroup_oom_kill`; candidate `memory.peak_credit_bytes` and `row_size_of` |
-| 2 | `exhaust-<family>.json`, every run of both arms | `mode`; `shape.receivers`, `shape.rows_per_receiver`, `shape.pause_ms`, `shape.trigger` fixed; `witness.refused_receivers`, `witness.owing_flips_total`, `witness.receivers`; `checks.final_state_exact`, `checks.eor_after_every_route`, `checks.no_session_resets`; `timing.recovery_ms` once every wire check passed |
+| 2 | `exhaust-<family>.json`, every run of both arms | `mode`; `shape.receivers`, `shape.rows_per_receiver`, `shape.pause_ms`, `shape.burst_interval_ms`, `shape.trigger`, `shape.registered_peers` fixed; `witness.refused_receivers`, `witness.peak_credit_rows`, `witness.receivers` (and `witness.peak_credit_bytes` on a byte-credit tree); `checks.final_state_exact`, `checks.one_eor_before_burst`, `checks.no_session_resets`; `timing.recovery_ms` once every wire check passed |
 | 3 | `exhaust-<family>.json`, every run of both arms | `mode`; `unaffected.injected` and `unaffected.delivered` (nonzero), `unaffected.p99_latency_ms`, `unaffected.max_gap_ms` |
 | 4 | `probes.json`, every run of both arms | `mode`; `probes` = the fixed 9 cells (`cell`, `shape`, `peers`, `stall_ms`; restart `table`), each candidate cell with `dirty_episodes` |
 | 6 | `fill-<family>.json`, every run of both arms, each family | `mode`; `shape.receivers`, `shape.rows_per_receiver` fixed; candidate `estimate.bytes_per_queued_row` and `row_size_of` |
@@ -266,9 +291,11 @@ paused-reader cell exits nonzero when a receiver is not Established.
 
 Self-tests, no daemon: `cargo test -p rrtransport credit` seeds a dropped
 route, a stale route, an extra route (before and after End-of-RIB), an
-undecodable UPDATE, a foreign IMET key, a route after End-of-RIB and a session
-reset into the wire checker; `python3 -m unittest discover -s
+undecodable UPDATE, a foreign IMET key, a route after End-of-RIB, a misplaced
+or repeated End-of-RIB for each trigger and a session reset into the wire
+checker; `python3 -m unittest discover -s
 bench/scale/rrtransport -p 'test_*.py'` seeds each bar's defect into the
-analyzer and checks that only that cell changes verdict, removes each required
-field in turn, and drives the runner with a stand-in binary to check that a
+analyzer and checks that only that cell changes verdict (owe-whole flips
+without spent credit and a restart burst offered as cell 2 are both INVALID),
+removes each required field in turn, and drives the runner with a stand-in binary to check that a
 rerun clears stale results.

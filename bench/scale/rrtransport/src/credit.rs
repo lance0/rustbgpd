@@ -7,13 +7,19 @@
 //! only metrics that exist on every tree it compares (`bgp_rib_outbound_credit_bytes`
 //! is recorded when present and never required by the harness).
 //!
-//! - `exhaust`: RFC 4724 restart burst. The RIB starts with selection
-//!   deferred; the burst receivers and one healthy receiver establish and
-//!   pause their socket reads; the restarting source then sends `rows`
-//!   routes and its End-of-RIB, which releases every route to every burst
-//!   receiver behind its held End-of-RIB. Readers resume after a fixed
-//!   pause. The healthy receiver gets a separate source's single-route
-//!   churn and nothing of the burst.
+//! - `exhaust`: ordinary announce burst. The burst receivers and one
+//!   healthy receiver establish, receive their End-of-RIB and pause their
+//!   socket reads; a source that is not restarting then sends `rows` fresh
+//!   routes, which every burst receiver's ordinary passes stage against its
+//!   outbound credit until it is spent. Readers resume after a fixed pause.
+//!   The healthy receiver gets a separate source's single-route churn and
+//!   nothing of the burst.
+//! - `restart`: the same cell behind an RFC 4724 restart. The RIB starts
+//!   with selection deferred and the restarting source's End-of-RIB releases
+//!   every route to every burst receiver behind its held End-of-RIB. The
+//!   release owes each private receiver its family whole and delivers it as
+//!   one uncharged whole-table operation, so this trigger never spends
+//!   ordinary credit: it is a wire and recovery check, not an exhaustion one.
 //! - `paused`: every EVPN receiver paused while one source re-announces
 //!   its table with alternating `LOCAL_PREF` every round.
 //! - `fill`: every receiver paused while one source sends fresh routes of
@@ -72,6 +78,8 @@ const SAMPLE: Duration = Duration::from_millis(250);
 const FIT_SAMPLE: Duration = Duration::from_millis(50);
 /// Churn period of the healthy receiver's single route.
 const CHURN_EVERY: Duration = Duration::from_millis(20);
+/// Hold time of every receiver session, both ends.
+const HOLD_SECS: u16 = 90;
 /// Quiet period after every burst receiver is exact.
 const QUIET: Duration = Duration::from_secs(2);
 
@@ -128,6 +136,72 @@ impl Family {
             Self::Evpn => std::mem::size_of::<EvpnRibRoute>(),
             Self::Vpn => std::mem::size_of::<VpnRibRoute>(),
             Self::FlowSpec => std::mem::size_of::<FlowSpecRoute>(),
+        }
+    }
+}
+
+/// How the burst of the exhaustion cell reaches the RIB.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Trigger {
+    /// Fresh routes from an established source: ordinary passes, charged
+    /// to each receiver's credit.
+    Ordinary,
+    /// An RFC 4724 selection release: owed whole, uncharged.
+    Restart,
+}
+
+impl Trigger {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Ordinary => "ordinary_announce_burst",
+            Self::Restart => "rfc4724_selection_release",
+        }
+    }
+
+    /// The result's `cell` and file-name prefix.
+    fn cell(self) -> &'static str {
+        match self {
+            Self::Ordinary => "exhaust",
+            Self::Restart => "restart",
+        }
+    }
+
+    /// The End-of-RIB order a burst receiver must see: after every route
+    /// of a restart burst; once, before every route of an ordinary one.
+    fn eor_check(self) -> &'static str {
+        match self {
+            Self::Ordinary => "one_eor_before_burst",
+            Self::Restart => "eor_after_every_route",
+        }
+    }
+
+    /// The fixed pause of the burst receivers' reads, from the first burst
+    /// UPDATE: past the end of a paced ordinary burst (73.5 s) and inside
+    /// the receivers' hold time.
+    fn pause(self) -> Duration {
+        match self {
+            Self::Ordinary => Duration::from_secs(80),
+            Self::Restart => Duration::from_secs(30),
+        }
+    }
+
+    /// Time between source UPDATEs. An ordinary burst is paced at about
+    /// half the rate the RIB stages it toward 150 private receivers, so
+    /// the RIB's queue stays short and the healthy receiver's delivery
+    /// shows what spent credit costs it, not how long the backlog is. A
+    /// restart burst is held by the selection gate and needs no pacing.
+    fn interval(self, reduced: bool) -> Duration {
+        match (self, reduced) {
+            (Self::Ordinary, false) => Duration::from_millis(500),
+            (Self::Ordinary, true) => Duration::from_millis(10),
+            (Self::Restart, _) => Duration::ZERO,
+        }
+    }
+
+    fn eor_ordered(self, state: &WireState) -> bool {
+        match self {
+            Self::Ordinary => state.eors == 1 && state.routes_before_eor == 0,
+            Self::Restart => !state.eor_premature && state.routes_after_eor == 0,
         }
     }
 }
@@ -503,7 +577,7 @@ fn transport_config(
     let mut config = crate::transport_config(remote);
     let mut peer = PeerConfig::new(LOCAL_AS, LOCAL_AS, CLUSTER);
     peer.connect_retry_secs = 1;
-    peer.hold_time = 90;
+    peer.hold_time = HOLD_SECS;
     peer.families = families;
     config.peer = peer;
     config.cluster_id = Some(CLUSTER);
@@ -572,7 +646,7 @@ impl Fixture {
                 listen: address,
                 local_as: LOCAL_AS,
                 router_id: ip,
-                hold_time: 90,
+                hold_time: HOLD_SECS,
                 families: families.clone(),
             };
             let handshake = tokio::spawn(establish_on(listener, stub));
@@ -878,8 +952,14 @@ fn write_result(output: &Path, name: &str, value: &Value) -> Result<()> {
     Ok(())
 }
 
-/// Cells 2 and 3: the restart-burst exhaustion cell and its unaffected peer.
-pub async fn exhaust(family: Family, output: &Path, options: &Options) -> Result<bool> {
+/// Cells 2 and 3: the exhaustion cell and its unaffected peer, or the same
+/// cell behind an RFC 4724 restart.
+pub async fn exhaust(
+    family: Family,
+    trigger: Trigger,
+    output: &Path,
+    options: &Options,
+) -> Result<bool> {
     let wire_family = family.wire()?;
     let (receivers, rows, pause, deadline) = if options.reduced {
         (
@@ -889,28 +969,36 @@ pub async fn exhaust(family: Family, output: &Path, options: &Options) -> Result
             Duration::from_secs(120),
         )
     } else {
-        (
-            150,
-            150_000,
-            Duration::from_secs(30),
-            Duration::from_secs(900),
-        )
+        (150, 150_000, trigger.pause(), Duration::from_secs(900))
     };
     let pause = options.pause.unwrap_or(pause);
+    // A receiver stub counts its hold time across a read pause, so a pause
+    // that long would end the session on the harness side.
+    ensure!(
+        pause < Duration::from_secs(HOLD_SECS.into()),
+        "the pause must be shorter than the receivers' {HOLD_SECS} s hold time"
+    );
+    let interval = trigger.interval(options.reduced);
     let burst_family = family.afi_safi();
+    let restart = trigger == Trigger::Restart;
+    let gr_families = if restart {
+        vec![burst_family]
+    } else {
+        Vec::new()
+    };
     let mut fixture = Fixture::start(
         options,
-        Some(SelectionDeferralConfig {
+        restart.then(|| SelectionDeferralConfig {
             timeout: Duration::from_secs(3_600),
             waiters: vec![SelectionDeferralWaiterConfig {
                 peer: PeerId::from_ipv4(SOURCE).into(),
-                families: vec![burst_family],
+                families: gr_families.clone(),
             }],
         }),
     );
-    // The restarting source re-establishes first, so the gate is armed
+    // A restarting source re-establishes first, so the gate is armed
     // before any receiver registers and every burst End-of-RIB is held.
-    let source_rx = source_up(&fixture.rib, SOURCE, vec![burst_family]).await?;
+    let source_rx = source_up(&fixture.rib, SOURCE, gr_families).await?;
     let churn_rx = source_up(&fixture.rib, CHURN_SOURCE, Vec::new()).await?;
     fixture._sources = vec![source_rx, churn_rx];
     let burst_policy = (family == Family::Unicast).then(private_unicast_policy);
@@ -920,7 +1008,8 @@ pub async fn exhaust(family: Family, output: &Path, options: &Options) -> Result
     specs.push((vec![(Afi::Ipv4, Safi::Unicast)], Some(healthy_policy())));
     fixture.connect(specs, Duration::from_secs(120)).await?;
     eprintln!(
-        "exhaust {}: {} receivers established",
+        "{} {}: {} receivers established",
+        trigger.cell(),
         family.name(),
         receivers + 1
     );
@@ -984,6 +1073,18 @@ pub async fn exhaust(family: Family, output: &Path, options: &Options) -> Result
         })
     };
 
+    // An ordinary burst follows each receiver's End-of-RIB, so nothing of
+    // the session's start is left to deliver behind the paused reads.
+    if !restart {
+        let until = Instant::now() + Duration::from_secs(30);
+        while !collectors
+            .iter()
+            .all(|(state, _)| state.lock().expect("wire state").eor_seen)
+        {
+            ensure!(Instant::now() < until, "a receiver got no End-of-RIB");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
     // Burst receivers pause their socket reads, acknowledged, before the burst.
     fixture.set_paused(0..receivers, true).await?;
     let t0 = Instant::now();
@@ -1000,34 +1101,10 @@ pub async fn exhaust(family: Family, output: &Path, options: &Options) -> Result
         SAMPLE,
         Arc::clone(&sampling),
     );
-    for start in (0..rows).step_by(CHUNK) {
-        fixture
-            .rib
-            .send(source_update(
-                family,
-                start..(start + CHUNK).min(rows),
-                BURST_VERSION,
-                100,
-            ))
-            .await?;
-    }
-    fixture
-        .rib
-        .send(RibUpdate::EndOfRib {
-            peer: PeerId::from_ipv4(SOURCE),
-            session_id: 1,
-            afi: burst_family.0,
-            safi: burst_family.1,
-        })
-        .await?;
-    let release_sent = t0.elapsed();
-    eprintln!("burst and release sent at {release_sent:?}");
-
-    // Churn starts behind the release in the RIB's queue, so the gate never
-    // holds it; it runs until the cell ends.
+    // The healthy receiver's churn runs until the cell ends.
     let churn_stop = Arc::new(AtomicBool::new(false));
     let churn_log = Arc::new(Mutex::new(Vec::new()));
-    let churn = {
+    let start_churn = || {
         let rib = fixture.rib.clone();
         let stop = Arc::clone(&churn_stop);
         let log = Arc::clone(&churn_log);
@@ -1045,6 +1122,39 @@ pub async fn exhaust(family: Family, output: &Path, options: &Options) -> Result
             }
         })
     };
+    // An ordinary burst is paced, so the churn runs beside it from its
+    // first UPDATE. A restart's churn starts behind the release in the
+    // RIB's queue, so the gate never holds it.
+    let mut churn = (!restart).then(start_churn);
+    for start in (0..rows).step_by(CHUNK) {
+        if start != 0 && !interval.is_zero() {
+            tokio::time::sleep(interval).await;
+        }
+        fixture
+            .rib
+            .send(source_update(
+                family,
+                start..(start + CHUNK).min(rows),
+                BURST_VERSION,
+                100,
+            ))
+            .await?;
+    }
+    if restart {
+        fixture
+            .rib
+            .send(RibUpdate::EndOfRib {
+                peer: PeerId::from_ipv4(SOURCE),
+                session_id: 1,
+                afi: burst_family.0,
+                safi: burst_family.1,
+            })
+            .await?;
+    }
+    let release_sent = t0.elapsed();
+    eprintln!("burst sent at {release_sent:?}");
+    let window_start = if restart { t0 + release_sent } else { t0 };
+    let churn = churn.take().unwrap_or_else(start_churn);
 
     tokio::time::sleep_until(tokio::time::Instant::from_std(t0 + pause)).await;
     fixture.set_paused(0..receivers, false).await?;
@@ -1090,7 +1200,7 @@ pub async fn exhaust(family: Family, output: &Path, options: &Options) -> Result
     for ((state, _), ip) in collectors.iter().zip(&watched) {
         let state = state.lock().expect("wire state");
         exact += usize::from(state.exact());
-        ordered += usize::from(!state.eor_premature && state.routes_after_eor == 0);
+        ordered += usize::from(trigger.eor_ordered(&state));
         missing += state.missing();
         after_eor += state.routes_after_eor;
         resets += state.resets;
@@ -1104,6 +1214,8 @@ pub async fn exhaust(family: Family, output: &Path, options: &Options) -> Result
             "eor_seen": state.eor_seen,
             "eor_premature": state.eor_premature,
             "routes_after_eor": state.routes_after_eor,
+            "routes_before_eor": state.routes_before_eor,
+            "eors": state.eors,
             "announced": state.announced,
             "withdrawals": state.withdrawals,
             "outside": state.outside,
@@ -1117,7 +1229,6 @@ pub async fn exhaust(family: Family, output: &Path, options: &Options) -> Result
         (state.arrivals.clone(), state.resets)
     };
     let injected = churn_log.lock().expect("churn log").clone();
-    let window_start = t0 + release_sent;
     let unaffected = delivery(&injected, &arrivals, window_start, end);
     let refused_peers = watched.iter().filter(|ip| refused_by(ip) > 0.0).count();
     let healthy_ip = fixture.receivers[healthy].ip;
@@ -1127,7 +1238,7 @@ pub async fn exhaust(family: Family, output: &Path, options: &Options) -> Result
     let resets = resets + churn_resets;
     let result = json!({
         "schema": "rrtransport-credit/1",
-        "cell": "exhaust",
+        "cell": trigger.cell(),
         "family": family.name(),
         "mode": if options.correctness_only { "correctness" } else { "measured" },
         "shape": {
@@ -1135,7 +1246,11 @@ pub async fn exhaust(family: Family, output: &Path, options: &Options) -> Result
             "rows_per_receiver": rows,
             "pause_ms": ms(pause),
             "chunk_rows": CHUNK,
-            "trigger": "rfc4724_selection_release",
+            "burst_interval_ms": ms(interval),
+            "trigger": trigger.name(),
+            // Every outbound peer the RIB divides its credit among: the
+            // burst receivers, the healthy one and the two sources.
+            "registered_peers": receivers + 3,
             "receiver_rcvbuf_bytes": RECEIVER_RCVBUF,
         },
         "row_size_of": family.row_size_of(),
@@ -1148,7 +1263,7 @@ pub async fn exhaust(family: Family, output: &Path, options: &Options) -> Result
         },
         "checks": {
             "final_state_exact": exact == receivers,
-            "eor_after_every_route": ordered == receivers,
+            trigger.eor_check(): ordered == receivers,
             "no_session_resets": resets == 0 && down.is_empty(),
         },
         "wire": {
@@ -1160,10 +1275,17 @@ pub async fn exhaust(family: Family, output: &Path, options: &Options) -> Result
             "session_flaps_total": flaps,
         },
         "witness": {
+            // What an analyzer may count as exhaustion. Owe-whole flips are
+            // context only: a selection release flips every private
+            // receiver with no credit spent.
             "signals": [
-                "bgp_outbound_commit_refusals_total{reason=\"outbound_credit\"} per burst receiver",
-                "bgp_rib_outbound_owing_flips_total",
+                "peak of bgp_rib_outbound_credit_bytes (bgp_rib_outbound_credit_rows on a tree \
+                 without it), summed over peers, against receivers x the per-peer credit at \
+                 shape.registered_peers",
+                "bgp_outbound_commit_refusals_total{reason=\"outbound_credit\"} on every burst receiver",
             ],
+            "peak_credit_rows": instruments.peak_credit_rows,
+            "peak_credit_bytes": instruments.peak_credit_bytes,
             "refused_receivers": refused_peers,
             "outbound_route_drops_total": snapshot.total("bgp_outbound_route_drops_total"),
             "receivers": receivers,
@@ -1186,7 +1308,11 @@ pub async fn exhaust(family: Family, output: &Path, options: &Options) -> Result
         "memory": memory_json(&instruments),
         "receivers": rows_json,
     });
-    write_result(output, &format!("exhaust-{}.json", family.name()), &result)?;
+    write_result(
+        output,
+        &format!("{}-{}.json", trigger.cell(), family.name()),
+        &result,
+    )?;
     fixture.close().await?;
     Ok(recorded_pass(&result))
 }
@@ -1396,7 +1522,10 @@ pub async fn fill(family: Family, output: &Path, options: &Options) -> Result<bo
 mod tests {
     use serde_json::json;
 
-    use super::{recorded_pass, Options};
+    use std::time::Instant;
+
+    use super::{recorded_pass, Options, Trigger};
+    use crate::credit_wire::{Observed, WireFamily, WireState};
 
     fn parse(args: &[&str]) -> Options {
         Options::parse(&args.iter().map(ToString::to_string).collect::<Vec<_>>()).unwrap()
@@ -1416,6 +1545,38 @@ mod tests {
                 "{args:?} must not be measured"
             );
         }
+    }
+
+    #[test]
+    fn each_trigger_checks_its_own_end_of_rib_order() {
+        let now = Instant::now();
+        let eor = Observed {
+            end_of_rib: true,
+            ..Observed::default()
+        };
+        let route = Observed {
+            announced: vec![(0, Some(7))],
+            ..Observed::default()
+        };
+        let run = |messages: &[&Observed]| {
+            let mut state = WireState::new(WireFamily::Unicast, 1, 7);
+            for message in messages {
+                state.apply_observed(message, now);
+            }
+            (
+                Trigger::Ordinary.eor_ordered(&state),
+                Trigger::Restart.eor_ordered(&state),
+            )
+        };
+        // (ordinary, restart): the marker before the burst, or after it.
+        assert_eq!(run(&[&eor, &route]), (true, false));
+        assert_eq!(run(&[&route, &eor]), (false, true));
+        // Seeded: a second End-of-RIB behind an ordinary burst.
+        assert_eq!(run(&[&eor, &route, &eor]), (false, false));
+        // Seeded: a route ahead of an ordinary burst's End-of-RIB.
+        assert_eq!(run(&[&route, &eor, &route]), (false, false));
+        assert_ne!(Trigger::Ordinary.eor_check(), Trigger::Restart.eor_check());
+        assert_ne!(Trigger::Ordinary.cell(), Trigger::Restart.cell());
     }
 
     #[test]

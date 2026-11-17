@@ -12,7 +12,14 @@ import credit_bars
 GIB = 1 << 30
 
 
-def exhaust(family, recovery_ms=20_000.0, p99=5.0, gap=60.0):
+# The fixed shape's per-peer credit at 153 registered peers.
+ROW_CREDIT = 16_777_216 // 153
+BYTE_CREDIT = (2 * GIB) // 153
+
+
+def exhaust(family, recovery_ms=20_000.0, p99=5.0, gap=60.0, candidate=False):
+    """An ordinary burst that filled every receiver's credit and then owed
+    keys: no refusal and, on the parent, no owe-whole flip."""
     return {
         "cell": "exhaust",
         "family": family,
@@ -21,7 +28,13 @@ def exhaust(family, recovery_ms=20_000.0, p99=5.0, gap=60.0):
         "shape": dict(credit_bars.EXHAUST_SHAPE),
         "timing": {"recovery_ms": recovery_ms},
         "checks": {name: True for name in credit_bars.WIRE_CHECKS},
-        "witness": {"refused_receivers": 150, "owing_flips_total": 0.0, "receivers": 150},
+        "witness": {
+            "refused_receivers": 0,
+            "owing_flips_total": 150.0 if candidate else 0.0,
+            "receivers": 150,
+            "peak_credit_rows": 150.0 * (56_144 if candidate else ROW_CREDIT),
+            "peak_credit_bytes": 150.0 * 56_144 * 250 if candidate else None,
+        },
         "unaffected": {
             "injected": 1_000,
             "delivered": 1_000,
@@ -83,8 +96,8 @@ def fill(family, estimate):
 
 def arm(candidate):
     files = {
-        "exhaust-unicast.json": exhaust("unicast"),
-        "exhaust-evpn.json": exhaust("evpn"),
+        "exhaust-unicast.json": exhaust("unicast", candidate=candidate),
+        "exhaust-evpn.json": exhaust("evpn", candidate=candidate),
         "paused-evpn.json": paused(6 * GIB if candidate else 9 * GIB, GIB if candidate else None),
         "probes.json": probes(),
     }
@@ -150,10 +163,10 @@ class Bars(unittest.TestCase):
         results = self.wire_defect("final_state_exact")
         self.assert_only(results, "cell 2 exhaustion unicast", "FAIL", "final_state_exact failed")
 
-    def test_seeded_route_after_eor(self):
-        results = self.wire_defect("eor_after_every_route")
+    def test_seeded_misplaced_eor(self):
+        results = self.wire_defect("one_eor_before_burst")
         self.assert_only(
-            results, "cell 2 exhaustion unicast", "FAIL", "eor_after_every_route failed"
+            results, "cell 2 exhaustion unicast", "FAIL", "one_eor_before_burst failed"
         )
 
     def test_seeded_session_reset(self):
@@ -189,32 +202,97 @@ class Bars(unittest.TestCase):
         results = self.run_bars(mutate)
         self.assert_only(results, "cell 3 unaffected peer evpn", "FAIL", "candidate p99")
 
-    def test_seeded_missing_refusal_witness(self):
-        def mutate(parent, _candidate):
-            parent["exhaust-unicast.json"]["witness"]["refused_receivers"] = 0
+    def witness_defect(self, side, family="unicast", **fields):
+        def mutate(parent, candidate):
+            arm = parent if side == "parent" else candidate
+            arm[f"exhaust-{family}.json"]["witness"].update(fields)
 
-        results = self.run_bars(mutate)
-        # The unaffected-peer cell reads the same run but has no witness bar.
-        self.assertEqual(results["cell 2 exhaustion unicast"][0], "INVALID")
-        self.assertIn("never exhausted credit", results["cell 2 exhaustion unicast"][1])
-        others = {k: v for k, v in results.items() if k != "cell 2 exhaustion unicast"}
-        self.assertTrue(all(v == "PASS" for v, _ in others.values()), others)
+        return self.run_bars(mutate)
 
-    def test_owe_whole_flips_are_a_witness(self):
-        def mutate(parent, _candidate):
-            witness = parent["exhaust-unicast.json"]["witness"]
-            witness["refused_receivers"] = 0
-            witness["owing_flips_total"] = 150.0
+    def test_seeded_credit_never_reached(self):
+        # One row (parent) or one byte (candidate) short of every receiver's
+        # credit. The unaffected-peer cell reads the same run but has no
+        # witness bar.
+        cases = {
+            "parent": {"peak_credit_rows": 150.0 * ROW_CREDIT - 1},
+            "candidate": {"peak_credit_bytes": 150.0 * BYTE_CREDIT - 1},
+        }
+        for side, fields in cases.items():
+            with self.subTest(side=side):
+                results = self.witness_defect(side, **fields)
+                self.assert_only(
+                    results, "cell 2 exhaustion unicast", "INVALID", "never exhausted credit"
+                )
+                self.assertIn(f"{side} run 0", results["cell 2 exhaustion unicast"][1])
 
-        self.assertEqual(self.run_bars(mutate)["cell 2 exhaustion unicast"][0], "PASS")
+    def test_seeded_owe_whole_flips_without_spent_credit_are_not_a_witness(self):
+        # What a selection release leaves: one flip per receiver, no credit
+        # charged, nothing refused.
+        cases = {
+            "parent": {"peak_credit_rows": 0.0},
+            "candidate": {"peak_credit_rows": 0.0, "peak_credit_bytes": 0.0},
+        }
+        for side, fields in cases.items():
+            with self.subTest(side=side):
+                results = self.witness_defect(
+                    side, "evpn", owing_flips_total=150.0, refused_receivers=0, **fields
+                )
+                self.assert_only(
+                    results, "cell 2 exhaustion evpn", "INVALID", "flips are not a witness"
+                )
 
-    def test_too_few_flips_are_not_a_witness(self):
-        def mutate(parent, _candidate):
-            witness = parent["exhaust-unicast.json"]["witness"]
-            witness["refused_receivers"] = 0
-            witness["owing_flips_total"] = 149.0
+    def test_refusals_on_every_receiver_are_a_witness(self):
+        # Each arm's own gauge below its credit, every receiver refused.
+        for side, gauge in (("parent", "peak_credit_rows"), ("candidate", "peak_credit_bytes")):
+            with self.subTest(side=side):
+                results = self.witness_defect(side, refused_receivers=150, **{gauge: 0.0})
+                verdict, reason = results["cell 2 exhaustion unicast"]
+                self.assertEqual(verdict, "PASS", reason)
+                self.assertIn(f"{side} credit refusals on 150/150", reason)
 
-        self.assertEqual(self.run_bars(mutate)["cell 2 exhaustion unicast"][0], "INVALID")
+    def test_seeded_refusals_on_too_few_receivers_are_not_a_witness(self):
+        results = self.witness_defect("parent", peak_credit_rows=0.0, refused_receivers=149)
+        self.assert_only(results, "cell 2 exhaustion unicast", "INVALID", "refusals on 149/150")
+
+    def test_seeded_byte_credit_tree_without_its_gauge_is_invalid(self):
+        # Judged in rows, a byte-credit tree's rows never reach the row credit.
+        results = self.witness_defect("candidate", peak_credit_bytes=None)
+        self.assert_only(results, "cell 2 exhaustion unicast", "INVALID", "rows <")
+
+    def test_clean_witness_names_what_it_counted(self):
+        reason = self.run_bars()["cell 2 exhaustion unicast"][1]
+        self.assertIn(f"parent credit gauge peak 16448250 rows >= 150 x {ROW_CREDIT}", reason)
+        self.assertIn(
+            f"candidate credit gauge peak 2105400000 bytes >= 150 x {BYTE_CREDIT}", reason
+        )
+
+    def test_seeded_selection_release_is_not_an_exhaustion_cell(self):
+        # A restart burst's result offered as cell 2, with its 150 flips.
+        run = exhaust("unicast")
+        run["shape"]["trigger"] = "rfc4724_selection_release"
+        run["witness"].update(owing_flips_total=150.0, peak_credit_rows=0.0)
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, "exhaust-unicast.json").write_text(json.dumps(run))
+            results = credit_bars.check(Path(root))
+        self.assertEqual(results[0][1], "INVALID", results)
+        self.assertIn("cannot exhaust ordinary credit", results[0][2])
+
+    def test_check_reads_a_restart_burst_without_a_witness(self):
+        run = exhaust("evpn")
+        run["cell"] = "restart"
+        run["shape"]["trigger"] = "rfc4724_selection_release"
+        run["checks"] = {name: True for name in credit_bars.RESTART_WIRE_CHECKS}
+        run["witness"].update(owing_flips_total=150.0, peak_credit_rows=0.0)
+        for seeded, verdict in ((None, "PASS"), ("eor_after_every_route", "FAIL")):
+            with self.subTest(seeded=seeded), tempfile.TemporaryDirectory() as root:
+                if seeded:
+                    run["checks"][seeded] = False
+                Path(root, "restart-evpn.json").write_text(json.dumps(run))
+                Path(root, "exhaust-evpn.json").write_text(json.dumps(exhaust("evpn")))
+                results = {name: verdict for name, verdict, _ in credit_bars.check(Path(root))}
+                self.assertEqual(
+                    results, {"exhaustion evpn": "PASS", "restart burst evpn": verdict}
+                )
 
     def test_seeded_dropped_route_without_settlement_is_fail(self):
         # A run that never settles has no recovery time; the wire FAIL must
@@ -273,11 +351,13 @@ class Bars(unittest.TestCase):
                 "cell 2 exhaustion unicast",
                 [
                     "mode",
+                    "shape.trigger",
+                    "shape.registered_peers",
                     "witness.refused_receivers",
-                    "witness.owing_flips_total",
+                    "witness.peak_credit_rows",
                     "witness.receivers",
                     "checks.final_state_exact",
-                    "checks.eor_after_every_route",
+                    "checks.one_eor_before_burst",
                     "checks.no_session_resets",
                     "timing.recovery_ms",
                 ],
@@ -437,7 +517,13 @@ class Bars(unittest.TestCase):
         cases = {
             ("exhaust-unicast.json", "rows_per_receiver"): ("cell 2 exhaustion unicast", 4_096),
             ("exhaust-evpn.json", "receivers"): ("cell 2 exhaustion evpn", 4),
-            ("exhaust-evpn.json", "pause_ms"): ("cell 2 exhaustion evpn", 500.0),
+            ("exhaust-evpn.json", "pause_ms"): ("cell 2 exhaustion evpn", 30_000.0),
+            ("exhaust-evpn.json", "burst_interval_ms"): ("cell 2 exhaustion evpn", 0.0),
+            ("exhaust-unicast.json", "registered_peers"): ("cell 2 exhaustion unicast", 7),
+            ("exhaust-unicast.json", "trigger"): (
+                "cell 2 exhaustion unicast",
+                "rfc4724_selection_release",
+            ),
             ("paused-evpn.json", "receivers"): ("cell 1 paused-reader evpn", 4),
             ("paused-evpn.json", "routes"): ("cell 1 paused-reader evpn", 2_000),
             ("fill-unicast.json", "rows_per_receiver"): ("cell 6 bytes per queued row", 8_192),

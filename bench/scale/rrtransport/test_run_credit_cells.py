@@ -112,6 +112,14 @@ class Runner(unittest.TestCase):
             lines = (root / "out" / "provenance.jsonl").read_text().splitlines()
             self.assertEqual([json.loads(line)["cells"] for line in lines], [["probes"]])
 
+    def test_each_burst_cell_runs_its_own_trigger(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            body = 'echo "$1 $2" >>"$(dirname "$0")/calls"\n'
+            self.assertEqual(self.run_runner(root, 0, "restart-evpn", "exhaust-evpn", body=body), 0)
+            calls = (root / "calls").read_text().splitlines()
+            self.assertEqual(calls, ["credit-restart evpn", "credit-exhaust evpn"])
+
 
 if __name__ == "__main__":
     unittest.main()
