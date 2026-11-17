@@ -2444,12 +2444,12 @@ fn peer_session_reshape_plan() -> RuntimeConfigTransactionPlan {
 }
 
 /// Public half of the live-impact executor fake: serves the plan and drives
-/// each policy-impact or
-/// resolved-policy apply from `apply_results` (Ok returns the next
-/// `captured_priors` entry, falling back to echoing targets when the test
-/// does not care about the returned prior payload; Err simulates a mid-fanout
-/// failure). Records static targets in `apply_calls` and dynamic selectors
-/// in `dynamic_calls`.
+/// each policy-impact apply or rollback restore from `apply_results` (Ok
+/// returns the next `captured_priors` entry to a forward apply, falling back
+/// to echoing targets when the test does not care about the returned prior
+/// payload; Err simulates a mid-fanout failure). Records static targets and
+/// restored priors in `apply_calls` and dynamic selectors in
+/// `dynamic_calls`. A rollback sent as a forward apply panics.
 async fn fake_live_policy_peer_manager(
     mut rx: mpsc::Receiver<PeerManagerCommand>,
     plan: RuntimeConfigTransactionPlan,
@@ -2522,22 +2522,13 @@ async fn fake_live_policy_peer_manager(
                     }
                 }
             }
-            PeerManagerCommand::ApplyResolvedPolicySnapshot { targets, reply } => {
-                apply_calls.lock().await.push(targets.clone());
+            PeerManagerCommand::RestoreResolvedPolicySnapshot { priors, reply } => {
+                apply_calls.lock().await.push(priors);
                 dynamic_calls.lock().await.push(Vec::new());
-                match apply_results.lock().await.pop_front().unwrap_or(Ok(())) {
-                    Ok(()) => {
-                        let priors = captured_priors
-                            .lock()
-                            .await
-                            .pop_front()
-                            .unwrap_or_else(|| targets.clone());
-                        let _ = reply.send(Ok(priors));
-                    }
-                    Err(error) => {
-                        let _ = reply.send(Err(error));
-                    }
-                }
+                let _ = reply.send(apply_results.lock().await.pop_front().unwrap_or(Ok(())));
+            }
+            PeerManagerCommand::ApplyResolvedPolicySnapshot { .. } => {
+                panic!("a live-policy rollback must restore its priors, not re-apply them forward")
             }
             _ => panic!("unexpected peer-manager command in live-policy transaction test"),
         }
@@ -11985,7 +11976,7 @@ async fn enumerated_live_policy_peer(
             PeerManagerCommand::RuntimeConfigSnapshot { .. } => "snapshot",
             PeerManagerCommand::PlanConfigTransaction { .. } => "plan",
             PeerManagerCommand::ApplyPolicyImpactSnapshot { .. } => "apply policies",
-            PeerManagerCommand::ApplyResolvedPolicySnapshot { .. } => "restore policies",
+            PeerManagerCommand::RestoreResolvedPolicySnapshot { .. } => "restore policies",
             PeerManagerCommand::CommitConfigSnapshotStage { .. } => "finalize snapshot",
             _ => panic!("unexpected live-policy peer command"),
         };
@@ -12043,9 +12034,9 @@ async fn enumerated_live_policy_peer(
                 schedule.effect(TransactionTestActor::Peer);
                 transaction_test_reply(reply, Ok(priors), fault).await;
             }
-            PeerManagerCommand::ApplyResolvedPolicySnapshot { targets, reply } => {
-                let priors = std::mem::replace(&mut *live.lock().await, targets);
-                if transaction_test_reply(reply, Ok(priors), fault).await {
+            PeerManagerCommand::RestoreResolvedPolicySnapshot { priors, reply } => {
+                *live.lock().await = priors;
+                if transaction_test_reply(reply, Ok(()), fault).await {
                     schedule.restored(TransactionTestActor::Peer);
                 }
             }

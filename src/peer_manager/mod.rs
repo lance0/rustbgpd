@@ -3084,8 +3084,6 @@ impl PeerManager {
                 let _ = reply.send(self.current_config.effective_redacted_toml());
             }
             PeerManagerCommand::ApplyResolvedPolicySnapshot { targets, reply } => {
-                // API publication rollback restores policy chains before the
-                // staged config. Reads report each source's current values.
                 let result = boxed(|| {
                     self.apply_resolved_policy_snapshot_with_prestage_reads(
                         targets,
@@ -3094,6 +3092,22 @@ impl PeerManager {
                     )
                 })
                 .await
+                .map_err(policy::PolicySnapshotFailure::into_apply_error);
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::RestoreResolvedPolicySnapshot { priors, reply } => {
+                // A config transaction's publication failed: put back the
+                // chains its forward apply replaced, before the staged config
+                // is restored. Reads report each source's current values.
+                let result = boxed(|| {
+                    self.restore_resolved_policy_snapshot(
+                        priors,
+                        false,
+                        OperatorReadAdmission::Served,
+                    )
+                })
+                .await
+                .map(drop)
                 .map_err(policy::PolicySnapshotFailure::into_apply_error);
                 let _ = reply.send(result);
             }
