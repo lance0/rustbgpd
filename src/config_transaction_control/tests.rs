@@ -6641,6 +6641,85 @@ async fn forward_import_edit_on_a_peer_without_route_refresh_is_still_refused() 
     }
 }
 
+/// An operator's history rollback is a forward edit, not a restore: moving
+/// the import chain of a peer without Route Refresh back to a retained
+/// config is refused before anything is applied, and no session is reset.
+#[tokio::test]
+async fn history_rollback_import_edit_on_a_peer_without_route_refresh_is_refused() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let edit = confirmed_import_edit(60, true, false).await;
+    edit.controller
+        .clone()
+        .confirm(proto::ConfirmConfigTransactionRequest {
+            confirm_id: "deploy-1".to_string(),
+        })
+        .await
+        .expect("the candidate is confirmed");
+    let runtime = crate::reload::runtime_config_snapshot(&edit.peer_tx)
+        .await
+        .expect("real peer manager must return its runtime config");
+    let running = crate::config::persisted_config_document(&runtime).unwrap();
+
+    // History: the prior `permit` config at index 1, the running one at 0.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    record_v2_history(dir.path(), &edit.previous_toml);
+    record_v2_history(dir.path(), &running);
+    let config_path = dir.path().join("runtime.toml");
+    std::fs::write(&config_path, &running).unwrap();
+    let accepted = Arc::new(AcceptedConfigSnapshot::load(&config_path, None).unwrap());
+    let (_accepted_tx, accepted_rx) = watch::channel(accepted);
+    let (config_tx, config_rx) = mpsc::channel(8);
+    tokio::spawn(ack_config_transaction_commits(config_rx));
+    let controller = ConfigTransactionController::new_accepted(
+        FibTableControlDeps {
+            config_history_dir: Some(dir.path().to_path_buf()),
+            ..deps_value(None, edit.peer_tx.clone(), Some(config_tx), Vec::new())
+        },
+        BgpMetrics::new(),
+        accepted_rx,
+    )
+    .with_preloaded_planner(edit.controller.peer_mgr_internal_tx.clone().unwrap());
+
+    let error = controller
+        .clone()
+        .rollback(proto::RollbackConfigTransactionRequest {
+            index: 1,
+            ..Default::default()
+        })
+        .await
+        .expect_err("a history rollback of an import edit for a peer without Route Refresh");
+    assert!(
+        error
+            .to_string()
+            .contains("did not negotiate Route Refresh")
+            && error.fence_reason().is_none(),
+        "{error:?}"
+    );
+    assert_eq!(
+        edit.installed_actions(),
+        vec![Some(PolicyAction::Deny)],
+        "the rollback installs nothing"
+    );
+    assert!(
+        edit.acks.resets_after(0).await.is_empty(),
+        "no session reset"
+    );
+    let runtime = crate::reload::runtime_config_snapshot(&edit.peer_tx)
+        .await
+        .expect("real peer manager must return its runtime config");
+    assert_eq!(
+        crate::config::persisted_config_document(&runtime).unwrap(),
+        running,
+        "the running config is unchanged"
+    );
+    controller
+        .reject_if_pending("test mutation")
+        .await
+        .expect("a refused rollback leaves nothing pending");
+}
+
 /// A rollback restore that fails partway is never unwound back to the
 /// candidate: the abort fences for supervised recovery (the restart
 /// boot-reverts from the retained journal) instead of reporting an abort
