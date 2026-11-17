@@ -1609,6 +1609,15 @@ fn a_large_private_pass_leaves_as_charged_r_row_chunks() {
             Some(rows(std::slice::from_ref(chunk)))
         );
     }
+    // Each piece is charged its own bytes, and the pieces sum to the pass.
+    assert_charges_are_the_held_envelopes(&manager, peer, &chunks);
+    let charged: usize = chunks
+        .iter()
+        .filter_map(|chunk| chunk.credit.as_ref())
+        .map(crate::OutboundCharge::bytes)
+        .sum();
+    assert_eq!(charged, unicast_rows(3000), "the pieces sum to the pass");
+    assert_eq!(manager.outbound_credit_bytes(peer), unicast_rows(3000));
     assert_eq!(manager.outbound_credit_rows(peer), 3000);
     drop(chunks);
     assert_eq!(manager.outbound_credit_rows(peer), 0);
@@ -3533,5 +3542,52 @@ fn small_rows_fill_the_byte_credit_at_more_rows() {
     assert!(
         withdrawn >= 4 * announced,
         "{withdrawn} withdrawals against {announced} announcements"
+    );
+}
+
+/// The credit checks read bytes, never rows: a stalled receiver whose real
+/// queued passes hold its whole byte credit (2,048 rows, far fewer rows than
+/// bytes) is exhausted for the private-family preflight, and the owed-key
+/// tick does not count it as able to progress. Red when either check
+/// compares the row count with the byte limit: 2,048 rows sit far below it.
+#[test]
+fn spent_byte_credit_is_exhausted_whatever_the_row_count() {
+    const CREDIT: usize = 2 * CHUNK_ROWS;
+    let mut manager = manager().with_outbound_credit_bytes(unicast_rows(CREDIT));
+    manager.test_force_ungrouped = true;
+    let mut source = up(&mut manager, peer_v4(SOURCE), ipv4_sendable(), 4096, 0);
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 42, 1));
+    let mut rx = up(&mut manager, peer, ipv4_sendable(), 4096, 0);
+    send_all(&mut rx);
+    for pass in 0..4u32 {
+        let routes = (pass * 1024..(pass + 1) * 1024).map(source_route).collect();
+        routes_received(&mut manager, routes, vec![], vec![], vec![]);
+        send_all(&mut source);
+    }
+    let rows = manager.outbound_credit_rows(peer);
+    let bytes = manager.outbound_credit_bytes(peer);
+    assert_eq!(rows, CREDIT, "two passes queued, the rest owed");
+    assert!(
+        bytes >= manager.outbound_credit_limit(),
+        "{bytes} bytes held"
+    );
+    assert!(
+        rows < manager.outbound_credit_limit() / 100,
+        "rows far below bytes"
+    );
+    assert!(manager.owing(peer).is_some());
+    assert!(
+        manager.outbound_credit_exhausted(peer),
+        "the preflight sees the spent bytes"
+    );
+    assert!(
+        !manager.owing_tick_due(),
+        "no owed drain can progress without credit"
+    );
+    drop(held(&mut rx));
+    assert!(!manager.outbound_credit_exhausted(peer));
+    assert!(
+        manager.owing_tick_due(),
+        "credit returned: the drain may run"
     );
 }
