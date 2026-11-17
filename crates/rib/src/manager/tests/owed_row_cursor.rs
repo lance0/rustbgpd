@@ -262,16 +262,25 @@ fn tick(manager: &mut RibManager, receivers: &mut [Receiver]) {
     }
 }
 
-fn fallbacks(manager: &RibManager) -> f64 {
+fn counter(manager: &RibManager, name: &str) -> f64 {
     manager
         .metrics
         .registry()
         .gather()
         .into_iter()
-        .filter(|family| family.name() == "bgp_rib_outbound_owing_fallback_total")
+        .filter(|family| family.name() == name)
         .flat_map(|family| family.get_metric().to_vec())
         .map(|metric| metric.get_counter().get_value())
         .sum()
+}
+
+fn fallbacks(manager: &RibManager) -> f64 {
+    counter(manager, "bgp_rib_outbound_owing_fallback_total")
+}
+
+/// Families (of any receiver) that began to be owed whole.
+fn flips(manager: &RibManager) -> f64 {
+    counter(manager, "bgp_rib_outbound_owing_flips_total")
 }
 
 /// Tick until no resync work is left.
@@ -615,6 +624,20 @@ fn a_refresh_mid_walk_absorbs_the_rest_of_the_walk() {
         rows as usize,
         "the answer is the whole table"
     );
+    // One answer, bracketed: both RFC 7313 markers, and the End-of-RIB a
+    // peer without them reads instead (the session writes one or the other).
+    assert_eq!(
+        sent.iter()
+            .filter(|update| !update.refresh_markers.is_empty())
+            .count(),
+        1,
+        "answered once"
+    );
+    assert_eq!(sent[answer].refresh_markers, BRACKET);
+    assert_eq!(sent[answer].end_of_rib, [V4]);
+    assert!(!manager.pending_refresh.contains_key(&peer));
+    drain(&mut manager, &mut receivers);
+    assert!(receivers[0].rx.is_empty(), "nothing follows the answer");
 }
 
 /// Shutdown mid-walk: the close flush sends the withdrawals behind the
@@ -1843,4 +1866,522 @@ fn a_non_best_change_behind_the_cursor_is_revisited() {
         assert_eq!(receivers[0].wire.markers, 1);
         assert_eq!(receivers[0].wire.rows_after_marker, 0);
     }
+}
+
+/// The markers of one ROUTE-REFRESH answer.
+const BRACKET: [(Afi, Safi, rustbgpd_wire::RouteRefreshSubtype); 2] = [
+    (V4.0, V4.1, rustbgpd_wire::RouteRefreshSubtype::BoRR),
+    (V4.0, V4.1, rustbgpd_wire::RouteRefreshSubtype::EoRR),
+];
+
+/// One thing a receiver was sent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Sent {
+    /// Route rows outside a refresh answer (one or more envelopes).
+    Rows,
+    /// An End-of-RIB outside a refresh answer.
+    Eor,
+    /// A refresh answer of this many rows: one envelope that carries `BoRR`
+    /// and `EoRR` for a peer with RFC 7313 and an End-of-RIB for one
+    /// without. The request has no subtype, so the answer is one envelope
+    /// for both and the session writes the markers its peer negotiated.
+    Answer(usize),
+}
+
+/// What `receiver` was sent since it last wrote, in order; it writes it.
+fn sent(receiver: &mut Receiver) -> Vec<Sent> {
+    let mut out = Vec::new();
+    while let Ok(update) = receiver.rx.try_recv() {
+        receiver.wire.apply(&update);
+        if !update.refresh_markers.is_empty() {
+            assert_eq!(update.refresh_markers, BRACKET);
+            assert_eq!(update.end_of_rib, [V4]);
+            out.push(Sent::Answer(update.announce.len()));
+            continue;
+        }
+        let rows = update.announce.len() + update.unicast_withdrawals().count();
+        if rows != 0 && out.last() != Some(&Sent::Rows) {
+            out.push(Sent::Rows);
+        }
+        if update.end_of_rib.contains(&V4) {
+            out.push(Sent::Eor);
+        }
+    }
+    out
+}
+
+/// Tick until no resync work is left; receiver 0 writes, and what
+/// receiver `index` was sent is returned.
+fn drain_sent(manager: &mut RibManager, receivers: &mut [Receiver], index: usize) -> Vec<Sent> {
+    let mut seen = sent(&mut receivers[index]);
+    for _ in 0..100_000 {
+        if !manager.resync_tick_pending() {
+            return seen;
+        }
+        manager.resync_dirty_peers_bounded();
+        receivers[0].write();
+        for item in sent(&mut receivers[index]) {
+            if item != Sent::Rows || seen.last() != Some(&Sent::Rows) {
+                seen.push(item);
+            }
+        }
+    }
+    panic!("the drain does not finish");
+}
+
+fn refresh_request(manager: &mut RibManager, peer: PeerId) {
+    manager.handle_update(RibUpdate::RouteRefreshRequest {
+        peer,
+        session_id: 0,
+        afi: V4.0,
+        safi: V4.1,
+        queued: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+    });
+}
+
+/// A set kept at its cap keeps its cursor until it is empty. The cursor
+/// starts at the head of the list, so the first step of the set finds it
+/// caught up; the family stays owed whole while the set has keys, so later
+/// passes are logged for the cursor and the set does not grow again. Red
+/// when a caught-up cursor ends with keys left in its set: the next passes
+/// mark the set (121 keys, nothing logged).
+#[test]
+fn a_kept_set_keeps_its_cursor_until_it_is_empty() {
+    let mut manager = manager(2);
+    std::mem::forget(up_session(&mut manager, peer_v4(SOURCE), 0));
+    let peer = receiver(0);
+    let mut rx = up_session(&mut manager, peer, 0);
+    while rx.try_recv().is_ok() {}
+    let charge =
+        crate::outbound_credit::OutboundCharge::new(&manager.outbound_credit_handle(peer), 2);
+    let rows: Vec<_> = (0..120).map(|index| (index, 0)).collect();
+    received(&mut manager, &rows, &[]);
+    assert!(manager.owes_whole(peer, UNICAST));
+    assert_eq!(manager.owed_key_count(peer, UNICAST), 120);
+    assert_eq!(manager.owed_rows[0].len(), 0);
+    drop(charge);
+    // One step of one key; the list is empty, so the cursor has caught up.
+    manager.resync_dirty_peers_bounded();
+    assert_eq!(manager.owed_key_count(peer, UNICAST), 119);
+    assert!(
+        manager.owes_whole(peer, UNICAST),
+        "the cursor ended with keys left in its set"
+    );
+    received(&mut manager, &[(120, 0), (121, 0)], &[]);
+    assert_eq!(
+        (
+            manager.owed_key_count(peer, UNICAST),
+            manager.owed_rows[0].len()
+        ),
+        (119, 2),
+        "the set is frozen and the pass is logged"
+    );
+}
+
+/// Churn while a kept set drains: the family flips once, every pass is
+/// logged and stages nothing, and the End-of-RIB leaves only when the set
+/// is empty and the cursor has caught up. It is checked with the cursor
+/// caught up and keys left in the set, and with the set empty and the
+/// cursor behind. Red when the cursor ends at the first step: the passes
+/// mark the set again and it flips again.
+#[test]
+fn churn_past_a_kept_set_flips_once_and_the_end_of_rib_waits_for_both() {
+    let mut manager = manager(CREDIT);
+    std::mem::forget(up_session(&mut manager, peer_v4(SOURCE), 0));
+    let peer = receiver(0);
+    let mut rx = up_session(&mut manager, peer, 0);
+    let mut wire = Wire::default();
+    wire.write(&mut rx);
+    wire.markers = 0;
+    let mut receivers = vec![Receiver { peer, rx, wire }];
+    let charge =
+        crate::outbound_credit::OutboundCharge::new(&manager.outbound_credit_handle(peer), CREDIT);
+    let mut expected: Vec<_> = (0..120).map(|index| (index, 0)).collect();
+    received(&mut manager, &expected, &[]);
+    assert!(manager.owes_whole(peer, UNICAST));
+    assert_eq!(flips(&manager), 1.0);
+    manager.owe_eor(peer, V4);
+    drop(charge);
+    // Caught up (nothing is logged yet) with keys left in the set.
+    tick(&mut manager, &mut receivers);
+    let mut steps = 1;
+    assert_eq!(manager.owed_key_count(peer, UNICAST), 120 - STEP);
+    assert!(
+        manager.owes_whole(peer, UNICAST),
+        "caught up, set not empty"
+    );
+    assert_eq!(receivers[0].wire.markers, 0);
+    while manager.owed_key_count(peer, UNICAST) != 0 {
+        let round = u32::try_from(steps).unwrap();
+        received(&mut manager, &[(200 + round, 0), (0, round)], &[]);
+        expected.push((200 + round, 0));
+        expected[0] = (0, round);
+        receivers[0].write();
+        assert_eq!(
+            receivers[0].wire.announced.len(),
+            steps * STEP,
+            "a pass staged rows toward a receiver owed whole"
+        );
+        tick(&mut manager, &mut receivers);
+        steps += 1;
+        assert_eq!(manager.owed_key_count(peer, UNICAST), 120 - steps * STEP);
+        assert!(manager.owes_whole(peer, UNICAST), "step {steps}");
+        assert_eq!(flips(&manager), 1.0, "step {steps}: flipped again");
+        assert_eq!(receivers[0].wire.markers, 0, "step {steps}");
+    }
+    // The set is empty; the cursor is behind the churn.
+    assert_eq!(manager.owed_rows[0].len(), steps, "every pass was logged");
+    assert!(manager.eor_pending(peer).contains(&V4));
+    drain(&mut manager, &mut receivers);
+    assert_eq!(flips(&manager), 1.0);
+    assert_settled(&manager, &receivers, &expected, "kept set");
+    assert_eq!(receivers[0].wire.uncharged, 0);
+}
+
+/// A ROUTE-REFRESH from a receiver the list cap evicted, whose initial
+/// End-of-RIB is still owed, waits for the receiver's resync: the request
+/// builds nothing in its own turn and stays pending, the tick's unit sends
+/// the table and the End-of-RIB, and the answer follows with its markers,
+/// once. The request has no subtype: a peer without RFC 7313 reads the
+/// same answer's End-of-RIB. Red when the request is answered in its own
+/// turn: an answer ahead of the initial End-of-RIB carries no marker
+/// (RFC 7313 section 4), and the request is spent on it.
+#[test]
+fn a_refresh_from_an_evicted_receiver_follows_its_resync_with_its_markers() {
+    let (mut manager, mut receivers, expected) = evict_stalled(1);
+    let peer = receivers[1].peer;
+    receivers[1].write();
+    assert!(manager.owed_row_evicted.contains(&peer));
+    assert!(manager.eor.owes(peer, V4));
+    let builds = manager.adj_rib_out_commit_stats.resync_builds;
+    refresh_request(&mut manager, peer);
+    assert_eq!(sent(&mut receivers[1]), [], "built in the request's turn");
+    assert!(manager.pending_refresh.contains_key(&peer), "still asked");
+    assert!(manager.owed_row_evicted.contains(&peer));
+    assert_eq!(
+        drain_sent(&mut manager, &mut receivers, 1),
+        [Sent::Rows, Sent::Eor, Sent::Answer(expected.len())]
+    );
+    assert_eq!(receivers[1].wire.table, table(&expected));
+    assert_eq!(
+        manager.adj_rib_out_commit_stats.resync_builds - builds,
+        1,
+        "one resync"
+    );
+    assert!(!manager.pending_refresh.contains_key(&peer), "answered");
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert!(manager.owed_row_evicted.is_empty());
+    assert!(manager.eor_pending(peer).is_empty());
+    // The next request is answered at once, as for any clean receiver.
+    refresh_request(&mut manager, peer);
+    assert_eq!(
+        drain_sent(&mut manager, &mut receivers, 1),
+        [Sent::Answer(expected.len())]
+    );
+}
+
+/// An operator refresh (`RefreshPeerOutbound`) of an evicted receiver
+/// builds nothing in its own turn either: the receiver stays the tick's,
+/// which sends the forced table and the End-of-RIB once. Red when a forced
+/// pass takes an evicted receiver: the command's turn builds its table.
+#[test]
+fn an_operator_refresh_of_an_evicted_receiver_is_built_by_the_tick() {
+    let (mut manager, mut receivers, expected) = evict_stalled(1);
+    let peer = receivers[1].peer;
+    receivers[1].write();
+    let builds = manager.adj_rib_out_commit_stats.resync_builds;
+    let (reply, mut answer) = oneshot::channel();
+    manager.handle_update(RibUpdate::RefreshPeerOutbound { peer, reply });
+    assert!(matches!(answer.try_recv(), Ok(Ok(()))));
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
+    assert_eq!(sent(&mut receivers[1]), [], "built in the command's turn");
+    assert!(manager.owed_row_evicted.contains(&peer));
+    assert_eq!(
+        drain_sent(&mut manager, &mut receivers, 1),
+        [Sent::Rows, Sent::Eor]
+    );
+    assert_eq!(receivers[1].wire.table, table(&expected));
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds - builds, 1);
+    assert!(!manager.force_outbound_peers.contains(&peer));
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert!(manager.owed_row_evicted.is_empty());
+}
+
+/// An operator refresh mid-walk is a forced resync: it covers the family,
+/// so the cursor and its set are dropped, the list is freed and the
+/// End-of-RIB follows the table, once. Red when the resync leaves the
+/// family owed: the cursor walks on behind the End-of-RIB.
+#[test]
+fn an_operator_refresh_mid_walk_resyncs_and_drops_the_cursor() {
+    let rows = 40u32;
+    let (mut manager, mut receivers) = owing(1, rows, CREDIT);
+    tick(&mut manager, &mut receivers);
+    let peer = receivers[0].peer;
+    assert_eq!(receivers[0].wire.table.len(), STEP);
+    let builds = manager.adj_rib_out_commit_stats.resync_builds;
+    let (reply, mut answer) = oneshot::channel();
+    manager.handle_update(RibUpdate::RefreshPeerOutbound { peer, reply });
+    assert!(matches!(answer.try_recv(), Ok(Ok(()))));
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds - builds, 1);
+    assert!(!manager.owes(peer, V4), "the resync covered the family");
+    assert_eq!(manager.owed_rows[0].len(), 0);
+    assert_eq!(
+        drain_sent(&mut manager, &mut receivers, 0),
+        [Sent::Rows, Sent::Eor]
+    );
+    let all: Vec<_> = (0..rows).map(|index| (index, 0)).collect();
+    assert_eq!(receivers[0].wire.table, table(&all));
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds - builds, 1);
+}
+
+/// The list is cut back to its cap, twice the peak plus the slack, at the
+/// end of every pass (so it never holds more than the cap plus one pass,
+/// three times the peak plus the slack), with stalled cursors more than
+/// one trim apart: `count` receivers start cursors `gap` keys apart and
+/// read nothing while `fresh` new keys a pass rotate through the table.
+/// Returns the longest list a pass left and the cap it had then. Red when
+/// an eviction that leaves more than one trim of entries behind the next
+/// cursor ends the cap's work for that pass: one receiver is evicted a
+/// pass and the list outgrows the cap, then the bound.
+fn stalled_staggered(count: u8, gap: u32, fresh: u32) -> (usize, usize) {
+    let mut manager = manager(1 << 20);
+    std::mem::forget(up_session(&mut manager, peer_v4(SOURCE), 0));
+    let mut rxs: Vec<_> = (0..count)
+        .map(|index| {
+            let peer = receiver(index);
+            (peer, up_sized(&mut manager, peer, 0, 1 << 16, |_| {}))
+        })
+        .collect();
+    let (mut next, mut table, mut peak) = (0u32, 0usize, 0usize);
+    for holder in 0..usize::from(count) {
+        let rows: Vec<_> = (next..next + gap).map(|index| (index, 0)).collect();
+        next += gap;
+        received(&mut manager, &rows, &[]);
+        table += gap as usize;
+        if holder > 0 {
+            peak = peak.max(table + gap as usize);
+        }
+        // Those without a cursor yet read; the rest never do.
+        for (_, rx) in &mut rxs[holder..] {
+            while rx.try_recv().is_ok() {}
+        }
+        manager.owe_whole_family(rxs[holder].0, UNICAST);
+    }
+    let mut previous: Vec<u32> = vec![];
+    let (mut longest, mut cap_then) = (0, 0);
+    for _ in 0..200 {
+        let rows: Vec<_> = (next..next + fresh).map(|index| (index, 0)).collect();
+        let gone = std::mem::replace(&mut previous, (next..next + fresh).collect());
+        next += fresh;
+        received(&mut manager, &rows, &gone);
+        table = table + fresh as usize - gone.len();
+        peak = peak.max(table + fresh as usize + gone.len());
+        let (len, cap) = (manager.owed_rows[0].len(), 2 * peak + 4 * CHUNK_ROWS);
+        assert!(len <= cap, "{len} keys in the list, cap {cap}");
+        if len > longest {
+            (longest, cap_then) = (len, cap);
+        }
+        if manager.owed_row_evicted.len() == usize::from(count) && !manager.owed_rows_trimming() {
+            return (longest, cap_then);
+        }
+    }
+    panic!("the stalled receivers were never all evicted");
+}
+
+#[test]
+fn stalled_cursors_more_than_a_trim_apart_keep_the_list_under_its_bound() {
+    let (longest, cap) = stalled_staggered(8, 4100, 20_000);
+    assert!(longest > cap / 2, "the list did grow: {longest}");
+}
+
+/// The cap counts what each cursor still has to read, exactly: of two
+/// stalled receivers eight keys apart, the pass that leaves the cap plus
+/// eight keys after the slower one evicts it and keeps the other, which
+/// has the cap after it; the list is left at the cap. Red when a receiver
+/// with exactly the cap after its cursor is evicted too.
+#[test]
+fn a_receiver_with_exactly_the_cap_after_its_cursor_is_kept() {
+    const FRESH: u32 = 515;
+    let (mut manager, mut receivers) = owing(2, 16, CREDIT);
+    // Receiver 0 never has credit; receiver 1 takes one step of eight
+    // keys, then reads nothing.
+    let _stalled = crate::outbound_credit::OutboundCharge::new(
+        &manager.outbound_credit_handle(receivers[0].peer),
+        CREDIT,
+    );
+    for _ in 0..2 {
+        manager.resync_dirty_peers_bounded();
+    }
+    assert_eq!(manager.outbound_credit_rows(receivers[1].peer), STEP);
+    // The table holds the 16 rows and one pass's fresh ones, and a pass
+    // carries those and the ones it withdraws.
+    let cap = 2 * (16 + 3 * FRESH as usize) + 4 * CHUNK_ROWS;
+    for pass in 1..=14u32 {
+        let base = 1000 + pass * FRESH;
+        let fresh: Vec<_> = (base..base + FRESH).map(|index| (index, 0)).collect();
+        let gone: Vec<u32> = if pass == 1 {
+            vec![]
+        } else {
+            (base - FRESH..base).collect()
+        };
+        received(&mut manager, &fresh, &gone);
+        if pass < 14 {
+            assert_eq!(manager.owed_rows[0].len(), 16 + (pass * FRESH) as usize);
+            assert_eq!(fallbacks(&manager), 0.0, "pass {pass}");
+        }
+    }
+    // The last pass left the cap plus eight keys after receiver 0.
+    assert_eq!(fallbacks(&manager), 1.0, "the slower receiver only");
+    assert!(manager.owed_row_evicted.contains(&receivers[0].peer));
+    assert!(manager.owes_whole(receivers[1].peer, UNICAST));
+    assert!(!manager.dirty_peers.contains(&receivers[1].peer));
+    assert_eq!(manager.owed_rows[0].len(), cap, "cut back to the cap");
+    drop(_stalled);
+    drain(&mut manager, &mut receivers);
+    for receiver in &receivers {
+        assert_eq!(receiver.wire.markers, 1);
+        assert_eq!(receiver.wire.table.len(), 16 + FRESH as usize);
+    }
+    assert_eq!(fallbacks(&manager), 1.0);
+}
+
+/// An evicted receiver whose unit is refused (here a live whole-table
+/// operation) is no backlog: with nothing else pending the tick reports
+/// none, so the timer keeps its ordinary interval, and the unit runs on
+/// the tick after the operation ends. Red when the tick reports a backlog
+/// for every evicted receiver it selected: it re-arms at the backlog
+/// cadence for as long as the receiver stays blocked.
+#[test]
+fn a_refused_evicted_receiver_leaves_the_tick_at_its_ordinary_interval() {
+    let (mut manager, mut receivers, expected) = evict_stalled(1);
+    let peer = receivers[1].peer;
+    receivers[1].write();
+    let latch = manager
+        .begin_outbound_operation(peer, 1)
+        .expect("a live whole-table operation");
+    // The receiver that keeps up finishes: nothing else is pending.
+    for _ in 0..1000 {
+        manager.resync_dirty_peers_bounded();
+        receivers[0].write();
+    }
+    assert!(!manager.owes(receivers[0].peer, V4));
+    assert_eq!(manager.owed_rows[0].len(), 0);
+    let builds = manager.adj_rib_out_commit_stats.resync_builds;
+    assert!(
+        !manager.resync_dirty_peers_bounded(),
+        "a refused unit was reported as a backlog"
+    );
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
+    assert!(manager.dirty_peers.contains(&peer));
+    assert!(manager.owed_row_evicted.contains(&peer));
+    drop(latch);
+    assert!(manager.resync_dirty_peers_bounded(), "the unit ran");
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds - builds, 1);
+    assert!(manager.owed_row_evicted.is_empty());
+    drain(&mut manager, &mut receivers);
+    for receiver in &mut receivers {
+        receiver.write();
+    }
+    assert_settled(&manager, &receivers, &expected, "refused, then run");
+}
+
+/// Work count: receivers tied at one position are evicted in one pass
+/// with a fixed number of scans of the owing receivers, whatever their
+/// number. Red when each eviction looks for the slowest receiver and trims
+/// the list again: the pass visits them once per evicted receiver.
+#[test]
+fn tied_evictions_scan_the_owing_receivers_a_fixed_number_of_times() {
+    for count in [75u32, 300] {
+        let mut manager = manager(CREDIT);
+        std::mem::forget(up_session(&mut manager, peer_v4(SOURCE), 0));
+        let _rxs: Vec<_> = (0..count)
+            .map(|index| {
+                let peer = peer_v4(Ipv4Addr::from(0x0b00_0000 + index));
+                let rx = up_sized(&mut manager, peer, 0, 64, |_| {});
+                manager.owe_whole_family(peer, UNICAST);
+                rx
+            })
+            .collect();
+        let receivers = count as usize;
+        // Nobody reads while fresh keys rotate through the table.
+        let mut evicted = false;
+        for round in 0..64u32 {
+            let base = round * 1024;
+            let fresh: Vec<_> = (base..base + 1024).map(|index| (index, 0)).collect();
+            let gone: Vec<u32> = (base.saturating_sub(1024)..base).collect();
+            let before = (
+                fallbacks(&manager),
+                manager.adj_rib_out_commit_stats.owed_peer_scans,
+            );
+            received(&mut manager, &fresh, &gone);
+            if fallbacks(&manager) > before.0 {
+                assert_eq!(
+                    fallbacks(&manager) - before.0,
+                    f64::from(count),
+                    "every tied receiver in one pass"
+                );
+                let scans = manager.adj_rib_out_commit_stats.owed_peer_scans - before.1;
+                assert!(
+                    scans <= 16 * receivers,
+                    "{scans} receiver visits to evict {receivers} tied receivers"
+                );
+                evicted = true;
+                break;
+            }
+        }
+        assert!(evicted, "{count} receivers were never evicted");
+        assert_eq!(manager.owed_row_evicted.len(), receivers);
+    }
+}
+
+/// The list its last cursor left empties on the resync tick alone, a
+/// bounded trim a tick, with no pass to log a key. Red when a pending trim
+/// does not keep the tick armed: the list stays until the next pass.
+#[test]
+fn a_list_left_by_its_last_cursor_empties_on_the_tick_alone() {
+    let (mut manager, receivers) = owing(1, 9000, CREDIT);
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: receivers[0].peer,
+        session_id: 0,
+    });
+    assert_eq!(manager.owed_rows[0].len(), 9000 - 4 * CHUNK_ROWS);
+    let mut ticks = 0;
+    while manager.resync_tick_pending() {
+        manager.resync_dirty_peers_bounded();
+        ticks += 1;
+        assert!(ticks <= 2, "the list does not empty");
+    }
+    assert_eq!((ticks, manager.owed_rows[0].len()), (2, 0));
+}
+
+/// A tick trims the list even when no owing receiver can take a step: one
+/// receiver owes a key and has no credit, and the list the last cursor
+/// left still empties in two ticks. Red when the tick's shortcut for
+/// owing receivers that only wait for credit ignores a pending trim.
+#[test]
+fn a_tick_trims_the_list_while_no_owing_receiver_can_step() {
+    let (mut manager, receivers) = owing(1, 9000, CREDIT);
+    let waiting = receiver(7);
+    let mut rx = up_session(&mut manager, waiting, 0);
+    while rx.try_recv().is_ok() {}
+    let _charge = crate::outbound_credit::OutboundCharge::new(
+        &manager.outbound_credit_handle(waiting),
+        CREDIT,
+    );
+    received(&mut manager, &[(5, 1)], &[]);
+    assert_eq!(manager.owed_key_count(waiting, UNICAST), 1);
+    assert!(!manager.owes_whole(waiting, UNICAST));
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: receivers[0].peer,
+        session_id: 0,
+    });
+    assert!(manager.owed_rows_trimming());
+    assert!(!manager.owing_tick_due(), "no receiver can step");
+    let mut ticks = 0;
+    while manager.owed_rows[0].len() != 0 {
+        manager.resync_dirty_peers_bounded();
+        ticks += 1;
+        assert!(ticks <= 2, "the list does not empty");
+    }
+    assert_eq!(manager.owed_key_count(waiting, UNICAST), 1, "still owed");
 }
