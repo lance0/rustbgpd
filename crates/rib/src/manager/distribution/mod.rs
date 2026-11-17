@@ -329,7 +329,8 @@ pub(in crate::manager) struct OutboundCommitBatch {
 enum LadderAdmission<'a> {
     /// A reserved slot of a whole-table operation; charges no rows.
     Slot(crate::outbound_credit::OutboundSlot),
-    /// An ordinary envelope; `credit` is charged its private rows.
+    /// An ordinary envelope; `credit` is charged its private rows and their
+    /// bytes.
     Ordinary {
         permit: tokio::sync::mpsc::Permit<'a, OutboundRouteUpdate>,
         credit: Option<Arc<crate::outbound_credit::OutboundCredit>>,
@@ -339,7 +340,7 @@ enum LadderAdmission<'a> {
 /// Send an ordinary envelope charged to `credit`. A pass with more than
 /// [`crate::outbound_credit::CHUNK_ROWS`] rows goes out as pieces of that
 /// many rows, in phase order, when the channel takes them all now, otherwise
-/// as one envelope; each piece is charged its own private rows.
+/// as one envelope; each piece is charged its own private rows and bytes.
 pub(in crate::manager) fn enqueue_charged_outbound_update(
     sender: &tokio::sync::mpsc::Sender<OutboundRouteUpdate>,
     permit: tokio::sync::mpsc::Permit<'_, OutboundRouteUpdate>,
@@ -353,7 +354,8 @@ pub(in crate::manager) fn enqueue_charged_outbound_update(
     let charge = |mut update: OutboundRouteUpdate| {
         let rows = private.rows(&update);
         if rows != 0 {
-            update.credit = Some(OutboundCharge::new(credit, rows));
+            let bytes = private.bytes(&update);
+            update.credit = Some(OutboundCharge::new(credit, rows, bytes));
         }
         update
     };

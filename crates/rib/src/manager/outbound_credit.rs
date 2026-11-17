@@ -1,4 +1,4 @@
-//! Admission of RIB-to-session envelopes against per-peer row credit and the
+//! Admission of RIB-to-session envelopes against per-peer byte credit and the
 //! one-live-operation latch (`crate::outbound_credit`).
 
 use std::sync::{Arc, Weak};
@@ -9,7 +9,7 @@ use super::RibManager;
 use super::distribution::OutboundCommitFailure;
 use crate::PeerId;
 use crate::outbound_credit::{
-    OperationLatch, OutboundCredit, OutboundOperation, PrivateFamilies, row_credit_for,
+    OperationLatch, OutboundCredit, OutboundOperation, PrivateFamilies, credit_bytes_for,
 };
 
 /// One peer's outbound credit and its live whole-table operation, kept
@@ -34,12 +34,12 @@ pub(super) const CREDIT_REFUSAL: OutboundCommitFailure =
     OutboundCommitFailure::Refused(OutboundCommitRefusal::OutboundCredit);
 
 impl RibManager {
-    /// Fix every peer's ordinary row credit at `rows` instead of sizing it
+    /// Fix every peer's ordinary credit at `bytes` instead of sizing it
     /// from the number of registered peers. For tests and bench builds.
     #[cfg(any(test, feature = "bench-internals"))]
     #[must_use]
-    pub fn with_outbound_row_credit(mut self, rows: usize) -> Self {
-        self.outbound_row_credit_override = Some(rows);
+    pub fn with_outbound_credit_bytes(mut self, bytes: usize) -> Self {
+        self.outbound_credit_override = Some(bytes);
         self
     }
 
@@ -52,17 +52,17 @@ impl RibManager {
             .initialize_outbound_commit_refusal_series(&peer.label());
     }
 
-    /// The per-peer row credit at the current number of registered outbound
+    /// The per-peer byte credit at the current number of registered outbound
     /// peers, read at each admission. Every registered peer counts, private
     /// family or not (a grouped peer's OTC diagnostics are charged too), so
     /// the count needs no membership tracking and the credits of the live
-    /// peers sum to at most `DAEMON_ROW_CREDIT` (or `P` times the floor).
+    /// peers sum to at most `DAEMON_CREDIT_BYTES` (or `P` times the floor).
     /// Envelopes admitted while fewer peers were registered stay charged
     /// until they drop; such a peer is refused until it is back under the
     /// current credit, so that excess only drains.
-    pub(super) fn outbound_row_credit(&self) -> usize {
-        self.outbound_row_credit_override
-            .unwrap_or_else(|| row_credit_for(self.outbound_peers.len()))
+    pub(super) fn outbound_credit_limit(&self) -> usize {
+        self.outbound_credit_override
+            .unwrap_or_else(|| credit_bytes_for(self.outbound_peers.len()))
     }
 
     /// Which of `peer`'s families it holds in its own Adj-RIB-Out.
@@ -83,7 +83,7 @@ impl RibManager {
             && self
                 .outbound_credit
                 .get(&peer)
-                .is_some_and(|entry| entry.credit.rows() >= self.outbound_row_credit())
+                .is_some_and(|entry| entry.credit.bytes() >= self.outbound_credit_limit())
     }
 
     /// Count a preflight refusal like a refused send.
@@ -134,7 +134,7 @@ impl RibManager {
     }
 
     /// Admit an ordinary envelope with private rows: while the peer's live
-    /// rows are below its credit, or, during shutdown, when the envelope's
+    /// bytes are below its credit, or, during shutdown, when the envelope's
     /// private rows withdraw, or announce only keys they also withdraw
     /// (`closing_admissible`). Returns the credit to charge; a peer that
     /// never registered is not tracked.
@@ -146,7 +146,7 @@ impl RibManager {
         let Some(entry) = self.outbound_credit.get(&peer) else {
             return Ok(None);
         };
-        if entry.credit.rows() < self.outbound_row_credit()
+        if entry.credit.bytes() < self.outbound_credit_limit()
             || (self.outbound_closing && closing_admissible())
         {
             Ok(Some(Arc::clone(&entry.credit)))
@@ -230,25 +230,25 @@ impl RibManager {
             .retain(|peer, entry| registered.contains_key(peer) || entry.busy());
     }
 
-    /// Publish the row credit in use and the live whole-table operations,
-    /// summed over every peer.
+    /// Publish the rows and bytes of credit in use and the live whole-table
+    /// operations, summed over every peer.
     // ponytail: one pass over the peers per loop iteration; keep running
     // totals in the credit and latch if a profile at thousands of peers
     // shows it.
     pub(super) fn sample_outbound_credit_gauges(&self) {
-        let (rows, operations) =
-            self.outbound_credit
-                .values()
-                .fold((0_usize, 0_usize), |(rows, operations), entry| {
-                    (
-                        rows + entry.credit.rows(),
-                        operations + usize::from(entry.latch.strong_count() != 0),
-                    )
-                });
-        self.metrics.set_rib_outbound_credit(
-            i64::try_from(rows).unwrap_or(i64::MAX),
-            i64::try_from(operations).unwrap_or(i64::MAX),
+        let (rows, bytes, operations) = self.outbound_credit.values().fold(
+            (0_usize, 0_usize, 0_usize),
+            |(rows, bytes, operations), entry| {
+                (
+                    rows + entry.credit.rows(),
+                    bytes + entry.credit.bytes(),
+                    operations + usize::from(entry.latch.strong_count() != 0),
+                )
+            },
         );
+        let gauge = |value: usize| i64::try_from(value).unwrap_or(i64::MAX);
+        self.metrics
+            .set_rib_outbound_credit(gauge(rows), gauge(bytes), gauge(operations));
     }
 
     /// Live private rows held by `peer`'s envelopes.
@@ -257,6 +257,14 @@ impl RibManager {
         self.outbound_credit
             .get(&peer)
             .map_or(0, |entry| entry.credit.rows())
+    }
+
+    /// Estimated bytes held by `peer`'s envelopes: its credit in use.
+    #[cfg(test)]
+    pub(super) fn outbound_credit_bytes(&self, peer: PeerId) -> usize {
+        self.outbound_credit
+            .get(&peer)
+            .map_or(0, |entry| entry.credit.bytes())
     }
 
     /// `peer`'s credit, to charge it directly.

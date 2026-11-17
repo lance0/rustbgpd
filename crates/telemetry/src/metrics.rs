@@ -756,6 +756,7 @@ struct BgpMetricsInner {
     rib_outbound_owing_flips: IntCounter,
     rib_outbound_dirty_peers: IntGauge,
     rib_outbound_credit_rows: IntGauge,
+    rib_outbound_credit_bytes: IntGauge,
     rib_outbound_operations_live: IntGauge,
     rib_outbound_dirty_oldest_seconds: IntGauge,
     rib_outbound_registration_pending_peers: IntGauge,
@@ -1934,8 +1935,15 @@ impl BgpMetrics {
         let rib_outbound_credit_rows = IntGauge::new(
             "bgp_rib_outbound_credit_rows",
             "Private-family rows held by ordinary outbound envelopes queued for or \
-             being sent by sessions, all peers: the row credit in use. Sampled once \
-             per RIB manager loop iteration.",
+             being sent by sessions, all peers. Credit is admitted in bytes; see \
+             bgp_rib_outbound_credit_bytes. Sampled once per RIB manager loop iteration.",
+        )
+        .expect("valid metric definition");
+        let rib_outbound_credit_bytes = IntGauge::new(
+            "bgp_rib_outbound_credit_bytes",
+            "Estimated bytes of the private-family rows held by ordinary outbound \
+             envelopes queued for or being sent by sessions, all peers: the outbound \
+             credit in use. Sampled once per RIB manager loop iteration.",
         )
         .expect("valid metric definition");
         let rib_outbound_operations_live = IntGauge::new(
@@ -3608,6 +3616,9 @@ impl BgpMetrics {
             .register(Box::new(rib_outbound_credit_rows.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(rib_outbound_credit_bytes.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(rib_outbound_operations_live.clone()))
             .expect("metric not already registered");
         registry
@@ -4176,6 +4187,7 @@ impl BgpMetrics {
             rib_outbound_owing_flips,
             rib_outbound_dirty_peers,
             rib_outbound_credit_rows,
+            rib_outbound_credit_bytes,
             rib_outbound_operations_live,
             rib_outbound_dirty_oldest_seconds,
             rib_outbound_registration_pending_peers,
@@ -6253,16 +6265,24 @@ impl BgpMetrics {
         self.0.rib_stalled.set(i64::from(stalled));
     }
 
-    /// Set the sampled row credit in use and live whole-table operations.
-    pub fn set_rib_outbound_credit(&self, rows: i64, operations: i64) {
+    /// Set the sampled rows and bytes of outbound credit in use and the live
+    /// whole-table operations.
+    pub fn set_rib_outbound_credit(&self, rows: i64, bytes: i64, operations: i64) {
         self.0.rib_outbound_credit_rows.set(rows);
+        self.0.rib_outbound_credit_bytes.set(bytes);
         self.0.rib_outbound_operations_live.set(operations);
     }
 
-    /// Read the row-credit-in-use gauge. Test/diagnostic helper.
+    /// Read the credit-rows gauge. Test/diagnostic helper.
     #[must_use]
     pub fn rib_outbound_credit_rows(&self) -> i64 {
         self.0.rib_outbound_credit_rows.get()
+    }
+
+    /// Read the credit-bytes gauge. Test/diagnostic helper.
+    #[must_use]
+    pub fn rib_outbound_credit_bytes(&self) -> i64 {
+        self.0.rib_outbound_credit_bytes.get()
     }
 
     /// Read the live whole-table operation gauge. Test/diagnostic helper.
@@ -11544,8 +11564,9 @@ mod tests {
         assert_eq!(m.peer_outbound_writer_bytes("10.0.0.1"), 2);
         assert_eq!(m.peer_outbound_writer_bytes("10.0.0.2"), 7);
         assert_eq!(m.outbound_writer_bytes(), 9);
-        m.set_rib_outbound_credit(11, 2);
+        m.set_rib_outbound_credit(11, 2750, 2);
         assert_eq!(m.rib_outbound_credit_rows(), 11);
+        assert_eq!(m.rib_outbound_credit_bytes(), 2750);
         assert_eq!(m.rib_outbound_operations_live(), 2);
         m.initialize_outbound_commit_refusal_series("10.0.0.1");
         let text = gather_text(&m);

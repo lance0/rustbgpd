@@ -17,7 +17,7 @@ const OVERLAY_WORK: &str = "owing_cancel_overlay";
 fn manager() -> RibManager {
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
-        .with_outbound_row_credit(CREDIT);
+        .with_outbound_credit_bytes(unicast_rows(CREDIT));
     manager.test_force_ungrouped = true;
     super::distribution_window::untimed_window(&mut manager);
     manager

@@ -189,7 +189,7 @@ async fn run(
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     // Cohort mechanics compare grouped and private streams: the default
     // row credit, whatever a credit sweep sets.
-    manager.outbound_row_credit_override = None;
+    manager.outbound_credit_override = None;
     manager.test_force_ungrouped = force_ungrouped;
     manager.initial_dump_defer_min_routes = 0;
     let probes = Arc::new(AtomicUsize::new(0));

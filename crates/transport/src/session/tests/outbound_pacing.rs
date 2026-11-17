@@ -623,7 +623,7 @@ async fn outbound_pacing_queued_latch_and_credit_release_after_completion_and_ab
         let (mut session, _peer, commands, _rib_rx, mut writer, mut envelope, inventory) =
             queued_last_owner_session().await;
         let credit = Arc::new(rustbgpd_rib::OutboundCredit::default());
-        envelope.credit = Some(rustbgpd_rib::OutboundCharge::new(&credit, 7));
+        envelope.credit = Some(rustbgpd_rib::OutboundCharge::new(&credit, 7, 1_750));
         let latch = Arc::new(rustbgpd_rib::OperationLatch::new(Arc::default()));
         let weak = Arc::downgrade(&latch);
         envelope.latch = Some(latch);
@@ -664,6 +664,7 @@ async fn outbound_pacing_queued_latch_and_credit_release_after_completion_and_ab
         assert_eq!(inventory.live(), 0, "abort {abort}");
         assert_eq!(weak.strong_count(), 0, "abort {abort}: latch released");
         assert_eq!(credit.rows(), 0, "abort {abort}: credit released");
+        assert_eq!(credit.bytes(), 0, "abort {abort}: credit bytes released");
     }
 }
 
@@ -2043,7 +2044,7 @@ async fn moved_partial_slices_resume_and_retire_before_releasing_credit() {
             let weak = Arc::downgrade(&latch);
             let mut update = OutboundRouteUpdate {
                 exact_export_snapshot: Some(session.publish_export_profile()),
-                credit: Some(rustbgpd_rib::OutboundCharge::new(&credit, 7)),
+                credit: Some(rustbgpd_rib::OutboundCharge::new(&credit, 7, 1_750)),
                 latch: Some(latch),
                 end_of_rib: vec![family],
                 ..OutboundRouteUpdate::default()
@@ -2182,6 +2183,7 @@ async fn moved_partial_slices_resume_and_retire_before_releasing_credit() {
             assert!(session.pending_outbound.is_none());
             assert_eq!(live(), 0);
             assert_eq!(credit.rows(), 0);
+            assert_eq!(credit.bytes(), 0);
             assert_eq!(weak.strong_count(), 0);
         }
     }

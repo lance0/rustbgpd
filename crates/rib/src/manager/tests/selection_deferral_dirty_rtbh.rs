@@ -3331,7 +3331,7 @@ fn held_empty_view_resync_flushes_the_markers_the_hold_does_not_hold() {
                 families: vec![FAMILY],
             }],
         })
-        .with_outbound_row_credit(4);
+        .with_outbound_credit_bytes(unicast_rows(4));
     manager.test_force_ungrouped = true;
     let (outbound_tx, mut observer_rx) = mpsc::channel(1);
     outbound_tx
@@ -3368,7 +3368,11 @@ fn held_empty_view_resync_flushes_the_markers_the_hold_does_not_hold() {
         empty_stagings,
         "an empty follow-up pass does not repeat staging for a caught-up held peer"
     );
-    let spent = crate::OutboundCharge::new(&manager.outbound_credit_handle(observer), 4);
+    let spent = crate::OutboundCharge::new(
+        &manager.outbound_credit_handle(observer),
+        4,
+        unicast_rows(4),
+    );
     let stagings = manager.outbound_stagings(observer);
     let mut route = make_v6_route(
         Ipv6Prefix::new("2001:db8:30::".parse().unwrap(), 64),
