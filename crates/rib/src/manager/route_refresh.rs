@@ -1014,6 +1014,16 @@ impl RibManager {
                 // RFC 5291 §6: a peer ROUTE-REFRESH lifts the initial-
                 // advertisement gate. Internal recovery may only observe it.
                 self.lift_orf_gate(peer, family);
+                // A receiver the owed-row cap evicted is built by the resync
+                // tick alone, and its initial End-of-RIB may still be owed:
+                // an answer ahead of that marker carries no BoRR or EoRR
+                // (RFC 7313 section 4) and would spend the request. It
+                // waits for the receiver's resync, which sends the marker
+                // first, as an answer the channel refused does.
+                if self.owed_row_evicted.contains(&peer) {
+                    self.defer_refresh_answer(peer, family, suppress_eor);
+                    return FamilyReplayOutcome::Failed;
+                }
                 // GR or selection release may owe the ORF-gated initial
                 // flood. Only the peer refresh may consume this obligation.
                 let deferred_eor = self.eor.behind_orf_table(peer, family);

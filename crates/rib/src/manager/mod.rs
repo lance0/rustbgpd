@@ -310,6 +310,9 @@ struct AdjRibOutCommitStats {
     owed_drain_steps: usize,
     #[cfg(test)]
     owed_drain_step_rows_max: usize,
+    /// Owing peers visited by the owed-row trim and cap scans.
+    #[cfg(test)]
+    owed_peer_scans: usize,
     /// Distinct keys collected into per-peer VPN resync enumerations.
     #[cfg(test)]
     vpn_resync_key_inserts: usize,
@@ -4387,16 +4390,21 @@ impl RibManager {
             // built; it stays marked while it stays dirty.
             let evicted = self.owed_row_evicted.remove(&last);
             self.distribute_changes_without_stale_flush();
-            if evicted && self.dirty_peers.contains(&last) {
+            let still_dirty = self.dirty_peers.contains(&last);
+            if evicted && still_dirty {
                 self.owed_row_evicted.insert(last);
             }
+            // Refused (a live whole-table operation, a full channel), the
+            // unit built nothing: it is no backlog, and the release of what
+            // refused it wakes the tick.
+            let ran = evicted && (!still_dirty || self.selection_partial_caught_up(last));
             self.dirty_peers.extend(withheld);
             self.dirty_since.extend(withheld_since);
             self.force_outbound_peers.extend(withheld_force);
             // An evicted receiver's resync is a whole table whatever the
             // poll budget says: it is the tick's last unit, so the actor
             // loop takes queued input before the next receiver's.
-            if evicted {
+            if ran {
                 return true;
             }
             let unattempted_remain = self
