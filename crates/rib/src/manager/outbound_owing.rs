@@ -28,7 +28,7 @@
 //! - A key no source still offers and the peer does not hold is cancelled
 //!   (the keep-set below mirrors the resync enumeration).
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::hash::Hash;
 
 use rustbgpd_wire::{Afi, EvpnRouteKey, Prefix, Safi, VpnRouteKey};
@@ -36,7 +36,6 @@ use tracing::debug;
 
 use super::RibManager;
 use super::distribution::OutboundCommitFailure;
-use super::eor_hold::{EorHold, EorTrigger};
 use crate::PeerId;
 use crate::fast_hash::{FastMap, FastSet};
 use crate::outbound_credit::{CHUNK_ROWS, OutboundOperation, OutboundSlot};
@@ -144,9 +143,11 @@ impl<K: Clone + Eq + Hash> OwedKeys<K> {
     }
 }
 
-/// Most list entries one cursor step reads, dead ones included, so a step
-/// over a churned list stays bounded.
-const CURSOR_SCAN: usize = 4 * CHUNK_ROWS;
+/// Most list entries one [`OwedRows::trim`] drops. A cursor that leaves (a
+/// flap, an eviction, the last one catching up) can put a table of entries
+/// behind every other cursor at once; they are dropped this many per trim,
+/// and two per key logged, never in one turn.
+const TRIM_ROWS: usize = 4 * CHUNK_ROWS;
 
 /// Keys a list may hold beyond twice its family's peak ([`OwedRows::peak`])
 /// before the slowest receivers are resynced instead
@@ -155,18 +156,29 @@ const OWED_ROWS_SLACK: usize = 4 * CHUNK_ROWS;
 
 /// The unicast keys of one AFI that passes carried while some receiver owed
 /// the family whole, in the order they last changed: a key that changes
-/// again moves to the back. A receiver's debt is every live entry after its
+/// again moves to the back. A receiver's debt is every entry after its
 /// cursor, so a key changed behind a cursor is visited again and one changed
 /// ahead of it is visited once, at its newest state.
+///
+/// Each key has one entry, moved in O(log n) when the key is logged again,
+/// so the list has no dead entries to compact and a step reads only the
+/// keys it sends. Both indexes are ordered maps: they have no capacity to
+/// rehash or relocate as the list grows or shrinks, and they free their
+/// nodes as entries leave. So no call does list work that grows with the
+/// table: a logged key moves one entry and drops at most two, and a trim
+/// drops at most [`TRIM_ROWS`].
 #[derive(Default)]
 pub(super) struct OwedRows {
-    /// Keys with the sequence they were logged at, ascending; an entry
-    /// whose sequence no longer matches `live` was logged again later.
-    order: std::collections::VecDeque<(Prefix, u64)>,
-    live: FastMap<Prefix, u64>,
+    /// Each key by the sequence it was last logged at.
+    order: BTreeMap<u64, Prefix>,
+    /// The sequence each key is held at.
+    live: BTreeMap<Prefix, u64>,
     /// Sequence of the newest entry ever logged; it never goes back, so a
     /// cursor taken from it stays valid across a trim.
     head: u64,
+    /// The slowest cursor at the last trim (the head with no cursor):
+    /// entries up to it are behind every cursor and wait to be dropped.
+    floor: u64,
     /// The most keys one pass has accounted for while a cursor was held:
     /// the family's Loc-RIB after the pass plus the keys the pass carried,
     /// so the rows a pass withdrew still count. The cap is taken from it:
@@ -174,6 +186,9 @@ pub(super) struct OwedRows {
     /// and only fresh keys rotating past a receiver that falls behind do.
     /// Zero again once the list is freed.
     peak: usize,
+    /// Most entries one `touch` or `trim` has dropped.
+    #[cfg(test)]
+    pub(super) dropped_max: usize,
 }
 
 impl OwedRows {
@@ -182,72 +197,81 @@ impl OwedRows {
         self.head
     }
 
-    /// Distinct keys held.
+    /// Distinct keys held, those still to be dropped included.
     pub(super) fn len(&self) -> usize {
         self.live.len()
     }
 
-    /// Log `key` as changed now.
+    /// Whether entries behind every cursor are still to be dropped.
+    pub(super) fn trimming(&self) -> bool {
+        self.order
+            .first_key_value()
+            .is_some_and(|(sequence, _)| *sequence <= self.floor)
+    }
+
+    /// Log `key` as changed now: its entry moves to the back. While entries
+    /// wait to be dropped two go with each key logged, so the list does not
+    /// grow until they are gone.
     fn touch(&mut self, key: Prefix) {
         self.head += 1;
-        self.live.insert(key, self.head);
-        self.order.push_back((key, self.head));
-        if self.order.len() > 2 * self.live.len() + 64 {
-            let live = &self.live;
-            self.order
-                .retain(|(key, sequence)| live.get(key) == Some(sequence));
+        if let Some(logged) = self.live.insert(key, self.head) {
+            self.order.remove(&logged);
+        }
+        self.order.insert(self.head, key);
+        self.drop_behind(2);
+    }
+
+    /// Drop up to `most` of the oldest entries behind every cursor.
+    fn drop_behind(&mut self, most: usize) {
+        let mut dropped = 0;
+        while dropped < most
+            && let Some(entry) = self.order.first_entry()
+            && *entry.key() <= self.floor
+        {
+            self.live.remove(&entry.remove());
+            dropped += 1;
+        }
+        #[cfg(test)]
+        {
+            self.dropped_max = self.dropped_max.max(dropped);
         }
     }
 
-    /// Up to `count` live keys after `cursor`, oldest first, reading at
-    /// most `scan` entries, and the cursor past everything read.
-    fn after(&self, cursor: u64, count: usize, scan: usize) -> (Vec<Prefix>, u64) {
-        let start = self
-            .order
-            .partition_point(|(_, sequence)| *sequence <= cursor);
+    /// Up to `count` keys after `cursor`, oldest first, and the cursor past
+    /// them (the head when none is left).
+    fn after(&self, cursor: u64, count: usize) -> (Vec<Prefix>, u64) {
+        let mut entries = self.order.range(cursor.saturating_add(1)..);
         let mut keys = Vec::new();
         let mut last = cursor;
-        for (read, (key, sequence)) in self.order.range(start..).enumerate() {
-            if keys.len() == count || read == scan {
-                return (keys, last);
-            }
+        for (sequence, key) in entries.by_ref().take(count) {
+            keys.push(*key);
             last = *sequence;
-            if self.live.get(key) == Some(sequence) {
-                keys.push(*key);
-            }
         }
-        (keys, self.head)
+        if entries.next().is_none() {
+            last = self.head;
+        }
+        (keys, last)
     }
 
-    /// Drop every entry no cursor still waits for: those up to `floor`, the
-    /// slowest cursor, or all of them when no receiver holds one.
+    /// Drop entries no cursor still waits for, at most [`TRIM_ROWS`] a
+    /// call: those up to `floor`, the slowest cursor, or all of them when
+    /// no receiver holds one. The peak is cleared when the list has
+    /// emptied with no cursor.
     fn trim(&mut self, floor: Option<u64>) {
-        let Some(floor) = floor else {
-            self.order = std::collections::VecDeque::new();
-            self.live = FastMap::default();
+        self.floor = floor.unwrap_or(self.head);
+        self.drop_behind(TRIM_ROWS);
+        if floor.is_none() && self.order.is_empty() {
             self.peak = 0;
-            return;
-        };
-        while let Some(&(key, sequence)) = self.order.front() {
-            if sequence > floor {
-                break;
-            }
-            self.order.pop_front();
-            if self.live.get(&key) == Some(&sequence) {
-                self.live.remove(&key);
-            }
-        }
-        if self.order.capacity() > 4 * self.order.len() + 64 {
-            self.order.shrink_to(2 * self.order.len());
-            self.live.shrink_to(2 * self.live.len());
         }
     }
 
-    /// Capacity-based byte estimate, as [`OwedKeys::bytes`].
+    /// Byte estimate: each key has an entry in both maps, counted at a
+    /// B-tree's worst fill (five of eleven slots a leaf) with a quarter
+    /// more for the inner nodes.
     #[cfg(test)]
     pub(super) fn bytes(&self) -> usize {
-        let entry = std::mem::size_of::<(Prefix, u64)>();
-        self.order.capacity() * entry + self.live.capacity() * (entry + 1)
+        let entry = std::mem::size_of::<Prefix>() + std::mem::size_of::<u64>();
+        self.live.len() * 2 * (entry * 11 / 5 + entry / 4)
     }
 }
 
@@ -913,6 +937,7 @@ impl RibManager {
     /// regroup, an escalation). Returns whether it owed anything.
     pub(super) fn drop_peer_owing(&mut self, peer: PeerId) -> bool {
         self.owing_peers.remove(&peer);
+        self.owed_row_evicted.remove(&peer);
         let Some(owing) = self.take_owing(peer) else {
             return false;
         };
@@ -1428,6 +1453,12 @@ impl RibManager {
         })
     }
 
+    /// Whether a list still holds entries behind every cursor: the resync
+    /// tick drops them a bounded number at a time.
+    pub(super) fn owed_rows_trimming(&self) -> bool {
+        self.owed_rows.iter().any(OwedRows::trimming)
+    }
+
     /// Whether any peer has owed work the resync tick can run.
     pub(super) fn owing_runnable(&self) -> bool {
         self.owing_peers.iter().any(|&peer| {
@@ -1665,7 +1696,7 @@ impl RibManager {
             return false;
         };
         let count = self.owing_step_keys(peer, family, budget);
-        let (mut keys, last) = self.owed_rows[index].after(from, count, CURSOR_SCAN);
+        let (mut keys, last) = self.owed_rows[index].after(from, count);
         if held {
             keys.retain(|prefix| self.owed_key_exempt(peer, &OwedKey::Unicast(*prefix)));
         }
@@ -1738,8 +1769,9 @@ impl RibManager {
         }
     }
 
-    /// The slowest unicast cursor per AFI, after dropping every list entry
-    /// behind it; `None` where no receiver holds one (that list is freed).
+    /// The slowest unicast cursor per AFI, after dropping a bounded number
+    /// of the list entries behind it; `None` where no receiver holds one
+    /// (that list is being freed).
     pub(super) fn trim_owed_rows(&mut self) -> [Option<u64>; 2] {
         let mut floors = [None::<u64>; 2];
         for &peer in &self.owing_peers {
@@ -1800,12 +1832,15 @@ impl RibManager {
     /// After a pass's member loop: a list that outgrew its cap (fresh keys
     /// rotating through the table past a receiver that does not keep up) is
     /// cut back by marking its slowest receivers dirty, slice 1a's path.
-    /// Nothing is built here: the pass that logged the keys is over, so
-    /// each resync is a unit of the dirty ring, not part of this turn.
+    /// Nothing is built here, and no later pass builds it either: an
+    /// evicted receiver is resynced only by the resync tick, one receiver
+    /// per unit ([`Self::owed_row_evicted`]). While entries an earlier
+    /// trim left are still being dropped the list is not growing
+    /// ([`OwedRows::touch`]) and no receiver is evicted for them.
     pub(super) fn cap_owed_rows(&mut self) {
         for (index, family) in OwedFamily::UNICAST.into_iter().enumerate() {
             let cap = 2 * self.owed_rows[index].peak + OWED_ROWS_SLACK;
-            while self.owed_rows[index].len() > cap {
+            while self.owed_rows[index].len() > cap && !self.owed_rows[index].trimming() {
                 let slowest = self
                     .owing_peers
                     .iter()
@@ -1822,7 +1857,9 @@ impl RibManager {
                 debug!(%peer, ?family, "owed-row list over its cap — slowest receiver resyncs");
                 self.drop_peer_owing(peer);
                 self.metrics.record_rib_outbound_owing_fallback();
-                self.mark_outbound_dirty(peer);
+                if self.mark_outbound_dirty(peer) {
+                    self.owed_row_evicted.insert(peer);
+                }
             }
         }
     }
@@ -1853,7 +1890,10 @@ impl RibManager {
                 .iter()
                 .any(|&afi_safi| self.eor.owes(peer, afi_safi))
         {
-            self.release_eor_hold(peer, EorHold::OwedKeys, EorTrigger::Release);
+            // Every owed row was admitted. A marker the channel refuses
+            // (the last envelope may have taken its last slot) waits for
+            // the tick's marker retry: a resync would send the table again.
+            self.settle_free_eor(peer);
         }
     }
 
@@ -1916,8 +1956,7 @@ impl RibManager {
             let mut keys = owing.copy_keys(family, DrainScope::All, usize::MAX);
             if owing.is_whole(family) {
                 let index = family.unicast_index();
-                let (rest, _) =
-                    self.owed_rows[index].after(owing.cursor[index], usize::MAX, usize::MAX);
+                let (rest, _) = self.owed_rows[index].after(owing.cursor[index], usize::MAX);
                 keys.extend(rest.into_iter().map(OwedKey::Unicast));
             }
             OwingDrain::keyed(peer, family, usize::MAX, keys)
@@ -1978,7 +2017,7 @@ impl RibManager {
                 let cursor_keys = if family.is_unicast() && owing.is_whole(family) {
                     let index = family.unicast_index();
                     self.owed_rows[index]
-                        .after(owing.cursor[index], usize::MAX, usize::MAX)
+                        .after(owing.cursor[index], usize::MAX)
                         .0
                 } else {
                     Vec::new()
@@ -2431,38 +2470,39 @@ mod fifo_tests {
         }
     }
 
+    fn row(index: u32) -> Prefix {
+        Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+            std::net::Ipv4Addr::from(0x0a00_0000 + index),
+            32,
+        ))
+    }
+
     /// The shared list: a key logged again moves to the back, a read
-    /// resumes after its cursor and is bounded in keys and in entries
-    /// scanned, and a trim keeps the head.
+    /// resumes after its cursor and is bounded in keys, and a trim keeps
+    /// the head.
     #[test]
     fn owed_rows_move_a_changed_key_to_the_back() {
-        let key = |index: u8| {
-            Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
-                std::net::Ipv4Addr::new(192, 0, 2, index),
-                32,
-            ))
-        };
+        let key = row;
         let mut rows = OwedRows::default();
         for index in 0..5 {
             rows.touch(key(index));
         }
-        assert_eq!(rows.after(0, 2, usize::MAX), (vec![key(0), key(1)], 2));
+        assert_eq!(rows.after(0, 2), (vec![key(0), key(1)], 2));
         // Key 1 changes behind a cursor at 2, key 3 ahead of it.
         rows.touch(key(1));
         rows.touch(key(3));
         assert_eq!(rows.head(), 7);
         assert_eq!(rows.len(), 5);
         assert_eq!(
-            rows.after(2, usize::MAX, usize::MAX),
+            rows.after(2, usize::MAX),
             (vec![key(2), key(4), key(1), key(3)], 7)
         );
-        // A scan bound stops a read early; the cursor resumes after it.
-        let (keys, cursor) = rows.after(0, usize::MAX, 3);
-        assert_eq!((keys, cursor), (vec![key(0), key(2)], 3));
-        assert_eq!(rows.after(7, 9, 9), (vec![], 7), "caught up");
+        assert_eq!(rows.after(0, 2), (vec![key(0), key(2)], 3));
+        assert_eq!(rows.after(5, 2), (vec![key(1), key(3)], 7), "the last keys");
+        assert_eq!(rows.after(7, 9), (vec![], 7), "caught up");
         rows.trim(Some(5));
         assert_eq!(rows.len(), 2, "keys 1 and 3 are still ahead of a cursor");
-        assert_eq!(rows.after(5, 9, 9), (vec![key(1), key(3)], 7));
+        assert_eq!(rows.after(5, 9), (vec![key(1), key(3)], 7));
         rows.trim(None);
         assert_eq!(
             (rows.len(), rows.head()),
@@ -2470,11 +2510,57 @@ mod fifo_tests {
             "the head never goes back"
         );
         assert_eq!(rows.bytes(), 0);
-        // Churn of one key does not grow the list.
-        for _ in 0..10_000 {
-            rows.touch(key(9));
+    }
+
+    /// Work count: no call does list maintenance that grows with the list.
+    /// A cursor that reads nothing keeps `ROWS` keys in the list while one
+    /// key changes over and over: every change moves that key's one entry,
+    /// so the list holds no dead entries and no `touch` drops or scans any.
+    /// When the cursor then leaves, the whole list is behind every cursor:
+    /// each trim drops at most `TRIM_ROWS` entries and each key logged two,
+    /// and the list still empties. Nothing is relocated or rehashed on the
+    /// way down: the list has no capacity. Red when changed keys leave dead
+    /// entries that one call compacts, and when a trim drops all it can.
+    #[test]
+    fn no_call_does_list_work_that_grows_with_the_list() {
+        const ROWS: u32 = 50_000;
+        let mut rows = OwedRows::default();
+        for index in 0..ROWS {
+            rows.touch(row(index));
         }
-        assert!(rows.order.len() <= 2 * rows.len() + 64);
+        // The stalled cursor sits before the first key.
+        rows.trim(Some(0));
+        for _ in 0..3 * ROWS {
+            rows.touch(row(7));
+            assert_eq!(rows.order.len(), rows.len(), "one entry per key");
+        }
+        rows.trim(Some(0));
+        assert_eq!(rows.len(), ROWS as usize);
+        assert_eq!(rows.dropped_max, 0, "nothing is behind the cursor");
+        // The cursor leaves; another one waits at the head.
+        let head = rows.head();
+        let mut trims = 0;
+        while rows.len() != 0 {
+            let before = rows.len();
+            rows.trim(Some(head));
+            assert!(before - rows.len() <= TRIM_ROWS, "one trim dropped more");
+            trims += 1;
+        }
+        assert_eq!(trims, (ROWS as usize).div_ceil(TRIM_ROWS));
+        assert_eq!(rows.dropped_max, TRIM_ROWS);
+        // Logging keys while entries wait drops two of them per key, so the
+        // list does not grow, and never more.
+        let mut rows = OwedRows::default();
+        for index in 0..ROWS {
+            rows.touch(row(index));
+        }
+        rows.floor = rows.head();
+        for index in 0..1000 {
+            let before = rows.len();
+            rows.touch(row(ROWS + index));
+            assert_eq!(rows.len(), before - 1, "two dropped, one logged");
+        }
+        assert_eq!(rows.dropped_max, 2);
     }
 
     #[test]

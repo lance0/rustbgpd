@@ -50,7 +50,18 @@ fn up_with(
     session_id: u64,
     edit: impl FnOnce(&mut RibUpdate),
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
-    let (outbound_tx, output) = mpsc::channel(4096);
+    up_sized(manager, peer, session_id, 4096, edit)
+}
+
+/// [`up_with`] on an outbound channel of `channel` envelopes.
+fn up_sized(
+    manager: &mut RibManager,
+    peer: PeerId,
+    session_id: u64,
+    channel: usize,
+    edit: impl FnOnce(&mut RibUpdate),
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    let (outbound_tx, output) = mpsc::channel(channel);
     let mut registration = RibUpdate::PeerUp {
         supersedes: None,
         per_client_best: false,
@@ -203,12 +214,22 @@ impl Receiver {
 /// (as a selection release leaves them), then one pass carrying rows
 /// 0..`rows`: the debt every cursor starts with. Nothing was staged.
 fn owing(receivers: u8, rows: u32, credit: usize) -> (RibManager, Vec<Receiver>) {
+    owing_sized(receivers, rows, credit, 4096)
+}
+
+/// [`owing`] with outbound channels of `channel` envelopes.
+fn owing_sized(
+    receivers: u8,
+    rows: u32,
+    credit: usize,
+    channel: usize,
+) -> (RibManager, Vec<Receiver>) {
     let mut manager = manager(credit);
     std::mem::forget(up_session(&mut manager, peer_v4(SOURCE), 0));
     let mut receivers: Vec<Receiver> = (0..receivers)
         .map(|index| {
             let peer = receiver(index);
-            let mut rx = up_session(&mut manager, peer, 0);
+            let mut rx = up_sized(&mut manager, peer, 0, channel, |_| {});
             let mut wire = Wire::default();
             wire.write(&mut rx);
             assert_eq!(wire.markers, 1, "the empty initial table's End-of-RIB");
@@ -1110,39 +1131,29 @@ fn an_eviction_pass_builds_no_resync_in_its_own_turn() {
     assert!(units >= STALLED, "{units} units for {STALLED} receivers");
 }
 
-/// Work count: one step reads at most `CURSOR_SCAN` list entries, dead ones
-/// included, and still moves the cursor. Every key of a large list changes
-/// again, so the cursor has that many dead entries ahead of it: the steps
-/// that read only dead entries send nothing, and the first live row leaves
-/// in the step that reaches it. Red without the scan bound: the first step
-/// reads past every dead entry and sends rows.
+/// Work count: a key that changes again moves its one list entry, so a
+/// list every key of which changed again holds no dead entries: the next
+/// step sends a full chunk, the walk takes ceil(N / B) steps and each row
+/// leaves once, at its newest state. Red when a changed key leaves a dead
+/// entry behind: steps read dead entries and send less than a chunk.
 #[test]
-fn a_step_over_dead_entries_reads_a_bounded_number_and_advances() {
-    const SCAN: usize = 4 * CHUNK_ROWS;
-    let rows = u32::try_from(2 * SCAN + 800).unwrap();
+fn a_key_changed_again_leaves_no_dead_entry_for_a_step_to_read() {
+    let rows = u32::try_from(8 * CHUNK_ROWS + 800).unwrap();
     let (mut manager, mut receivers) = owing(1, rows, 1 << 20);
     let again: Vec<_> = (0..rows).map(|index| (index, 1)).collect();
     received(&mut manager, &again, &[]);
+    assert_eq!(manager.owed_rows[0].len(), rows as usize);
     let steps = manager.adj_rib_out_commit_stats.owed_drain_steps;
-    for step in 0..2 {
-        tick(&mut manager, &mut receivers);
-        assert!(
-            receivers[0].wire.announced.is_empty(),
-            "step {step} read past {SCAN} dead entries"
-        );
-        assert!(manager.owes_whole(receivers[0].peer, UNICAST));
-    }
-    // 800 dead entries are left, then the live ones.
     tick(&mut manager, &mut receivers);
-    assert_eq!(receivers[0].wire.announced.len(), CHUNK_ROWS, "it advanced");
-    assert!(manager.adj_rib_out_commit_stats.owed_drain_steps - steps <= 3);
+    assert_eq!(receivers[0].wire.announced.len(), CHUNK_ROWS, "a full step");
     drain(&mut manager, &mut receivers);
+    assert_eq!(manager.adj_rib_out_commit_stats.owed_drain_steps - steps, 9);
     assert_eq!(
         receivers[0].wire.announced.len(),
         rows as usize,
         "once each"
     );
-    assert_settled(&manager, &receivers, &again, "dead entries");
+    assert_settled(&manager, &receivers, &again, "changed again");
 }
 
 /// Two cursors, one key: a key that sits behind the faster cursor and ahead
@@ -1184,7 +1195,8 @@ fn a_key_between_two_cursors_reaches_both_once_at_its_newest_state() {
 /// no credit: the first gets its marker after its last row while the
 /// second still owes and has none; once the second reads it drains and
 /// gets exactly one marker after its last row. Red when a marker waits for
-/// every cursor of the family.
+/// every cursor of the family, and when it leaves a tick after the step
+/// that caught up.
 #[test]
 fn a_caught_up_receiver_gets_its_end_of_rib_while_another_is_stalled() {
     let rows = 40u32;
@@ -1193,9 +1205,15 @@ fn a_caught_up_receiver_gets_its_end_of_rib_while_another_is_stalled() {
         &manager.outbound_credit_handle(receivers[1].peer),
         CREDIT,
     );
+    let mut caught_up = false;
     for _ in 0..64 {
         tick(&mut manager, &mut receivers);
+        // The marker leaves in the step that catches up, not a tick later.
+        let done = !manager.owes(receivers[0].peer, V4);
+        assert_eq!(receivers[0].wire.markers, usize::from(done));
+        caught_up |= done;
     }
+    assert!(caught_up);
     let all: Vec<_> = (0..rows).map(|index| (index, 0)).collect();
     assert_eq!(receivers[0].wire.table, table(&all));
     assert_eq!(receivers[0].wire.markers, 1, "its own cursor caught up");
@@ -1338,6 +1356,214 @@ fn ipv4_and_ipv6_cursors_on_one_receiver_each_end_with_their_own_marker() {
     assert!(one_family_done, "one family finished before the other");
     assert_eq!(seen, [[40, 1, 0], [8, 1, 0]]);
     assert_eq!(manager.owed_rows[0].len() + manager.owed_rows[1].len(), 0);
+}
+
+/// The last step takes the last slot of the outbound channel, so the
+/// End-of-RIB that follows it is refused. Every owed row was admitted: the
+/// receiver is not marked dirty and no resync is built. The marker waits
+/// for the tick's marker retry and leaves once, after the last row, when
+/// the channel has room. Red when the refusal marks the receiver dirty:
+/// the table is sent again as an uncharged whole-peer resync.
+#[test]
+fn a_full_channel_at_the_last_step_keeps_the_marker_for_the_tick() {
+    let rows = 3u32;
+    let (mut manager, mut receivers) = owing_sized(1, rows, 1 << 20, 1);
+    let peer = receivers[0].peer;
+    let builds = manager.adj_rib_out_commit_stats.resync_builds;
+    // The step's one envelope fills the channel; nothing is read yet.
+    manager.resync_dirty_peers_bounded();
+    assert!(manager.outbound_channel_full(peer));
+    assert!(!manager.owes(peer, V4), "every owed row was admitted");
+    assert!(
+        manager.eor_pending(peer).contains(&V4),
+        "refused, still owed"
+    );
+    assert!(
+        !manager.dirty_peers.contains(&peer),
+        "no resync for a marker"
+    );
+    // Ticks against the full channel change nothing.
+    for _ in 0..3 {
+        manager.resync_dirty_peers_bounded();
+        assert!(!manager.dirty_peers.contains(&peer));
+    }
+    receivers[0].write();
+    assert_eq!(receivers[0].wire.announced.len(), rows as usize);
+    assert_eq!(
+        receivers[0].wire.markers, 0,
+        "refused with the channel full"
+    );
+    // Room again: the next tick sends the marker, once.
+    for _ in 0..4 {
+        tick(&mut manager, &mut receivers);
+        assert_eq!(receivers[0].wire.markers, 1);
+    }
+    assert_eq!(
+        manager.adj_rib_out_commit_stats.resync_builds, builds,
+        "no resync was built"
+    );
+    assert_eq!(
+        receivers[0].wire.announced.len(),
+        rows as usize,
+        "once each"
+    );
+    assert!(receivers[0].wire.uncharged == 0 && receivers[0].wire.latched == 0);
+    let all: Vec<_> = (0..rows).map(|index| (index, 0)).collect();
+    assert_settled(&manager, &receivers, &all, "full channel");
+}
+
+/// Receiver 0 reads and keeps up while `stalled` others read nothing and
+/// fresh keys rotate through the table, until the list cap evicts them.
+/// Returns the table the rotation left.
+fn evict_stalled(stalled: u8) -> (RibManager, Vec<Receiver>, Vec<(u32, u32)>) {
+    let (mut manager, mut receivers) = owing(1 + stalled, 8, CREDIT);
+    for round in 0..200u32 {
+        let base = 1000 + round * 64;
+        let fresh: Vec<_> = (base..base + 64).map(|index| (index, 0)).collect();
+        let gone: Vec<_> = if round == 0 {
+            vec![]
+        } else {
+            (base - 64..base).collect()
+        };
+        let before = fallbacks(&manager);
+        received(&mut manager, &fresh, &gone);
+        if fallbacks(&manager) > before {
+            assert_eq!(fallbacks(&manager) - before, f64::from(stalled));
+            for receiver in &receivers[1..] {
+                assert!(manager.dirty_peers.contains(&receiver.peer));
+                assert!(manager.owed_row_evicted.contains(&receiver.peer));
+            }
+            let table = (0..8).map(|index| (index, 0)).chain(fresh).collect();
+            return (manager, receivers, table);
+        }
+        for _ in 0..12 {
+            manager.resync_dirty_peers_bounded();
+            receivers[0].write();
+        }
+    }
+    panic!("the stalled receivers were never evicted");
+}
+
+/// Work count: a receiver the cap evicted is resynced by the resync tick
+/// only. The ordinary passes that follow the eviction build no resync and
+/// stage nothing toward the evicted receivers, though each has channel
+/// room; the tick then builds one a unit, and each receiver ends with the
+/// exact table and one End-of-RIB after it. Red when an ordinary pass
+/// takes an evicted receiver as any dirty one: the first one-key pass
+/// builds a whole-table resync for each of them in its own turn.
+#[test]
+fn an_ordinary_pass_builds_no_resync_for_an_evicted_receiver() {
+    const STALLED: usize = 3;
+    let (mut manager, mut receivers, mut expected) = evict_stalled(3);
+    let builds = manager.adj_rib_out_commit_stats.resync_builds;
+    // The evicted receivers read what their steps had queued.
+    for receiver in &mut receivers[1..] {
+        receiver.write();
+    }
+    for variant in 1..4 {
+        received(&mut manager, &[(5, variant)], &[]);
+        assert_eq!(
+            manager.adj_rib_out_commit_stats.resync_builds, builds,
+            "an ordinary pass built a resync"
+        );
+    }
+    expected[5] = (5, 3);
+    for receiver in &mut receivers[1..] {
+        assert!(!manager.outbound_channel_full(receiver.peer), "it has room");
+        let sent = receiver.wire.announced.len();
+        receiver.write();
+        assert_eq!(receiver.wire.announced.len(), sent, "nothing was staged");
+        assert!(manager.dirty_peers.contains(&receiver.peer));
+    }
+    assert_eq!(manager.owed_row_evicted.len(), STALLED);
+    // The tick: one evicted receiver a unit.
+    for unit in 1..=STALLED {
+        manager.resync_dirty_peers_bounded();
+        assert_eq!(
+            manager.adj_rib_out_commit_stats.resync_builds - builds,
+            unit,
+            "one resync a unit"
+        );
+        assert_eq!(manager.owed_row_evicted.len(), STALLED - unit);
+    }
+    drain(&mut manager, &mut receivers);
+    assert!(manager.owed_row_evicted.is_empty());
+    assert_eq!(
+        manager.adj_rib_out_commit_stats.resync_builds - builds,
+        STALLED,
+        "one resync a receiver"
+    );
+    assert_settled(&manager, &receivers, &expected, "evicted");
+}
+
+/// The mark of an evicted receiver does not outlive what it stands for. A
+/// tick that finds no room leaves the receiver dirty and marked; a flap, a
+/// new session, a closed channel and a regroup each drop the mark, and the
+/// receiver's next session or resync ends with the exact table and one
+/// End-of-RIB.
+#[test]
+fn an_evicted_receivers_mark_ends_with_its_session_or_its_group() {
+    // No room at the tick: still dirty, still the tick's.
+    let (mut manager, mut receivers, expected) = evict_stalled(1);
+    let peer = receivers[1].peer;
+    let latch = manager
+        .begin_outbound_operation(peer, 1)
+        .expect("a live whole-table operation");
+    let builds = manager.adj_rib_out_commit_stats.resync_builds;
+    manager.resync_dirty_peers_bounded();
+    received(&mut manager, &[(5, 0)], &[]);
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
+    assert!(manager.dirty_peers.contains(&peer));
+    assert!(manager.owed_row_evicted.contains(&peer));
+    drop(latch);
+    drain(&mut manager, &mut receivers);
+    assert!(manager.owed_row_evicted.is_empty());
+    assert_settled(&manager, &receivers, &expected, "no room at the tick");
+
+    // A flap, and a new session over the old one.
+    for flap in [true, false] {
+        let (mut manager, mut receivers, expected) = evict_stalled(1);
+        let peer = receivers[1].peer;
+        if flap {
+            manager.handle_update(RibUpdate::PeerDown {
+                peer,
+                session_id: 0,
+            });
+            assert!(!manager.dirty_peers.contains(&peer));
+        }
+        let rx = up_session(&mut manager, peer, 1);
+        assert!(manager.owed_row_evicted.is_empty(), "flap: {flap}");
+        receivers[1] = Receiver {
+            peer,
+            rx,
+            wire: Wire::default(),
+        };
+        drain(&mut manager, &mut receivers);
+        assert!(manager.owed_row_evicted.is_empty());
+        assert_settled(&manager, &receivers, &expected, "new session");
+    }
+
+    // The channel closes before the tick reaches the receiver.
+    let (mut manager, mut receivers, _) = evict_stalled(1);
+    let gone = receivers.pop().unwrap();
+    drop(gone.rx);
+    manager.resync_dirty_peers_bounded();
+    assert!(manager.owed_row_evicted.is_empty());
+    assert!(!manager.dirty_peers.contains(&gone.peer));
+
+    // A regroup: the receiver is dirty as any regrouped member is.
+    let (mut manager, mut receivers, expected) = evict_stalled(1);
+    let peer = receivers[1].peer;
+    manager.test_force_ungrouped = false;
+    drop(manager.recompute_update_group(peer));
+    assert!(manager.grouped_member_of(peer).is_some());
+    assert!(manager.owed_row_evicted.is_empty());
+    assert!(manager.dirty_peers.contains(&peer));
+    drain(&mut manager, &mut receivers);
+    assert_eq!(receivers[1].wire.table, table(&expected));
+    assert_eq!(receivers[1].wire.markers, 1);
+    assert_eq!(receivers[1].wire.rows_after_marker, 0);
+    assert!(!manager.dirty_peers.contains(&peer));
 }
 
 fn second_path(index: u32, med: u32) -> Route {

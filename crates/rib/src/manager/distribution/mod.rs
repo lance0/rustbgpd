@@ -9598,6 +9598,13 @@ impl RibManager {
                     let drain_whole_operation = drain
                         .as_deref()
                         .is_some_and(|drain| drain.whole && drain.slot.is_none());
+                    // A receiver the owed-row cap evicted is built by the
+                    // resync tick alone, one receiver per unit: any other
+                    // pass leaves it dirty, as when its channel has no room.
+                    if is_dirty && self.owed_row_evicted.contains(&peer) {
+                        self.defer_unsent_outbound_pass(peer, member_of, &group_stage, &checkpoint);
+                        break 'member;
+                    }
                     if is_dirty || is_force || drain_whole_operation {
                         let flush = usize::from((is_dirty || is_force) && self.eor.owes_peer(peer));
                         match self.begin_outbound_operation(peer, 1 + flush) {
