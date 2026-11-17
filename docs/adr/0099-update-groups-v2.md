@@ -608,14 +608,17 @@ value per address family, zero again when the list has emptied. The cap is
 checked after each pass, so the list holds at most the cap plus the keys of
 one pass: three times the peak plus 4,096 keys, at about 105 bytes a key
 (some 30 MB at 150,000 routes when passes are small against the table, and
-about 425 MB at 1,000,000 routes when one pass carries the whole table; by
-allocation count in a model of the two maps, not a daemon measurement). A
+65 MB when one pass carried the whole table, as a selection release does;
+210 MB and 425 MB at 1,000,000 routes; by allocation count in a model of
+the two maps, not a daemon measurement). A
 pass's withdrawals count toward the peak, so one large withdrawal, a peer
 loss or a selection release that carries more keys than the released table
 does not reach the cap. Fresh keys that keep rotating through the table past
 a receiver that does not keep up do (a receiver that reads nothing, or one
-that reads more slowly than the table turns over): after about one table's
-worth of prefixes the list has not held before. The slowest receivers are
+that reads more slowly than the table turns over): after one to three
+tables' worth of prefixes the list has not held before, one when passes are
+small against the table and three when one pass carried the whole table,
+as a selection release does. The slowest receivers are
 then resynced instead (the slice 1a path, counted by
 `bgp_rib_outbound_owing_fallback_total`) until the list fits.
 
@@ -623,7 +626,9 @@ That fallback is a whole-peer resync: one uncharged whole-table operation
 per evicted receiver, a turn and a table copy that grow with the table. It
 is paced, not bounded like a step. The pass that finds the list over its cap
 builds nothing; it marks the receivers it evicts dirty, and only the resync
-tick builds their resyncs, one receiver per unit. An ordinary pass leaves
+tick builds their resyncs, one receiver per tick: the tick ends with that
+unit whatever is left of its poll budget, so queued input runs before the
+next receiver's. An ordinary pass leaves
 such a receiver dirty, as it leaves one whose channel has no room, so no
 pass builds a table for each evicted receiver. The tick's units are not
 drain steps and are not observed in

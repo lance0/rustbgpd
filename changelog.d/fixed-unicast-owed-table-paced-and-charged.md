@@ -19,7 +19,7 @@
   until the list names more than twice the most routes one pass accounted
   for (the family's table after the pass plus the routes it carried) plus
   4,096, is resynced instead and counted in
-  `bgp_rib_outbound_owing_fallback_total`. That takes about one table's
+  `bgp_rib_outbound_owing_fallback_total`. That takes one to three tables'
   worth of prefixes the list has not held before; one large withdrawal, a
   peer loss or a selection release does not cause it. The resync is one
   whole-table operation per receiver, outside its credit and in one RIB
