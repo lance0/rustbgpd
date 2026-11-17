@@ -50,7 +50,7 @@ stop it before the after-snapshot, or replace a scoped call with a global
 mutation. Transport/read failures are INVALID; accepted global fallback is
 FAIL. All three controls detect the broken condition. Two earlier harness
 attempts were INVALID before mutation (empty address lookup and wrong health
-field); their raw output is preserved in the rollback archive.
+field); their raw output was recorded in the rollback archive, since removed (see the note below).
 
 ## Artifacts and limits
 
