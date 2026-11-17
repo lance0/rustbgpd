@@ -1229,8 +1229,9 @@ struct Quiet {
 }
 
 /// Stop the churn task by `deadline`. Past it, its send is waiting on a RIB
-/// that stopped serving its channel: abort it, so a late send cannot log a
-/// row beside a restarted task's, and return false.
+/// that stopped serving its channel: abort it and wait for the abort, so a
+/// send that completes at the deadline cannot log a row after a restarted
+/// task read its next sequence, and return false.
 async fn stop_churn(churn: Churn, deadline: tokio::time::Instant) -> Result<bool> {
     let (stop, mut task) = churn;
     stop.store(true, Ordering::Release);
@@ -1238,7 +1239,7 @@ async fn stop_churn(churn: Churn, deadline: tokio::time::Instant) -> Result<bool
         joined?;
         return Ok(true);
     }
-    task.abort();
+    crate::rr1000_support::abort_and_join([task]).await?;
     Ok(false)
 }
 
@@ -1275,8 +1276,9 @@ fn quiet_excluded_json(quiet: &Quiet, excluded: Option<(Instant, Instant)>, t0: 
 /// gauge until `until`. The RIB publishes the gauge once per turn and holds
 /// it until its next turn, and the 20 ms churn is nearly every turn, so
 /// outside this window nothing bounds how many samples carry the churn row
-/// (README). The RIB waits end within `cap` of `until`; past it the window
-/// is unavailable and the cell goes on to resume its readers.
+/// (README). The RIB waits end within `cap` of `until`, however late the
+/// window starts; past it the window is unavailable and the cell goes on to
+/// resume its readers.
 #[expect(
     clippy::too_many_arguments,
     reason = "the window's churn, RIB, gauges, logs and time bounds are the caller's own state"
@@ -1292,8 +1294,9 @@ async fn quiet_window(
     cap: Duration,
 ) -> Result<Quiet> {
     let ms = |at: Instant| at.saturating_duration_since(t0).as_secs_f64() * 1e3;
-    let cap_at =
-        tokio::time::Instant::now() + until.saturating_duration_since(Instant::now()) + cap;
+    // Anchored to the window's end: a window that starts late, behind a
+    // held read at its own cap, gets only what remains of `cap`.
+    let cap_at = tokio::time::Instant::from_std(until) + cap;
     let unavailable = || {
         format!(
             "no RIB reply within {} ms of the window's end",
@@ -1341,8 +1344,10 @@ async fn quiet_window(
         unavailable: (!joined).then(unavailable),
     };
     if delivered.is_some() {
-        tokio::time::sleep(QUIET_SETTLE).await;
-        let published = published_credit_rows(rib, metrics);
+        let published = async {
+            tokio::time::sleep(QUIET_SETTLE).await;
+            published_credit_rows(rib, metrics).await
+        };
         match tokio::time::timeout_at(cap_at, published).await {
             Ok(published) => {
                 published?;
@@ -2407,7 +2412,8 @@ mod tests {
     use super::{
         attributes, check_read_hold, churn_plan, fold_slice_maxima, held_read, longest,
         quiet_excluded_json, quiet_window, recorded_pass, socket_queue_bytes, source_withdrawal,
-        Buckets, Churn, Family, Options, Snapshot, Trigger, HELD_READ_CAP, QUIET_CAP, SLICE_MAX,
+        stop_churn, Buckets, Churn, Family, Options, Snapshot, Trigger, HELD_READ_CAP, QUIET_CAP,
+        QUIET_LEAD, SLICE_MAX,
     };
     use crate::credit_wire::{Observed, WireFamily, WireState};
 
@@ -2468,56 +2474,165 @@ mod tests {
     async fn a_silent_rib_still_reaches_the_readers_resume_within_the_caps() {
         // The cell's order before it resumes its readers: the held read,
         // then the churn-free window. The RIB never serves its channel, in
-        // paused time: each wait ends at its cap, not the test's own.
+        // paused time: each wait ends at its cap, not the test's own. One
+        // clock: `t0` and the window's end come from tokio's paused clock.
         let metrics = rustbgpd_telemetry::BgpMetrics::new();
         let (log, received) = (Mutex::default(), Mutex::default());
         let cap = QUIET_CAP;
-        let silent_window = |churn: Churn, rib: tokio::sync::mpsc::Sender<RibUpdate>| {
+        // Returns the window and when it started and ended, from its end.
+        let window = |churn: Churn, rib: tokio::sync::mpsc::Sender<RibUpdate>, lead, late| {
             let (metrics, log, received) = (&metrics, &log, &received);
             async move {
-                let started = tokio::time::Instant::now();
-                let t0 = Instant::now();
-                let held = held_read(&rib, metrics, &[], Family::Unicast, 0, t0, HELD_READ_CAP)
-                    .await
-                    .unwrap();
-                assert!(held.get("unavailable").is_some(), "{held}");
-                let quiet = quiet_window(churn, &rib, metrics, log, received, t0, t0, cap);
+                let t0 = tokio::time::Instant::now();
+                let until = t0 + lead;
+                if late {
+                    let read = held_read(
+                        &rib,
+                        metrics,
+                        &[],
+                        Family::Unicast,
+                        0,
+                        t0.into(),
+                        HELD_READ_CAP,
+                    );
+                    let held = read.await.unwrap();
+                    assert!(held.get("unavailable").is_some(), "{held}");
+                }
+                let entered = tokio::time::Instant::now();
+                let quiet = quiet_window(
+                    churn,
+                    &rib,
+                    metrics,
+                    log,
+                    received,
+                    t0.into(),
+                    until.into(),
+                    cap,
+                );
                 let quiet = tokio::time::timeout(4 * (HELD_READ_CAP + cap), quiet)
                     .await
                     .expect("the churn-free window ends at its cap")
                     .unwrap();
-                (quiet, started.elapsed())
+                let ended = tokio::time::Instant::now();
+                (quiet, entered.checked_duration_since(until), ended - until)
             }
         };
-
         // The churn task's send waits on the RIB's full channel.
-        let (rib, _queue) = tokio::sync::mpsc::channel(1);
-        let stuck = rib.clone();
-        let stop = Arc::new(AtomicBool::new(false));
-        let task = tokio::spawn(async move {
-            for _ in 0..2 {
-                let (reply, _count) = tokio::sync::oneshot::channel();
-                let _ = stuck.send(RibUpdate::QueryLocRibCount { reply }).await;
-            }
-        });
-        let (quiet, took) = silent_window((stop, task), rib).await;
-        assert!(quiet.unavailable.is_some() && quiet.delivered.is_none());
-        assert!(quiet.readings.is_empty());
-        assert_eq!(took, HELD_READ_CAP + cap);
-        let excluded = quiet_excluded_json(&quiet, None, Instant::now());
-        assert!(excluded["unavailable"].is_string(), "{excluded}");
-
+        let stuck = || {
+            let (rib, queue) = tokio::sync::mpsc::channel(1);
+            let sender = rib.clone();
+            let task = tokio::spawn(async move {
+                for _ in 0..2 {
+                    let (reply, _count) = tokio::sync::oneshot::channel();
+                    let _ = sender.send(RibUpdate::QueryLocRibCount { reply }).await;
+                }
+            });
+            ((Arc::new(AtomicBool::new(false)), task), rib, queue)
+        };
         // The churn stops; the queries that republish the gauges go
         // unanswered.
-        let (rib, _queue) = tokio::sync::mpsc::channel(8);
-        let churn = (Arc::new(AtomicBool::new(false)), tokio::spawn(async {}));
-        let (quiet, took) = silent_window(churn, rib).await;
-        assert!(quiet.unavailable.is_some() && quiet.delivered.is_some());
-        assert!(quiet.published_ms.is_none() && quiet.readings.is_empty());
-        assert_eq!(took, HELD_READ_CAP + cap);
-        let excluded = super::excluded_window(quiet.stopped, quiet.delivered, Instant::now());
-        let excluded = quiet_excluded_json(&quiet, excluded, Instant::now());
-        assert!(excluded["unavailable"].is_string(), "{excluded}");
+        let stopped = || {
+            let (rib, queue) = tokio::sync::mpsc::channel(8);
+            let churn = (Arc::new(AtomicBool::new(false)), tokio::spawn(async {}));
+            (churn, rib, queue)
+        };
+
+        // On time, the window's waits get the full cap past its end. Late,
+        // behind a held read at its cap, they get only what remains of it:
+        // 0.3 s here, none when the read ended at the cap itself.
+        let late = HELD_READ_CAP.checked_sub(QUIET_LEAD).unwrap();
+        for (lead, held, entered) in [
+            (QUIET_LEAD, true, Some(late)),
+            (Duration::ZERO, true, Some(cap)),
+            (QUIET_LEAD, false, None),
+        ] {
+            let (churn, rib, _queue) = stuck();
+            let (quiet, at, ended) = window(churn, rib, lead, held).await;
+            assert_eq!(
+                (at, ended),
+                (entered, cap),
+                "lead {lead:?}, held read {held}"
+            );
+            assert!(quiet.unavailable.is_some() && quiet.delivered.is_none());
+            assert!(quiet.readings.is_empty());
+            let excluded = quiet_excluded_json(&quiet, None, Instant::now());
+            assert!(excluded["unavailable"].is_string(), "{excluded}");
+
+            let (churn, rib, _queue) = stopped();
+            let (quiet, at, ended) = window(churn, rib, lead, held).await;
+            assert_eq!(
+                (at, ended),
+                (entered, cap),
+                "lead {lead:?}, held read {held}"
+            );
+            assert!(quiet.unavailable.is_some() && quiet.delivered.is_some());
+            assert!(quiet.published_ms.is_none() && quiet.readings.is_empty());
+            let excluded = super::excluded_window(quiet.stopped, quiet.delivered, Instant::now());
+            let excluded = quiet_excluded_json(&quiet, excluded, Instant::now());
+            assert!(excluded["unavailable"].is_string(), "{excluded}");
+        }
+    }
+
+    #[test]
+    fn a_churn_send_completing_at_the_stop_deadline_logs_before_the_restart() {
+        // The old churn task has logged row 1; its send of row 2 completes
+        // as the stop's deadline passes, and its poll is still running when
+        // the stop aborts it. The poll is held by a handshake: a worker that
+        // parks while the stop is pending releases it, so a stop that waits
+        // for the aborted task lets it finish; a stop that returns at once
+        // leaves it held until the restart has read its next sequence.
+        let stop = Arc::new(AtomicBool::new(false));
+        let returned = Arc::new(AtomicBool::new(false));
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release = Arc::new(Mutex::new(Some(release_tx)));
+        let runtime = {
+            let (stop, returned, release) = (stop.clone(), returned.clone(), release.clone());
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .on_thread_park(move || {
+                    if stop.load(Ordering::Acquire) && !returned.load(Ordering::Acquire) {
+                        if let Some(release) = release.lock().unwrap().take() {
+                            release.send(()).unwrap();
+                        }
+                    }
+                })
+                .build()
+                .unwrap()
+        };
+        let log = Arc::new(Mutex::new(Vec::<(u32, Instant)>::new()));
+        runtime.block_on(async {
+            let (sending_tx, sending_rx) = std::sync::mpsc::channel();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let task_log = Arc::clone(&log);
+            let task = tokio::spawn(async move {
+                task_log.lock().unwrap().push((1, Instant::now()));
+                sending_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                task_log.lock().unwrap().push((2, Instant::now()));
+                done_tx.send(()).unwrap();
+            });
+            sending_rx.recv().unwrap();
+            let churn: Churn = (Arc::clone(&stop), task);
+            // Already passed, so the stop aborts on its first poll.
+            let deadline = tokio::time::Instant::now() - Duration::from_secs(1);
+            let returned = Arc::clone(&returned);
+            let joined = tokio::spawn(async move {
+                let joined = stop_churn(churn, deadline).await;
+                returned.store(true, Ordering::Release);
+                joined
+            });
+            assert!(!joined.await.unwrap().unwrap());
+            // The restart reads its next sequence, as `start_churn` does.
+            let next = log.lock().unwrap().last().map_or(1, |&(last, _)| last + 1);
+            if let Some(release) = release.lock().unwrap().take() {
+                release.send(()).unwrap();
+            }
+            done_rx.recv().unwrap();
+            log.lock().unwrap().push((next, Instant::now()));
+        });
+        let sequences: Vec<u32> = log.lock().unwrap().iter().map(|&(s, _)| s).collect();
+        assert_eq!(sequences, [1, 2, 3]);
     }
 
     #[test]

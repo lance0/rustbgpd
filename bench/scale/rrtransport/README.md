@@ -235,7 +235,10 @@ when the churn restarted, recorded as `unaffected.quiet_excluded` (`from_ms`,
 A slow delivery of that last row therefore stays in the gap. When it never
 arrived nothing is excluded (`quiet_excluded` is null and the gap is the raw
 one). The window's RIB waits (the churn's stop and the queries that republish
-the gauges) end at most 5 s past its end; past that the window is unavailable
+the gauges) end at most 5 s past its end, measured from the end and not from
+when the window started: a window that starts late, behind a held read at its
+own cap, gets only what remains of those 5 s, possibly none; past that the
+window is unavailable
 (`quiet.unavailable` set, no readings, `quiet_excluded` is
 `{"unavailable": ...}`), the cell still resumes its readers, and bar 3 and the
 plateau are INVALID: an unknown span is not "nothing excluded".
