@@ -1693,6 +1693,7 @@ mod eor_grace;
 mod eor_hold;
 mod events_metrics;
 mod evpn;
+mod evpn_clean_regroup;
 mod evpn_complete_feed;
 mod evpn_dataplane_query;
 mod evpn_explain;

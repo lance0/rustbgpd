@@ -3197,7 +3197,10 @@ fn sorted_keys<'a>(
 }
 
 /// The member's Ready proof, in key order.
-fn proof_keys(manager: &RibManager, peer: PeerId) -> Option<Vec<rustbgpd_wire::EvpnRouteKey>> {
+pub(super) fn proof_keys(
+    manager: &RibManager,
+    peer: PeerId,
+) -> Option<Vec<rustbgpd_wire::EvpnRouteKey>> {
     manager
         .evpn_recovery
         .proof_keys(manager.evpn_recovery_handle(peer)?)
@@ -3206,7 +3209,7 @@ fn proof_keys(manager: &RibManager, peer: PeerId) -> Option<Vec<rustbgpd_wire::E
 
 /// A grouped member holds a Ready proof exactly while it is dirty or owes a
 /// terminal marker. A pending reset owns recovery instead of a proof.
-fn assert_proof_only_while_owed(manager: &RibManager, peer: PeerId) {
+pub(super) fn assert_proof_only_while_owed(manager: &RibManager, peer: PeerId) {
     if manager.evpn_recovery_reset_pending(peer) {
         return;
     }

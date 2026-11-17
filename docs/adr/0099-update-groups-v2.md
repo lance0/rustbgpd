@@ -404,6 +404,10 @@ The first missed admission is not the only capture seam. A clean member's
 refresh that leaves a terminal marker owed captures at the end of its own
 actor turn; see the 2026-11-10 amendment.
 
+A clean member's regroup between two owned groups does not capture before the
+move. The pass that receives its feed captures afterwards, and only when the
+admission was missed; see the 2026-11-16 amendment.
+
 Do not discard this provenance during a dirty RTC change, repeated regroup or
 source flip. The initial EVPN recovery key-provenance limits are **16 MiB per
 peer** and **256 MiB daemon-wide**, enforced together as internal admission caps.
@@ -1545,3 +1549,218 @@ The readiness regressions for refused owned passes hold with the walk's new
 checkpoint count. These are component results with EVPN ownership enabled in
 tests. The turn-length, cost and recovery-memory qualifications have not been
 run on this change, and production EVPN ownership remains disabled.
+
+## Amendment (2026-11-16): a clean member's regroup captures no proof
+
+A member that moved between two owned EVPN groups captured a proof of its
+actual OLD before anything moved, built its feed, and then, inside one commit,
+reserved every key against that proof, counted the planned admission through
+it, preflighted and applied the batch into it, matched the result against its
+NEW projection and released it. For a clean member none of that decided what
+was sent: its feed is the difference between its two eligible projections, and
+the proof was built and released in one actor turn. One untimed, instrumented
+attribution of an export-policy reload that moved 148 of 150 members, at 250
+routes per client, put about 46% of each owned member's turn in that cycle:
+about 13% in the capture and the rest in the commit-side passes. The private
+path has no such work. Those are shares from a diagnostic build, not a
+qualification.
+
+**Rule.** Section E requires the proof at the first missed admission. The
+regroup seam took it before it knew whether the admission would be missed. A
+clean member's regroup now takes none unless its admission is missed. The
+unicast cohort transition already works this way (only a member whose
+envelope fails captures keys), and so does the clean refresh of the
+2026-11-10 amendment.
+
+**Eligibility.** All of these must hold when the member leaves OLD. Any other
+member takes the proof cycle unchanged.
+
+1. OLD owns EVPN, and NEW is an installed table that owns EVPN and has a
+   valid stamp. An absent or deferred destination and a private destination
+   are excluded. So is a destination still being prepared for a policy
+   transition, which a join discards and rebuilds: only the join-time build
+   makes a table own EVPN, so such a table never satisfies this condition.
+2. The member is clean in OLD by the 2026-11-10 definition: not dirty, no
+   reset pending, a dormant recovery handle, no completion receipt, no
+   End-of-RIB owed for EVPN, and no unreleased private EVPN row.
+3. Its commit can be attempted now: the channel has room, no whole-table
+   operation of the member is live, it has an exact export encoder, EVPN
+   selection is not deferred, and no selection gate holds the member's
+   resync. The first four only avoid building a feed whose commit would be
+   refused: without them the member captures after the pass instead of
+   before the move, and the wire is the same. The last is different. A
+   held member's commit salvages the withdrawals of exempt sources (a
+   removed blackhole route, for one) from a batch the gate otherwise
+   refuses, and that salvage needs the member's proof. Without this
+   condition those withdrawals would wait for the next resync.
+4. The caller hands the returned feed to a distribution pass in the same
+   actor turn. Every seam that regroups and then distributes does: a policy
+   replacement (single, batched or paced), slow-peer isolation, a family
+   becoming sendable and a conditional-advertisement attachment change.
+   Session registration drops the feed, so it always captures.
+
+When either projection is incomplete no feed can be built. The member then
+captures from OLD, which is still installed at that point, as it always did.
+
+**Basis.** The feed is built exactly as before: it announces every row of NEW
+that is eligible for the member and that the member did not hold with an
+equal value, and withdraws every key of the member's OLD projection that NEW
+does not give it. While it walks NEW it also records `fresh`: the announced
+keys for which the member held no OLD value. The member's actual OLD is then
+recoverable without OLD:
+
+> actual OLD = (the rows of NEW eligible for the member, less `fresh`) plus
+> the withdrawn keys.
+
+A row the exact-rejection overlay hid in OLD was not held, so it is `fresh`
+and gets a new probe, as section E already requires of a changed candidate.
+`fresh` and the withdrawn keys ride on the feed's seal as its basis, for one
+actor turn. The completion receipt is minted as before, which also keeps the
+dirty mark that follows the move from capturing NEW as though it were OLD.
+
+**Commit.** Three things change, and only for a commit whose seal carries a
+basis:
+
+- Prior admission is read from the basis: a withdrawn key was held, and an
+  announced key was held unless it is `fresh`. That drives the admitted count
+  and the exact-rejection reconcile, so a rejected candidate the member held
+  is withdrawn in the same envelope and one it did not hold is only dropped.
+- The admission reservation accepts the member although it is dirty, grouped
+  and holds no proof. Any other commit for that member in the same turn is
+  refused as before.
+- Completion has no proof to match or release. It checks that the seal is
+  still current, completes the receipt and settles it; the admitted count is
+  the one maintained from the envelope.
+
+A clean regroup therefore makes no ledger call that allocates: no capture,
+reservation, pin or application. The member's charge and its peak do not move.
+
+**Missed admission.** After its member loop, the pass that was handed the
+feed settles every basis at one site. An admitted feed, or one proved a
+no-op, needs nothing. In every other case nothing was sent: the commit was
+refused, the pass skipped the member, or the feed was never attempted. The
+member still holds actual OLD, and the pass captures it from the basis with
+one walk of the member's NEW projection. That is the cost of the capture it
+replaces, paid only by a member whose admission was missed. From there the
+member is an ordinary dirty member with a Ready proof, and the resync heals
+it as it heals any refused regroup.
+
+**Why this is safe when the last leaver retires OLD.** The capture never
+reads OLD. It reads NEW, which the member has joined and which therefore
+cannot be retired, and the two key lists on the seal. NEW is still the table
+the feed walked: only a staging changes a table, every staging moves its
+stamp, and nothing stages between a regroup and the end of its pass. The
+checkpoints inside that span answer only the read-only readiness lane; a
+later member's join in the same turn builds only a table that does not exist
+yet. The walk does not read the member's exact-rejection overlay, which only
+that member's own admitted commit writes.
+
+**Fences and reset.** The basis is used only while the member is on the same
+session, channel and recovery handle, the handle is still dormant, the member
+belongs to NEW, and NEW's stamp is the one the feed read. If any of these
+fails there is no trustworthy withdrawal set, and the member takes section
+E's reset through the admission-invariant path; it never continues with
+guessed withdrawals. The same holds when:
+
+- the ledger refuses the capture, which is the reset every refused capture
+  takes;
+- a proof appears under the feed. A staging of NEW captures its dirty members
+  before it moves the table, and for this member that would capture NEW's
+  rows. A seal with a basis is not current once its handle holds a proof, so
+  the commit is refused and the member is reset;
+- an admitted envelope's completion fails. The enqueue cannot be undone and
+  no proof records what it admitted.
+
+A terminal marker left owed at completion needs a proof past the turn.
+Eligibility excludes it, and completion still handles it: it captures from
+the member's NEW projection, exact rejection included, as the refresh tail
+does.
+
+**Invariant.** The 2026-11-10 invariant (a grouped member holds a Ready proof
+exactly while it is dirty or owes a terminal marker) now has one bounded
+exception. Between a clean member's regroup and the end of the pass that
+received its feed, inside one actor turn, the member is dirty with a dormant
+handle and an incomplete receipt. Every site that begins a capture for a
+dirty member, and so relies on such a member already holding its proof, runs
+in another actor message: a staging's capture of its dirty members, the owned
+pass, the policy re-evaluation, a later regroup's capture before the move, a
+refresh answer for a member that is not clean, and the refresh tail behind an
+owed marker. The dirty mark's own capture is suppressed by the receipt, and
+the captures that guard a clean member skip a dirty one. When the pass ends
+the member is clean, holds a Ready proof, or has a pending reset.
+
+**A feed that never reaches a pass.** Condition 4 is a promise by the caller,
+and every caller keeps it. Debug builds refuse to drop an unsettled basis.
+Were one lost anyway, the member would stay dirty with a dormant handle and
+an incomplete receipt, its commits refused, until one of the sites above
+began a capture for it and took NEW's projection for what it holds; keys of
+OLD absent from NEW would then never be withdrawn. Those sites share one
+entry, and that entry now refuses exactly this state (dirty, grouped, dormant
+handle, receipt never completed) and resets the member instead. The state is
+legitimate only inside the window, where the settling pass opens its capture
+in the ledger directly. A receipt behind an owed marker is complete, and
+every other dirty member holds its proof, so nothing else meets the refusal.
+The same refusal covers a capture attempted inside the window.
+
+**Admitted count.** The proof cycle re-based the member's admitted count on
+its proof at every regroup. The proofless commit adds the envelope's delta to
+the count the member already had, as an ordinary clean delta does. The two
+agree because a clean member's count is the size of its admitted set; a count
+that had drifted would now stay drifted across the regroup, where it used to
+be corrected, and one that underflowed would refuse the commit and reset the
+session. Debug builds assert the equality when a missed admission's proof is
+sealed.
+
+**Pacing.** A missed mover's capture runs after the member loop. Its time is
+added to that member's share of the pass, which is what the paced walk reads
+to size the next command, so the capture is budgeted like the member's other
+pass work. The command it runs in is already admitted: if every mover of one
+command misses, that command exceeds its prediction by their captures, the
+same work the capture before the move used to add to the recompute.
+
+**Accounting.** An admitted mover is charged its record only, throughout. A
+mover whose admission is missed is charged for the same keys as before, from
+the end of the pass rather than from before the move.
+
+The basis itself is not charged to the ledger. It is two key lists, `fresh`
+and a copy of the feed's withdrawals, held from the regroup to the end of the
+pass. Their combined length is at most the number of keys on which the
+member's OLD and NEW projections differ in membership, which the feed's own
+uncharged announce and withdraw vectors already bound, and they live for one
+paced command, for each mover of that command. Section E charges copies that
+outlive an operation; these do not, like the feed they ride on. They are zero
+when the two groups export the same keys.
+
+**Evidence status.** Unit tests pin: each clean mover of a paced reload
+passes no capture checkpoint, builds one feed and leaves the peer and daemon
+ledger usage, peaks included, unchanged, equally for fleets of 8 and 32, and
+the last mover retires OLD; for three members whose feeds hold a changed row,
+a fresh key, a withdrawn key, a rejected row the member held and one it did
+not, where one member has a rejection overlay and one sourced a row, the
+envelopes, admitted counts and overlays equal those of the proof cycle; a
+regroup with nothing to send completes with no envelope; for each of those
+members, with the admission missed by a skipped member, a stale seal or the
+selection gate, and with the mover both an early and the last leaver, the
+proof captured from the basis equals a capture of OLD taken before the move,
+nothing was sent, no reset is requested, and the resync withdraws only held
+keys and ends on the member's NEW projection; a moved stamp resets with the
+admission-invariant request and captures nothing; a proof captured under the
+feed, by hand or by a staging of NEW, refuses the commit and resets; a ledger
+refusal at the basis capture resets and sends no route or marker; an admitted
+envelope whose completion fails resets and is not captured over; a marker
+left owed captures the admitted set at completion; a commit without the seal
+is refused in the regroup's own turn; each eligibility condition has a case
+that refuses the proofless path and leaves exactly the state the capturing
+seam leaves; and the seam that drops its feed captures an eligible member. Further tests
+pin: three movers in one pass, for every subset whose admission is missed and
+for a pass that skips them all, each end with their own actual OLD as proof
+or clean on NEW, heal onto NEW and request no reset; a basis with 36 fresh
+keys reconstructs actual OLD; a channel that closes inside the commit resets
+at completion; a capture attempted inside the window, by a staging or
+directly, is refused and resets; and a feed dropped before any pass resets at
+the next staging, regroup or refresh answer with nothing captured and no EVPN
+route or marker after. The work-count and envelope cases apply one mover per
+command; the multi-mover case is the three-member one above.
+These are component results with EVPN ownership enabled in tests. The
+regroup-time and recovery-memory qualifications have not been run on this
+change, and production EVPN ownership remains disabled.

@@ -1314,7 +1314,7 @@ impl RibManager {
         let mut evpn_feeds = std::collections::HashMap::new();
         for peer in regroup {
             if self.update_groups.members.contains_key(&peer) {
-                if let Some(feed) = self.recompute_update_group(peer) {
+                if let Some(feed) = self.recompute_update_group_for_pass(peer) {
                     evpn_feeds.insert(peer, feed);
                 }
                 regrouped = true;
