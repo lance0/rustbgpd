@@ -9487,6 +9487,9 @@ impl RibManager {
         drop(readiness);
         self.finish_readiness_owner(prep_installed);
         let distribute_peers = || {
+            // The unicast AFIs this pass carries, read once for the first
+            // peer that owes one of them whole.
+            let mut carried_afis: Option<[bool; 2]> = None;
             for peer in peers {
                 let paced_member_started = self
                     .paced_member_costs
@@ -10341,24 +10344,46 @@ impl RibManager {
                             {
                                 let sendable = self.peer_sendable_families.get(&peer);
                                 let orf = self.peer_orf_pending.get(&peer);
-                                let mut kept = HashSet::with_capacity(effective_prefixes.len());
+                                // Every AFI the pass carries is owed whole
+                                // (a selection release toward each private
+                                // receiver): nothing is staged or marked,
+                                // so the prefixes are not visited per peer.
+                                let afi =
+                                    |prefix: &Prefix| usize::from(matches!(prefix, Prefix::V6(_)));
+                                let whole_only = gates.contains(&OwingGate::Whole) && {
+                                    let carried = *carried_afis.get_or_insert_with(|| {
+                                        let mut carried = [false; 2];
+                                        for prefix in best_changed.iter().chain(&all_affected) {
+                                            checkpoint();
+                                            carried[afi(prefix)] = true;
+                                        }
+                                        carried
+                                    });
+                                    (0..2)
+                                        .all(|afi| !carried[afi] || gates[afi] == OwingGate::Whole)
+                                };
+                                let mut kept = HashSet::new();
                                 let mut marks = Vec::new();
-                                for prefix in effective_prefixes.iter() {
-                                    checkpoint();
-                                    let family = prefix_family(prefix);
-                                    match gates[usize::from(matches!(prefix, Prefix::V6(_)))] {
-                                        OwingGate::Stream { .. } => {
-                                            kept.insert(*prefix);
+                                if !whole_only {
+                                    kept.reserve(effective_prefixes.len());
+                                    for prefix in effective_prefixes.iter() {
+                                        checkpoint();
+                                        let family = prefix_family(prefix);
+                                        match gates[afi(prefix)] {
+                                            OwingGate::Stream { .. } => {
+                                                kept.insert(*prefix);
+                                            }
+                                            OwingGate::Owe
+                                                if sendable.is_some_and(|families| {
+                                                    families.contains(&family)
+                                                }) && !orf.is_some_and(|gated| {
+                                                    gated.contains(&family)
+                                                }) =>
+                                            {
+                                                marks.push(OwedKey::Unicast(*prefix));
+                                            }
+                                            OwingGate::Owe | OwingGate::Whole => {}
                                         }
-                                        OwingGate::Owe
-                                            if sendable.is_some_and(|families| {
-                                                families.contains(&family)
-                                            }) && !orf
-                                                .is_some_and(|gated| gated.contains(&family)) =>
-                                        {
-                                            marks.push(OwedKey::Unicast(*prefix));
-                                        }
-                                        OwingGate::Owe | OwingGate::Whole => {}
                                     }
                                 }
                                 self.mark_owed(peer, marks);
@@ -11114,6 +11139,16 @@ impl RibManager {
                                     selection.selection_deferred(route.family())
                                 })
                         });
+                        if !resync {
+                            // A drain sends what the peer lacks: a rule it
+                            // already holds unchanged is not announced again.
+                            fs_announce.retain(|route| {
+                                checkpoint();
+                                !rib_out
+                                    .get_flowspec(&route.selection_key())
+                                    .is_some_and(|old| old.same_advertisement(route))
+                            });
+                        }
                     }
 
                     let mut evpn_complete_feed = None;

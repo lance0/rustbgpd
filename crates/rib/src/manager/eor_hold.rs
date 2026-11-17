@@ -609,6 +609,18 @@ impl RibManager {
         self.settle_eor_as(peer, None, Offer::Release, None, true);
     }
 
+    /// [`Self::settle_free_eor`] for `family`'s marker alone, on a slot of
+    /// `operation`: a refresh answer absorbed the family's owed table into
+    /// that operation, and the marker follows it ahead of the answer.
+    pub(super) fn settle_free_eor_in(
+        &mut self,
+        peer: PeerId,
+        family: (Afi, Safi),
+        operation: &mut OutboundOperation,
+    ) {
+        self.settle_eor_as(peer, Some(&[family]), Offer::Release, Some(operation), true);
+    }
+
     fn settle_eor_as(
         &mut self,
         peer: PeerId,

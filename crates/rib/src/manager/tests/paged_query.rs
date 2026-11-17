@@ -1576,8 +1576,36 @@ fn every_direct_timer_mutation_seam_advances_route_page_versions() {
     manager.finish_route_refresh(peer, family.0, family.1, true);
     assert_ne!(versions(&manager), before, "refresh-timeout seam");
 
+    let waiter = peer_v4(Ipv4Addr::new(192, 0, 2, 77));
+    manager = manager.with_selection_deferral(crate::SelectionDeferralConfig {
+        timeout: std::time::Duration::from_secs(60),
+        waiters: vec![crate::SelectionDeferralWaiterConfig {
+            peer: waiter.into(),
+            families: vec![family],
+        }],
+    });
+    super::arm_selection_waiter(&mut manager, waiter, &[family]);
+    // A route received under the hold is selected by the timer's release.
+    register_test_peer(&mut manager, peer, 0);
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer,
+        session_id: 0,
+        announced: vec![make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+            Ipv4Addr::new(10, 0, 0, 1),
+        )],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    drain_route_chunks(&mut manager);
+    assert_eq!(manager.loc_rib.len(), 0);
     let before = versions(&manager);
-    manager.release_selection_families(&[family], "test timer expiry");
+    manager.expire_selection_deferral();
+    assert_eq!(manager.loc_rib.len(), 1);
     assert_ne!(versions(&manager), before, "selection-release seam");
 }
 

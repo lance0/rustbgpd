@@ -999,6 +999,7 @@ async fn a_peer_resynced_by_the_release_pass_holds_the_whole_family_at_its_marke
         assert!(resynced_at_marker.is_empty(), "{case}: still held");
 
         manager.expire_selection_deferral();
+        drain_resync_ticks(&mut manager);
 
         apply_until_marker(&mut resynced, &mut resynced_table, &mut resynced_at_marker);
         apply_until_marker(&mut clean, &mut clean_table, &mut clean_at_marker);

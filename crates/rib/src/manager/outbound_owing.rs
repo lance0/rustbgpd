@@ -762,7 +762,7 @@ impl RibManager {
     /// Whether `family` toward `peer` is held in the peer's own Adj-RIB-Out
     /// and so may owe keys: group-owned and handoff EVPN families keep
     /// slice 1a's path.
-    fn owing_family_in_scope(&self, peer: PeerId, family: OwedFamily) -> bool {
+    pub(super) fn owing_family_in_scope(&self, peer: PeerId, family: OwedFamily) -> bool {
         match family {
             OwedFamily::IPV4_UNICAST | OwedFamily::IPV6_UNICAST => {
                 self.grouped_member_of(peer).is_none()
@@ -1237,19 +1237,18 @@ impl RibManager {
     }
 
     /// Whether some owing peer could make progress this tick: it has credit,
-    /// channel room and runnable work, or an End-of-RIB waits on an
-    /// absorption with its latch free. Read before taking the tick's
-    /// executor handoff.
+    /// channel room and runnable work (an End-of-RIB that waits on an
+    /// absorption with its latch free included). Read before taking the
+    /// tick's executor handoff.
     pub(super) fn owing_tick_due(&self) -> bool {
         let limit = self.outbound_row_credit();
         self.owing_peers.iter().any(|&peer| {
             self.owing_peer_runnable(peer)
-                && ((self
+                && self
                     .outbound_credit
                     .get(&peer)
                     .is_some_and(|entry| entry.credit.rows() < limit)
-                    && !self.outbound_channel_full(peer))
-                    || (!self.outbound_operation_live(peer) && self.eor_waits_on_owed_keys(peer)))
+                && !self.outbound_channel_full(peer)
         })
     }
 
@@ -1276,8 +1275,8 @@ impl RibManager {
     }
 
     /// Drain owed keys under the tick's poll budget, round-robin over the
-    /// owing peers from [`Self::owing_cursor`]: per peer, retry a barrier
-    /// waiting on an absorption, then, with credit, run one step of its next
+    /// owing peers from [`Self::owing_cursor`]: per peer, with credit, retry
+    /// a barrier waiting on an absorption, then run one step of its next
     /// runnable family. Rounds repeat while a step progressed. Returns
     /// whether the budget cut the slice short.
     pub(super) fn drain_owing_bounded(&mut self, poll_start: std::time::Instant) -> bool {
@@ -1317,13 +1316,23 @@ impl RibManager {
         if self.dirty_peers.contains(&peer) || self.force_outbound_peers.contains(&peer) {
             return false;
         }
+        // Spent credit holds the marker's absorption too: the family it
+        // would stage waits for the receiver to read, and only this
+        // receiver's own End-of-RIB waits with it.
+        let limit = self.outbound_row_credit();
+        let rows = self
+            .outbound_credit
+            .get(&peer)
+            .map_or(limit, |entry| entry.credit.rows());
+        if rows >= limit || self.outbound_channel_full(peer) {
+            return false;
+        }
         let mut progressed = false;
         if !self.outbound_operation_live(peer) && self.eor_waits_on_owed_keys(peer) {
             let before = self.eor.families(peer).count();
             self.release_eor_hold(peer, EorHold::OwedKeys, EorTrigger::Release);
             progressed |= self.eor.families(peer).count() < before;
         }
-        let limit = self.outbound_row_credit();
         let rows = self
             .outbound_credit
             .get(&peer)
@@ -1660,7 +1669,9 @@ pub(super) enum WholePass {
 
 impl RibManager {
     /// The P3/P4 gate over a pass's `keys` toward `peer`, whose two AFI
-    /// families are `families` (`index` picks a key's).
+    /// families are `families` (`index` picks a key's). `carried` belongs
+    /// to the pass and this key set: which of the two AFIs the keys carry,
+    /// read once for the first peer that owes one of them whole.
     pub(super) fn owing_keyed_pass<'k, K, S>(
         &mut self,
         peer: PeerId,
@@ -1668,6 +1679,7 @@ impl RibManager {
         families: [OwedFamily; 2],
         index: impl Fn(&K) -> usize,
         owed: impl Fn(&K) -> OwedKey,
+        carried: &mut Option<[bool; 2]>,
     ) -> KeyedPass<'k, std::collections::HashSet<K, S>>
     where
         K: Clone + Eq + Hash,
@@ -1679,6 +1691,21 @@ impl RibManager {
         ];
         if gates.iter().all(|gate| *gate == OwingGate::UNBOUNDED) {
             return KeyedPass::Preflight;
+        }
+        // Every AFI the pass carries is owed whole (a selection release
+        // toward each private receiver): nothing is staged or marked, so
+        // the keys are not visited per peer.
+        if gates.contains(&OwingGate::Whole) {
+            let carried = *carried.get_or_insert_with(|| {
+                let mut carried = [false; 2];
+                for key in keys {
+                    carried[index(key)] = true;
+                }
+                carried
+            });
+            if (0..2).all(|afi| !carried[afi] || gates[afi] == OwingGate::Whole) {
+                return KeyedPass::Skip;
+            }
         }
         let budget = gates
             .iter()

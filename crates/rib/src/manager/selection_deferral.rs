@@ -17,7 +17,7 @@ use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{Afi, Safi};
 
 use super::RibManager;
-use super::eor_hold::{EorHold, EorTrigger};
+use super::eor_hold::EorTrigger;
 use super::evpn_recovery::EvpnCompleteFeed;
 
 /// Process-wide ceiling across every typed identity retained while route
@@ -1575,29 +1575,6 @@ impl RibManager {
             .and_then(SelectionDeferral::deadline)
     }
 
-    /// Complete a family release. Ordinary release runs the delayed selection;
-    /// a timer fallback may recompute a family that collision failback staged
-    /// earlier. All identity sets come from Adj-RIB-In, which continued
-    /// accepting current-session updates while Loc-RIB selection was frozen.
-    #[cfg(test)]
-    pub(super) fn release_selection_families(
-        &mut self,
-        families: &[(Afi, Safi)],
-        reason: &'static str,
-    ) {
-        if families.is_empty() {
-            return;
-        }
-        self.with_selection_readiness(|manager| {
-            // Timer expiry and all-EoR release can recompute Loc-RIB directly
-            // without a new RibUpdate. Fence every view before the release.
-            manager.advance_all_route_pages();
-            for &family in families {
-                manager.complete_selection_family(family, None, reason);
-            }
-        });
-    }
-
     pub(super) fn apply_selection_deferral_transitions(
         &mut self,
         transitions: impl IntoIterator<Item = SelectionDeferralTransition>,
@@ -1655,7 +1632,7 @@ impl RibManager {
                         selection.release(family, release_reason, &manager.metrics);
                     }
                     if armed {
-                        manager.complete_selection_family(family, Some(&resynced), reason);
+                        manager.complete_selection_family(family, &resynced, reason);
                     }
                 }
             }
@@ -1666,21 +1643,19 @@ impl RibManager {
         self.request_helper_stale_retire();
     }
 
-    /// Finish the release of `family`. `staged` is `None` when its routes
-    /// are still to be selected here; otherwise they were selected and sent
-    /// under the armed gate, and it names the peers whose pending resync
-    /// that pass admitted.
+    /// Finish the release of `family`, whose routes were selected under the
+    /// armed gate. `resynced` names the peers whose pending resync that
+    /// pass admitted.
     fn complete_selection_family(
         &mut self,
         family: (Afi, Safi),
-        staged: Option<&HashSet<PeerId>>,
+        resynced: &HashSet<PeerId>,
         reason: &'static str,
     ) {
         let readiness = self.replacement_readiness.clone();
         let checkpoint =
             || super::replacement_readiness_checkpoint_at(&readiness, "selection_inventory", false);
         checkpoint();
-        let already_staged = staged.is_some();
         // Release does not by itself purge the stale rows a GR helper keeps:
         // our End-of-RIB does, once it is sent, and replay grace can still
         // hold it. A carry stays while that End-of-RIB can be held and its
@@ -1710,10 +1685,7 @@ impl RibManager {
                 )
             })
             .collect();
-        if !already_staged {
-            self.recompute_released_selection_family(family);
-        }
-        if already_staged && family == (Afi::L2Vpn, Safi::Evpn) {
+        if family == (Afi::L2Vpn, Safi::Evpn) {
             self.complete_selection_evpn_feeds();
         }
         // Existing sessions received no initial table and no EoR while
@@ -1727,7 +1699,7 @@ impl RibManager {
                 // a partial resync while another family stays held.
                 continue;
             }
-            if staged.is_some_and(|resynced| resynced.contains(&peer)) {
+            if resynced.contains(&peer) {
                 // Its resync was admitted under the gate, which held only
                 // this marker back: the table is whole, so the marker
                 // follows it and no replay is owed.
@@ -1742,27 +1714,38 @@ impl RibManager {
                 }
                 continue;
             }
-            // An ORF gate defers the replay. A sendable family held by this
-            // gate already recorded its table obligation at registration or
-            // unlock, and the flush keeps that marker for the peer's refresh.
-            // Any other pending marker (a withheld family, or one the writer
-            // deferred) is an honest-empty completion and leaves now.
-            if !self.dirty_peers.contains(&peer) {
-                // A late group member may have skipped a frozen row already in
-                // the shared table; unchanged group selection cannot replay it.
-                if family != (Afi::L2Vpn, Safi::Evpn) || !evpn_coverage_required {
-                    let outcome = self.send_route_refresh_response_inner(
-                        peer,
-                        family.0,
-                        family.1,
-                        super::route_refresh::FamilyReplayKind::SelectionRelease,
-                    );
-                    if outcome == super::route_refresh::FamilyReplayOutcome::Failed {
-                        self.mark_outbound_dirty(peer);
-                        continue;
-                    }
+            if self.dirty_peers.contains(&peer) {
+                continue;
+            }
+            // A late group member may have skipped a frozen row already in
+            // the shared table; unchanged group selection cannot replay it.
+            // The replay is a no-operation for a family the peer holds in
+            // its own Adj-RIB-Out (owed at release) and for one behind an
+            // ORF gate, whose table waits for the peer's refresh.
+            if family != (Afi::L2Vpn, Safi::Evpn) || !evpn_coverage_required {
+                let outcome = self.send_route_refresh_response_inner(
+                    peer,
+                    family.0,
+                    family.1,
+                    super::route_refresh::FamilyReplayKind::SelectionRelease,
+                );
+                if outcome == super::route_refresh::FamilyReplayOutcome::Failed {
+                    self.mark_outbound_dirty(peer);
+                    continue;
                 }
-                self.release_eor_hold(peer, EorHold::Selection, EorTrigger::Release);
+            }
+            // A family the release owed to this peer keeps its marker for
+            // the owed-key drain, which sends the table first and reads the
+            // peer's credit before it does. Otherwise this family's marker
+            // leaves now, and only this family's: the settle absorbs what a
+            // family owes ahead of its marker, and another family the peer
+            // still owes must not be staged in this turn. An ORF-gated
+            // sendable family recorded its table obligation at registration
+            // or unlock and keeps its marker for the peer's refresh; any
+            // other pending marker (a withheld family, or one the writer
+            // deferred) is an honest-empty completion.
+            if !self.owes(peer, family) {
+                self.settle_eor_of(peer, &[family], EorTrigger::Release);
             }
         }
         let refresh_peers: Vec<_> = self
@@ -1802,6 +1785,39 @@ impl RibManager {
             }
         }
         self.retire_settled_selection_admission();
+    }
+
+    /// Owe `family` whole to every receiver that holds it in its own
+    /// Adj-RIB-Out, is not dirty or forced (a resync covers those) and is
+    /// not waiting for the peer's first refresh behind an ORF gate.
+    fn owe_released_family(&mut self, family: (Afi, Safi)) {
+        let Some(owed) = super::outbound_owing::OwedFamily::of(family) else {
+            return;
+        };
+        let peers: Vec<PeerId> = self
+            .peer_sendable_families
+            .iter()
+            .inspect(|_| self.replacement_checkpoint(false))
+            .filter(|(_, families)| families.contains(&family))
+            .map(|(&peer, _)| peer)
+            .collect();
+        for peer in peers {
+            self.replacement_checkpoint(false);
+            // An RFC 5291 gate withholds the family until the peer's first
+            // refresh, whose answer is the whole table: nothing is owed
+            // before it, and a debt the gate cannot drain would hold the
+            // marker of a peer that never refreshes.
+            let orf_gated = self
+                .peer_orf_pending
+                .get(&peer)
+                .is_some_and(|gated| gated.contains(&family));
+            if !orf_gated
+                && self.owing_peer_in_scope(peer)
+                && self.owing_family_in_scope(peer, owed)
+            {
+                self.owe_whole_family(peer, owed);
+            }
+        }
     }
 
     /// Pending peers wait until release has updated both selection and the
@@ -1901,6 +1917,17 @@ impl RibManager {
         debug_assert!(!self.selection_release_staging);
         self.wake_selection_partial_recovery(family);
         self.selection_release_staging = true;
+        // A receiver that holds this family in its own Adj-RIB-Out owes it
+        // whole from here: the release pass stages nothing toward it, and
+        // the owed-key drain sends it one receiver per resync tick, with the
+        // family's End-of-RIB held behind the debt. A unicast, labeled or
+        // VPN pass does not visit the released keys for such a receiver
+        // either, so its share of the release turn does not grow with the
+        // table. Still per receiver times rows in this turn: a pending
+        // resync of a dirty or forced receiver, the candidate scan of an
+        // Add-Path, ORR or per-client-best receiver, and a deferred
+        // ROUTE-REFRESH answer.
+        self.owe_released_family(family);
         if family == (Afi::L2Vpn, Safi::Evpn) {
             // Both Stage and Release reach this seam before any admission.
             // A feed must retain its terminal duty while convergence is held.
@@ -2061,22 +2088,6 @@ impl RibManager {
             let mut evpn = evpn.into_set(&mut checkpoint);
             if !evpn.is_empty() {
                 self.recompute_and_distribute_evpn(&evpn);
-                // RTC interest may have changed while a pre-existing private
-                // row was frozen; restage under the current membership.
-                let peers: Vec<_> = self
-                    .outbound_peers
-                    .keys()
-                    .inspect(|_| checkpoint())
-                    .filter(|peer| {
-                        self.evpn_grouped_member_of(**peer).is_none()
-                            && !self.has_private_evpn_handoff(**peer)
-                    })
-                    .copied()
-                    .collect();
-                for peer in peers {
-                    checkpoint();
-                    self.distribute_evpn_keys_to_peer(peer, &evpn, &mut checkpoint);
-                }
                 // As for unicast: retire rejections whose held row is gone.
                 if !self.peer_unexportable.is_empty() {
                     let gone: Vec<_> = evpn

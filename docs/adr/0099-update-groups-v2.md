@@ -513,6 +513,30 @@ a private (per-peer Adj-RIB-Out) family instead of staging it. It later stages
 that key once, from current state. The owed key is the prefix or NLRI identity,
 never a path ID.
 
+An RFC 4724 selection release is a second source of owed state: it owes the
+released family whole to every receiver that holds the family in its own
+Adj-RIB-Out, and stages nothing toward those receivers in the release turn.
+The owed-key drain then sends each receiver the family, by diff against its
+admitted Adj-RIB-Out, with the family's End-of-RIB behind it. A family still
+behind an RFC 5291 initial-advertisement gate is not owed; the peer's first
+refresh answers with the whole table. A receiver that is dirty or forced at
+the release is not owed either; its resync covers the family. The resync tick
+reads a receiver's credit before it absorbs owed state for a waiting
+End-of-RIB, so a receiver that has stopped reading delays only its own table
+and marker. The selection-release replay remains for unicast and VPN group
+members only.
+
+The release sends only the released family's End-of-RIB, and only when that
+family owes nothing: a receiver can be a group member for one family and hold
+another in its own Adj-RIB-Out, and the release of the first does not absorb
+the second. A ROUTE-REFRESH for a family still owed absorbs the owed table
+into the answer's operation, sends the End-of-RIB that waited only for it,
+and then the answer between BoRR and EoRR, because RFC 7313 section 4 allows
+no BoRR before that End-of-RIB. The other releases of an End-of-RIB hold (a
+grace window ending, the RT-Constrain membership and ORF caps, a pass that
+cancels a family's last owed key) still absorb every family the receiver
+owes in their own turn, without reading its credit.
+
 Each owed key carries a *logged deferral*: a test-build record of (session,
 receiver, AFI/SAFI, key). It opens when the key becomes owed. It closes when the
 key is drained, absorbed or cancelled, or when a resync covers it.

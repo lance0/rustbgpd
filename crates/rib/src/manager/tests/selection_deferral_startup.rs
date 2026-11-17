@@ -328,6 +328,7 @@ fn dormant_typed_selection_replays_unchanged_rows_before_late_initial_eor() {
                 safi: afi_safi.1,
             });
             assert!(!manager.selection_convergence_held(afi_safi));
+            drain_resync_ticks(&mut manager);
             let mut delivered = HashSet::new();
             let mut eors = 0;
             for update in drain(&mut late_rx) {
@@ -455,6 +456,7 @@ fn dormant_private_evpn_membership_change_is_reconciled_at_selection_release() {
         afi: EVPN.0,
         safi: EVPN.1,
     });
+    drain_resync_ticks(&mut manager);
     let old_updates = drain(&mut observer_rx);
     assert_eq!(
         old_updates
