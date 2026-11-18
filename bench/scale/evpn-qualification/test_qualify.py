@@ -7,10 +7,12 @@ import fcntl
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import tarfile
 import tempfile
+import threading
 import unittest
 from unittest.mock import Mock, patch
 
@@ -67,6 +69,79 @@ def driver_text(clients, routes):
 
 
 class TestQualification(unittest.TestCase):
+    def test_mid_cell_compiler_invalidates_memory_result(self):
+        for compiler in (None, "cargo", "rustc", "rustdoc", "clippy-driver"):
+            with self.subTest(compiler=compiler), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root / "bin").mkdir()
+                for binary in ("rustbgpd-candidate", "evpn-rr-soak"):
+                    (root / "bin" / binary).touch()
+                Q.write_json(root / "binaries.json", {p.name: Q.digest(p) for p in (root / "bin").iterdir()})
+                manifest = {"daemon_cpus": "0", "harness_cpus": "1", "settle_seconds": 0}
+                sampled = threading.Event()
+                expected_reason = None
+                process = Mock(pid=42)
+                process.poll.return_value = None
+                leg = root / "memory-00-candidate-3x10"
+
+                def run(command, **kwargs):
+                    if command[0] == "pgrep":
+                        # Scope the real matcher to our children and their synthetic argv[0].
+                        # Their host-visible comm stays "cat", even beside a real campaign.
+                        result = subprocess.run(["pgrep", "-P", str(os.getpid()), "-af", *command[1:]], **kwargs)
+                        if result.returncode == 0:
+                            sampled.set()
+                        return result
+                    if command[1].endswith("gen-scenario.py"):
+                        fixture = Path(command[3])
+                        (fixture / "config.toml").touch()
+                        (fixture / "finish").mkdir()
+                        (fixture / "finish/ready").touch()
+                    return subprocess.CompletedProcess(command, 0)
+
+                def finish(*_):
+                    nonlocal expected_reason
+                    if compiler:
+                        with subprocess.Popen([compiler], executable="/bin/cat", stdin=subprocess.PIPE) as fake:
+                            expected_reason = f"compiler observed during timed cell: {fake.pid} {compiler}"
+                            sampled.wait(5)
+                            fake.communicate()  # gone before the cell returns
+                        if compiler == "cargo":
+                            raise Q.AcceptanceFailure("synthetic bar failure")
+
+                def spawn(command, **kwargs):
+                    if command[0] == "systemd-run":
+                        print("evpn_qualification " + json.dumps(witness("candidate")), file=kwargs["stderr"], flush=True)
+                    return process
+
+                with patch.object(Q, "cell_gate"), patch.object(Q, "require_timing_window"), \
+                     patch.object(Q, "subprocess", wraps=subprocess) as commands, \
+                     patch.object(Q.COMMON, "own_child", side_effect=lambda child: child), \
+                     patch.object(Q.COMMON, "daemon_pid", return_value=42), \
+                     patch.object(Q.COMMON, "process_identity", return_value={"pid": 42}), \
+                     patch.object(Q.COMMON, "stop_owned"), patch.object(Q.COMMON, "snapshot_cgroup", return_value={}), \
+                     patch.object(Q, "fetch", return_value=(200, metrics_text())), \
+                     patch.object(Q, "finish_cell", side_effect=finish):
+                    commands.run.side_effect = run
+                    commands.Popen.side_effect = spawn
+                    raised = None
+                    try:
+                        Q.run_cell(root, manifest, "candidate", 3, 10, 0, False)
+                    except ValueError as error:
+                        raised = str(error)
+                result = json.loads((leg / "result.json").read_text())
+                self.assertEqual(result["status"], "INVALID" if compiler else "PASS")
+                self.assertEqual(result.get("error"), expected_reason)
+                self.assertEqual(raised, expected_reason)
+
+    def test_unavailable_compiler_roster_invalidates_only_timed_cells(self):
+        with patch.object(Q.subprocess, "run", return_value=Mock(returncode=2)) as sample:
+            with Q.watch_compilers(True):
+                pass
+            sample.assert_not_called()
+            with self.assertRaisesRegex(ValueError, "compiler roster unavailable"), Q.watch_compilers(False):
+                self.fail("timed cell ran without a compiler roster")
+
     def test_readiness_retains_http_error_code_separately(self):
         error = Q.urllib.error.HTTPError("http://readyz", 503, "busy", {}, None)
         with patch.object(Q, "fetch", side_effect=error):
