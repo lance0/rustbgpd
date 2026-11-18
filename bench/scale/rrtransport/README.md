@@ -366,6 +366,14 @@ and patches nothing. What each recorded number measures:
   it the field is null. There the drain's readiness checkpoints are
   unnamed, so its slices fall in stage `other` with every other unnamed
   checkpoint and are cut at every 64th checkpoint, not at step boundaries.
+- `actor.eviction_recovery_longest_ms` reports the count and longest
+  duration bracket from `bgp_rib_outbound_eviction_recovery_seconds` for
+  each observed data commit outcome (`processed` or `commit_refused`).
+  Each sample covers one cap-evicted receiver's recovery build in the RIB.
+  An empty object means the run observed no build. A null means its binary
+  lacked the instrument. The report identifies the cell, repetition and arm
+  in paired analysis, or the result path in a single-arm check, and gives
+  the run mode. The credit cells can finish without reaching the cursor cap.
 - `drain_gauges`: from the release (`from_ms`) to the cell end, the getter
   values of `bgp_rib_outbound_operations_live` and
   `bgp_rib_outbound_credit_rows`, read every 1 ms (`reads`, up to

@@ -333,6 +333,31 @@ class Bars(unittest.TestCase):
         self.assertEqual(len(results), CELL_COUNT)
         self.assertTrue(all(v == "PASS" for v, _ in results.values()), results)
 
+    def test_eviction_timing_keeps_its_source_and_cannot_fail_a_bar(self):
+        field = "eviction_recovery_longest_ms"
+
+        observed = {
+            "processed": histogram(500.0, 1000.0, 1),
+            "commit_refused": histogram(250.0, 500.0, 2),
+        }
+
+        def mutate(parent, candidate):
+            parent["restart-unicast.json"]["actor"][field] = None
+            candidate["exhaust-unicast.json"]["actor"] = {field: {}}
+            candidate["restart-unicast.json"]["actor"][field] = observed
+
+        results = self.run_bars(mutate)
+        for source, reading in (
+            ("parent 1 restart-unicast", "no instrument"),
+            ("candidate 1 exhaust-unicast", "no eviction recovery build observed"),
+            ("candidate 1 restart-unicast", json.dumps(observed, sort_keys=True)),
+        ):
+            verdict, reason = results.pop(f"{source} eviction recovery")
+            self.assertEqual(verdict, "REPORT")
+            self.assertIn(reading, reason)
+            self.assertIn("measured run", reason)
+        self.assertTrue(all(verdict == "PASS" for verdict, _ in results.values()))
+
     def test_failed_optional_release_is_visible_without_gating_campaign(self):
         def mutate(_parent, candidate):
             candidate["provenance.jsonl"] = provenance("candidate", [*ALL_CELLS, "release-timer"])

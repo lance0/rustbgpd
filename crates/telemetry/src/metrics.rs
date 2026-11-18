@@ -768,6 +768,7 @@ struct BgpMetricsInner {
     rib_dirty_resync: IntCounterVec,
     rib_outbound_owing_fallback: IntCounter,
     rib_outbound_owing_flips: IntCounter,
+    rib_outbound_eviction_recovery_seconds: HistogramVec,
     rib_outbound_owed_drain_step_seconds: HistogramVec,
     rib_outbound_dirty_peers: IntGauge,
     rib_outbound_credit_rows: IntGauge,
@@ -1932,6 +1933,18 @@ impl BgpMetrics {
              pass found the peer without credit.",
         )
         .expect("valid metric definition");
+        let rib_outbound_eviction_recovery_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "bgp_rib_outbound_eviction_recovery_seconds",
+                "Wall-clock duration of building and settling one receiver's owed-row cap eviction recovery after preflight, by data commit outcome (processed or commit_refused).",
+            )
+            .buckets(actor_buckets_with_250ms()),
+            &["outcome"],
+        )
+        .expect("valid metric definition");
+        for outcome in ["processed", "commit_refused"] {
+            rib_outbound_eviction_recovery_seconds.with_label_values(&[outcome]);
+        }
         let rib_outbound_owed_drain_step_seconds = HistogramVec::new(
             HistogramOpts::new(
                 "bgp_rib_outbound_owed_drain_step_seconds",
@@ -3626,6 +3639,9 @@ impl BgpMetrics {
             .register(Box::new(rib_outbound_owing_flips.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(rib_outbound_eviction_recovery_seconds.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(rib_outbound_owed_drain_step_seconds.clone()))
             .expect("metric not already registered");
         registry
@@ -4204,6 +4220,7 @@ impl BgpMetrics {
             rib_dirty_resync,
             rib_outbound_owing_fallback,
             rib_outbound_owing_flips,
+            rib_outbound_eviction_recovery_seconds,
             rib_outbound_owed_drain_step_seconds,
             rib_outbound_dirty_peers,
             rib_outbound_credit_rows,
@@ -6235,6 +6252,24 @@ impl BgpMetrics {
     /// Record a private family a peer began to owe whole.
     pub fn record_rib_outbound_owing_flip(&self) {
         self.0.rib_outbound_owing_flips.inc();
+    }
+
+    /// Observe one cap-evicted receiver's recovery build. A refused data
+    /// commit still incurred the build cost. Preflight refusals did not.
+    pub fn observe_rib_outbound_eviction_recovery(
+        &self,
+        commit_refused: bool,
+        duration: std::time::Duration,
+    ) {
+        let outcome = if commit_refused {
+            "commit_refused"
+        } else {
+            "processed"
+        };
+        self.0
+            .rib_outbound_eviction_recovery_seconds
+            .with_label_values(&[outcome])
+            .observe(duration.as_secs_f64());
     }
 
     /// Observe one owed-route drain step toward one receiver. `scope` is

@@ -136,12 +136,12 @@ const ROW_CREDIT: [(&str, usize); 4] = [
 /// The RIB's since-render slice maxima, in microseconds per stage.
 const SLICE_MAX: &str = "bgp_rib_actor_slice_max_microseconds";
 /// Histograms whose longest observation in the run the result brackets:
-/// message turns, the work units outside them, and one owed-drain step.
-/// A tree without the last records null.
-const TURN_HISTOGRAMS: [(&str, &str); 3] = [
+/// message turns, work outside them, owed-drain steps and eviction recoveries.
+const TURN_HISTOGRAMS: [(&str, &str); 4] = [
     ("bgp_rib_actor_turn_duration_seconds", "kind"),
     ("bgp_rib_actor_work_duration_seconds", "work_unit"),
     ("bgp_rib_outbound_owed_drain_step_seconds", "scope"),
+    ("bgp_rib_outbound_eviction_recovery_seconds", "outcome"),
 ];
 
 /// Families a cell can inject.
@@ -2067,6 +2067,7 @@ pub async fn exhaust(
         "turn_longest_ms": turn_longest[0],
         "work_longest_ms": turn_longest[1],
         "owed_drain_step_longest_ms": turn_longest[2],
+        "eviction_recovery_longest_ms": turn_longest[3],
         "inbox_round_trip": {
             "from_ms": ms(release_sent),
             "to_ms": ms(round_trips_to),
