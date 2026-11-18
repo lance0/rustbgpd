@@ -10,6 +10,7 @@ use rustbgpd_wire::EvpnRouteKey;
 use super::super::eor_hold::{EorHold, EorTrigger};
 use super::super::outbound_owing::OwedFamily;
 use super::*;
+use crate::ingest_budget::IngestBudget;
 use crate::outbound_credit::CHUNK_ROWS;
 
 const SOURCE: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
@@ -1837,13 +1838,24 @@ fn park(
     announce: &[(u32, u32)],
     withdraw: &[u32],
 ) -> usize {
+    park_charged(manager, receivers, announce, withdraw, None)
+}
+
+/// [`park`], the message charged to its session's ingest `budget`.
+fn park_charged(
+    manager: &mut RibManager,
+    receivers: &[Receiver],
+    announce: &[(u32, u32)],
+    withdraw: &[u32],
+    budget: Option<&Arc<IngestBudget>>,
+) -> usize {
     assert_eq!(receivers.len(), 2);
     assert!(announce.is_empty() != withdraw.is_empty(), "one mutation");
     let before: Vec<_> = receivers
         .iter()
         .map(|receiver| manager.outbound_stagings(receiver.peer))
         .collect();
-    manager.handle_update(RibUpdate::RoutesReceived {
+    let update = RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(SOURCE),
         announced: vec![],
@@ -1856,6 +1868,10 @@ fn park(
             .collect(),
         evpn_withdrawn: withdraw.iter().map(|&index| key(index)).collect(),
         validated_with: None,
+    };
+    manager.handle_update(match budget {
+        Some(budget) => update.metered(budget),
+        None => update,
     });
     for _ in 0..=manager.outbound_peers.len() {
         let served: Vec<usize> = (0..2)
@@ -3028,4 +3044,239 @@ fn a_dirty_evicted_member_whose_channel_is_gone_keeps_no_debt() {
     assert!(!manager.owed_row_evicted.contains(&stuck));
     assert!(manager.owing(stuck).is_none(), "in that tick");
     assert!(!manager.owing_peers.contains(&stuck));
+}
+
+/// The message whose fanout parks came from a session, so it carries that
+/// session's ingest permit. What happens to a receiver while the fanout is
+/// parked (its cursor starts, the cap evicts it, a release owes it whole,
+/// its policy moves it) changes which receivers the later slices skip, not
+/// when the message is finished: the budget is held after the event and
+/// after every slice that leaves the fanout parked, and returns in the
+/// step that reaches the last receiver. Red when the batch gives its permit
+/// up as the fanout parks, and when a cursor start drops the parked fanout
+/// (the batch finishes with receivers unreached).
+#[test]
+fn a_parked_evpn_fanout_keeps_its_ingest_budget_until_its_last_receiver() {
+    for event in ["cursor", "eviction", "release", "regroup"] {
+        let mut manager = if event == "release" {
+            deferral_manager(CREDIT)
+        } else {
+            manager(CREDIT).with_owing_theta_floor(1)
+        };
+        std::mem::forget(up_sized(&mut manager, peer_v4(SOURCE), 0, 4096, &[V4]));
+        let mut receivers: Vec<Receiver> = (0..2)
+            .map(|index| Receiver::up(&mut manager, receiver(index), 4096, &[EVPN]))
+            .collect();
+        received(&mut manager, &all(4), &[]);
+        drain(&mut manager, &mut receivers);
+        let budget = IngestBudget::new();
+        let parked = [(10, 0), (11, 0)];
+        let late = park_charged(&mut manager, &receivers, &parked, &[], Some(&budget));
+        let late_peer = receivers[late].peer;
+        assert_eq!(budget.unfinished(), 2, "{event}: charged and parked");
+        let mut expected = all(4);
+        expected.extend(parked);
+        match event {
+            "cursor" => {
+                for index in 2000..2200 {
+                    inject(&mut manager, index);
+                    expected.push((index, 0));
+                }
+                assert!(manager.owes_whole(late_peer, FAMILY), "{event}");
+                assert!(
+                    manager.owed_key_count(late_peer, FAMILY) >= 2,
+                    "{event}: the parked keys joined its set"
+                );
+            }
+            "eviction" => {
+                let index = rotate_until_evicted(&mut manager, late_peer);
+                expected.push((index, 0));
+            }
+            "release" => {
+                receivers.push(hold(&mut manager));
+                release(&mut manager);
+                assert!(manager.owes_whole(late_peer, FAMILY), "{event}");
+            }
+            _ => regroup(&mut manager, late_peer, Some(permit_all())),
+        }
+        assert!(
+            manager.pending_evpn_fanout.is_some(),
+            "{event}: still parked"
+        );
+        assert_eq!(budget.unfinished(), 2, "{event}: held across the event");
+        let mut steps = 0;
+        while manager.pending_evpn_fanout.is_some() {
+            steps += 1;
+            assert!(steps < 64, "{event}: the fanout does not finish");
+            assert!(manager.process_next_route_chunk());
+            let held = if manager.pending_evpn_fanout.is_some() {
+                2
+            } else {
+                0
+            };
+            assert_eq!(budget.unfinished(), held, "{event}: slice {steps}");
+        }
+        assert!(manager.pending_route_batches.is_empty(), "{event}");
+        drain(&mut manager, &mut receivers);
+        for receiver in &receivers {
+            assert_eq!(receiver.wire.table, table(&expected), "{event}");
+            assert!(!manager.owes(receiver.peer, EVPN), "{event}");
+            assert!(!manager.dirty_peers.contains(&receiver.peer), "{event}");
+        }
+        assert_eq!(budget.unfinished(), 0, "{event}");
+    }
+}
+
+/// The in-hold wait is for a dirty resync that ended clean, and for no
+/// other resync. An operator refresh of a clean receiver forces a resync
+/// inside the hold: the receiver missed nothing, so it does not wait. A
+/// dirty resync whose commit is refused (no export encoder) leaves the
+/// receiver dirty and not waiting, so the tick retries it inside the hold;
+/// once a retry is admitted the receiver has its unicast rows there and
+/// waits for its EVPN rebuild. Red when a forced resync waits too (every
+/// refreshed receiver would be held until the release), and when a
+/// still-dirty receiver is made to wait (the hold then holds its retry,
+/// and its unicast rows with it).
+#[test]
+fn only_a_dirty_resync_that_ends_clean_inside_an_evpn_hold_waits() {
+    let manager = deferral_manager(CREDIT);
+    let (mut manager, mut receivers) = owing_from(manager, &[V4, EVPN], 2, 8, 4096);
+    drain(&mut manager, &mut receivers);
+    let (forced, refused) = (receivers[0].peer, receivers[1].peer);
+    receivers.push(hold(&mut manager));
+
+    let builds = manager.adj_rib_out_commit_stats.resync_builds;
+    let (reply, mut answer) = oneshot::channel();
+    manager.handle_update(RibUpdate::RefreshPeerOutbound {
+        peer: forced,
+        reply,
+    });
+    assert!(matches!(answer.try_recv(), Ok(Ok(()))));
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds - builds, 1);
+    assert!(!manager.force_outbound_peers.contains(&forced), "served");
+    assert!(!manager.dirty_peers.contains(&forced));
+    assert!(
+        !manager.owed_row_evicted.contains(&forced),
+        "a forced resync does not wait"
+    );
+
+    manager.mark_outbound_dirty(refused);
+    let encoder = manager
+        .peer_export_encoders
+        .remove(&refused)
+        .expect("an exact export encoder");
+    received_unicast(&mut manager, 0..UNICAST);
+    let builds = manager.adj_rib_out_commit_stats.resync_builds;
+    for _ in 0..4 {
+        tick(&mut manager, &mut receivers);
+    }
+    assert!(
+        manager.adj_rib_out_commit_stats.resync_builds - builds >= 2,
+        "the tick retries the refused resync inside the hold"
+    );
+    assert!(manager.dirty_peers.contains(&refused), "refused");
+    assert!(
+        !manager.owed_row_evicted.contains(&refused),
+        "still dirty: not waiting"
+    );
+    assert!(receivers[1].wire.unicast_table.is_empty());
+    manager.peer_export_encoders.insert(refused, encoder);
+    for _ in 0..4 {
+        tick(&mut manager, &mut receivers);
+    }
+    assert!(manager.selection_deferred(EVPN), "all inside the hold");
+    assert_eq!(receivers[1].wire.unicast_table, unicast_table(UNICAST));
+    assert!(!manager.dirty_peers.contains(&refused), "admitted");
+    assert!(manager.owed_row_evicted.contains(&refused), "and waits");
+
+    release(&mut manager);
+    let (built, _) = drain_one_unit_a_tick(&mut manager, &mut receivers);
+    assert_eq!(built, 1, "the waiting receiver's unit only");
+    assert!(manager.owed_row_evicted.is_empty());
+    for receiver in &receivers {
+        assert_eq!(receiver.wire.table, table(&all(8)));
+        assert!(!manager.owes(receiver.peer, EVPN));
+        assert!(!manager.dirty_peers.contains(&receiver.peer));
+    }
+    assert_eq!(manager.owed_evpn_rows.len(), 0, "the list is freed");
+}
+
+/// The other side of the `channel gone` cell: a dirty receiver the cap did
+/// not evict keeps its record, with its live position, when the tick drops
+/// it from the retry; the record ends with the session. Red when the retry
+/// drops every gone receiver's record.
+#[test]
+fn a_dirty_receiver_whose_channel_is_gone_keeps_a_live_position_for_its_session_end() {
+    let (mut manager, mut receivers) = owing(2, 8, CREDIT);
+    let gone = receivers[1].peer;
+    manager.mark_outbound_dirty(gone);
+    assert!(!manager.owed_row_evicted.contains(&gone));
+    drop(receivers.remove(1));
+    manager.resync_dirty_peers_bounded();
+    assert!(!manager.dirty_peers.contains(&gone), "no retry");
+    assert!(manager.owes_whole(gone, FAMILY), "the record is kept");
+    assert!(manager.owing_peers.contains(&gone));
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: gone,
+        session_id: 0,
+    });
+    assert!(manager.owing(gone).is_none(), "ended with the session");
+    drain(&mut manager, &mut receivers);
+    assert_settled(&manager, &receivers, &all(8), "the other receiver");
+}
+
+/// A receiver in a private handoff inside an EVPN selection hold: a member
+/// that left an EVPN-owning group dirty, with X withdrawn while its channel
+/// was full, so only its recovery proof names X and it holds no EVPN row
+/// of its own. Its resyncs inside the hold enumerate no EVPN key and cover
+/// no proof, so its EVPN table stays owed through the hold, and the resync
+/// after the release withdraws X. (It stays dirty there, so the in-hold
+/// wait's recovery-handle condition is not what keeps it owed.)
+#[test]
+fn a_private_handoff_resynced_inside_an_evpn_hold_withdraws_after_the_release() {
+    let first = 10u32;
+    let (mut manager, sibling, owned) = owned_sibling(deferral_manager(CREDIT));
+    let mover = Receiver::up(&mut manager, receiver(1), 8, &[EVPN]);
+    let peer = mover.peer;
+    regroup(&mut manager, peer, Some(permit_all()));
+    assert_eq!(manager.evpn_grouped_member_of(peer), Some(owned));
+    let mut receivers = vec![sibling, mover];
+    received(&mut manager, &all(first), &[]);
+    drain(&mut manager, &mut receivers);
+    assert_eq!(receivers[1].wire.table, table(&all(first)), "admitted");
+    let sender = manager.outbound_peers[&peer].clone();
+    while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
+    received(&mut manager, &[], &[0]);
+    assert!(manager.dirty_peers.contains(&peer), "admission refused");
+    receivers.push(hold(&mut manager));
+    regroup(&mut manager, peer, None);
+    assert!(manager.evpn_grouped_member_of(peer).is_none(), "private");
+    assert!(manager.evpn_recovery_handle(peer).is_some(), "a proof");
+    assert_eq!(
+        manager
+            .adj_ribs_out
+            .get(&peer)
+            .map_or(0, AdjRibOut::evpn_len),
+        0,
+        "no EVPN row of its own"
+    );
+    for _ in 0..50 {
+        tick(&mut manager, &mut receivers);
+    }
+    assert!(manager.selection_deferred(EVPN));
+    assert!(
+        manager.dirty_peers.contains(&peer) || manager.owed_row_evicted.contains(&peer),
+        "its EVPN table is still owed"
+    );
+    assert!(
+        receivers[1].wire.table.contains_key(&key(0)),
+        "X still held"
+    );
+    release(&mut manager);
+    drain_one_unit_a_tick(&mut manager, &mut receivers);
+    let expected: Vec<_> = (1..first).map(|index| (index, 0)).collect();
+    assert_eq!(receivers[1].wire.table, table(&expected));
+    assert_eq!(receivers[1].wire.count(0), (1, 1), "X withdrawn once");
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert!(manager.owed_row_evicted.is_empty());
 }
