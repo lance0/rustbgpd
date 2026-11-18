@@ -4389,7 +4389,7 @@ impl RibManager {
             // This unit is where a receiver the owed-row cap evicted is
             // built; it stays marked while it stays dirty.
             let evicted = self.owed_row_evicted.remove(&last);
-            let built = self.distribute_changes_without_stale_flush();
+            let built = self.distribute_changes_without_stale_flush(evicted.then_some(last));
             let still_dirty = self.dirty_peers.contains(&last);
             if evicted && still_dirty {
                 self.owed_row_evicted.insert(last);

@@ -1242,7 +1242,31 @@ def verdicts(parent_dir: Path, candidate_dir: Path) -> list[tuple[str, str, str]
     for arm in (parent, candidate):
         for rep, directory in sorted(arm.repetitions.items()):
             results.extend(optional_release_reports(directory, arm, rep))
+            for cell in sorted(arm.attempted[rep]):
+                if not cell.startswith(("restart-", "exhaust-")):
+                    continue
+                try:
+                    run = arm.run(rep, cell)
+                except (Invalid, AttributeError, TypeError, ValueError):
+                    continue  # The campaign cells above report unusable results.
+                if run and (note := eviction_reading(run, f"{arm.name} {rep} {cell}")):
+                    results.append(note)
     return results
+
+
+def eviction_reading(run: dict, source: str) -> tuple[str, str, str] | None:
+    actor = run.get("actor")
+    field = "eviction_recovery_longest_ms"
+    if not isinstance(actor, dict) or field not in actor:
+        return None  # Older result schema.
+    reading = actor[field]
+    if reading is None:
+        detail = "no instrument"
+    elif reading == {}:
+        detail = "no eviction recovery build observed"
+    else:
+        detail = json.dumps(reading, sort_keys=True)
+    return f"{source} eviction recovery", "REPORT", f"{run.get('mode')} run, actor.{field}: {detail}"
 
 
 def optional_release_reports(
@@ -1331,7 +1355,10 @@ def check(directory: Path) -> list[tuple[str, str, str]]:
                 for path in sorted(directory.rglob(name)):
                     marker = path.parent / f"{cell}-exit.json"
                     exit_record = read(marker) if marker.exists() else None
-                    runs.append(explained(read(path), exit_record, f"{path.parent}: {cell}"))
+                    run = explained(read(path), exit_record, f"{path.parent}: {cell}")
+                    runs.append(run)
+                    if note := eviction_reading(run, str(path)):
+                        results.append(note)
                 if not runs:
                     continue
                 if kind == "exhaust":

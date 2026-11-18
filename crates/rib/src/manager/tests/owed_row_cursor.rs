@@ -1607,6 +1607,67 @@ fn drain_steps_observed(manager: &RibManager) -> u64 {
         .sum()
 }
 
+/// Seed the post-eviction mark on a one-row receiver so the timing controls
+/// can exercise the actual tick without filling the owed-row list.
+#[test]
+fn eviction_recovery_times_only_the_selected_receivers_build() {
+    let mut manager = manager(CREDIT);
+    let _source = up_session(&mut manager, peer_v4(SOURCE), 0);
+    let peer = receiver(0);
+    let mut output = up_session(&mut manager, peer, 0);
+    let mut wire = Wire::default();
+    wire.write(&mut output);
+    let counts = |manager: &RibManager| {
+        let samples = histogram_sample_counts_by_label(
+            &manager.metrics,
+            "bgp_rib_outbound_eviction_recovery_seconds",
+            "outcome",
+        );
+        (samples["processed"], samples["commit_refused"])
+    };
+
+    let builds = manager.adj_rib_out_commit_stats.resync_builds;
+    assert!(manager.mark_outbound_dirty(peer));
+    manager.resync_dirty_peers_bounded();
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds + 1);
+    assert_eq!(counts(&manager), (0, 0));
+    assert!(!manager.dirty_peers.contains(&peer));
+
+    assert!(manager.mark_outbound_dirty(peer));
+    manager.owed_row_evicted.insert(peer);
+    received(&mut manager, &[(0, 0)], &[]);
+    let latch = manager.begin_outbound_operation(peer, 1).unwrap();
+    // A force-only sibling builds in the same pass while this peer fails preflight.
+    let sibling = receiver(1);
+    let mut sibling_output = up_session(&mut manager, sibling, 0);
+    Wire::default().write(&mut sibling_output);
+    let before_refusal = manager.adj_rib_out_commit_stats.resync_builds;
+    manager.force_outbound_peers.insert(sibling);
+    manager.resync_dirty_peers_bounded();
+    assert_eq!(
+        manager.adj_rib_out_commit_stats.resync_builds,
+        before_refusal + 1
+    );
+    assert!(!manager.force_outbound_peers.contains(&sibling));
+    assert!(manager.owed_row_evicted.contains(&peer));
+    assert_eq!(counts(&manager), (0, 0));
+    drop(latch);
+
+    let encoder = manager.peer_export_encoders.remove(&peer).unwrap();
+    manager.resync_dirty_peers_bounded();
+    assert_eq!(missing_encoder_refusals(&manager, peer), 1.0);
+    assert!(manager.owed_row_evicted.contains(&peer));
+    assert_eq!(counts(&manager), (0, 1));
+
+    manager.peer_export_encoders.insert(peer, encoder);
+    manager.resync_dirty_peers_bounded();
+    wire.write(&mut output);
+    assert_eq!(wire.table, table(&[(0, 0)]));
+    assert!(!manager.owed_row_evicted.contains(&peer));
+    assert_eq!(counts(&manager), (1, 1));
+    assert_eq!(drain_steps_observed(&manager), 0);
+}
+
 /// Work count: a tick resyncs at most one evicted receiver, however much
 /// of its poll budget is left: that resync is a whole table, and the tick
 /// ends with it. The unit is not a drain step and is observed under no
