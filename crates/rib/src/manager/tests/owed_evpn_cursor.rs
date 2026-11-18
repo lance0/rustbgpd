@@ -2492,3 +2492,378 @@ fn an_evicted_group_members_position_holds_no_list_entry() {
         assert_eq!(receiver.wire.rows_after_marker, 0, "receiver {index}");
     }
 }
+
+/// Group members with small channels: the cap evicts `1 + readers` of
+/// them. One (`stuck`) is dirty first, its channel full of its group's
+/// unicast rows, and never writes; the others wait, clean. Returns the
+/// unicast rows sent and the EVPN table every receiver must end with.
+fn evict_one_stuck(readers: u8) -> (RibManager, Vec<Receiver>, u32, Vec<(u32, u32)>) {
+    let mut manager = manager(CREDIT);
+    manager.test_force_ungrouped = false;
+    let (mut manager, mut receivers) = owing_from(manager, &[V4, EVPN], 2 + readers, 8, 8);
+    received_unicast(&mut manager, 0..UNICAST);
+    for receiver in &mut receivers {
+        receiver.write();
+    }
+    let stuck = receivers[1].peer;
+    let mut unicast = UNICAST;
+    while !manager.dirty_peers.contains(&stuck) {
+        assert!(unicast < UNICAST + 64, "the stuck member's channel fills");
+        received_unicast(&mut manager, unicast..unicast + 1);
+        unicast += 1;
+        for (index, receiver) in receivers.iter_mut().enumerate() {
+            if index != 1 {
+                receiver.write();
+            }
+        }
+    }
+    let mut fresh: Vec<(u32, u32)> = Vec::new();
+    for _round in 0..900u32 {
+        let base = fresh.last().map_or(1000, |&(index, _)| index + 1);
+        let gone: Vec<u32> = fresh.iter().map(|&(index, _)| index).collect();
+        fresh = (base..base + 64).map(|index| (index, 0)).collect();
+        received(&mut manager, &fresh, &gone);
+        if manager.owed_row_evicted.len() == receivers.len() - 1 {
+            break;
+        }
+        for _ in 0..12 {
+            manager.resync_dirty_peers_bounded();
+            receivers[0].write();
+        }
+    }
+    assert_eq!(manager.owed_row_evicted.len(), receivers.len() - 1);
+    assert!(manager.dirty_peers.contains(&stuck), "stuck is dirty");
+    assert!(manager.outbound_channel_full(stuck));
+    for receiver in &receivers[2..] {
+        assert!(!manager.dirty_peers.contains(&receiver.peer), "waiting");
+    }
+    let expected = all(8).into_iter().chain(fresh).collect();
+    (manager, receivers, unicast, expected)
+}
+
+/// Liveness: one evicted group member is stalled for good (dirty, its
+/// channel full, its unit refused before it builds on every tick), and
+/// several evicted members read. Every reader is rebuilt within two ticks
+/// of its turn, each tick building at most one table and capturing at most
+/// one group table, at any poll budget; the stalled member is rebuilt once
+/// it reads. Red when a dirty evicted receiver that cannot build holds the
+/// promotion of the others (no reader is ever rebuilt).
+#[test]
+fn a_stalled_evicted_member_holds_no_other_members_unit() {
+    const READERS: u8 = 4;
+    for budget in [Duration::ZERO, Duration::from_secs(3600)] {
+        let (mut manager, mut receivers, unicast, expected) = evict_one_stuck(READERS);
+        manager.flush_poll_budget = budget;
+        let start = manager.adj_rib_out_commit_stats;
+        let ticks = 2 * usize::from(READERS) + 2;
+        for _ in 0..ticks {
+            let before = manager.adj_rib_out_commit_stats;
+            manager.resync_dirty_peers_bounded();
+            for (index, receiver) in receivers.iter_mut().enumerate() {
+                if index != 1 {
+                    receiver.write();
+                }
+            }
+            let after = manager.adj_rib_out_commit_stats;
+            assert!(after.resync_builds - before.resync_builds <= 1);
+            assert!(after.group_table_captures - before.group_table_captures <= 1);
+        }
+        let now = manager.adj_rib_out_commit_stats;
+        assert_eq!(
+            now.resync_builds - start.resync_builds,
+            usize::from(READERS),
+            "one table per reader, none for the stalled member ({budget:?})"
+        );
+        assert_eq!(
+            now.group_table_captures - start.group_table_captures,
+            usize::from(READERS),
+            "one capture per reader"
+        );
+        for (index, receiver) in receivers.iter().enumerate().skip(2) {
+            assert!(
+                !manager.owed_row_evicted.contains(&receiver.peer),
+                "reader {index} rebuilt within {ticks} ticks ({budget:?})"
+            );
+            assert_eq!(receiver.wire.table, table(&expected), "reader {index}");
+            assert_eq!(receiver.wire.markers, 1, "reader {index}");
+            assert_eq!(receiver.wire.rows_after_marker, 0, "reader {index}");
+        }
+        assert!(manager.owed_row_evicted.contains(&receivers[1].peer));
+        // The stalled member reads at last.
+        drain_one_unit_a_tick(&mut manager, &mut receivers);
+        assert!(manager.owed_row_evicted.is_empty());
+        for (index, receiver) in receivers.iter().enumerate() {
+            assert_eq!(receiver.wire.table, table(&expected), "receiver {index}");
+            assert_eq!(receiver.wire.unicast_table, unicast_table(unicast));
+            assert_eq!(receiver.wire.markers, 1, "receiver {index}");
+            assert_eq!(receiver.wire.rows_after_marker, 0, "receiver {index}");
+            assert!(!manager.owes(receiver.peer, EVPN), "receiver {index}");
+        }
+        assert_eq!(manager.owed_evpn_rows.len(), 0, "the list is freed");
+    }
+}
+
+/// An EVPN selection hold begins while two receivers the cap evicted still
+/// wait for their units, and EVPN changes inside it. A resync inside the
+/// hold enumerates no EVPN key, so no unit of theirs runs there, though
+/// the ticks run for another dirty receiver: nothing is built or captured
+/// for them, each keeps its eviction and its state (`dirty`:
+/// already dirty when the hold began, as an ungrouped receiver always is;
+/// otherwise a group member not yet promoted), and the tick does not stay
+/// armed for them. After the release each is rebuilt by its unit, one a
+/// tick, and ends exact. `admitted`: the receivers held the table before
+/// they stalled, and row 5 was withdrawn while they owed EVPN whole (the
+/// eviction dropped its list entry): the row leaves them. Otherwise they
+/// still owe their End-of-RIB, which follows the rebuilt rows.
+fn evicted_receivers_meet_a_hold(grouped: bool, dirty: bool, admitted: bool) {
+    let case = format!("grouped={grouped} dirty={dirty} admitted={admitted}");
+    let mut manager = deferral_manager(CREDIT);
+    manager.test_force_ungrouped = !grouped;
+    let (mut manager, mut receivers) = owing_from(manager, &[V4, EVPN], 3, 8, 4096);
+    received_unicast(&mut manager, 0..UNICAST);
+    if admitted {
+        drain(&mut manager, &mut receivers);
+        for receiver in &receivers {
+            assert_eq!(receiver.wire.table, table(&all(8)), "{case}: admitted");
+        }
+    }
+    let evicted = [receivers[1].peer, receivers[2].peer];
+    let mut fresh: Vec<(u32, u32)> = Vec::new();
+    let mut withdrawn = false;
+    for _round in 0..900u32 {
+        let base = fresh.last().map_or(1000, |&(index, _)| index + 1);
+        let mut gone: Vec<u32> = fresh.iter().map(|&(index, _)| index).collect();
+        if !withdrawn && evicted.iter().all(|&peer| manager.owes_whole(peer, FAMILY)) {
+            gone.push(5);
+            withdrawn = true;
+        }
+        fresh = (base..base + 64).map(|index| (index, 0)).collect();
+        received(&mut manager, &fresh, &gone);
+        if manager.owed_row_evicted.len() == 2 {
+            break;
+        }
+        for _ in 0..12 {
+            manager.resync_dirty_peers_bounded();
+            receivers[0].write();
+        }
+    }
+    assert!(withdrawn, "{case}");
+    for peer in evicted {
+        assert!(manager.owed_row_evicted.contains(&peer), "{case}: evicted");
+        if dirty {
+            // As a failed send leaves any receiver.
+            manager.mark_outbound_dirty(peer);
+        }
+        assert_eq!(manager.dirty_peers.contains(&peer), dirty, "{case}");
+    }
+    let waiter = hold(&mut manager);
+    receivers.push(waiter);
+    received(&mut manager, &[(9000, 0)], &[6]);
+    // The reader is dirty for a reason of its own, so ticks run their
+    // whole course inside the hold: its resync is the only table built.
+    manager.mark_outbound_dirty(receivers[0].peer);
+    let stats = manager.adj_rib_out_commit_stats;
+    for _ in 0..20 {
+        tick(&mut manager, &mut receivers);
+    }
+    let now = manager.adj_rib_out_commit_stats;
+    assert!(!manager.dirty_peers.contains(&receivers[0].peer), "{case}");
+    assert_eq!(
+        now.resync_builds - stats.resync_builds,
+        1,
+        "{case}: no evicted receiver's unit"
+    );
+    assert_eq!(
+        now.group_table_captures, stats.group_table_captures,
+        "{case}: no capture"
+    );
+    assert!(!manager.resync_tick_pending(), "{case}: the tick rests");
+    for receiver in &receivers[1..3] {
+        let peer = receiver.peer;
+        assert!(manager.owed_row_evicted.contains(&peer), "{case}: kept");
+        assert_eq!(manager.dirty_peers.contains(&peer), dirty, "{case}");
+        assert_eq!(receiver.wire.table.contains_key(&key(5)), admitted);
+        assert_eq!(receiver.wire.markers, usize::from(admitted), "{case}");
+    }
+    release(&mut manager);
+    assert!(manager.resync_tick_pending(), "{case}: the release arms it");
+    drain_one_unit_a_tick(&mut manager, &mut receivers);
+    let expected: Vec<(u32, u32)> = (0..8)
+        .filter(|index| *index != 5 && *index != 6)
+        .map(|index| (index, 0))
+        .chain(fresh)
+        .chain([(9000, 0)])
+        .collect();
+    assert!(manager.owed_row_evicted.is_empty(), "{case}");
+    for (index, receiver) in receivers[..3].iter().enumerate() {
+        assert_eq!(receiver.wire.table, table(&expected), "{case}: {index}");
+        assert_eq!(receiver.wire.markers, 1, "{case}: {index}");
+        assert!(!manager.owes(receiver.peer, EVPN), "{case}: {index}");
+        assert!(!manager.dirty_peers.contains(&receiver.peer), "{case}");
+        if !admitted && index != 0 {
+            assert_eq!(receiver.wire.rows_after_marker, 0, "{case}: {index}");
+        }
+    }
+    assert_eq!(manager.owed_evpn_rows.len(), 0, "{case}: the list is freed");
+}
+
+/// Red when the tick promotes a waiting member inside the hold (its unit
+/// clears the eviction with EVPN not enumerated, the kept position is read
+/// again, and row 5 stays for good).
+#[test]
+fn a_hold_before_a_waiting_evicted_members_unit_loses_no_withdrawal() {
+    evicted_receivers_meet_a_hold(true, false, true);
+    evicted_receivers_meet_a_hold(true, false, false);
+}
+
+/// Red when the tick runs a dirty evicted receiver's unit inside the hold.
+#[test]
+fn a_hold_before_a_dirty_evicted_receivers_unit_loses_no_withdrawal() {
+    for grouped in [true, false] {
+        evicted_receivers_meet_a_hold(grouped, true, true);
+        evicted_receivers_meet_a_hold(grouped, true, false);
+    }
+}
+
+/// The state table's cells for a waiting evicted group member (not dirty,
+/// debt kept, position dead), one event each; every case then ends exact
+/// through `drain_one_unit_a_tick`.
+/// - `channel_full`: the tick does not promote a member whose channel has
+///   no room (no capture for a unit that would be refused); it does once
+///   the member writes.
+/// - `operation_live`: nor one whose whole-table operation is live.
+/// - `channel_gone`: a member whose session is gone is dropped by the tick
+///   in that tick, debt and eviction both.
+/// - `absorb`: an operation that would absorb the family is refused as for
+///   capacity; the debt and the eviction stay for the tick's unit.
+/// - `close`: the shutdown flush reads no list entry from the dead
+///   position.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one table walks every event from the same waiting state to the same exact end"
+)]
+fn a_waiting_evicted_member_meets_each_event() {
+    for case in [
+        "channel_full",
+        "operation_live",
+        "channel_gone",
+        "absorb",
+        "close",
+    ] {
+        let (mut manager, mut receivers, _unicast, mut expected) = evict_one_stuck(2);
+        // The stuck member reads now: only the case's member is special.
+        receivers[1].write();
+        let peer = receivers[2].peer;
+        let stats = manager.adj_rib_out_commit_stats;
+        let waits = |manager: &RibManager| {
+            assert!(manager.owed_row_evicted.contains(&peer), "{case}: evicted");
+            assert!(!manager.dirty_peers.contains(&peer), "{case}: clean");
+            assert!(manager.owes_whole(peer, FAMILY), "{case}: debt kept");
+        };
+        waits(&manager);
+        match case {
+            "channel_full" => {
+                let mut unicast = 100;
+                while !manager.outbound_channel_full(peer) {
+                    received_unicast(&mut manager, unicast..unicast + 1);
+                    unicast += 1;
+                    for (index, receiver) in receivers.iter_mut().enumerate() {
+                        if index != 2 {
+                            receiver.write();
+                        }
+                    }
+                }
+                waits(&manager);
+                for _ in 0..8 {
+                    manager.resync_dirty_peers_bounded();
+                    for (index, receiver) in receivers.iter_mut().enumerate() {
+                        if index != 2 {
+                            receiver.write();
+                        }
+                    }
+                }
+                // (Every pass captures a clean member whose channel is
+                // full, evicted or not, so captures are not counted here.)
+                waits(&manager);
+                assert_eq!(manager.owed_row_evicted.len(), 1, "{case}: the rest ran");
+            }
+            "operation_live" => {
+                let operation = manager.begin_outbound_operation(peer, 1).unwrap();
+                for _ in 0..8 {
+                    tick(&mut manager, &mut receivers);
+                }
+                waits(&manager);
+                assert_eq!(
+                    manager.adj_rib_out_commit_stats.group_table_captures
+                        - stats.group_table_captures,
+                    1,
+                    "{case}: the other waiting member only"
+                );
+                drop(operation);
+            }
+            "channel_gone" => {
+                receivers.remove(2);
+                manager.resync_dirty_peers_bounded();
+                assert!(manager.owing(peer).is_none(), "{case}: in that tick");
+                assert!(!manager.owing_peers.contains(&peer), "{case}");
+                assert!(!manager.owed_row_evicted.contains(&peer), "{case}");
+                assert!(!manager.dirty_peers.contains(&peer), "{case}");
+            }
+            "absorb" => {
+                receivers[2].write();
+                let rows = receivers[2].wire.announced.len();
+                let mut operation = manager.begin_outbound_operation(peer, 2).unwrap();
+                let absorbed = manager.absorb_owed_family(peer, EVPN, &mut operation);
+                assert_eq!(
+                    absorbed,
+                    Err(crate::manager::outbound_credit::CREDIT_REFUSAL),
+                    "{case}"
+                );
+                drop(operation);
+                receivers[2].write();
+                assert_eq!(receivers[2].wire.announced.len(), rows, "{case}");
+                waits(&manager);
+            }
+            "close" => {
+                // A live position, and two changes logged after the dead one.
+                // The reader catches up by drain steps alone (no tick, so
+                // nobody is promoted), then owes whole again from the head.
+                for _ in 0..4096 {
+                    if !manager.owes(receivers[0].peer, EVPN) {
+                        break;
+                    }
+                    manager.drain_owing_bounded(std::time::Instant::now());
+                    receivers[0].write();
+                }
+                assert!(!manager.owes(receivers[0].peer, EVPN), "{case}");
+                manager.owe_whole_family(receivers[0].peer, FAMILY);
+                received(&mut manager, &[(9000, 0)], &[3]);
+                expected.retain(|&(index, _)| index != 3);
+                expected.push((9000, 0));
+                let kept: usize = receivers
+                    .iter()
+                    .map(|receiver| manager.owed_key_count(receiver.peer, FAMILY))
+                    .sum();
+                let read = manager.adj_rib_out_commit_stats.owed_drain_rows_read;
+                manager.owing_close_flush();
+                assert_eq!(
+                    manager.adj_rib_out_commit_stats.owed_drain_rows_read - read,
+                    kept + 2,
+                    "{case}: each kept set and the live position's two keys"
+                );
+                waits(&manager);
+            }
+            _ => unreachable!(),
+        }
+        drain_one_unit_a_tick(&mut manager, &mut receivers);
+        assert!(manager.owed_row_evicted.is_empty(), "{case}");
+        for (index, receiver) in receivers.iter().enumerate() {
+            assert_eq!(receiver.wire.table, table(&expected), "{case}: {index}");
+            assert_eq!(receiver.wire.markers, 1, "{case}: {index}");
+            assert!(!manager.owes(receiver.peer, EVPN), "{case}: {index}");
+            assert!(!manager.dirty_peers.contains(&receiver.peer), "{case}");
+        }
+        assert_eq!(manager.owed_evpn_rows.len(), 0, "{case}: the list is freed");
+    }
+}
