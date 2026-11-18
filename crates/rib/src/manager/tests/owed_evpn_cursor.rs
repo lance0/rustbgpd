@@ -352,21 +352,22 @@ fn fallbacks(manager: &RibManager) -> f64 {
 
 /// Drain steps the step histogram recorded under `scope`.
 fn steps_observed(manager: &RibManager, scope: &str) -> u64 {
-    manager
-        .metrics
-        .registry()
-        .gather()
-        .into_iter()
-        .filter(|family| family.name() == "bgp_rib_outbound_owed_drain_step_seconds")
-        .flat_map(|family| family.get_metric().to_vec())
-        .filter(|metric| {
-            metric
-                .get_label()
-                .iter()
-                .any(|label| label.name() == "scope" && label.value() == scope)
-        })
-        .map(|metric| metric.get_histogram().get_sample_count())
-        .sum()
+    histogram_sample_counts_by_label(
+        &manager.metrics,
+        "bgp_rib_outbound_owed_drain_step_seconds",
+        "scope",
+    )[scope]
+}
+
+/// Eviction recoveries the histogram recorded: processed, then refused at
+/// the commit.
+fn recoveries_observed(manager: &RibManager) -> (u64, u64) {
+    let samples = histogram_sample_counts_by_label(
+        &manager.metrics,
+        "bgp_rib_outbound_eviction_recovery_seconds",
+        "outcome",
+    );
+    (samples["processed"], samples["commit_refused"])
 }
 
 /// Tick until no resync work is left; every session writes what it was
@@ -826,6 +827,11 @@ fn an_evpn_refresh_before_the_initial_end_of_rib_is_answered_after_it() {
         refused + 1,
         "one admitted resync"
     );
+    assert_eq!(
+        recoveries_observed(&manager),
+        (1, u64::try_from(refused).unwrap()),
+        "the refused builds and the admitted one are timed apart"
+    );
     assert!(!manager.pending_refresh.contains_key(&peer), "answered");
     assert!(manager.owed_row_evicted.is_empty());
 }
@@ -865,6 +871,11 @@ fn an_evicted_evpn_receiver_is_rebuilt_only_by_the_tick_one_per_tick() {
         built = now;
     }
     assert_eq!(built - builds, 3, "one resync per evicted receiver");
+    assert_eq!(
+        recoveries_observed(&manager),
+        (3, 0),
+        "each EVPN eviction recovery is timed"
+    );
     assert!(manager.owed_row_evicted.is_empty());
     for (index, receiver) in receivers.iter().enumerate() {
         assert_eq!(
@@ -1381,4 +1392,348 @@ fn a_live_rtc_change_behind_an_evpn_cursor_revisits_the_keys_it_passed() {
     assert!(!wire.announced.contains(&b.key()));
     assert!(manager.owing(sibling).is_none());
     assert_eq!(fallbacks(&manager), 0.0);
+}
+
+/// A chain that permits every route unmodified: another group key than no
+/// chain at all, with the same exported rows.
+fn permit_all() -> PolicyChain {
+    let mut statement = super::update_groups::deny_statement(Ipv4Prefix::new(SOURCE, 32));
+    statement.prefix = None;
+    statement.action = rustbgpd_policy::PolicyAction::Permit;
+    PolicyChain::new(vec![rustbgpd_policy::Policy {
+        entries: vec![statement],
+        default_action: rustbgpd_policy::PolicyAction::Deny,
+    }])
+}
+
+/// Move `peer` under `policy` through the export-policy transaction.
+fn regroup(manager: &mut RibManager, peer: PeerId, policy: Option<PolicyChain>) {
+    manager
+        .replace_peer_export_policy_synchronously(peer, policy)
+        .unwrap();
+}
+
+/// A manager whose peers group, with the source and a sibling whose group
+/// owns its members' EVPN rows: every other member of that group (the
+/// [`permit_all`] chain) is group-owned, and a peer without a chain holds
+/// EVPN privately. No build decides EVPN ownership from configuration, so
+/// the sibling's group is given it while every table is empty; each later
+/// move is the real regroup.
+fn owned_sibling(mut manager: RibManager) -> (RibManager, Receiver, usize) {
+    manager.test_force_ungrouped = false;
+    std::mem::forget(up_sized(&mut manager, peer_v4(SOURCE), 0, 4096, &[V4]));
+    let sibling = Receiver::up(&mut manager, receiver(0), 4096, &[EVPN]);
+    regroup(&mut manager, sibling.peer, Some(permit_all()));
+    let gid = manager.grouped_member_of(sibling.peer).unwrap();
+    assert_eq!(manager.group_ribs[&gid].members.len(), 1);
+    manager
+        .group_ribs
+        .get_mut(&gid)
+        .unwrap()
+        .set_evpn_ownership_for_test(true);
+    assert!(manager.register_evpn_recovery(sibling.peer, false));
+    assert_eq!(manager.evpn_grouped_member_of(sibling.peer), Some(gid));
+    (manager, sibling, gid)
+}
+
+/// A group-owned receiver holds no private EVPN position.
+fn assert_no_cursor(manager: &RibManager, peer: PeerId, at: &str) {
+    assert!(!manager.owes_whole(peer, FAMILY), "{at}: a private cursor");
+    assert!(!manager.owes(peer, EVPN), "{at}: private EVPN debt");
+}
+
+/// Contract (ownership, private to owned): a private receiver holds X and
+/// its cursor is mid-walk when the source withdraws X, so that withdrawal
+/// is owed to it by the shared list alone. Its policy then moves it into a
+/// group that owns EVPN. The private position ends with the old ownership
+/// and the list is freed; the owned destination's recovery withdraws X and
+/// sends every row the walk had not reached, then one End-of-RIB. The
+/// group-owned sibling never holds a private position. Red when the regroup
+/// keeps the old position, and when the private rows it had admitted are
+/// not captured for the destination.
+#[test]
+fn a_private_evpn_cursor_ends_when_its_receiver_becomes_group_owned() {
+    let rows = 40u32;
+    let (mut manager, sibling, owned) = owned_sibling(manager(CREDIT));
+    let mover = Receiver::up(&mut manager, receiver(1), 4096, &[EVPN]);
+    let (sibling_peer, peer) = (sibling.peer, mover.peer);
+    assert!(manager.evpn_grouped_member_of(peer).is_none(), "private");
+    let mut receivers = vec![sibling, mover];
+    received(&mut manager, &[(0, 0)], &[]);
+    drain(&mut manager, &mut receivers);
+    for receiver in &receivers {
+        assert_eq!(receiver.wire.table, table(&[(0, 0)]), "X admitted");
+    }
+    manager.owe_eor(peer, EVPN);
+    manager.owe_whole_family(peer, FAMILY);
+    let rest: Vec<_> = (1..rows).map(|index| (index, 0)).collect();
+    received(&mut manager, &rest, &[]);
+    tick(&mut manager, &mut receivers);
+    tick(&mut manager, &mut receivers);
+    assert_eq!(receivers[1].wire.table.len(), 1 + 2 * STEP, "mid-walk");
+    // X leaves every table: only the list owes the mover its withdrawal.
+    received(&mut manager, &[], &[0]);
+    receivers[1].write();
+    assert!(manager.loc_rib.get_evpn(&key(0)).is_none());
+    assert!(manager.ribs[&peer_v4(SOURCE)].get_evpn(&key(0)).is_none());
+    assert!(
+        receivers[1].wire.table.contains_key(&key(0)),
+        "X still held"
+    );
+    assert_eq!(receivers[1].wire.table.len(), 1 + 2 * STEP);
+    assert!(manager.owes_whole(peer, FAMILY));
+    assert_eq!(manager.owed_key_count(peer, FAMILY), 0, "no kept set");
+    assert_no_cursor(&manager, sibling_peer, "before the regroup");
+
+    // Its channel is full, so the move's own turn cannot admit the
+    // recovery: the position must end with the move, not with a resync.
+    let sender = manager.outbound_peers[&peer].clone();
+    while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
+    regroup(&mut manager, peer, Some(permit_all()));
+    assert_eq!(manager.evpn_grouped_member_of(peer), Some(owned));
+    assert!(manager.dirty_peers.contains(&peer), "recovery refused");
+    assert_no_cursor(&manager, peer, "the moved receiver");
+    assert!(manager.owing(peer).is_none(), "the position ended");
+    assert_eq!(
+        manager.owed_evpn_rows.len(),
+        0,
+        "no cursor: the list is freed"
+    );
+    receivers[1].write();
+    assert_eq!(receivers[1].wire.table.len(), 1 + 2 * STEP, "nothing sent");
+    for _ in 0..1000 {
+        tick(&mut manager, &mut receivers);
+        assert_no_cursor(&manager, peer, "owned recovery");
+        assert_no_cursor(&manager, sibling_peer, "sibling");
+        if !manager.resync_tick_pending() {
+            break;
+        }
+    }
+    assert!(!manager.resync_tick_pending());
+    let wire = &receivers[1].wire;
+    assert_eq!(wire.table, table(&rest), "exact table");
+    assert_eq!(wire.count(0), (1, 1), "X withdrawn once");
+    assert_eq!((wire.markers, wire.rows_after_marker), (1, 0));
+    assert!(!manager.eor_pending(peer).contains(&EVPN));
+    assert!(!manager.dirty_peers.contains(&peer));
+    let wire = &receivers[0].wire;
+    assert_eq!(wire.table, table(&rest), "the sibling's table");
+    assert_eq!(wire.announced.len(), rows as usize, "once each");
+    assert_eq!(wire.markers, 0, "the sibling owed no End-of-RIB");
+    assert_eq!(manager.owed_evpn_rows.len(), 0);
+}
+
+/// Contract (ownership, owned to private): a group-owned member holds X
+/// and its channel is full when the source withdraws X, so only its
+/// recovery proof owes it that withdrawal. Its policy then moves it to the
+/// private path while another private receiver's cursor is mid-walk. The
+/// moved receiver withdraws X and ends exact with one End-of-RIB; the other
+/// cursor keeps its position and ends exact, each row once; the group-owned
+/// sibling never holds a private position. Red when the proof of what the
+/// member held is dropped at the move.
+#[test]
+fn a_member_leaving_an_owned_evpn_group_withdraws_what_only_it_was_owed() {
+    let (rows, first) = (40u32, 10u32);
+    let (mut manager, sibling, owned) = owned_sibling(manager(CREDIT));
+    let mover = Receiver::up(&mut manager, receiver(1), 8, &[EVPN]);
+    let other = Receiver::up(&mut manager, receiver(2), 4096, &[EVPN]);
+    let (sibling_peer, peer, other_peer) = (sibling.peer, mover.peer, other.peer);
+    regroup(&mut manager, peer, Some(permit_all()));
+    assert_eq!(manager.evpn_grouped_member_of(peer), Some(owned));
+    assert!(manager.evpn_grouped_member_of(other_peer).is_none());
+    let mut receivers = vec![sibling, mover, other];
+    received(&mut manager, &all(first), &[]);
+    drain(&mut manager, &mut receivers);
+    for receiver in &receivers {
+        assert_eq!(receiver.wire.table, table(&all(first)), "admitted");
+    }
+    assert_eq!(receivers[1].wire.markers, 0);
+    // The other private receiver owes EVPN whole and walks two steps.
+    manager.owe_eor(other_peer, EVPN);
+    manager.owe_whole_family(other_peer, FAMILY);
+    let rest: Vec<_> = (first..first + rows).map(|index| (index, 0)).collect();
+    received(&mut manager, &rest, &[]);
+    tick(&mut manager, &mut receivers);
+    tick(&mut manager, &mut receivers);
+    let walked = receivers[2].wire.table.len();
+    assert_eq!(walked, first as usize + 2 * STEP, "mid-walk");
+    assert_eq!(receivers[1].wire.table.len(), (first + rows) as usize);
+    // The member's channel fills, then X leaves every table.
+    manager.owe_eor(peer, EVPN);
+    let sender = manager.outbound_peers[&peer].clone();
+    while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
+    received(&mut manager, &[], &[0]);
+    assert!(manager.loc_rib.get_evpn(&key(0)).is_none());
+    assert!(manager.ribs[&peer_v4(SOURCE)].get_evpn(&key(0)).is_none());
+    assert!(manager.dirty_peers.contains(&peer), "admission refused");
+    assert_no_cursor(&manager, peer, "a refused owned member");
+    assert_no_cursor(&manager, sibling_peer, "before the regroup");
+    // What the other cursor has left to read, its kept set and the keys
+    // read so far.
+    let position = |manager: &RibManager| {
+        (
+            manager.owed_evpn_rows.len(),
+            manager.owed_key_count(other_peer, FAMILY),
+            manager.adj_rib_out_commit_stats.owed_drain_rows_read,
+        )
+    };
+    let before = position(&manager);
+    assert_eq!((before.0, before.1), (rows as usize - 2 * STEP + 1, 0));
+
+    regroup(&mut manager, peer, None);
+    assert!(manager.evpn_grouped_member_of(peer).is_none(), "private");
+    assert_eq!(manager.evpn_grouped_member_of(sibling_peer), Some(owned));
+    assert_eq!(
+        position(&manager),
+        before,
+        "the other position is untouched"
+    );
+    assert!(manager.owes_whole(other_peer, FAMILY));
+    receivers[1].write();
+    assert!(
+        receivers[1].wire.table.contains_key(&key(0)),
+        "X still held"
+    );
+    for _ in 0..1000 {
+        tick(&mut manager, &mut receivers);
+        assert_no_cursor(&manager, sibling_peer, "sibling");
+        if !manager.resync_tick_pending() {
+            break;
+        }
+    }
+    assert!(!manager.resync_tick_pending());
+    let expected: Vec<_> = (1..first + rows).map(|index| (index, 0)).collect();
+    for (index, receiver) in receivers.iter().enumerate() {
+        let wire = &receiver.wire;
+        assert_eq!(wire.table, table(&expected), "receiver {index}");
+        assert_eq!(wire.count(0), (1, 1), "receiver {index}: X withdrawn once");
+        assert_eq!(wire.rows_after_marker, 0, "receiver {index}");
+        assert!(!manager.owes(receiver.peer, EVPN), "receiver {index}");
+        assert!(!manager.dirty_peers.contains(&receiver.peer));
+        assert!(!manager.eor_pending(receiver.peer).contains(&EVPN));
+    }
+    assert_eq!(receivers[0].wire.markers, 0, "the sibling owed none");
+    assert_eq!(receivers[1].wire.markers, 1, "the moved receiver");
+    assert_eq!(receivers[2].wire.markers, 1, "the other receiver");
+    assert_eq!(
+        receivers[2].wire.announced.len(),
+        (first + rows) as usize,
+        "the other cursor read each row once"
+    );
+    assert!(!manager.has_private_evpn_handoff(peer));
+    assert_eq!(manager.owed_evpn_rows.len(), 0);
+}
+
+/// Contract (forced resync): an operator refresh of a private receiver
+/// whose cursor is mid-walk, with a withdrawal in its kept set, forces one
+/// resync without marking it dirty. That one build covers the debt: the
+/// cursor and its set are dropped, the list is freed, and the receiver is
+/// sent rows and then its End-of-RIB, nothing after. Red when the resync
+/// leaves the family owed: the walk goes on after the End-of-RIB.
+#[test]
+fn an_operator_refresh_mid_evpn_walk_resyncs_once_and_drops_the_cursor() {
+    let rows = 40u32;
+    let mut manager = manager(CREDIT).with_owing_theta_floor(1 << 20);
+    std::mem::forget(up_sized(&mut manager, peer_v4(SOURCE), 0, 4096, &[V4]));
+    let mut receivers = vec![Receiver::up(&mut manager, receiver(0), 4096, &[EVPN])];
+    let peer = receivers[0].peer;
+    received(&mut manager, &all(rows), &[]);
+    drain(&mut manager, &mut receivers);
+    assert_eq!(receivers[0].wire.table, table(&all(rows)), "admitted");
+    // It stops reading: changes spend its credit and the rest are owed by
+    // key, the withdrawal of row 0 among them.
+    let changed: Vec<_> = (8..32).map(|index| (index, 1)).collect();
+    received(&mut manager, &changed, &[]);
+    received(&mut manager, &[], &[0]);
+    let kept = manager.owed_key_count(peer, FAMILY);
+    assert!(kept != 0 && !manager.owes_whole(peer, FAMILY));
+    // A cursor over the kept set, then rows for it to walk.
+    manager.owe_eor(peer, EVPN);
+    manager.owe_whole_family(peer, FAMILY);
+    assert_eq!(
+        manager.owed_key_count(peer, FAMILY),
+        kept,
+        "the set is kept"
+    );
+    let fresh: Vec<_> = (100..100 + rows).map(|index| (index, 0)).collect();
+    received(&mut manager, &fresh, &[]);
+    tick(&mut manager, &mut receivers);
+    assert!(manager.owes_whole(peer, FAMILY), "mid-walk");
+    assert!(manager.owed_evpn_rows.len() != 0);
+    assert!(receivers[0].wire.table.contains_key(&key(0)), "row 0 held");
+    assert_eq!(receivers[0].wire.markers, 0);
+    receivers[0].wire.sent.clear();
+    let builds = manager.adj_rib_out_commit_stats.resync_builds;
+    let (reply, mut answer) = oneshot::channel();
+    manager.handle_update(RibUpdate::RefreshPeerOutbound { peer, reply });
+    assert!(matches!(answer.try_recv(), Ok(Ok(()))));
+    assert!(!manager.dirty_peers.contains(&peer), "forced, not dirty");
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds - builds, 1);
+    assert!(manager.owing(peer).is_none(), "cursor and kept set dropped");
+    assert_eq!(manager.owed_evpn_rows.len(), 0, "the list is freed");
+    drain(&mut manager, &mut receivers);
+    assert_eq!(receivers[0].wire.sent, [Sent::Rows, Sent::Eor]);
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds - builds, 1);
+    assert_eq!(receivers[0].wire.count(0).1, 1, "row 0 withdrawn once");
+    let expected: Vec<_> = (1..rows)
+        .map(|index| (index, u32::from((8..32).contains(&index))))
+        .chain(fresh)
+        .collect();
+    assert_settled(&manager, &receivers, &expected, "forced resync");
+}
+
+/// Contract (a stable owned sibling): a group-owned EVPN member beside a
+/// private receiver never acquires a private position: not when its credit
+/// is spent as a mutation fans out, and not at a selection release, which
+/// starts the private receiver's cursor. Both end with the exact table.
+/// Red when a group-owned family is in scope for owed keys.
+#[test]
+fn a_group_owned_evpn_sibling_never_acquires_a_private_cursor() {
+    let rows = 20u32;
+    let (mut manager, sibling, owned) = owned_sibling(deferral_manager(CREDIT));
+    let private = Receiver::up(&mut manager, receiver(1), 4096, &[EVPN]);
+    let (sibling_peer, private_peer) = (sibling.peer, private.peer);
+    assert!(manager.evpn_grouped_member_of(private_peer).is_none());
+    let mut receivers = vec![sibling, private];
+    received(&mut manager, &all(rows), &[]);
+    drain(&mut manager, &mut receivers);
+    assert_no_cursor(&manager, sibling_peer, "converged");
+    // Spent credit: a private receiver would owe these keys.
+    let credit = manager.outbound_credit_handle(sibling_peer);
+    let charge = crate::outbound_credit::OutboundCharge::new(&credit, CREDIT);
+    received(&mut manager, &[(0, 1), (1, 1)], &[]);
+    assert_no_cursor(&manager, sibling_peer, "spent credit");
+    drop(charge);
+    drain(&mut manager, &mut receivers);
+    // A selection hold and its release.
+    receivers.push(hold(&mut manager));
+    received(&mut manager, &[(2, 1)], &[3]);
+    assert_no_cursor(&manager, sibling_peer, "held");
+    release(&mut manager);
+    assert!(
+        manager.owes_whole(private_peer, FAMILY),
+        "the private cursor"
+    );
+    assert_eq!(manager.evpn_grouped_member_of(sibling_peer), Some(owned));
+    assert_no_cursor(&manager, sibling_peer, "released");
+    for _ in 0..1000 {
+        tick(&mut manager, &mut receivers);
+        assert_no_cursor(&manager, sibling_peer, "draining");
+        if !manager.resync_tick_pending() {
+            break;
+        }
+    }
+    assert!(!manager.resync_tick_pending());
+    let expected: Vec<_> = (0..rows)
+        .filter(|index| *index != 3)
+        .map(|index| (index, u32::from(index < 3)))
+        .collect();
+    for (index, receiver) in receivers.iter().enumerate() {
+        assert_eq!(receiver.wire.table, table(&expected), "receiver {index}");
+        assert_eq!(receiver.wire.rows_after_marker, 0, "receiver {index}");
+        assert!(!manager.owes(receiver.peer, EVPN), "receiver {index}");
+        assert!(!manager.dirty_peers.contains(&receiver.peer));
+    }
+    assert_eq!(receivers[0].wire.count(3), (1, 1));
+    assert_eq!(manager.owed_evpn_rows.len(), 0);
 }
