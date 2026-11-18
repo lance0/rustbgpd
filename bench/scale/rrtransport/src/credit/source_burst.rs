@@ -21,6 +21,12 @@
 //! are those sent before it and not finished at its admission. A burst
 //! message of 1,024 routes fills the window's affected-prefix bound by
 //! itself, so those markers end no window the RIB would have extended.
+//! Smaller burst messages (`--routes-per-update`) share a window, so a
+//! marker goes only behind the message that brings a window begun after
+//! the previous marker to one of its bounds (distinct affected prefixes,
+//! route entries or messages), and behind
+//! the last; a burst message then counts as ahead until the marker of its
+//! group is answered.
 
 use std::thread;
 
@@ -29,10 +35,16 @@ use rustbgpd_wire::{Ipv4NlriEntry, Ipv4UnicastMode, UpdateMessage};
 use super::*;
 use crate::credit_wire::unicast_index;
 
-/// Burst routes per UPDATE: the RIB's route chunk and the distribution
-/// window's affected-prefix bound, so each message is one window. That is
-/// past 4,096 bytes, so the burst source negotiates Extended Message.
+/// Burst routes per UPDATE by default: the RIB's route chunk and the
+/// distribution window's affected-prefix bound, so each message is one
+/// window. That is past 4,096 bytes, so the burst source then negotiates
+/// Extended Message.
 const ROWS_PER_UPDATE: usize = 1_024;
+/// The distribution window's bounds: distinct affected prefixes, route
+/// entries and messages.
+const WINDOW_PREFIXES: usize = 1_024;
+const WINDOW_ROUTES: usize = 4 * WINDOW_PREFIXES;
+const WINDOW_MESSAGES: usize = 256;
 /// Capacity of each half of the tapped channel; the daemon's is 4,096.
 const TAP_CAPACITY: usize = 2_048;
 /// Healthy updates sent before the burst starts: the run's own baseline.
@@ -60,6 +72,8 @@ pub struct Variant {
     /// Burst routes instead of the shape's own: the RIB-side residence
     /// proof runs two sizes and compares the readings.
     pub rows: Option<usize>,
+    /// Burst routes per UPDATE instead of 1,024: a different, named shape.
+    pub routes_per_update: Option<usize>,
 }
 
 impl Variant {
@@ -82,6 +96,10 @@ impl Variant {
                     let value = taken.next().context("--rows needs a value")?;
                     variant.rows = Some(value.parse()?);
                 }
+                "--routes-per-update" => {
+                    let value = taken.next().context("--routes-per-update needs a value")?;
+                    variant.routes_per_update = Some(value.parse()?);
+                }
                 _ => rest.push(arg),
             }
         }
@@ -95,11 +113,31 @@ impl Variant {
             "the control sends no healthy update to stall"
         );
         ensure!(variant.rows != Some(0), "--rows needs at least one route");
+        ensure!(
+            variant
+                .routes_per_update
+                .is_none_or(|routes| (1..=ROWS_PER_UPDATE).contains(&routes)),
+            "--routes-per-update must be 1 to {ROWS_PER_UPDATE}"
+        );
         Ok(variant)
     }
 
     fn seeded(self) -> bool {
         self.stall.is_some() || self.burst_interval.is_some()
+    }
+
+    fn routes_per_update(self) -> usize {
+        self.routes_per_update.unwrap_or(ROWS_PER_UPDATE)
+    }
+
+    /// The result's cell name: a smaller UPDATE is its own shape.
+    fn cell(self) -> &'static str {
+        match (self.routes_per_update() == ROWS_PER_UPDATE, self.control) {
+            (true, false) => "source-burst",
+            (true, true) => "source-burst-control",
+            (false, false) => "source-burst-small",
+            (false, true) => "source-burst-small-control",
+        }
     }
 }
 
@@ -129,10 +167,14 @@ struct Admitted {
 impl Admitted {
     /// Burst messages ahead of this update at its admission: forwarded
     /// before it and not yet finished. A message finished within the
-    /// stamper's wake-up time of the admission can read as still ahead.
-    fn burst_ahead(&self, finished: &[Instant]) -> usize {
-        let before = &finished[..self.burst_before.min(finished.len())];
-        self.burst_before - before.partition_point(|&done| done <= self.at)
+    /// stamper's wake-up time of the admission, or one whose group's marker
+    /// was not yet answered, can read as still ahead.
+    fn burst_ahead(&self, finished: &[(Instant, usize)]) -> usize {
+        let answered = finished.partition_point(|&(done, _)| done <= self.at);
+        let done = answered
+            .checked_sub(1)
+            .map_or(0, |last| finished[last].1.min(self.burst_before));
+        self.burst_before - done
     }
 }
 
@@ -142,9 +184,9 @@ struct TapLog {
     /// When the marker ahead of each healthy sequence was answered.
     dispatched: Vec<(u32, Instant)>,
     burst: Vec<(Instant, BurstMessage)>,
-    /// When the marker behind each burst message was answered, in order:
-    /// the RIB had finished that message.
-    finished: Vec<Instant>,
+    /// When each burst marker was answered, in order, with the burst
+    /// messages forwarded ahead of it: the RIB had finished those.
+    finished: Vec<(Instant, usize)>,
     markers_lost: usize,
     peak_depth: usize,
     /// Forwards that found the RIB's channel full and waited for room.
@@ -156,6 +198,8 @@ struct TapConfig {
     burst: PeerId,
     healthy: PeerId,
     stall: Option<Duration>,
+    /// Per burst message in order: whether a marker goes behind it.
+    marked: Vec<bool>,
 }
 
 enum Class {
@@ -166,7 +210,8 @@ enum Class {
 
 enum Mark {
     Healthy(u32),
-    Burst,
+    /// Behind this many burst messages.
+    Burst(usize),
 }
 
 fn classify(update: &RibUpdate, config: &TapConfig) -> Class {
@@ -219,7 +264,7 @@ fn tap(
             match (answered, mark) {
                 (false, _) => log.markers_lost += 1,
                 (true, Mark::Healthy(sequence)) => log.dispatched.push((sequence, now)),
-                (true, Mark::Burst) => log.finished.push(now),
+                (true, Mark::Burst(through)) => log.finished.push((now, through)),
             }
         }
     });
@@ -269,7 +314,9 @@ fn tap(
                 Class::Burst(message) => {
                     log.lock().expect("tap log").burst.push((at, message));
                     burst_seen += 1;
-                    behind = Some(Mark::Burst);
+                    if config.marked.get(burst_seen - 1) == Some(&true) {
+                        behind = Some(Mark::Burst(burst_seen));
+                    }
                 }
                 Class::Other => {}
             }
@@ -352,17 +399,22 @@ fn healthy_update(sequence: u32) -> Message {
 /// The burst source's messages in order: every route announced, then the
 /// churn plan's subset withdrawn and half of that announced again at a new
 /// version, so the final table is exact only if the source's order held.
-fn burst_plan(rows: usize) -> (Vec<(Message, BurstMessage)>, Reference) {
+/// Also returns whether a marker goes behind each message ([`marked`]).
+fn burst_plan(
+    rows: usize,
+    per_update: usize,
+) -> (Vec<(Message, BurstMessage)>, Vec<bool>, Reference) {
     let all: Vec<usize> = (0..rows).collect();
     let (withdrawn, reannounced) = churn_plan(rows);
     let mut plan = Vec::new();
+    let mut prefixes = Vec::new();
     let stages: [(&[usize], bool, u32); 3] = [
         (&all, true, BURST_VERSION),
         (&withdrawn, false, 0),
         (&reannounced, true, CHURN_VERSION),
     ];
     for (indices, announce, med) in stages {
-        for chunk in indices.chunks(ROWS_PER_UPDATE) {
+        for chunk in indices.chunks(per_update) {
             let (up, down): (&[usize], &[usize]) =
                 if announce { (chunk, &[]) } else { (&[], chunk) };
             plan.push((
@@ -373,11 +425,47 @@ fn burst_plan(rows: usize) -> (Vec<(Message, BurstMessage)>, Reference) {
                     first: chunk.first().copied(),
                 },
             ));
+            prefixes.push(chunk);
         }
     }
+    let marked = marked(&prefixes, per_update);
     let reference =
         Reference::churned(rows, BURST_VERSION, &withdrawn, &reannounced, CHURN_VERSION);
-    (plan, reference)
+    (plan, marked, reference)
+}
+
+/// Which burst messages carry a marker behind them, given each message's
+/// prefixes: the one that brings a window begun after the previous marker
+/// to a bound where the RIB closes it anyway, and the last. The bounds are
+/// distinct affected prefixes (a churn tail that withdraws and announces a
+/// prefix again counts it once), route entries and messages. With
+/// 1,024-route messages, every one, the tail's shorter messages included.
+fn marked(burst: &[&[usize]], per_update: usize) -> Vec<bool> {
+    if per_update >= WINDOW_PREFIXES {
+        return vec![true; burst.len()];
+    }
+    let mut affected = HashSet::new();
+    let (mut routes, mut messages) = (0, 0);
+    let mut marked: Vec<bool> = burst
+        .iter()
+        .map(|&message| {
+            affected.extend(message.iter().copied());
+            routes += message.len();
+            messages += 1;
+            let closes = affected.len() >= WINDOW_PREFIXES
+                || routes >= WINDOW_ROUTES
+                || messages >= WINDOW_MESSAGES;
+            if closes {
+                affected.clear();
+                (routes, messages) = (0, 0);
+            }
+            closes
+        })
+        .collect();
+    if let Some(last) = marked.last_mut() {
+        *last = true;
+    }
+    marked
 }
 
 #[derive(Debug, Default)]
@@ -452,11 +540,8 @@ fn deny_all() -> PolicyChain {
 
 /// The cell, or with `variant.control` its control without healthy updates.
 pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<bool> {
-    let cell = if variant.control {
-        "source-burst-control"
-    } else {
-        "source-burst"
-    };
+    let cell = variant.cell();
+    let per_update = variant.routes_per_update();
     let (receivers, rows, every, deadline) = if options.reduced {
         (
             8,
@@ -492,15 +577,21 @@ pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<b
     // Burst receivers, the healthy receiver, then the two sources, which
     // are sessions like the others and are exported nothing.
     let (healthy, burst_source, healthy_source) = (receivers, receivers + 1, receivers + 2);
-    let (plan, reference) = burst_plan(rows);
+    let (plan, marked, reference) = burst_plan(rows, per_update);
     let reference = Arc::new(reference);
     let expected: Vec<BurstMessage> = plan.iter().map(|&(_, message)| message).collect();
+    let burst_markers = marked.iter().filter(|&&mark| mark).count();
+    let extended = plan.iter().any(|(message, _)| {
+        matches!(message, Message::Update(update)
+            if update.encoded_len() > usize::from(rustbgpd_wire::MAX_MESSAGE_LEN))
+    });
     let log = Arc::new(Mutex::new(TapLog::default()));
     let tap_threads = tap(
         TapConfig {
             burst: PeerId::from_ipv4(receiver_ip(burst_source)),
             healthy: PeerId::from_ipv4(receiver_ip(healthy_source)),
             stall: variant.stall,
+            marked,
         },
         ingress_rx,
         rib,
@@ -511,10 +602,10 @@ pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<b
         .collect();
     specs.push((unicast.clone(), Some(healthy_policy())));
     specs.extend((0..2).map(|_| (unicast.clone(), Some(deny_all()))));
-    // Only the burst source needs messages past 4,096 bytes.
+    // Only the burst source can need messages past 4,096 bytes.
     fixture
         .connect_extended(specs, Duration::from_secs(120), |index| {
-            index == burst_source
+            extended && index == burst_source
         })
         .await?;
     let registered_peers = fixture.receivers.len();
@@ -650,7 +741,7 @@ pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<b
     // Finished: the RIB answered the marker behind the burst and every
     // burst receiver's table is exact.
     let settled = loop {
-        let done = log.lock().expect("tap log").finished.len() == plan.len();
+        let done = log.lock().expect("tap log").finished.len() == burst_markers;
         if done
             && collectors
                 .iter()
@@ -715,8 +806,9 @@ pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<b
         (state.arrivals.clone(), state.resets, state.decode_failures)
     };
     let log = std::mem::take(&mut *log.lock().expect("tap log"));
-    let burst_done = (log.finished.len() == plan.len())
-        .then(|| log.finished.last().copied())
+    let messages_finished = log.finished.last().map_or(0, |&(_, through)| through);
+    let burst_done = (messages_finished == plan.len())
+        .then(|| log.finished.last().map(|&(at, _)| at))
         .flatten();
     // Per healthy update: its four stamps and what was queued ahead of it.
     // A sequence the RIB replaced before delivery counts as received at
@@ -765,8 +857,10 @@ pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<b
         "shape": {
             "receivers": receivers,
             "routes": rows,
-            "rows_per_update": ROWS_PER_UPDATE,
+            "rows_per_update": per_update,
             "burst_messages": plan.len(),
+            "burst_markers": burst_markers,
+            "extended_message": extended,
             "burst_interval_ms": interval.as_secs_f64() * 1e3,
             "healthy_every_ms": every.as_secs_f64() * 1e3,
             "healthy_lead_ms": LEAD.as_secs_f64() * 1e3,
@@ -795,7 +889,7 @@ pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<b
             "messages_admitted": log.burst.len(),
             "first_admitted_ms": first_admitted.map(ms),
             "last_admitted_ms": last_admitted.map(ms),
-            "messages_finished": log.finished.len(),
+            "messages_finished": messages_finished,
             "rib_done_ms": burst_done.map(ms),
             "completion_ms": completion.filter(|_| settled).map(ms),
             // Routes over the time from the first write to the session's
@@ -890,6 +984,7 @@ mod tests {
                     burst: PeerId::from_ipv4(SOURCE),
                     healthy: PeerId::from_ipv4(CHURN_SOURCE),
                     stall,
+                    marked: vec![true; burst],
                 },
                 ingress_rx,
                 rib,
@@ -1036,7 +1131,7 @@ mod tests {
 
     #[test]
     fn burst_plan_ends_with_an_order_sensitive_tail() {
-        let (plan, _) = burst_plan(2_500);
+        let (plan, marks, _) = burst_plan(2_500, ROWS_PER_UPDATE);
         let shape: Vec<_> = plan
             .iter()
             .map(|(_, m)| (m.announced, m.withdrawn, m.first))
@@ -1065,6 +1160,90 @@ mod tests {
             full.encoded_len() > 4_096,
             "a full message needs Extended Message"
         );
+        assert_eq!(marks, [true; 5], "every message, as before");
+    }
+
+    /// Positions (1-based) of the messages a marker goes behind.
+    fn marker_positions(burst: &[Vec<usize>], per_update: usize) -> Vec<usize> {
+        let burst: Vec<&[usize]> = burst.iter().map(Vec::as_slice).collect();
+        marked(&burst, per_update)
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &mark)| mark.then_some(index + 1))
+            .collect()
+    }
+
+    #[test]
+    fn small_updates_carry_the_remainder_and_share_a_marker_per_window() {
+        let (plan, marks, _) = burst_plan(2_550, 100);
+        let shape: Vec<_> = plan
+            .iter()
+            .map(|(_, m)| (m.announced, m.withdrawn, m.first))
+            .collect();
+        // 26 announcements, the last with the remainder; 26 withdrawals in
+        // one message; 13 announced again.
+        assert_eq!(shape.len(), 28);
+        assert!(shape[..25]
+            .iter()
+            .enumerate()
+            .all(|(index, &message)| message == (100, 0, Some(index * 100))));
+        assert_eq!(
+            shape[25..],
+            [(50, 0, Some(2_500)), (0, 26, Some(0)), (13, 0, Some(0))]
+        );
+        for (message, _) in &plan {
+            let Message::Update(update) = message else {
+                panic!("burst message is not an UPDATE");
+            };
+            assert!(
+                update.encoded_len() <= usize::from(rustbgpd_wire::MAX_MESSAGE_LEN),
+                "a 100-route message needs no Extended Message"
+            );
+        }
+        // A marker where 1,024 prefixes have accumulated since the last one
+        // (the 11th and 22nd messages), and behind the last.
+        let marks: Vec<usize> = marks
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &mark)| mark.then_some(index + 1))
+            .collect();
+        assert_eq!(marks, [11, 22, 28]);
+        // One-route messages: the window's message bound closes it first.
+        let single: Vec<Vec<usize>> = (0..600).map(|index| vec![index]).collect();
+        assert_eq!(marker_positions(&single, 1), [256, 512, 600]);
+    }
+
+    /// The window's affected-prefix bound counts distinct prefixes: a churn
+    /// tail that withdraws prefixes and announces them again counts each
+    /// once, so a marker there would close a window the RIB extends.
+    #[test]
+    fn markers_count_distinct_prefixes_not_route_entries() {
+        let withdrawn: Vec<usize> = (0..600).collect();
+        let fresh: Vec<usize> = (600..1_100).collect();
+        let tail = [withdrawn.clone(), withdrawn.clone(), fresh, vec![2_000]];
+        // 1,200 entries but 600 prefixes after the second message.
+        assert_eq!(marker_positions(&tail, 100), [3, 4]);
+        // The route-entry bound (4,096) still closes a window first.
+        let repeated = vec![(0..1_000).collect::<Vec<usize>>(); 6];
+        assert_eq!(marker_positions(&repeated, 100), [5, 6]);
+    }
+
+    /// A message whose group's marker is unanswered still counts as ahead.
+    #[test]
+    fn burst_ahead_counts_by_answered_group() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let admitted = Admitted {
+            sequence: 1,
+            at: at(10),
+            depth: 0,
+            burst_before: 15,
+            late: false,
+        };
+        assert_eq!(admitted.burst_ahead(&[]), 15);
+        assert_eq!(admitted.burst_ahead(&[(at(5), 11)]), 4);
+        assert_eq!(admitted.burst_ahead(&[(at(5), 11), (at(20), 22)]), 4);
+        assert_eq!(admitted.burst_ahead(&[(at(20), 11)]), 15);
     }
 
     #[test]
@@ -1077,6 +1256,8 @@ mod tests {
             "5",
             "--rows",
             "32000",
+            "--routes-per-update",
+            "100",
         ]
         .map(String::from)
         .into();
@@ -1085,7 +1266,22 @@ mod tests {
         assert_eq!(variant.stall, Some(Duration::from_millis(200)));
         assert_eq!(variant.burst_interval, Some(Duration::from_millis(5)));
         assert_eq!(variant.rows, Some(32_000));
+        assert_eq!(variant.routes_per_update(), 100);
+        assert_eq!(variant.cell(), "source-burst-small");
         assert!(variant.seeded() && !variant.control);
+        let named = |flags: &[&str]| {
+            let mut args = flags.iter().map(ToString::to_string).collect();
+            Variant::take(&mut args).map(Variant::cell)
+        };
+        assert_eq!(named(&[]).expect("default"), "source-burst");
+        let control = named(&["--control", "--routes-per-update", "1024"]);
+        assert_eq!(control.expect("explicit default"), "source-burst-control");
+        let small = named(&["--control", "--routes-per-update", "1"]);
+        assert_eq!(small.expect("smallest"), "source-burst-small-control");
+        for bad in ["0", "1025", "x"] {
+            assert!(named(&["--routes-per-update", bad]).is_err(), "{bad}");
+        }
+        assert!(named(&["--routes-per-update"]).is_err(), "no value");
         let mut late = vec!["--stall-ms".to_string(), "400".to_string()];
         assert!(Variant::take(&mut late).is_err(), "a stall past the lead");
         let mut empty = vec!["--rows".to_string(), "0".to_string()];

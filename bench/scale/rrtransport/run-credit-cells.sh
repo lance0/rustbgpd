@@ -20,8 +20,9 @@
 # directory attempted. Use one directory per repetition and one binary per
 # directory. The report-only release-mixed and release-timer cells, and the
 # source-burst and source-burst-control cells (an unpaced source burst
-# through real sessions, and its control without healthy updates), run only
-# when explicitly named.
+# through real sessions, and its control without healthy updates) and their
+# source-burst-small counterparts (100 routes per UPDATE), run only when
+# explicitly named.
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -61,6 +62,7 @@ sha=$(sha256sum "$binary" | cut -d' ' -f1)
 result_of() {
     case $1 in
     release-mixed | release-timer | source-burst | source-burst-control) echo "$1.json" ;;
+    source-burst-small | source-burst-small-control) echo "$1.json" ;;
     probes) echo probes.json ;;
     paused) echo paused-evpn.json ;;
     exhaust-unicast | exhaust-evpn | restart-unicast | restart-evpn) echo "$1.json" ;;
@@ -90,6 +92,10 @@ for cell in "${cells[@]}"; do
     release-mixed | release-timer) args=("credit-$cell" "$output") limit=64G ;;
     source-burst) args=(credit-source-burst "$output") limit=64G ;;
     source-burst-control) args=(credit-source-burst "$output" --control) limit=64G ;;
+    source-burst-small) args=(credit-source-burst "$output" --routes-per-update 100) limit=64G ;;
+    source-burst-small-control)
+        args=(credit-source-burst "$output" --control --routes-per-update 100) limit=64G
+        ;;
     probes) args=(credit-probe "$output") limit=64G ;;
     exhaust-*) args=(credit-exhaust "${cell#exhaust-}" "$output") limit=64G ;;
     restart-churn-*) args=(credit-restart-churn "${cell#restart-churn-}" "$output") limit=64G ;;
