@@ -762,6 +762,53 @@ fn still_withheld_orf_family_completes_on_clean_selection_release() {
     assert!(!manager.dirty_peers.contains(&target));
 }
 
+/// The peer refreshes its withheld ORF family while selection holds it.
+/// A withheld family has no table for its marker to follow, so the refresh
+/// does not put the marker behind one: the release sends it, and the
+/// answer that follows carries its `BoRR` and `EoRR`.
+#[test]
+fn withheld_orf_family_refreshed_under_selection_keeps_its_refresh_markers() {
+    let (mut manager, _source_rx, mut target_rx) = setup_withheld_v6();
+    let source = peer_v4(SOURCE_ADDR);
+    let target = peer_v4(TARGET_ADDR);
+    let mut seen = BTreeSet::new();
+    let mut eors = HashMap::new();
+    assert_eq!(observe(&mut target_rx, true, &mut seen, &mut eors), 2);
+    assert!(!manager.dirty_peers.contains(&target));
+    refresh(&mut manager, V6);
+    assert!(manager.eor_behind_orf_table(target).is_empty());
+
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: source,
+        session_id: SOURCE_SESSION,
+        afi: V6.0,
+        safi: V6.1,
+    });
+    for _ in 0..4 {
+        manager.resync_dirty_peers_bounded();
+    }
+    let mut wire = Vec::new();
+    while let Ok(update) = target_rx.try_recv().map(delivered) {
+        assert_eq!(update.announce.len(), 0, "a withheld family sends no table");
+        wire.push((update.end_of_rib.clone(), update.refresh_markers.clone()));
+    }
+    assert_eq!(
+        wire,
+        [
+            (vec![V6], vec![]),
+            (
+                vec![],
+                vec![
+                    (V6.0, V6.1, rustbgpd_wire::RouteRefreshSubtype::BoRR),
+                    (V6.0, V6.1, rustbgpd_wire::RouteRefreshSubtype::EoRR),
+                ]
+            ),
+        ]
+    );
+    assert!(manager.eor_pending(target).is_empty());
+    assert!(!manager.pending_refresh.contains_key(&target));
+}
+
 /// Drain the writer, then run the dirty-resync retry until the target settles.
 fn pump(
     manager: &mut RibManager,
@@ -983,7 +1030,12 @@ async fn refresh_after_the_cap_inside_a_longer_grace_keeps_table_first() {
     observe(&mut target_rx, true, &mut seen, &mut eors);
     assert_eq!(eors, HashMap::new(), "grace still holds every marker");
     tokio::time::advance(Duration::from_secs(30)).await;
+    let sender = manager.outbound_peers[&target].clone();
+    let full = sender.try_reserve_many(sender.max_capacity()).unwrap();
     refresh(&mut manager, V6);
+    assert!(manager.pending_refresh[&target].contains(&V6));
+    drop(full);
+    manager.resync_dirty_peers_bounded();
     observe(&mut target_rx, true, &mut seen, &mut eors);
     assert!(
         seen.contains(&ordinary_v6(0x100)),

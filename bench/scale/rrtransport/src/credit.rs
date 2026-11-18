@@ -978,6 +978,8 @@ fn fold_slice_maxima(metrics: &BgpMetrics, into: &mut BTreeMap<String, f64>) -> 
 /// `(upper bound in seconds, count)`.
 type Buckets = BTreeMap<String, (u64, Vec<(f64, u64)>)>;
 
+/// Keyed by `label`'s value, as `value/family` where the series also
+/// carries a `family` label (a tree may label owed-drain steps by family).
 fn buckets(metrics: &BgpMetrics, name: &str, label: &str) -> Buckets {
     let mut buckets = Buckets::new();
     for family in metrics.registry().gather() {
@@ -985,11 +987,17 @@ fn buckets(metrics: &BgpMetrics, name: &str, label: &str) -> Buckets {
             continue;
         }
         for metric in family.get_metric() {
-            let key = metric
-                .get_label()
-                .iter()
-                .find(|pair| pair.name() == label)
-                .map_or_else(String::new, |pair| pair.value().to_string());
+            let value = |name: &str| {
+                metric
+                    .get_label()
+                    .iter()
+                    .find(|pair| pair.name() == name)
+                    .map(|pair| pair.value().to_string())
+            };
+            let mut key = value(label).unwrap_or_default();
+            if let Some(family) = value("family").filter(|_| label != "family") {
+                key = format!("{key}/{family}");
+            }
             let histogram = metric.get_histogram();
             let edges = histogram
                 .get_bucket()
@@ -1032,7 +1040,8 @@ fn longest(before: &Buckets, after: &Buckets) -> Value {
     Value::Object(out)
 }
 
-/// Getter reads of the live-operation and credit-rows gauges.
+/// Getter reads of the live-operation and credit-rows gauges, and reads of
+/// the credit-bytes gauge where the tree exports it.
 #[derive(Default)]
 struct GaugeWatch {
     reads: usize,
@@ -1040,9 +1049,29 @@ struct GaugeWatch {
     peak_credit_rows: i64,
     operations_first_ms: Option<f64>,
     operations_last_ms: Option<f64>,
+    credit_bytes_reads: usize,
+    peak_credit_bytes: Option<f64>,
+    /// `watched`, `not exported`, `exported after start` (the gauge was
+    /// absent when the watch started, as a labeled family is until its
+    /// first child, so nothing read it) or `failed` (the watch panicked).
+    credit_bytes_watch: &'static str,
 }
 
-/// Read both gauges every `GAUGE_WATCH` until `stop`.
+/// The credit-bytes gauge, where a tree exports it.
+const CREDIT_BYTES: &str = "bgp_rib_outbound_credit_bytes";
+
+/// Sets `stop` when dropped, so an early return or a canceled cell still
+/// ends the blocking byte watch, which runtime shutdown would wait on.
+struct StopOnDrop(Arc<AtomicBool>);
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+/// Read both getters every `GAUGE_WATCH` until `stop`, and the credit-bytes
+/// gauge beside them (`watch_credit_bytes`).
 fn watch_gauges(
     metrics: BgpMetrics,
     t0: Instant,
@@ -1052,6 +1081,7 @@ fn watch_gauges(
         let mut watch = GaugeWatch::default();
         let mut tick = tokio::time::interval(GAUGE_WATCH);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let bytes = watch_credit_bytes(&metrics, &stop);
         while !stop.load(Ordering::Acquire) {
             tick.tick().await;
             let operations = metrics.rib_outbound_operations_live();
@@ -1066,8 +1096,47 @@ fn watch_gauges(
                 watch.operations_last_ms = Some(at_ms);
             }
         }
+        watch.credit_bytes_watch = match bytes {
+            Some(bytes) => match bytes.await {
+                Ok(read) => {
+                    (watch.credit_bytes_reads, watch.peak_credit_bytes) = read;
+                    "watched"
+                }
+                Err(_) => "failed",
+            },
+            None if Snapshot::take(&metrics).series(CREDIT_BYTES).is_some() => {
+                "exported after start"
+            }
+            None => "not exported",
+        };
         watch
     })
+}
+
+/// Read `bgp_rib_outbound_credit_bytes` every `GAUGE_WATCH` until `stop`,
+/// where the tree exports it: `(reads, peak)`; `None` on a tree without it.
+/// No tree this harness builds against has a getter for it on every arm,
+/// so each read is a registry gather, over a millisecond on the reduced
+/// shape; it runs on its own blocking thread so the getter reads keep
+/// their period, back to back when a gather outlasts the period.
+fn watch_credit_bytes(
+    metrics: &BgpMetrics,
+    stop: &Arc<AtomicBool>,
+) -> Option<tokio::task::JoinHandle<(usize, Option<f64>)>> {
+    Snapshot::take(metrics).series(CREDIT_BYTES)?;
+    let (metrics, stop) = (metrics.clone(), Arc::clone(stop));
+    Some(tokio::task::spawn_blocking(move || {
+        let (mut reads, mut peak) = (0, None::<f64>);
+        while !stop.load(Ordering::Acquire) {
+            let started = Instant::now();
+            if let Some(value) = Snapshot::take(&metrics).total(CREDIT_BYTES) {
+                peak = Some(peak.map_or(value, |peak| peak.max(value)));
+            }
+            reads += 1;
+            std::thread::sleep(GAUGE_WATCH.saturating_sub(started.elapsed()));
+        }
+        (reads, peak)
+    }))
 }
 
 /// The inbox round trips of one run.
@@ -1841,6 +1910,7 @@ pub async fn exhaust(
     let release_sent = t0.elapsed();
     eprintln!("burst sent at {release_sent:?}");
     let watching = Arc::new(AtomicBool::new(false));
+    let _stop_watching = StopOnDrop(Arc::clone(&watching));
     let gauges = watch_gauges(fixture.metrics.clone(), t0, Arc::clone(&watching));
     let probing = Arc::new(AtomicBool::new(false));
     let round_trips = probe_round_trips(
@@ -2088,6 +2158,10 @@ pub async fn exhaust(
         "operations_live_first_ms": gauges.operations_first_ms,
         "operations_live_last_ms": gauges.operations_last_ms,
         "peak_credit_rows": gauges.peak_credit_rows,
+        // Null on a tree without `bgp_rib_outbound_credit_bytes`.
+        "peak_credit_bytes": gauges.peak_credit_bytes,
+        "credit_bytes_reads": gauges.credit_bytes_reads,
+        "credit_bytes_watch": gauges.credit_bytes_watch,
     });
     let result = json!({
         "schema": "rrtransport-credit/1",
@@ -2413,10 +2487,11 @@ mod tests {
     use std::sync::Mutex;
 
     use super::{
-        attributes, check_read_hold, churn_plan, fold_slice_maxima, held_read, longest,
+        attributes, buckets, check_read_hold, churn_plan, fold_slice_maxima, held_read, longest,
         quiet_excluded_json, quiet_window, recorded_pass, socket_queue_bytes, source_withdrawal,
-        stop_churn, Buckets, Churn, Family, Options, Snapshot, Trigger, HELD_READ_CAP, QUIET_CAP,
-        QUIET_LEAD, SLICE_MAX,
+        stop_churn, watch_credit_bytes, watch_gauges, Buckets, Churn, Family, Options, Snapshot,
+        StopOnDrop, Trigger, CREDIT_BYTES, HELD_READ_CAP, QUIET_CAP, QUIET_LEAD, SLICE_MAX,
+        TURN_HISTOGRAMS,
     };
     use crate::credit_wire::{Observed, WireFamily, WireState};
 
@@ -2775,6 +2850,96 @@ mod tests {
         );
         // A label without observations in the window is left out.
         assert!(longest.get("z").is_none());
+    }
+
+    #[test]
+    fn step_buckets_name_the_family_where_the_histogram_carries_one() {
+        let metrics = rustbgpd_telemetry::BgpMetrics::new();
+        // This tree's step histogram is keyed by scope alone.
+        let keys: Vec<_> = buckets(&metrics, TURN_HISTOGRAMS[2].0, "scope")
+            .into_keys()
+            .collect();
+        assert_eq!(keys, ["cursor", "keyed", "whole"]);
+        // A tree that labels steps by family too.
+        let options = prometheus::HistogramOpts::new("labeled_steps_seconds", "steps");
+        let labeled = prometheus::HistogramVec::new(options, &["scope", "family"]).unwrap();
+        labeled
+            .with_label_values(&["cursor", "l2vpn_evpn"])
+            .observe(0.01);
+        labeled
+            .with_label_values(&["whole", "ipv4_unicast"])
+            .observe(0.01);
+        metrics.registry().register(Box::new(labeled)).unwrap();
+        let keys: Vec<_> = buckets(&metrics, "labeled_steps_seconds", "scope")
+            .into_keys()
+            .collect();
+        assert_eq!(keys, ["cursor/l2vpn_evpn", "whole/ipv4_unicast"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn credit_bytes_watch_reads_the_gauge_only_where_exported() {
+        let metrics = rustbgpd_telemetry::BgpMetrics::new();
+        let stop = Arc::new(AtomicBool::new(false));
+        // This tree exports no byte gauge: no watch, and the result's
+        // `drain_gauges.peak_credit_bytes` is null.
+        assert!(watch_credit_bytes(&metrics, &stop).is_none());
+        let gauge = prometheus::IntGauge::new("bgp_rib_outbound_credit_bytes", "bytes").unwrap();
+        metrics
+            .registry()
+            .register(Box::new(gauge.clone()))
+            .unwrap();
+        gauge.set(7);
+        let watch = watch_credit_bytes(&metrics, &stop).expect("the gauge is exported");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        stop.store(true, Ordering::Release);
+        let (reads, peak) = watch.await.unwrap();
+        assert!(reads > 0);
+        assert_eq!(peak, Some(7.0));
+    }
+
+    #[tokio::test]
+    async fn gauge_watch_reports_how_it_read_the_byte_gauge() {
+        let metrics = rustbgpd_telemetry::BgpMetrics::new();
+        let finish = |stop: &Arc<AtomicBool>| stop.store(true, Ordering::Release);
+        // No byte gauge on this tree.
+        let stop = Arc::new(AtomicBool::new(false));
+        let watch = watch_gauges(metrics.clone(), Instant::now(), Arc::clone(&stop));
+        tokio::task::yield_now().await;
+        finish(&stop);
+        let watch = watch.await.unwrap();
+        assert_eq!(watch.credit_bytes_watch, "not exported");
+        assert_eq!(watch.peak_credit_bytes, None);
+        // A labeled family is absent from a gather until its first child:
+        // a gauge that appears after the watch started was never read, and
+        // the watch says so instead of reading as a tree without it. On
+        // this current-thread runtime one yield runs the watch's start.
+        let options = prometheus::Opts::new(CREDIT_BYTES, "bytes");
+        let gauge = prometheus::IntGaugeVec::new(options, &["family"]).unwrap();
+        metrics
+            .registry()
+            .register(Box::new(gauge.clone()))
+            .unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let watch = watch_gauges(metrics.clone(), Instant::now(), Arc::clone(&stop));
+        tokio::task::yield_now().await;
+        gauge.with_label_values(&["ipv4_unicast"]).set(7);
+        finish(&stop);
+        let watch = watch.await.unwrap();
+        assert_eq!(watch.credit_bytes_watch, "exported after start");
+        assert_eq!(watch.peak_credit_bytes, None);
+        // Exported from the start: dropping the cell's guard, as an early
+        // return does, ends the blocking watch.
+        let stop = Arc::new(AtomicBool::new(false));
+        let guard = StopOnDrop(Arc::clone(&stop));
+        let watch = watch_gauges(metrics.clone(), Instant::now(), Arc::clone(&stop));
+        tokio::task::yield_now().await;
+        drop(guard);
+        let watch = tokio::time::timeout(Duration::from_secs(10), watch).await;
+        // Stop it anyway, so a broken guard fails here instead of hanging
+        // runtime shutdown on the blocking watch.
+        finish(&stop);
+        let watch = watch.expect("the guard stops the watch").unwrap();
+        assert_eq!(watch.credit_bytes_watch, "watched");
     }
 
     #[test]

@@ -602,6 +602,13 @@ impl RibManager {
         !self.eor.owes(peer, family)
     }
 
+    /// Whether `family`'s marker toward `peer` waits for a complete EVPN
+    /// feed that is not current. Only a build of the peer's table (a resync
+    /// or a refresh answer) makes the feed current; no release or tick does.
+    pub(super) fn eor_waits_for_evpn_feed(&self, peer: PeerId, family: (Afi, Safi)) -> bool {
+        self.eor_hold_applies(peer, family, EorHold::EvpnFeed)
+    }
+
     /// Whether the polling lanes may send `family`'s marker to `peer` as a
     /// plain marker: nothing holds it, the RFC 5291 §6 gate included.
     pub(super) fn eor_retry_ready(&self, peer: PeerId, family: (Afi, Safi)) -> bool {
