@@ -54,8 +54,8 @@ thread_local! {
 #[cfg(test)]
 type EvpnGrowthProbe = (Vec<usize>, usize, Vec<usize>);
 
-/// EVPN route slots at which [`AdjRibOut::insert_evpn`] reserves the rest of
-/// the slab's first segment.
+/// Most EVPN route slots the slab's first segment holds before it is given
+/// the whole segment: see [`reserve_evpn_slots`].
 const EVPN_FIRST_SEGMENT_AT: usize = 1 << 13;
 
 // One stored EVPN route and one index entry. A change to either changes the
@@ -66,13 +66,38 @@ const _: () = {
     assert!(std::mem::size_of::<(EvpnRouteKey, u32)>() == 68);
 };
 
+/// Give the EVPN slab room for `additional` routes that are new to the
+/// index. Both the batch reserve and a single insert size it here.
+///
+/// The slab's first segment grows by copying its routes, so it is a power
+/// of two of at most `EVPN_FIRST_SEGMENT_AT` slots, or the whole segment.
+/// The step between the two copies at most `EVPN_FIRST_SEGMENT_AT` slots
+/// (1.18 MB), the last doubling under 2 MiB, and happens once, in the call
+/// that first needs a slot past them. Freed slots are reused first and
+/// need no room; capacity that is never written is not resident.
+fn reserve_evpn_slots(
+    bodies: &mut RouteSlab<EvpnRibRoute>,
+    additional: usize,
+    checkpoint: &mut impl FnMut(),
+) {
+    let rows = bodies.len() + additional;
+    if rows <= bodies.slot_count() {
+        return;
+    }
+    let slots = if rows > EVPN_FIRST_SEGMENT_AT {
+        rows.max(SEGMENT)
+    } else {
+        rows.next_power_of_two().max(4)
+    };
+    bodies.reserve_with(slots - bodies.len(), checkpoint);
+}
+
 /// Store the route of a key that is new to the EVPN index.
 fn new_evpn_slot(bodies: &mut RouteSlab<EvpnRibRoute>, route: &mut Option<EvpnRibRoute>) -> u32 {
     if bodies.slot_count() == EVPN_FIRST_SEGMENT_AT {
-        // The slab's first segment doubles by copying its routes. Give it
-        // the whole segment at the last doubling that copies less than
-        // 2 MiB; capacity that is never written is not resident.
-        bodies.reserve_with(SEGMENT - bodies.len(), &mut || {});
+        // No reserve covered this insert. Below this the slab doubles the
+        // first segment itself, to the sizes the policy allows.
+        reserve_evpn_slots(bodies, 1, &mut || {});
     }
     bodies.insert(route.take().expect("a new key stores its route once"))
 }
@@ -1063,7 +1088,7 @@ impl AdjRibOut {
     /// Reserve the EVPN index and route slots for a known outbound batch.
     pub(crate) fn reserve_evpn_with(&mut self, additional: usize, checkpoint: &mut impl FnMut()) {
         self.evpn_index.reserve_count_with(additional, checkpoint);
-        self.evpn_bodies.reserve_with(additional, checkpoint);
+        reserve_evpn_slots(&mut self.evpn_bodies, additional, checkpoint);
     }
 
     /// Insert or replace an advertised EVPN route.
