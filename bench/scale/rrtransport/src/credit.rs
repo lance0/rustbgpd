@@ -1051,6 +1051,23 @@ struct GaugeWatch {
     operations_last_ms: Option<f64>,
     credit_bytes_reads: usize,
     peak_credit_bytes: Option<f64>,
+    /// `watched`, `not exported`, `exported after start` (the gauge was
+    /// absent when the watch started, as a labeled family is until its
+    /// first child, so nothing read it) or `failed` (the watch panicked).
+    credit_bytes_watch: &'static str,
+}
+
+/// The credit-bytes gauge, where a tree exports it.
+const CREDIT_BYTES: &str = "bgp_rib_outbound_credit_bytes";
+
+/// Sets `stop` when dropped, so an early return or a canceled cell still
+/// ends the blocking byte watch, which runtime shutdown would wait on.
+struct StopOnDrop(Arc<AtomicBool>);
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
 }
 
 /// Read both getters every `GAUGE_WATCH` until `stop`, and the credit-bytes
@@ -1079,9 +1096,19 @@ fn watch_gauges(
                 watch.operations_last_ms = Some(at_ms);
             }
         }
-        if let Some(bytes) = bytes {
-            (watch.credit_bytes_reads, watch.peak_credit_bytes) = bytes.await.unwrap_or_default();
-        }
+        watch.credit_bytes_watch = match bytes {
+            Some(bytes) => match bytes.await {
+                Ok(read) => {
+                    (watch.credit_bytes_reads, watch.peak_credit_bytes) = read;
+                    "watched"
+                }
+                Err(_) => "failed",
+            },
+            None if Snapshot::take(&metrics).series(CREDIT_BYTES).is_some() => {
+                "exported after start"
+            }
+            None => "not exported",
+        };
         watch
     })
 }
@@ -1096,7 +1123,6 @@ fn watch_credit_bytes(
     metrics: &BgpMetrics,
     stop: &Arc<AtomicBool>,
 ) -> Option<tokio::task::JoinHandle<(usize, Option<f64>)>> {
-    const CREDIT_BYTES: &str = "bgp_rib_outbound_credit_bytes";
     Snapshot::take(metrics).series(CREDIT_BYTES)?;
     let (metrics, stop) = (metrics.clone(), Arc::clone(stop));
     Some(tokio::task::spawn_blocking(move || {
@@ -1884,6 +1910,7 @@ pub async fn exhaust(
     let release_sent = t0.elapsed();
     eprintln!("burst sent at {release_sent:?}");
     let watching = Arc::new(AtomicBool::new(false));
+    let _stop_watching = StopOnDrop(Arc::clone(&watching));
     let gauges = watch_gauges(fixture.metrics.clone(), t0, Arc::clone(&watching));
     let probing = Arc::new(AtomicBool::new(false));
     let round_trips = probe_round_trips(
@@ -2133,6 +2160,7 @@ pub async fn exhaust(
         // Null on a tree without `bgp_rib_outbound_credit_bytes`.
         "peak_credit_bytes": gauges.peak_credit_bytes,
         "credit_bytes_reads": gauges.credit_bytes_reads,
+        "credit_bytes_watch": gauges.credit_bytes_watch,
     });
     let result = json!({
         "schema": "rrtransport-credit/1",
@@ -2460,8 +2488,9 @@ mod tests {
     use super::{
         attributes, buckets, check_read_hold, churn_plan, fold_slice_maxima, held_read, longest,
         quiet_excluded_json, quiet_window, recorded_pass, socket_queue_bytes, source_withdrawal,
-        stop_churn, watch_credit_bytes, Buckets, Churn, Family, Options, Snapshot, Trigger,
-        HELD_READ_CAP, QUIET_CAP, QUIET_LEAD, SLICE_MAX, TURN_HISTOGRAMS,
+        stop_churn, watch_credit_bytes, watch_gauges, Buckets, Churn, Family, Options, Snapshot,
+        StopOnDrop, Trigger, CREDIT_BYTES, HELD_READ_CAP, QUIET_CAP, QUIET_LEAD, SLICE_MAX,
+        TURN_HISTOGRAMS,
     };
     use crate::credit_wire::{Observed, WireFamily, WireState};
 
@@ -2865,6 +2894,51 @@ mod tests {
         let (reads, peak) = watch.await.unwrap();
         assert!(reads > 0);
         assert_eq!(peak, Some(7.0));
+    }
+
+    #[tokio::test]
+    async fn gauge_watch_reports_how_it_read_the_byte_gauge() {
+        let metrics = rustbgpd_telemetry::BgpMetrics::new();
+        let finish = |stop: &Arc<AtomicBool>| stop.store(true, Ordering::Release);
+        // No byte gauge on this tree.
+        let stop = Arc::new(AtomicBool::new(false));
+        let watch = watch_gauges(metrics.clone(), Instant::now(), Arc::clone(&stop));
+        tokio::task::yield_now().await;
+        finish(&stop);
+        let watch = watch.await.unwrap();
+        assert_eq!(watch.credit_bytes_watch, "not exported");
+        assert_eq!(watch.peak_credit_bytes, None);
+        // A labeled family is absent from a gather until its first child:
+        // a gauge that appears after the watch started was never read, and
+        // the watch says so instead of reading as a tree without it. On
+        // this current-thread runtime one yield runs the watch's start.
+        let options = prometheus::Opts::new(CREDIT_BYTES, "bytes");
+        let gauge = prometheus::IntGaugeVec::new(options, &["family"]).unwrap();
+        metrics
+            .registry()
+            .register(Box::new(gauge.clone()))
+            .unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let watch = watch_gauges(metrics.clone(), Instant::now(), Arc::clone(&stop));
+        tokio::task::yield_now().await;
+        gauge.with_label_values(&["ipv4_unicast"]).set(7);
+        finish(&stop);
+        let watch = watch.await.unwrap();
+        assert_eq!(watch.credit_bytes_watch, "exported after start");
+        assert_eq!(watch.peak_credit_bytes, None);
+        // Exported from the start: dropping the cell's guard, as an early
+        // return does, ends the blocking watch.
+        let stop = Arc::new(AtomicBool::new(false));
+        let guard = StopOnDrop(Arc::clone(&stop));
+        let watch = watch_gauges(metrics.clone(), Instant::now(), Arc::clone(&stop));
+        tokio::task::yield_now().await;
+        drop(guard);
+        let watch = tokio::time::timeout(Duration::from_secs(10), watch).await;
+        // Stop it anyway, so a broken guard fails here instead of hanging
+        // runtime shutdown on the blocking watch.
+        finish(&stop);
+        let watch = watch.expect("the guard stops the watch").unwrap();
+        assert_eq!(watch.credit_bytes_watch, "watched");
     }
 
     #[test]

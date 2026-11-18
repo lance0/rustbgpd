@@ -362,7 +362,10 @@ and patches nothing. What each recorded number measures:
   set) or `whole` (one whole-family pass, including one absorbed for a
   waiting End-of-RIB). Where the histogram also carries a `family` label,
   each key is `scope/family` (for example `cursor/l2vpn_evpn`); bar 6 reads
-  from these keys how the run drained its family. A tree that times
+  from these keys how the run drained its family. A scope or family label
+  outside the product's closed vocabularies (`OWED_DRAIN_STEP_SCOPES` and
+  the canonical family labels in `crates/telemetry/src/metrics.rs`) makes
+  bar 6 INVALID, naming it. A tree that times
   owed-drain steps exports it from `RibManager::owing_drain_step` (`crates/rib/src/manager/outbound_owing.rs`)
   with the stall buckets (exact edges at 50 and 250 ms); on a tree without
   it the field is null. There the drain's readiness checkpoints are
@@ -380,11 +383,17 @@ and patches nothing. What each recorded number measures:
   run drained by cursor every whole-table operation is that family's; in
   one whose family drains whole the peak is reported, not gated. On a tree
   with `bgp_rib_outbound_credit_bytes`, the watch also reads that gauge
-  every 1 ms by name (`peak_credit_bytes`, over `credit_bytes_reads` reads;
-  null and 0 on a tree without it). No tree has a getter for it on every
-  arm, so each read is a registry gather, over a millisecond on the reduced
-  shape; it runs on its own thread so the getter reads keep their period,
-  back to back when a gather outlasts it.
+  by name, aiming at every 1 ms (`peak_credit_bytes`, over
+  `credit_bytes_reads` reads; null and 0 on a tree without it). No tree has
+  a getter for it on every arm, so each read is a registry gather, over a
+  millisecond on the reduced shape; it runs on its own thread so the getter
+  reads keep their period, back to back when a gather outlasts it.
+  `credit_bytes_watch` says how it went: `watched`, `not exported`,
+  `exported after start` (the gauge was absent when the watch started, as
+  a labeled family is until its first child, so nothing read it) or
+  `failed`. The byte watch thread runs only on an arm that exports the
+  gauge, so in a comparison of a row-credit parent with a byte-credit
+  candidate it loads the two arms unequally.
 - `witness.held` (release cells; null elsewhere): one read with every burst
   reader paused, just before the churn-free window (`at_ms`), bounded at
   5 s; past that it records only `unavailable` and the cell resumes its
@@ -465,10 +474,14 @@ The cell-7 bars read the candidate's measured fixed-shape runs only:
   and the live operations are report-only, and the line names that reason.
   Both scopes for the family (a partial move) or neither is INVALID, and so
   is a candidate run without the histogram (null, as on a tree without it),
-  like bar 1. `check` reads a run without the histogram as a tree that
-  predates it, where unicast drains by cursor and EVPN whole. On main
-  unicast records `cursor` steps and EVPN `whole` ones; a tree that moves
-  EVPN onto the cursor gates its witness with no analyzer change.
+  like bar 1. A family the candidate must drain by cursor (unicast always;
+  `analyze --require-cursor FAMILY` adds one) FAILs when its run recorded
+  steps for it but no `cursor` step, naming the scopes it saw. `check` reads
+  a run without the histogram as a tree that predates it, where unicast
+  drains by cursor and EVPN whole. On main unicast records `cursor` steps
+  and EVPN `whole` ones; a campaign whose candidate moves EVPN onto the
+  cursor passes `--require-cursor evpn`, so a candidate that still drains
+  it whole FAILs instead of reporting its witness.
   The charging witness: every
   row held toward the paused receivers must be charged (`witness.held`):
   held = `advertised_rows` − `read_rows` may exceed the charge
@@ -506,14 +519,19 @@ The cell-7 bars read the candidate's measured fixed-shape runs only:
   (credit − one pass), 150 × (109,655 − 1,024), is reported only. A
   byte-credit tree keeps the credit-rows gauge and its meaning, so it takes
   the same rows checks: the rows bound, and the charging witness for a
-  family it drains by cursor. Its byte bound reads the 1 ms byte peak
+  family it drains by cursor. Its byte bound reads the byte watch's peak
   (`drain_gauges.peak_credit_bytes`): at most receivers × (per-peer byte
   credit + 1,024 × (`row_size_of` + 146)), 150 × (14,035,840 + 1,024 × 250)
-  for unicast at 2 GiB. It gates only when the run records its tree's byte
-  credit (`byte_credit`: `DAEMON_CREDIT_BYTES`, `MIN_CREDIT_BYTES`,
-  `MAX_CREDIT_BYTES`) and rows of one size (the witness's uniform-row
-  check); otherwise, as for this harness, which records no `byte_credit`,
-  it is report-only with the reason. It never makes bar 6 undecided.
+  for unicast at 2 GiB, from the run's record of its tree's byte credit
+  (`byte_credit`: `DAEMON_CREDIT_BYTES`, `MIN_CREDIT_BYTES`,
+  `MAX_CREDIT_BYTES`). A peak the watch read over it FAILs. Otherwise the
+  bound must be able to gate, or bar 6 is INVALID: a `byte_credit` record
+  (this harness records none, because the byte tree keeps those constants
+  crate-private and exports no limit, so a byte-credit candidate is INVALID
+  here), rows of one size (the witness's uniform-row check), a byte watch
+  that saw the drain (`credit_bytes_watch` `watched`, not only the 250 ms
+  sampler) and at least one byte read per 10 ms of its window on average;
+  the line names the actual reads and interval.
 
 Each bar of each run is judged on its own, so a FAIL in any of them stands
 even when another bar or another run lacks an instrument. A repetition that
@@ -635,7 +653,7 @@ absolute), with 150 receivers among 153 registered peers, 150,000 rows, a
 | 4 | zero dirty episodes in every candidate probe cell |
 | 6 | report-only |
 | 7 owed-drain step | every candidate release run's longest owed-drain step ≤ 50 ms (INVALID on a tree without the histogram: no instrument) |
-| 7 per kind and family | exact wire state, one End-of-RIB after the table, zero resets; churn variant: both kinds of churn, sent between the release and the resume, and on every receiver a churned route already in its post-churn state before its End-of-RIB; longest actor turn ≤ 250 ms (PASS needs the poll and the inbox round trip within it); healthy gap ≤ 1 s; credit-rows peak ≤ 150 × (per-peer credit + one pass); for a family the run recorded `cursor` owed-drain steps for, live whole-table operations 0 from the release on and rows held toward the paused receivers no more than the charge plus the rows already encoded (report-only where it recorded only `whole` steps; INVALID with both, neither or no histogram); byte bound ≤ 150 × (per-peer byte credit + one pass) only with the run's `byte_credit` record and uniform rows, else report-only |
+| 7 per kind and family | exact wire state, one End-of-RIB after the table, zero resets; churn variant: both kinds of churn, sent between the release and the resume, and on every receiver a churned route already in its post-churn state before its End-of-RIB; longest actor turn ≤ 250 ms (PASS needs the poll and the inbox round trip within it); healthy gap ≤ 1 s; credit-rows peak ≤ 150 × (per-peer credit + one pass); for a family the run recorded `cursor` owed-drain steps for, live whole-table operations 0 from the release on and rows held toward the paused receivers no more than the charge plus the rows already encoded (report-only where it recorded only `whole` steps; INVALID with both, neither or no histogram); a family that must drain by cursor (unicast; `--require-cursor` adds one) FAILs without a `cursor` step; byte bound ≤ 150 × (per-peer byte credit + one pass) on a byte-credit tree, INVALID without the run's `byte_credit` record, uniform rows, a complete byte watch or one byte read per 10 ms |
 
 **INVALID** means the evidence cannot support a verdict: a missing result,
 a correctness-only or reduced run offered as a measurement, a missing
@@ -689,17 +707,21 @@ so are a null owed-drain step instrument, a long poll with no provably long
 turn, a dead turn or gauge instrument, a long inbox round trip under a short
 poll, an unfinished probe, churn outside the drain or behind every
 receiver's End-of-RIB, an over-wide excluded window, a partial move to the
-cursor, a candidate release without the step histogram, a result without
-the `row_credit` record, and a held read that is
+cursor, a candidate release without the step histogram, an unknown step
+scope or family label, a release without its `witness` object, a result
+without the `row_credit` record, and a held read that is
 unavailable, not tight either way, outside the pause, idle or within its
 slack, over the wrong connections or with rows not one an UPDATE of one
 size; the measured unicast reads with every fourth cursor envelope or
 every envelope uncharged FAIL while the measured clean read and a charged
-drain short of the credit pass; an EVPN run with `cursor` steps, labeled
-or not, fails the same way, one with only `whole` steps is report-only, and
-a byte-credit tree takes the row witness (an uncharged cursor row FAILs,
-a clean one passes) while its byte bound gates only with its `byte_credit`
-record and uniform rows; a FAIL
+drain short of the credit pass; a unicast run with only `whole` (or
+`keyed` and `whole`) steps FAILs, an EVPN run with `cursor` steps, labeled
+or not, fails the same way, one with only `whole` steps is report-only
+unless `--require-cursor evpn` makes it FAIL, and a byte-credit tree takes
+the row witness (an uncharged cursor row FAILs, a clean one passes) while
+its byte bound FAILs over the bound and is INVALID without its
+`byte_credit` record, uniform rows, a complete byte watch or a dense one;
+a FAIL
 survives another run's missing instrument or another
 repetition's missing or wrong-shape result, and a missing repetition keeps
 cell 7 from passing),

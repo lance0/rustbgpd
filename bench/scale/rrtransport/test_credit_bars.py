@@ -1,10 +1,13 @@
 """Seeded defects for the outbound-credit bars: each must turn exactly its
 own cell's verdict, for its own reason, and leave every other cell PASS."""
 
+import contextlib
 import copy
+import io
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import credit_bars
@@ -307,7 +310,7 @@ def provenance(sha, cells=None):
 
 
 class Bars(unittest.TestCase):
-    def run_bars(self, mutate=None):
+    def run_bars(self, mutate=None, require_cursor=()):
         parent, candidate = arm(False), arm(True)
         if mutate:
             mutate(parent, candidate)
@@ -329,7 +332,7 @@ class Bars(unittest.TestCase):
             return {
                 name: (verdict, reason)
                 for name, verdict, reason in credit_bars.verdicts(
-                    Path(root, "parent"), Path(root, "candidate")
+                    Path(root, "parent"), Path(root, "candidate"), require_cursor
                 )
             }
 
@@ -1543,7 +1546,7 @@ class Bars(unittest.TestCase):
                 # No step at all: bar 6 cannot tell how the family drained.
                 line = "cell 7 release under churn unicast"
                 self.assertEqual(results[line][0], "INVALID", results[line])
-                self.assertIn("no cursor or whole owed-drain step recorded", results[line][1])
+                self.assertIn("no owed-drain step recorded for", results[line][1])
                 del results[line]
                 self.assert_only(results, "cell 7 release owed-drain step", verdict, reason)
 
@@ -1690,12 +1693,162 @@ class Bars(unittest.TestCase):
                 self.assertIn("partial move", results[line][1])
 
     @staticmethod
-    def byte_tree(run, peak=None, record=True):
-        """`run` on a byte-credit tree: both byte peaks and, with `record`,
-        the RIB's byte-credit constants."""
+    def uncharged_whole(steps):
+        """A release that drained by uncharged whole-table operations: 150
+        live, nothing charged."""
+
+        def change(run):
+            run["actor"]["owed_drain_step_longest_ms"] = steps
+            run["drain_gauges"]["peak_operations_live"] = 150
+            run["witness"]["held"] = held(0)
+            run["drain_gauges"]["peak_credit_rows"] = 0
+
+        return change
+
+    def test_unicast_must_drain_by_cursor(self):
+        # The review's probes: a unicast drained by whole (or keyed and
+        # whole) steps, 150 live operations and nothing charged, FAILs,
+        # naming the family and the scopes it recorded.
+        many = histogram(10.0, 25.0, 900)
+        for steps, seen in (
+            ({"whole": many}, "whole"),
+            ({"keyed": many, "whole": many}, "keyed, whole"),
+            ({"whole/ipv4_unicast": many, "cursor/l2vpn_evpn": many}, "whole"),
+        ):
+            for file, line in (
+                ("restart-unicast.json", "cell 7 selection release unicast"),
+                ("restart-churn-unicast.json", "cell 7 release under churn unicast"),
+            ):
+                with self.subTest(steps=list(steps), file=file):
+                    results = self.release_defect(file, self.uncharged_whole(steps))
+                    self.assert_only(
+                        results,
+                        line,
+                        "FAIL",
+                        "unicast must drain by cursor, but the run recorded no cursor owed-drain "
+                        f"step for it (scopes seen: {seen})",
+                    )
+
+    def test_require_cursor_gates_another_family(self):
+        # An EVPN-cursor campaign passes `--require-cursor evpn`: a
+        # candidate that still drains EVPN whole FAILs, and one that moved
+        # it passes, from the same analyzer source.
+        whole = self.uncharged_whole({"whole": histogram(10.0, 25.0, 900)})
+        results = self.release_defect("restart-evpn.json", whole)
+        self.assertTrue(all(v == "PASS" for v, _ in results.values()), results)
+
+        def evpn_whole(_parent, candidate):
+            whole(candidate["restart-evpn.json"])
+
+        # The fixture drains EVPN whole in its churn cell too, so both FAIL.
+        results = self.run_bars(evpn_whole, require_cursor=("evpn",))
+        for line in ("cell 7 selection release evpn", "cell 7 release under churn evpn"):
+            verdict, reason = results.pop(line)
+            self.assertEqual(verdict, "FAIL", reason)
+            self.assertIn("evpn must drain by cursor", reason)
+        self.assertTrue(all(v == "PASS" for v, _ in results.values()), results)
+
+        def evpn_cursor(_parent, candidate):
+            for cell in ("restart-evpn", "restart-churn-evpn"):
+                candidate[f"{cell}.json"]["actor"]["owed_drain_step_longest_ms"] = {
+                    "cursor": histogram(10.0, 25.0)
+                }
+
+        results = self.run_bars(evpn_cursor, require_cursor=("evpn",))
+        self.assertTrue(all(v == "PASS" for v, _ in results.values()), results)
+
+    def test_require_cursor_command_line(self):
+        calls = []
+        with (
+            mock.patch.object(
+                credit_bars, "verdicts", lambda *args: calls.append(args) or []
+            ),
+            mock.patch.object(credit_bars, "report", lambda results: 0),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            argv = ["x", "analyze", "--require-cursor", "evpn", "p", "c"]
+            self.assertEqual(credit_bars.main(argv), 0)
+            self.assertEqual(calls, [(Path("p"), Path("c"), ("evpn",))])
+            self.assertEqual(credit_bars.main(["x", "analyze", "p", "c"]), 0)
+            self.assertEqual(calls[-1], (Path("p"), Path("c"), ()))
+            for argv in (
+                ["x", "analyze", "--require-cursor", "vpn", "p", "c"],
+                ["x", "analyze", "p", "c", "--require-cursor"],
+                ["x", "check", "--require-cursor", "evpn", "d"],
+            ):
+                with self.subTest(argv=argv):
+                    self.assertEqual(credit_bars.main(argv), 2)
+
+    def test_unknown_step_key_is_invalid(self):
+        # The review's probes: a family label or scope outside the product's
+        # vocabularies is INVALID with its name, not silently dropped.
+        for file, steps, reason in (
+            (
+                "restart-evpn.json",
+                {"whole/l2vpn_evpn": histogram(10.0, 25.0), "cursor/L2VPN_EVPN": histogram(10.0, 25.0)},
+                "unknown family label 'L2VPN_EVPN'",
+            ),
+            ("restart-unicast.json", {"cursor/ipv4": histogram(10.0, 25.0)}, "unknown family label 'ipv4'"),
+            ("restart-unicast.json", {"cursor/unknown": histogram(10.0, 25.0)}, "label 'unknown'"),
+            ("restart-unicast.json", {"chunk": histogram(10.0, 25.0)}, "unknown scope 'chunk'"),
+        ):
+            line = "cell 7 selection release " + ("evpn" if "evpn" in file else "unicast")
+
+            def change(run, steps=steps):
+                self.uncharged_whole(steps)(run)
+                run["drain_gauges"]["peak_operations_live"] = 0
+
+            with self.subTest(steps=list(steps)):
+                results = self.release_defect(file, change)
+                self.assert_only(results, line, "INVALID", reason)
+        # Every canonical label of another family is known and ignored.
+        others = {
+            f"cursor/{label}": histogram(10.0, 25.0)
+            for label, family in credit_bars.STEP_FAMILIES.items()
+            if family != "evpn"
+        }
+
+        def change(run):
+            run["actor"]["owed_drain_step_longest_ms"] = {
+                **others,
+                "whole/l2vpn_evpn": histogram(10.0, 25.0),
+            }
+
+        results = self.release_defect("restart-evpn.json", change)
+        self.assertTrue(all(v == "PASS" for v, _ in results.values()), results)
+
+    def test_release_without_a_witness_object_is_invalid(self):
+        # Every release run must carry its witness object, including one
+        # whose family drains whole; a FAIL elsewhere in bar 6 still stands.
+        line = "cell 7 selection release evpn"
+        for witness in (None, "absent", []):
+
+            def change(run, witness=witness):
+                if witness == "absent":
+                    del run["witness"]
+                else:
+                    run["witness"] = witness
+
+            def over(run, witness=witness):
+                change(run, witness)
+                run["drain_gauges"]["peak_credit_rows"] = RELEASE_ROW_BOUND + 1
+
+            with self.subTest(witness=witness):
+                results = self.release_defect("restart-evpn.json", change)
+                self.assert_only(results, line, "INVALID", "witness")
+                results = self.release_defect("restart-evpn.json", over)
+                self.assert_only(results, line, "FAIL", f"> {RELEASE_ROW_BOUND}")
+
+    @staticmethod
+    def byte_tree(run, peak=None, record=True, reads=33_000):
+        """`run` on a byte-credit tree: both byte peaks, the byte watch's
+        reads (one a millisecond over the 33 s watch by default) and, with
+        `record`, the RIB's byte-credit constants."""
         bound = RELEASE_BYTE_BOUND[run["family"]]
         run["witness"]["peak_credit_bytes"] = float(bound)
         run["drain_gauges"]["peak_credit_bytes"] = bound if peak is None else peak
+        run["drain_gauges"]["credit_bytes_reads"] = reads
+        run["drain_gauges"]["credit_bytes_watch"] = "watched"
         if record:
             run["byte_credit"] = dict(BYTE_CREDIT_RECORD)
 
@@ -1725,7 +1878,8 @@ class Bars(unittest.TestCase):
                         self.assertIn("charge witness (the run recorded cursor", results[line][1])
                         bound = RELEASE_BYTE_BOUND["unicast"]
                         self.assertIn(
-                            f"credit bytes peak {bound} read every 1 ms (bound {bound})",
+                            f"credit bytes peak {bound} over 33000 reads, one every 1.0 ms "
+                            f"(bound {bound})",
                             results[line][1],
                         )
                     else:
@@ -1758,33 +1912,54 @@ class Bars(unittest.TestCase):
                         f"credit bytes peak {peak} > {bound} = 150 x ({BYTE_CREDIT} + 1024 x 290)",
                     )
 
-        # Over the bound, but without the run's byte-credit record, rows of
-        # one size or the 1 ms reading: report-only, never undecided.
-        def no_record(run):
-            self.byte_tree(run, bound + 1, record=False)
+        # A byte tree whose bound cannot gate is INVALID, never PASS: no
+        # byte-credit record (the review's probe: 1.9x over the bound in
+        # every release cell passed), a partial one, rows not of one size,
+        # only the 250 ms sampler, or a byte watch that lost the gauge.
+        def no_record(_parent, candidate):
+            for cell in RELEASE_CELLS:
+                run = candidate[f"{cell}.json"]
+                self.byte_tree(run, int(RELEASE_BYTE_BOUND[run["family"]] * 1.9), record=False)
+                run["drain_gauges"]["peak_credit_rows"] = int(0.95 * RELEASE_ROW_BOUND)
+
+        results = self.run_bars(no_record)
+        for cell, verdict in results.items():
+            expected = "INVALID" if cell.startswith("cell 7 ") and "step" not in cell else "PASS"
+            with self.subTest(cell=cell):
+                self.assertEqual(verdict[0], expected, verdict)
+                if expected == "INVALID":
+                    self.assertIn("byte credit in use but no byte bound recorded", verdict[1])
 
         def two_rows(run):
-            self.byte_tree(run, bound + 1)
+            self.byte_tree(run, bound - 1)
             run["wire"]["max_rows_per_update"] = 2
 
         def partial_record(run):
-            self.byte_tree(run, bound + 1)
+            self.byte_tree(run, bound - 1)
             del run["byte_credit"]["MIN_CREDIT_BYTES"]
 
         def sampler_only(run):
             self.byte_tree(run)
             del run["drain_gauges"]["peak_credit_bytes"]
 
+        def appeared_late(run):
+            run["witness"]["peak_credit_bytes"] = float(bound)
+            run["drain_gauges"]["credit_bytes_watch"] = "exported after start"
+
+        def watch_failed(run):
+            self.byte_tree(run)
+            run["drain_gauges"]["credit_bytes_watch"] = "failed"
+
         for change, reason in (
-            (no_record, "byte bound report-only: no byte_credit record in the run"),
-            (two_rows, "report-only: row size not uniform"),
-            (partial_record, "byte bound report-only: not judged"),
-            (sampler_only, "no 1 ms byte reading"),
+            (two_rows, "cannot gate: row size not uniform"),
+            (partial_record, "byte_credit.MIN_CREDIT_BYTES"),
+            (sampler_only, "no 1 ms byte watch reading"),
+            (appeared_late, "byte watch 'exported after start'"),
+            (watch_failed, "byte watch 'failed'"),
         ):
             with self.subTest(reason=reason):
                 results = self.release_defect("restart-churn-evpn.json", change)
-                self.assertTrue(all(v == "PASS" for v, _ in results.values()), results)
-                self.assertIn(reason, results[line][1])
+                self.assert_only(results, line, "INVALID", reason)
 
         def huge_rows(run):
             self.byte_tree(run)
@@ -1792,6 +1967,32 @@ class Bars(unittest.TestCase):
 
         results = self.release_defect("restart-churn-evpn.json", huge_rows)
         self.assert_only(results, line, "FAIL", f"credit rows peak {10**12} > {RELEASE_ROW_BOUND}")
+
+    def test_byte_watch_reports_its_rate_and_gates_only_when_dense(self):
+        # The reading names the byte watch's actual reads and interval. A
+        # watch sparser than one read per 10 ms cannot pass the bound (the
+        # review's probe: 3 reads over the drain passed), but a peak it did
+        # read over the bound still FAILs.
+        line = "cell 7 selection release unicast"
+        bound = RELEASE_BYTE_BOUND["unicast"]
+        for reads, peak, verdict, reason in (
+            (3_300, bound, "PASS", "over 3300 reads, one every 10.0 ms (bound"),
+            (3_299, bound, "INVALID", "byte watch too sparse: 3299 reads over the 33000 ms"),
+            (3, 1, "INVALID", "byte watch too sparse: 3 reads"),
+            (0, bound, "INVALID", "one every inf ms"),
+            (3, bound + 1, "FAIL", f"credit bytes peak {bound + 1} > {bound}"),
+        ):
+
+            def change(run, reads=reads, peak=peak):
+                self.byte_tree(run, peak, reads=reads)
+
+            with self.subTest(reads=reads, peak=peak):
+                results = self.release_defect("restart-unicast.json", change)
+                if verdict == "PASS":
+                    self.assertTrue(all(v == "PASS" for v, _ in results.values()), results)
+                    self.assertIn(reason, results[line][1])
+                else:
+                    self.assert_only(results, line, verdict, reason)
 
     def test_check_without_a_step_histogram_keeps_the_legacy_families(self):
         # `check` on a tree that predates the histogram: unicast's witness
