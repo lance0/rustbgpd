@@ -2793,6 +2793,29 @@ impl OrrClientBurst {
 /// their own flip.
 #[test]
 fn orr_client_receives_only_the_net_change_of_a_queued_bgpls_burst() {
+    net_change_of_a_queued_bgpls_burst(feed_update);
+}
+
+/// The same burst as a session sends it, each UPDATE charged to the
+/// session's ingest budget: the rebuild is owed and coalesced exactly as
+/// for the bare messages.
+#[test]
+fn orr_client_receives_only_the_net_change_of_a_metered_bgpls_burst() {
+    let budget = crate::ingest_budget::IngestBudget::new();
+    net_change_of_a_queued_bgpls_burst(|announced, withdrawn| {
+        let update = feed_update(announced, withdrawn).metered(&budget);
+        assert!(matches!(update, RibUpdate::SessionRoutes { .. }));
+        update
+    });
+    assert_eq!(budget.unfinished(), 0);
+}
+
+fn net_change_of_a_queued_bgpls_burst(
+    feed_update: impl Fn(
+        Vec<crate::route::BgpLsRibRoute>,
+        Vec<crate::route::BgpLsRouteKey>,
+    ) -> RibUpdate,
+) {
     let mut burst = OrrClientBurst::new(64);
     assert_eq!(burst.announced_next_hops(), vec![orr_nh_x()]);
 

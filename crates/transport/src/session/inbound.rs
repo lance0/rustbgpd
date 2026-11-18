@@ -1257,6 +1257,17 @@ impl PeerSession {
     /// `Err` means the RIB actor is unavailable — the caller should
     /// abandon the rest of its turn.
     pub(super) fn deliver_routes_to_rib(&mut self, update: RibUpdate) -> Result<(), ()> {
+        // Every route-bearing message of every family passes here, so none
+        // goes around the ingest budget.
+        let update = match &self.ingest_budget {
+            Some(budget) => {
+                let update = update.metered(budget);
+                // The one place the gate closes: where the budget is charged.
+                self.ingest_gate_closed |= budget.gate_closed(false);
+                update
+            }
+            None => update,
+        };
         let parked = !self.rib_backlog.is_empty();
         let delivered = self.send_to_rib(update);
         if !parked && !self.rib_backlog.is_empty() {
@@ -1292,6 +1303,11 @@ impl PeerSession {
                 if *session_id == self.session_identity.id =>
             {
                 self.rib_epoch = None;
+                // The ended epoch's routes keep their permits on the old
+                // budget; they never pace the next connection.
+                if self.ingest_budget.is_some() {
+                    self.ingest_budget = Some(rustbgpd_rib::ingest_budget::IngestBudget::new());
+                }
             }
             _ => {}
         }
@@ -1478,6 +1494,35 @@ impl PeerSession {
             self.on_rib_admission(then);
         }
         self.rib_reserve = None;
+        if self.read_buf.has_complete_frame() {
+            self.process_read_buffer().await;
+        }
+    }
+
+    /// The one place the ingest gate reopens, run at the top of every run
+    /// loop turn: once the RIB has returned the budget to its resume mark
+    /// (or the session end replaced the budget), process the input buffered
+    /// behind the gate, in stream order. [`Self::deliver_routes_to_rib`]
+    /// closes the gate; every other reader sees the stored gate, so none can
+    /// observe the budget's return and leave complete frames buffered until
+    /// the peer's next byte. Input also held behind a full channel is
+    /// processed once that backlog is delivered.
+    ///
+    /// The budget never holds anything already read: only reading and
+    /// processing further peer PDUs stop, so a message of any size is
+    /// admitted while the gate is open, and End-of-RIB, refresh markers and
+    /// session ends are sent in stream order without waiting for budget.
+    pub(super) async fn reopen_ingest_gate(&mut self) {
+        if !self.ingest_gate_closed
+            || self
+                .ingest_budget
+                .as_ref()
+                .is_some_and(|budget| budget.gate_closed(true))
+        {
+            return;
+        }
+        self.ingest_gate_closed = false;
+        self.gate_hold_admissions = 0;
         if self.read_buf.has_complete_frame() {
             self.process_read_buffer().await;
         }
@@ -4344,6 +4389,18 @@ fn is_registration_context(update: &RibUpdate) -> bool {
             | RibUpdate::SetPeerSourceContext { .. }
             | RibUpdate::SetPeerWithheldFamilies { .. }
     )
+}
+
+/// Wait for returned ingest budget; never completes without a budget.
+/// Cancel-safe: a wake-up that arrives while no one waits is kept. A wake-up
+/// may be stale; the run loop re-checks the budget at the top of its turn.
+pub(super) async fn ingest_budget_resumed(
+    budget: Option<&rustbgpd_rib::ingest_budget::IngestBudget>,
+) {
+    match budget {
+        Some(budget) => budget.resumed().await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Poll the backlog's reservation. Cancel-safe: the reservation keeps its

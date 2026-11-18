@@ -848,28 +848,51 @@ impl PeerSession {
     }
 
     /// Drain complete messages from the read buffer and feed to FSM.
+    pub(super) async fn process_read_buffer(&mut self) {
+        self.process_buffered_input(Admit::Parked).await;
+    }
+
+    /// [`Self::process_read_buffer`], with how far it goes past parked
+    /// input; see [`Admit`].
     #[expect(
         clippy::too_many_lines,
         reason = "message ingestion keeps decode, BMP accounting, FSM dispatch, and buffer ordering explicit"
     )]
-    pub(super) async fn process_read_buffer(&mut self) {
+    pub(super) async fn process_buffered_input(&mut self, mut admit: Admit) {
+        // Nothing more will arrive on a closed connection, so nothing is
+        // gained by pacing what it already delivered: every complete frame
+        // is processed, its RIB messages joining any held ones in order.
+        let all = admit == Admit::All;
         loop {
             // The OPEN just processed may have parked a collision candidate;
             // input behind it waits for the verdict. Input behind a message
             // held for the RIB waits until the run loop delivers it.
-            if self.collision_verdict_pending() || !self.rib_backlog.is_empty() {
+            if self.collision_verdict_pending() || (!all && !self.rib_backlog.is_empty()) {
+                return;
+            }
+            // Input behind a spent ingest budget waits until the run loop
+            // sees the RIB return it. The pass is spent on the first frame
+            // considered, gate closed or not, so it cannot outlive a gate
+            // that closes later in this buffer.
+            let admitted = std::mem::replace(&mut admit, Admit::Parked) != Admit::Parked;
+            if self.ingest_gate_closed && !admitted && !all {
                 return;
             }
             // Reconcile a due refresh window before *each* buffered PDU, not
             // merely once per socket read. One read can contain several UPDATEs
             // and the first may park on RIB backpressure until after the shared
             // deadline; the next one must see the corrected max-prefix count.
-            if self.expire_refresh_accounting_windows().is_err() {
+            // Behind held messages a timeout would only be queued again for
+            // every frame, so the last frames of a closed connection are
+            // counted without that correction.
+            if (!all || self.rib_backlog.is_empty())
+                && self.expire_refresh_accounting_windows().is_err()
+            {
                 return;
             }
             // A timeout held behind a full channel sweeps its window only
             // once admitted; the next PDU waits for that correction.
-            if !self.rib_backlog.is_empty() {
+            if !all && !self.rib_backlog.is_empty() {
                 return;
             }
             let raw_pdu = match self.read_buf.try_frame() {
@@ -1709,6 +1732,18 @@ pub(super) async fn read_tcp(
         .as_mut()
         .expect("read_tcp called without read_half");
     read_half.read_buf(buf).await
+}
+
+/// How far [`PeerSession::process_buffered_input`] goes past input that is
+/// waiting for the RIB.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Admit {
+    /// Stop at a message held for the RIB or a closed ingest gate.
+    Parked,
+    /// One PDU past a closed ingest gate, for a hold expiry behind it.
+    OnePastGate,
+    /// Every complete frame, for a connection the peer has closed.
+    All,
 }
 
 /// Awaitable view of the writer task's `JoinHandle`. The select arm

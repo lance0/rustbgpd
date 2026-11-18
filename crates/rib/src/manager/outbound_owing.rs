@@ -12,22 +12,83 @@
 //!   mark its keys; the drain stages them.
 //! - A family whose set outgrows its byte cap θ, and every `FlowSpec`,
 //!   BGP-LS or RT-Constrain family, owes the whole family instead.
-//! - A unicast family owed whole is a row cursor ([`OwedRows`]): one list
-//!   per AFI, shared by every receiver, of the keys passes carried since
-//!   the oldest debt began, in the order they last changed. The receiver
-//!   holds a sequence number; a drain step sends the next keys after it as
-//!   an ordinary charged envelope, with no operation latch. Its set stops
-//!   growing at θ and drains ahead of the cursor, which lives until the
-//!   set is empty and the list has been read to its end.
+//! - A unicast or EVPN family owed whole is a row cursor ([`OwedRows`]):
+//!   one list per family, shared by every receiver, of the keys passes
+//!   carried since the oldest debt began, in the order they last changed.
+//!   The receiver holds a sequence number; a drain step sends the next keys
+//!   after it as an ordinary charged envelope, with no operation latch. Its
+//!   set drains ahead of the cursor, which lives until the set is empty
+//!   and the list has been read to its end. Under a cursor the set takes
+//!   no key a pass logged, so ordinary changes stop growing it at θ; it
+//!   still takes the keys no list entry after the position names for this
+//!   receiver (EVPN: an RT-Constrain restage, up to the table and what the
+//!   receiver holds; a fanout parked when the cursor started, one inbound
+//!   chunk), and so is not bounded at θ.
 //! - Any other family owed whole drains as one family-scoped resync under
 //!   an operation latch.
 //! - A refresh answer and a replay first absorb their family's owed keys
 //!   into their own operation, so none is left behind their markers. An
 //!   End-of-RIB a hold release freed waits for the drain, which reads the
-//!   peer's credit: a unicast marker leaves when the family's steps have
+//!   peer's credit: a cursor family's marker leaves when its steps have
 //!   caught up, any other is absorbed with its family, one per step.
 //! - A key no source still offers and the peer does not hold is cancelled
 //!   (the keep-set below mirrors the resync enumeration).
+//!
+//! # A receiver's EVPN debt as one state machine
+//!
+//! | State | Record | Dirty | Evicted |
+//! | --- | --- | --- | --- |
+//! | `N` not owing | none | no | no |
+//! | `K` keyed | set | no | no |
+//! | `C` cursor | whole, live position | no | no |
+//! | `W` waiting | whole with a dead position, a keyed set, or none | no | yes |
+//! | `D` evicted, dirty | kept (member) or dropped | yes | yes |
+//! | `R` ordinary resync | any | yes | no |
+//!
+//! `evicted` is [`RibManager::owed_row_evicted`]: the receiver's EVPN table
+//! is owed to a whole-table unit of the resync tick. The owed-row cap puts
+//! a group member that fell behind in `W`, and so does a dirty resync that
+//! ran inside an EVPN selection hold for a receiver holding EVPN rows (or
+//! a private recovery proof): it enumerated no EVPN key, and the release
+//! logs the Loc-RIB, not a row only the receiver holds. A position is read only
+//! through [`RibManager::live_cursor`], which has none for `W` and `D`:
+//! the drain, the list trim and its cap, the settle check, an absorption
+//! (refused as for capacity) and the shutdown flush all see no cursor.
+//!
+//! | Event | `K`/`C` | `W` | `D` |
+//! | --- | --- | --- | --- |
+//! | EVPN pass, parked slice | mark or log | nothing staged; an unlogged key joins the set | out of scope, left dirty |
+//! | drain step | sends | none for EVPN | none |
+//! | cap pass | `C` behind: `W` (member) or `D` | skipped | skipped |
+//! | tick, unit admissible | – | `D` (one capture, lowest first), then its unit | unit: `N`, End-of-RIB behind it |
+//! | tick, channel full or operation live | – | stays `W`, no capture | refused before the build, stays `D` |
+//! | tick, channel gone | dropped | dropped | dropped, record and mark together |
+//! | tick inside an EVPN selection hold | waits | stays `W` | stays `D`, nothing built |
+//! | dirty resync inside the hold (`R`) | `W` if it holds EVPN rows, else as before | – | – |
+//! | hold release | inventory logged | owes whole, position dead; next tick promotes | unchanged; next tick builds |
+//! | peer refresh | absorbs the debt | deferred to the unit | deferred to the unit |
+//! | operator refresh, failed send | `R` | `D` (that turn's one capture) | `D` |
+//! | operator replay, limit recovery | absorbs the debt | absorption refused as for capacity; stays `W` | as any dirty peer |
+//! | forced resync (ORF IMMEDIATE) | covers the record | record covered, stays evicted: one more unit | left to the tick |
+//! | selection-partial mark (unicast, VPN) | `R` | `D`, no capture | `D` |
+//! | regroup | `R` | `R` (mark and record dropped) | `R` |
+//! | session end or registration | `N` | `N` | `N` |
+//! | shutdown flush | set and remainder | set only | set only |
+//!
+//! A unit that builds an evicted receiver is the only exit from `W`/`D`
+//! besides a session end, and it runs only when EVPN is enumerated
+//! ([`RibManager::evicted_unit_held`]), so the dead position is never read
+//! again and the withdrawals its dropped entries named are sent by that
+//! unit's diff against what the receiver holds. A regroup's `R` is resynced
+//! in its own transaction: outside a hold that resync is the exit, inside
+//! one it leaves `W` again.
+//!
+//! Inside the hold the tick is not armed for `W` or `D` on their own
+//! account. A ROUTE-REFRESH pending from such a receiver keeps it armed
+//! through the deferred-refresh lane: each tick re-defers the answer and
+//! builds nothing, until the release or the deferral timeout. A unicast
+//! or VPN hold alone does not hold `D`: its unit runs, stays dirty behind
+//! that hold and runs again at its release.
 
 use std::collections::{BTreeMap, HashSet};
 use std::hash::Hash;
@@ -87,7 +148,7 @@ impl<K: Clone + Eq + Hash> OwedKeys<K> {
     }
 
     /// [`Self::remove`] for a set that only drains (one kept under a
-    /// unicast cursor): no compaction and no capacity release, each of
+    /// cursor): no compaction and no capacity release, each of
     /// which moves a share of the set in one call. The set is freed when
     /// its last key leaves.
     fn remove_draining(&mut self, key: &K) {
@@ -174,7 +235,8 @@ const TRIM_ROWS: usize = 4 * CHUNK_ROWS;
 /// cursor is resynced instead ([`RibManager::cap_owed_rows`]).
 const OWED_ROWS_SLACK: usize = 4 * CHUNK_ROWS;
 
-/// The unicast keys of one AFI that passes carried while some receiver owed
+/// The keys of one cursor family (a unicast AFI, or EVPN) that passes
+/// carried while some receiver owed
 /// the family whole, in the order they last changed: a key that changes
 /// again moves to the back. A receiver's debt is every entry after its
 /// cursor, so a key changed behind a cursor is visited again and one changed
@@ -187,12 +249,11 @@ const OWED_ROWS_SLACK: usize = 4 * CHUNK_ROWS;
 /// nodes as entries leave. So no call does list work that grows with the
 /// table: a logged key moves one entry and drops at most two, and a trim
 /// drops at most [`TRIM_ROWS`].
-#[derive(Default)]
-pub(super) struct OwedRows {
+pub(super) struct OwedRows<K> {
     /// Each key by the sequence it was last logged at.
-    order: BTreeMap<u64, Prefix>,
+    order: BTreeMap<u64, K>,
     /// The sequence each key is held at.
-    live: BTreeMap<Prefix, u64>,
+    live: BTreeMap<K, u64>,
     /// Sequence of the newest entry ever logged; it never goes back, so a
     /// cursor taken from it stays valid across a trim.
     head: u64,
@@ -211,7 +272,21 @@ pub(super) struct OwedRows {
     pub(super) dropped_max: usize,
 }
 
-impl OwedRows {
+impl<K> Default for OwedRows<K> {
+    fn default() -> Self {
+        Self {
+            order: BTreeMap::new(),
+            live: BTreeMap::new(),
+            head: 0,
+            floor: 0,
+            peak: 0,
+            #[cfg(test)]
+            dropped_max: 0,
+        }
+    }
+}
+
+impl<K: Copy + Ord> OwedRows<K> {
     /// The cursor of a receiver that has caught up.
     pub(super) fn head(&self) -> u64 {
         self.head
@@ -232,7 +307,7 @@ impl OwedRows {
     /// Log `key` as changed now: its entry moves to the back. While entries
     /// wait to be dropped two go with each key logged, so the list does not
     /// grow until they are gone.
-    fn touch(&mut self, key: Prefix) {
+    fn touch(&mut self, key: K) {
         self.head += 1;
         if let Some(logged) = self.live.insert(key, self.head) {
             self.order.remove(&logged);
@@ -284,7 +359,7 @@ impl OwedRows {
 
     /// Up to `count` keys after `cursor`, oldest first, and the cursor past
     /// them (the head when none is left).
-    fn after(&self, cursor: u64, count: usize) -> (Vec<Prefix>, u64) {
+    fn after(&self, cursor: u64, count: usize) -> (Vec<K>, u64) {
         let mut entries = self.order.range(cursor.saturating_add(1)..);
         let mut keys = Vec::new();
         let mut last = cursor;
@@ -315,7 +390,7 @@ impl OwedRows {
     /// more for the inner nodes.
     #[cfg(test)]
     pub(super) fn bytes(&self) -> usize {
-        let entry = std::mem::size_of::<Prefix>() + std::mem::size_of::<u64>();
+        let entry = std::mem::size_of::<K>() + std::mem::size_of::<u64>();
         self.live.len() * 2 * (entry * 11 / 5 + entry / 4)
     }
 }
@@ -417,6 +492,24 @@ impl OwedFamily {
         usize::from(self == Self::IPV6_UNICAST)
     }
 
+    /// The families owed whole as a row cursor, by cursor index: the
+    /// unicast AFIs at their AFI index, then EVPN.
+    const CURSORS: [Self; 3] = [Self::IPV4_UNICAST, Self::IPV6_UNICAST, Self::EVPN];
+
+    /// The cursor index of the EVPN family.
+    const EVPN_CURSOR: usize = 2;
+
+    /// The cursor index of a family owed whole as a row cursor.
+    fn cursor_index(self) -> Option<usize> {
+        Self::CURSORS.iter().position(|family| *family == self)
+    }
+
+    /// Whether the family is owed whole as a row cursor, not as one
+    /// whole-table operation.
+    pub(super) fn has_cursor(self) -> bool {
+        self.cursor_index().is_some()
+    }
+
     /// A `FlowSpec` family, global (SAFI 133) or VPN (SAFI 134).
     pub(super) fn is_flowspec(self) -> bool {
         matches!(
@@ -499,16 +592,18 @@ pub(super) struct PeerOwing {
     labeled: [OwedKeys<Prefix>; 2],
     vpn: [OwedKeys<VpnRouteKey>; 2],
     evpn: OwedKeys<EvpnRouteKey>,
-    /// A bit per [`OwedFamily`] owed whole. For a unicast family the bit
+    /// A bit per [`OwedFamily`] owed whole. For a cursor family the bit
     /// says `cursor` is live.
     whole: u16,
-    /// Per unicast AFI owed whole: the [`OwedRows`] sequence drained up to.
-    cursor: [u64; 2],
-    /// Per unicast AFI: how far past `cursor` the current selection hold
-    /// has read for the rows it exempts. `cursor` does not move in a hold,
-    /// so the release reads the held rows again.
-    hold_cursor: [u64; 2],
-    /// A bit per whole family (not unicast) already drained inside the
+    /// Per cursor family ([`OwedFamily::CURSORS`]) owed whole: the
+    /// [`OwedRows`] sequence drained up to.
+    cursor: [u64; 3],
+    /// Per cursor family: how far past `cursor` the current selection hold
+    /// has read for the rows it exempts (unicast only: EVPN has none).
+    /// `cursor` does not move in a hold, so the release reads the held rows
+    /// again.
+    hold_cursor: [u64; 3],
+    /// A bit per whole family (not a cursor) already drained inside the
     /// current selection hold (its exempt rows); it stays owed for the
     /// release.
     hold_drained: u16,
@@ -539,14 +634,14 @@ impl PeerOwing {
             vpn: Default::default(),
             evpn: OwedKeys::default(),
             whole: 0,
-            cursor: [0; 2],
-            hold_cursor: [0; 2],
+            cursor: [0; 3],
+            hold_cursor: [0; 3],
             hold_drained: 0,
             next_family: 0,
         }
     }
 
-    /// Where a drain step of unicast `index` reads from: past what the
+    /// Where a drain step of cursor `index` reads from: past what the
     /// current hold already read when `held`.
     fn cursor_from(&self, index: usize, held: bool) -> u64 {
         if held {
@@ -633,6 +728,10 @@ impl PeerOwing {
                 let index = usize::from(OwedFamily::vpn_of(key) == OwedFamily::VPNV6);
                 self.vpn[index].remove(key);
             }
+            // Kept under a cursor, the set only drains.
+            OwedKey::Evpn(key) if self.is_whole(OwedFamily::EVPN) => {
+                self.evpn.remove_draining(key);
+            }
             OwedKey::Evpn(key) => self.evpn.remove(key),
         }
     }
@@ -679,30 +778,35 @@ impl PeerOwing {
             OwedFamily::IPV6_LABELED => self.labeled[1].clear(),
             OwedFamily::VPNV4 => self.vpn[0].clear(),
             OwedFamily::VPNV6 => self.vpn[1].clear(),
-            OwedFamily::EVPN => self.evpn.clear(),
+            OwedFamily::EVPN => {
+                self.evpn.clear();
+                let index = OwedFamily::EVPN_CURSOR;
+                (self.cursor[index], self.hold_cursor[index]) = (0, 0);
+            }
             _ => {}
         }
     }
 
     /// Owe `family` whole: its set is dropped.
     fn flip_whole(&mut self, family: OwedFamily) {
-        debug_assert!(!family.is_unicast(), "unicast starts a cursor");
+        debug_assert!(!family.has_cursor(), "a cursor family starts a cursor");
         self.clear_family(family);
         self.whole |= family.bit();
     }
 
-    /// Owe unicast `index` whole from `head` of its [`OwedRows`]: every key
+    /// Owe cursor family `index` whole from `head` of its [`OwedRows`]: every key
     /// a later pass carries. The keys already owed stay in their set, which
-    /// stops growing and drains ahead of the cursor; the cursor ends when
-    /// the set is empty and the list has been read to its end.
+    /// takes no logged key from here on and drains ahead of the cursor; the
+    /// cursor ends when the set is empty and the list has been read to its
+    /// end.
     fn start_cursor(&mut self, index: usize, head: u64) {
-        self.whole |= OwedFamily::UNICAST[index].bit();
+        self.whole |= OwedFamily::CURSORS[index].bit();
         (self.cursor[index], self.hold_cursor[index]) = (head, 0);
     }
 
-    /// The unicast cursor of `index` caught up with its list.
+    /// The cursor of `index` caught up with its list.
     fn end_cursor(&mut self, index: usize) {
-        self.whole &= !OwedFamily::UNICAST[index].bit();
+        self.whole &= !OwedFamily::CURSORS[index].bit();
         (self.cursor[index], self.hold_cursor[index]) = (0, 0);
     }
 
@@ -887,7 +991,7 @@ impl OwingDrain {
     }
 
     fn whole(peer: PeerId, family: OwedFamily) -> Self {
-        debug_assert!(!family.is_unicast(), "unicast drains by cursor");
+        debug_assert!(!family.has_cursor(), "a cursor family drains by cursor");
         let mut drain = Self::new(peer, family, usize::MAX);
         drain.whole = true;
         drain
@@ -994,13 +1098,45 @@ impl RibManager {
         let Some(owing) = self.take_owing(peer) else {
             return false;
         };
-        if OwedFamily::UNICAST
+        if OwedFamily::CURSORS
             .iter()
             .any(|&family| owing.is_whole(family))
         {
             self.trim_owed_rows();
         }
         true
+    }
+
+    /// The head of cursor family `index`'s shared list.
+    fn owed_rows_head(&self, index: usize) -> u64 {
+        if index == OwedFamily::EVPN_CURSOR {
+            self.owed_evpn_rows.head()
+        } else {
+            self.owed_rows[index].head()
+        }
+    }
+
+    /// Up to `count` keys after `cursor` in cursor family `index`'s shared
+    /// list, oldest first, and the cursor past them.
+    fn owed_rows_after(&self, index: usize, cursor: u64, count: usize) -> (Vec<OwedKey>, u64) {
+        if index == OwedFamily::EVPN_CURSOR {
+            let (keys, last) = self.owed_evpn_rows.after(cursor, count);
+            (keys.into_iter().map(OwedKey::Evpn).collect(), last)
+        } else {
+            let (keys, last) = self.owed_rows[index].after(cursor, count);
+            (keys.into_iter().map(OwedKey::Unicast).collect(), last)
+        }
+    }
+
+    /// `peer`'s position in cursor family `index`'s shared list, or `None`
+    /// when `owing` holds no cursor there or the owed-row cap evicted the
+    /// receiver ([`Self::owed_row_evicted`]): the entries after an evicted
+    /// position were dropped, so nothing reads the list from it. Every
+    /// reader of a position asks here first (a drain step through
+    /// [`Self::owed_family_drainable`]).
+    fn live_cursor(&self, peer: PeerId, owing: &PeerOwing, index: usize) -> Option<u64> {
+        (owing.is_whole(OwedFamily::CURSORS[index]) && !self.owed_row_evicted.contains(&peer))
+            .then(|| owing.cursor[index])
     }
 
     /// Whether `peer` owes anything of `family` (keys or the whole family).
@@ -1056,8 +1192,8 @@ impl RibManager {
         if let Some(owing) = self.owing(peer) {
             if owing.is_whole(family) {
                 // A new local change must re-arm the exempt pass even
-                // while the rest of this whole family stays held. A unicast
-                // cursor needs no mark: the pass logged its keys.
+                // while the rest of this whole family stays held. A cursor
+                // needs no mark: the pass logged its keys.
                 let held_exempt = family.is_flowspec()
                     && family
                         .afi_safis()
@@ -1118,6 +1254,28 @@ impl RibManager {
     /// is inserted, and one it cannot is cancelled. A set past its byte cap
     /// is replaced by owing its family whole.
     pub(super) fn mark_owed(&mut self, peer: PeerId, keys: impl IntoIterator<Item = OwedKey>) {
+        self.mark_owed_inner(peer, keys, false);
+    }
+
+    /// [`Self::mark_owed`] for keys no pass logged in the shared list (a
+    /// change in what one receiver may be sent, with every winner as it
+    /// was): under a cursor they join the receiver's own set, which drains
+    /// ahead of the cursor, so a key the cursor has already read is visited
+    /// again for this receiver alone.
+    pub(super) fn mark_owed_unlogged(
+        &mut self,
+        peer: PeerId,
+        keys: impl IntoIterator<Item = OwedKey>,
+    ) {
+        self.mark_owed_inner(peer, keys, true);
+    }
+
+    fn mark_owed_inner(
+        &mut self,
+        peer: PeerId,
+        keys: impl IntoIterator<Item = OwedKey>,
+        unlogged: bool,
+    ) {
         let mut keys = keys.into_iter().peekable();
         if keys.peek().is_none() {
             return;
@@ -1130,13 +1288,14 @@ impl RibManager {
         let mut rejected = None;
         let mut pending_otc = None;
         let mut touched = 0u16;
+        let mut evpn_cursor_started = false;
         for key in keys {
             self.replacement_checkpoint(false);
             let family = key.family();
             if !sendable.is_some_and(|families| families.contains(&family.afi_safis()[0])) {
                 continue;
             }
-            if owing.is_whole(family) {
+            if owing.is_whole(family) && !(unlogged && family.has_cursor()) {
                 owing.hold_drained &= !family.bit();
                 continue;
             }
@@ -1160,12 +1319,16 @@ impl RibManager {
             super::retire_hash_set(&mut prefixes, &mut || self.replacement_checkpoint(false));
         }
         for family in OwedFamily::ALL {
+            // A live cursor stays where it is however large an unlogged
+            // mark makes its set: the keys it has not read are named only
+            // after its position.
             if touched & family.bit() != 0
+                && !owing.is_whole(family)
                 && owing.set_bytes(family) > self.owing_theta(peer, family)
             {
-                if family.is_unicast() {
-                    let index = family.unicast_index();
-                    owing.start_cursor(index, self.owed_rows[index].head());
+                if let Some(index) = family.cursor_index() {
+                    owing.start_cursor(index, self.owed_rows_head(index));
+                    evpn_cursor_started |= family == OwedFamily::EVPN;
                 } else {
                     owing.flip_whole(family);
                 }
@@ -1187,6 +1350,9 @@ impl RibManager {
         if settled {
             self.defer_eor_settle(peer);
         }
+        if evpn_cursor_started {
+            self.owe_parked_evpn_fanout(peer);
+        }
     }
 
     /// Re-insert keys a drain popped and did not stage: they were owed.
@@ -1199,8 +1365,8 @@ impl RibManager {
             .take_owing(peer)
             .unwrap_or_else(|| Box::new(PeerOwing::new(session_id)));
         for key in keys {
-            // A unicast cursor is already past the key: it goes to the set.
-            if key.family().is_unicast() || !owing.is_whole(key.family()) {
+            // A cursor is already past the key: it goes to the set.
+            if key.family().has_cursor() || !owing.is_whole(key.family()) {
                 let exempt = self.owed_key_exempt(peer, &key);
                 owing.insert(key, exempt);
             }
@@ -1209,7 +1375,7 @@ impl RibManager {
     }
 
     /// Owe `family` whole to `peer` (a whole-only family's refusal, a
-    /// selection release). A unicast family starts its cursor at the head of
+    /// selection release). A cursor family starts its cursor at the head of
     /// the shared list, so the caller's pass must carry every key the
     /// receiver may lack; a cursor already running is left where it is.
     pub(super) fn owe_whole_family(&mut self, peer: PeerId, family: OwedFamily) {
@@ -1217,10 +1383,10 @@ impl RibManager {
         let mut owing = self
             .take_owing(peer)
             .unwrap_or_else(|| Box::new(PeerOwing::new(session_id)));
-        if !owing.is_whole(family) {
-            if family.is_unicast() {
-                let index = family.unicast_index();
-                owing.start_cursor(index, self.owed_rows[index].head());
+        let started = !owing.is_whole(family);
+        if started {
+            if let Some(index) = family.cursor_index() {
+                owing.start_cursor(index, self.owed_rows_head(index));
             } else {
                 owing.flip_whole(family);
             }
@@ -1229,6 +1395,9 @@ impl RibManager {
         // New debt inside a selection hold gets its own exempt pass.
         owing.hold_drained &= !family.bit();
         self.put_owing(peer, owing);
+        if started && family == OwedFamily::EVPN {
+            self.owe_parked_evpn_fanout(peer);
+        }
     }
 
     fn note_owing_whole(&mut self, peer: PeerId, family: OwedFamily) {
@@ -1251,7 +1420,7 @@ impl RibManager {
         let Some(mut owing) = self.take_owing(peer) else {
             return;
         };
-        let cursors = OwedFamily::UNICAST.map(|family| owing.is_whole(family));
+        let cursors = OwedFamily::CURSORS.map(|family| owing.is_whole(family));
         for family in OwedFamily::ALL {
             if !family
                 .afi_safis()
@@ -1261,7 +1430,7 @@ impl RibManager {
                 owing.clear_family(family);
             }
         }
-        let ended = OwedFamily::UNICAST.map(|family| owing.is_whole(family)) != cursors;
+        let ended = OwedFamily::CURSORS.map(|family| owing.is_whole(family)) != cursors;
         self.put_owing(peer, owing);
         if ended {
             self.trim_owed_rows();
@@ -1449,7 +1618,7 @@ impl RibManager {
     }
 
     /// Whether `family` of `owing` is drainable now (`latch_free`: a whole
-    /// family other than unicast needs `peer`'s operation latch).
+    /// family without a cursor needs `peer`'s operation latch).
     fn owed_family_drainable(
         &self,
         peer: PeerId,
@@ -1457,7 +1626,14 @@ impl RibManager {
         family: OwedFamily,
         latch_free: bool,
     ) -> Option<DrainScope> {
-        if !owing.owes(family) || (owing.is_whole(family) && !family.is_unicast() && !latch_free) {
+        if !owing.owes(family) || (owing.is_whole(family) && !family.has_cursor() && !latch_free) {
+            return None;
+        }
+        // The cap evicted this cursor: the tick's resync sends the family.
+        if let Some(index) = family.cursor_index()
+            && owing.is_whole(family)
+            && self.live_cursor(peer, owing, index).is_none()
+        {
             return None;
         }
         self.owed_drain_scope(peer, owing, family)
@@ -1471,7 +1647,7 @@ impl RibManager {
             self.outbound_operation_live(peer)
                 && OwedFamily::ALL.iter().any(|&family| {
                     owing.is_whole(family)
-                        && !family.is_unicast()
+                        && !family.has_cursor()
                         && self.owed_drain_scope(peer, owing, family).is_some()
                 })
         })
@@ -1509,7 +1685,7 @@ impl RibManager {
     /// Whether a list still holds entries behind every cursor: the resync
     /// tick drops them a bounded number at a time.
     pub(super) fn owed_rows_trimming(&self) -> bool {
-        self.owed_rows.iter().any(OwedRows::trimming)
+        self.owed_rows.iter().any(OwedRows::trimming) || self.owed_evpn_rows.trimming()
     }
 
     /// Whether any peer has owed work the resync tick can run.
@@ -1611,8 +1787,8 @@ impl RibManager {
         if rows >= limit || self.outbound_channel_full(peer) {
             return false;
         }
-        // One family per step: a waiting marker's family (unicast never:
-        // its marker follows its own steps) is absorbed whole behind this
+        // One family per step: a waiting marker's family (a cursor family
+        // never: its marker follows its own steps) is absorbed whole behind this
         // credit read, and the peer's next owed family waits for its next
         // step and a fresh read.
         if !self.outbound_operation_live(peer) {
@@ -1640,8 +1816,8 @@ impl RibManager {
     }
 
     /// One drain step of `family`'s `scope` toward `peer` within `budget`
-    /// rows: the next keys of its set, then of its unicast cursor, or a
-    /// whole family of any other kind.
+    /// rows: the next keys of its set, then of its cursor, or a whole
+    /// family of any other kind.
     pub(super) fn owing_drain_step(
         &mut self,
         peer: PeerId,
@@ -1657,7 +1833,7 @@ impl RibManager {
         } else {
             owing.keyed_len(family)
         };
-        let step = match (owing.is_whole(family), family.is_unicast()) {
+        let step = match (owing.is_whole(family), family.has_cursor()) {
             (true, false) => "whole",
             (true, true) if set_len == 0 => "cursor",
             _ => "keyed",
@@ -1682,7 +1858,7 @@ impl RibManager {
         progressed
     }
 
-    /// One step of a family owed whole that has no cursor (not unicast):
+    /// One step of a family owed whole that has no cursor:
     /// a family-scoped resync as one whole-table operation.
     fn owing_whole_step(&mut self, peer: PeerId, family: OwedFamily, scope: DrainScope) -> bool {
         if self.outbound_operation_live(peer) {
@@ -1730,12 +1906,24 @@ impl RibManager {
             .map_or(1, |rows| CHUNK_ROWS.min((budget / rows).max(1)))
     }
 
-    /// One step of a unicast cursor: the next live keys after it in the
+    /// The budget a step of `keys` keys is staged under. An EVPN key stages
+    /// at most two rows, so a step fitted by [`Self::owing_step_keys`] is
+    /// one staging call; the other families stage key by key.
+    fn owing_step_budget(family: OwedFamily, keys: usize, budget: usize) -> usize {
+        if family == OwedFamily::EVPN {
+            pass_budget(keys, Some(2), budget)
+        } else {
+            budget
+        }
+    }
+
+    /// One step of a cursor: the next live keys after it in the
     /// shared list, staged by diff as an ordinary envelope charged against
     /// the peer's credit, with no operation latch. The cursor moves past
     /// what the step read once the envelope is admitted. Inside a selection
-    /// hold the step sends only the rows the hold exempts and moves the
-    /// hold's own position, so the release reads the held rows again.
+    /// hold a unicast step sends only the rows the hold exempts and moves
+    /// the hold's own position, so the release reads the held rows again
+    /// (EVPN has no exemption and does not step inside its hold).
     fn owing_cursor_step(
         &mut self,
         peer: PeerId,
@@ -1743,19 +1931,21 @@ impl RibManager {
         scope: DrainScope,
         budget: usize,
     ) -> bool {
-        let index = family.unicast_index();
+        let Some(index) = family.cursor_index() else {
+            return false;
+        };
         let held = scope == DrainScope::Exempt;
         let Some(from) = self.owing(peer).map(|owing| owing.cursor_from(index, held)) else {
             return false;
         };
         let count = self.owing_step_keys(peer, family, budget);
-        let (mut keys, last) = self.owed_rows[index].after(from, count);
+        let (mut keys, last) = self.owed_rows_after(index, from, count);
         if held {
-            keys.retain(|prefix| self.owed_key_exempt(peer, &OwedKey::Unicast(*prefix)));
+            keys.retain(|key| self.owed_key_exempt(peer, key));
         }
         let mut unstaged = Vec::new();
         if !keys.is_empty() {
-            let keys = keys.into_iter().map(OwedKey::Unicast).collect();
+            let budget = Self::owing_step_budget(family, keys.len(), budget);
             let mut drain = OwingDrain::keyed(peer, family, budget, keys);
             self.distribute_owing_drain(&mut drain);
             match drain.outcome {
@@ -1797,6 +1987,7 @@ impl RibManager {
             .expect("the peer still owes keys")
             .copy_keys(family, scope, count);
         let popped = keys.len();
+        let budget = Self::owing_step_budget(family, popped, budget);
         let mut drain = OwingDrain::keyed(peer, family, budget, keys.clone());
         self.distribute_owing_drain(&mut drain);
         match drain.outcome {
@@ -1822,11 +2013,11 @@ impl RibManager {
         }
     }
 
-    /// The slowest unicast cursor per AFI, after dropping a bounded number
-    /// of the list entries behind it; `None` where no receiver holds one
-    /// (that list is being freed).
-    pub(super) fn trim_owed_rows(&mut self) -> [Option<u64>; 2] {
-        let mut floors = [None::<u64>; 2];
+    /// The slowest cursor per cursor family, after dropping a bounded
+    /// number of the list entries behind it; `None` where no receiver holds
+    /// one (that list is being freed).
+    pub(super) fn trim_owed_rows(&mut self) -> [Option<u64>; 3] {
+        let mut floors = [None::<u64>; 3];
         #[cfg(test)]
         {
             self.adj_rib_out_commit_stats.owed_peer_scans += self.owing_peers.len();
@@ -1835,9 +2026,9 @@ impl RibManager {
             let Some(owing) = self.owing(peer) else {
                 continue;
             };
+            // An evicted receiver's cursor waits for nothing.
             for (index, floor) in floors.iter_mut().enumerate() {
-                if owing.is_whole(OwedFamily::UNICAST[index]) {
-                    let cursor = owing.cursor[index];
+                if let Some(cursor) = self.live_cursor(peer, owing, index) {
                     *floor = Some(floor.map_or(cursor, |floor| floor.min(cursor)));
                 }
             }
@@ -1845,7 +2036,41 @@ impl RibManager {
         for (rows, floor) in self.owed_rows.iter_mut().zip(floors) {
             rows.trim(floor);
         }
+        self.owed_evpn_rows.trim(floors[OwedFamily::EVPN_CURSOR]);
         floors
+    }
+
+    /// Whether no cursor list holds a key and no receiver owes anything:
+    /// a pass then has nothing to log.
+    fn owed_rows_idle(&self) -> bool {
+        self.owing_peers.is_empty()
+            && self.owed_rows.iter().all(|rows| rows.len() == 0)
+            && self.owed_evpn_rows.len() == 0
+    }
+
+    /// An EVPN pass selected `keys` (the keys whose winner changed, or a
+    /// selection release's whole inventory): log them once for the
+    /// receivers that owe EVPN whole, whose gate stages and marks nothing.
+    /// Once per mutation, never per receiver or paced slice. With no such
+    /// receiver nothing is logged.
+    pub(super) fn log_owed_evpn_rows(&mut self, keys: &HashSet<EvpnRouteKey>) {
+        if self.owed_rows_idle() {
+            return;
+        }
+        if self.trim_owed_rows()[OwedFamily::EVPN_CURSOR].is_none() {
+            return;
+        }
+        #[cfg(test)]
+        {
+            self.adj_rib_out_commit_stats.owed_evpn_logs += 1;
+        }
+        for key in keys {
+            self.replacement_checkpoint(false);
+            self.owed_evpn_rows.touch(*key);
+        }
+        let table = self.loc_rib.evpn_len();
+        let rows = &mut self.owed_evpn_rows;
+        rows.peak = rows.peak.max(table + keys.len());
     }
 
     /// A unicast pass is about to stage `best_changed` and `all_affected`:
@@ -1857,11 +2082,11 @@ impl RibManager {
         best_changed: &HashSet<Prefix>,
         all_affected: &HashSet<Prefix>,
     ) {
-        if self.owing_peers.is_empty() && self.owed_rows.iter().all(|rows| rows.len() == 0) {
+        if self.owed_rows_idle() {
             return;
         }
         let floors = self.trim_owed_rows();
-        if floors == [None, None] {
+        if floors[..2] == [None, None] {
             return;
         }
         let changed = best_changed.iter().chain(
@@ -1896,56 +2121,150 @@ impl RibManager {
     /// so they are dropped first and no receiver is evicted for them.
     /// Nothing is built here, and no later pass builds it either: an
     /// evicted receiver is resynced only by the resync tick, one receiver
-    /// per unit ([`Self::owed_row_evicted`]).
+    /// per unit ([`Self::owed_row_evicted`]). A group member is not made
+    /// dirty here either: the capture of its group's table belongs to the
+    /// tick too.
     pub(super) fn cap_owed_rows(&mut self) {
-        for (index, family) in OwedFamily::UNICAST.into_iter().enumerate() {
-            let cap = 2 * self.owed_rows[index].peak + OWED_ROWS_SLACK;
-            let Some(over) = self.owed_rows[index].over(cap) else {
-                continue;
-            };
-            #[cfg(test)]
-            {
-                self.adj_rib_out_commit_stats.owed_peer_scans += self.owing_peers.len();
-            }
-            let behind: Vec<PeerId> = self
-                .owing_peers
-                .iter()
-                .copied()
-                .filter(|&peer| {
-                    self.owing(peer)
-                        .is_some_and(|owing| owing.is_whole(family) && owing.cursor[index] < over)
+        for index in 0..OwedFamily::UNICAST.len() {
+            self.cap_owed_rows_of(index);
+        }
+    }
+
+    /// [`Self::cap_owed_rows`] for the EVPN list, after an EVPN pass's
+    /// receiver loop.
+    pub(super) fn cap_owed_evpn_rows(&mut self) {
+        self.cap_owed_rows_of(OwedFamily::EVPN_CURSOR);
+    }
+
+    fn cap_owed_rows_of(&mut self, index: usize) {
+        let family = OwedFamily::CURSORS[index];
+        let evpn = index == OwedFamily::EVPN_CURSOR;
+        let (cap, over) = if evpn {
+            let rows = &self.owed_evpn_rows;
+            let cap = 2 * rows.peak + OWED_ROWS_SLACK;
+            (cap, rows.over(cap))
+        } else {
+            let rows = &self.owed_rows[index];
+            let cap = 2 * rows.peak + OWED_ROWS_SLACK;
+            (cap, rows.over(cap))
+        };
+        let Some(over) = over else {
+            return;
+        };
+        #[cfg(test)]
+        {
+            self.adj_rib_out_commit_stats.owed_peer_scans += self.owing_peers.len();
+        }
+        let behind: Vec<PeerId> = self
+            .owing_peers
+            .iter()
+            .copied()
+            .filter(|&peer| {
+                self.owing(peer).is_some_and(|owing| {
+                    self.live_cursor(peer, owing, index)
+                        .is_some_and(|cursor| cursor < over)
                 })
-                .collect();
-            for peer in behind {
-                debug!(%peer, ?family, "owed-row list over its cap — receiver resyncs");
-                self.owing_peers.remove(&peer);
-                drop(self.take_owing(peer));
-                self.metrics.record_rib_outbound_owing_fallback();
-                if self.mark_outbound_dirty(peer) {
-                    self.owed_row_evicted.insert(peer);
-                }
+            })
+            .collect();
+        for peer in behind {
+            debug!(%peer, ?family, "owed-row list over its cap — receiver resyncs");
+            self.metrics.record_rib_outbound_owing_fallback();
+            // A group member's dirty mark walks its group's table to
+            // capture what it was sent, and this pass may evict many
+            // members: the mark waits for the resync tick, one receiver a
+            // tick ([`Self::promote_evicted_receiver`]). Until its resync
+            // covers the family its debt stays, with a cursor no drain
+            // reads: EVPN passes skip the receiver and its End-of-RIB
+            // waits, as before, while its group's families flow to it.
+            if evpn && self.grouped_member_of(peer).is_some() {
+                self.owed_row_evicted.insert(peer);
+                continue;
             }
-            self.trim_owed_rows();
+            self.owing_peers.remove(&peer);
+            drop(self.take_owing(peer));
+            if self.mark_outbound_dirty(peer) {
+                self.owed_row_evicted.insert(peer);
+            }
+        }
+        self.trim_owed_rows();
+        if evpn {
+            self.owed_evpn_rows.drop_over(cap);
+        } else {
             self.owed_rows[index].drop_over(cap);
         }
     }
 
+    /// Whether evicted `peer`'s resync must wait for an EVPN selection
+    /// hold: inside one a resync enumerates no EVPN key, so its unit would
+    /// clear the dirty flag and the eviction with the family not rebuilt.
+    /// The receiver keeps its state, dirty or waiting, until the release.
+    pub(super) fn evicted_unit_held(&self, peer: PeerId) -> bool {
+        const EVPN: (Afi, Safi) = (Afi::L2Vpn, Safi::Evpn);
+        self.owed_row_evicted.contains(&peer)
+            && self.selection_deferred(EVPN)
+            && self
+                .peer_sendable_families
+                .get(&peer)
+                .is_some_and(|families| families.contains(&EVPN))
+    }
+
+    /// Whether a group member the cap evicted still waits to be made dirty
+    /// and no selection hold keeps it waiting.
+    pub(super) fn owed_eviction_pending(&self) -> bool {
+        self.owed_row_evicted
+            .iter()
+            .any(|&peer| !self.dirty_peers.contains(&peer) && !self.evicted_unit_held(peer))
+    }
+
+    /// The resync tick makes at most one waiting evicted group member
+    /// dirty: one capture of a group's table per tick, ahead of that
+    /// receiver's whole-table unit. It takes the lowest receiver whose unit
+    /// could be admitted now (no selection hold, room in its channel, no
+    /// live whole-table operation) and passes over the rest at no cost, so
+    /// no receiver waits behind another, dirty or not, that cannot build.
+    /// One scan of the evicted receivers.
+    pub(super) fn promote_evicted_receiver(&mut self) {
+        let waiting: Vec<PeerId> = self
+            .owed_row_evicted
+            .iter()
+            .copied()
+            .filter(|peer| !self.dirty_peers.contains(peer))
+            .collect();
+        let mut next = None::<PeerId>;
+        for peer in waiting {
+            if self.outbound_channel_gone(peer) {
+                // Its session is gone: nothing is owed to it.
+                self.drop_peer_owing(peer);
+            } else if !self.evicted_unit_held(peer)
+                && !self.outbound_channel_full(peer)
+                && !self.outbound_operation_live(peer)
+            {
+                next = Some(next.map_or(peer, |lowest| lowest.min(peer)));
+            }
+        }
+        if let Some(peer) = next {
+            self.mark_outbound_dirty(peer);
+        }
+    }
+
     /// After a drain of `family` ended without a refusal: a whole family
-    /// clears its bit (a unicast one once its kept set is empty and its
+    /// clears its bit (a cursor family once its kept set is empty and its
     /// cursor has caught up with the list: until both hold, passes log
-    /// their keys for the cursor and the set stays frozen), and the
+    /// their keys for the cursor and the set takes only unlogged marks), and the
     /// End-of-RIB of a family that no longer owes anything, if one waits,
     /// goes out now.
     fn owing_family_settled(&mut self, peer: PeerId, family: OwedFamily) {
         if let Some(mut owing) = self.take_owing(peer) {
-            let caught_up = owing.is_whole(family)
-                && family.is_unicast()
-                && owing.keyed_len(family) == 0
-                && owing.cursor[family.unicast_index()]
-                    >= self.owed_rows[family.unicast_index()].head();
-            if caught_up {
-                owing.end_cursor(family.unicast_index());
-            } else if owing.is_whole(family) && !family.is_unicast() {
+            let cursor = family.cursor_index();
+            let caught_up = cursor.is_some_and(|index| {
+                owing.keyed_len(family) == 0
+                    && self
+                        .live_cursor(peer, &owing, index)
+                        .is_some_and(|at| at >= self.owed_rows_head(index))
+            });
+            if let Some(index) = cursor.filter(|_| caught_up) {
+                owing.end_cursor(index);
+            } else if owing.is_whole(family) && cursor.is_none() {
                 owing.clear_family(family);
             }
             self.put_owing(peer, owing);
@@ -2017,16 +2336,19 @@ impl RibManager {
         if !owing.owes(family) {
             return Ok(());
         }
-        let mut drain = if owing.is_whole(family) && !family.is_unicast() {
+        let mut drain = if owing.is_whole(family) && !family.has_cursor() {
             OwingDrain::whole(peer, family)
         } else {
             // Copied, not popped: a refusal leaves the set and the cursor
-            // as they were. A unicast cursor's remainder joins the keys.
+            // as they were. A cursor's remainder joins the keys.
             let mut keys = owing.copy_keys(family, DrainScope::All, usize::MAX);
-            if owing.is_whole(family) {
-                let index = family.unicast_index();
-                let (rest, _) = self.owed_rows[index].after(owing.cursor[index], usize::MAX);
-                keys.extend(rest.into_iter().map(OwedKey::Unicast));
+            if let Some(index) = family.cursor_index().filter(|_| owing.is_whole(family)) {
+                // An evicted cursor has no remainder to absorb: the family
+                // stays owed for the tick's resync, as after a refusal.
+                let Some(cursor) = self.live_cursor(peer, owing, index) else {
+                    return Err(super::outbound_credit::CREDIT_REFUSAL);
+                };
+                keys.extend(self.owed_rows_after(index, cursor, usize::MAX).0);
             }
             OwingDrain::keyed(peer, family, usize::MAX, keys)
         };
@@ -2042,7 +2364,7 @@ impl RibManager {
                     owing.clear_family(family);
                     self.put_owing(peer, owing);
                 }
-                if family.is_unicast() {
+                if family.has_cursor() {
                     self.trim_owed_rows();
                 }
                 self.reinsert_owed(peer, drain.unstaged);
@@ -2081,18 +2403,16 @@ impl RibManager {
                 if !owing.owes(family) {
                     continue;
                 }
-                // A unicast cursor's remainder is flushed with the set and
-                // stays behind the cursor, which does not move.
-                let cursor_keys = if family.is_unicast() && owing.is_whole(family) {
-                    let index = family.unicast_index();
-                    self.owed_rows[index]
-                        .after(owing.cursor[index], usize::MAX)
-                        .0
-                } else {
-                    Vec::new()
-                };
+                // A cursor's remainder is flushed with the set and stays
+                // behind the cursor, which does not move.
+                let cursor_keys = family
+                    .cursor_index()
+                    .and_then(|index| Some((index, self.live_cursor(peer, owing, index)?)))
+                    .map_or_else(Vec::new, |(index, cursor)| {
+                        self.owed_rows_after(index, cursor, usize::MAX).0
+                    });
                 let mut popped = Vec::new();
-                let mut drain = if owing.is_whole(family) && !family.is_unicast() {
+                let mut drain = if owing.is_whole(family) && !family.has_cursor() {
                     if self.outbound_operation_live(peer) {
                         debug!(%peer, ?family, "owed family not flushed at close: a whole-table update is still live");
                         continue;
@@ -2108,7 +2428,7 @@ impl RibManager {
                         None => continue,
                     };
                     let mut keys = popped.clone();
-                    keys.extend(cursor_keys.into_iter().map(OwedKey::Unicast));
+                    keys.extend(cursor_keys);
                     OwingDrain::keyed(peer, family, usize::MAX, keys)
                 };
                 drain.close = true;
@@ -2148,6 +2468,19 @@ impl RibManager {
     #[cfg(test)]
     pub(super) fn owed_key_count(&self, peer: PeerId, family: OwedFamily) -> usize {
         self.owing(peer).map_or(0, |owing| owing.keyed_len(family))
+    }
+
+    /// Whether `peer`'s EVPN cursor has read past `key`'s list entry.
+    #[cfg(test)]
+    pub(super) fn owed_evpn_cursor_passed(&self, peer: PeerId, key: &EvpnRouteKey) -> bool {
+        self.owing(peer).is_some_and(|owing| {
+            owing.is_whole(OwedFamily::EVPN)
+                && self
+                    .owed_evpn_rows
+                    .live
+                    .get(key)
+                    .is_some_and(|logged| *logged <= owing.cursor[OwedFamily::EVPN_CURSOR])
+        })
     }
 
     /// Whether `family` is owed whole to `peer`.
@@ -2302,11 +2635,15 @@ impl RibManager {
     /// when nothing is staged (the keys were owed, the family is owed
     /// whole, or, out of scope, slice 1a's preflight refused). A streaming
     /// peer stages as many keys as its remaining credit holds, two rows a
-    /// key at most, and owes the rest.
+    /// key at most, and owes the rest. `logged`: the pass logged `keys` for
+    /// the cursors ([`Self::log_owed_evpn_rows`]); a restage of one
+    /// receiver's view with every winner unchanged did not, so under a
+    /// cursor its keys join that receiver's own set.
     pub(super) fn owing_evpn_pass<'k>(
         &mut self,
         peer: PeerId,
         keys: &'k HashSet<EvpnRouteKey>,
+        logged: bool,
     ) -> Option<(std::borrow::Cow<'k, HashSet<EvpnRouteKey>>, bool)> {
         match self.owing_gate(peer, OwedFamily::EVPN) {
             OwingGate::Stream { row_budget } if row_budget == usize::MAX => (!self
@@ -2333,7 +2670,12 @@ impl RibManager {
                 self.mark_owed(peer, keys.iter().copied().map(OwedKey::Evpn));
                 None
             }
-            OwingGate::Whole => None,
+            OwingGate::Whole => {
+                if !logged {
+                    self.mark_owed_unlogged(peer, keys.iter().copied().map(OwedKey::Evpn));
+                }
+                None
+            }
         }
     }
 
@@ -2522,7 +2864,7 @@ mod fifo_tests {
             owing.insert(key, true);
             owing.start_cursor(0, 5);
             owing.start_cursor(1, 6);
-            owing.hold_cursor = [7, 8];
+            owing.hold_cursor = [7, 8, 0];
             assert_eq!(owing.keyed_len(v4), 1, "the set survives the flip");
             assert_eq!(owing.exempt_len(v4), 1);
             assert_eq!(owing.cursor_from(0, false), 5);
@@ -2697,7 +3039,7 @@ mod fifo_tests {
     #[test]
     fn the_list_matches_a_model_under_random_operations() {
         type Cursor = Option<(u64, HashSet<Prefix>)>;
-        fn trim(rows: &mut OwedRows, cursors: &[Cursor]) {
+        fn trim(rows: &mut OwedRows<Prefix>, cursors: &[Cursor]) {
             rows.trim(cursors.iter().flatten().map(|(cursor, _)| *cursor).min());
         }
         let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
@@ -2828,6 +3170,55 @@ mod fifo_tests {
             assert_eq!(owing.keyed_len(family), left);
         }
         assert_eq!(owing.set_bytes(family), 0);
+        assert!(owing.is_whole(family), "the cursor is ended by its step");
+    }
+
+    /// As above for the EVPN set, whose removal has its own arm: under a
+    /// cursor it only drains, with no compaction and no capacity release.
+    #[test]
+    fn an_evpn_set_kept_under_a_cursor_drains_without_rebuilding() {
+        const KEYS: u32 = 50_000;
+        let family = OwedFamily::EVPN;
+        let key = |index: u32| {
+            rustbgpd_wire::EvpnRoute::Imet(rustbgpd_wire::EvpnImet {
+                rd: rustbgpd_wire::RouteDistinguisher([0; 8]),
+                ethernet_tag: rustbgpd_wire::EthernetTagId(index),
+                originator_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            })
+            .key()
+        };
+        let mut owing = PeerOwing::new(1);
+        for index in 0..KEYS {
+            owing.insert(OwedKey::Evpn(key(index)), false);
+        }
+        owing.start_cursor(OwedFamily::EVPN_CURSOR, 0);
+        let shape = |owing: &PeerOwing| {
+            let set = &owing.evpn;
+            (set.order.capacity(), set.live.capacity(), set.order.len())
+        };
+        let mut left = KEYS as usize;
+        while left != 0 {
+            for key in owing.copy_keys(family, DrainScope::All, CHUNK_ROWS) {
+                let before = shape(&owing);
+                owing.remove(&key);
+                left -= 1;
+                if left == 0 {
+                    assert_eq!(owing.set_bytes(family), 0, "an empty set is freed");
+                    continue;
+                }
+                let after = shape(&owing);
+                assert!(
+                    after.0 == before.0 && before.1 - after.1 <= 1,
+                    "a capacity changed with {left} keys left: {before:?} to {after:?}"
+                );
+                assert!(
+                    before.2 - after.2 <= 1,
+                    "{} entries moved",
+                    before.2 - after.2
+                );
+            }
+            assert_eq!(owing.keyed_len(family), left);
+        }
         assert!(owing.is_whole(family), "the cursor is ended by its step");
     }
 

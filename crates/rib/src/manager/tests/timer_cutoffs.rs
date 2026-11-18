@@ -569,7 +569,7 @@ async fn primary_run_budget_ends_on_a_suspension_another_branch_woke() {
 
 /// Registers a session; `restarting` sets the OPEN's Restart State bit and
 /// `orf` negotiates Address Prefix ORF receive for IPv4 unicast.
-fn connect_peer(
+pub(super) fn connect_peer(
     manager: &mut RibManager,
     address: Ipv4Addr,
     session_id: u64,
@@ -601,7 +601,7 @@ fn connect_peer(
     rx
 }
 
-fn received(address: Ipv4Addr, session_id: u64, announced: Vec<Route>) -> RibUpdate {
+pub(super) fn received(address: Ipv4Addr, session_id: u64, announced: Vec<Route>) -> RibUpdate {
     RibUpdate::RoutesReceived {
         peer: peer_v4(address),
         session_id,
@@ -615,7 +615,7 @@ fn received(address: Ipv4Addr, session_id: u64, announced: Vec<Route>) -> RibUpd
     }
 }
 
-fn restart(
+pub(super) fn restart(
     address: Ipv4Addr,
     session_id: u64,
     restart_time: u16,
@@ -634,7 +634,7 @@ fn restart(
 }
 
 /// The prefix whose wire history the overtake tests follow.
-fn followed() -> Ipv4Prefix {
+pub(super) fn followed() -> Ipv4Prefix {
     Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24)
 }
 
@@ -655,7 +655,7 @@ fn long_batch(address: Ipv4Addr) -> RibUpdate {
 
 /// Polls the actor without letting it sleep until it has answered the
 /// barrier queued behind the updates under test.
-fn run_until(
+pub(super) fn run_until(
     actor: &mut std::pin::Pin<Box<impl Future<Output = ()>>>,
     barrier: &mut oneshot::Receiver<usize>,
 ) {
@@ -675,7 +675,7 @@ fn run_until(
 
 /// `withdraw` / `announce` for every update on `rx` touching the followed
 /// prefix, and `eor` for each IPv4 unicast End-of-RIB.
-fn followed_trace(rx: &mut mpsc::Receiver<OutboundRouteUpdate>) -> Vec<&'static str> {
+pub(super) fn followed_trace(rx: &mut mpsc::Receiver<OutboundRouteUpdate>) -> Vec<&'static str> {
     trace_of(
         &std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>(),
         followed(),
@@ -683,7 +683,7 @@ fn followed_trace(rx: &mut mpsc::Receiver<OutboundRouteUpdate>) -> Vec<&'static 
 }
 
 /// [`followed_trace`] over already drained `updates`, for `prefix`.
-fn trace_of(updates: &[OutboundRouteUpdate], prefix: Ipv4Prefix) -> Vec<&'static str> {
+pub(super) fn trace_of(updates: &[OutboundRouteUpdate], prefix: Ipv4Prefix) -> Vec<&'static str> {
     let prefix = Prefix::V4(prefix);
     let mut trace = Vec::new();
     for update in updates {

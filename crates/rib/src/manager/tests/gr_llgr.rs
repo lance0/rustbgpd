@@ -3304,6 +3304,44 @@ async fn gr_eor_after_llgr_reconnect_resolves_mixed_paths() {
     assert!(manager.loc_rib.get(&retention_v6_prefix()).is_none());
 }
 
+/// A typed-family receipt republishes `bgp_gr_stale_routes` as it clears a
+/// stale mark, whether the message arrives bare or as a session sends it,
+/// charged to its ingest budget.
+#[tokio::test(start_paused = true)]
+async fn typed_family_readvertisement_moves_the_stale_gauge_bare_or_metered() {
+    const VPN: (Afi, Safi) = (Afi::Ipv4, Safi::MplsVpn);
+    for metered in [false, true] {
+        let (_tx, mut manager) = direct_manager(None);
+        let source = retention_source();
+        let _out_rx = establish_peer(&mut manager, source);
+        let readvertised = || RibUpdate::VpnRoutesReceived {
+            session_id: 0,
+            peer: source,
+            announced: vec![make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 1), 31, 100, 100)],
+            withdrawn: vec![],
+        };
+        manager.handle_update(readvertised());
+        manager.handle_update(gr_with_llgr(source, 120, vec![VPN], vec![VPN], 30));
+        assert_eq!(gr_gauges(&manager, source), (1.0, 1.0));
+        let _new_rx = reconnect_with_capabilities(&mut manager, source, &[VPN], &[VPN]);
+        assert_eq!(gr_gauges(&manager, source), (1.0, 1.0));
+
+        let budget = crate::ingest_budget::IngestBudget::new();
+        let update = if metered {
+            readvertised().metered(&budget)
+        } else {
+            readvertised()
+        };
+        assert_eq!(matches!(update, RibUpdate::SessionRoutes { .. }), metered);
+        manager.handle_update(update);
+        assert_eq!(
+            gr_gauges(&manager, source),
+            (1.0, 0.0),
+            "metered {metered}: the re-advertised route is no longer stale"
+        );
+    }
+}
+
 /// Partial GR: the LLGR-only family's Long-Lived Stale Time can expire while
 /// the GR family is still in its GR phase; the gauge keeps counting the
 /// GR-stale routes.

@@ -84,6 +84,29 @@ fn each_message_turn_is_observed_under_its_kind() {
     assert_eq!(counts.get("peer_lifecycle").copied().unwrap_or(0), 0);
 }
 
+/// A session's route message, charged to its ingest budget, is the turn of
+/// the message it wraps: same kind, peer and route count.
+#[test]
+fn metered_route_message_is_the_turn_of_the_message_it_wraps() {
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
+    let ribs = std::collections::HashMap::new();
+    let bare = ActorTurn::new(&routes_received(peer), &ribs);
+    let budget = crate::ingest_budget::IngestBudget::new();
+    let wrapped = routes_received(peer).metered(&budget);
+    assert!(matches!(wrapped, RibUpdate::SessionRoutes { .. }));
+    assert_eq!(ActorTurn::new(&wrapped, &ribs), bare);
+    let unsized_turn = ActorTurn::new(
+        &RibUpdate::EndOfRib {
+            peer,
+            session_id: 0,
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+        },
+        &ribs,
+    );
+    assert_ne!(bare, unsized_turn, "the route count is part of the turn");
+}
+
 /// A test hook holds the turn for exactly the threshold, so the turn is slow
 /// by construction rather than by racing a sleep against the actor.
 #[test]

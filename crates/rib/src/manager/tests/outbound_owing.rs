@@ -2937,25 +2937,40 @@ fn only_eligible_whole_debt_waits_on_a_live_latch() {
         (true, true, true),
         (true, false, true),
     ] {
-        // Unicast owed whole reads a cursor and needs no latch
-        // (`owed_row_cursor`): EVPN stands for the families that do.
-        let family = EVPN;
+        // Unicast and EVPN owed whole read a cursor and need no latch
+        // (`owed_row_cursor`, `owed_evpn_cursor`): labeled unicast stands
+        // for the families that do.
+        let family = (Afi::Ipv4, Safi::LabeledUnicast);
         let owed_family = OwedFamily::of(family).unwrap();
-        let mut manager =
-            deferral_manager(vec![EVPN], 8).with_owing_theta_floor(if whole { 0 } else { 1 << 30 });
-        let mut source = up(&mut manager, peer_v4(SOURCE), vec![V4, EVPN]);
+        let mut manager = deferral_manager(vec![family], 8).with_owing_theta_floor(if whole {
+            0
+        } else {
+            1 << 30
+        });
+        let mut source = up(&mut manager, peer_v4(SOURCE), vec![V4, family]);
         let peer = peer_v4(Ipv4Addr::new(10, 0, 25, 2));
-        let mut rx = up(&mut manager, peer, vec![V4, EVPN]);
+        let mut rx = up(&mut manager, peer, vec![V4, family]);
         send_all(&mut rx);
         let credit = manager.outbound_credit_handle(peer);
         let charge = crate::outbound_credit::OutboundCharge::new(&credit, 8);
-        received(&mut manager, vec![], vec![], vec![evpn_route(0, 0)], vec![]);
+        manager.handle_update(RibUpdate::LabeledRoutesReceived {
+            peer: peer_v4(SOURCE),
+            session_id: 0,
+            announced: vec![typed_labeled_route(Afi::Ipv4, 0)],
+            withdrawn: vec![],
+        });
+        drain_route_chunks(&mut manager);
         send_all(&mut source);
         assert!(send_all(&mut rx).is_empty());
         assert!(manager.owes(peer, family));
         assert_eq!(manager.owes_whole(peer, owed_family), whole);
         let _waiter = held_family.then(|| {
-            connect_families(&mut manager, Ipv4Addr::new(192, 0, 2, 83), vec![EVPN], true)
+            connect_families(
+                &mut manager,
+                Ipv4Addr::new(192, 0, 2, 83),
+                vec![family],
+                true,
+            )
         });
         assert_eq!(manager.selection_deferred(family), held_family);
         if whole {
@@ -3164,8 +3179,9 @@ fn labeled_add_path_pass_budgets_with_the_family_cap() {
 
 /// Whole-family debt that waits only for the receiver's live operation
 /// latch keeps the resync timer armed, so the latch release drains it
-/// with no other activity. EVPN stands for the families whose whole debt
-/// is one operation; unicast reads a cursor and needs no latch. Red when
+/// with no other activity. Labeled unicast stands for the families whose
+/// whole debt is one operation; unicast and EVPN read a cursor and need no
+/// latch. Red when
 /// such debt does not keep the timer: the timer disarms and the latch
 /// release wakes nothing.
 #[tokio::test(start_paused = true)]
@@ -3183,25 +3199,30 @@ async fn whole_family_debt_behind_a_latch_drains_when_it_releases() {
     manager.test_force_ungrouped = true;
     let handle = tokio::spawn(manager.run());
     let (source_tx, mut source_rx) = mpsc::channel(64);
-    tx.send(peer_up_message(peer_v4(SOURCE), vec![V4, EVPN], source_tx))
-        .await
-        .unwrap();
-    let announce = |routes: Vec<Route>, evpn: Vec<EvpnRibRoute>| RibUpdate::RoutesReceived {
+    let labeled = (Afi::Ipv4, Safi::LabeledUnicast);
+    tx.send(peer_up_message(
+        peer_v4(SOURCE),
+        vec![V4, labeled],
+        source_tx,
+    ))
+    .await
+    .unwrap();
+    let announce = |routes: Vec<Route>| RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer_v4(SOURCE),
         announced: routes,
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
-        evpn_announced: evpn,
+        evpn_announced: vec![],
         evpn_withdrawn: vec![],
         validated_with: None,
     };
-    tx.send(announce(vec![route(50, 0)], vec![])).await.unwrap();
+    tx.send(announce(vec![route(50, 0)])).await.unwrap();
     actor_barrier(&tx).await;
     let peer = peer_v4(Ipv4Addr::new(10, 0, 29, 1));
     let (peer_tx, mut peer_rx) = mpsc::channel(64);
-    tx.send(peer_up_message(peer, vec![V4, EVPN], peer_tx))
+    tx.send(peer_up_message(peer, vec![V4, labeled], peer_tx))
         .await
         .unwrap();
     actor_barrier(&tx).await;
@@ -3209,16 +3230,22 @@ async fn whole_family_debt_behind_a_latch_drains_when_it_releases() {
     let dump = held(&mut peer_rx);
     assert!(!dump.is_empty());
     // Four unicast rows spend the credit.
-    tx.send(announce((0..4).map(|key| route(key, 0)).collect(), vec![]))
+    tx.send(announce((0..4).map(|key| route(key, 0)).collect()))
         .await
         .unwrap();
     actor_barrier(&tx).await;
     let spent = held(&mut peer_rx);
     assert_eq!(rows(&spent), 4);
-    // An EVPN route is owed now, and whole at a zero byte cap.
-    tx.send(announce(vec![], vec![evpn_route(9, 0)]))
-        .await
-        .unwrap();
+    // A labeled route is owed now, and whole at a zero byte cap.
+    let owed = typed_labeled_route(Afi::Ipv4, 9);
+    tx.send(RibUpdate::LabeledRoutesReceived {
+        peer: peer_v4(SOURCE),
+        session_id: 0,
+        announced: vec![owed.clone()],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
     actor_barrier(&tx).await;
     while source_rx.try_recv().is_ok() {}
     drop(spent);
@@ -3232,11 +3259,15 @@ async fn whole_family_debt_behind_a_latch_drains_when_it_releases() {
     );
     drop(dump);
     // No query may wake the actor after the latch release.
-    let owed = evpn_route(9, 0).key();
+    let owed = owed.nlri.prefix;
     tokio::time::timeout(Duration::from_millis(50), async {
         loop {
             let update = peer_rx.recv().await.expect("the actor keeps its sender");
-            if update.evpn_announce.iter().any(|route| route.key() == owed) {
+            if update
+                .labeled_announce
+                .iter()
+                .any(|route| route.nlri.prefix == owed)
+            {
                 break;
             }
         }

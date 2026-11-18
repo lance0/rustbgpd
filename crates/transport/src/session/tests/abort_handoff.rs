@@ -77,7 +77,7 @@ impl GatedRib {
             self.late_ends += usize::from(late);
             let seen = match match &update {
                 RibUpdate::LateSessionEnd(end) => end.as_ref(),
-                update => update,
+                update => update.unmetered(),
             } {
                 RibUpdate::PeerUp { session_id, .. } => Some(("PeerUp", *session_id)),
                 RibUpdate::PeerDown { session_id, .. } => Some(("PeerDown", *session_id)),
@@ -337,6 +337,43 @@ async fn abort_while_parked_delivers_held_routes_then_closes_the_epoch() {
         [("RoutesReceived", 1), ("PeerDown", 1)]
     );
     assert_eq!(rib.loc_rib_count().await, 0);
+}
+
+/// The same hand-off for a session that charges its routes to an ingest
+/// budget, as every session outside these fixtures does: the held message
+/// crosses the hand-off with its permit, reaches the RIB ahead of the
+/// `PeerDown`, and the RIB returns the budget when it has finished it.
+/// Mutation-red: a hand-off that drops a metered message forwards only the
+/// `PeerDown`.
+#[tokio::test(start_paused = true)]
+async fn abort_while_parked_hands_off_metered_routes_with_their_permit() {
+    let mut rib = GatedRib::spawn();
+    let (mut s1, s1_commands, _s1_peer) = established(&rib, 1).await;
+    let budget = rustbgpd_rib::ingest_budget::IngestBudget::new();
+    s1.ingest_budget = Some(Arc::clone(&budget));
+    rib.release().await;
+    rib.hold_full();
+    receive(&mut s1, first());
+    s1.process_read_buffer().await;
+    assert!(matches!(
+        s1.rib_backlog.front(),
+        Some((RibUpdate::SessionRoutes { .. }, _))
+    ));
+    assert_eq!(budget.unfinished(), 1, "held, charged");
+    let mark = rib.forwarded.len();
+
+    owned(s1, s1_commands)
+        .abort_for_transport_safety_and_wait()
+        .await;
+    assert_eq!(budget.unfinished(), 1, "the permit crosses the hand-off");
+    rib.release().await;
+
+    assert_eq!(
+        rib.forwarded_since(mark),
+        [("RoutesReceived", 1), ("PeerDown", 1)]
+    );
+    assert_eq!(rib.loc_rib_count().await, 0);
+    assert_eq!(budget.unfinished(), 0, "the RIB finished the message");
 }
 
 /// Nothing held at the abort: an idle Established session aborted with the

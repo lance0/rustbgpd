@@ -72,15 +72,35 @@ resolved.
     deliver each owed family, one family of one receiver per step, after
     reading that receiver's credit. The evidence is work counts in
     unit-level tests, not timings. Each owed family other than IPv4 and
-    IPv6 unicast still goes out as one operation, like the whole-family
-    sends below.
-  - Ordinary UPDATE bursts, still on main and not yet attributed: 150,000
-    routes sent at once as ordinary UPDATEs toward 150 private receivers
-    delayed an unrelated peer's updates by 27–34 s. Paced at one
-    1,024-route UPDATE per 500 ms, the gap was about 0.4 s for unicast and
-    4.6 s for EVPN. These are single untimed harness runs on a shared host,
-    and the cause, one long unit of work or many short units served in
-    arrival order, is not yet established.
+    IPv6 unicast and EVPN still goes out as one operation, like the
+    whole-family sends below.
+  - Ordinary UPDATE bursts, v0.83.0 and earlier: 150,000 routes sent at
+    once as ordinary UPDATEs toward 150 private receivers delayed an
+    unrelated peer's updates by 27–34 s in single untimed harness runs on a
+    shared host. The burst was many short units served in arrival order:
+    the session queued all of it ahead of the other peer's update. On main
+    after v0.83.0 a session stops reading its socket while 1,536 routes it
+    already sent are unfinished in the RIB
+    ([ADR-0078](../adr/0078-inbound-rib-backpressure.md)), so the other
+    peer's update waits behind at most about 1,536 route entries per
+    bursting source (reading resumes at 1,024). The limit counts route
+    entries, not messages: at roughly 1,000 routes per UPDATE it is about
+    two messages and two distribution passes, while a source sending
+    one-route UPDATEs can have 1,536 messages queued, which the RIB's
+    distribution window (256 messages, 1,024 distinct prefixes or 5 ms)
+    works through in six or more smaller passes for unicast and one message
+    at a time for other families. The evidence is a count in unit-level
+    tests (at most two 1,200-route burst messages queued ahead of another
+    source) and untimed reduced-shape harness runs, not a timed measurement
+    at 150 receivers. The wait still
+    grows with the number of sources bursting at once, and route input
+    that does not come from a session is not bounded this way.
+  - Paced EVPN bursts, still on main: at one 1,024-route UPDATE per 500 ms
+    toward 150 private receivers an unrelated peer's update waited up to
+    4.6 s (about 0.4 s for unicast), in a single untimed harness run. The
+    session bound above does not change it: the wait is inside one inbound
+    message, where every receiver's EVPN table grows at the same row
+    counts.
   - Whole-family sends of IPv4 and IPv6 unicast, v0.83.0 and earlier: a
     receiver that was owed a released family, or whose owed keys exceeded
     the keyed threshold (a quarter of its table), was sent the whole family
@@ -119,9 +139,32 @@ resolved.
     receiver's own owed routes, kept when they exceed the keyed threshold,
     stay owed until all are sent: updates that arrive meanwhile go to the
     shared list, and the End-of-RIB follows both.
+  - EVPN whole-family sends toward private receivers, fixed on main after
+    v0.83.0: EVPN owed whole (after a selection release, or past the keyed
+    threshold) is sent as unicast is, from a shared list of the route keys
+    that changed, at most 1,024 per step, each step an ordinary update
+    charged against the receiver's credit, with the End-of-RIB after the
+    last step. The evidence is work counts and wire content in unit-level
+    tests; no timed run at 150 receivers × 150,000 routes has been made.
+    The fallback for a receiver that falls behind is the unicast one. For
+    a receiver that is also a member of an update group, the resync tick
+    first walks that group's table twice to record what the member was
+    sent, for one such receiver per tick and never in the update pass.
+    A receiver that fell behind is not rebuilt inside an EVPN selection
+    hold; its resync follows the release. A receiver resynced inside the
+    hold for another reason while it holds EVPN rows gets its EVPN table
+    from one such resync after the release, not from the list. Still on
+    main: until that release, a later resync, an operator soft refresh or
+    a peer route refresh for that receiver is not served for any family;
+    each waits for the rebuild. The wait ends with the selection-deferral
+    timeout at the latest: the largest `gr_restart_time` among
+    planned-restart neighbors (default 120 s), measured from process
+    start.
+    An EVPN family owned by an update group, and a receiver in a private
+    handoff, keep the recovery path and its complete feed.
   - Whole-family sends of the other families, still on main: labeled
-    unicast, VPN, EVPN, FlowSpec, BGP-LS and RT-Constrain owed whole still
-    go out as one operation per receiver that is not charged against the
+    unicast, VPN, FlowSpec, BGP-LS and RT-Constrain owed whole still go
+    out as one operation per receiver that is not charged against the
     outbound credit, in one RIB turn that grows with the family's table.
 
 - **A GR helper can keep a deleted RTBH whose prefix still has another

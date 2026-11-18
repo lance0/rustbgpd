@@ -640,7 +640,9 @@ that pass more.
 That fallback is a whole-peer resync: one uncharged whole-table operation
 per evicted receiver, a turn and a table copy that grow with the table. It
 is paced, not bounded like a step. The pass that finds the list over its cap
-builds nothing; it marks the receivers it evicts dirty, and only the resync
+builds nothing; it marks the receivers it evicts dirty (an EVPN receiver
+that is a member of an update group is marked by the tick instead, see
+below), and only the resync
 tick builds their resyncs, one receiver per tick: the tick ends with that
 unit whatever is left of its poll budget, so queued input runs before the
 next receiver's. An ordinary pass leaves
@@ -659,6 +661,102 @@ drain steps and are not observed in
 A full outbound channel at a family's last step refuses only the
 End-of-RIB: every owed row was admitted, so the receiver is not resynced
 and the resync tick retries the marker alone.
+
+**EVPN owed whole: the same row cursor.** EVPN held in a receiver's own
+Adj-RIB-Out and owed whole uses the mechanism above with one list keyed by
+EVPN route key: the same position per receiver, the same steps of at most
+1,024 keys charged against its credit with no operation latch, the same
+End-of-RIB rule, cap, eviction, paced fallback, deferred refresh answer and
+bounded list maintenance. What differs is where the keys come from:
+
+- *Mutations.* Each EVPN mutation logs the keys whose winner changed
+  (payload changes under the same key and withdrawals included) once,
+  after selection and before the receiver loop. The loop may park across
+  turns, and its later slices log nothing again and skip a receiver that
+  holds a position. A position that starts while the loop is parked (the
+  receiver's set passed its byte cap, or a selection release) is at or
+  past the parked keys, or they were never logged because no position
+  existed: at that start the keys of the parked loop that has not yet
+  reached the receiver join the receiver's own owed set. That is at most
+  one inbound chunk of keys per start, after one scan of the receivers the
+  loop still has to reach, and nothing while no loop is parked. A receiver
+  whose table is built while the loop is parked (a registration, a
+  resync) reads the Loc-RIB the mutation already changed.
+- *Selection release.* The release starts the positions first, then logs
+  its whole inventory once (every key any Adj-RIB-In holds, every key
+  recorded during the hold, and the frozen Loc-RIB when that record
+  overflowed) before selection leaves out the unchanged winners. A
+  receiver that joined during the hold holds none of them, and no fan-out
+  would carry them.
+- *RT-Constrain.* A live membership change toward a receiver that holds
+  VPN in a group and EVPN privately changes what it may be sent with every
+  winner as it was, so no mutation logs it. With a position live, the keys
+  of that restage (the EVPN Loc-RIB and what the receiver holds) join the
+  receiver's own owed set, which drains ahead of the position in the same
+  charged steps. Keys the position already read are visited again for
+  that receiver alone; no other receiver reads them twice. These keys are
+  not held to the set's byte cap: one membership change during a walk can
+  make that receiver's set as large as the restage (up to the EVPN table
+  plus what the receiver holds), marked in one turn of that size, until
+  its steps drain it. Passing the cap there would mean the whole-table
+  resync this mechanism replaces.
+- *Kept set.* A receiver's owed keys survive the byte-cap flip and a
+  following release, as for unicast: a withdrawal whose key has left every
+  table is named nowhere else.
+- *No hold exemption.* EVPN has no rows exempt from a selection hold, so
+  a position does not move inside one.
+- *Eviction of a group member.* A unicast position belongs to a receiver
+  outside every update group; an EVPN position usually belongs to a member
+  of one, which holds unicast or VPN in the group and EVPN privately.
+  Marking a group member dirty captures what it was sent from the group's
+  table, in two walks of that table, so a pass that evicted many members
+  of one group and marked each would do members × rows of work in one
+  turn. The evicting pass does not mark them: each keeps its debt, with a
+  position no step reads and that holds no list entry, so
+  EVPN passes still skip it and its End-of-RIB still waits, while its
+  group's families keep flowing to it. The resync tick marks at most one
+  such receiver per tick, the lowest whose unit could be admitted now (room
+  in its channel, no whole-table operation still live), so a tick does at
+  most one capture and one evicted receiver's whole-table unit, which
+  covers the debt, and a receiver that cannot build holds no other. Inside
+  an EVPN selection hold a resync enumerates no EVPN key, so no evicted
+  receiver is marked or built there: each keeps its state and its eviction
+  until the release, and its unit follows. The same holds for any
+  receiver that is resynced inside the hold for another reason (a failed
+  send, a policy change, a regroup) while it holds EVPN rows: that resync
+  sends its other families and leaves its EVPN table to one unit after
+  the release, because the release logs the Loc-RIB for the positions
+  and a row only the receiver still holds is named nowhere in it. The
+  release turn builds no table for it. Limitation: from that resync until
+  the release, a later resync, an operator soft refresh or a peer route
+  refresh for that receiver is not served for any family; each waits for
+  the unit. The selection-deferral timeout bounds the wait: the largest
+  `gr_restart_time` among planned-restart neighbors (default 120 s),
+  measured from process start. What reaches such a receiver
+  first is handled for that receiver alone: a session end or a regroup
+  ends the debt (a regroup marks its own member dirty, as for any member
+  that owes), an operator refresh marks it dirty and leaves the table to
+  the tick, and a ROUTE-REFRESH waits for the resync. An EVPN receiver
+  outside every group is marked by the evicting pass, as for unicast: that
+  mark walks no table.
+
+An EVPN family owned by an update group, and a receiver in a private
+handoff, are outside owed-key management as before: they keep the recovery
+path with its complete-feed proof, admission seal and terminal marker, and
+never hold a position. Labeled unicast, VPN, FlowSpec, BGP-LS and
+RT-Constrain owed whole still drain as one operation.
+
+The step histogram records EVPN steps under scope `cursor` with the unicast
+ones and carries no family label: the bound on a step's rows and credit
+is the same for both, and a label would split every series for a
+distinction that bound does not need. Step time is not the same: an EVPN
+step commits into the receiver's EVPN Adj-RIB-Out map, which rebuilds as
+it grows, so its longest steps are longer than a unicast step of the same
+rows (seen in one untimed fixture run; the cause is read from the code,
+not attributed by measurement).
+Not measured: no timed run and no memory measurement of the EVPN list has
+been made; an EVPN route key is larger than a prefix, so the modeled bytes
+per key above do not carry over.
 
 Three sends for a unicast family still owed stay outside this: a
 ROUTE-REFRESH answer and an operator replay absorb the rest of the walk into

@@ -105,6 +105,9 @@ pub(in crate::manager) struct DistributionWindow {
     pub(in crate::manager) messages: usize,
     /// Ingested route, withdrawal and other NLRI entries.
     pub(in crate::manager) routes: usize,
+    /// Ingest permits of the drained session messages, returned once the
+    /// window's distribution pass has run.
+    permits: Vec<crate::ingest_budget::IngestPermit>,
 }
 
 impl DistributionWindow {
@@ -112,7 +115,7 @@ impl DistributionWindow {
     /// Every other update is a barrier the window settles before.
     fn admits(update: &RibUpdate) -> bool {
         matches!(
-            update,
+            update.unmetered(),
             RibUpdate::RoutesReceived {
                 flowspec_announced,
                 flowspec_withdrawn,
@@ -7923,6 +7926,11 @@ impl RibManager {
         if !self.dirty_peers.contains(&peer) && self.evpn_grouped_member_of(peer).is_some() {
             self.capture_shared_evpn_admitted(peer);
         }
+        // An evicted group member not yet dirty: the forced table is the
+        // resync tick's to build, as any evicted receiver's.
+        if self.owed_row_evicted.contains(&peer) {
+            self.mark_outbound_dirty(peer);
+        }
         self.set_selection_partial_caught_up(peer, false);
         self.force_outbound_peers.insert(peer);
         self.distribute_changes(&HashSet::new(), &HashSet::new());
@@ -8199,7 +8207,7 @@ impl RibManager {
         let chunk_started = std::time::Instant::now();
         let Some(chunk) = pending.next_chunk() else {
             // Empty batch: nothing ingested, but it still ends a message.
-            return self.finish_route_batch();
+            return self.finish_route_batch(&mut pending);
         };
         self.distribution_window
             .started
@@ -8292,7 +8300,7 @@ impl RibManager {
         } else if pending.has_more() {
             self.pending_route_batches.push_front(pending);
         } else {
-            self.finish_route_batch();
+            self.finish_route_batch(&mut pending);
         }
         self.metrics.observe_rib_actor_work("route_chunk", ingest);
         true
@@ -8323,15 +8331,20 @@ impl RibManager {
         if pending.has_more() {
             self.pending_route_batches.push_front(pending);
         } else {
-            self.finish_route_batch();
+            self.finish_route_batch(&mut pending);
         }
     }
 
     /// A route batch has drained. Extend the distribution window over the
     /// next already-queued eligible message, or settle it. Returns whether
     /// a route batch is queued again.
-    fn finish_route_batch(&mut self) -> bool {
+    fn finish_route_batch(&mut self, drained: &mut PendingRoutesReceived) -> bool {
         self.distribution_window.messages += 1;
+        // The sending session's budget returns with the pass that distributes
+        // these routes, which a window extended below runs in a later turn.
+        self.distribution_window
+            .permits
+            .extend(drained.ingest_permit.take());
         if self.extend_distribution_window() {
             return true;
         }
@@ -9525,6 +9538,7 @@ impl RibManager {
                 let mut installed = false;
                 let mut eviction_started = None;
                 let mut commit_refused = false;
+                let mut evpn_rebuild_owed = false;
                 'member: {
                     let readiness = self.replacement_readiness.clone();
                     let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
@@ -10002,9 +10016,10 @@ impl RibManager {
                                 .adj_ribs_out
                                 .get(&peer)
                                 .is_some_and(|rib_out| rib_out.evpn_len() != 0));
-                    let mut effective_evpn_keys: HashSet<rustbgpd_wire::EvpnRouteKey> = if (resync
-                        && !evpn_group_owned)
-                        || whole(super::outbound_owing::OwedFamily::EVPN)
+                    // EVPN is never drained whole: owed whole it is a row
+                    // cursor, whose steps bring their keys.
+                    let mut effective_evpn_keys: HashSet<rustbgpd_wire::EvpnRouteKey> = if resync
+                        && !evpn_group_owned
                     {
                         self.replacement_checkpoint(true);
                         let mut all: HashSet<rustbgpd_wire::EvpnRouteKey> = HashSet::with_capacity(
@@ -10042,10 +10057,23 @@ impl RibManager {
                             }));
                         }
                         if self.selection_deferred((Afi::L2Vpn, Safi::Evpn)) {
+                            // The hold's release logs the Loc-RIB for the
+                            // receiver's cursor, not a row only the
+                            // receiver holds.
+                            evpn_rebuild_owed = is_dirty
+                                && (private_evpn_recovery.is_some()
+                                    || self
+                                        .adj_ribs_out
+                                        .get(&peer)
+                                        .is_some_and(|rib_out| rib_out.evpn_len() != 0));
                             super::retire_hash_set(&mut all, &mut || checkpoint());
                         }
                         all
                     } else if let Some(drain) = drain.as_deref_mut() {
+                        #[cfg(test)]
+                        {
+                            self.adj_rib_out_commit_stats.owed_drain_rows_read += drain.evpn.len();
+                        }
                         std::mem::take(&mut drain.evpn)
                     } else {
                         HashSet::new()
@@ -11956,6 +11984,13 @@ impl RibManager {
                         super::retire_hash_set(prefixes, &mut || checkpoint());
                     }
                     self.replacement_checkpoint(true);
+                }
+                // A dirty resync inside an EVPN selection hold enumerated no
+                // EVPN key, so the rows the receiver holds were not diffed:
+                // once clean it waits, as a receiver the owed-row cap
+                // evicted, for the tick's unit after the release.
+                if evpn_rebuild_owed && !self.dirty_peers.contains(&peer) {
+                    self.owed_row_evicted.insert(peer);
                 }
                 self.finish_readiness_owner(installed);
                 if let Some(started) = eviction_started {

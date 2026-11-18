@@ -826,6 +826,76 @@ async fn run_loop_answers_then_replays_queued_work() {
     actor.abort();
 }
 
+/// Queued re-evaluation sends routes to the RIB, so it waits behind a spent
+/// ingest budget as peer input does, and runs once the RIB returns it.
+/// Red proof: a run loop that lets re-evaluation run behind the gate
+/// delivers the route while the budget is spent.
+#[tokio::test]
+async fn queued_revalidation_waits_behind_a_spent_ingest_budget() {
+    use rustbgpd_rib::ingest_budget::{INGEST_BUDGET_ROUTES, IngestBudget};
+    let mut f = fixture(vrps(vec![vrp(INVALID, 65099)]), deny_invalid(true)).await;
+    f.announce(INVALID).await;
+    f.rib_routes();
+    let budget = IngestBudget::new();
+    f.session.ingest_budget = Some(Arc::clone(&budget));
+    // The RIB still holds a budget's worth of this session's routes.
+    let unfinished = budget.charge(INGEST_BUDGET_ROUTES);
+    f.announce(VALID).await;
+    assert!(f.session.ingest_gate_closed);
+    let _accepted = f.rib_rx.try_recv().unwrap();
+    let (cmd_tx, cmd_rx) = mpsc::channel(8);
+    f.session.commands = cmd_rx;
+    f.validation
+        .send_replace(vrps(vec![vrp(INVALID, 65099), vrp(INVALID, 65002)]));
+    let Fixture {
+        mut session,
+        mut rib_rx,
+        validation: _validation,
+        server: _server,
+    } = f;
+
+    let run = session.run();
+    let steps = tokio::time::timeout(Duration::from_secs(10), async {
+        let (reply, answer) = oneshot::channel();
+        cmd_tx
+            .send(PeerCommand::RevalidateImport {
+                delta: ValidationDelta::Rpki(Some(Arc::from(vec![vrp(INVALID, 65002)]))),
+                reply,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            answer.await.unwrap(),
+            ImportRevalidation::Local {
+                refresh_families: Vec::new()
+            }
+        );
+        // Each turn of the run loop is a chance for re-evaluation to run.
+        for _ in 0..64 {
+            let (reply, state) = oneshot::channel();
+            cmd_tx
+                .send(PeerCommand::QueryState { reply })
+                .await
+                .unwrap();
+            state.await.unwrap();
+        }
+        assert!(
+            rib_rx.try_recv().is_err(),
+            "re-evaluation waits behind the gate"
+        );
+        drop(unfinished);
+        rib_rx.recv().await.unwrap()
+    });
+    let update = tokio::select! {
+        result = run => panic!("run() ended behind the gate: {result:?}"),
+        update = steps => update.expect("returned budget resumes the re-evaluation"),
+    };
+    let RibUpdate::RoutesReceived { announced, .. } = update.unmetered() else {
+        panic!("the re-evaluated route reaches the RIB");
+    };
+    assert_eq!(announced[0].prefix, Prefix::V4(prefix(INVALID)));
+}
+
 /// Replay re-runs attribute normalization on retained input, but the
 /// discards were counted once when the UPDATE was received.
 #[tokio::test]
