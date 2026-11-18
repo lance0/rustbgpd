@@ -325,6 +325,13 @@ pub(in crate::manager) struct OutboundCommitBatch {
     pub(in crate::manager) slot: Option<crate::outbound_credit::OutboundSlot>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DistributionPass {
+    Ordinary,
+    Ingest,
+    EvictionRecovery(PeerId),
+}
+
 /// How the commit ladder admitted its envelope (`crate::outbound_credit`).
 enum LadderAdmission<'a> {
     /// A reserved slot of a whole-table operation; charges no rows.
@@ -9084,7 +9091,7 @@ impl RibManager {
         self.distribute_changes_inner(
             best_changed,
             all_affected,
-            true,
+            DistributionPass::Ingest,
             false,
             HashMap::new(),
             None,
@@ -9096,11 +9103,17 @@ impl RibManager {
     /// hides withheld dirty peers until it restores them, so it leaves the
     /// stale exempt flush to the tick. Returns whether the pass built a
     /// whole-table resync, whether or not its commit was then admitted.
-    pub(super) fn distribute_changes_without_stale_flush(&mut self) -> bool {
+    pub(super) fn distribute_changes_without_stale_flush(
+        &mut self,
+        evicted: Option<PeerId>,
+    ) -> bool {
         self.distribute_changes_inner(
             &HashSet::new(),
             &HashSet::new(),
-            false,
+            evicted.map_or(
+                DistributionPass::Ordinary,
+                DistributionPass::EvictionRecovery,
+            ),
             false,
             HashMap::new(),
             None,
@@ -9115,7 +9128,7 @@ impl RibManager {
         self.distribute_changes_inner(
             best_changed,
             all_affected,
-            false,
+            DistributionPass::Ordinary,
             false,
             HashMap::new(),
             None,
@@ -9135,7 +9148,7 @@ impl RibManager {
         self.distribute_changes_inner(
             changed,
             changed,
-            false,
+            DistributionPass::Ordinary,
             false,
             HashMap::new(),
             Some(targets),
@@ -9151,7 +9164,7 @@ impl RibManager {
         self.distribute_changes_inner(
             best_changed,
             all_affected,
-            false,
+            DistributionPass::Ordinary,
             true,
             HashMap::new(),
             None,
@@ -9167,7 +9180,7 @@ impl RibManager {
         self.distribute_changes_inner(
             &HashSet::new(),
             &HashSet::new(),
-            false,
+            DistributionPass::Ordinary,
             advertised_generation_already_advanced,
             feeds,
             None,
@@ -9224,7 +9237,7 @@ impl RibManager {
         &mut self,
         best_changed: &HashSet<Prefix>,
         all_affected: &HashSet<Prefix>,
-        service_ingest_readiness: bool,
+        pass_kind: DistributionPass,
         advertised_generation_already_advanced: bool,
         evpn_feeds: HashMap<PeerId, super::evpn_recovery::EvpnCompleteFeed>,
         targets: Option<&HashSet<PeerId>>,
@@ -9240,7 +9253,7 @@ impl RibManager {
             manager.distribute_changes_with_readiness::<false>(
                 best_changed,
                 all_affected,
-                service_ingest_readiness,
+                pass_kind,
                 advertised_generation_already_advanced,
                 evpn_feeds,
                 targets,
@@ -9299,7 +9312,7 @@ impl RibManager {
         let _ = self.distribute_changes_with_readiness::<true>(
             empty,
             empty,
-            false,
+            DistributionPass::Ordinary,
             false,
             HashMap::new(),
             Some(targets),
@@ -9320,7 +9333,7 @@ impl RibManager {
         &mut self,
         best_changed: &HashSet<Prefix>,
         all_affected: &HashSet<Prefix>,
-        service_ingest_readiness: bool,
+        pass_kind: DistributionPass,
         advertised_generation_already_advanced: bool,
         mut evpn_feeds: HashMap<PeerId, super::evpn_recovery::EvpnCompleteFeed>,
         targets: Option<&HashSet<PeerId>>,
@@ -9510,6 +9523,8 @@ impl RibManager {
                 // independent readiness episodes; an existing outer owner's
                 // identity and age are retained.
                 let mut installed = false;
+                let mut eviction_started = None;
+                let mut commit_refused = false;
                 'member: {
                     let readiness = self.replacement_readiness.clone();
                     let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
@@ -9519,7 +9534,7 @@ impl RibManager {
                     // without admitting general queries or mutations. Keep the
                     // transition age in direct-drive use so a genuinely stalled
                     // transition still fails closed.
-                    if service_ingest_readiness {
+                    if pass_kind == DistributionPass::Ingest {
                         let transition_elapsed = self
                             .pending_clean_policy_transition
                             .as_ref()
@@ -9669,6 +9684,9 @@ impl RibManager {
                         self.note_outbound_staging(peer);
                     }
                     let resync = is_dirty || is_force;
+                    if is_dirty && pass_kind == DistributionPass::EvictionRecovery(peer) {
+                        eviction_started = Some(std::time::Instant::now());
+                    }
                     // The family a drain enumerates whole, as a resync would.
                     let drain_whole = drain
                         .as_deref()
@@ -11848,6 +11866,7 @@ impl RibManager {
                                 }
                             }
                         } else if let Err(failure) = commit {
+                            commit_refused = true;
                             if let Some(drain) = drain.as_deref_mut() {
                                 // The drain re-owes or escalates; it never
                                 // takes a pass's dirty path.
@@ -11944,6 +11963,12 @@ impl RibManager {
                     self.replacement_checkpoint(true);
                 }
                 self.finish_readiness_owner(installed);
+                if let Some(started) = eviction_started {
+                    let elapsed = started.elapsed();
+                    self.metrics
+                        .observe_rib_outbound_eviction_recovery(commit_refused, elapsed);
+                    debug!(%peer, commit_refused, elapsed_seconds = elapsed.as_secs_f64(), "owed-row cap eviction recovery built");
+                }
                 if let (Some(started), Some(slot)) = (
                     paced_member_started,
                     self.paced_member_costs

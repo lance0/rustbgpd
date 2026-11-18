@@ -578,12 +578,13 @@ def run_cell(output, manifest, q, r, wire, shape, arm, index, correctness):
               "cell_started_monotonic_ns": time.monotonic_ns()}
     try:
         q.cell_gate(output, manifest, leg, correctness)
-        r.scenario(fixture, output / "sources/candidate", BARS["clients"])
-        identities = source.verify_build(output, manifest, q)
-        binary, harness = output / "bin" / f"rustbgpd-{arm}", output / "bin/evpn-rr-soak"
-        check.require(all(q.digest(path) == identities[path.name] for path in (binary, harness)), "binary input changed")
-        environment = dict(os.environ, RUSTBGPD_BENCH_WRITER_POLLS="1", RUSTBGPD_BENCH_UNSENT_THRESHOLD_BYTES="4096")
-        with (leg / "daemon.log").open("x") as log, (leg / "observer.log").open("x") as observer:
+        with (q.watch_compilers(correctness), (leg / "daemon.log").open("x") as log,
+              (leg / "observer.log").open("x") as observer):
+            r.scenario(fixture, output / "sources/candidate", BARS["clients"])
+            identities = source.verify_build(output, manifest, q)
+            binary, harness = output / "bin" / f"rustbgpd-{arm}", output / "bin/evpn-rr-soak"
+            check.require(all(q.digest(path) == identities[path.name] for path in (binary, harness)), "binary input changed")
+            environment = dict(os.environ, RUSTBGPD_BENCH_WRITER_POLLS="1", RUSTBGPD_BENCH_UNSENT_THRESHOLD_BYTES="4096")
             subprocess.run(["taskset", "-c", manifest["daemon_cpus"], str(binary), "--check", "--strict", str(fixture / "config.toml")],
                            stdout=log, stderr=subprocess.STDOUT, env=environment, check=True)
             if not correctness:

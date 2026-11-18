@@ -8,6 +8,8 @@ exports have the same private observer. Neither patch changes normal builds.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import fcntl
 from datetime import datetime, timezone
 import importlib.util
@@ -22,6 +24,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -133,6 +136,35 @@ def cell_gate(output, manifest, leg, correctness):
     (leg / "quiet-host.exit").write_text(f"{status}\n")
     require(status == 0, "per-cell quiet-host gate failed")
     require_timing_window(manifest)
+
+
+@contextmanager
+def watch_compilers(correctness):
+    if correctness:
+        yield
+        return
+
+    def sample():
+        result = subprocess.run(["pgrep", "-lx", "cargo|rustc|rustdoc|clippy-driver"],
+                                capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            raise ValueError(f"compiler observed during timed cell: {result.stdout.splitlines()[0]}")
+        require(result.returncode == 1, f"compiler roster unavailable (pgrep exit {result.returncode})")
+
+    stopped = threading.Event()
+
+    def poll():
+        while not stopped.wait(1):
+            sample()
+
+    sample()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        watcher = executor.submit(poll)
+        try:
+            yield
+        finally:
+            stopped.set()
+            watcher.result()  # Contamination takes precedence over a cell bar failure.
 
 
 def cleanup_cell(record, leg, fixture, driver, daemon, controller=None):
@@ -502,14 +534,15 @@ def run_cell(output, manifest, arm, clients, routes, index, correctness):
               "correctness_only": correctness, "status": "INVALID", "scope": SCOPE}
     try:
         cell_gate(output, manifest, leg, correctness)
-        env = {key: value for key, value in os.environ.items() if not key.startswith("GEN_")}
-        env.update(GEN_EVPN="1", GEN_IBGP_RR_ASN="64512")
-        subprocess.run([sys.executable, str(output / "sources/candidate/bench/scale/reloadstall/gen-scenario.py"),
-                        str(clients), str(scenario), "17986"], env=env, check=True,
-                       stdout=subprocess.DEVNULL)
-        config = scenario / "config.toml"
-        config.write_text(config.read_text().replace("127.0.0.1:9179", "127.0.0.1:19186"))
-        with (leg / "daemon.log").open("x") as log, (leg / "observer.log").open("x") as observer, (leg / "driver.log").open("x") as driver_log:
+        with (watch_compilers(correctness), (leg / "daemon.log").open("x") as log,
+              (leg / "observer.log").open("x") as observer, (leg / "driver.log").open("x") as driver_log):
+            env = {key: value for key, value in os.environ.items() if not key.startswith("GEN_")}
+            env.update(GEN_EVPN="1", GEN_IBGP_RR_ASN="64512")
+            subprocess.run([sys.executable, str(output / "sources/candidate/bench/scale/reloadstall/gen-scenario.py"),
+                            str(clients), str(scenario), "17986"], env=env, check=True,
+                           stdout=subprocess.DEVNULL)
+            config = scenario / "config.toml"
+            config.write_text(config.read_text().replace("127.0.0.1:9179", "127.0.0.1:19186"))
             subprocess.run(["taskset", "-c", manifest["daemon_cpus"], str(binary), "--check", "--strict", str(config)],
                            stdout=log, stderr=subprocess.STDOUT, check=True, timeout=30)
             command = ["systemd-run", "--user", "--scope", "--quiet", "-p", f"MemoryMax={DAEMON_BYTES}",
@@ -563,8 +596,7 @@ def run_cell(output, manifest, arm, clients, routes, index, correctness):
             accept(all(sample["status"] == 200 for sample in samples), "readiness failed during initial load/settle")
             record["status"] = "PASS"
     except Exception as error:
-        if isinstance(error, AcceptanceFailure):
-            record["status"] = "FAIL"
+        record["status"] = "FAIL" if isinstance(error, AcceptanceFailure) else "INVALID"
         record["error"] = str(error)
         raise
     finally:

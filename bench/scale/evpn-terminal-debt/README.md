@@ -267,8 +267,9 @@ binary, ten ABBA cells, ten confirmation cells; every timed cell passes the UTC
 window check and the quiet-host gate. A field (churn-applied, convergence) fails
 only when its ABBA ratio and its confirmation ratio both exceed
 max(1.02, its A/A ratio + 0.01). The first cell that is not PASS ends the
-comparison; nothing is retried. As in every measured campaign of these harnesses,
-the quiet-host gate samples the host only before each cell: a compiler that
-starts during a cell is waited out by the next gate and does not invalidate the
-cell it ran beside, so the window must stay hands-off. There are no report-only cells: no shape of this
+comparison; nothing is retried. During a timed cell the shared EVPN watcher samples
+process names once per second. An observed `cargo`, `rustc`, `rustdoc`, or
+`clippy-driver` ends the comparison with the cell marked INVALID and its PID
+and name in the reason. Processes can start and exit between samples.
+There are no report-only cells: no shape of this
 harness isolates a clean-delta owned pass or a refused-member pass.
