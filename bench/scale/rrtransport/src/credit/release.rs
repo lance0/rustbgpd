@@ -3,9 +3,24 @@
 use super::*;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Cell {
+enum Cell {
     Mixed,
     Timer,
+    Single(Family),
+}
+
+impl Cell {
+    fn parse(name: &str) -> Result<Self> {
+        Ok(match name {
+            "release-mixed" => Self::Mixed,
+            "release-timer" => Self::Timer,
+            "release-vpn4" => Self::Single(Family::Vpn),
+            "release-vpn6" => Self::Single(Family::Vpn6),
+            "release-labeled4" => Self::Single(Family::Labeled4),
+            "release-labeled6" => Self::Single(Family::Labeled6),
+            _ => bail!("unknown release cell {name}"),
+        })
+    }
 }
 
 const RECEIVERS: usize = 2;
@@ -85,21 +100,18 @@ async fn collect(
     states
 }
 
-pub async fn run(cell: Cell, output: &Path, options: &Options) -> Result<bool> {
+pub async fn run(name: &str, output: &Path, options: &Options) -> Result<bool> {
+    let cell = Cell::parse(name)?;
     ensure!(
         options.pause.is_none() && options.seconds.is_none(),
         "these release cells take --reduced or --correctness-only"
     );
-    let mixed = cell == Cell::Mixed;
-    let (name, timeout, reason): (_, u64, _) = if mixed {
-        ("release-mixed", 60, "all_eor")
-    } else {
-        ("release-timer", 6, "timer")
-    };
-    let families = if mixed {
-        vec![Family::Unicast, Family::Evpn]
-    } else {
-        vec![Family::Unicast]
+    let timer = cell == Cell::Timer;
+    let (timeout, reason) = if timer { (6, "timer") } else { (60, "all_eor") };
+    let families = match cell {
+        Cell::Mixed => vec![Family::Unicast, Family::Evpn],
+        Cell::Timer => vec![Family::Unicast],
+        Cell::Single(family) => vec![family],
     };
     let rows = if options.reduced { 16 } else { 64 };
     let negotiated: Vec<_> = families.iter().map(|family| family.afi_safi()).collect();
@@ -121,7 +133,7 @@ pub async fn run(cell: Cell, output: &Path, options: &Options) -> Result<bool> {
         fixture
             .sources
             .push(source_up(&fixture.rib, SOURCE, negotiated.clone()).await?);
-        let policy = (!mixed).then(private_unicast_policy);
+        let policy = (cell != Cell::Mixed).then(private_unicast_policy);
         fixture
             .connect(
                 vec![(negotiated, policy); RECEIVERS],
@@ -158,7 +170,7 @@ pub async fn run(cell: Cell, output: &Path, options: &Options) -> Result<bool> {
         for &family in &families {
             fixture
                 .rib
-                .send(source_update(family, 0..rows, BURST_VERSION, 100))
+                .send(release_source_update(family, 0..rows))
                 .await?;
         }
         barrier(&fixture.rib).await?;
@@ -166,7 +178,7 @@ pub async fn run(cell: Cell, output: &Path, options: &Options) -> Result<bool> {
         let t0 = Instant::now();
         let mut flips = Vec::new();
         let mut triggers = BTreeMap::new();
-        if mixed {
+        if !timer {
             let mut previous = before.total(FLIPS);
             for family in &families {
                 let (afi, safi) = family.afi_safi();
@@ -181,9 +193,11 @@ pub async fn run(cell: Cell, output: &Path, options: &Options) -> Result<bool> {
                     })
                     .await?;
                 barrier(&fixture.rib).await?;
-                let current = Snapshot::take(&fixture.metrics).total(FLIPS);
-                flips.push(current.zip(previous).map(|(end, start)| end - start));
-                previous = current;
+                if cell == Cell::Mixed {
+                    let current = Snapshot::take(&fixture.metrics).total(FLIPS);
+                    flips.push(current.zip(previous).map(|(end, start)| end - start));
+                    previous = current;
+                }
             }
         } else {
             triggers.insert(Family::Unicast.name(), earliest_expiry);
@@ -198,7 +212,8 @@ pub async fn run(cell: Cell, output: &Path, options: &Options) -> Result<bool> {
             let (ip, states) = result?;
             let mut wire = BTreeMap::new();
             for (family, state) in states {
-                exact &= state.exact();
+                exact &=
+                    state.exact() && (!matches!(cell, Cell::Single(_)) || state.withdrawals == 0);
                 ordered &= Trigger::Restart.eor_ordered(&state);
                 no_resets &= state.resets == 0;
                 let eor_ms = state
@@ -216,6 +231,8 @@ pub async fn run(cell: Cell, output: &Path, options: &Options) -> Result<bool> {
                     json!({
                         "eors": state.eors,
                         "missing": state.missing(),
+                        "announced": state.announced,
+                        "withdrawals": state.withdrawals,
                         "before_eor": state.routes_before_eor,
                         "after_eor": state.routes_after_eor,
                         "decode_failures": state.decode_failures,
@@ -248,7 +265,7 @@ pub async fn run(cell: Cell, output: &Path, options: &Options) -> Result<bool> {
                 None,
             );
             armed &= active == 1.0 && waiters == 1.0;
-            released &= releases == 1.0 && timeouts == f64::from(!mixed);
+            released &= releases == 1.0 && timeouts == f64::from(timer);
             observations.insert(
                 family.name(),
                 json!({
@@ -260,7 +277,7 @@ pub async fn run(cell: Cell, output: &Path, options: &Options) -> Result<bool> {
                 }),
             );
         }
-        let ownership = if mixed {
+        let ownership = if cell == Cell::Mixed {
             let first = &groups[&receiver_ip(0)];
             first.starts_with("group:")
                 && groups.values().all(|group| group == first)

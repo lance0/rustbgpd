@@ -32,7 +32,7 @@ pub mod release;
 pub mod source_burst;
 
 use std::collections::{BTreeMap, HashSet};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -47,14 +47,15 @@ use rustbgpd_policy::{
 use rustbgpd_rib::route::{Route, RouteOrigin};
 use rustbgpd_rib::update::RibUpdate;
 use rustbgpd_rib::{
-    AttrSet, EvpnRibRoute, FlowSpecRoute, PeerId, RibManager, SelectionDeferralConfig,
-    SelectionDeferralWaiterConfig, VpnRibRoute,
+    AttrSet, EvpnRibRoute, FlowSpecRoute, LabeledRibRoute, PeerId, RibManager,
+    SelectionDeferralConfig, SelectionDeferralWaiterConfig, VpnRibRoute,
 };
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_transport::PeerHandle;
 use rustbgpd_wire::{
     Afi, AsPath, AsPathSegment, AspaValidation, EthernetTagId, EvpnImet, EvpnRoute, Ipv4Prefix,
-    Message, Origin, PathAttribute, Prefix, RouteDistinguisher, RpkiValidation, Safi,
+    Ipv6Prefix, LabeledNlri, Message, MplsLabelEntry, Origin, PathAttribute, Prefix,
+    RouteDistinguisher, RpkiValidation, Safi, VpnNlri, VpnPrefix,
 };
 use serde_json::{json, Value};
 use tokio::net::TcpSocket;
@@ -153,6 +154,9 @@ pub enum Family {
     Unicast,
     Evpn,
     Vpn,
+    Vpn6,
+    Labeled4,
+    Labeled6,
     FlowSpec,
 }
 
@@ -172,6 +176,9 @@ impl Family {
             Self::Unicast => "unicast",
             Self::Evpn => "evpn",
             Self::Vpn => "vpn",
+            Self::Vpn6 => "vpn6",
+            Self::Labeled4 => "labeled4",
+            Self::Labeled6 => "labeled6",
             Self::FlowSpec => "flowspec",
         }
     }
@@ -181,6 +188,9 @@ impl Family {
             Self::Unicast => (Afi::Ipv4, Safi::Unicast),
             Self::Evpn => (Afi::L2Vpn, Safi::Evpn),
             Self::Vpn => (Afi::Ipv4, Safi::MplsVpn),
+            Self::Vpn6 => (Afi::Ipv6, Safi::MplsVpn),
+            Self::Labeled4 => (Afi::Ipv4, Safi::LabeledUnicast),
+            Self::Labeled6 => (Afi::Ipv6, Safi::LabeledUnicast),
             Self::FlowSpec => (Afi::Ipv4, Safi::FlowSpec),
         }
     }
@@ -189,7 +199,11 @@ impl Family {
         Ok(match self {
             Self::Unicast => WireFamily::Unicast,
             Self::Evpn => WireFamily::Evpn,
-            _ => bail!("wire checks cover unicast and evpn only"),
+            Self::Vpn => WireFamily::Vpn4,
+            Self::Vpn6 => WireFamily::Vpn6,
+            Self::Labeled4 => WireFamily::Labeled4,
+            Self::Labeled6 => WireFamily::Labeled6,
+            Self::FlowSpec => bail!("wire checks do not cover flowspec"),
         })
     }
 
@@ -198,7 +212,8 @@ impl Family {
         match self {
             Self::Unicast => std::mem::size_of::<Route>(),
             Self::Evpn => std::mem::size_of::<EvpnRibRoute>(),
-            Self::Vpn => std::mem::size_of::<VpnRibRoute>(),
+            Self::Vpn | Self::Vpn6 => std::mem::size_of::<VpnRibRoute>(),
+            Self::Labeled4 | Self::Labeled6 => std::mem::size_of::<LabeledRibRoute>(),
             Self::FlowSpec => std::mem::size_of::<FlowSpecRoute>(),
         }
     }
@@ -380,22 +395,51 @@ fn evpn_route(index: usize, attrs: Arc<AttrSet>) -> EvpnRibRoute {
     }
 }
 
-fn vpn_route(index: usize, attrs: Arc<AttrSet>) -> VpnRibRoute {
-    use rustbgpd_wire::vpn::{MplsLabelEntry, VpnNlri, VpnPrefix};
+fn mpls_destination(afi: Afi, index: usize) -> (Prefix, IpAddr) {
+    if afi == Afi::Ipv6 {
+        let subnet = u16::try_from(index).expect("IPv6 fixture subnet fits u16");
+        let prefix = Ipv6Addr::new(0x2001, 0xdb8, subnet, 0, 0, 0, 0, 0);
+        let next_hop = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+        (Prefix::V6(Ipv6Prefix::new(prefix, 48)), next_hop.into())
+    } else {
+        (
+            Prefix::V4(Ipv4Prefix::new(unicast_prefix(index), 24)),
+            SOURCE.into(),
+        )
+    }
+}
+
+fn route_label(index: usize) -> MplsLabelEntry {
+    MplsLabelEntry {
+        label: 16 + u32::try_from(index % 1_000).expect("label fits"),
+        traffic_class: 0,
+        bottom_of_stack: true,
+    }
+}
+
+fn vpn_route(
+    index: usize,
+    attrs: Arc<AttrSet>,
+    rd: RouteDistinguisher,
+    (prefix, next_hop): (Prefix, IpAddr),
+) -> VpnRibRoute {
+    let prefix = match prefix {
+        Prefix::V4(p) => VpnPrefix::V4 {
+            addr: p.addr,
+            len: p.len,
+        },
+        Prefix::V6(p) => VpnPrefix::V6 {
+            addr: p.addr,
+            len: p.len,
+        },
+    };
     VpnRibRoute {
         nlri: VpnNlri {
-            labels: vec![MplsLabelEntry {
-                label: 16 + u32::try_from(index % 1_000).expect("label fits"),
-                traffic_class: 0,
-                bottom_of_stack: true,
-            }],
-            route_distinguisher: RouteDistinguisher([0, 0, 0xfc, 0x00, 0, 0, 0, 1]),
-            prefix: VpnPrefix::V4 {
-                addr: unicast_prefix(index),
-                len: 24,
-            },
+            labels: vec![route_label(index)],
+            route_distinguisher: rd,
+            prefix,
         },
-        next_hop: IpAddr::V4(SOURCE),
+        next_hop,
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: PeerId::from_ipv4(SOURCE),
@@ -406,6 +450,59 @@ fn vpn_route(index: usize, attrs: Arc<AttrSet>) -> VpnRibRoute {
         is_stale: false,
         is_llgr_stale: false,
         path_id: 0,
+    }
+}
+
+/// VPN release rows come in pairs with the same prefix and different RDs.
+fn release_source_update(family: Family, indices: std::ops::Range<usize>) -> RibUpdate {
+    let afi = family.afi_safi().0;
+    let peer = PeerId::from_ipv4(SOURCE);
+    match family {
+        Family::Vpn | Family::Vpn6 => RibUpdate::VpnRoutesReceived {
+            peer,
+            session_id: 1,
+            announced: indices
+                .map(|index| {
+                    let rd =
+                        RouteDistinguisher([0, 0, 0xfc, 0, 0, 0, 0, 1 + u8::from(index % 2 == 1)]);
+                    vpn_route(
+                        index,
+                        attributes(index, BURST_VERSION, 100),
+                        rd,
+                        mpls_destination(afi, index / 2),
+                    )
+                })
+                .collect(),
+            withdrawn: Vec::new(),
+        },
+        Family::Labeled4 | Family::Labeled6 => RibUpdate::LabeledRoutesReceived {
+            peer,
+            session_id: 1,
+            announced: indices
+                .map(|index| {
+                    let (prefix, next_hop) = mpls_destination(afi, index);
+                    LabeledRibRoute {
+                        nlri: LabeledNlri {
+                            labels: vec![route_label(index)],
+                            prefix,
+                        },
+                        next_hop,
+                        link_local_next_hop: None,
+                        next_hop_scope: None,
+                        peer,
+                        attributes: attributes(index, BURST_VERSION, 100),
+                        received_at: Instant::now(),
+                        origin_type: RouteOrigin::Ibgp,
+                        peer_router_id: SOURCE,
+                        is_stale: false,
+                        is_llgr_stale: false,
+                        path_id: 0,
+                    }
+                })
+                .collect(),
+            withdrawn: Vec::new(),
+        },
+        _ => source_update(family, indices, BURST_VERSION, 100),
     }
 }
 
@@ -474,10 +571,20 @@ fn source_update(
                 peer,
                 session_id,
                 announced: indices
-                    .map(|index| vpn_route(index, attrs(index)))
+                    .map(|index| {
+                        vpn_route(
+                            index,
+                            attrs(index),
+                            EVPN_RD,
+                            mpls_destination(Afi::Ipv4, index),
+                        )
+                    })
                     .collect(),
                 withdrawn: Vec::new(),
             };
+        }
+        Family::Vpn6 | Family::Labeled4 | Family::Labeled6 => {
+            unreachable!("release-only family uses release_source_update")
         }
         Family::Unicast => {
             announced = indices
@@ -1780,6 +1887,10 @@ pub async fn exhaust(
     } else {
         trigger.cell()
     };
+    ensure!(
+        matches!(family, Family::Unicast | Family::Evpn),
+        "exhaust and restart cover unicast and evpn only"
+    );
     let wire_family = family.wire()?;
     let (receivers, rows, pause, deadline) = if options.reduced {
         (
@@ -3153,6 +3264,39 @@ mod tests {
                 "{name} drifted from the RIB"
             );
         }
+    }
+
+    #[test]
+    fn vpn_release_pairs_rds_while_fill_keeps_distinct_prefixes() {
+        let RibUpdate::VpnRoutesReceived {
+            announced: fill, ..
+        } = super::source_update(Family::Vpn, 0..2, super::BURST_VERSION, 100)
+        else {
+            panic!("expected VPN fill rows");
+        };
+        let RibUpdate::VpnRoutesReceived {
+            announced: release, ..
+        } = super::release_source_update(Family::Vpn, 0..2)
+        else {
+            panic!("expected VPN release rows");
+        };
+        for (index, route) in fill.iter().enumerate() {
+            assert_eq!(route.nlri.route_distinguisher, super::EVPN_RD);
+            assert_eq!(
+                route.nlri.prefix,
+                super::VpnPrefix::V4 {
+                    addr: super::unicast_prefix(index),
+                    len: 24
+                }
+            );
+        }
+        assert_eq!(release[0].nlri, fill[0].nlri);
+        assert_eq!(release[1].nlri.prefix, release[0].nlri.prefix);
+        assert_ne!(
+            release[1].nlri.route_distinguisher,
+            release[0].nlri.route_distinguisher
+        );
+        assert_eq!(release[1].nlri.labels, fill[1].nlri.labels);
     }
 
     #[test]

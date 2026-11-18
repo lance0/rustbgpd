@@ -118,11 +118,15 @@ class Runner(unittest.TestCase):
             body = 'echo "$1" >>"$(dirname "$0")/calls"\n'
             self.assertEqual(self.run_runner(root, 0, body=body), 0)
             calls = root / "calls"
-            commands = ["credit-release-mixed", "credit-release-timer"]
+            cells = [
+                "release-mixed", "release-timer", "release-vpn4", "release-vpn6",
+                "release-labeled4", "release-labeled6",
+            ]
+            commands = [f"credit-{cell}" for cell in cells]
             self.assertTrue(set(commands).isdisjoint(calls.read_text().splitlines()))
             calls.write_text("")
             self.assertEqual(
-                self.run_runner(root, 0, "release-mixed", "release-timer", body=body), 0
+                self.run_runner(root, 0, *cells, body=body), 0
             )
             self.assertEqual(calls.read_text().splitlines(), commands)
 

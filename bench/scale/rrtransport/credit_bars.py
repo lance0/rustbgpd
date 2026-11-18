@@ -51,7 +51,10 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-OPTIONAL_RELEASES = ("release-mixed", "release-timer")
+OPTIONAL_RELEASES = (
+    "release-mixed", "release-timer", "release-vpn4", "release-vpn6",
+    "release-labeled4", "release-labeled6",
+)
 OPTIONAL_RELEASE_CHECKS = {
     "armed_after_staging",
     "release_reason",
