@@ -105,6 +105,9 @@ pub(in crate::manager) struct DistributionWindow {
     pub(in crate::manager) messages: usize,
     /// Ingested route, withdrawal and other NLRI entries.
     pub(in crate::manager) routes: usize,
+    /// Ingest permits of the drained session messages, returned once the
+    /// window's distribution pass has run.
+    permits: Vec<crate::ingest_budget::IngestPermit>,
 }
 
 impl DistributionWindow {
@@ -112,7 +115,7 @@ impl DistributionWindow {
     /// Every other update is a barrier the window settles before.
     fn admits(update: &RibUpdate) -> bool {
         matches!(
-            update,
+            update.unmetered(),
             RibUpdate::RoutesReceived {
                 flowspec_announced,
                 flowspec_withdrawn,
@@ -8199,7 +8202,7 @@ impl RibManager {
         let chunk_started = std::time::Instant::now();
         let Some(chunk) = pending.next_chunk() else {
             // Empty batch: nothing ingested, but it still ends a message.
-            return self.finish_route_batch();
+            return self.finish_route_batch(&mut pending);
         };
         self.distribution_window
             .started
@@ -8292,7 +8295,7 @@ impl RibManager {
         } else if pending.has_more() {
             self.pending_route_batches.push_front(pending);
         } else {
-            self.finish_route_batch();
+            self.finish_route_batch(&mut pending);
         }
         self.metrics.observe_rib_actor_work("route_chunk", ingest);
         true
@@ -8323,15 +8326,20 @@ impl RibManager {
         if pending.has_more() {
             self.pending_route_batches.push_front(pending);
         } else {
-            self.finish_route_batch();
+            self.finish_route_batch(&mut pending);
         }
     }
 
     /// A route batch has drained. Extend the distribution window over the
     /// next already-queued eligible message, or settle it. Returns whether
     /// a route batch is queued again.
-    fn finish_route_batch(&mut self) -> bool {
+    fn finish_route_batch(&mut self, drained: &mut PendingRoutesReceived) -> bool {
         self.distribution_window.messages += 1;
+        // The sending session's budget returns with the pass that distributes
+        // these routes, which a window extended below runs in a later turn.
+        self.distribution_window
+            .permits
+            .extend(drained.ingest_permit.take());
         if self.extend_distribution_window() {
             return true;
         }

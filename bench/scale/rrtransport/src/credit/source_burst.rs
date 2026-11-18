@@ -170,7 +170,9 @@ enum Mark {
 }
 
 fn classify(update: &RibUpdate, config: &TapConfig) -> Class {
-    let (peer, announced, withdrawn) = match update {
+    // A session charges its route messages to its ingest budget; the permit
+    // travels on through the tap with the message.
+    let (peer, announced, withdrawn) = match update.unmetered() {
         RibUpdate::RoutesReceived {
             peer,
             announced,

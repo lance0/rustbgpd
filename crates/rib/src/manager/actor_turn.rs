@@ -64,7 +64,7 @@ impl ActorTurn {
         // A late session end is the turn of the end it wraps.
         let update = match update {
             RibUpdate::LateSessionEnd(end) => end.as_ref(),
-            update => update,
+            update => update.unmetered(),
         };
         let (routes, members) = match update {
             RibUpdate::WireRoutesReceived(batch) => (

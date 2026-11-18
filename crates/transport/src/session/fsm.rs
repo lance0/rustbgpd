@@ -588,11 +588,12 @@ impl PeerSession {
     /// equivalent rule likewise counts parsed packets. Only a peer with
     /// no complete frame outstanding expires.
     ///
-    /// While RIB-bound messages are held, input is deliberately left
-    /// unprocessed, so liveness cannot be proven from it; see
-    /// [`Self::renew_parked_hold`] for the bounded policy used then.
+    /// While RIB-bound messages are held, or the ingest budget is spent,
+    /// input is deliberately left unprocessed, so liveness cannot be proven
+    /// from it; see [`Self::renew_parked_hold`] for the bounded policy used
+    /// then.
     pub(super) async fn handle_hold_timer_expiry(&mut self) {
-        if !self.rib_backlog.is_empty() {
+        if self.rib_input_parked() {
             if self.renew_parked_hold() {
                 self.metrics
                     .record_hold_timer_rearmed_pending_input(&self.peer_label);

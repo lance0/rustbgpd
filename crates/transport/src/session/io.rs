@@ -856,8 +856,9 @@ impl PeerSession {
         loop {
             // The OPEN just processed may have parked a collision candidate;
             // input behind it waits for the verdict. Input behind a message
-            // held for the RIB waits until the run loop delivers it.
-            if self.collision_verdict_pending() || !self.rib_backlog.is_empty() {
+            // held for the RIB waits until the run loop delivers it, and
+            // input behind a spent ingest budget until the RIB returns it.
+            if self.collision_verdict_pending() || self.rib_input_parked() {
                 return;
             }
             // Reconcile a due refresh window before *each* buffered PDU, not

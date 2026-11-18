@@ -4212,7 +4212,7 @@ fn evpn_fanout_serves_readiness_at_each_receiver_boundary() {
 
 /// A manager with `receivers` EVPN-capable eBGP receivers and a flush budget
 /// of zero, so a paced EVPN fanout parks at every receiver boundary.
-fn zero_budget_evpn_fanout(receivers: u8) -> (RibManager, Vec<PeerId>) {
+pub(super) fn zero_budget_evpn_fanout(receivers: u8) -> (RibManager, Vec<PeerId>) {
     let (ingress_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let peers: Vec<_> = (0..receivers)
@@ -4253,7 +4253,7 @@ fn advertised_evpn(manager: &RibManager, peers: &[PeerId]) -> Vec<usize> {
         .collect()
 }
 
-fn evpn_update(
+pub(super) fn evpn_update(
     source: Ipv4Addr,
     announced: Vec<EvpnRibRoute>,
     withdrawn: Vec<rustbgpd_wire::EvpnRouteKey>,

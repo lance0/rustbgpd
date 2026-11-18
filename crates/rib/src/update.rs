@@ -2800,6 +2800,15 @@ pub enum RibUpdate {
         /// Accepted/reply-lost must fence rather than invent cancellation.
         reply: oneshot::Sender<Result<(), crate::dampening::DampeningControlError>>,
     },
+    /// A session's route-bearing message, charged to that session's ingest
+    /// budget until the RIB finishes it. Everything but the permit is the
+    /// wrapped message's; see [`RibUpdate::metered`].
+    SessionRoutes {
+        /// Returns the routes to the session's budget when dropped.
+        permit: crate::ingest_budget::IngestPermit,
+        /// One of the route-bearing variants.
+        routes: Box<RibUpdate>,
+    },
     /// Original-wire classification for an installed history consumer.
     WireRoutesReceived(WireRoutesReceived),
     /// Peer session sent us routes.
@@ -4479,12 +4488,81 @@ pub enum RibUpdate {
 }
 
 impl RibUpdate {
+    /// Charge a route-bearing message to its session's `budget`, one route
+    /// per announced or withdrawn entry of any family: a withdrawal fans out
+    /// to as many receivers as an announcement. Any other message is
+    /// returned unchanged and is never held back by the budget.
+    #[must_use]
+    pub fn metered(self, budget: &Arc<crate::ingest_budget::IngestBudget>) -> Self {
+        let routes = match &self {
+            Self::WireRoutesReceived(batch) => {
+                batch.announced.len()
+                    + batch.withdrawn.len()
+                    + batch.flowspec_announced.len()
+                    + batch.flowspec_withdrawn.len()
+                    + batch.evpn_announced.len()
+                    + batch.evpn_withdrawn.len()
+            }
+            Self::RoutesReceived {
+                announced,
+                withdrawn,
+                flowspec_announced,
+                flowspec_withdrawn,
+                evpn_announced,
+                evpn_withdrawn,
+                ..
+            } => {
+                announced.len()
+                    + withdrawn.len()
+                    + flowspec_announced.len()
+                    + flowspec_withdrawn.len()
+                    + evpn_announced.len()
+                    + evpn_withdrawn.len()
+            }
+            Self::BgpLsRoutesReceived {
+                announced,
+                withdrawn,
+                ..
+            } => announced.len() + withdrawn.len(),
+            Self::VpnRoutesReceived {
+                announced,
+                withdrawn,
+                ..
+            } => announced.len() + withdrawn.len(),
+            Self::LabeledRoutesReceived {
+                announced,
+                withdrawn,
+                ..
+            } => announced.len() + withdrawn.len(),
+            Self::RtcRoutesReceived {
+                announced,
+                withdrawn,
+                ..
+            } => announced.len() + withdrawn.len(),
+            _ => return self,
+        };
+        Self::SessionRoutes {
+            permit: budget.charge(routes),
+            routes: Box::new(self),
+        }
+    }
+
+    /// The message itself, without a session's ingest permit around it.
+    #[must_use]
+    pub fn unmetered(&self) -> &Self {
+        match self {
+            Self::SessionRoutes { routes, .. } => routes,
+            update => update,
+        }
+    }
+
     /// The neighbor a session-sourced message belongs to. The RIB drops such
     /// a message when that handle is no longer live: its neighbor was deleted
     /// (and perhaps re-added under a new handle) after the message was sent.
     #[must_use]
     pub fn session_peer(&self) -> Option<PeerId> {
         match self {
+            Self::SessionRoutes { routes, .. } => routes.session_peer(),
             Self::WireRoutesReceived(received) => Some(received.peer),
             Self::RoutesReceived { peer, .. }
             | Self::BgpLsRoutesReceived { peer, .. }
@@ -4527,7 +4605,8 @@ impl RibUpdate {
     )]
     pub(crate) const fn actor_turn_kind(&self) -> RibActorTurnKind {
         match self {
-            Self::WireRoutesReceived(_)
+            Self::SessionRoutes { .. }
+            | Self::WireRoutesReceived(_)
             | Self::RoutesReceived { .. }
             | Self::BgpLsRoutesReceived { .. }
             | Self::VpnRoutesReceived { .. }
