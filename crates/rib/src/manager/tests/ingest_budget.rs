@@ -201,6 +201,41 @@ fn coalesced_message_holds_its_permit_until_the_window_settles() {
     assert_eq!(budget.unfinished(), 0);
 }
 
+/// The permit is still held while the window's pass runs, not only until it
+/// starts: the pass is the work the budget stands for. A readiness owner
+/// makes the pass's checkpoints observable, and the test reads the budget
+/// at each staging checkpoint inside the pass.
+/// Red proof: a window that returns its permits before the pass reads 0
+/// inside it.
+#[tokio::test]
+async fn window_holds_its_permits_through_its_pass() {
+    let (_tx, mut manager) = test_manager();
+    let _source_rx = connect_peer(&mut manager, SOURCE, 1, false, false);
+    let _observer_rx = connect_peer(&mut manager, OBSERVER, 1, false, false);
+    let budget = IngestBudget::new();
+    let inside_the_pass = Arc::new(std::sync::Mutex::new(Vec::new()));
+    manager.replacement_readiness_test_hook = Some(Arc::new({
+        let (budget, seen) = (Arc::clone(&budget), Arc::clone(&inside_the_pass));
+        move |stage| {
+            if stage == "staging_shared_emit" {
+                seen.lock().unwrap().push(budget.unfinished());
+            }
+        }
+    }));
+    manager.handle_update(metered(
+        received(SOURCE, 1, host_routes(SOURCE, 0, 3)),
+        &budget,
+    ));
+    manager.with_ingest_readiness(|manager| while manager.process_next_route_chunk() {});
+    let inside_the_pass = inside_the_pass.lock().unwrap();
+    assert!(!inside_the_pass.is_empty(), "the pass staged the observer");
+    assert!(
+        inside_the_pass.iter().all(|&unfinished| unfinished == 3),
+        "held inside the pass: {inside_the_pass:?}"
+    );
+    assert_eq!(budget.unfinished(), 0, "returned after it");
+}
+
 /// A batch whose EVPN fan-out is parked across actor turns is unfinished
 /// until the last receiver has its rows.
 /// Red proof: returning the permit when a chunk is ingested reads 0 while

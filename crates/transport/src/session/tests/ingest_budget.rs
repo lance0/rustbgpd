@@ -429,8 +429,8 @@ async fn hold_expiry_behind_the_gate_with_a_silent_peer_is_hold_timer_expired() 
 /// bytes, and a third with still nothing processed closes the session as a
 /// local overload (Cease/Out of Resources), not as Hold Timer Expired. No
 /// frame is admitted past the gate meanwhile.
-/// Red proof: with the gate's one-frame admission applied while a message
-/// is held, the first expiry processes the KEEPALIVE and nothing is closed.
+/// Red proof: with the gate's liveness rule applied while a message is
+/// held, every expiry is deferred and the session is never closed.
 #[tokio::test]
 async fn hold_expiry_behind_the_gate_and_a_full_channel_follows_the_parked_policy() {
     let Metered {
@@ -486,8 +486,8 @@ async fn hold_expiry_behind_the_gate_and_a_full_channel_follows_the_parked_polic
 /// buffered input waits for both, and the deferral budget is whole again
 /// once a peer PDU is processed.
 /// Red proof: without the reset on a processed PDU the count stays at one;
-/// a gate that ignores the held message, or a held message that ignores
-/// the gate, processes the KEEPALIVE one step early.
+/// a delivered backlog that ignores the gate processes the KEEPALIVE one
+/// step early.
 #[tokio::test]
 async fn input_behind_the_gate_and_a_full_channel_waits_for_both() {
     for channel_first in [true, false] {
@@ -550,34 +550,45 @@ async fn input_behind_the_gate_and_a_full_channel_waits_for_both() {
 }
 
 /// The routes of an ended connection keep their permits on the old budget:
-/// they do not pace the next connection of the same neighbor.
-/// Red proof: with one budget for the session's lifetime the gate is still
-/// closed after the session end.
+/// they do not pace the next connection of the same neighbor, whether the
+/// session ended for good or the RIB retains its routes for a graceful
+/// restart.
+/// Red proof: with one budget for the session's lifetime, or kept across a
+/// graceful-restart end, the gate is still closed after the session end.
 #[tokio::test]
 async fn session_end_starts_a_fresh_budget() {
-    let Metered {
-        mut session,
-        mut rib_rx,
-        budget,
-        commands: _commands,
-        server: _server,
-    } = metered_session().await;
-    buffer_and_process(&mut session, &[burst_pdu(10), burst_pdu(20)]).await;
-    assert!(session.ingest_gate_closed);
-    session.drive_fsm(Event::ManualStop { reason: None }).await;
-    assert_eq!(budget.unfinished(), 2 * BLOCK, "the RIB still holds both");
-    // The run loop's next turn sees the fresh budget.
-    session.reopen_ingest_gate().await;
-    assert!(!session.ingest_gate_closed);
-    let mut last = None;
-    while let Ok(update) = rib_rx.try_recv() {
-        last = Some(update);
+    for graceful in [false, true] {
+        let Metered {
+            mut session,
+            mut rib_rx,
+            budget,
+            commands: _commands,
+            server: _server,
+        } = metered_session().await;
+        buffer_and_process(&mut session, &[burst_pdu(10), burst_pdu(20)]).await;
+        assert!(session.ingest_gate_closed);
+        if graceful {
+            super::run_loop::negotiate_graceful_restart(&mut session, false);
+            session.handle_tcp_read_result(Ok(0)).await;
+        } else {
+            session.drive_fsm(Event::ManualStop { reason: None }).await;
+        }
+        assert_eq!(budget.unfinished(), 2 * BLOCK, "the RIB still holds both");
+        // The run loop's next turn sees the fresh budget.
+        session.reopen_ingest_gate().await;
+        assert!(!session.ingest_gate_closed, "graceful {graceful}");
+        let mut last = None;
+        while let Ok(update) = rib_rx.try_recv() {
+            last = Some(update);
+        }
+        assert_eq!(
+            matches!(last, Some(RibUpdate::PeerGracefulRestart { .. })),
+            graceful,
+            "graceful {graceful}: the session end is sent without waiting for budget"
+        );
+        assert!(graceful || matches!(last, Some(RibUpdate::PeerDown { .. })));
+        assert_eq!(budget.unfinished(), 0);
     }
-    assert!(
-        matches!(last, Some(RibUpdate::PeerDown { .. })),
-        "the session end is sent without waiting for budget"
-    );
-    assert_eq!(budget.unfinished(), 0);
 }
 
 /// Handshake: `budget` holds at least `routes`. Bounded spin, so a session

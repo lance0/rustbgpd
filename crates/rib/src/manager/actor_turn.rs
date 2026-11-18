@@ -49,6 +49,7 @@ pub(super) const SLOW_ACTOR_TURN_LOG_INTERVAL: Duration = Duration::from_secs(10
 /// The kind and cheap size fields of one turn, captured before the message
 /// is consumed.
 #[derive(Clone, Copy)]
+#[cfg_attr(test, derive(Debug, PartialEq))]
 pub(super) struct ActorTurn {
     kind: RibActorTurnKind,
     peer: Option<PeerId>,
