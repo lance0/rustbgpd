@@ -1936,7 +1936,10 @@ impl BgpMetrics {
         let rib_outbound_eviction_recovery_seconds = HistogramVec::new(
             HistogramOpts::new(
                 "bgp_rib_outbound_eviction_recovery_seconds",
-                "Wall-clock duration of building and settling one receiver's owed-row cap eviction recovery after preflight, by data commit outcome (processed or commit_refused).",
+                "Wall-clock duration of one receiver's whole-table recovery build after preflight, \
+                 through commit handling and cleanup, by data commit outcome (processed or commit_refused). \
+                 Covers owed-row cap evictions and post-release rebuilds for EVPN state that a dirty \
+                 resync deferred during a selection hold.",
             )
             .buckets(actor_buckets_with_250ms()),
             &["outcome"],
@@ -6254,8 +6257,8 @@ impl BgpMetrics {
         self.0.rib_outbound_owing_flips.inc();
     }
 
-    /// Observe one cap-evicted receiver's recovery build. A refused data
-    /// commit still incurred the build cost. Preflight refusals did not.
+    /// Observe one receiver's eviction or deferred EVPN recovery build.
+    /// A refused data commit still incurred the build cost. Preflight refusals did not.
     pub fn observe_rib_outbound_eviction_recovery(
         &self,
         commit_refused: bool,
