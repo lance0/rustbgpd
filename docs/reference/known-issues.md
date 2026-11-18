@@ -79,11 +79,11 @@ resolved.
     unrelated peer's updates by 27–34 s in single untimed harness runs on a
     shared host. The burst was many short units served in arrival order:
     the session queued all of it ahead of the other peer's update. On main
-    after v0.83.0 a session stops reading its socket while 1,024 routes it
+    after v0.83.0 a session stops reading its socket while 2,048 routes it
     already sent are unfinished in the RIB
     ([ADR-0078](../adr/0078-inbound-rib-backpressure.md)), so the other
-    peer's update waits behind about one distribution pass per bursting
-    source. The evidence is a count in unit-level tests (at most two burst
+    peer's update waits behind at most about two distribution passes per
+    bursting source. The evidence is a count in unit-level tests (at most two burst
     messages queued ahead of another source) and untimed reduced-shape
     harness runs, not a timed measurement at 150 receivers. The wait still
     grows with the number of sources bursting at once, and route input

@@ -13,15 +13,15 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Unfinished routes at which a session stops reading its socket: one
-/// distribution window of affected prefixes, so the shared queue holds about
-/// one distribution pass per source.
+/// Unfinished routes at which a session stops reading its socket: two
+/// distribution windows of affected prefixes.
 // ponytail: one fixed budget for every session and family. Make it a
-// per-neighbor setting if a source needs a deeper pipeline than one window.
-pub const INGEST_BUDGET_ROUTES: usize = 1024;
-/// Unfinished routes at which a stopped session reads again. Resuming at
-/// half the budget keeps a stream of small messages from stopping and
-/// resuming once per message.
+// per-neighbor setting if a source needs a deeper pipeline than two windows.
+pub const INGEST_BUDGET_ROUTES: usize = 2048;
+/// Unfinished routes at which a stopped session reads again: one
+/// distribution window, so the RIB has the session's next full-window
+/// message decoded and queued while it works on the current one, and a
+/// stream of small messages does not stop and resume once per message.
 pub const INGEST_RESUME_ROUTES: usize = INGEST_BUDGET_ROUTES / 2;
 
 /// One session's count of routes sent to the RIB and not yet finished there.

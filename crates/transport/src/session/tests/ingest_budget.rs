@@ -11,8 +11,9 @@ use super::*;
 use rustbgpd_rib::ingest_budget::{INGEST_BUDGET_ROUTES, INGEST_RESUME_ROUTES, IngestBudget};
 
 /// Routes per burst UPDATE: one leaves the gate open, two close it, and one
-/// still unfinished keeps it closed.
-const BLOCK: usize = 600;
+/// still unfinished keeps it closed. An UPDATE this large is an Extended
+/// Message, which a session accepts from any peer.
+const BLOCK: usize = 1200;
 const _: () = assert!(BLOCK < INGEST_BUDGET_ROUTES && 2 * BLOCK >= INGEST_BUDGET_ROUTES);
 const _: () = assert!(BLOCK > INGEST_RESUME_ROUTES);
 
@@ -72,9 +73,12 @@ fn block_pdu(block: u8, count: usize, len: u8) -> Vec<u8> {
         false,
         Ipv4UnicastMode::Body,
     );
-    rustbgpd_wire::encode_message(&Message::Update(update))
-        .unwrap()
-        .to_vec()
+    rustbgpd_wire::encode_message_with_limit(
+        &Message::Update(update),
+        rustbgpd_wire::EXTENDED_MAX_MESSAGE_LEN,
+    )
+    .unwrap()
+    .to_vec()
 }
 
 fn burst_pdu(block: u8) -> Vec<u8> {

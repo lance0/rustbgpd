@@ -2503,7 +2503,7 @@ neighbor value overrides the group.
 The stale-route timers, the long-lived stale timer and the Enhanced Route
 Refresh timeout sweep at their deadline, after the input the RIB had already
 received by then. They do not wait for input still unread in the peer's
-socket. A session leaves its socket unread while 1,024 routes it already sent
+socket. A session leaves its socket unread while 2,048 routes it already sent
 are unfinished in the RIB, so a route the peer re-advertised just before the
 deadline, behind a larger burst the RIB had not finished, is swept and then
 announced again when it is read. An End-of-RIB marker is unaffected: it

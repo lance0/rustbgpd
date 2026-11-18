@@ -1,10 +1,10 @@
 ### Fixed
 
 - One peer's burst no longer delays every other peer's updates for the length
-  of the burst. Each session now stops reading its socket while 1,024 routes it
-  already sent are unfinished in the RIB and resumes at 512, so the RIB's
-  input queue holds about one distribution pass per source and TCP paces the
-  sender. Previously a session queued its whole burst ahead of other peers:
+  of the burst. Each session now stops reading its socket while 2,048 routes it
+  already sent are unfinished in the RIB and resumes at 1,024, so the RIB's
+  input queue holds at most about two distribution passes per source and TCP
+  paces the sender. Previously a session queued its whole burst ahead of other peers:
   in the transport harness, 150,000 routes sent at once toward 150 private
   receivers made an unrelated peer's update wait about 15 s. The wait still
   grows with the number of peers bursting at once. See

@@ -2950,7 +2950,7 @@ What to do when it fires:
    this deadline. The same Cease closes a session whose peer input has
    waited for the RIB for about three hold times since its last processed
    message, logged as `RIB admission stalled past local budget` (ADR-0078).
-   Input waits while the RIB channel is full, and while 1,024 routes the
+   Input waits while the RIB channel is full, and while 2,048 routes the
    session already sent are unfinished in the RIB (its ingest budget). Its
    interval is the configured nonzero `send_hold_time`,
    or `max(480, 2 × hold_time)` seconds when `send_hold_time = 0`; disabling
