@@ -53,6 +53,15 @@ reader behind `rbgp diff snapshot from-bmp` is fuzzed through `crates/cli/fuzz`.
 bytes (M73 BGP-LS byte fidelity, M74 VPN preserve-verbatim) over the whole
 reachable input space: decode → encode → decode must reproduce the value.
 
+## Reviewing the nightly pin
+
+Review `fuzz/rust-nightly.txt` monthly and whenever a workspace lockfile or
+minimum Rust version update causes a fuzz build to fail. Choose a dated nightly
+with the Linux x86-64 toolchain available. Run
+`python3 scripts/check_fuzz_toolchain_pin.py`, seed the fuzz lockfiles, then
+build and run every target in `just fuzz-list` on a fixed input before adopting
+the new pin.
+
 ## Running locally
 
 Requires the reviewed nightly in `fuzz/rust-nightly.txt` and cargo-fuzz 0.13.2
@@ -68,10 +77,12 @@ The recipe selects the pinned toolchain and changes to the target's owning
 crate. Corpus and artifact paths are relative to that crate. Choose another
 crate and target from `just fuzz-list`, with its appropriate input bound.
 
-Without just, select the same toolchain before changing directories:
+Without just, select the same toolchain and seed the fuzz lockfiles from the
+workspace lockfile before changing directories:
 
 ```sh
 export RUSTUP_TOOLCHAIN="$(cat fuzz/rust-nightly.txt)"
+fuzz/seed-fuzz-lockfiles.sh
 cd crates/wire
 cargo fuzz list
 cargo fuzz run encode_update fuzz/corpus/encode_update fuzz/seeds/encode_update -- -max_total_time=300 -max_len=4096
@@ -213,6 +224,7 @@ repository root, replay it in the owning crate (wire in this example):
 ```sh
 printf '%s' '<the Base64: value>' | base64 -d > /tmp/crash-input
 export RUSTUP_TOOLCHAIN="$(cat fuzz/rust-nightly.txt)"
+fuzz/seed-fuzz-lockfiles.sh
 cd crates/wire
 cargo fuzz run <target> /tmp/crash-input
 cargo fuzz tmin <target> /tmp/crash-input   # minimize before pinning
