@@ -1741,12 +1741,10 @@ branch is between features.
   neither a vulnerability. RUSTSEC-2024-0436 (`paste`): the sole chain is
   `tikv-jemalloc-ctl`, a build-time proc-macro surface. RUSTSEC-2026-0543
   (`chrono`, all versions affected; alternatives `jiff` and `time`): `chrono`
-  is a direct dependency of the MRT writer, a transitive dependency of `rmcp`
-  and `schemars`, and a dev-dependency through `bgpkit-parser`, so it cannot be
-  removed until `rmcp` and `schemars` drop it. Revisit when those chains are
-  gone (and the MRT writer has moved off `chrono`), or when a real
-  vulnerability is published against either crate; delete the ignore in the
-  same PR.
+  remains in the MCP server through `rmcp` and its `schemars/chrono04` feature,
+  and in differential tests through `bgpkit-parser/parser`. Remove its ignore
+  when both paths are gone. Reassess either exception if a vulnerability is
+  published against the corresponding crate.
 
 ---
 
