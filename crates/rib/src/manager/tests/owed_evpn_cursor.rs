@@ -350,6 +350,25 @@ fn fallbacks(manager: &RibManager) -> f64 {
         .sum()
 }
 
+/// Drain steps the step histogram recorded under `scope`.
+fn steps_observed(manager: &RibManager, scope: &str) -> u64 {
+    manager
+        .metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .filter(|family| family.name() == "bgp_rib_outbound_owed_drain_step_seconds")
+        .flat_map(|family| family.get_metric().to_vec())
+        .filter(|metric| {
+            metric
+                .get_label()
+                .iter()
+                .any(|label| label.name() == "scope" && label.value() == scope)
+        })
+        .map(|metric| metric.get_histogram().get_sample_count())
+        .sum()
+}
+
 /// Tick until no resync work is left; every session writes what it was
 /// sent.
 fn drain(manager: &mut RibManager, receivers: &mut [Receiver]) {
@@ -423,9 +442,10 @@ fn an_evpn_debt_drains_in_bounded_steps() {
 /// Credit: every envelope of the drain is an ordinary one charged against
 /// the receiver's credit, no whole-table operation is taken (and a live
 /// one is not waited for), and a receiver that reads nothing is queued at
-/// most its credit plus one step, with its End-of-RIB still owed. Red when
-/// a waiting End-of-RIB absorbs the family: one uncharged operation of N
-/// rows.
+/// most its credit plus one step, with its End-of-RIB still owed. Every
+/// step is observed under the histogram's `cursor` scope and none under
+/// `whole`. Red when a waiting End-of-RIB absorbs the family: one uncharged
+/// operation of N rows, observed as a `whole` step.
 #[test]
 fn an_evpn_cursor_drain_is_charged_and_takes_no_operation() {
     let rows = 100;
@@ -456,6 +476,12 @@ fn an_evpn_cursor_drain_is_charged_and_takes_no_operation() {
     );
     drain(&mut manager, &mut receivers);
     assert_settled(&manager, &receivers, &all(rows), "charged");
+    assert_eq!(
+        steps_observed(&manager, "whole") + steps_observed(&manager, "keyed"),
+        0,
+        "an EVPN cursor's steps are observed as cursor steps only"
+    );
+    assert!(steps_observed(&manager, "cursor") >= 2 * u64::from(rows) / STEP as u64);
     for receiver in &receivers {
         assert_eq!(receiver.wire.uncharged, 0, "every envelope is charged");
         assert_eq!(receiver.wire.latched, 0, "no operation latch");
@@ -564,9 +590,13 @@ fn evpn_changes_before_and_after_the_cursor_reach_each_receiver_at_their_newest_
 /// leaves the position where it was, and the rows resume exactly once
 /// when room returns. When the final data step takes the last channel
 /// slot, the End-of-RIB is refused, waits for the tick's marker retry and
-/// leaves once: no resync is built and no row is sent again. Red when a
-/// refused step moves the position (rows are lost) and when the refused
-/// marker marks the receiver dirty.
+/// leaves once: no resync is built and no row is sent again. The tick
+/// reads the credit and the channel room the step's admission reads, so it
+/// offers no step that would be refused; the step's own refusal is run
+/// directly, against spent credit and against a full channel, and sends
+/// nothing, reads on from the same position and marks nothing dirty. Red
+/// when a refused step moves the position (rows are lost) and when the
+/// refused marker marks the receiver dirty.
 #[test]
 fn a_refused_evpn_step_keeps_its_position_and_a_refused_marker_replays_nothing() {
     // Credit: the receiver reads nothing, so the second step is refused.
@@ -627,6 +657,47 @@ fn a_refused_evpn_step_keeps_its_position_and_a_refused_marker_replays_nothing()
     );
     assert_eq!(receivers[0].wire.uncharged + receivers[0].wire.latched, 0);
     assert_settled(&manager, &receivers, &all(rows), "full channel");
+
+    // The step's own refusal, past the tick's preflight.
+    let rows = 40u32;
+    for full_channel in [false, true] {
+        let (mut manager, mut receivers) = owing(1, rows, CREDIT);
+        let peer = receivers[0].peer;
+        tick(&mut manager, &mut receivers);
+        assert_eq!(receivers[0].wire.announced.len(), STEP);
+        let credit = manager.outbound_credit_handle(peer);
+        let sender = manager.outbound_peers[&peer].clone();
+        let charge =
+            (!full_channel).then(|| crate::outbound_credit::OutboundCharge::new(&credit, CREDIT));
+        let slots: Vec<_> = std::iter::from_fn(|| sender.clone().try_reserve_owned().ok())
+            .take(if full_channel { usize::MAX } else { 0 })
+            .collect();
+        assert_eq!(manager.outbound_channel_full(peer), full_channel);
+        for _ in 0..3 {
+            assert!(
+                !manager.owing_drain_step(
+                    peer,
+                    FAMILY,
+                    super::super::outbound_owing::DrainScope::All,
+                    CREDIT
+                ),
+                "full channel {full_channel}: the step is refused"
+            );
+        }
+        drop((charge, slots));
+        receivers[0].write();
+        assert_eq!(receivers[0].wire.announced.len(), STEP, "nothing sent");
+        assert!(manager.owes_whole(peer, FAMILY));
+        assert!(!manager.dirty_peers.contains(&peer));
+        assert_eq!(fallbacks(&manager), 0.0);
+        drain(&mut manager, &mut receivers);
+        assert_eq!(
+            receivers[0].wire.announced.len(),
+            rows as usize,
+            "full channel {full_channel}: every row once, none skipped"
+        );
+        assert_settled(&manager, &receivers, &all(rows), "refused step");
+    }
 }
 
 fn refresh_request(manager: &mut RibManager, peer: PeerId) {
@@ -684,10 +755,13 @@ fn evict_stalled(stalled: u8) -> (RibManager, Vec<Receiver>, Vec<(u32, u32)>) {
 /// Contract (refresh before the initial End-of-RIB). Mid-walk, a peer's
 /// ROUTE-REFRESH absorbs the rest of the walk into its own operation: the
 /// owed rows, the initial End-of-RIB, then the answer between its markers.
-/// From a receiver the cap evicted, whose resync is first refused (a live
-/// operation), the request is kept and answered after that resync and its
-/// End-of-RIB. Each marker is counted once. Red when the request is spent
-/// while the initial End-of-RIB is still owed.
+/// From a receiver the cap evicted the request builds nothing in its own
+/// turn and is kept through a resync whose commit is first refused (no
+/// export encoder); it is answered after the admitted resync and its
+/// End-of-RIB. Each marker is counted once. Red when the walk's remaining
+/// rows are left out of the absorption (the End-of-RIB leaves ahead of
+/// them), and when the request is spent while the evicted receiver's
+/// initial End-of-RIB is still owed.
 #[test]
 fn an_evpn_refresh_before_the_initial_end_of_rib_is_answered_after_it() {
     let rows = 40u32;
@@ -715,15 +789,31 @@ fn an_evpn_refresh_before_the_initial_end_of_rib_is_answered_after_it() {
     receivers[1].wire.sent.clear();
     assert!(manager.eor.owes(peer, EVPN));
     let builds = manager.adj_rib_out_commit_stats.resync_builds;
-    let operation = manager.begin_outbound_operation(peer, 1).unwrap();
     refresh_request(&mut manager, peer);
-    for _ in 0..5 {
+    receivers[1].write();
+    assert_eq!(receivers[1].wire.sent, [], "built in the request's turn");
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
+    assert!(manager.pending_refresh.contains_key(&peer), "still asked");
+    assert!(manager.owed_row_evicted.contains(&peer));
+    // The recovery is first refused after its build.
+    let encoder = manager
+        .peer_export_encoders
+        .remove(&peer)
+        .expect("an exact export encoder");
+    let mut refused = 0;
+    for _ in 0..6 {
+        let before = manager.adj_rib_out_commit_stats.resync_builds;
         tick(&mut manager, &mut receivers);
+        let built = manager.adj_rib_out_commit_stats.resync_builds - before;
+        assert!(built <= 1, "{built} tables built in one tick");
+        refused += built;
     }
+    assert!(refused != 0, "the recovery was built and refused");
     assert_eq!(receivers[1].wire.sent, [], "refused: nothing is sent");
     assert!(manager.pending_refresh.contains_key(&peer), "still asked");
     assert!(manager.owed_row_evicted.contains(&peer));
-    drop(operation);
+    assert!(manager.eor.owes(peer, EVPN));
+    manager.peer_export_encoders.insert(peer, encoder);
     drain(&mut manager, &mut receivers);
     assert_eq!(
         receivers[1].wire.sent,
@@ -731,18 +821,25 @@ fn an_evpn_refresh_before_the_initial_end_of_rib_is_answered_after_it() {
     );
     assert_eq!(receivers[1].wire.table, table(&expected));
     assert_eq!(receivers[1].wire.markers, 1);
-    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds - builds, 1);
+    assert_eq!(
+        manager.adj_rib_out_commit_stats.resync_builds - builds,
+        refused + 1,
+        "one admitted resync"
+    );
     assert!(!manager.pending_refresh.contains_key(&peer), "answered");
     assert!(manager.owed_row_evicted.is_empty());
 }
 
 /// Work count: receivers the cap evicted are rebuilt by the resync tick
-/// only, one per tick: the EVPN mutations that follow build no resync and
-/// stage nothing toward them. Red when an ordinary pass takes an evicted
-/// receiver as any dirty one.
+/// only, one per tick: the EVPN and unicast mutations that follow build no
+/// resync for them. Red when an ordinary pass takes an evicted
+/// receiver as any dirty one, and when a tick with budget left goes on to
+/// the next evicted receiver.
 #[test]
 fn an_evicted_evpn_receiver_is_rebuilt_only_by_the_tick_one_per_tick() {
     let (mut manager, mut receivers, mut expected) = evict_stalled(3);
+    // Whatever poll budget is left: the unit ends the tick.
+    manager.flush_poll_budget = Duration::from_secs(3600);
     for receiver in &mut receivers[1..] {
         receiver.write();
     }
@@ -751,6 +848,8 @@ fn an_evicted_evpn_receiver_is_rebuilt_only_by_the_tick_one_per_tick() {
         received(&mut manager, &[(index, 0)], &[]);
         expected.push((index, 0));
     }
+    // A unicast mutation's pass visits every dirty peer.
+    received_unicast(&mut manager, 0..1);
     assert_eq!(
         manager.adj_rib_out_commit_stats.resync_builds, builds,
         "no mutation builds an evicted receiver's table"
