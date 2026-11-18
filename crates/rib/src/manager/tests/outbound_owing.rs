@@ -1467,13 +1467,14 @@ fn refresh_absorbing_on_the_last_slot_offers_the_marker_it_freed() {
     for _ in 0..3 {
         sender.try_send(OutboundRouteUpdate::default()).unwrap();
     }
-    manager.handle_update(RibUpdate::RouteRefreshRequest {
+    let refresh = || RibUpdate::RouteRefreshRequest {
         peer,
         session_id: 0,
         afi: Afi::Ipv4,
         safi: Safi::Unicast,
         queued: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-    });
+    };
+    manager.handle_update(refresh());
     assert!(manager.owing(peer).is_none(), "absorbed on the last slot");
     assert!(
         manager.pending_refresh[&peer].contains(&V4),
@@ -1493,6 +1494,14 @@ fn refresh_absorbing_on_the_last_slot_offers_the_marker_it_freed() {
         "the owed withdrawal went out first"
     );
 
+    // A second refresh can arrive after the withdrawal drains, before the
+    // tick retries the initial marker. It may coalesce with the first.
+    manager.handle_update(refresh());
+    assert!(matches!(
+        rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    assert!(manager.pending_refresh[&peer].contains(&V4));
     manager.resync_dirty_peers_bounded();
     let sent = send_all(&mut rx);
     let marker = sent

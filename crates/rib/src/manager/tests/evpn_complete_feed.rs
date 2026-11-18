@@ -2112,6 +2112,8 @@ fn refused_marker_of_an_orf_gated_family_waits_on_the_tick_but_not_on_a_release(
 #[test]
 fn review_refused_unicast_marker_preserves_held_evpn_coverage() {
     let (mut manager, peer, gid, mut output) = fixture();
+    let route = review_announce_unicast(&mut manager, 94);
+    while output.try_recv().is_ok() {}
     admit_waiting_for_eor(&mut manager, peer, gid, &received(100));
     output.try_recv().map(delivered).unwrap();
     let unicast = (Afi::Ipv4, Safi::Unicast);
@@ -2143,11 +2145,40 @@ fn review_refused_unicast_marker_preserves_held_evpn_coverage() {
     }
     assert!(output.try_recv().map(delivered).is_err());
 
+    // The writer drained, but its initial unicast EoR has yet to be retried.
+    assert!(!manager.owes(peer, unicast));
+    manager.handle_update(RibUpdate::RouteRefreshRequest {
+        peer,
+        session_id: 7,
+        afi: unicast.0,
+        safi: unicast.1,
+        queued: Arc::default(),
+    });
+    assert_eq!(
+        output
+            .try_recv()
+            .map(|u| (u.announce.len(), u.end_of_rib, u.refresh_markers)),
+        Err(mpsc::error::TryRecvError::Empty),
+        "a clean receiver's initial EoR must precede the refresh"
+    );
+    assert!(manager.pending_refresh[&peer].contains(&unicast));
     manager.resync_dirty_peers_bounded();
     let marker = output.try_recv().map(delivered).unwrap();
     assert_eq!(marker.end_of_rib, [unicast]);
     assert!(marker.announce.is_empty() && marker.unicast_withdrawals().next().is_none());
     assert!(marker.evpn_announce.is_empty() && marker.evpn_withdraw.is_empty());
+    let answer = output.try_recv().map(delivered).unwrap();
+    assert_eq!(answer.announce.len(), 1);
+    assert_eq!(answer.announce[0].prefix, route.prefix);
+    assert_eq!(answer.end_of_rib, [unicast]);
+    assert_eq!(
+        answer.refresh_markers,
+        [
+            (unicast.0, unicast.1, RouteRefreshSubtype::BoRR),
+            (unicast.0, unicast.1, RouteRefreshSubtype::EoRR),
+        ]
+    );
+    assert!(!manager.pending_refresh.contains_key(&peer));
     assert!(output.try_recv().map(delivered).is_err());
     assert_eq!(manager.eor_pending(peer), HashSet::from([EVPN]));
     assert!(manager.evpn_feed_is_current(peer));

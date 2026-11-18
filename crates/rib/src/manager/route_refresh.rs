@@ -989,8 +989,7 @@ impl RibManager {
                 // A first ORF refresh unlocks the initial table. If the cap
                 // released its EoR into another hold, keep it behind that
                 // table even when selection or a full writer defers the flood.
-                let owes_eor = self.eor.owes(peer, family);
-                if owes_eor
+                if self.eor.owes(peer, family)
                     && self
                         .peer_orf_pending
                         .get(&peer)
@@ -1013,20 +1012,12 @@ impl RibManager {
                 // RFC 5291 §6: a peer ROUTE-REFRESH lifts the initial-
                 // advertisement gate. Internal recovery may only observe it.
                 self.lift_orf_gate(peer, family);
-                let deferred_eor = self.eor.behind_orf_table(peer, family);
-                // RFC 7313 §4: an ordinary answer must follow the initial
-                // EoR, even when another hold outlasts the dirty resync.
-                // The receiver evicted by the owed-row cap always waits for
-                // the resync tick to rebuild its table.
-                if self.owed_row_evicted.contains(&peer)
-                    || (owes_eor
-                        && !deferred_eor
-                        && (self.dirty_peers.contains(&peer) || self.eor_withheld(peer, family)))
-                {
+                // The resync tick rebuilds a receiver evicted by the owed-row cap.
+                if self.owed_row_evicted.contains(&peer) {
                     self.defer_refresh_answer(peer, family, suppress_eor);
                     return FamilyReplayOutcome::Failed;
                 }
-                (suppress_eor, deferred_eor)
+                (suppress_eor, self.eor.behind_orf_table(peer, family))
             }
             FamilyReplayKind::PrefixLimitRecovery
             | FamilyReplayKind::OperatorReplay
@@ -1150,6 +1141,16 @@ impl RibManager {
             }
             return FamilyReplayOutcome::Failed;
         };
+        // RFC 7313 §4: once any owed rows have been absorbed, an ordinary
+        // answer may start only if the initial EoR has actually been admitted.
+        // The first ORF flood is the table its marker is still waiting for.
+        if matches!(replay_kind, FamilyReplayKind::PeerRefresh { .. })
+            && !deferred_eor
+            && self.eor.owes(peer, family)
+        {
+            self.defer_refresh_answer(peer, family, suppress_eor);
+            return FamilyReplayOutcome::Failed;
+        }
         if !latched {
             self.note_outbound_staging(peer);
         }
