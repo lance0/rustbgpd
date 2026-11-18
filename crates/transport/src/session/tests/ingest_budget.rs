@@ -1123,27 +1123,22 @@ fn cease_pdu(subcode: u8) -> Vec<u8> {
     .to_vec()
 }
 
-/// What a session that was not reading its socket did with a peer that
-/// sent `update` (one UPDATE for block 50), then `notification` (a Cease
-/// with that subcode), then closed.
+/// What a session that had left its socket unread observed when its peer closed.
 struct UnreadClose {
     /// This session's route blocks and its session end, in RIB order:
     /// what the RIB was sent, then what is held for it.
     rib: Vec<String>,
     /// The peer's NOTIFICATION was counted as received.
     received: f64,
-    /// NOTIFICATIONs this session sent (Hold Timer Expired or a Cease).
+    /// Header Error NOTIFICATIONs this session sent.
+    header_errors: f64,
+    /// Hold Timer Expired or Cease NOTIFICATIONs this session sent.
     sent: f64,
     /// The session end counts as a peer-side TCP loss.
     tcp_loss: bool,
 }
 
-async fn unread_close(
-    unread: Unread,
-    nbit: bool,
-    update: bool,
-    notification: Option<u8>,
-) -> UnreadClose {
+async fn unread_close(unread: Unread, nbit: bool, frames: &[u8]) -> UnreadClose {
     let Metered {
         mut session,
         mut rib_rx,
@@ -1157,6 +1152,7 @@ async fn unread_close(
             fill_rib_channel(&session);
             buffer_and_process(&mut session, &[block_pdu(40, INGEST_BUDGET_ROUTES, 24)]).await;
             assert_eq!(session.rib_backlog.len(), 1, "held for the full channel");
+            assert!(session.ingest_gate_closed);
             None
         }
         Unread::Gate => Some(gated_with_buffered_keepalives(&mut session, &mut rib_rx, 0).await),
@@ -1168,15 +1164,8 @@ async fn unread_close(
             Some(held)
         }
     };
-    let mut sent = Vec::new();
-    if update {
-        sent.extend(block_pdu(50, 3, 24));
-    }
-    if let Some(subcode) = notification {
-        sent.extend(cease_pdu(subcode));
-    }
-    if !sent.is_empty() {
-        peer_sends(&mut server, &mut session, &sent).await;
+    if !frames.is_empty() {
+        peer_sends(&mut server, &mut session, frames).await;
     }
     server.shutdown().await.unwrap();
     let (metrics, peer) = (session.metrics.clone(), session.peer_label.clone());
@@ -1215,6 +1204,7 @@ async fn unread_close(
     UnreadClose {
         rib,
         received: count("bgp_notifications_received_total", &[("code", "6")]),
+        header_errors: count("bgp_notifications_sent_total", &[("code", "1")]),
         sent: count("bgp_notifications_sent_total", &[("code", "4")])
             + count("bgp_notifications_sent_total", &[("code", "6")]),
         tcp_loss: session.batch_peer_tcp_loss,
@@ -1249,7 +1239,14 @@ async fn close_found_at_hold_expiry_follows_the_frames_buffered_ahead_of_it() {
         ] {
             for update in [false, true] {
                 let case = format!("{unread:?}, n bit {nbit}, {notification:?}, update {update}");
-                let got = unread_close(unread, nbit, update, notification).await;
+                let mut frames = Vec::new();
+                if update {
+                    frames.extend(block_pdu(50, 3, 24));
+                }
+                if let Some(subcode) = notification {
+                    frames.extend(cease_pdu(subcode));
+                }
+                let got = unread_close(unread, nbit, &frames).await;
                 let mut rib = Vec::new();
                 if matches!(unread, Unread::FullChannel) {
                     rib.push("routes 40");
@@ -1265,13 +1262,48 @@ async fn close_found_at_hold_expiry_follows_the_frames_buffered_ahead_of_it() {
                     "{case}"
                 );
                 assert_eq!(
-                    got.sent, 0.0,
+                    got.header_errors + got.sent,
+                    0.0,
                     "{case}: nothing sent to the closed connection"
                 );
                 assert_eq!(got.tcp_loss, notification.is_none(), "{case}");
             }
         }
     }
+}
+
+#[tokio::test]
+async fn unread_close_stops_at_a_malformed_header() {
+    let mut bad_header = keepalive_pdu();
+    bad_header[17] = 5; // Declared length is shorter than the header.
+    let frames = [block_pdu(50, 3, 24), bad_header, block_pdu(60, 3, 24)].concat();
+    for (nbit, end) in [(false, "PeerDown"), (true, "PeerGracefulRestart")] {
+        let got = unread_close(Unread::FullChannel, nbit, &frames).await;
+        assert_eq!(got.rib, ["routes 40", "routes 50", end]);
+        assert_eq!(got.header_errors, 1.0);
+        assert_eq!(got.sent, 0.0);
+        assert!(!got.tcp_loss);
+    }
+}
+
+#[tokio::test]
+async fn unread_close_discards_an_update_after_a_notification() {
+    let frames = [block_pdu(50, 3, 24), cease_pdu(2), block_pdu(60, 3, 24)].concat();
+    let got = unread_close(Unread::FullChannel, false, &frames).await;
+    assert_eq!(got.rib, ["routes 40", "routes 50", "PeerDown"]);
+    assert_eq!(got.received, 1.0);
+    assert_eq!(got.header_errors + got.sent, 0.0);
+    assert!(!got.tcp_loss);
+}
+
+#[tokio::test]
+async fn unread_close_with_a_partial_frame_reports_tcp_loss() {
+    let mut frames = block_pdu(50, 3, 24);
+    frames.extend_from_slice(&keepalive_pdu()[..10]);
+    let got = unread_close(Unread::FullChannel, false, &frames).await;
+    assert_eq!(got.rib, ["routes 40", "routes 50", "PeerGracefulRestart"]);
+    assert_eq!(got.header_errors + got.sent, 0.0);
+    assert!(got.tcp_loss);
 }
 
 /// The expiry that would close a held session with Cease/Out of Resources
