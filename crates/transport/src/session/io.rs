@@ -867,8 +867,11 @@ impl PeerSession {
                 return;
             }
             // Input behind a spent ingest budget waits until the run loop
-            // sees the RIB return it.
-            if self.ingest_gate_closed && !std::mem::take(&mut past_gate) {
+            // sees the RIB return it. The pass is spent on the first frame
+            // considered, gate closed or not, so it cannot outlive a gate
+            // that closes later in this buffer.
+            let admitted = std::mem::take(&mut past_gate);
+            if self.ingest_gate_closed && !admitted {
                 return;
             }
             // Reconcile a due refresh window before *each* buffered PDU, not

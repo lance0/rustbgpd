@@ -392,6 +392,32 @@ async fn hold_expiry_behind_the_gate_admits_one_pending_frame_per_expiry() {
     assert_eq!(session.parked_hold_renewals, 0, "no deferral was spent");
 }
 
+/// A hold expiry's one-frame pass is spent on the first frame it considers,
+/// whether or not the gate is closed then. An expiry that finds the gate
+/// open processes the buffer as any read does, and the gate that closes
+/// after two UPDATEs holds the rest.
+/// Red proof: a pass consumed only when the gate is closed survives the
+/// first two UPDATEs and carries a third past the gate they closed.
+#[tokio::test]
+async fn hold_expiry_with_the_gate_open_does_not_carry_a_frame_past_a_gate_closed_mid_buffer() {
+    let Metered {
+        mut session,
+        mut rib_rx,
+        budget,
+        commands: _commands,
+        server: _server,
+    } = metered_session().await;
+    for block in [10, 20, 30, 40] {
+        session.read_buf.buf.extend_from_slice(&burst_pdu(block));
+    }
+    assert!(!session.ingest_gate_closed);
+    assert!(hold_expiry(&mut session).await);
+    let delivered: Vec<_> = std::iter::from_fn(|| rib_rx.try_recv().ok()).collect();
+    assert_eq!(delivered.len(), 2, "the gate closes after two UPDATEs");
+    assert_eq!(budget.unfinished(), 2 * BLOCK, "no overdraft");
+    assert!(session.ingest_gate_closed);
+}
+
 /// Behind the gate a peer with no complete frame pending has been silent
 /// for the hold time: the session sends Hold Timer Expired, not a local
 /// overload Cease. Half a frame is not liveness.
