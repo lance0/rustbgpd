@@ -983,6 +983,12 @@ async fn gr_restarter_deferred_eor_follows_plain_refresh_flood() {
 
 #[tokio::test]
 async fn dirty_initial_dump_refresh_waits_for_pending_eor() {
+    for add_path in [true, false] {
+        check_dirty_initial_refresh(add_path);
+    }
+}
+
+fn check_dirty_initial_refresh(add_path: bool) {
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let source = Ipv4Addr::new(10, 0, 0, 1);
@@ -1019,8 +1025,8 @@ async fn dirty_initial_dump_refresh_waits_for_pending_eor() {
         is_ebgp: true,
         route_reflector_client: false,
         orr_vantage: None,
-        add_path_send_families: vec![],
-        add_path_send_max: 0,
+        add_path_send_families: if add_path { vec![family] } else { vec![] },
+        add_path_send_max: u32::from(add_path),
         negotiated_orf_recv: vec![],
         negotiated_llgr_families: vec![],
     });
@@ -1034,30 +1040,45 @@ async fn dirty_initial_dump_refresh_waits_for_pending_eor() {
             .announce
             .is_empty()
     );
-    manager.send_route_refresh_response(peer, family.0, family.1);
-    let refresh = out_rx.try_recv().map(delivered).unwrap();
-    assert!(!refresh.announce.is_empty());
+    assert_eq!(manager.grouped_member_of(peer).is_none(), add_path);
+    assert!(!manager.owed_row_evicted.contains(&peer));
+    manager.handle_update(RibUpdate::RouteRefreshRequest {
+        queued: Arc::default(),
+        session_id: 0,
+        peer,
+        afi: family.0,
+        safi: family.1,
+    });
     assert!(
-        refresh.refresh_markers.is_empty(),
-        "pending initial EoR forbids BoRR"
+        matches!(out_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+        "the peer refresh must wait for its initial EoR"
     );
-    assert!(
-        refresh.end_of_rib.is_empty(),
-        "dirty resync still owns the initial EoR"
-    );
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    assert!(manager.pending_refresh[&peer].contains(&family));
+
+    manager.resync_dirty_peers_bounded();
     let resync = out_rx.try_recv().map(delivered).unwrap();
-    assert_eq!(resync.refresh_markers.len(), 0);
+    assert_eq!(resync.refresh_markers, []);
     assert_eq!(resync.end_of_rib, vec![family]);
     assert!(manager.eor_pending(peer).is_empty());
-    manager.send_route_refresh_response(peer, family.0, family.1);
+
+    // Draining the one-slot writer makes room for the original request.
+    manager.resync_dirty_peers_bounded();
+    let refresh = out_rx.try_recv().map(delivered).unwrap();
+    assert_eq!(refresh.announce.len(), 1);
+    assert_eq!(refresh.end_of_rib, vec![family]);
     assert_eq!(
-        out_rx.try_recv().map(delivered).unwrap().refresh_markers,
+        refresh.refresh_markers,
         vec![
             (family.0, family.1, RouteRefreshSubtype::BoRR),
             (family.0, family.1, RouteRefreshSubtype::EoRR),
         ]
     );
+    assert!(!manager.pending_refresh.contains_key(&peer));
+    manager.resync_dirty_peers_bounded();
+    assert!(matches!(
+        out_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
 }
 
 /// Two independently gated families lift independently: each family's

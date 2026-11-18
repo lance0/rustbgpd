@@ -986,48 +986,38 @@ impl RibManager {
         let family = (afi, safi);
         let (suppress_eor, deferred_eor) = match replay_kind {
             FamilyReplayKind::PeerRefresh { suppress_eor } => {
+                // A first ORF refresh unlocks the initial table. If the cap
+                // released its EoR into another hold, keep it behind that
+                // table even when selection or a full writer defers the flood.
+                if self.eor.owes(peer, family)
+                    && self
+                        .peer_orf_pending
+                        .get(&peer)
+                        .is_some_and(|gated| gated.contains(&family))
+                    && self
+                        .peer_sendable_families
+                        .get(&peer)
+                        .is_some_and(|sendable| sendable.contains(&family))
+                {
+                    self.owe_eor_behind_orf_table(peer, family);
+                }
                 if self.selection_convergence_held(family) {
                     self.selection_deferred_refresh
                         .entry(peer)
                         .or_default()
                         .insert(family);
-                    // The peer's first refresh found the initial marker
-                    // still unsent (an ORF cap released it into the hold):
-                    // it now follows this response's table, as it does when
-                    // the response is not deferred.
-                    let first_refresh = self
-                        .peer_orf_pending
-                        .get(&peer)
-                        .is_some_and(|gated| gated.contains(&family));
-                    if first_refresh
-                        && self.eor.owes(peer, family)
-                        && self
-                            .peer_sendable_families
-                            .get(&peer)
-                            .is_some_and(|sendable| sendable.contains(&family))
-                    {
-                        self.owe_eor_behind_orf_table(peer, family);
-                    }
                     debug!(%peer, ?afi, ?safi, "route-refresh response deferred behind RFC 4724 convergence gate");
                     return FamilyReplayOutcome::Deferred;
                 }
                 // RFC 5291 §6: a peer ROUTE-REFRESH lifts the initial-
                 // advertisement gate. Internal recovery may only observe it.
                 self.lift_orf_gate(peer, family);
-                // A receiver the owed-row cap evicted is built by the resync
-                // tick alone, and its initial End-of-RIB may still be owed:
-                // an answer ahead of that marker carries no BoRR or EoRR
-                // (RFC 7313 section 4) and would spend the request. It
-                // waits for the receiver's resync, which sends the marker
-                // first, as an answer the channel refused does.
+                // The resync tick rebuilds a receiver evicted by the owed-row cap.
                 if self.owed_row_evicted.contains(&peer) {
                     self.defer_refresh_answer(peer, family, suppress_eor);
                     return FamilyReplayOutcome::Failed;
                 }
-                // GR or selection release may owe the ORF-gated initial
-                // flood. Only the peer refresh may consume this obligation.
-                let deferred_eor = self.eor.behind_orf_table(peer, family);
-                (suppress_eor, deferred_eor)
+                (suppress_eor, self.eor.behind_orf_table(peer, family))
             }
             FamilyReplayKind::PrefixLimitRecovery
             | FamilyReplayKind::OperatorReplay
@@ -1151,6 +1141,22 @@ impl RibManager {
             }
             return FamilyReplayOutcome::Failed;
         };
+        // RFC 7313 §4: once any owed rows have been absorbed, an ordinary
+        // answer may start only if the initial EoR has actually been admitted.
+        // The first ORF flood is the table its marker is still waiting for.
+        if matches!(replay_kind, FamilyReplayKind::PeerRefresh { .. })
+            && !deferred_eor
+            && self.eor.owes(peer, family)
+        {
+            // An EVPN marker held by its feed waits for a build of the feed,
+            // which this answer no longer is. A clean peer has none coming:
+            // its resync builds the feed, sends the marker and then answers.
+            if self.eor_waits_for_evpn_feed(peer, family) && !self.dirty_peers.contains(&peer) {
+                self.mark_outbound_dirty(peer);
+            }
+            self.defer_refresh_answer(peer, family, suppress_eor);
+            return FamilyReplayOutcome::Failed;
+        }
         if !latched {
             self.note_outbound_staging(peer);
         }
