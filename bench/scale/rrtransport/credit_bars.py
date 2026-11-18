@@ -1145,12 +1145,24 @@ def byte_bound(run: dict, what: str, receivers: float) -> Bar:
         raise Invalid(
             f"{what}: byte watch {state!r}: the credit-bytes gauge was not read over the drain"
         )
+    if state == "watched" and peak is None:
+        # The watch started, so the tree exports the gauge, but it kept no
+        # reading: not a row-credit tree.
+        raise Invalid(
+            f"{what}: byte watch started but kept no credit-bytes reading "
+            f"(drain_gauges.peak_credit_bytes null): the byte bound cannot gate"
+        )
     if peak is None and sampled is None:
         return None, None, ""
     if peak is None:
         raise Invalid(
             f"{what}: byte credit in use (sampler peak {sampled}) but no 1 ms byte watch "
             "reading (drain_gauges.peak_credit_bytes): the byte bound cannot gate"
+        )
+    if state != "watched":
+        raise Invalid(
+            f"{what}: credit-bytes peak recorded but drain_gauges.credit_bytes_watch is "
+            f"{state!r}, not 'watched': the byte watch's coverage is unconfirmed"
         )
     peak = number(run, "drain_gauges.peak_credit_bytes", what)
     reads = number(run, "drain_gauges.credit_bytes_reads", what)

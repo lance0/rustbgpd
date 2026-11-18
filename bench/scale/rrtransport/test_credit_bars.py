@@ -1941,6 +1941,23 @@ class Bars(unittest.TestCase):
         def sampler_only(run):
             self.byte_tree(run)
             del run["drain_gauges"]["peak_credit_bytes"]
+            run["drain_gauges"]["credit_bytes_watch"] = "not exported"
+
+        def watched_no_peak(run):
+            # A watch that started but kept no reading, sampler null too:
+            # not a row-credit tree.
+            self.byte_tree(run)
+            run["witness"]["peak_credit_bytes"] = None
+            run["drain_gauges"]["peak_credit_bytes"] = None
+            run["drain_gauges"]["credit_bytes_reads"] = 0
+
+        def peak_unwatched(run):
+            self.byte_tree(run)
+            run["drain_gauges"]["credit_bytes_watch"] = "not exported"
+
+        def peak_no_status(run):
+            self.byte_tree(run)
+            del run["drain_gauges"]["credit_bytes_watch"]
 
         def appeared_late(run):
             run["witness"]["peak_credit_bytes"] = float(bound)
@@ -1954,6 +1971,9 @@ class Bars(unittest.TestCase):
             (two_rows, "cannot gate: row size not uniform"),
             (partial_record, "byte_credit.MIN_CREDIT_BYTES"),
             (sampler_only, "no 1 ms byte watch reading"),
+            (watched_no_peak, "byte watch started but kept no credit-bytes reading"),
+            (peak_unwatched, "credit_bytes_watch is 'not exported', not 'watched'"),
+            (peak_no_status, "credit_bytes_watch is None, not 'watched'"),
             (appeared_late, "byte watch 'exported after start'"),
             (watch_failed, "byte watch 'failed'"),
         ):

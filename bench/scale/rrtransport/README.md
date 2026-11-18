@@ -529,8 +529,9 @@ The cell-7 bars read the candidate's measured fixed-shape runs only:
   (this harness records none, because the byte tree keeps those constants
   crate-private and exports no limit, so a byte-credit candidate is INVALID
   here), rows of one size (the witness's uniform-row check), a byte watch
-  that saw the drain (`credit_bytes_watch` `watched`, not only the 250 ms
-  sampler) and at least one byte read per 10 ms of its window on average;
+  that saw the drain (`credit_bytes_watch` `watched` for any byte peak,
+  not only the 250 ms sampler; a `watched` run with no byte reading is
+  INVALID, not a row-credit tree) and at least one byte read per 10 ms of its window on average;
   the line names the actual reads and interval.
 
 Each bar of each run is judged on its own, so a FAIL in any of them stands
