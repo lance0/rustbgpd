@@ -1103,3 +1103,265 @@ async fn budget_returned_to_exactly_the_resume_mark_wakes_the_run_loop() {
     };
     assert_eq!(burst_block(&third), Some((30, 1)));
 }
+
+/// How a session came to leave its socket unread before the peer closed.
+#[derive(Clone, Copy, Debug)]
+enum Unread {
+    /// A message is held for a full RIB channel.
+    FullChannel,
+    /// The ingest gate closed; hold expiries still admit one frame each.
+    Gate,
+    /// The gate stayed closed past its eight admissions.
+    GateBound,
+}
+
+fn cease_pdu(subcode: u8) -> Vec<u8> {
+    rustbgpd_wire::encode_message(&Message::Notification(
+        rustbgpd_wire::NotificationMessage::new(NotificationCode::Cease, subcode, Bytes::new()),
+    ))
+    .unwrap()
+    .to_vec()
+}
+
+/// What a session that was not reading its socket did with a peer that
+/// sent `update` (one UPDATE for block 50), then `notification` (a Cease
+/// with that subcode), then closed.
+struct UnreadClose {
+    /// This session's route blocks and its session end, in RIB order:
+    /// what the RIB was sent, then what is held for it.
+    rib: Vec<String>,
+    /// The peer's NOTIFICATION was counted as received.
+    received: f64,
+    /// NOTIFICATIONs this session sent (Hold Timer Expired or a Cease).
+    sent: f64,
+    /// The session end counts as a peer-side TCP loss.
+    tcp_loss: bool,
+}
+
+async fn unread_close(
+    unread: Unread,
+    nbit: bool,
+    update: bool,
+    notification: Option<u8>,
+) -> UnreadClose {
+    let Metered {
+        mut session,
+        mut rib_rx,
+        mut server,
+        commands: _commands,
+        ..
+    } = metered_session().await;
+    super::run_loop::negotiate_graceful_restart(&mut session, nbit);
+    let _held = match unread {
+        Unread::FullChannel => {
+            fill_rib_channel(&session);
+            buffer_and_process(&mut session, &[block_pdu(40, INGEST_BUDGET_ROUTES, 24)]).await;
+            assert_eq!(session.rib_backlog.len(), 1, "held for the full channel");
+            None
+        }
+        Unread::Gate => Some(gated_with_buffered_keepalives(&mut session, &mut rib_rx, 0).await),
+        Unread::GateBound => {
+            let held = gated_with_buffered_keepalives(&mut session, &mut rib_rx, 20).await;
+            for _ in 0..MAX_GATE_HOLD_ADMISSIONS {
+                assert!(hold_expiry(&mut session).await);
+            }
+            Some(held)
+        }
+    };
+    let mut sent = Vec::new();
+    if update {
+        sent.extend(block_pdu(50, 3, 24));
+    }
+    if let Some(subcode) = notification {
+        sent.extend(cease_pdu(subcode));
+    }
+    if !sent.is_empty() {
+        peer_sends(&mut server, &mut session, &sent).await;
+    }
+    server.shutdown().await.unwrap();
+    let (metrics, peer) = (session.metrics.clone(), session.peer_label.clone());
+    let mut expiries = 0;
+    loop {
+        // Handshake: each expiry finds what the peer sent, or its close.
+        let mut byte = [0_u8; 1];
+        let _ = session.read_half.as_mut().unwrap().peek(&mut byte).await;
+        if !hold_expiry(&mut session).await {
+            break;
+        }
+        expiries += 1;
+        assert!(expiries < 8, "the close ends the session");
+    }
+    let name = |update: &RibUpdate| match update {
+        RibUpdate::PeerDown { .. } => Some("PeerDown".to_string()),
+        RibUpdate::PeerGracefulRestart { .. } => Some("PeerGracefulRestart".to_string()),
+        other => burst_block(other).map(|(block, _)| format!("routes {block}")),
+    };
+    let mut rib: Vec<_> = std::iter::from_fn(|| rib_rx.try_recv().ok())
+        .filter_map(|update| name(&update))
+        .collect();
+    rib.extend(
+        session
+            .rib_backlog
+            .iter()
+            .filter_map(|(held, _)| name(held)),
+    );
+    let count = |name: &str, labels: &[(&str, &str)]| {
+        let labels: Vec<_> = [("peer", peer.as_str())]
+            .into_iter()
+            .chain(labels.iter().copied())
+            .collect();
+        counter(&metrics, name, &labels)
+    };
+    UnreadClose {
+        rib,
+        received: count("bgp_notifications_received_total", &[("code", "6")]),
+        sent: count("bgp_notifications_sent_total", &[("code", "4")])
+            + count("bgp_notifications_sent_total", &[("code", "6")]),
+        tcp_loss: session.batch_peer_tcp_loss,
+    }
+}
+
+/// A peer that sends a NOTIFICATION and closes ends the session by that
+/// NOTIFICATION, however long the session had left its socket unread: the
+/// hold expiry that finds the close first processes every complete frame
+/// buffered ahead of it, as the read arm would have before it saw the end
+/// of the stream. So for a peer with Graceful Restart the RIB deletes the
+/// routes (RFC 4724) unless the N bit was exchanged (RFC 8538 section 4),
+/// and deletes them after a Hard Reset regardless (section 3.2). An UPDATE
+/// the peer sent first reaches the RIB ahead of the session end, so routes
+/// retained as stale are the peer's last advertisements. A close alone
+/// stays a TCP failure, which retains the routes.
+/// Red proof: with the close taken straight to the TCP failure, a held
+/// session and one past its eight admissions retain the routes after every
+/// NOTIFICATION and drop the UPDATE; with no frame admitted past the gate,
+/// a gated session never ends.
+#[tokio::test]
+async fn close_found_at_hold_expiry_follows_the_frames_buffered_ahead_of_it() {
+    const ADMIN_SHUTDOWN: u8 = 2;
+    const HARD_RESET: u8 = 9;
+    for unread in [Unread::FullChannel, Unread::Gate, Unread::GateBound] {
+        for (nbit, notification, end) in [
+            (false, Some(ADMIN_SHUTDOWN), "PeerDown"),
+            (true, Some(HARD_RESET), "PeerDown"),
+            (true, Some(ADMIN_SHUTDOWN), "PeerGracefulRestart"),
+            (false, None, "PeerGracefulRestart"),
+            (true, None, "PeerGracefulRestart"),
+        ] {
+            for update in [false, true] {
+                let case = format!("{unread:?}, n bit {nbit}, {notification:?}, update {update}");
+                let got = unread_close(unread, nbit, update, notification).await;
+                let mut rib = Vec::new();
+                if matches!(unread, Unread::FullChannel) {
+                    rib.push("routes 40");
+                }
+                if update {
+                    rib.push("routes 50");
+                }
+                rib.push(end);
+                assert_eq!(got.rib, rib, "{case}");
+                assert_eq!(
+                    got.received,
+                    f64::from(u8::from(notification.is_some())),
+                    "{case}"
+                );
+                assert_eq!(
+                    got.sent, 0.0,
+                    "{case}: nothing sent to the closed connection"
+                );
+                assert_eq!(got.tcp_loss, notification.is_none(), "{case}");
+            }
+        }
+    }
+}
+
+/// The expiry that would close a held session with Cease/Out of Resources
+/// probes the socket first, so a close that became readable only then is
+/// still a TCP failure.
+/// Red proof: without a probe on that expiry the session sends the Cease
+/// and the RIB gets `PeerDown`.
+#[tokio::test]
+async fn the_expiry_that_would_close_a_held_session_probes_first() {
+    let Metered {
+        mut session,
+        mut rib_rx,
+        mut server,
+        commands: _commands,
+        ..
+    } = metered_session().await;
+    super::run_loop::negotiate_graceful_restart(&mut session, false);
+    fill_rib_channel(&session);
+    buffer_and_process(&mut session, &[block_pdu(40, INGEST_BUDGET_ROUTES, 24)]).await;
+    peer_sends(&mut server, &mut session, &keepalive_pdu()).await;
+    assert!(hold_expiry(&mut session).await, "the wait earns a deferral");
+    assert!(hold_expiry(&mut session).await, "new bytes earn the last");
+    assert_eq!(session.parked_hold_renewals, MAX_PARKED_HOLD_RENEWALS);
+    peer_closes(&mut server, &mut session).await;
+    assert!(!hold_expiry(&mut session).await);
+    assert_eq!(notifications_sent(&session, "6"), 0.0);
+    assert_eq!(session_end(&session, &mut rib_rx), "PeerGracefulRestart");
+}
+
+/// A read half no writer task shares, so a reset's error is left for the
+/// reader (the fixture's writer otherwise takes it, and the read half sees
+/// a plain end of stream). Returns the peer and the idle write half.
+async fn private_reader(session: &mut PeerSession) -> (TcpStream, tokio::net::tcp::OwnedWriteHalf) {
+    let (client, peer) = connected_stream_pair().await;
+    let (read, write) = client.into_split();
+    session.read_half = Some(read);
+    (peer, write)
+}
+
+/// The peer resets the connection; returns once the session's socket
+/// reports it.
+async fn peer_resets(peer: TcpStream, session: &mut PeerSession) {
+    socket2::SockRef::from(&peer)
+        .set_linger(Some(Duration::ZERO))
+        .unwrap();
+    drop(peer);
+    let read_half = session.read_half.as_ref().unwrap();
+    while !read_half
+        .ready(tokio::io::Interest::READABLE)
+        .await
+        .unwrap()
+        .is_read_closed()
+    {}
+}
+
+/// A read error found at a hold expiry is a TCP failure like an end of
+/// stream, behind the gate and for a held session alike.
+/// Red proof: with a read error taken for an empty socket the gated session
+/// sends Hold Timer Expired and the held one the Cease; the RIB gets
+/// `PeerDown` from both.
+#[tokio::test]
+async fn read_error_found_at_hold_expiry_is_a_tcp_failure() {
+    for full_channel in [false, true] {
+        let Metered {
+            mut session,
+            mut rib_rx,
+            server: _server,
+            commands: _commands,
+            ..
+        } = metered_session().await;
+        super::run_loop::negotiate_graceful_restart(&mut session, false);
+        let _held = if full_channel {
+            fill_rib_channel(&session);
+            buffer_and_process(&mut session, &[block_pdu(40, INGEST_BUDGET_ROUTES, 24)]).await;
+            None
+        } else {
+            Some(gated_with_buffered_keepalives(&mut session, &mut rib_rx, 0).await)
+        };
+        let (peer, _write) = private_reader(&mut session).await;
+        peer_resets(peer, &mut session).await;
+        if full_channel {
+            assert!(hold_expiry(&mut session).await, "the wait earns a deferral");
+        }
+        assert!(!hold_expiry(&mut session).await);
+        let sent = notifications_sent(&session, "4") + notifications_sent(&session, "6");
+        assert_eq!(sent, 0.0, "full channel {full_channel}");
+        assert_eq!(
+            session_end(&session, &mut rib_rx),
+            "PeerGracefulRestart",
+            "full channel {full_channel}"
+        );
+    }
+}
