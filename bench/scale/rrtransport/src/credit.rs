@@ -25,8 +25,11 @@
 //! - `fill`: every receiver paused while one source sends fresh routes of
 //!   one family; bytes per queued row is the slope of allocated bytes over
 //!   the credit-rows gauge before the first refusal.
+//! - `source_burst`: an unpaced burst and a healthy source's steady
+//!   updates, both through real sessions; see the module.
 
 pub mod release;
+pub mod source_burst;
 
 use std::collections::{BTreeMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
