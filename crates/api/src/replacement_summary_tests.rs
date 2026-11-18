@@ -595,7 +595,8 @@ async fn health_completes_inside_actual_rib_export(mode: HeldExport) {
         .unwrap();
     let started = std::time::Instant::now();
     let mut health_request = tokio::spawn(async move {
-        ControlRpc::get_health(&service, Request::new(proto::HealthRequest {})).await
+        let result = ControlRpc::get_health(&service, Request::new(proto::HealthRequest {})).await;
+        (service, result)
     });
     tokio::time::timeout(Duration::from_secs(1), async {
         while readiness_tx.capacity() != 7 {
@@ -631,14 +632,16 @@ async fn health_completes_inside_actual_rib_export(mode: HeldExport) {
         readiness_capacity, 8,
         "export checkpoint must consume the queued readiness request"
     );
-    let health = health
+    let (service, health) = health
         .expect("GetHealth must complete while the export owner remains held")
-        .unwrap()
+        .unwrap();
+    let health = health
         .expect("GetHealth retains its 200 ms readiness deadline")
         .into_inner();
     assert!(elapsed < crate::health_probe::CORE_READINESS_DEADLINE);
     assert!(health.healthy);
-    assert_eq!(health.total_routes, 4);
+    // Readiness keeps the last complete count while selection publishes the family.
+    assert_eq!(health.total_routes, if selection_release { 0 } else { 4 });
     assert_eq!(calls, 2);
     assert!(general_fenced);
     assert!(mutation_fenced);
@@ -671,6 +674,12 @@ async fn health_completes_inside_actual_rib_export(mode: HeldExport) {
     .await
     .expect("export finishes with EoR after probe release");
     assert_eq!(announced, 4);
+    let after = ControlRpc::get_health(&service, Request::new(proto::HealthRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(after.healthy);
+    assert_eq!(after.total_routes, 4);
     manager_task.abort();
     peer_task.abort();
 }
