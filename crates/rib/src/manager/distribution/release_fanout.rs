@@ -1,6 +1,7 @@
 //! One unicast release batch. The actor owns this transaction until every member
 //! has received the staged delta or transferred it to corrective resync.
 
+use super::super::outbound_owing::CursorFloors;
 use super::super::update_groups::{GroupRibOut, GroupStageOutput, ReleaseFallback};
 use super::release_denials::{MemberVerdicts, ReleaseDenials};
 use super::release_pcb::{PreparedPcb, ReleasePcb};
@@ -55,7 +56,7 @@ pub(in crate::manager) struct ReleaseDistribution {
     pcb_scope: HashSet<Prefix>,
     staged: HashMap<usize, GroupStageOutput>,
     lane_entries: usize,
-    floors: [Option<u64>; 3],
+    floors: CursorFloors,
 }
 
 impl ReleaseDistribution {
@@ -83,7 +84,7 @@ impl ReleaseDistribution {
             pcb_scope: HashSet::new(),
             staged: HashMap::new(),
             lane_entries: 0,
-            floors: [None; 3],
+            floors: CursorFloors::default(),
         }
     }
 }

@@ -127,7 +127,7 @@ fn stage_case(state: ReceiverState, release: Release, rows: u32, evict: bool) {
     received(&mut manager, &[(90_000, 1)], &[6]);
     if state == ReceiverState::Dirty && release.rearmed() {
         drain(&mut manager, &mut receivers);
-        assert!(manager.held_evpn_rebuilds.contains(&receivers[0].peer));
+        assert!(manager.owes_held_rebuild(receivers[0].peer, FAMILY));
     }
     let replacement = waiter_up(&mut manager, WAITER, 22);
     manager.handle_update(RibUpdate::PeerDown {
