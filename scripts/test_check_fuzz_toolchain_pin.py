@@ -12,6 +12,7 @@ import check_fuzz_toolchain_pin as guard
 
 
 PIN_LINE = f'toolchain="$(cat {guard.PIN_PATH})"'
+SEED_LINE = 'cp Cargo.lock "$dir/Cargo.lock"'
 
 FLOATING_SELECTIONS = (
     "      - uses: dtolnay/rust-toolchain@master",
@@ -115,9 +116,31 @@ class FuzzToolchainPinTests(unittest.TestCase):
         for line in PIN_DERIVED_SELECTIONS:
             with self.subTest(line=line):
                 failures = guard.audit_consumer(
-                    ".github/workflows/fuzz.yml", f"{PIN_LINE}\n{line}\n"
+                    ".github/workflows/fuzz.yml", f"{PIN_LINE}\n{SEED_LINE}\n{line}\n"
                 )
                 self.assertEqual(failures, [], f"{line!r} must be accepted")
+
+    def test_fuzz_build_without_lockfile_seed_is_rejected(self) -> None:
+        for build in (
+            '          cargo fuzz run "$t" -- -max_total_time=120',
+            "  cargo fuzz build -O --debug-assertions",
+            '        cargo +"$TOOLCHAIN" fuzz build',
+        ):
+            for seed in ("", f"  # {SEED_LINE}\n"):
+                with self.subTest(build=build, seed=seed):
+                    failures = guard.audit_consumer(
+                        "fuzz/build-fuzzers.sh", f"{PIN_LINE}\n{seed}{build}\n"
+                    )
+                    self.assertTrue(
+                        any("workspace Cargo.lock" in f for f in failures), failures
+                    )
+            with self.subTest(build=build, seed="code"):
+                self.assertEqual(
+                    guard.audit_consumer(
+                        "fuzz/build-fuzzers.sh", f"{PIN_LINE}\n{SEED_LINE}\n{build}\n"
+                    ),
+                    [],
+                )
 
     def test_broken_walk_fails_loudly(self) -> None:
         original = guard.tracked_files

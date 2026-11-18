@@ -11,6 +11,12 @@ Consumers are discovered from the tracked tree rather than a maintained list,
 so a fourth integration is covered the day it lands instead of passing
 vacuously. An empty discovery set is itself a failure: a guard that cannot
 fail is worse than no guard.
+
+A consumer that builds fuzz targets must also seed each fuzz crate's lockfile
+from the workspace `Cargo.lock`. The fuzz crates are separate workspaces with
+no tracked lockfile, so without the seed every build takes the newest release
+of every dependency, and one that needs a newer std than the pin breaks the
+campaign the same way a floating compiler does.
 """
 
 from __future__ import annotations
@@ -81,6 +87,10 @@ VIOLATION_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
         f"assigns a floating nightly; read the toolchain from {PIN_PATH}",
     ),
 )
+
+FUZZ_BUILD = re.compile(r"""cargo\s+(?:["']?\+\S+\s+)?fuzz\s+(?:build|run)\b""")
+LOCKFILE_SEED = re.compile(r"\bcp\s.*\bCargo\.lock\b")
+
 
 def strip_comment(line: str) -> str:
     """Drop a shell, YAML, Dockerfile, or justfile `#` comment from `line`.
@@ -163,6 +173,13 @@ def audit_consumer(relative: str, text: str) -> list[str]:
         failures.append(
             f"{relative} selects a Rust toolchain for fuzzing but no longer "
             f"reads {PIN_PATH}"
+        )
+    if any(FUZZ_BUILD.search(line) for line in code) and not any(
+        LOCKFILE_SEED.search(line) for line in code
+    ):
+        failures.append(
+            f"{relative} builds fuzz targets without seeding the fuzz lockfile "
+            "from the workspace Cargo.lock"
         )
     for number, line in enumerate(code, start=1):
         for pattern, reason in VIOLATION_RULES:
