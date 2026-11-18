@@ -264,6 +264,7 @@ async fn retained_routes(
 ) -> Vec<rustbgpd_rib::Route> {
     let (reply, response) = oneshot::channel();
     rib.send(RibUpdate::QueryRoutesPage {
+        accept_releasing: false,
         scope: rustbgpd_rib::update::RouteQueryScope::Received { peer: Some(peer) },
         filter: None,
         after: None,

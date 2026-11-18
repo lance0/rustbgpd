@@ -212,8 +212,8 @@ fn build(setup: &Setup, count: u8, rows: u16) -> (RibManager, Receivers) {
     (manager, receivers)
 }
 
-/// The deferral timer releases `families`, in this order, in one turn. The
-/// order of a real expiry comes from a hash map; here it is fixed.
+/// One expiry schedules `families` in this order. Drive selection to completion
+/// without running the independent receiver drain.
 fn timer_releases(manager: &mut RibManager, families: &[(Afi, Safi)]) {
     use crate::manager::selection_deferral::SelectionDeferralTransition::{Release, Stage};
     let order = |transition: &_| match transition {
@@ -225,6 +225,7 @@ fn timer_releases(manager: &mut RibManager, families: &[(Afi, Safi)]) {
     transitions.sort_by_key(order);
     assert_eq!(transitions.len(), families.len());
     manager.apply_selection_deferral_transitions(transitions, "Selection_Deferral_Timer expired");
+    drain_unicast_release(manager);
     manager.settle_eor_after_pass();
 }
 

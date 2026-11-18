@@ -51,6 +51,8 @@ use rustbgpd_wire::ExtendedCommunity;
 pub(in crate::manager) mod admitted_recovery;
 mod membership;
 mod payload;
+pub(in crate::manager) mod release_fallback;
+pub(in crate::manager) use release_fallback::{ReleaseFallback, RsFallback};
 mod policy_transition;
 pub(in crate::manager) mod recovery_provenance;
 pub(in crate::manager) use policy_transition::{
@@ -693,7 +695,7 @@ pub(in crate::manager) struct GroupRibOut {
     /// member whose winner (or substitution) is suppressed toward it takes
     /// the first eligible entry ([`Self::adv_entry_for`]), as the per-peer
     /// walk does. Committed with the lane; always empty for plain groups.
-    rs_fallback: ShardedMap<Prefix, Arc<[RunnerUp]>>,
+    rs_fallback: ShardedMap<Prefix, RsFallback>,
     /// RFC 7947 control contexts `(rs_asn, member_asn)` of the members that
     /// enforce control communities.
     rs_members: AddrMap<PeerId, (u32, u32)>,
@@ -1416,7 +1418,7 @@ impl GroupRibOut {
             .then(|| self.runner_up.get(&key.0))
             .flatten();
         let fallback = (self.per_client_best && key.1 == 0)
-            .then(|| self.rs_fallback.get(&key.0).map(|fallback| &**fallback))
+            .then(|| self.rs_fallback.get(&key.0))
             .flatten();
         let resolved = payload::resolve_member_slot(
             member,
@@ -1491,12 +1493,45 @@ impl GroupRibOut {
         if self.rs_members.is_empty() {
             return;
         }
+        self.reindex_rs_keys(keys, checkpoint);
+        self.rs_adjust_keys(keys, 1, checkpoint);
+    }
+
+    fn reindex_rs_keys(&mut self, keys: &[(Prefix, u32)], checkpoint: &mut impl FnMut()) {
         for &key in keys {
             checkpoint();
             let targets = self.rs_targets(key);
             self.set_rs_targets(key, targets);
         }
-        self.rs_adjust_keys(keys, 1, checkpoint);
+    }
+
+    /// Subtract or restore this page's RS-control count correction around a
+    /// release batch. Grouped unicast owns a single-best slot at path ID zero.
+    pub(in crate::manager) fn adjust_release_rs_members(
+        &mut self,
+        members: &[PeerId],
+        prefixes: &HashSet<Prefix>,
+        sign: i64,
+    ) {
+        for member in members {
+            let Some(&rs) = self.rs_members.get(member) else {
+                continue;
+            };
+            for &prefix in prefixes {
+                let key = (prefix, 0);
+                if self
+                    .rs_tagged
+                    .get(&key)
+                    .is_some_and(|targets| targets.names(rs))
+                {
+                    let adjustment = self.rs_slot_adjust(*member, rs, key);
+                    if adjustment != 0 {
+                        self.rs_count_adjust.entry(*member).or_default()
+                            [Self::count_slot(&prefix)] += sign * adjustment;
+                    }
+                }
+            }
+        }
     }
 
     /// Register an rs-control member and seed its count correction. The
@@ -1597,7 +1632,7 @@ impl GroupRibOut {
 
     /// Commit a prefix's recomputed RFC 7947 fallback list
     /// ([`Self::rs_fallback`]) alongside its lane.
-    fn apply_rs_fallback(&mut self, prefix: Prefix, fallback: Option<Arc<[RunnerUp]>>) {
+    fn apply_rs_fallback(&mut self, prefix: Prefix, fallback: Option<RsFallback>) {
         match fallback {
             Some(fallback) => {
                 self.rs_fallback.insert(prefix, fallback);
@@ -1719,6 +1754,10 @@ impl GroupRibOut {
             .is_some()
     }
 
+    pub(in crate::manager) fn runner_up_count(&self) -> usize {
+        self.runner_up.len()
+    }
+
     /// The member's wire slot at one staged key: [`Self::adv_entry`] with
     /// RFC 7947 control applied for an `rs_control_communities` member
     /// (`rs_control` = `(rs_asn, member_asn)`). A suppressed slot resolves
@@ -1742,7 +1781,7 @@ impl GroupRibOut {
                 .then(|| self.runner_up.get(prefix))
                 .flatten(),
             (self.per_client_best && path_id == 0 && rs_control.is_some())
-                .then(|| self.rs_fallback.get(prefix).map(|fallback| &**fallback))
+                .then(|| self.rs_fallback.get(prefix))
                 .flatten(),
             |entry| self.source_control_for_route(entry.route, entry.source_attrs),
         )
@@ -2134,6 +2173,23 @@ impl GroupRibOut {
         snapshot
     }
 
+    pub(in crate::manager) fn take_release_denials(
+        &mut self,
+        prefix: Prefix,
+    ) -> AddrMap<(PeerId, u32), Option<PolicyLabel>> {
+        self.policy_filtered.remove(&prefix).unwrap_or_default()
+    }
+
+    pub(in crate::manager) fn set_release_denials(
+        &mut self,
+        prefix: Prefix,
+        denials: AddrMap<(PeerId, u32), Option<PolicyLabel>>,
+    ) {
+        if !denials.is_empty() {
+            self.policy_filtered.insert(prefix, denials);
+        }
+    }
+
     /// Refresh the persistent group-verdict denial set for one staging
     /// pass: entries for staged prefixes are replaced by the pass's
     /// denials (same transition scope as the per-peer path's
@@ -2156,6 +2212,16 @@ impl GroupRibOut {
                 .get_or_default(key.prefix)
                 .insert((key.source_peer, key.path_id), label.clone());
         }
+    }
+
+    pub(in crate::manager) fn small_release_history(&self, prefix: &Prefix, limit: usize) -> bool {
+        self.policy_filtered
+            .get(prefix)
+            .is_none_or(|paths| paths.len() <= limit)
+            && self
+                .rs_fallback
+                .get(prefix)
+                .is_none_or(|paths| paths.len() <= limit)
     }
 
     /// Whether any group denial falls in `prefixes`, walking the smaller side.
@@ -2396,15 +2462,8 @@ impl RibManager {
     }
 
     pub(in crate::manager) fn refresh_group_recovery_gauges(&self) {
-        let readiness = self.replacement_readiness.clone();
         self.metrics.set_update_group_recovery_entries(
-            i64::try_from(
-                self.pending_group_admitted
-                    .entries_with_checkpoint(&mut |force| {
-                        super::replacement_readiness_checkpoint(&readiness, force);
-                    }),
-            )
-            .unwrap_or(i64::MAX),
+            i64::try_from(self.pending_group_admitted.entries()).unwrap_or(i64::MAX),
         );
         self.metrics.set_update_group_recovery_bytes(
             i64::try_from(self.pending_group_admitted.bytes()).unwrap_or(i64::MAX),
@@ -3053,7 +3112,20 @@ impl RibManager {
                 (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast | Safi::MplsVpn)
             ) && self.selection_convergence_held(family)
         });
+        // A session that sent its marker before the startup hold still needs
+        // its actual admitted rows until both release frontiers have passed.
+        let release_pending = [Afi::Ipv4, Afi::Ipv6].into_iter().any(|afi| {
+            let family = (afi, Safi::Unicast);
+            (self.owed_release_open(family)
+                || self.release_marker_pending(peer, family)
+                || self.late_release_join_pending(peer, family))
+                && self
+                    .peer_sendable_families
+                    .get(&peer)
+                    .is_some_and(|families| families.contains(&family))
+        });
         if !still_held
+            && !release_pending
             && !self.selection_resync_held(peer)
             && let Some(session_id) = self.outbound_session_ids.get(&peer).copied()
             && let Some(record) = self.newest_live_session_mut(peer, session_id)
@@ -4535,7 +4607,7 @@ impl RibManager {
             .group_ribs
             .values()
             .inspect(|_| self.replacement_checkpoint(false))
-            .map(|group| group.runner_up.len())
+            .map(GroupRibOut::runner_up_count)
             .sum::<usize>();
         self.metrics
             .set_update_group_runner_up_entries(i64::try_from(entries).unwrap_or(i64::MAX));

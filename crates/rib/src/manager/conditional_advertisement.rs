@@ -81,6 +81,15 @@ pub struct ConditionalAdvertisement {
     pub retiring: bool,
 }
 
+impl ConditionalAdvertisement {
+    fn dataset_generations(&self) -> impl Iterator<Item = u64> + '_ {
+        self.condition_policy
+            .iter()
+            .flat_map(|policy| policy.compiled().referenced_datasets())
+            .map(|slot| slot.handle.pin().generation)
+    }
+}
+
 /// Observed condition of one definition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ConditionObservation {
@@ -223,6 +232,9 @@ struct EntryMatches {
 #[derive(Clone, Debug, Default)]
 struct ConditionMatches {
     entries: Vec<EntryMatches>,
+    /// Generations at the start of the last full scan. The peer manager can
+    /// publish new handle contents before it submits the RIB refresh.
+    dataset_generations: Box<[u64]>,
     present: usize,
     unknown: usize,
 }
@@ -231,6 +243,7 @@ impl ConditionMatches {
     fn new(entries: usize) -> Self {
         Self {
             entries: vec![EntryMatches::default(); entries],
+            dataset_generations: Box::default(),
             present: 0,
             unknown: 0,
         }
@@ -683,8 +696,11 @@ impl RibManager {
         }
     }
 
-    /// A released RFC 4724 family re-observes its definitions and arms a
-    /// fresh settle interval from the release time.
+    /// Start a fresh settle interval at RFC 4724 selection release. Candidate
+    /// changes update the range matches before selection filtering, even while
+    /// held. Both End-of-RIB and timer expiry follow the admitted batch's observation
+    /// flush. Only a published dataset still awaiting its RIB refresh can
+    /// invalidate the accumulated observations.
     pub(super) fn release_conditional_advertisement_family(&mut self, family: (Afi, Safi)) {
         if self.conditional_advertisements.definitions.is_empty() {
             return;
@@ -714,9 +730,12 @@ impl RibManager {
                     .insert(name, state);
                 continue;
             }
-            let matches = self.scan_condition(&state.definition);
-            state.observed = matches.observation();
-            state.matches = Arc::new(matches);
+            let scanned = state.matches.dataset_generations.iter().copied();
+            if !state.definition.retiring && state.definition.dataset_generations().ne(scanned) {
+                let matches = self.scan_condition(&state.definition);
+                state.observed = matches.observation();
+                state.matches = Arc::new(matches);
+            }
             state.observed_since = now;
             state.deadline = None;
             if state.observed != ConditionObservation::Unknown
@@ -1069,6 +1088,8 @@ impl RibManager {
         if definition.retiring {
             return ConditionMatches::new(definition.condition_prefixes.len());
         }
+        let mut matches = ConditionMatches::new(definition.condition_prefixes.len());
+        matches.dataset_generations = definition.dataset_generations().collect();
         let mut prefixes = BTreeSet::new();
         for entry in &definition.condition_prefixes {
             if entry.ge.is_none() && entry.le.is_none() {
@@ -1083,7 +1104,6 @@ impl RibManager {
                 );
             }
         }
-        let mut matches = ConditionMatches::new(definition.condition_prefixes.len());
         for prefix in prefixes {
             self.condition_scan_checkpoint();
             matches.record(

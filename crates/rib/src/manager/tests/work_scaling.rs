@@ -2288,6 +2288,8 @@ fn gate_release_fanout(size: usize, ipv6_deferred: bool) -> Work {
             .selection_deferral_end_of_rib(waiter, 77, V4)
             .expect("the last waiter releases the family");
         manager.apply_selection_deferral_transitions([release], "test");
+        drain_unicast_release(&mut manager);
+        manager.resync_dirty_peers_bounded();
     });
 
     assert!(!manager.selection_convergence_held(V4));
@@ -2904,6 +2906,16 @@ fn deferred_post_miss_rtbh_replay(size: usize) -> Work {
         safi: family.1,
     });
     let mut release_markers = post_miss_drain(&mut receivers, &mut wires);
+    while manager.unicast_release_runnable() {
+        manager.advance_unicast_release();
+        for (total, markers) in release_markers
+            .iter_mut()
+            .zip(post_miss_drain(&mut receivers, &mut wires))
+        {
+            *total += markers;
+        }
+    }
+    manager.resync_dirty_peers_bounded();
     manager.distribute_changes(&HashSet::new(), &HashSet::new());
     for (total, markers) in release_markers
         .iter_mut()
@@ -3553,6 +3565,8 @@ fn late_private_arm(size: usize) -> Work {
         afi: family.0,
         safi: family.1,
     });
+    drain_unicast_release(&mut manager);
+    manager.resync_dirty_peers_bounded();
     apply(&mut receivers, &mut wires, true);
     manager.distribute_changes(&HashSet::new(), &HashSet::new());
     apply(&mut receivers, &mut wires, true);

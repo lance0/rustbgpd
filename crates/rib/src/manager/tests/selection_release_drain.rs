@@ -115,6 +115,7 @@ fn release(manager: &mut RibManager, by_timer: bool) {
             safi: FAMILY.1,
         });
     }
+    drain_unicast_release(manager);
     assert!(!manager.selection_convergence_held(FAMILY));
 }
 
@@ -128,6 +129,44 @@ fn drain(manager: &mut RibManager, receivers: &mut Receivers, wires: &mut [Wire]
         }
     }
     assert!(!manager.resync_tick_pending());
+}
+
+/// After the global gate opens, an intervening grace expiry or teardown can
+/// retire helper state. Peers awaiting a marker visit still need theirs.
+#[test]
+fn helper_ledger_survives_until_its_release_marker_visit() {
+    let (mut manager, receivers) = held(70, 1);
+    manager.expire_selection_deferral();
+    while manager.selection_convergence_held(FAMILY) {
+        assert!(manager.unicast_release_runnable());
+        manager.advance_unicast_release();
+    }
+    let peer = receivers
+        .iter()
+        .map(|(peer, _)| *peer)
+        .find(|&peer| manager.release_marker_pending(peer, FAMILY))
+        .expect("a later marker page");
+    assert!(manager.helper_stale_may_hold(peer));
+    let owner = super::super::HoldWithdrawOwner::Peer(peer);
+    let bound = crate::outbound_credit::CHUNK_ROWS;
+    let rows = 3 * bound;
+    let keys = (0..u32::try_from(rows).unwrap())
+        .map(|index| (Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(index), 32)), 0));
+    manager.record_hold_exempt_withdrawn(owner, keys, "helper_stale_exempt");
+    manager.request_helper_stale_retire();
+    assert_eq!(manager.hold_exempt_withdrawn[&owner].len(), rows);
+    let mut remaining = rows;
+    while manager.unicast_release_runnable() {
+        manager.advance_unicast_release();
+        let next = manager
+            .hold_exempt_withdrawn
+            .get(&owner)
+            .map_or(0, BTreeSet::len);
+        assert!(remaining - next <= bound, "one cleanup page");
+        remaining = next;
+    }
+    assert!(!manager.helper_stale_may_hold(peer));
+    assert_eq!(remaining, 0);
 }
 
 fn wires(receivers: &Receivers) -> Vec<Wire> {
@@ -310,6 +349,7 @@ fn a_refresh_of_an_owed_family_follows_the_table_and_its_end_of_rib() {
             manager.handle_update(refresh);
             assert!(receivers[0].1.try_recv().is_err(), "deferred by the hold");
             release(&mut manager, false);
+            manager.retry_deferred_refreshes(std::time::Instant::now());
         } else {
             release(&mut manager, false);
             assert!(receivers[0].1.try_recv().is_err(), "owed, not sent");
@@ -695,6 +735,7 @@ fn timer_releases(manager: &mut RibManager, families: &[(Afi, Safi)]) {
     transitions.sort_by_key(order);
     assert_eq!(transitions.len(), families.len());
     manager.apply_selection_deferral_transitions(transitions, "Selection_Deferral_Timer expired");
+    drain_unicast_release(manager);
     manager.settle_eor_after_pass();
     for &family in families {
         assert!(!manager.selection_convergence_held(family));
@@ -771,5 +812,102 @@ fn a_group_family_release_leaves_an_owed_private_family_to_the_drain() {
             assert!(!manager.owes(*peer, FLOWSPEC), "{turns:?}");
             assert!(!manager.dirty_peers.contains(peer), "{turns:?}");
         }
+    }
+}
+
+#[test]
+fn mid_release_join_skips_a_buffered_group_withdrawal_and_recovers_uncaptured_source_rows() {
+    let mut manager = manager_with_dormant_waiter();
+    let mut existing = connect(&mut manager, receiver(0), 64, false, false);
+    let gid = manager.grouped_member_of(peer_v4(receiver(0))).unwrap();
+    register_test_peer(&mut manager, peer_v4(SOURCE), 0);
+    let received = |source, announced, withdrawn| RibUpdate::RoutesReceived {
+        peer: peer_v4(source),
+        session_id: 0,
+        announced,
+        withdrawn,
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    };
+    let routes: Vec<_> = (0..2049).map(|i| make_indexed_route(i, SOURCE)).collect();
+    let gone = routes[0].prefix;
+    let mut expected: BTreeSet<_> = routes.iter().map(|r| r.prefix).collect();
+    expected.remove(&gone);
+    manager.handle_update(received(SOURCE, routes, vec![]));
+    drain_route_chunks(&mut manager);
+    assert!(
+        std::iter::from_fn(|| existing.try_recv().ok())
+            .any(|message| message.announce.iter().any(|route| route.prefix == gone))
+    );
+
+    let _waiter = connect(&mut manager, WAITER, 64, true, false);
+    manager.handle_update(received(SOURCE, vec![], vec![(gone, 0)]));
+    drain_route_chunks(&mut manager);
+    assert!(
+        manager.loc_rib.get(&gone).is_some(),
+        "frozen before release"
+    );
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: peer_v4(WAITER),
+        session_id: u64::from(WAITER.octets()[3]),
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    });
+    while manager.loc_rib.get(&gone).is_some() {
+        assert!(manager.unicast_release_runnable());
+        manager.advance_unicast_release();
+    }
+    assert!(
+        !manager.release_delivery_pending(),
+        "ordinary registration can run"
+    );
+    assert!(
+        manager.group_ribs[&gid].table.get(&gone, 0).is_some(),
+        "withdrawal selected but not yet staged"
+    );
+
+    let late_source = Ipv4Addr::new(198, 51, 100, 33);
+    register_test_peer(&mut manager, peer_v4(late_source), 0);
+    let extra = make_indexed_route(9999, late_source);
+    expected.insert(extra.prefix);
+    manager.handle_update(received(late_source, vec![extra], vec![]));
+    drain_route_chunks(&mut manager);
+    let mut receivers = vec![];
+    let mut wires = vec![];
+    for (address, private) in [(receiver(1), false), (receiver(2), true)] {
+        let mut rx = connect(&mut manager, address, 64, false, private);
+        assert_eq!(
+            manager.grouped_member_of(peer_v4(address)),
+            (!private).then_some(gid)
+        );
+        let mut wire = Wire::default();
+        wire.write(&mut rx, true);
+        assert!(!wire.announced.contains(&gone), "stale initial replay");
+        assert_eq!(
+            manager
+                .export_policy_counters
+                .get(&peer_v4(address))
+                .map_or(0, |counts| counts.snapshot().export_policy_routes_permitted,),
+            0,
+            "joining while initial selection is held evaluates no ordinary permits",
+        );
+        assert_eq!(wire.markers, 0);
+        receivers.push((peer_v4(address), rx));
+        wires.push(wire);
+    }
+    drain_unicast_release(&mut manager);
+    drain(&mut manager, &mut receivers, &mut wires);
+    for wire in wires {
+        assert!(!wire.announced.contains(&gone));
+        assert_eq!(
+            wire.announced.len(),
+            expected.len(),
+            "each healthy join admits each row once"
+        );
+        assert_eq!(wire.table, expected);
+        assert_eq!(wire.markers, 1);
     }
 }

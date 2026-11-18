@@ -95,7 +95,7 @@ fn take_refresh_stale<K: Clone + Eq + std::hash::Hash>(
 /// `clean_policy_transition_peer_ready` check the key, so for these maps a
 /// present key must mean a non-empty set. Returns whether `family` was
 /// present.
-fn remove_family_drop_empty(
+pub(super) fn remove_family_drop_empty(
     map: &mut HashMap<PeerId, HashSet<(Afi, Safi)>>,
     peer: PeerId,
     family: (Afi, Safi),
@@ -552,7 +552,7 @@ impl RibManager {
         let queued = self.primary_backlog().min(MAX_JOIN_COHORT - 1);
         if queued == 0
             || !matches!(family, (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast))
-            || self.selection_convergence_held(family)
+            || self.selection_peer_convergence_held(leader, family)
             || self.test_ingest_stall.is_some()
             || !self.pending_route_batches.is_empty()
             || !self.outbound_session_ids.contains_key(&leader)
@@ -588,6 +588,7 @@ impl RibManager {
             };
             if (*afi, *safi) != family
                 || peers.contains(peer)
+                || self.release_marker_pending(*peer, family)
                 || self.outbound_session_ids.get(peer) != Some(session_id)
                 || self.grouped_member_of(*peer) != Some(gid)
             {
@@ -1001,7 +1002,7 @@ impl RibManager {
                 {
                     self.owe_eor_behind_orf_table(peer, family);
                 }
-                if self.selection_convergence_held(family) {
+                if self.selection_peer_convergence_held(peer, family) {
                     self.selection_deferred_refresh
                         .entry(peer)
                         .or_default()
@@ -1026,7 +1027,14 @@ impl RibManager {
                     .peer_orf_pending
                     .get(&peer)
                     .is_some_and(|pending| pending.contains(&family));
-                if self.selection_convergence_held(family) || orf_pending {
+                // A sealed collision Stage can admit its late member's missing
+                // rows even while the survivor still holds the protocol marker.
+                let staged_initial = matches!(replay_kind, FamilyReplayKind::SelectionRelease)
+                    && safi == Safi::Unicast
+                    && !self.initial_selection_deferred(family);
+                if (self.selection_peer_convergence_held(peer, family) && !staged_initial)
+                    || orf_pending
+                {
                     return FamilyReplayOutcome::Deferred;
                 }
                 (true, false)

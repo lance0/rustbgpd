@@ -842,6 +842,7 @@ mod tests {
         let server = spawn_mock_server(None).await;
         *server.state.list_route_pages.lock().await =
             vec![rustbgpd_api::proto::ListRoutesResponse {
+                selection_release: None,
                 routes: vec![rustbgpd_api::proto::Route {
                     prefix: "203.0.113.0".into(),
                     prefix_length: 24,

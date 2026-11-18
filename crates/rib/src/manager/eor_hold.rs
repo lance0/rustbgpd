@@ -312,7 +312,7 @@ impl RibManager {
     /// Every reason is decided here and nowhere else.
     fn eor_hold_applies(&self, peer: PeerId, family: (Afi, Safi), hold: EorHold) -> bool {
         match hold {
-            EorHold::Selection => self.selection_convergence_held(family),
+            EorHold::Selection => self.selection_peer_convergence_held(peer, family),
             EorHold::RtMembership => {
                 self.eor.rt_membership_held(peer) && Self::rtc_gated_family(family)
             }
@@ -638,6 +638,26 @@ impl RibManager {
         self.settle_eor_as(peer, Some(families), offer, operation, false);
     }
 
+    /// This peer's release visit found its table admitted or owned by a
+    /// subsequent drain. A full writer only needs a marker retry.
+    pub(super) fn settle_unicast_release_eor(
+        &mut self,
+        peer: PeerId,
+        family: (Afi, Safi),
+        missing_group_rows_admitted: bool,
+    ) {
+        let caught_up = self.selection_partial_caught_up(peer);
+        let offer = if caught_up {
+            Offer::Table
+        } else {
+            Offer::Release
+        };
+        // A refused terminal behind a held member's newly admitted rows
+        // captures its exact group baseline for the corrective resync.
+        let retry_marker_only = caught_up || !missing_group_rows_admitted;
+        self.settle_eor_as(peer, Some(&[family]), offer, None, retry_marker_only);
+    }
+
     /// A resync of `peer` was admitted while a
     /// selection gate still held a family's marker, and that gate is now
     /// released: the marker follows the table, even while the peer stays
@@ -829,8 +849,27 @@ impl RibManager {
     /// Whether a polling lane may retry `family`'s owed marker: a send of
     /// it was refused and nothing else holds it.
     fn eor_refused_retry_ready(&self, peer: PeerId, family: (Afi, Safi)) -> bool {
-        self.eor.stored(peer, family).contains(EorHold::Writer)
-            && self.eor_retry_ready(peer, family)
+        if !self.eor.stored(peer, family).contains(EorHold::Writer) {
+            return false;
+        }
+        if matches!(family, (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast)) {
+            // The ORF cap already authorized an empty completion. Refusal by
+            // the writer must not reinstate an indefinite wait for a refresh.
+            let offer = if self.orf_eor_cap_passed.contains(&peer) {
+                Offer::Release
+            } else {
+                Offer::Retry
+            };
+            // A sibling gate can keep a dirty peer parked after its table
+            // was admitted. Any new missed delta invalidates that receipt.
+            let covered = if self.selection_partial_caught_up(peer) {
+                HoldSet::EMPTY.with(EorHold::Resync)
+            } else {
+                HoldSet::EMPTY
+            };
+            return self.eor_free_for(peer, family, offer, covered);
+        }
+        self.eor_retry_ready(peer, family)
     }
 
     /// Whether the resync tick has a refused marker of `peer` to retry.

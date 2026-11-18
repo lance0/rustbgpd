@@ -568,12 +568,16 @@ impl RibService {
     async fn query_routes_page(
         &self,
         scope: RouteQueryScope,
-        filter: Option<RouteQueryFilter>,
-        after: Option<RouteQueryKey>,
-        expected_version: Option<RoutePageVersion>,
-        page_size: usize,
+        req: &proto::ListRoutesRequest,
+        filters: RouteFilters,
+        query_identity: &str,
     ) -> Result<RoutePage, Status> {
-        rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryRoutesPage {
+        let ((after, expected_version, known_total), page_size) =
+            parse_route_page_params(req, scope, query_identity)?;
+        let prefix = filters.prefix;
+        let filter = build_route_query_filter(req.afi_safi, filters, known_total);
+        let mut page = rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryRoutesPage {
+            accept_releasing: req.accept_releasing,
             scope,
             filter,
             after,
@@ -592,7 +596,12 @@ impl RibService {
             RoutePageError::GenerationExhausted => Status::unavailable(
                 "route pagination unavailable because its process-local generation is exhausted",
             ),
-        })
+        })?;
+        page.releasing[0] &= req.afi_safi != proto::AddressFamily::Ipv6Unicast as i32
+            && !matches!(prefix, Some(Prefix::V6(_)));
+        page.releasing[1] &= req.afi_safi != proto::AddressFamily::Ipv4Unicast as i32
+            && !matches!(prefix, Some(Prefix::V4(_)));
+        Ok(page)
     }
 
     async fn list_peer_evpn_routes(
@@ -2312,6 +2321,16 @@ fn route_page_to_response(
         String::new()
     };
     proto::ListRoutesResponse {
+        selection_release: Some(proto::SelectionReleaseState {
+            releasing_families: [
+                proto::AddressFamily::Ipv4Unicast,
+                proto::AddressFamily::Ipv6Unicast,
+            ]
+            .into_iter()
+            .zip(page.releasing)
+            .filter_map(|(family, releasing)| releasing.then_some(family as i32))
+            .collect(),
+        }),
         routes: page
             .routes
             .iter()
@@ -2976,16 +2995,8 @@ impl proto::rib_service_server::RibService for RibService {
             key.as_ref(),
         );
         let scope = RouteQueryScope::Received { peer };
-        let ((after, expected_version, known_total), page_size) =
-            parse_route_page_params(&req, scope, &query_identity)?;
         let page = self
-            .query_routes_page(
-                scope,
-                build_route_query_filter(req.afi_safi, filters, known_total),
-                after,
-                expected_version,
-                page_size,
-            )
+            .query_routes_page(scope, &req, filters, &query_identity)
             .await?;
         if let Some(key) = &key {
             self.require_known_peer_if_empty(key.address, page.routes.is_empty())
@@ -3019,16 +3030,8 @@ impl proto::rib_service_server::RibService for RibService {
         let filters = RouteFilters::from_request(&req)?;
         let query_identity = route_page_query_identity(req.afi_safi, &filters);
         let scope = RouteQueryScope::Best;
-        let ((after, expected_version, known_total), page_size) =
-            parse_route_page_params(&req, scope, &query_identity)?;
         let page = self
-            .query_routes_page(
-                scope,
-                build_route_query_filter(req.afi_safi, filters, known_total),
-                after,
-                expected_version,
-                page_size,
-            )
+            .query_routes_page(scope, &req, filters, &query_identity)
             .await?;
         Ok(Response::new(route_page_to_response(
             &page,
@@ -3066,16 +3069,8 @@ impl proto::rib_service_server::RibService for RibService {
             Some(&key),
         );
         let scope = RouteQueryScope::Advertised { peer };
-        let ((after, expected_version, known_total), page_size) =
-            parse_route_page_params(&req, scope, &query_identity)?;
         let page = self
-            .query_routes_page(
-                scope,
-                build_route_query_filter(req.afi_safi, filters, known_total),
-                after,
-                expected_version,
-                page_size,
-            )
+            .query_routes_page(scope, &req, filters, &query_identity)
             .await?;
         self.require_known_peer_if_empty(key.address, page.routes.is_empty())
             .await?;
@@ -8083,6 +8078,7 @@ mod tests {
         );
         route.peer = peer;
         let page = RoutePage {
+            releasing: [false; 2],
             peer_scope: rustbgpd_rib::PeerScope::default(),
             routes: vec![route],
             total: 2,
@@ -8661,6 +8657,7 @@ mod tests {
 
     fn list_routes_request() -> proto::ListRoutesRequest {
         proto::ListRoutesRequest {
+            accept_releasing: false,
             neighbor_address: String::new(),
             afi_safi: 0,
             page_size: 0,
@@ -11876,6 +11873,7 @@ mod tests {
         };
         let response = route_page_to_response(
             &RoutePage {
+                releasing: [false; 2],
                 peer_scope: rustbgpd_rib::PeerScope::default(),
                 routes: Vec::new(),
                 total: 0,
@@ -11902,6 +11900,17 @@ mod tests {
 
         let decoded = proto::ListRoutesResponse::decode(response.encode_to_vec().as_slice())
             .expect("route-page response round trip");
+        assert_eq!(
+            decoded.selection_release,
+            Some(proto::SelectionReleaseState::default())
+        );
+        let legacy = proto::ListRoutesResponse {
+            selection_release: None,
+            ..response
+        };
+        let decoded_legacy =
+            proto::ListRoutesResponse::decode(legacy.encode_to_vec().as_slice()).unwrap();
+        assert!(decoded_legacy.selection_release.is_none());
         assert_eq!(
             decoded.page_version,
             Some(proto::RoutePageVersion {
@@ -12097,6 +12106,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn empty_terminal_unicast_pages_mark_only_requested_releasing_families() {
+        use proto::AddressFamily::{Ipv4Unicast, Ipv6Unicast, Unspecified};
+
+        let (tx, mut rx) = mpsc::channel(1);
+        let service = RibService::new(tx);
+        for (family, prefix, expected) in [
+            (
+                Unspecified,
+                "",
+                vec![Ipv4Unicast as i32, Ipv6Unicast as i32],
+            ),
+            (Ipv4Unicast, "", vec![Ipv4Unicast as i32]),
+            (Ipv6Unicast, "", vec![Ipv6Unicast as i32]),
+            (Unspecified, "192.0.2.1", vec![Ipv4Unicast as i32]),
+            (Ipv4Unicast, "2001:db8::1", vec![]),
+        ] {
+            let request = Request::new(proto::ListRoutesRequest {
+                afi_safi: family as i32,
+                prefix_filter: prefix.to_owned(),
+                accept_releasing: true,
+                ..Default::default()
+            });
+            let serve_page = async {
+                let Some(RibUpdate::QueryRoutesPage {
+                    accept_releasing,
+                    reply,
+                    ..
+                }) = rx.recv().await
+                else {
+                    panic!("expected route page");
+                };
+                assert!(accept_releasing);
+                reply
+                    .send(Ok(RoutePage {
+                        releasing: [true, true],
+                        ..RoutePage::default()
+                    }))
+                    .unwrap();
+            };
+            let (response, ()) = tokio::join!(service.list_best_routes(request), serve_page);
+            let response = response.unwrap().into_inner();
+            assert_eq!(response.routes, []);
+            assert_eq!(response.next_page_token, "");
+            assert_eq!(
+                response.selection_release.unwrap().releasing_families,
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn stale_route_page_generation_maps_to_aborted_restart() {
         let (tx, mut rx) = mpsc::channel(1);
         tokio::spawn(async move {
@@ -12131,6 +12191,7 @@ mod tests {
         tokio::spawn(async move {
             while let Some(update) = rx.recv().await {
                 if let RibUpdate::QueryRoutesPage {
+                    accept_releasing: _,
                     scope,
                     filter,
                     after,
@@ -12145,6 +12206,7 @@ mod tests {
                     assert!(expected_version.is_none());
                     assert_eq!(page_size, 1);
                     let _ = reply.send(Ok(RoutePage {
+                        releasing: [false; 2],
                         peer_scope: rustbgpd_rib::PeerScope::default(),
                         routes: vec![page_route.clone()],
                         total: 2,
@@ -12233,6 +12295,7 @@ mod tests {
                 if let RibUpdate::QueryRoutesPage { scope, reply, .. } = update {
                     assert_eq!(scope, RouteQueryScope::Received { peer: Some(peer) });
                     let _ = reply.send(Ok(RoutePage {
+                        releasing: [false; 2],
                         peer_scope: rustbgpd_rib::PeerScope::default(),
                         routes: vec![route.clone()],
                         total: 2,
@@ -12321,6 +12384,7 @@ mod tests {
                 assert!(filter(&matching));
                 assert!(!filter(&nonmatching));
                 let _ = reply.send(Ok(RoutePage {
+                    releasing: [false; 2],
                     peer_scope: rustbgpd_rib::PeerScope::default(),
                     routes: vec![response_route],
                     total: 1,
@@ -12400,6 +12464,7 @@ mod tests {
                 assert_eq!(after, Some(key));
                 assert_eq!(expected_version, Some(version));
                 let _ = reply.send(Ok(RoutePage {
+                    releasing: [false; 2],
                     peer_scope: rustbgpd_rib::PeerScope::default(),
                     routes: Vec::new(),
                     total: 1,
@@ -12445,6 +12510,7 @@ mod tests {
             while let Some(update) = rx.recv().await {
                 if let RibUpdate::QueryRoutesPage { reply, .. } = update {
                     let _ = reply.send(Ok(RoutePage {
+                        releasing: [false; 2],
                         peer_scope: rustbgpd_rib::PeerScope::default(),
                         routes: page.clone(),
                         total: 2,

@@ -763,6 +763,7 @@ async fn collect_query_routes(tx: &mpsc::Sender<RibUpdate>, scope: RouteQuerySco
     loop {
         let (reply, response) = oneshot::channel();
         tx.send(RibUpdate::QueryRoutesPage {
+            accept_releasing: false,
             scope,
             filter: None,
             after,
@@ -1314,6 +1315,13 @@ fn drain_route_chunks(manager: &mut RibManager) {
     while manager.process_next_route_chunk() {}
 }
 
+/// Drive selection through its last marker sweep without spending any receiver's resync credit.
+fn drain_unicast_release(manager: &mut RibManager) {
+    while manager.unicast_release_runnable() {
+        manager.advance_unicast_release();
+    }
+}
+
 /// Run resync ticks while the actor would keep its resync timer armed.
 fn drain_resync_ticks(manager: &mut RibManager) {
     for _ in 0..64 {
@@ -1751,6 +1759,7 @@ mod outbound_resync_state;
 mod owed_cancellation;
 mod owed_evpn_cursor;
 mod owed_row_cursor;
+mod paced_selection_release;
 mod paged_query;
 mod peer_identity;
 mod per_client_best;

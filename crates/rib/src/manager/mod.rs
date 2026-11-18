@@ -1070,6 +1070,8 @@ pub struct RibManager {
     selection_deferral: Option<selection_deferral::SelectionDeferral>,
     /// Release updates every selected view before pending whole-peer resyncs emit.
     selection_release_staging: bool,
+    unicast_release: selection_deferral::UnicastReleases,
+    release_readiness_count: Option<usize>,
     /// Route identities touched while their family's Loc-RIB was frozen.
     /// Includes withdrawals so restored rows absent from Adj-RIB-In are
     /// still removed when the gate releases.
@@ -1129,6 +1131,11 @@ pub struct RibManager {
     rx: mpsc::Receiver<RibUpdate>,
     /// Priority channel for read-only queries (gRPC).
     query_rx: mpsc::Receiver<RibUpdate>,
+    /// At most one mailbox of legacy general reads waits for a coherent view.
+    release_general_reads: VecDeque<RibUpdate>,
+    /// Independent primary-read bound. Startup expiry and primary closure
+    /// may each admit their already queued FIFO (see `release_primary_has_room`).
+    release_primary_reads: VecDeque<RibUpdate>,
     /// Dedicated type-narrow lane used only by core readiness.
     readiness_rx: Option<mpsc::Receiver<RibReadinessQuery>>,
     /// Dedicated lane for summaries with frozen replacement projections.
@@ -1304,18 +1311,19 @@ pub struct RibManager {
     /// Adj-RIB-Out no longer names it. Bounded per owner by
     /// [`HELPER_STALE_EXEMPT_LIMIT`]; retired once nothing can hold that
     /// End-of-RIB.
-    hold_exempt_withdrawn: HashMap<HoldWithdrawOwner, BTreeSet<(Prefix, u32)>>,
+    hold_exempt_withdrawn: BTreeMap<HoldWithdrawOwner, BTreeSet<(Prefix, u32)>>,
     /// Hold sources (a selection family, a grace window) that went away
     /// since the last retirement pass; nonzero means a carry or ledger may
     /// have become retirable.
     helper_stale_hold_ends: u32,
+    release_helper_retirement: Option<peer_lifecycle::ReleaseHelperRetirement>,
     /// Exempt unicast keys an ended session of a GR-capable peer may still
     /// hold as stale (RFC 4724 §4.2). The peer drops stale routes only at
     /// our End-of-RIB, which a selection hold or replay grace can defer, so
     /// the next session withdraws the ones it does not advertise while it
     /// is held. Bounded by the exempt rows; retired per family once that
     /// End-of-RIB is sent or can no longer be held.
-    helper_stale_exempt: HashMap<PeerId, HelperStaleExempt>,
+    helper_stale_exempt: BTreeMap<PeerId, HelperStaleExempt>,
     /// Actual admitted unicast/VPN keys while a member's shared desired view
     /// can advance without delivery. Exact capacity charge is capped at
     /// 64 MiB per peer and 512 MiB per daemon (provisional qualification
@@ -2157,6 +2165,8 @@ pub(super) struct LiveSessionRecord {
     /// Initial unicast replay omitted rows behind process-start selection.
     /// Own its admitted-key proof independently of End-of-RIB replay grace.
     selection_initial_pending: bool,
+    /// An omitted grouped row was admitted before this family's terminal.
+    release_missing_admitted: [bool; 2],
     /// A process-start hold retains this receiver's admitted projection.
     selection_partial_pending: [bool; 4],
     /// Every currently exportable change is admitted; only held work remains.
@@ -2176,7 +2186,7 @@ pub(super) struct LiveSessionRecord {
 const HELPER_STALE_EXEMPT_LIMIT: usize = 1 << 16;
 
 /// Who a hold-scoped exempt withdrawal was sent to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum HoldWithdrawOwner {
     Group(usize),
     Peer(PeerId),
@@ -2197,6 +2207,9 @@ struct HelperStaleExempt {
     /// a flush cannot finish: a full writer, or a skipped set whose prefixes
     /// changed. The resync timer then runs until a flush settles it.
     settled: bool,
+    /// Startup batches touched a carried prefix. A sealed family wakes the
+    /// helper's ordinary retry independently of a sibling release.
+    release_changed: [bool; 2],
     /// Families whose waiting keys an ORF gate held at the last flush.
     orf_blocked: Vec<(Afi, Safi)>,
     /// Families whose waiting keys waited at the last flush because our
@@ -3056,6 +3069,8 @@ impl RibManager {
             eor_replay: eor_grace::ReplayWait::default(),
             selection_deferral: None,
             selection_release_staging: false,
+            unicast_release: selection_deferral::UnicastReleases::default(),
+            release_readiness_count: None,
             deferred_selection_keys: selection_deferral::DeferredSelectionKeys::default(),
             selection_deferred_refresh: HashMap::new(),
             peer_asn: HashMap::new(),
@@ -3068,9 +3083,10 @@ impl RibManager {
             group_ribs: HashMap::new(),
             pending_regroup_baseline: HashMap::new(),
             pending_extra_withdraws: HashMap::new(),
-            hold_exempt_withdrawn: HashMap::new(),
+            hold_exempt_withdrawn: BTreeMap::new(),
             helper_stale_hold_ends: 0,
-            helper_stale_exempt: HashMap::new(),
+            release_helper_retirement: None,
+            helper_stale_exempt: BTreeMap::new(),
             pending_group_admitted,
             evpn_recovery: update_groups::recovery_provenance::EvpnRecoveryProvenance::new(),
             evpn_recovery_reset: None,
@@ -3132,6 +3148,8 @@ impl RibManager {
             metrics,
             rx,
             query_rx,
+            release_general_reads: VecDeque::new(),
+            release_primary_reads: VecDeque::new(),
             readiness_rx: None,
             summary_rx: None,
             replacement_readiness: None,
@@ -3348,7 +3366,7 @@ impl RibManager {
                 observer: self.replacement_readiness_test_hook.clone(),
                 rx: self.readiness_rx.take(),
                 metrics: self.metrics.clone(),
-                count: self.loc_rib.len(),
+                count: self.completed_loc_rib_count(),
                 kind,
                 started,
                 last_service: tokio::time::Instant::now(),
@@ -3400,7 +3418,7 @@ impl RibManager {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        debug_assert_eq!(readiness.count, self.loc_rib.len());
+        debug_assert_eq!(readiness.count, self.completed_loc_rib_count());
         self.readiness_rx = readiness.rx.take();
         #[cfg(feature = "bench-internals")]
         readiness
@@ -3442,7 +3460,7 @@ impl RibManager {
             if context.kind == ReadinessOwnerKind::Replacement {
                 return;
             }
-            context.count = self.loc_rib.len();
+            context.count = self.completed_loc_rib_count();
         }
         self.replacement_checkpoint_at("selection_recompute", false);
     }
@@ -3547,6 +3565,8 @@ impl RibManager {
     #[must_use]
     pub fn with_selection_deferral(mut self, config: SelectionDeferralConfig) -> Self {
         self.selection_deferral = selection_deferral::SelectionDeferral::new(config, &self.metrics);
+        self.update_selection_inventory_index();
+        self.initialize_release_peers();
         self
     }
 
@@ -4025,10 +4045,138 @@ impl RibManager {
         }
     }
 
+    fn completed_loc_rib_count(&self) -> usize {
+        self.release_readiness_count
+            .unwrap_or_else(|| self.loc_rib.len())
+    }
+
+    /// Compatibility boundary for snapshot reads. The page opt-in covers its
+    /// own empty/terminal replies. A scalar count uses the last complete view.
+    fn release_fences_read(&self, update: &RibUpdate) -> bool {
+        if !self.unicast_release_partial() {
+            return false;
+        }
+        // The public envelope can be constructed directly. Classify the
+        // operation dispatch will actually perform, including nested permits.
+        let mut update = update;
+        while let RibUpdate::SessionRoutes { routes, .. } = update {
+            update = routes;
+        }
+        if update.actor_turn_kind() != rustbgpd_telemetry::metrics::RibActorTurnKind::Query {
+            return false;
+        }
+        match update {
+            RibUpdate::QueryRoutesPage {
+                accept_releasing,
+                filter,
+                ..
+            } => {
+                if *accept_releasing {
+                    return false;
+                }
+                let afi = filter.as_ref().and_then(|filter| {
+                    crate::update::ordered_route_query(filter)
+                        .and_then(|(afi, _)| afi)
+                        .or_else(|| {
+                            crate::update::prefix_route_query(filter).map(|p| prefix_family(&p).0)
+                        })
+                });
+                afi.is_none_or(|afi| self.unicast_release_in_progress(afi))
+            }
+            RibUpdate::ExplainBestPath { prefix, .. }
+            | RibUpdate::LookupBestPath { prefix, .. } => {
+                self.unicast_release_in_progress(prefix_family(prefix).0)
+            }
+            RibUpdate::ExplainAdvertisedRoute {
+                prefix,
+                rd,
+                labeled,
+                ..
+            } => {
+                rd.is_none()
+                    && !*labeled
+                    && self.unicast_release_in_progress(prefix_family(prefix).0)
+            }
+            // Subscriptions report committed deltas and must see registrations
+            // in order. The other queries here do not materialize unicast state.
+            RibUpdate::SubscribeRouteEvents { .. }
+            | RibUpdate::SubscribeFibCandidateChanges { .. }
+            | RibUpdate::QueryRouteEventHistory { .. }
+            | RibUpdate::QueryLocRibCount { .. }
+            | RibUpdate::QueryInstalledExportChain { .. }
+            | RibUpdate::QueryPeerGroups { .. }
+            | RibUpdate::QueryPeerGroupsVersioned { .. }
+            | RibUpdate::QueryPeerRetainedStale { .. }
+            | RibUpdate::QueryPeerRetention { .. }
+            | RibUpdate::QueryPeerRetentions { .. }
+            | RibUpdate::QueryPeerUpdateGroup { .. }
+            | RibUpdate::QueryUpdateGroupSnapshot { .. }
+            | RibUpdate::QueryUpdateGroupComparison { .. }
+            | RibUpdate::QueryLeasedKeys { .. }
+            | RibUpdate::SubscribeEvpnRouteEvents { .. }
+            | RibUpdate::QueryEvpnRouteEventHistory { .. }
+            | RibUpdate::QueryEvpnRoutes { .. }
+            | RibUpdate::QueryEvpnRoutesPage { .. }
+            | RibUpdate::QueryEvpnDataplaneRoutes { .. }
+            | RibUpdate::QueryEvpnSessionsSynced { .. }
+            | RibUpdate::QueryEvpnEsSnapshot { .. }
+            | RibUpdate::QueryBgpLsRoutes { .. }
+            | RibUpdate::QueryBgpLsRoutesPage { .. }
+            | RibUpdate::QueryRtcRoutes { .. }
+            | RibUpdate::QueryRtcRoutesPage { .. }
+            | RibUpdate::QueryVpnRoutes { .. }
+            | RibUpdate::QueryVpnRoutesPage { .. }
+            | RibUpdate::QueryLabeledRoutes { .. }
+            | RibUpdate::QueryLabeledRoutesPage { .. } => false,
+            _ => true,
+        }
+    }
+
+    /// Replay one admitted request at the first seam where its view is complete.
+    fn serve_released_read(&mut self) -> bool {
+        if self
+            .release_primary_reads
+            .front()
+            .is_some_and(|q| !self.release_fences_read(q))
+        {
+            let query = self
+                .release_primary_reads
+                .pop_front()
+                .expect("checked front");
+            if self.release_primary_reads.is_empty() {
+                self.release_primary_reads.shrink_to_fit();
+            }
+            self.handle_update(query);
+            true
+        } else if self
+            .release_general_reads
+            .front()
+            .is_some_and(|q| !self.release_fences_read(q))
+        {
+            let query = self
+                .release_general_reads
+                .pop_front()
+                .expect("checked front");
+            if self.release_general_reads.is_empty() {
+                self.release_general_reads.shrink_to_fit();
+            }
+            self.serve_general_query(query);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Drain a bounded number of pending queries from the priority channel.
     fn drain_queries(&mut self, limit: usize) {
+        if self.release_delivery_pending() {
+            return;
+        }
         self.drain_summary_queries();
         for _ in 0..limit {
+            if self.release_general_reads.len() >= self.query_rx.max_capacity() {
+                break;
+            }
             let Ok(query) = self.query_rx.try_recv() else {
                 break;
             };
@@ -4041,6 +4189,10 @@ impl RibManager {
     /// through here so the post-commit query trace is consumed by the
     /// first general query dispatched, whichever path delivers it.
     fn serve_general_query(&mut self, query: RibUpdate) {
+        if self.release_fences_read(&query) {
+            self.release_general_reads.push_back(query);
+            return;
+        }
         if let Some(trace) = self.post_commit_query_trace.take() {
             trace.emit("general");
         }
@@ -4123,7 +4275,7 @@ impl RibManager {
                     Some(elapsed) if elapsed >= MAX_HEALTHY_POLICY_TRANSITION_AGE => {
                         Err(RibReadinessError::PolicyTransitionStalled)
                     }
-                    _ => Ok(self.loc_rib.len()),
+                    _ => Ok(self.completed_loc_rib_count()),
                 };
                 let _ = reply.send(result);
             }
@@ -4247,7 +4399,8 @@ impl RibManager {
         self.dirty_peers.iter().any(|&peer| {
             self.replacement_checkpoint(false);
             self.dirty_unit_due(peer)
-        }) || !self.pending_inbound_refresh.is_empty()
+        }) || self.next_late_release_join().is_some()
+            || !self.pending_inbound_refresh.is_empty()
             || self.helper_stale_exempt.iter().any(|(&peer, carried)| {
                 self.replacement_checkpoint(false);
                 self.helper_stale_needs_rescan(peer, carried)
@@ -4272,7 +4425,9 @@ impl RibManager {
     /// families, nor an evicted receiver's inside an EVPN selection hold
     /// ([`Self::evicted_unit_held`]). The hold's release makes it due.
     fn dirty_unit_due(&self, peer: PeerId) -> bool {
-        !self.selection_partial_caught_up(peer) && !self.evicted_unit_held(peer)
+        !self.selection_partial_caught_up(peer)
+            && !self.evicted_unit_held(peer)
+            && !self.release_resync_waits(peer)
     }
 
     /// The outcome label of a resync tick that re-arms: `still_dirty` while
@@ -4335,6 +4490,7 @@ impl RibManager {
         // between the chunks of an open distribution window: settle it
         // (flush and exact-export retirement) before any recovery runs.
         self.settle_distribution_window();
+        self.recover_late_release_join();
         // ADR-0113 capacity recovery is family-scoped and already coalesced.
         // One live peer/family is replayed per timer tick; any runnable
         // remainder keeps `resync_tick_pending` true and re-arms the timer.
@@ -4420,6 +4576,7 @@ impl RibManager {
             // This unit is where a receiver the owed-row cap evicted is
             // built; it stays marked while it stays dirty.
             let evicted = self.owed_row_evicted.remove(&last);
+            self.take_late_joins_for_resync(last);
             let built = self.distribute_changes_without_stale_flush(evicted.then_some(last));
             let still_dirty = self.dirty_peers.contains(&last);
             if evicted && still_dirty {
@@ -4565,16 +4722,65 @@ impl RibManager {
         }
     }
 
+    /// While an interrupted Stage waits for its replacement session, backpressure
+    /// primary reads after one mailbox. The one-shot startup timer may also drain
+    /// its captured backlog (at most one mailbox and the held lookahead), so an
+    /// already admitted `EoR` can win the race even with the read buffer full.
+    fn release_primary_has_room(&mut self) -> bool {
+        // The peer manager samples both BMP statistics every minute with a
+        // reply deadline. A parked Stage must not accumulate abandoned samples.
+        if self.release_primary_reads.front().is_some_and(|q| match q {
+            RibUpdate::QueryBmpPeerStats { reply } => reply.is_closed(),
+            RibUpdate::QueryBmpLocRibStats { reply } => reply.is_closed(),
+            _ => false,
+        }) {
+            self.release_primary_reads.pop_front();
+        }
+        self.release_primary_reads.len() < self.rx.max_capacity()
+            // Closing the input fixes its remaining backlog, including its
+            // reserved permits. Consume it so a final queued EoR or mutation
+            // can settle an admitted read before the actor observes EOF.
+            || self.rx.is_closed()
+            || self
+                .expiry_cutoffs
+                .remaining(ExpiryTimer::SelectionDeferral)
+                > 0
+    }
+
+    /// Probe one FIFO head at saturation. Mutations and compatible reads can
+    /// still proceed while only the legacy read buffer is full.
+    fn can_receive_release_primary(&mut self) -> bool {
+        if self.release_primary_has_room() {
+            return true;
+        }
+        if self.primary_lookahead.is_none() {
+            self.primary_lookahead = self.rx.try_recv().ok();
+        }
+        self.primary_lookahead
+            .as_ref()
+            .is_none_or(|update| !self.release_fences_read(update))
+    }
+
+    fn admit_primary(&mut self, update: RibUpdate) -> Option<RibUpdate> {
+        if !self.release_primary_has_room() && self.release_fences_read(&update) {
+            self.primary_lookahead = Some(update);
+            return None;
+        }
+        Some(update)
+    }
+
     /// The next queued primary update, the held lookahead first.
     fn try_recv_primary(&mut self) -> Option<RibUpdate> {
+        if self.release_delivery_pending() {
+            return None;
+        }
         let update = self
             .primary_lookahead
             .take()
-            .or_else(|| self.rx.try_recv().ok());
-        if update.is_some() {
-            self.expiry_cutoffs.charge();
-        }
-        update
+            .or_else(|| self.rx.try_recv().ok())?;
+        let update = self.admit_primary(update)?;
+        self.expiry_cutoffs.charge();
+        Some(update)
     }
 
     /// A due timer's admission cutoff is exhausted: coalescing paths must
@@ -4661,6 +4867,10 @@ impl RibManager {
     /// (primary, general and summary queries) dispatches through here, except
     /// summaries answered from a synchronous replacement's frozen projection.
     fn handle_update(&mut self, update: RibUpdate) {
+        if self.release_fences_read(&update) {
+            self.release_primary_reads.push_back(update);
+            return;
+        }
         let turn = actor_turn::ActorTurn::new(&update, &self.ribs);
         let started = std::time::Instant::now();
         self.handle_update_untimed(update);
@@ -5238,6 +5448,7 @@ impl RibManager {
                 self.handle_expire_injection_leases(&leases);
             }
             RibUpdate::QueryRoutesPage {
+                accept_releasing: _,
                 scope,
                 filter,
                 after,
@@ -6199,12 +6410,11 @@ impl RibManager {
                 unprobed.insert(found);
             }
         }
-        let walk = unresolved;
-        if walk.contains(&true) {
+        if unresolved.contains(&true) {
             // The walk is table-sized, so it takes the readiness lane.
             self.with_ingest_readiness(|manager| {
                 let readiness = manager.replacement_readiness.clone();
-                let mut settle = |identity: ExactExportKey| {
+                manager.visit_unindexed_export_identities(unresolved, |identity| {
                     #[cfg(test)]
                     reads.set(reads.get() + 1);
                     replacement_readiness_checkpoint_at(
@@ -6215,31 +6425,14 @@ impl RibManager {
                     if let Some(found) = live.get_mut(&identity) {
                         *found = true;
                     }
-                };
-                for rib in manager.ribs.values() {
-                    if walk[0] {
-                        for route in rib.iter_flowspec() {
-                            settle(ExactExportKey::FlowSpec(route.selection_key()));
-                        }
-                    }
-                    if walk[1] {
-                        for route in rib.iter_bgpls() {
-                            settle(ExactExportKey::BgpLs(route.key()).nlri_identity());
-                        }
-                    }
-                    if walk[2] {
-                        for route in rib.iter_rtc() {
-                            settle(ExactExportKey::Rtc(route.key()).nlri_identity());
-                        }
-                    }
-                }
+                });
             });
         }
-        overlay.retain(|_, rejected| {
+        overlay.retain(|peer, rejected| {
             checkpoint();
             rejected.retain(|key| {
                 checkpoint();
-                match live.entry(key.nlri_identity()) {
+                let keep = match live.entry(key.nlri_identity()) {
                     std::collections::hash_map::Entry::Occupied(probed) => *probed.get(),
                     std::collections::hash_map::Entry::Vacant(unprobed) => {
                         #[cfg(test)]
@@ -6251,7 +6444,11 @@ impl RibManager {
                         });
                         *unprobed.insert(is_live)
                     }
+                };
+                if !keep {
+                    self.unicast_release.rejections.record(*peer, key, false);
                 }
+                keep
             });
             !rejected.is_empty()
         });
@@ -6259,6 +6456,32 @@ impl RibManager {
         #[cfg(test)]
         {
             self.test_exact_export_liveness_reads += reads.get();
+        }
+    }
+
+    /// Walk the requested families whose received NLRI cannot be looked up
+    /// by identity independently of its input path ID.
+    fn visit_unindexed_export_identities(
+        &self,
+        walk: [bool; 3],
+        mut visit: impl FnMut(ExactExportKey),
+    ) {
+        for rib in self.ribs.values() {
+            if walk[0] {
+                for route in rib.iter_flowspec() {
+                    visit(ExactExportKey::FlowSpec(route.selection_key()));
+                }
+            }
+            if walk[1] {
+                for route in rib.iter_bgpls() {
+                    visit(ExactExportKey::BgpLs(route.key()).nlri_identity());
+                }
+            }
+            if walk[2] {
+                for route in rib.iter_rtc() {
+                    visit(ExactExportKey::Rtc(route.key()).nlri_identity());
+                }
+            }
         }
     }
 
@@ -6481,12 +6704,16 @@ impl RibManager {
         {
             self.test_exact_export_liveness_reads += reads.get();
         }
-        self.peer_unexportable.retain(|_, rejected| {
+        self.peer_unexportable.retain(|peer, rejected| {
             checkpoint();
             rejected.retain(|key| {
                 checkpoint();
                 let identity = key.nlri_identity();
-                !rejected_withdrawn.contains(&identity) || live.contains(&identity)
+                let keep = !rejected_withdrawn.contains(&identity) || live.contains(&identity);
+                if !keep {
+                    self.unicast_release.rejections.record(*peer, key, false);
+                }
+                keep
             });
             !rejected.is_empty()
         });
@@ -6534,10 +6761,6 @@ impl RibManager {
         let _ = self.route_events_tx.send(event);
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "prefix-scoped rejection mutation and transition event publication share one commit"
-    )]
     pub(super) fn update_policy_filtered_routes_for_prefixes(
         &mut self,
         target_peer: PeerId,
@@ -6633,31 +6856,39 @@ impl RibManager {
         };
         for key in newly_filtered.by_ref() {
             self.replacement_checkpoint(false);
-            let peer_scope = self
-                .ribs
-                .get(&key.source_peer)
-                .and_then(|rib| rib.get(&key.prefix, key.path_id))
-                .map_or(crate::route::AspaContextId::DEFAULT, |route| {
-                    route.aspa_context
-                });
-            self.publish_route_event(RouteEvent {
-                event_id: 0,
-                event_type: RouteEventType::PolicyFiltered,
-                prefix: key.prefix,
-                peer: Some(key.source_peer.addr()),
-                previous_peer: None,
-                target_peer: Some(key.target_peer.addr()),
-                peer_scope,
-                previous_peer_scope: crate::route::AspaContextId::DEFAULT,
-                target_peer_scope,
-                timestamp_unix_ms: crate::event::unix_time_ms_now(),
-                path_id: key.path_id,
-                reason: "policy_denied".to_string(),
-            });
+            self.publish_policy_filtered_key(key, target_peer_scope);
         }
         self.replacement_checkpoint(true);
         drop(newly_filtered);
         self.replacement_checkpoint(true);
+    }
+
+    fn publish_policy_filtered_key(
+        &mut self,
+        key: PolicyFilteredRouteKey,
+        target_peer_scope: crate::route::AspaContextId,
+    ) {
+        let peer_scope = self
+            .ribs
+            .get(&key.source_peer)
+            .and_then(|rib| rib.get(&key.prefix, key.path_id))
+            .map_or(crate::route::AspaContextId::DEFAULT, |route| {
+                route.aspa_context
+            });
+        self.publish_route_event(RouteEvent {
+            event_id: 0,
+            event_type: RouteEventType::PolicyFiltered,
+            prefix: key.prefix,
+            peer: Some(key.source_peer.addr()),
+            previous_peer: None,
+            target_peer: Some(key.target_peer.addr()),
+            peer_scope,
+            previous_peer_scope: crate::route::AspaContextId::DEFAULT,
+            target_peer_scope,
+            timestamp_unix_ms: crate::event::unix_time_ms_now(),
+            path_id: key.path_id,
+            reason: "policy_denied".to_string(),
+        });
     }
 
     pub(super) fn clear_policy_filtered_routes_for_peer(&mut self, target_peer: PeerId) {
@@ -7523,6 +7754,7 @@ impl RibManager {
         let mut primary_run = PrimaryRunBudget::default();
         // Start of the primary work admitted since the last prestage slice.
         let mut prestage_primary_since: Option<std::time::Instant> = None;
+        let mut release_primary_due = true;
 
         // A deferred attribute sweep must also run when UPDATE traffic stops.
         let attr_gc_sleep = tokio::time::sleep(ATTR_INTERN_GC_INTERVAL);
@@ -7562,6 +7794,15 @@ impl RibManager {
         tokio::pin!(registration_wait_sleep);
 
         loop {
+            // A staged group delta must reach its members before another mutation
+            // can change the shared table or membership. Yield the executor on
+            // every bounded member poll; admit primary traffic at the batch seam.
+            if self.release_delivery_pending() {
+                self.advance_unicast_release();
+                self.drain_readiness_queries(None);
+                tokio::task::yield_now().await;
+                continue;
+            }
             // Every timer and queued-work turn ends here too.
             self.settle_eor_after_pass();
             #[cfg(test)]
@@ -7688,12 +7929,13 @@ impl RibManager {
                 continue;
             }
 
+            let released_read = self.serve_released_read();
             // One bounded validation slice per ordinary actor turn, including
             // under sustained primary traffic. Clean transitions above retain
             // their existing ownership fence.
             let validated_flowspec = self.process_flowspec_validation_chunk();
             let retired_dampening = self.dampening_history.retire(ROUTES_RECEIVED_CHUNK_SIZE) > 0;
-            if validated_flowspec || retired_dampening {
+            if validated_flowspec || retired_dampening || released_read {
                 self.drain_readiness_queries(None);
                 self.drain_queries(QUERY_BUDGET_PER_CHUNK);
                 tokio::task::yield_now().await;
@@ -7780,6 +8022,9 @@ impl RibManager {
                 false
             };
 
+            let accept_summary = !self.unicast_release_partial();
+            let accept_general =
+                query_rx_open && self.release_general_reads.len() < self.query_rx.max_capacity();
             let needs_timers = has_attr_gc_timer
                 || has_registration_wait_timer
                 || resync_armed
@@ -7841,12 +8086,22 @@ impl RibManager {
                 self.expiry_cutoffs
                     .observe(timer, due.then_some(deadline), now, backlog);
             }
+            let accept_primary = self.can_receive_release_primary();
             let cutoffs = &self.expiry_cutoffs;
-            let rtc_eor_due = rtc_eor_due && !cutoffs.yields(ExpiryTimer::RtcEor);
-            let conditional_due = conditional_due && !cutoffs.yields(ExpiryTimer::Conditional);
-            let gr_due = gr_due && !cutoffs.yields(ExpiryTimer::GrStale);
-            let llgr_due = llgr_due && !cutoffs.yields(ExpiryTimer::LlgrStale);
-            let refresh_due = refresh_due && !cutoffs.yields(ExpiryTimer::RefreshWindow);
+            // A re-armed startup Stage can be parked until its deadline. Keep
+            // other due timers' cutoffs when their pre-deadline FIFO is held by
+            // read backpressure. Sleep until the startup timer or another
+            // source can make progress instead of polling an already due timer.
+            let schedule = |timer, due: bool| {
+                let waiting = due && !accept_primary && cutoffs.remaining(timer) > 0;
+                (due && !waiting && !cutoffs.yields(timer), !waiting)
+            };
+            let (rtc_eor_due, wake_rtc_eor) = schedule(ExpiryTimer::RtcEor, rtc_eor_due);
+            let (conditional_due, wake_conditional) =
+                schedule(ExpiryTimer::Conditional, conditional_due);
+            let (gr_due, wake_gr) = schedule(ExpiryTimer::GrStale, gr_due);
+            let (llgr_due, wake_llgr) = schedule(ExpiryTimer::LlgrStale, llgr_due);
+            let (refresh_due, wake_refresh) = schedule(ExpiryTimer::RefreshWindow, refresh_due);
             let selection_due = selection_due && !cutoffs.yields(ExpiryTimer::SelectionDeferral);
             if rtc_eor_due {
                 // A queued RT-Constrain EoR releases the hold with its
@@ -7960,6 +8215,21 @@ impl RibManager {
                 continue;
             }
 
+            if self.unicast_release_runnable() {
+                if release_primary_due && self.drain_ready_updates().await {
+                    release_primary_due = false;
+                    continue;
+                }
+                release_primary_due = true;
+                self.advance_unicast_release();
+                self.drain_readiness_queries(None);
+                if !self.release_delivery_pending() {
+                    self.drain_queries(QUERY_BUDGET_PER_CHUNK);
+                }
+                tokio::task::yield_now().await;
+                continue;
+            }
+
             // Unfenced destination pre-staging: queued mutation traffic goes
             // first, so churn keeps flowing (and keeps already-staged
             // prefixes current) between slices. That priority is bounded:
@@ -8009,7 +8279,7 @@ impl RibManager {
                 self.drain_readiness_queries(None);
                 self.drain_queries(QUERY_BUDGET_PER_CHUNK);
                 tokio::task::yield_now().await;
-            } else if validated_flowspec || retired_dampening {
+            } else if validated_flowspec || retired_dampening || released_read {
                 // Do not sleep while validation remains queued, but admit a
                 // primary update between slices instead of monopolizing turns.
                 if let Some(update) = self.try_recv_primary() {
@@ -8018,29 +8288,36 @@ impl RibManager {
                     });
                     self.drain_general_queries_if_unfenced();
                 }
-            } else if needs_timers {
+            } else if needs_timers || !accept_primary {
                 tokio::select! {
+                    // A saturated legacy FIFO cannot poll recv for closure.
+                    // Recheck it at the ordinary retry cadence, including when
+                    // every remaining sender drops while this actor is asleep.
+                    () = async { tokio::time::sleep(DIRTY_RESYNC_INTERVAL).await }, if !accept_primary => {}
                     readiness = Self::receive_readiness_query(&mut self.readiness_rx) => {
                         match readiness {
                             Some(query) => self.serve_readiness_query(query).await,
                             None => self.readiness_rx = None,
                         }
                     }
-                    summary = Self::receive_summary_query(&mut self.summary_rx) => {
+                    summary = Self::receive_summary_query(&mut self.summary_rx), if accept_summary => {
                         match summary {
                             Some(query) => self.serve_summary_query(query),
                             None => self.summary_rx = None,
                         }
                     }
-                    query = self.query_rx.recv(), if query_rx_open => {
+                    query = self.query_rx.recv(), if accept_general => {
                         match query {
                             Some(q) => self.serve_general_query(q),
                             None => query_rx_open = false,
                         }
                     }
-                    update = Self::recv_primary(&mut self.primary_lookahead, &mut self.rx) => {
+                    update = Self::recv_primary(&mut self.primary_lookahead, &mut self.rx), if accept_primary => {
                         match update {
                             Some(update) => {
+                                let Some(update) = self.admit_primary(update) else {
+                                    continue;
+                                };
                                 self.maybe_stall_test_ingest(&update).await;
                                 let started = primary_run
                                     .start(std::time::Instant::now(), &self.actor_suspended);
@@ -8095,12 +8372,12 @@ impl RibManager {
                     }
                     // Each timer only wakes the loop: expiry is applied by
                     // the due checks above, under its admission cutoff.
-                    () = gr_sleep.as_mut(), if has_gr_timers => {}
-                    () = llgr_sleep.as_mut(), if has_llgr_timers => {}
-                    () = refresh_sleep.as_mut(), if has_refresh_timers => {}
-                    () = rtc_eor_sleep.as_mut(), if has_rtc_eor_timer => {}
+                    () = gr_sleep.as_mut(), if has_gr_timers && wake_gr => {}
+                    () = llgr_sleep.as_mut(), if has_llgr_timers && wake_llgr => {}
+                    () = refresh_sleep.as_mut(), if has_refresh_timers && wake_refresh => {}
+                    () = rtc_eor_sleep.as_mut(), if has_rtc_eor_timer && wake_rtc_eor => {}
                     () = selection_sleep.as_mut(), if has_selection_timer => {}
-                    () = conditional_sleep.as_mut(), if has_conditional_timer => {}
+                    () = conditional_sleep.as_mut(), if has_conditional_timer && wake_conditional => {}
                     () = registration_wait_sleep.as_mut(), if has_registration_wait_timer => {}
                     () = latch_released.notified(), if resync_armed => {
                         // A whole-table operation drained: work deferred
@@ -8121,21 +8398,24 @@ impl RibManager {
                             None => self.readiness_rx = None,
                         }
                     }
-                    summary = Self::receive_summary_query(&mut self.summary_rx) => {
+                    summary = Self::receive_summary_query(&mut self.summary_rx), if accept_summary => {
                         match summary {
                             Some(query) => self.serve_summary_query(query),
                             None => self.summary_rx = None,
                         }
                     }
-                    query = self.query_rx.recv(), if query_rx_open => {
+                    query = self.query_rx.recv(), if accept_general => {
                         match query {
                             Some(q) => self.serve_general_query(q),
                             None => query_rx_open = false,
                         }
                     }
-                    update = Self::recv_primary(&mut self.primary_lookahead, &mut self.rx) => {
+                    update = Self::recv_primary(&mut self.primary_lookahead, &mut self.rx), if accept_primary => {
                         match update {
                             Some(update) => {
+                                let Some(update) = self.admit_primary(update) else {
+                                    continue;
+                                };
                                 self.maybe_stall_test_ingest(&update).await;
                                 let started = primary_run
                                     .start(std::time::Instant::now(), &self.actor_suspended);
@@ -8164,6 +8444,17 @@ impl RibManager {
                 self.metrics.record_rib_dirty_resync("cleared");
                 resync_armed = false;
             }
+        }
+
+        // A stopped Stage can still fence one AFI. EOF means there is no
+        // further primary input to settle it. Discard only ineligible heads
+        // so eligible sibling reads queued behind them receive their answer.
+        while !self.release_primary_reads.is_empty() || !self.release_general_reads.is_empty() {
+            if !self.serve_released_read() {
+                self.release_primary_reads.pop_front();
+                self.release_general_reads.pop_front();
+            }
+            tokio::task::yield_now().await;
         }
 
         debug!("rib manager shutting down");

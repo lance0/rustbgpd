@@ -1916,6 +1916,7 @@ impl MockRibService {
         let mut pages = self.state.list_route_pages.lock().await;
         Ok(if pages.is_empty() {
             server_proto::ListRoutesResponse {
+                selection_release: None,
                 routes: vec![],
                 next_page_token: String::new(),
                 total_count: 0,

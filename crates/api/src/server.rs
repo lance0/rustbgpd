@@ -2110,6 +2110,7 @@ async fn run_tcp_listener(
     ));
     routes.add_service(InjectionServiceServer::with_interceptor(
         InjectionService::new(rib_tx, max_tier, Arc::clone(&injection_leases))
+            .with_export_queries(rib_query_tx.clone())
             .with_peer_roster(import_roster.clone()),
         interceptor.clone(),
     ));
@@ -2399,6 +2400,7 @@ async fn run_uds_listener(
     ));
     routes.add_service(InjectionServiceServer::with_interceptor(
         InjectionService::new(rib_tx, max_tier, Arc::clone(&injection_leases))
+            .with_export_queries(rib_query_tx.clone())
             .with_peer_roster(import_roster.clone()),
         interceptor.clone(),
     ));

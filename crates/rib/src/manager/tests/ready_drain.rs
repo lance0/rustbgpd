@@ -150,6 +150,7 @@ async fn timer_drain_invalidates_a_page_before_the_next_route_chunk() {
     let (reply, mut response) = oneshot::channel();
     query_tx
         .try_send(RibUpdate::QueryRoutesPage {
+            accept_releasing: false,
             scope: RouteQueryScope::Best,
             filter: None,
             after: None,
@@ -175,6 +176,7 @@ async fn timer_drain_invalidates_a_page_before_the_next_route_chunk() {
     let (reply, mut continuation) = oneshot::channel();
     query_tx
         .try_send(RibUpdate::QueryRoutesPage {
+            accept_releasing: false,
             scope: RouteQueryScope::Best,
             filter: None,
             after: page.routes.last().map(route_query_key),
@@ -493,4 +495,248 @@ async fn injected_unicast_keeps_answering_readiness_during_selection_deferral() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn leased_unicast_keeps_answering_readiness_during_selection_deferral() {
     assert_injected_unicast_readiness_during_deferral(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn startup_release_preserves_readiness_and_holds_replacement_summaries() {
+    let (tx, rx) = mpsc::channel(2);
+    let (readiness_tx, readiness_rx) = mpsc::channel(2);
+    let (summary_tx, summary_rx) = mpsc::channel(2);
+    let mut manager = timer_manager(rx, dummy_query_rx())
+        .with_readiness_queries(readiness_rx)
+        .with_summary_queries(summary_rx);
+    manager.handle_update(routes(Ipv4Addr::new(10, 0, 0, 1), 0, 1));
+    while manager.traced_route_chunk() {}
+    assert_eq!(manager.loc_rib.len(), 1);
+    let family = (Afi::Ipv4, Safi::Unicast);
+    manager.release_readiness_count = Some(0);
+    manager.set_owed_release_open(family, true);
+
+    let (reply, mut summary) = oneshot::channel();
+    summary_tx
+        .try_send(crate::update::RibSummaryQuery::NeighborRibSnapshots {
+            peers: Vec::new(),
+            comparison: None,
+            include_retained: false,
+            reply,
+        })
+        .unwrap();
+    let (reply, mut readiness) = oneshot::channel();
+    readiness_tx
+        .try_send(RibReadinessQuery::LocRibCount {
+            reply,
+            enqueued: Instant::now(),
+        })
+        .unwrap();
+    manager.with_replacement_summary_reads("partial release", |manager| {
+        manager.replacement_checkpoint(true);
+    });
+    assert_eq!(readiness.try_recv().unwrap().unwrap(), 0);
+    assert!(matches!(
+        summary.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+
+    let (reply, mut count) = oneshot::channel();
+    tx.try_send(RibUpdate::QueryLocRibCount { reply }).unwrap();
+    assert!(manager.drain_ready_updates().await);
+    assert_eq!(count.try_recv().unwrap(), 0);
+    assert!(matches!(
+        summary.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+
+    manager.set_owed_release_open(family, false);
+    manager.release_readiness_count = None;
+    manager.drain_queries(1);
+    assert!(summary.try_recv().is_ok());
+    let (reply, mut readiness) = oneshot::channel();
+    manager.handle_readiness_query(
+        RibReadinessQuery::LocRibCount {
+            reply,
+            enqueued: Instant::now(),
+        },
+        None,
+    );
+    assert_eq!(readiness.try_recv().unwrap().unwrap(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn full_legacy_read_buffer_preserves_startup_timer_admission_cutoff() {
+    let (tx, rx) = mpsc::channel(1);
+    let mut manager = timer_manager(rx, dummy_query_rx());
+    manager.release_readiness_count = Some(0);
+    manager.set_owed_release_open((Afi::Ipv4, Safi::Unicast), true);
+    let (reply, mut parked) = oneshot::channel();
+    // Even a manually wrapped read retains the visibility contract and its
+    // ingest permits until its own reply. Normal sessions only wrap routes.
+    let budget = crate::ingest_budget::IngestBudget::new();
+    let wrapped = RibUpdate::SessionRoutes {
+        permit: budget.charge(1),
+        routes: Box::new(RibUpdate::SessionRoutes {
+            permit: budget.charge(1),
+            routes: Box::new(RibUpdate::QueryBmpLocRibStats { reply }),
+        }),
+    };
+    tx.try_send(wrapped).unwrap();
+    assert!(manager.drain_ready_updates().await);
+
+    let (reply, mut compatible) = oneshot::channel();
+    tx.try_send(RibUpdate::QueryLocRibCount { reply }).unwrap();
+    assert!(manager.drain_ready_updates().await);
+    assert_eq!(compatible.try_recv().unwrap(), 0);
+
+    let (reply, mut legacy_head) = oneshot::channel();
+    tx.try_send(RibUpdate::QueryBmpLocRibStats { reply })
+        .unwrap();
+    assert!(!manager.drain_ready_updates().await);
+    let (reply, mut before_deadline) = oneshot::channel();
+    tx.try_send(RibUpdate::QueryLocRibCount { reply }).unwrap();
+    let now = tokio::time::Instant::now();
+    for timer in [
+        ExpiryTimer::GrStale,
+        ExpiryTimer::LlgrStale,
+        ExpiryTimer::RtcEor,
+    ] {
+        manager
+            .expiry_cutoffs
+            .observe(timer, Some(now), now, manager.primary_backlog());
+        assert!(!manager.can_receive_release_primary());
+        assert!(!manager.drain_ready_updates().await);
+        assert_eq!(manager.release_primary_reads.len(), 1);
+        assert_eq!(manager.primary_backlog(), 2);
+    }
+    manager.expiry_cutoffs.observe(
+        ExpiryTimer::SelectionDeferral,
+        Some(now),
+        now,
+        manager.primary_backlog(),
+    );
+    assert!(
+        manager
+            .drain_before_expiry(ExpiryTimer::SelectionDeferral)
+            .await
+    );
+    assert!(
+        manager
+            .drain_before_expiry(ExpiryTimer::SelectionDeferral)
+            .await
+    );
+    assert_eq!(manager.release_primary_reads.len(), 2);
+    assert_eq!(budget.unfinished(), 2);
+    assert_eq!(before_deadline.try_recv().unwrap(), 0);
+    assert!(matches!(
+        parked.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    assert!(matches!(
+        legacy_head.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    let (reply, mut after_deadline) = oneshot::channel();
+    tx.try_send(RibUpdate::QueryLocRibCount { reply }).unwrap();
+    assert!(
+        !manager
+            .drain_before_expiry(ExpiryTimer::SelectionDeferral)
+            .await
+    );
+    assert!(matches!(
+        after_deadline.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    manager.release_readiness_count = None;
+    manager.set_owed_release_open((Afi::Ipv4, Safi::Unicast), false);
+    assert!(manager.serve_released_read());
+    assert!(parked.try_recv().is_ok());
+    assert_eq!(budget.unfinished(), 0);
+    assert!(manager.serve_released_read());
+    assert!(legacy_head.try_recv().is_ok());
+    assert_eq!(manager.release_primary_reads.capacity(), 0);
+    assert!(manager.drain_ready_updates().await);
+    assert_eq!(after_deadline.try_recv().unwrap(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn recurring_bmp_samples_do_not_fill_primary_during_a_parked_stage() {
+    let (tx, rx) = mpsc::channel(2);
+    let mut manager = timer_manager(rx, dummy_query_rx());
+    manager.release_readiness_count = Some(0);
+    manager.set_owed_release_open((Afi::Ipv4, Safi::Unicast), true);
+    for _ in 0..16 {
+        let (peer_reply, peer_sample) = oneshot::channel();
+        let (loc_reply, loc_sample) = oneshot::channel();
+        tx.try_send(RibUpdate::QueryBmpPeerStats { reply: peer_reply })
+            .unwrap();
+        tx.try_send(RibUpdate::QueryBmpLocRibStats { reply: loc_reply })
+            .unwrap();
+        assert!(manager.drain_ready_updates().await);
+        assert!(manager.drain_ready_updates().await);
+        assert_eq!(manager.release_primary_reads.len(), 2);
+        // The paired PM sampling deadline expires before the next tick.
+        drop((peer_sample, loc_sample));
+        let (reply, mut primary) = oneshot::channel();
+        tx.try_send(RibUpdate::QueryLocRibCount { reply }).unwrap();
+        assert!(manager.drain_ready_updates().await);
+        assert_eq!(primary.try_recv().unwrap(), 0);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn primary_eof_settles_eligible_parked_reads_without_waiting_for_a_missing_waiter() {
+    let (tx, rx) = mpsc::channel(2);
+    let (query_tx, query_rx) = mpsc::channel(2);
+    let mut manager = RibManager::new(rx, query_rx, None, None, BgpMetrics::new());
+    manager.release_readiness_count = Some(0);
+    for afi in [Afi::Ipv4, Afi::Ipv6] {
+        manager.set_owed_release_open((afi, Safi::Unicast), true);
+    }
+    let mut held = Vec::new();
+    let mut eligible = Vec::new();
+    for lane in [&tx, &query_tx] {
+        let (reply, response) = oneshot::channel();
+        lane.try_send(RibUpdate::QueryBmpLocRibStats { reply })
+            .unwrap();
+        held.push(response);
+        let (reply, response) = oneshot::channel();
+        lane.try_send(RibUpdate::LookupBestPath {
+            prefix: Prefix::V6(Ipv6Prefix::new(Ipv6Addr::LOCALHOST, 128)),
+            reply,
+        })
+        .unwrap();
+        eligible.push(response);
+    }
+    assert!(manager.drain_ready_updates().await);
+    assert!(manager.drain_ready_updates().await);
+    // One family sealed. Each lane has an eligible read behind its blocked head.
+    manager.set_owed_release_open((Afi::Ipv6, Safi::Unicast), false);
+    let (reply, response) = oneshot::channel();
+    tx.try_send(RibUpdate::QueryBmpLocRibStats { reply })
+        .unwrap();
+    held.push(response);
+    assert!(!manager.drain_ready_updates().await);
+    let (reply, mut barrier) = oneshot::channel();
+    tx.try_send(RibUpdate::QueryLocRibCount { reply }).unwrap();
+    let mut actor = Box::pin(manager.run());
+    assert!(
+        actor
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    assert!(matches!(
+        barrier.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    drop(tx);
+    tokio::time::advance(DIRTY_RESYNC_INTERVAL).await;
+    tokio::time::timeout(Duration::from_millis(1), actor)
+        .await
+        .expect("EOF drains without a new session or a startup timer");
+    assert_eq!(barrier.try_recv().unwrap(), 0);
+    for response in eligible {
+        assert!(response.await.unwrap().is_none());
+    }
+    for response in held {
+        assert!(response.await.is_err());
+    }
 }

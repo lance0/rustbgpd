@@ -11,7 +11,7 @@ use super::{
 
 /// A per-client-best prefix's recomputed exception lane and RFC 7947
 /// fallback list, committed together after the pass.
-type LaneUpdate = (Prefix, Option<RunnerUp>, Option<std::sync::Arc<[RunnerUp]>>);
+type LaneUpdate = (Prefix, Option<RunnerUp>, Option<super::RsFallback>);
 
 impl RibManager {
     /// The group a staging pass read at its top, for the commit block
@@ -99,18 +99,7 @@ impl RibManager {
             if prefixes.is_empty() {
                 continue;
             }
-            let mut out = self.stage_group_prefixes(gid, prefixes, memo);
-            // A memberless prestaged destination needs live table updates,
-            // but no wire payload until a member adopts it.
-            if self
-                .group_ribs
-                .get(&gid)
-                .is_some_and(|group| !group.members.is_empty())
-            {
-                out.build_shared_emit(&mut |force| {
-                    self.replacement_checkpoint_at("staging_shared_emit", force);
-                });
-            }
+            let out = self.stage_group_delivery(gid, prefixes, memo, false, None);
             staged.insert(gid, out);
         }
         // The staging commit is the one lane mutation site outside the
@@ -122,22 +111,56 @@ impl RibManager {
         staged
     }
 
+    /// Commit one group's bounded prefix batch and build the common member payload.
+    pub(in crate::manager) fn stage_group_delivery(
+        &mut self,
+        gid: usize,
+        prefixes: &HashSet<Prefix>,
+        memo: &mut crate::manager::distribution::ExportMemo,
+        paged_members: bool,
+        pcb: Option<crate::manager::distribution::PreparedPcb>,
+    ) -> GroupStageOutput {
+        let mut out = self.stage_group_prefixes_inner(gid, prefixes, memo, paged_members, pcb);
+        // A memberless prestaged destination needs live table updates,
+        // but no wire payload until a member adopts it.
+        if self
+            .group_ribs
+            .get(&gid)
+            .is_some_and(|group| !group.members.is_empty())
+        {
+            out.build_shared_emit(&mut |force| {
+                self.replacement_checkpoint_at("staging_shared_emit", force);
+            });
+        }
+        out
+    }
+
     /// One shared export-tail pass for `gid` over `prefixes`, reusing
     /// `distribute_single_best_prefix` with split horizon lifted out
     /// (`ExportTarget::Group`) and the group table as the diff baseline
     /// — the SAME body as the per-peer path, parameterized, never
     /// copied (design risk 1). Deltas are committed before returning;
     /// tombstones extend when a member is already dirty.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one staging pass keeps the plain single-best arm and the ADR-0126 \
-                  per-client-best arm over the same commit block"
-    )]
     pub(super) fn stage_group_prefixes<S: std::hash::BuildHasher>(
         &mut self,
         gid: usize,
         prefixes: &HashSet<Prefix, S>,
         memo: &mut crate::manager::distribution::ExportMemo,
+    ) -> GroupStageOutput {
+        self.stage_group_prefixes_inner(gid, prefixes, memo, false, None)
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "shared table staging commits single-best and per-client-best results"
+    )]
+    fn stage_group_prefixes_inner<S: std::hash::BuildHasher>(
+        &mut self,
+        gid: usize,
+        prefixes: &HashSet<Prefix, S>,
+        memo: &mut crate::manager::distribution::ExportMemo,
+        paged_members: bool,
+        mut pcb: Option<crate::manager::distribution::PreparedPcb>,
     ) -> GroupStageOutput {
         self.replacement_checkpoint(true);
         let mut out = GroupStageOutput::default();
@@ -148,6 +171,7 @@ impl RibManager {
         let mut result = crate::manager::distribution::UnicastDistributionResult::default();
         let mut per_client_best_result =
             crate::manager::distribution::UnicastDistributionResult::default();
+        let paged_pcb_denials = pcb.is_some();
         let per_client_best;
         {
             let Some(group) = self.group_ribs.get(&gid) else {
@@ -170,29 +194,37 @@ impl RibManager {
                     // ADR-0126 Decision 2: first-permitted winner walk
                     // + runner-up lane.
                     let deltas_before = out.deltas.len();
-                    let stage = Self::distribute_group_per_client_best_prefix(
-                        &self.ribs,
-                        &self.unicast_prefix_peers,
-                        &group.table,
-                        &self.peer_is_rr_client,
-                        prefix,
-                        self.selection_deferral.as_ref().is_some_and(|deferral| {
-                            deferral
-                                .selection_deferred(crate::manager::helpers::prefix_family(prefix))
-                        }),
-                        group.is_ebgp,
-                        group.interpret_rfc1997,
-                        group.is_rr_client,
-                        group.local_role,
-                        self.cluster_id,
-                        Some(&group.sendable),
-                        Some(&group.llgr),
-                        chain.as_ref(),
-                        memo,
-                        &mut out.evals,
-                        &mut per_client_best_result,
-                        &mut out.otc_blocked,
-                    );
+                    let stage = if let Some(prepared) = pcb.take() {
+                        per_client_best_result = prepared.rows;
+                        out.otc_blocked = prepared.otc_blocked;
+                        debug_assert!(prepared.evals.is_empty());
+                        prepared.stage
+                    } else {
+                        Self::distribute_group_per_client_best_prefix(
+                            &self.ribs,
+                            &self.unicast_prefix_peers,
+                            &group.table,
+                            &self.peer_is_rr_client,
+                            prefix,
+                            self.selection_deferral.as_ref().is_some_and(|deferral| {
+                                deferral.selection_deferred(crate::manager::helpers::prefix_family(
+                                    prefix,
+                                ))
+                            }),
+                            group.is_ebgp,
+                            group.interpret_rfc1997,
+                            group.is_rr_client,
+                            group.local_role,
+                            self.cluster_id,
+                            Some(&group.sendable),
+                            Some(&group.llgr),
+                            chain.as_ref(),
+                            memo,
+                            &mut out.evals,
+                            &mut per_client_best_result,
+                            &mut out.otc_blocked,
+                        )
+                    };
                     // The winner announce (at most one — the walk
                     // stages a single `path_id 0` winner), captured
                     // for the lane-transition supersession decision.
@@ -367,21 +399,17 @@ impl RibManager {
                     out.has_next_hop_actions |= winner_delta
                         && prior_fallback
                             .into_iter()
-                            .flat_map(|fallback| fallback.iter())
-                            .chain(
-                                stage
-                                    .rs_fallback
-                                    .iter()
-                                    .flat_map(|fallback| fallback.iter()),
-                            )
-                            .any(|entry| entry.nh.is_some());
+                            .chain(stage.rs_fallback.iter())
+                            .any(super::RsFallback::has_next_hop_actions);
                     if (prior_fallback.is_some() || stage.rs_fallback.is_some())
                         && !winner_delta
                         && (rs_view_moved
-                            || !super::payload::rs_fallback_equal(
-                                prior_fallback.map(|fallback| &**fallback),
-                                stage.rs_fallback.as_deref(),
-                            ))
+                            || !stage.release_fallback_equal.unwrap_or_else(|| {
+                                super::payload::rs_fallback_equal(
+                                    prior_fallback,
+                                    stage.rs_fallback.as_ref(),
+                                )
+                            }))
                     {
                         let prior = PriorGroupSlots::capture(group, *prefix, 0, &mut |force| {
                             self.replacement_checkpoint(force);
@@ -556,7 +584,9 @@ impl RibManager {
         } else {
             Vec::new()
         };
-        group.rs_adjust_before_commit(&rs_touched, &mut checkpoint);
+        if !paged_members {
+            group.rs_adjust_before_commit(&rs_touched, &mut checkpoint);
+        }
         for delta in &out.deltas {
             checkpoint();
             group.apply_delta(delta);
@@ -570,10 +600,18 @@ impl RibManager {
             group.apply_rs_fallback(prefix, rs_fallback);
         }
         group.commit_rs_transitions(&out.rs_transitions, &mut checkpoint);
-        group.rs_adjust_after_commit(&rs_touched, &mut checkpoint);
+        if paged_members {
+            group.reindex_rs_keys(&rs_touched, &mut checkpoint);
+        } else {
+            group.rs_adjust_after_commit(&rs_touched, &mut checkpoint);
+        }
         group.record_otc_blocked(prefixes, &out.otc_blocked, &mut checkpoint);
-        group.record_policy_filtered(prefixes, &labeled_filtered, &mut checkpoint);
-        if !group.dirty_members.is_empty() {
+        if !paged_pcb_denials {
+            group.record_policy_filtered(prefixes, &labeled_filtered, &mut checkpoint);
+        }
+        // The release delivers each staged delta to dirty members as well.
+        // Their page records these same tombstones and source-flip withdrawals.
+        if !paged_members && !group.dirty_members.is_empty() {
             for delta in &out.deltas {
                 checkpoint();
                 if delta.new.is_none() {

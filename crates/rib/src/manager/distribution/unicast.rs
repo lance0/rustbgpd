@@ -2456,7 +2456,6 @@ impl RibManager {
     /// entry itself.
     #[expect(
         clippy::too_many_arguments,
-        clippy::too_many_lines,
         clippy::fn_params_excessive_bools,
         reason = "group per-client-best export keeps group, policy, and table diff state together"
     )]
@@ -2483,7 +2482,6 @@ impl RibManager {
     ) -> PerClientBestPrefixStage {
         use crate::best_path::best_path_cmp;
 
-        let mut stage = PerClientBestPrefixStage::default();
         let family = match prefix {
             Prefix::V4(_) => (Afi::Ipv4, Safi::Unicast),
             Prefix::V6(_) => (Afi::Ipv6, Safi::Unicast),
@@ -2493,7 +2491,7 @@ impl RibManager {
                 checkpoint();
                 out.withdraw.push((*prefix, path_id));
             }
-            return stage;
+            return PerClientBestPrefixStage::default();
         }
 
         checkpoint();
@@ -2521,164 +2519,25 @@ impl RibManager {
         });
 
         let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
-        let mut winner_source: Option<PeerId> = None;
-        // Sources of permitted candidates that no RFC 7947 control community
-        // can suppress. Each serves every member it did not source, so a
-        // later candidate from one of them is no member's choice, and two of
-        // them settle every member's selection.
-        let mut clean_sources: smallvec::SmallVec<[PeerId; 2]> = smallvec::SmallVec::new();
-        let mut suppressible_seen = false;
-        let mut fallback: Vec<RunnerUp> = Vec::new();
-        for candidate in &candidates {
-            checkpoint();
-            if clean_sources.contains(&candidate.peer) {
-                continue;
-            }
-            let aspath_str = needs_as_path_string.then(|| memo.aspath_str(candidate));
-            let aspath_len = candidate.as_path().map_or(0, rustbgpd_wire::AsPath::len);
-            let origin_asn = candidate
-                .as_path()
-                .and_then(rustbgpd_wire::AsPath::origin_asn);
-            let ctx = RouteContext {
-                prefix: Some(*prefix),
-                next_hop: Some(candidate.next_hop),
-                extended_communities: candidate.extended_communities(),
-                communities: candidate.communities(),
-                large_communities: candidate.large_communities(),
-                as_path_str: aspath_str.as_deref().unwrap_or(""),
-                as_path: candidate.as_path(),
-                as_path_len: aspath_len,
-                origin_asn,
-                validation_state: candidate.validation_state,
-                aspa_state: candidate.aspa_state,
-                // Group-staged chains never read peer context — a
-                // chain that does disqualifies its peers from
-                // grouping (`requires_peer_context`).
-                peer_address: None,
-                peer_asn: None,
-                peer_group: None,
-                route_type: Some(route_type(candidate.origin_type)),
-                family: Some(unicast_route_family(prefix)),
-                evpn_route_type: None,
-                local_pref: candidate.local_pref_attr(),
-                med: candidate.med_attr(),
-            };
-            checkpoint();
-            let (result, evaluation) = evaluate_chain_with_attribution(export_pol, &ctx);
-            checkpoint();
-            evals.record(&evaluation, candidate.peer);
-            let label = evaluation.matched_policy.clone();
-            let filtered_key = PolicyFilteredRouteKey {
-                // Group placeholder target, restamped per member.
-                target_peer: LOCAL_PEER,
-                source_peer: candidate.peer,
-                prefix: *prefix,
-                path_id: candidate.path_id,
-            };
-            if result.action != PolicyAction::Permit {
-                out.policy_filtered.push((filtered_key, label));
-                continue;
-            }
-            checkpoint();
-            let (mut modified, nh_action) = memo.apply(candidate, &result.modifications);
-            checkpoint();
-            if super::no_advertise_export_suppressed(modified.communities()) {
-                // Policy-added NO_ADVERTISE is a policy suppression —
-                // same accounting as the deny arm, matching the
-                // per-peer multipath body.
-                out.policy_filtered.push((filtered_key, label));
-                continue;
-            }
-            modified.path_id = 0;
-            if may_suppress(candidate.communities(), candidate.large_communities()) {
-                suppressible_seen = true;
-            } else {
-                clean_sources.push(candidate.peer);
-            }
-            if let Some(winner) = winner_source {
-                let entry = RunnerUp {
-                    route: modified,
-                    nh: nh_action,
-                    source_attrs: capture_source_attrs(candidate),
-                    policy_label: label,
-                    winner_source: winner,
-                    local_source: crate::adj_rib_out::LocalExportSource::from_route(candidate),
-                };
-                // The runner-up: the first permitted candidate from another
-                // source.
-                let runner_up = stage.runner_up.is_none() && candidate.peer != winner;
-                let settled = clean_sources.len() == 2;
-                if settled && !suppressible_seen {
-                    // No suppression-form community on the winner or the
-                    // runner-up: the walk ends exactly as it always has, and
-                    // keeps no fallback.
-                    stage.runner_up = Some(entry);
-                    break;
-                }
-                if runner_up {
-                    stage.runner_up = Some(entry.clone());
-                }
-                fallback.push(entry);
-                if settled {
-                    break;
-                }
-                continue;
-            }
-            winner_source = Some(candidate.peer);
-            stage.winner_label = label;
-            stage.winner_source_attrs = capture_source_attrs(candidate);
-            // RFC 9234 record-not-act (ADR-0126): a blocked winner
-            // stays staged — the pre-commit backstop strips it from
-            // every member emission — but its blocked identity must
-            // land in the group residue so per-member diagnostics and
-            // the replay reconciliations see the backstop's outcome.
-            // `group_local_role` is group-uniform (snapshot on
-            // `GroupRibOut`), so this one verdict covers every member.
-            // Recorded even when the announce below is
-            // equality-suppressed: the caller's `record_otc_blocked`
-            // refreshes this prefix's residue every pass.
-            if super::otc_egress_blocked(&modified, group_local_role) {
-                checkpoint();
-                otc_blocked.push(modified.clone());
-            }
-            let changed = rib_out.local_export_source(prefix, 0)
-                != crate::adj_rib_out::LocalExportSource::from_route(candidate)
-                || rib_out.get(prefix, 0).is_none_or(|existing| {
-                    !unicast_routes_equal(
-                        existing,
-                        rib_out.next_hop_override(prefix, modified.path_id),
-                        &modified,
-                        nh_action.as_ref(),
-                    )
-                });
-            if changed {
-                checkpoint();
-                out.record_local_source(candidate, modified.path_id);
-                out.next_hop_override.push(nh_action);
-                out.announce.push(modified);
+        let mut walk = PcbWalk::default();
+        for candidate in candidates {
+            if walk.consume(
+                candidate,
+                rib_out,
+                prefix,
+                group_local_role,
+                export_pol,
+                needs_as_path_string,
+                memo,
+                evals,
+                out,
+                otc_blocked,
+                checkpoint,
+            ) {
+                break;
             }
         }
-
-        // A member whose winner (or substitution) a control community
-        // suppresses selects from the rest of the walk, like its per-peer
-        // walk; without a suppressible candidate `[winner, runner-up]` is
-        // the whole selection.
-        if suppressible_seen && !fallback.is_empty() {
-            checkpoint();
-            stage.rs_fallback = Some(fallback.into());
-        }
-        // Same residue rule as the ungrouped per-client-best arm: at
-        // most one route lives at path_id 0. Withdraw any non-zero
-        // residue, and 0 itself when no candidate was permitted — an
-        // implicit replace otherwise.
-        let staged_winner = winner_source.is_some();
-        for path_id in rib_out.path_ids_for_prefix(prefix) {
-            checkpoint();
-            if path_id != 0 || !staged_winner {
-                out.withdraw.push((*prefix, path_id));
-            }
-        }
-        stage
+        walk.finish(rib_out, prefix, out, checkpoint)
     }
 
     /// Single-best export tail for one prefix. `target` selects the
@@ -4071,6 +3930,199 @@ fn stage_multipath_row(
         out.record_local_source(candidate, modified.path_id);
         out.next_hop_override.push(nh_action);
         out.announce.push(modified);
+    }
+}
+
+/// Common first-permitted walk over ranked candidates. The release owner
+/// retains its progress when a prefix has more paths than one poll can visit.
+#[derive(Default)]
+pub(super) struct PcbWalk {
+    stage: PerClientBestPrefixStage,
+    winner_source: Option<PeerId>,
+    clean_sources: smallvec::SmallVec<[PeerId; 2]>,
+    suppressible_seen: bool,
+    fallback: crate::manager::update_groups::release_fallback::FallbackRows,
+}
+
+impl PcbWalk {
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "one ranked candidate updates the common winner, policy and fallback projection"
+    )]
+    pub(super) fn consume(
+        &mut self,
+        candidate: &crate::route::Route,
+        rib_out: &AdjRibOut,
+        prefix: &Prefix,
+        group_local_role: Option<rustbgpd_wire::BgpRole>,
+        export_pol: Option<&PolicyChain>,
+        needs_as_path_string: bool,
+        memo: &mut super::ExportMemo,
+        evals: &mut GroupEvalAccumulator,
+        out: &mut UnicastDistributionResult<(PolicyFilteredRouteKey, Option<PolicyLabel>)>,
+        otc_blocked: &mut Vec<crate::route::Route>,
+        checkpoint: &mut impl FnMut(),
+    ) -> bool {
+        checkpoint();
+        if self.clean_sources.contains(&candidate.peer) {
+            return false;
+        }
+        let aspath_str = needs_as_path_string.then(|| memo.aspath_str(candidate));
+        let aspath_len = candidate.as_path().map_or(0, rustbgpd_wire::AsPath::len);
+        let origin_asn = candidate
+            .as_path()
+            .and_then(rustbgpd_wire::AsPath::origin_asn);
+        let ctx = RouteContext {
+            prefix: Some(*prefix),
+            next_hop: Some(candidate.next_hop),
+            extended_communities: candidate.extended_communities(),
+            communities: candidate.communities(),
+            large_communities: candidate.large_communities(),
+            as_path_str: aspath_str.as_deref().unwrap_or(""),
+            as_path: candidate.as_path(),
+            as_path_len: aspath_len,
+            origin_asn,
+            validation_state: candidate.validation_state,
+            aspa_state: candidate.aspa_state,
+            // Group-staged chains never read peer context — a
+            // chain that does disqualifies its peers from
+            // grouping (`requires_peer_context`).
+            peer_address: None,
+            peer_asn: None,
+            peer_group: None,
+            route_type: Some(route_type(candidate.origin_type)),
+            family: Some(unicast_route_family(prefix)),
+            evpn_route_type: None,
+            local_pref: candidate.local_pref_attr(),
+            med: candidate.med_attr(),
+        };
+        checkpoint();
+        let (result, evaluation) = evaluate_chain_with_attribution(export_pol, &ctx);
+        checkpoint();
+        evals.record(&evaluation, candidate.peer);
+        let label = evaluation.matched_policy.clone();
+        let filtered_key = PolicyFilteredRouteKey {
+            // Group placeholder target, restamped per member.
+            target_peer: LOCAL_PEER,
+            source_peer: candidate.peer,
+            prefix: *prefix,
+            path_id: candidate.path_id,
+        };
+        if result.action != PolicyAction::Permit {
+            out.policy_filtered.push((filtered_key, label));
+            return false;
+        }
+        checkpoint();
+        let (mut modified, nh_action) = memo.apply(candidate, &result.modifications);
+        checkpoint();
+        if super::no_advertise_export_suppressed(modified.communities()) {
+            // Policy-added NO_ADVERTISE is a policy suppression —
+            // same accounting as the deny arm, matching the
+            // per-peer multipath body.
+            out.policy_filtered.push((filtered_key, label));
+            return false;
+        }
+        modified.path_id = 0;
+        if may_suppress(candidate.communities(), candidate.large_communities()) {
+            self.suppressible_seen = true;
+        } else {
+            self.clean_sources.push(candidate.peer);
+        }
+        if let Some(winner) = self.winner_source {
+            let entry = RunnerUp {
+                route: modified,
+                nh: nh_action,
+                source_attrs: capture_source_attrs(candidate),
+                policy_label: label,
+                winner_source: winner,
+                local_source: crate::adj_rib_out::LocalExportSource::from_route(candidate),
+            };
+            // The runner-up: the first permitted candidate from another
+            // source.
+            let runner_up = self.stage.runner_up.is_none() && candidate.peer != winner;
+            let settled = self.clean_sources.len() == 2;
+            if settled && !self.suppressible_seen {
+                // No suppression-form community on the winner or the
+                // runner-up: the walk ends exactly as it always has, and
+                // keeps no fallback.
+                self.stage.runner_up = Some(entry);
+                return true;
+            }
+            if runner_up {
+                self.stage.runner_up = Some(entry.clone());
+            }
+            self.fallback.push(entry);
+            if settled {
+                return true;
+            }
+            return false;
+        }
+        self.winner_source = Some(candidate.peer);
+        self.stage.winner_label = label;
+        self.stage.winner_source_attrs = capture_source_attrs(candidate);
+        // RFC 9234 record-not-act (ADR-0126): a blocked winner
+        // stays staged — the pre-commit backstop strips it from
+        // every member emission — but its blocked identity must
+        // land in the group residue so per-member diagnostics and
+        // the replay reconciliations see the backstop's outcome.
+        // `group_local_role` is group-uniform (snapshot on
+        // `GroupRibOut`), so this one verdict covers every member.
+        // Recorded even when the announce below is
+        // equality-suppressed: the caller's `record_otc_blocked`
+        // refreshes this prefix's residue every pass.
+        if super::otc_egress_blocked(&modified, group_local_role) {
+            checkpoint();
+            otc_blocked.push(modified.clone());
+        }
+        let changed = rib_out.local_export_source(prefix, 0)
+            != crate::adj_rib_out::LocalExportSource::from_route(candidate)
+            || rib_out.get(prefix, 0).is_none_or(|existing| {
+                !unicast_routes_equal(
+                    existing,
+                    rib_out.next_hop_override(prefix, modified.path_id),
+                    &modified,
+                    nh_action.as_ref(),
+                )
+            });
+        if changed {
+            checkpoint();
+            out.record_local_source(candidate, modified.path_id);
+            out.next_hop_override.push(nh_action);
+            out.announce.push(modified);
+        }
+        false
+    }
+
+    pub(super) fn finish(
+        mut self,
+        rib_out: &AdjRibOut,
+        prefix: &Prefix,
+        out: &mut UnicastDistributionResult<(PolicyFilteredRouteKey, Option<PolicyLabel>)>,
+        checkpoint: &mut impl FnMut(),
+    ) -> PerClientBestPrefixStage {
+        // A member whose winner (or substitution) a control community
+        // suppresses selects from the rest of the walk, like its per-peer
+        // walk; without a suppressible candidate `[winner, runner-up]` is
+        // the whole selection.
+        if self.suppressible_seen && !self.fallback.is_empty() {
+            checkpoint();
+            self.stage.rs_fallback = Some(crate::manager::update_groups::RsFallback::new(
+                self.fallback,
+            ));
+        }
+        // Same residue rule as the ungrouped per-client-best arm: at
+        // most one route lives at path_id 0. Withdraw any non-zero
+        // residue, and 0 itself when no candidate was permitted — an
+        // implicit replace otherwise.
+        let staged_winner = self.winner_source.is_some();
+        for path_id in rib_out.path_ids_for_prefix(prefix) {
+            checkpoint();
+            if path_id != 0 || !staged_winner {
+                out.withdraw.push((*prefix, path_id));
+            }
+        }
+        self.stage
     }
 }
 

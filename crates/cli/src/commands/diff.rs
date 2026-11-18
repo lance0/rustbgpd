@@ -1765,6 +1765,7 @@ mod tests {
         generation: u64,
     ) -> server_proto::ListRoutesResponse {
         server_proto::ListRoutesResponse {
+            selection_release: None,
             routes,
             next_page_token: next_page_token.to_string(),
             total_count,

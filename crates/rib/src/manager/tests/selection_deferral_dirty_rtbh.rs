@@ -378,6 +378,7 @@ fn assert_rtbh_dirty_recovery_preserves_frozen_ordinary(grouped: bool, regroup: 
         );
         let (reply, mut page) = oneshot::channel();
         manager.handle_update(RibUpdate::QueryRoutesPage {
+            accept_releasing: false,
             scope: crate::update::RouteQueryScope::Advertised { peer: observer },
             filter: None,
             after: None,
@@ -1386,6 +1387,20 @@ fn partial_family_release_wakes_omitted_data_before_its_initial_eor() {
             .count(),
         0
     );
+    let ordinary_admission = updates
+        .iter()
+        .position(|update| {
+            update
+                .announce
+                .iter()
+                .any(|row| row.prefix == Prefix::V4(ordinary))
+        })
+        .unwrap();
+    let ipv4_marker = updates
+        .iter()
+        .position(|update| update.end_of_rib.contains(&FAMILY))
+        .unwrap();
+    assert!(ordinary_admission <= ipv4_marker);
     assert!(manager.selection_deferred(v6));
     assert!(manager.dirty_peers.contains(&observer));
     manager.handle_update(RibUpdate::EndOfRib {
@@ -1395,8 +1410,17 @@ fn partial_family_release_wakes_omitted_data_before_its_initial_eor() {
         safi: v6.1,
     });
     let mut updates = apply_wire(&mut rx, &mut wire);
-    // With one channel slot, the admitted table can defer its marker until
-    // the writer drains. The production retry sends no second table.
+    // Dirty recovery can admit its table on the first post-seal tick.
+    // Once that table is admitted, a full channel can defer only the marker.
+    manager.resync_dirty_peers_bounded();
+    updates.extend(apply_wire(&mut rx, &mut wire));
+    assert!(
+        updates
+            .iter()
+            .filter(|update| !update.announce.is_empty())
+            .count()
+            <= 1
+    );
     manager.resync_dirty_peers_bounded();
     let retried = apply_wire(&mut rx, &mut wire);
     assert!(retried.iter().all(|update| update.announce.is_empty()));
@@ -1416,6 +1440,15 @@ fn partial_family_release_wakes_omitted_data_before_its_initial_eor() {
             .filter(|family| **family == FAMILY)
             .count(),
         0
+    );
+    let ipv6_marker = updates
+        .iter()
+        .position(|update| update.end_of_rib.contains(&v6))
+        .unwrap();
+    assert!(
+        updates[ipv6_marker + 1..]
+            .iter()
+            .all(|update| update.announce.is_empty())
     );
     assert!(!manager.dirty_peers.contains(&observer));
     assert!(!manager.pending_group_admitted.contains_record(observer));
@@ -2178,6 +2211,7 @@ fn assert_late_waiter_advertised_truth(
         .sum();
     let (reply, mut listing) = oneshot::channel();
     manager.handle_update(RibUpdate::QueryRoutesPage {
+        accept_releasing: false,
         scope: crate::update::RouteQueryScope::Advertised { peer: observer },
         filter: None,
         after: None,
@@ -3615,5 +3649,56 @@ fn limited_dirty_member_without_a_proof_counts_its_wire() {
         for per_client_best in [false, true] {
             assert_limited_dirty_member_counts_its_wire(delete, per_client_best, true);
         }
+    }
+}
+
+#[test]
+fn held_join_counts_only_eligible_policy_evaluations_and_denials() {
+    let mut manager = manager_with_dormant_waiter();
+    let prefixes = [1, 2, 3, 4].map(|octet| Ipv4Prefix::new(Ipv4Addr::new(10, 20, octet, 0), 24));
+    let policy = deny_prefixes_chain(&[Prefix::V4(prefixes[1]), Prefix::V4(prefixes[3])]);
+    let join = |manager: &mut RibManager, address| {
+        let mut up = registering_peer_up(peer_v4(address), 7);
+        let RibUpdate::PeerUp {
+            outbound_tx,
+            sendable_families,
+            export_policy,
+            ..
+        } = &mut up
+        else {
+            unreachable!()
+        };
+        let (tx, rx) = mpsc::channel(16);
+        *outbound_tx = tx;
+        *sendable_families = vec![FAMILY];
+        *export_policy = Some(policy.clone());
+        manager.handle_update(up);
+        rx
+    };
+    let _existing = join(&mut manager, OBSERVER);
+    for (index, prefix) in prefixes.into_iter().enumerate() {
+        // Last two carry an explicit BLACKHOLE on their original local path.
+        inject_aggregate(&mut manager, prefix, 42, index >= 2);
+    }
+    let gid = manager.grouped_member_of(peer_v4(OBSERVER)).unwrap();
+    let _waiter = connect(&mut manager, WAITER, 64, true, false);
+    assert!(manager.selection_deferred(FAMILY));
+    for (octet, private) in [(91, false), (92, true)] {
+        let address = Ipv4Addr::new(192, 0, 2, octet);
+        let peer = peer_v4(address);
+        manager.test_force_ungrouped = private;
+        let _rx = join(&mut manager, address);
+        assert_eq!(manager.grouped_member_of(peer), (!private).then_some(gid));
+        let stats = manager.export_policy_counters[&peer].snapshot();
+        assert_eq!(
+            (
+                stats.export_policy_routes_permitted,
+                stats.export_policy_routes_denied
+            ),
+            (1, 1),
+        );
+        let denials = &manager.policy_filtered_routes[&peer];
+        assert!(denials.contains_key(&Prefix::V4(prefixes[3])));
+        assert!(!denials.contains_key(&Prefix::V4(prefixes[1])));
     }
 }

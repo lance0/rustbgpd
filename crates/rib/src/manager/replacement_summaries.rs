@@ -105,6 +105,9 @@ impl RibManager {
     }
 
     pub(super) fn drain_summary_queries(&mut self) {
+        if self.unicast_release_partial() {
+            return;
+        }
         for _ in 0..QUERY_BUDGET_PER_CHUNK {
             let query = match self.summary_rx.as_mut() {
                 Some(rx) => match rx.try_recv() {
@@ -139,7 +142,7 @@ impl RibManager {
     ) -> T {
         // A nested scope has already moved the receiver into the shared context.
         // Embedders without the new lane retain their original queue behavior.
-        if self.summary_rx.is_none() {
+        if self.summary_rx.is_none() || self.unicast_release_partial() {
             return self.with_replacement_readiness(work);
         }
         let run = || {

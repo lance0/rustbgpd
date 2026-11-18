@@ -63,7 +63,7 @@ pub(in crate::manager) struct PriorGroupSlots {
     pub(super) source_attrs: Option<Arc<AttrSet>>,
     pub(super) lane: Option<RunnerUp>,
     /// The prior RFC 7947 fallback list ([`GroupRibOut::rs_fallback`]).
-    pub(super) rs_fallback: Option<Arc<[RunnerUp]>>,
+    pub(super) rs_fallback: Option<super::RsFallback>,
 }
 
 impl PriorGroupSlots {
@@ -130,7 +130,7 @@ impl PriorGroupSlots {
             rs_control,
             winner,
             self.lane.as_ref(),
-            self.rs_fallback.as_deref(),
+            self.rs_fallback.as_ref(),
             |entry| source_control_input(entry.source_attrs),
         )
     }
@@ -150,7 +150,7 @@ pub(in crate::manager) fn resolve_member_slot<'a>(
     rs_control: Option<(u32, u32)>,
     winner: AdvEntry<'a>,
     lane: Option<&'a RunnerUp>,
-    fallback: Option<&'a [RunnerUp]>,
+    fallback: Option<&'a super::RsFallback>,
     control: impl Fn(&AdvEntry<'a>) -> (&'a [u32], &'a [LargeCommunity]),
 ) -> Option<AdvEntry<'a>> {
     use crate::manager::distribution::rs_control::rs_control_suppressed;
@@ -159,9 +159,22 @@ pub(in crate::manager) fn resolve_member_slot<'a>(
         !rs_control_suppressed(communities, large_communities, rs_control)
     };
     match fallback.filter(|_| rs_control.is_some()) {
-        Some(fallback) => std::iter::once(winner)
-            .chain(fallback.iter().map(RunnerUp::adv_entry))
-            .find(|entry| entry.route.peer != member && eligible(entry)),
+        Some(fallback) => {
+            if winner.route.peer != member && eligible(&winner) {
+                return Some(winner);
+            }
+            if let Some(slots) = fallback.prepared_slots(rs_control.expect("checked above")) {
+                return slots
+                    .into_iter()
+                    .flatten()
+                    .map(|index| fallback[index].adv_entry())
+                    .find(|entry| entry.route.peer != member);
+            }
+            fallback
+                .iter()
+                .map(RunnerUp::adv_entry)
+                .find(|entry| entry.route.peer != member && eligible(entry))
+        }
         None => if winner.route.peer == member {
             lane.map(RunnerUp::adv_entry)
         } else {
@@ -196,13 +209,17 @@ pub(in crate::manager) fn runner_up_equal(old: &RunnerUp, new: &RunnerUp) -> boo
 
 /// [`runner_up_equal`] over two RFC 7947 fallback lists.
 pub(in crate::manager) fn rs_fallback_equal(
-    old: Option<&[RunnerUp]>,
-    new: Option<&[RunnerUp]>,
+    old: Option<&super::RsFallback>,
+    new: Option<&super::RsFallback>,
 ) -> bool {
     match (old, new) {
         (None, None) => true,
         (Some(old), Some(new)) => {
-            old.len() == new.len() && old.iter().zip(new).all(|(a, b)| runner_up_equal(a, b))
+            old.len() == new.len()
+                && old
+                    .iter()
+                    .zip(new.iter())
+                    .all(|(a, b)| runner_up_equal(a, b))
         }
         _ => false,
     }
@@ -380,7 +397,9 @@ pub(in crate::manager) struct PerClientBestPrefixStage {
     /// best-path order — the RFC 7947 per-member fallback
     /// ([`GroupRibOut::rs_fallback`]). `None` unless a walked candidate
     /// carries a suppression-form community ([`may_suppress`]).
-    pub(in crate::manager) rs_fallback: Option<Arc<[RunnerUp]>>,
+    pub(in crate::manager) rs_fallback: Option<super::RsFallback>,
+    /// Full list comparison, when the release evaluated it across actor turns.
+    pub(super) release_fallback_equal: Option<bool>,
 }
 
 /// Communities and large communities carried by a captured source
@@ -1207,6 +1226,10 @@ pub(super) fn bump_counter_row_with_checkpoint(
 }
 
 impl GroupEvalAccumulator {
+    pub(in crate::manager) fn is_empty(&self) -> bool {
+        self.totals.is_empty()
+    }
+
     fn retire_with(&mut self, checkpoint: &mut impl FnMut(bool)) {
         crate::manager::retire_vec(&mut self.totals, &mut || checkpoint(false));
         for (_, mut rows) in self.per_source.drain() {

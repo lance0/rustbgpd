@@ -78,7 +78,8 @@ pub enum RibReadinessError {
 /// behind its terminal commit or fail-closed fallback handoff.
 #[derive(Debug)]
 pub enum RibReadinessQuery {
-    /// Return the current Loc-RIB best-path count.
+    /// Return the last complete Loc-RIB best-path count during a startup release,
+    /// or the current count otherwise.
     LocRibCount {
         /// Response channel.
         reply: oneshot::Sender<Result<usize, RibReadinessError>>,
@@ -2261,6 +2262,8 @@ pub enum RoutePageError {
 /// One page of a resumable route query.
 #[derive(Debug, Clone, Default)]
 pub struct RoutePage {
+    /// Startup unicast selection release in progress at this read, IPv4 then IPv6.
+    pub releasing: [bool; 2],
     /// Routes on this page, ascending by identity key.
     pub routes: Vec<Route>,
     /// Total filter-matching routes in scope (cursor-independent).
@@ -3270,6 +3273,8 @@ pub enum RibUpdate {
     /// The reply channel doubles as the cancellation token: an
     /// abandoned caller (dropped receiver) skips the scan entirely.
     QueryRoutesPage {
+        /// The consumer can display the releasing families captured with this page.
+        accept_releasing: bool,
         /// Which table to read.
         scope: RouteQueryScope,
         /// Optional row filter evaluated inside the RIB task; `None`
@@ -3600,7 +3605,8 @@ pub enum RibUpdate {
         /// Our configured LLGR stale time (seconds). 0 = disabled.
         llgr_stale_time: u32,
     },
-    /// Query: return the number of prefixes in the Loc-RIB.
+    /// Query the Loc-RIB prefix count. During an incremental startup release
+    /// this is the last complete count captured before publication began.
     QueryLocRibCount {
         /// Response channel.
         reply: oneshot::Sender<usize>,

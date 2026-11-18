@@ -1,7 +1,7 @@
 //! One-shot LAN-1188 selection-deferral release measurement.
 //!
 //! Fixture construction is outside the timed interval. One ordinary Loc-RIB
-//! count query is queued before the exact production expiry call, then served
+//! count query is queued before expiry and its release continuations, then served
 //! through the manager's existing general-query drain. Each invocation emits
 //! one JSON receipt; no statistical campaign policy lives in this binary.
 
@@ -409,31 +409,24 @@ fn manager() -> (RibManager, mpsc::Sender<RibUpdate>, mpsc::Sender<RibUpdate>) {
     )
 }
 
-fn drain_eor(
-    receivers: &mut [mpsc::Receiver<OutboundRouteUpdate>],
-    expected_families: &[(Afi, Safi)],
-) -> (usize, usize, usize) {
-    let expected = expected_families.iter().copied().collect::<HashSet<_>>();
-    let mut markers = 0usize;
-    let mut complete_peers = 0usize;
-    let mut peers_with_routes = 0usize;
-    for receiver in receivers {
-        let mut seen = HashSet::new();
-        let mut route_payload = false;
+#[derive(Default)]
+struct ReceiverReceipt {
+    markers: HashSet<(Afi, Safi)>,
+    saw_routes: bool,
+}
+
+impl ReceiverReceipt {
+    fn observe(&mut self, receiver: &mut mpsc::Receiver<OutboundRouteUpdate>) {
         while let Ok(update) = receiver.try_recv() {
-            route_payload |= !update.announce.is_empty();
+            self.saw_routes |= !update.announce.is_empty();
             for family in update.end_of_rib {
                 assert!(
-                    seen.insert(family),
+                    self.markers.insert(family),
                     "one release delivered duplicate EoR for {family:?}"
                 );
-                markers = markers.saturating_add(1);
             }
         }
-        complete_peers = complete_peers.saturating_add(usize::from(seen == expected));
-        peers_with_routes = peers_with_routes.saturating_add(usize::from(route_payload));
     }
-    (markers, complete_peers, peers_with_routes)
 }
 
 fn run(mode: Mode, peers: usize, total_routes: usize) -> Receipt {
@@ -478,20 +471,33 @@ fn run(mode: Mode, peers: usize, total_routes: usize) -> Receipt {
     }
 
     let before = manager.bench_selection_deferral_inventory();
+    let mut observed: Vec<_> = (0..peers).map(|_| ReceiverReceipt::default()).collect();
+    let mut read_receivers = || {
+        for (receipt, receiver) in observed.iter_mut().zip(&mut receivers) {
+            receipt.observe(receiver);
+        }
+    };
     let release = manager.bench_selection_deferral_release_with_sentinel(
         &query_tx,
         &gated_families,
         RibManager::bench_peer_address(0),
         mode.expires(),
+        &mut read_receivers,
     );
+    read_receivers();
     let after = manager.bench_selection_deferral_inventory();
     let expected_eor = if mode.expires() {
         sendable_families.as_slice()
     } else {
         &[]
     };
-    let (eor_markers, eor_complete_peers, peers_with_route_payload) =
-        drain_eor(&mut receivers, expected_eor);
+    let expected_eor = expected_eor.iter().copied().collect::<HashSet<_>>();
+    let eor_markers = observed.iter().map(|peer| peer.markers.len()).sum();
+    let eor_complete_peers = observed
+        .iter()
+        .filter(|peer| peer.markers == expected_eor)
+        .count();
+    let peers_with_route_payload = observed.iter().filter(|peer| peer.saw_routes).count();
 
     Receipt {
         mode: mode.label().into(),

@@ -1813,8 +1813,9 @@ impl RibManager {
         self.deferred_selection_keys.is_cleared()
     }
 
-    /// Queue one Loc-RIB-count sentinel, time the exact production expiry
-    /// call, then serve the sentinel through the production general-query drain.
+    /// Queue a Loc-RIB-count sentinel and drive expiry and release continuations.
+    /// The release timer sums actor work; the sentinel also waits for receivers
+    /// to read their admitted updates at the seams between turns.
     /// `expire = false` is the same-setup control.
     ///
     /// # Panics
@@ -1829,6 +1830,7 @@ impl RibManager {
         families: &[(Afi, Safi)],
         snapshot_peer: PeerId,
         expire: bool,
+        mut read_receivers: impl FnMut(),
     ) -> [u64; 14] {
         let primary_depth_before = self.primary_backlog();
         assert_eq!(primary_depth_before, 0, "primary update lane must be empty");
@@ -1863,7 +1865,14 @@ impl RibManager {
         let release_duration = if expire {
             let release_started = std::time::Instant::now();
             self.expire_selection_deferral();
-            release_started.elapsed()
+            let mut actor_work = release_started.elapsed();
+            while self.unicast_release_runnable() {
+                read_receivers();
+                let step_started = std::time::Instant::now();
+                self.advance_unicast_release();
+                actor_work += step_started.elapsed();
+            }
+            actor_work
         } else {
             std::time::Duration::ZERO
         };
@@ -2558,8 +2567,7 @@ impl RibManager {
         while self.resync_tick_pending() && self.resync_dirty_peers_bounded() {}
         (
             self.dirty_peers.len(),
-            self.pending_group_admitted
-                .entries_with_checkpoint(&mut |_| {}),
+            self.pending_group_admitted.entries(),
         )
     }
 

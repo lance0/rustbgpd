@@ -5981,7 +5981,7 @@ async fn run<T>(
             let (trigger_tx, trigger_rx) = mpsc::channel(16);
             let mgr = rustbgpd_mrt::MrtManager::new(
                 writer_config,
-                rib_tx.clone(),
+                rib_query_tx.clone(),
                 trigger_rx,
                 router_id,
                 metrics.clone(),

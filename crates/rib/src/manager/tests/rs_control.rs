@@ -1269,6 +1269,7 @@ async fn advertised_surfaces(
         .collect();
     let (reply, response) = oneshot::channel();
     tx.send(RibUpdate::QueryRoutesPage {
+        accept_releasing: false,
         scope: RouteQueryScope::Advertised { peer },
         filter: Some(Box::new(|_: &Route| true)),
         after: None,
@@ -1784,6 +1785,7 @@ async fn filtered_page(
 ) -> (Vec<(String, String)>, u64) {
     let (reply, response) = oneshot::channel();
     tx.send(RibUpdate::QueryRoutesPage {
+        accept_releasing: false,
         scope: RouteQueryScope::Advertised { peer },
         filter: Some(match prefix {
             Some(prefix) => crate::update::prefix_route_query_filter(prefix, filter),

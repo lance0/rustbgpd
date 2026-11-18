@@ -2558,9 +2558,10 @@ the reload continues on the authoritative per-peer path. A change that always
 falls back keeps raising it on every reload. Independently,
 readiness remains healthy during bounded progress below 30 seconds, then fails
 closed with `RIB export-policy transition stalled` until commit or a cleaned-up
-fallback restores it. A selection-deferral release shares that 30-second bound
-but fails closed under its own reason, `RIB selection-deferral release
-stalled`, and records its readiness waits under the `selection_release` seam.
+fallback restores it. Synchronous selection-deferral work shares that 30-second bound and reports
+`RIB selection-deferral release stalled`. Its readiness waits use the
+`selection_release` seam. Between startup unicast release batches the actor
+answers readiness on its ordinary lane using the last complete count.
 Source-peer removal, and an injection lease expiry batch withdrawing the
 expired owners' local routes, use changing-count checkpoints under
 `peer_teardown` and fail closed after the same bound with `RIB peer teardown
@@ -4687,6 +4688,17 @@ filter or `--limit 1..1000`. A limited query is exactly one mutation-fenced
 RPC and reports whether the exact matching total was truncated. An unbounded
 query continues to require a version-consistent walk of every page and returns
 an error if the table changes; the CLI does not emit a torn snapshot.
+
+During startup selection release, a limited unicast route page in text or JSON
+can show the rows committed so far. Text names the releasing families after
+the rows. JSON includes their canonical labels in `releasing_families`, even
+when the page is empty. An empty list means that none of the requested families
+was releasing. With an older daemon the text reports that release status is
+unavailable and JSON omits the field. A page with `complete: true` can still
+have a releasing family. Full listings, counts and JSON Lines wait for the
+completed view. Readiness probes return the last complete unicast count until
+all open family walks finish. The `bgp_rib_loc_prefixes` gauge for each
+releasing unicast family retains its previous value until that walk finishes.
 
 All filter dimensions are AND-composed. Repeated values within the standard-
 or large-community dimension are OR-matched. RPKI states are `valid`,

@@ -431,13 +431,27 @@ fn kept_force_bit_fixture(exit: ForcedExit) -> (RibManager, mpsc::Receiver<Outbo
     (manager, output)
 }
 
+/// Complete the selection pages, then run the dirty-ring successor for each
+/// eligible peer. A sibling gate may keep a peer parked after its own resync.
+fn finish_release_resyncs(manager: &mut RibManager) {
+    drain_unicast_release(manager);
+    for _ in 0..manager.dirty_peers.len() {
+        if manager
+            .dirty_peers
+            .iter()
+            .any(|&peer| manager.dirty_unit_due(peer))
+        {
+            manager.resync_dirty_peers_bounded();
+        }
+    }
+}
+
 /// A forced resync that runs while a selection gate defers one of the
 /// peer's families keeps its force bit for that family. The bit is not a
 /// pending resync for the rest: another family's marker leaves in the turn
 /// its own hold ends, with no tick, whichever exit the forced pass took
 /// (empty view, nothing to send, or a commit with routes). The gate's
-/// release then runs the deferred forced resync itself; nothing else
-/// drives a force-only peer.
+/// release hands the deferred forced resync to the dirty ring.
 #[tokio::test(start_paused = true)]
 async fn a_force_bit_kept_for_a_deferred_family_holds_no_other_marker() {
     for exit in [
@@ -476,9 +490,10 @@ async fn a_force_bit_kept_for_a_deferred_family_holds_no_other_marker() {
         assert!(manager.force_outbound_peers.contains(&TARGET), "{exit:?}");
 
         manager.expire_selection_deferral();
+        finish_release_resyncs(&mut manager);
         assert!(
             !manager.force_outbound_peers.contains(&TARGET),
-            "{exit:?}: the gate's release runs the deferred forced resync"
+            "{exit:?}: the gate's successor runs the deferred forced resync"
         );
         assert!(!manager.dirty_peers.contains(&TARGET), "{exit:?}");
         assert!(!manager.resync_tick_pending(), "{exit:?}");
@@ -614,7 +629,7 @@ fn assert_route_precedes_marker(output: &mut mpsc::Receiver<OutboundRouteUpdate>
     let marker = sent
         .iter()
         .position(|update| update.end_of_rib.contains(&V4))
-        .unwrap_or_else(|| panic!("{case}: the End-of-RIB is sent in the release turn"));
+        .unwrap_or_else(|| panic!("{case}: the End-of-RIB is sent on release or its resync"));
     assert!(
         route <= marker,
         "{case}: the End-of-RIB (envelope {marker}) left before the released route (envelope {route})"
@@ -638,8 +653,7 @@ fn assert_route_precedes_marker(output: &mut mpsc::Receiver<OutboundRouteUpdate>
 }
 
 /// A gate ends while a receiver keeps a deferred force bit and owes the
-/// family's End-of-RIB. The deferred forced resync runs in the release
-/// turn, and the marker still follows the routes the release selects: the
+/// family's End-of-RIB. The deferred forced resync runs after the release, and the marker still follows the routes the release selects: the
 /// gate stays armed until they are admitted. By the timer and by the
 /// waiter's End-of-RIB.
 #[tokio::test(start_paused = true)]
@@ -655,6 +669,7 @@ async fn a_gate_release_sends_the_released_routes_before_the_marker_of_a_forced_
         } else {
             source_end_of_rib(&mut manager, V4);
         }
+        finish_release_resyncs(&mut manager);
         assert!(!manager.selection_convergence_held(V4), "{case}");
         assert!(!manager.force_outbound_peers.contains(&TARGET), "{case}");
         assert_route_precedes_marker(&mut output, case);
@@ -708,6 +723,7 @@ async fn a_gate_release_keeps_route_before_marker_while_another_family_is_deferr
     while output.try_recv().is_ok() {}
     while other.try_recv().is_ok() {}
     source_end_of_rib(&mut manager, V4);
+    finish_release_resyncs(&mut manager);
     assert!(!manager.selection_convergence_held(V4));
     assert!(manager.selection_convergence_held(V6));
     assert_route_precedes_marker(&mut output, "second family deferred");
@@ -740,6 +756,7 @@ async fn a_gate_release_keeps_route_before_marker_for_a_woken_dirty_peer() {
     while output.try_recv().is_ok() {}
     while forced.try_recv().is_ok() {}
     manager.expire_selection_deferral();
+    finish_release_resyncs(&mut manager);
     assert_route_precedes_marker(&mut output, "woken dirty peer");
     assert_route_precedes_marker(&mut forced, "forced peer");
     assert!(!manager.dirty_peers.contains(&OTHER));
@@ -828,6 +845,7 @@ async fn a_peer_resynced_by_the_release_pass_gets_its_marker_and_no_second_table
     assert!(manager.eor.owes(TARGET, V4));
 
     manager.expire_selection_deferral();
+    finish_release_resyncs(&mut manager);
 
     assert!(!manager.dirty_peers.contains(&TARGET), "resynced once");
     assert!(!manager.eor.owes(TARGET, V4));
@@ -869,6 +887,7 @@ async fn a_group_member_resynced_by_the_release_pass_gets_its_marker_and_no_seco
     assert!(manager.pending_group_admitted.contains_key(&TARGET));
 
     manager.expire_selection_deferral();
+    finish_release_resyncs(&mut manager);
 
     assert!(!manager.dirty_peers.contains(&TARGET), "resynced once");
     assert!(!manager.pending_group_admitted.contains_key(&TARGET));
@@ -1030,6 +1049,7 @@ async fn a_dirty_peer_held_by_another_family_gets_the_released_marker_once() {
     while output.try_recv().is_ok() {}
 
     source_end_of_rib(&mut manager, V4);
+    finish_release_resyncs(&mut manager);
 
     assert!(manager.selection_convergence_held(V6));
     assert_route_precedes_marker(&mut output, "dirty for IPv6");
@@ -1039,6 +1059,53 @@ async fn a_dirty_peer_held_by_another_family_gets_the_released_marker_once() {
         manager.resync_dirty_peers_bounded();
     }
     assert!(output.try_recv().is_err(), "no second partial resync");
+}
+
+/// A dirty peer resyncs IPv4 after the producer seals but before the marker
+/// walk reaches it. If its writer then refuses the marker, its IPv6 hold
+/// keeps the resync parked while the marker retries on its own.
+#[tokio::test(start_paused = true)]
+async fn refused_release_marker_retries_behind_a_partial_sibling_resync() {
+    let families = [V4, V6];
+    let receivers: Vec<_> = (1..=48u8)
+        .map(|index| {
+            (
+                peer_v4(Ipv4Addr::new(192, 0, 2, index)),
+                u64::from(index) + 10,
+                families.as_slice(),
+            )
+        })
+        .collect();
+    let (mut manager, mut outputs) = late_armed_gate(&families, &receivers);
+    source_end_of_rib(&mut manager, V4);
+    while manager.selection_convergence_held(V4) {
+        assert!(manager.unicast_release_runnable());
+        manager.advance_unicast_release();
+    }
+    let index = receivers
+        .iter()
+        .position(|(peer, _, _)| manager.release_marker_pending(*peer, V4))
+        .expect("pending marker page");
+    let peer = receivers[index].0;
+    let output = &mut outputs[index];
+    manager.mark_outbound_dirty(peer);
+    manager.resync_dirty_peers_bounded();
+    assert!(manager.selection_partial_caught_up(peer));
+    assert_eq!(markers_of(output, V4), 0);
+    let writer = manager.outbound_peers[&peer].clone();
+    let occupied: Vec<_> = std::iter::from_fn(|| writer.clone().try_reserve_owned().ok()).collect();
+    drain_unicast_release(&mut manager);
+    assert!(manager.eor.owes(peer, V4));
+    assert!(manager.selection_partial_caught_up(peer));
+    drop(occupied);
+    let builds = manager.adj_rib_out_commit_stats.resync_builds;
+    manager.resync_dirty_peers_bounded();
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
+    let marker = output.try_recv().unwrap();
+    assert!(marker.announce.is_empty());
+    assert_eq!(marker.end_of_rib, [V4]);
+    assert_eq!(manager.eor_pending(peer), HashSet::from([V6]));
+    assert!(output.try_recv().is_err());
 }
 
 /// A session whose IPv4 is behind the RFC 5291 §6 gate (it negotiated ORF
