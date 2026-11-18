@@ -72,8 +72,8 @@ resolved.
     deliver each owed family, one family of one receiver per step, after
     reading that receiver's credit. The evidence is work counts in
     unit-level tests, not timings. Each owed family other than IPv4 and
-    IPv6 unicast still goes out as one operation, like the whole-family
-    sends below.
+    IPv6 unicast and EVPN still goes out as one operation, like the
+    whole-family sends below.
   - Ordinary UPDATE bursts, v0.83.0 and earlier: 150,000 routes sent at
     once as ordinary UPDATEs toward 150 private receivers delayed an
     unrelated peer's updates by 27–34 s in single untimed harness runs on a
@@ -139,9 +139,32 @@ resolved.
     receiver's own owed routes, kept when they exceed the keyed threshold,
     stay owed until all are sent: updates that arrive meanwhile go to the
     shared list, and the End-of-RIB follows both.
+  - EVPN whole-family sends toward private receivers, fixed on main after
+    v0.83.0: EVPN owed whole (after a selection release, or past the keyed
+    threshold) is sent as unicast is, from a shared list of the route keys
+    that changed, at most 1,024 per step, each step an ordinary update
+    charged against the receiver's credit, with the End-of-RIB after the
+    last step. The evidence is work counts and wire content in unit-level
+    tests; no timed run at 150 receivers × 150,000 routes has been made.
+    The fallback for a receiver that falls behind is the unicast one. For
+    a receiver that is also a member of an update group, the resync tick
+    first walks that group's table twice to record what the member was
+    sent, for one such receiver per tick and never in the update pass.
+    A receiver that fell behind is not rebuilt inside an EVPN selection
+    hold; its resync follows the release. A receiver resynced inside the
+    hold for another reason while it holds EVPN rows gets its EVPN table
+    from one such resync after the release, not from the list. Still on
+    main: until that release, a later resync, an operator soft refresh or
+    a peer route refresh for that receiver is not served for any family;
+    each waits for the rebuild. The wait ends with the selection-deferral
+    timeout at the latest: the largest `gr_restart_time` among
+    planned-restart neighbors (default 120 s), measured from process
+    start.
+    An EVPN family owned by an update group, and a receiver in a private
+    handoff, keep the recovery path and its complete feed.
   - Whole-family sends of the other families, still on main: labeled
-    unicast, VPN, EVPN, FlowSpec, BGP-LS and RT-Constrain owed whole still
-    go out as one operation per receiver that is not charged against the
+    unicast, VPN, FlowSpec, BGP-LS and RT-Constrain owed whole still go
+    out as one operation per receiver that is not charged against the
     outbound credit, in one RIB turn that grows with the family's table.
 
 - **A GR helper can keep a deleted RTBH whose prefix still has another

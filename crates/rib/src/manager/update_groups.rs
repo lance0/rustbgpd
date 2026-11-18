@@ -2536,6 +2536,10 @@ impl RibManager {
                 Ok(())
             })()
         } else if let Some(group) = gid.and_then(|gid| self.group_ribs.get_mut(&gid)) {
+            #[cfg(test)]
+            {
+                self.adj_rib_out_commit_stats.group_table_captures += 1;
+            }
             let rejected = self.peer_unexportable.get(&peer);
             let limits = self.outbound_prefix_limits.get(&peer);
             let projected: &GroupRibOut = group;
@@ -3194,7 +3198,11 @@ impl RibManager {
     /// `PeerDown` path; this only stops the retry.
     pub(in crate::manager) fn drop_gone_dirty_peer(&mut self, peer: PeerId) {
         self.dirty_peers.remove(&peer);
-        self.owed_row_evicted.remove(&peer);
+        // An evicted receiver's kept debt has a dead position: it goes
+        // with the eviction mark.
+        if self.owed_row_evicted.contains(&peer) {
+            self.drop_peer_owing(peer);
+        }
         self.release_group_admitted_keys(peer);
         if let Some(gid) = self.grouped_member_of(peer)
             && let Some(group) = self.group_ribs.get_mut(&gid)
