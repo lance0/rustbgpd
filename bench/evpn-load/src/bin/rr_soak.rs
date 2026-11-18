@@ -535,6 +535,7 @@ async fn dial(args: &Args, i: u32) -> anyhow::Result<rustbgpd_evpn_load::PeerHan
         router_id: router_id(i),
         hold_time: args.hold_time,
         families: vec![(Afi::L2Vpn, Safi::Evpn)],
+        extended_message: false,
     };
     Ok(establish_stream(stream, cfg).await?)
 }

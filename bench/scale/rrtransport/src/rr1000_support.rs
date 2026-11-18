@@ -591,6 +591,7 @@ mod tests {
             router_id: Ipv4Addr::LOCALHOST,
             hold_time: 30,
             families: vec![(Afi::Ipv4, Safi::Unicast)],
+            extended_message: false,
         };
         let (accepted, connected) = tokio::join!(establish_on(listener, config()), async {
             establish_stream(TcpStream::connect(address).await.unwrap(), config()).await

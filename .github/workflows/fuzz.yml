@@ -43,6 +43,10 @@ jobs:
       - uses: ./.github/actions/install-protobuf
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: cargo install cargo-fuzz --version 0.13.2 --locked
+      # Build the dependency versions the workspace lockfile pins rather
+      # than whatever crates.io published last; see the script for why.
+      - name: Seed fuzz lockfiles from the workspace lockfile
+        run: fuzz/seed-fuzz-lockfiles.sh
       - name: Restore bounded wire corpus cache
         id: wire-corpus-restore
         if: env.WIRE_CORPUS_WRITER == 'true'

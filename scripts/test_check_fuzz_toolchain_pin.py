@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -12,6 +15,31 @@ import check_fuzz_toolchain_pin as guard
 
 
 PIN_LINE = f'toolchain="$(cat {guard.PIN_PATH})"'
+SEED_LINE = f"      run: {guard.SEED_SCRIPT}"
+
+KNOWN_BUILD_PATHS = (
+    ".github/workflows/fuzz.yml",
+    ".oss-scanner/Dockerfile",
+    "fuzz/build-fuzzers.sh",
+    "justfile",
+)
+
+# Each form the four build paths use, plus explicit interpreter prefixes.
+SEED_INVOCATIONS = (
+    SEED_LINE,
+    f'"$repo_root/{guard.SEED_SCRIPT}"',
+    f"    {guard.SEED_SCRIPT}",
+    f"    && {guard.SEED_SCRIPT} \\",
+    f"RUN {guard.SEED_SCRIPT}",
+    f"  bash {guard.SEED_SCRIPT}",
+)
+
+FUZZ_BUILDS = (
+    '          cargo fuzz run "$t" -- -max_total_time=120',
+    "  cargo fuzz build -O --debug-assertions",
+    '        cargo +"$TOOLCHAIN" fuzz build',
+    '    && cargo "+$(cat fuzz/rust-nightly.txt)" fuzz build',
+)
 
 FLOATING_SELECTIONS = (
     "      - uses: dtolnay/rust-toolchain@master",
@@ -118,6 +146,80 @@ class FuzzToolchainPinTests(unittest.TestCase):
                     ".github/workflows/fuzz.yml", f"{PIN_LINE}\n{line}\n"
                 )
                 self.assertEqual(failures, [], f"{line!r} must be accepted")
+
+    def test_repository_build_paths_are_discovered_and_seeded(self) -> None:
+        builds = guard.discover_fuzz_builds()
+        for relative in KNOWN_BUILD_PATHS:
+            self.assertIn(relative, builds)
+        for relative, text in builds.items():
+            with self.subTest(build_path=relative):
+                self.assertEqual(guard.audit_build_path(relative, text), [])
+
+    def test_build_without_a_prior_seed_is_rejected(self) -> None:
+        for build in FUZZ_BUILDS:
+            for name, text in (
+                ("missing", f"{build}\n"),
+                ("comment only", f"  # {SEED_LINE}\n{build}\n"),
+                ("after the build", f"{build}\n{SEED_LINE}\n"),
+                ("step name only", f"      - name: {guard.SEED_SCRIPT}\n        run: true\n{build}\n"),
+                ("echoed", f"        run: echo {guard.SEED_SCRIPT}\n{build}\n"),
+                ("argument", f"    ls -l {guard.SEED_SCRIPT}\n{build}\n"),
+            ):
+                with self.subTest(build=build, seed=name):
+                    failures = guard.audit_build_path("fuzz/build-fuzzers.sh", text)
+                    self.assertTrue(
+                        any(guard.SEED_SCRIPT in f for f in failures), failures
+                    )
+            for seed in SEED_INVOCATIONS:
+                with self.subTest(build=build, seed=seed):
+                    self.assertEqual(
+                        guard.audit_build_path("fuzz/build-fuzzers.sh", f"{seed}\n{build}\n"),
+                        [],
+                    )
+
+    def test_build_discovery_does_not_need_a_toolchain_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            helper = root / "helper.sh"
+            helper.write_text('cd crates/wire\ncargo +"$TOOLCHAIN" fuzz build\n')
+            prose = root / "notes.md"
+            prose.write_text("cargo fuzz run decode_update\n")
+            original_root, original_files = guard.ROOT, guard.tracked_files
+            guard.ROOT = root
+            guard.tracked_files = lambda: [helper, prose]
+            try:
+                builds = guard.discover_fuzz_builds()
+            finally:
+                guard.ROOT, guard.tracked_files = original_root, original_files
+        self.assertEqual(list(builds), ["helper.sh"])
+        self.assertTrue(guard.audit_build_path("helper.sh", builds["helper.sh"]))
+
+    def test_seed_script_seeds_every_fuzz_workspace_from_the_root_lockfile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "fuzz").mkdir()
+            shutil.copy2(guard.ROOT / guard.SEED_SCRIPT, root / guard.SEED_SCRIPT)
+            (root / "Cargo.lock").write_text("# workspace lockfile\n")
+            for crate in ("a", "b"):
+                (root / "crates" / crate / "fuzz").mkdir(parents=True)
+            (root / "crates" / "c").mkdir()
+            (root / "crates" / "a" / "fuzz" / "Cargo.lock").write_text("# stale\n")
+            subprocess.run([root / guard.SEED_SCRIPT], cwd="/", check=True)
+            for crate in ("a", "b"):
+                with self.subTest(crate=crate):
+                    seeded = root / "crates" / crate / "fuzz" / "Cargo.lock"
+                    self.assertEqual(seeded.read_text(), "# workspace lockfile\n")
+                    self.assertEqual(list(seeded.parent.glob(".Cargo.lock.*")), [])
+            self.assertFalse((root / "crates" / "c" / "Cargo.lock").exists())
+
+    def test_broken_build_walk_fails_loudly(self) -> None:
+        original = guard.tracked_files
+        guard.tracked_files = lambda: []
+        try:
+            with self.assertRaisesRegex(guard.PinGuardError, "walk is broken"):
+                guard.discover_fuzz_builds()
+        finally:
+            guard.tracked_files = original
 
     def test_broken_walk_fails_loudly(self) -> None:
         original = guard.tracked_files

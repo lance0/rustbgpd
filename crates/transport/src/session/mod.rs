@@ -227,6 +227,13 @@ impl ConnectFailureEpisode {
 /// blocked for about three hold times since then is closed with
 /// Cease/Out of Resources, as a local overload.
 const MAX_PARKED_HOLD_RENEWALS: u8 = 2;
+/// Consecutive hold expiries that may each admit one frame past a closed
+/// ingest gate. After them the wait uses the bounded policy above, so a peer
+/// that sent many complete frames and then went away does not stay
+/// Established for one hold time per frame. Eight hold times is 12 minutes
+/// at hold 90 and 24 s at hold 3; a bound near three would let one local RIB
+/// stall of a few hold times close every session behind its gate.
+const MAX_GATE_HOLD_ADMISSIONS: u8 = 8;
 /// Bytes one parked hold expiry may read from the socket looking for new
 /// input.
 const PARKED_HOLD_PROBE: usize = 4096;
@@ -335,9 +342,21 @@ pub(crate) struct PeerSession {
     /// emitted and whose `PeerDown` or `PeerGracefulRestart` it has not. A
     /// session dropped inside one closes it (see the `Drop` impl).
     rib_epoch: Option<PeerId>,
-    /// Hold renewals spent while RIB-bound messages are held, since the
+    /// This session's bound on routes sent to the RIB and not yet finished
+    /// there; every route-bearing message carries a permit from it. Replaced
+    /// when the Established epoch ends, so routes of an earlier connection
+    /// never pace a later one. `None` only under the unit-test constructors,
+    /// whose tests read the plain messages.
+    ingest_budget: Option<Arc<rustbgpd_rib::ingest_budget::IngestBudget>>,
+    /// The budget was spent and the run loop has not yet seen it fall to its
+    /// resume mark; see [`Self::reopen_ingest_gate`].
+    ingest_gate_closed: bool,
+    /// Hold renewals spent while peer input waits for the RIB, since the
     /// last peer PDU processed.
     parked_hold_renewals: u8,
+    /// Consecutive hold expiries that admitted a frame past the closed
+    /// ingest gate, since the gate last reopened.
+    gate_hold_admissions: u8,
     /// Canonical `peer` metric/log label from
     /// [`TransportConfig::peer_label`]: the neighbor address, scoped to its
     /// interface for a link-local neighbor (`interface:<name>` for an
@@ -2271,7 +2290,7 @@ impl PeerSession {
         advertise_graceful_shutdown: bool,
         session_identity: SessionIdentity,
     ) -> Self {
-        Self::new_at_tcp_ao_generation(
+        let mut session = Self::new_at_tcp_ao_generation(
             config,
             metrics,
             commands,
@@ -2286,7 +2305,11 @@ impl PeerSession {
             advertise_graceful_shutdown,
             session_identity,
             crate::TcpAoRotationGeneration::STARTUP,
-        )
+        );
+        // Unit tests read the plain route messages; the ingest-budget tests
+        // install a budget themselves.
+        session.ingest_budget = None;
+        session
     }
 
     #[expect(
@@ -2535,9 +2558,12 @@ impl PeerSession {
             shared_encode_stops: shared_group::SharedEncodeStops::default(),
             rib_tx,
             rib_backlog: VecDeque::new(),
+            ingest_budget: Some(rustbgpd_rib::ingest_budget::IngestBudget::new()),
+            ingest_gate_closed: false,
             rib_reserve: None,
             rib_epoch: None,
             parked_hold_renewals: 0,
+            gate_hold_admissions: 0,
             peer_label,
             peer_ip,
             link_local_next_hop_scope,
@@ -3265,12 +3291,17 @@ impl PeerSession {
             // KEEPALIVE unread: processing it would reach Established.
             //
             // Held RIB-bound messages park input too (ADR-0078): the socket
-            // stays unread so the kernel receive window paces the peer.
+            // stays unread so the kernel receive window paces the peer. So
+            // does a spent ingest budget, until the RIB finishes enough of
+            // the routes this session already sent.
+            self.reopen_ingest_gate().await;
             let rib_parked = !self.rib_backlog.is_empty();
+            let ingest_gated = self.ingest_gate_closed;
+            let input_parked = rib_parked || ingest_gated;
             let read_active = self.read_half.is_some()
                 && self.fsm.state() != SessionState::Idle
                 && !self.collision_verdict_pending()
-                && !rib_parked;
+                && !input_parked;
 
             let replay_waiting = self
                 .pending_replay
@@ -3279,7 +3310,7 @@ impl PeerSession {
             let receive_outbound = self.fsm.state() == SessionState::Established
                 && !replay_waiting
                 && self.pending_outbound.is_none();
-            let revalidating = self.revalidation_pending() && !rib_parked;
+            let revalidating = self.revalidation_pending() && !input_parked;
             // Destructure to split borrows for tokio::select!
             let Self {
                 read_half,
@@ -3301,6 +3332,7 @@ impl PeerSession {
                 outbound_admission_timer,
                 admission_progress,
                 rib_reserve,
+                ingest_budget,
                 ..
             } = self;
 
@@ -3341,6 +3373,10 @@ impl PeerSession {
                 reserved = inbound::poll_rib_reserve(rib_reserve), if rib_reserve.is_some() => {
                     self.advance_rib_backlog(reserved).await;
                 }
+
+                // The RIB returned ingest budget: the next turn reopens the
+                // gate and resumes the input behind it.
+                () = inbound::ingest_budget_resumed(ingest_budget.as_deref()), if ingest_gated => {}
 
                 () = async {
                     match pending_outbound.as_ref() {

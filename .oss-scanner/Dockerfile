@@ -43,6 +43,7 @@ RUN cargo fetch --locked
 # fuzz/rust-nightly.txt and the cargo-fuzz version CI uses. Fetch each one's dependencies so they build offline.
 RUN rustup toolchain install "$(cat fuzz/rust-nightly.txt)" --profile minimal \
     && cargo "+$(cat fuzz/rust-nightly.txt)" install cargo-fuzz --version 0.13.2 --locked \
+    && fuzz/seed-fuzz-lockfiles.sh \
     && for dir in crates/*/fuzz; do (cd "$dir" && cargo "+$(cat /src/fuzz/rust-nightly.txt)" fetch) || exit 1; done
 
 # Everything is fetched. From here on cargo must not try to reach a registry.

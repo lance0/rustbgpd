@@ -11,6 +11,18 @@ Consumers are discovered from the tracked tree rather than a maintained list,
 so a fourth integration is covered the day it lands instead of passing
 vacuously. An empty discovery set is itself a failure: a guard that cannot
 fail is worse than no guard.
+
+Every tracked file that runs `cargo fuzz build` or `cargo fuzz run`, whether
+or not it selects a toolchain, must run `fuzz/seed-fuzz-lockfiles.sh` earlier
+in the file. The fuzz crates are separate workspaces with no tracked
+lockfile, so without the seed every build takes the newest release of every
+dependency, and one that needs a newer std than the pin breaks the campaign
+the same way a floating compiler does. The seed script owns the source,
+destination and coverage; this check owns that a line invokes it as a
+command before the first build. It compares line order within a file, so it
+does not prove the seed and the build share a workflow step or recipe, that
+the invocation is unconditional (an `if` or a `false &&` guard still passes),
+or that the seed precedes other resolving commands such as `cargo fetch`.
 """
 
 from __future__ import annotations
@@ -81,6 +93,24 @@ VIOLATION_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
         f"assigns a floating nightly; read the toolchain from {PIN_PATH}",
     ),
 )
+
+SEED_SCRIPT = "fuzz/seed-fuzz-lockfiles.sh"
+# The seed script must be the command word: at the start of a line (bare, as
+# a workflow `run:` value, or after a Dockerfile `RUN`) or after `&&`, `||`,
+# `;` or `(`, optionally through `bash`/`sh` and a `$var/` root prefix. A step
+# name, an `echo`, or any other argument position does not run it.
+SEED_INVOCATION = re.compile(
+    r"""(?:^\s*(?:-\s+)?(?:run:\s*|RUN\s+)?|(?:&&|\|\||;|\()\s*)"""
+    r"""(?:(?:ba)?sh\s+)?"?(?:\$\{?\w+\}?/)?"""
+    + re.escape(SEED_SCRIPT)
+    + r""""?(?=\s|$|[;&|)])"""
+)
+# Any toolchain selector may sit between `cargo` and `fuzz`, including one
+# with spaces such as `"+$(cat fuzz/rust-nightly.txt)"`.
+FUZZ_BUILD = re.compile(r"\bcargo\b.*\bfuzz\s+(?:build|run)\b")
+# Python sources quote fuzz commands as checker data rather than running them.
+BUILD_SKIPPED_SUFFIXES = SKIPPED_SUFFIXES | {".py"}
+
 
 def strip_comment(line: str) -> str:
     """Drop a shell, YAML, Dockerfile, or justfile `#` comment from `line`.
@@ -172,9 +202,52 @@ def audit_consumer(relative: str, text: str) -> list[str]:
     return failures
 
 
+def discover_fuzz_builds() -> dict[str, str]:
+    """Map each tracked file that runs `cargo fuzz build|run` to its text.
+
+    Independent of toolchain markers: a helper that inherits the toolchain
+    still resolves the fuzz workspace's dependencies.
+    """
+    builds: dict[str, str] = {}
+    for path in tracked_files():
+        relative = path.relative_to(ROOT).as_posix()
+        if relative in SKIPPED_PATHS or path.suffix in BUILD_SKIPPED_SUFFIXES:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if any(FUZZ_BUILD.search(strip_comment(line)) for line in text.splitlines()):
+            builds[relative] = text
+    if not builds:
+        raise PinGuardError(
+            "no fuzz build path was discovered, so the walk is broken: the "
+            "scheduled campaign and the hosted builder script run cargo fuzz"
+        )
+    return dict(sorted(builds.items()))
+
+
+def audit_build_path(relative: str, text: str) -> list[str]:
+    """Require `SEED_SCRIPT` to run before the file's first fuzz build."""
+    code = [strip_comment(line) for line in text.splitlines()]
+    first_build = next(
+        (index for index, line in enumerate(code) if FUZZ_BUILD.search(line)), None
+    )
+    if first_build is None:
+        return []
+    if any(SEED_INVOCATION.search(line) for line in code[:first_build]):
+        return []
+    return [
+        f"{relative}:{first_build + 1} builds fuzz targets without first running "
+        f"{SEED_SCRIPT}, so the fuzz workspace resolves unreviewed dependency "
+        "versions"
+    ]
+
+
 def main() -> int:
     try:
         consumers = discover_consumers()
+        builds = discover_fuzz_builds()
     except PinGuardError as error:
         print(f"fuzz toolchain pin check failed: {error}", file=sys.stderr)
         return 1
@@ -183,6 +256,10 @@ def main() -> int:
         failure
         for relative, text in consumers.items()
         for failure in audit_consumer(relative, text)
+    ] + [
+        failure
+        for relative, text in builds.items()
+        for failure in audit_build_path(relative, text)
     ]
     if failures:
         for failure in failures:
@@ -194,6 +271,9 @@ def main() -> int:
         f"toolchain from {PIN_PATH}"
     )
     for relative in consumers:
+        print(f"  {relative}")
+    print(f"fuzz lockfile seed check passed: {len(builds)} build paths run {SEED_SCRIPT} first")
+    for relative in builds:
         print(f"  {relative}")
     return 0
 
