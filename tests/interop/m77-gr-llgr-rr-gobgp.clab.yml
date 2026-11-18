@@ -1,4 +1,4 @@
-# Containerlab topology: GoBGP PE + GoBGP client + GoBGP LS source ↔ rustbgpd RR
+# Containerlab topology: GoBGP VPN and BGP-LS peers ↔ rustbgpd RR
 # (M77 — GR/LLGR stale preservation for the RR families, RFC 4724 / RFC 9494)
 #
 # Validates: rustbgpd (receiving speaker) preserves a restarting peer's
@@ -16,8 +16,8 @@
 # l3vpn-ipv4-unicast, l3vpn-ipv6-unicast, and rtc.
 # gobgp-client: VRF blue (RD 65001:101, RT 65001:100) + a red-import VRF
 # for the red RTC membership; receives the reflected VPN routes. It
-# advertises GR+LLGR (never restarts — the capability exists so rustbgpd
-# does not strip the LLGR_STALE community toward it in the LLGR phase).
+# advertises GR+LLGR and receives LLGR_STALE when the PE's routes are promoted.
+# gobgp-ibgp and gobgp-ebgp: VPN receivers without LLGR or RTC.
 # gobgp-ls: linkstate only, GR restart-time 30, no LLGR; injects the M76
 # 4-link square that resolves the RR's ORR vantage.
 #
@@ -30,8 +30,7 @@
 # 4456 — a client's own route is not reflected back), and GoBGP's
 # v4.6.0 processRTCMembership withdraw path would then withdraw the client's
 # VPN routes toward the RR without checking that the RR's default RTC NLRI
-# still covers them. M77 retains the original topology shape while refreshing
-# the peer runtime, so the GR/LLGR contract is compared without a layout change.
+# still covers them. The two VPN-only receivers originate no memberships.
 #
 # Usage:
 #   docker build --target dev -t rustbgpd:dev .
@@ -61,6 +60,10 @@ topology:
         - ip link set eth2 up
         - ip addr add 10.0.2.1/24 dev eth3
         - ip link set eth3 up
+        - ip addr add 10.0.3.1/24 dev eth4
+        - ip link set eth4 up
+        - ip addr add 10.0.4.1/24 dev eth5
+        - ip link set eth5 up
       env:
         RUST_LOG: info
         RUSTBGPD_TOKEN_FILE: /run/rustbgpd/grpc-test-only-operator.token
@@ -95,7 +98,29 @@ topology:
         - ip addr add 10.0.2.2/24 dev eth1
         - ip link set eth1 up
 
+    gobgp-ibgp:
+      kind: linux
+      image: gobgp:v4.11.0-m77
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m77-ibgp.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.0.3.2/24 dev eth1
+        - ip link set eth1 up
+
+    gobgp-ebgp:
+      kind: linux
+      image: gobgp:v4.11.0-m77
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m77-ebgp.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.0.4.2/24 dev eth1
+        - ip link set eth1 up
+
   links:
     - endpoints: ["rustbgpd:eth1", "gobgp-client:eth1"]
     - endpoints: ["rustbgpd:eth2", "gobgp-pe:eth1"]
     - endpoints: ["rustbgpd:eth3", "gobgp-ls:eth1"]
+    - endpoints: ["rustbgpd:eth4", "gobgp-ibgp:eth1"]
+    - endpoints: ["rustbgpd:eth5", "gobgp-ebgp:eth1"]

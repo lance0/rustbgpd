@@ -1,0 +1,17 @@
+# VPN-only ebgp receiver. Leave LLGR disabled in its OPEN.
+[global.config]
+as = 65002
+router-id = "10.0.4.2"
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "10.0.4.1"
+peer-as = 65001
+
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "l3vpn-ipv4-unicast"
+
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "l3vpn-ipv6-unicast"

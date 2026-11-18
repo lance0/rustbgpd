@@ -21,14 +21,15 @@ def message(t, body):
     return b"\xff" * 16 + struct.pack("!HB", len(body) + 19, t) + body
 
 
-def open_body(restart=False, forwarding=False, llgr_time=30, family=25):
+def open_body(restart=False, forwarding=False, llgr_time=30, family=25, asn=65001):
     caps = bytes.fromhex("010400190046")
     gr = struct.pack("!HHBB", 60 | (0x8000 if restart else 0), family, 70, 0x80 if forwarding else 0)
     caps += bytes([64, len(gr)]) + gr
-    llgr = struct.pack("!HBB", 25, 70, 0) + llgr_time.to_bytes(3, "big")
-    caps += bytes([71, len(llgr)]) + llgr
+    if llgr_time is not None:
+        llgr = struct.pack("!HBB", 25, 70, 0) + llgr_time.to_bytes(3, "big")
+        caps += bytes([71, len(llgr)]) + llgr
     optional = bytes([2, len(caps)]) + caps
-    return b"\x04" + struct.pack("!HH", 65001, 90) + ipaddress.IPv4Address(oracle.SOURCE).packed + bytes([len(optional)]) + optional
+    return b"\x04" + struct.pack("!HH", asn, 90) + ipaddress.IPv4Address(oracle.SOURCE).packed + bytes([len(optional)]) + optional
 
 
 def attr(code, data, flags=None, extended=False):
@@ -330,6 +331,16 @@ class OracleTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             oracle.nlri_key((b"\x06" + oracle.nlri(5, 1)[1:]).hex())
 
+    def test_non_llgr_ebgp_withdrawals_are_bound_to_its_tcp_direction(self):
+        pair = (oracle.RR_EBGP, oracle.EBGP)
+        row = f"4\t{pair[0]}\t{pair[1]}\t100\t{withdraw([1], 1).hex()}"
+        # The LLGR client already withdrew all ten. Its capture cannot fill
+        # missing eBGP withdrawals.
+        self.assertEqual(oracle.client_withdrawals(fixture() + [row], pair),
+                         {oracle.nlri_key(oracle.nlri(1, 1).hex())})
+        with self.assertRaisesRegex(ValueError, "stream absent"):
+            oracle.client_withdrawals(fixture(), pair)
+
     def test_withdrawal_wrong_family_fails(self):
         lines = fixture()
         original = attr(15, bytes.fromhex("001946") + b"".join(oracle.nlri(t, 2) for t in range(1, 6))).hex()
@@ -344,6 +355,25 @@ class OracleTests(unittest.TestCase):
         for body in (open_body(family=1), open_body(llgr_time=0)):
             with self.assertRaises(ValueError):
                 oracle.admit_open(body)
+
+    def test_non_llgr_admission_checks_both_open_directions_and_remote_as(self):
+        links = ((oracle.SOURCE, oracle.RR), (oracle.CLIENT, oracle.RR_CLIENT),
+                 (oracle.IBGP, oracle.RR_IBGP), (oracle.EBGP, oracle.RR_EBGP))
+        rows = []
+        for stream, link in enumerate(links):
+            for src, dst in (link, link[::-1]):
+                timer = None if src in (oracle.IBGP, oracle.EBGP) else 30
+                asn = 65002 if src == oracle.EBGP else 65001
+                body = open_body(llgr_time=timer, asn=asn)
+                rows.append(f"{stream}\t{src}\t{dst}\t100\t{message(1, body).hex()}")
+        self.assertEqual(len(runner.live_admission(rows)), 8)
+        with self.assertRaisesRegex(ValueError, "incomplete"):
+            runner.live_admission(rows[:-1])
+        for src, asn in ((oracle.IBGP, 65001), (oracle.EBGP, 65002)):
+            with self.assertRaisesRegex(ValueError, "advertised LLGR"):
+                oracle.admit_open(open_body(asn=asn), src)
+            with self.assertRaisesRegex(ValueError, "OPEN AS"):
+                oracle.admit_open(open_body(llgr_time=None, asn=65003), src)
 
     def test_restart_requires_forwarding_bit_and_real_eor(self):
         for lines in (fixture(False), fixture(include_eor=False)):
@@ -605,30 +635,35 @@ class OracleTests(unittest.TestCase):
         startup = json.dumps({"target": "rustbgpd", "fields": {
             "message": "starting rustbgpd", "version": "0.82.0"}}) + "\n"
         banner = "\n  rustbgpd 0.82.0 | AS 65001 | router-id 10.0.122.1\n" \
-            "  |- 2 peers (2 iBGP)\n" \
+            "  |- 4 peers (1 eBGP, 3 iBGP)\n  |- 1 named policy\n" \
             "  |- grpc: tcp://0.0.0.0:50051 (token auth)\n" \
             "  |- grpc: unix:///var/lib/rustbgpd/grpc.sock\n" \
             "  |- metrics: http://0.0.0.0:9179/metrics\n\n"
         trace = trace_fixture(oracle.RR)["rr.log"]
         text = startup + banner + trace
-        events = parse_logs({"rr.log": text})
-        self.assertEqual(events[0]["line"], 9)
+        receiver_logs = {"ibgp.log": "", "ebgp.log": ""}
+        events = parse_logs({"rr.log": text, **receiver_logs})
+        archived = text.replace("4 peers (1 eBGP, 3 iBGP)\n  |- 1 named policy", "2 peers (2 iBGP)")
+        self.assertEqual(parse_logs({"rr.log": archived})[0]["line"], 9)
+        with self.assertRaises(ValueError):
+            parse_logs({"rr.log": archived, **receiver_logs})
+        self.assertEqual(events[0]["line"], 10)
         result = oracle.analyze_wire(fixture() + collision_rows(oracle.RR), events)
-        self.assertEqual(result["collision_closes"][0]["close_line"], 11)
-        for broken in (text.replace("2 peers (2 iBGP)", "3 peers (3 iBGP)"),
+        self.assertEqual(result["collision_closes"][0]["close_line"], 12)
+        for broken in (text.replace("4 peers (1 eBGP, 3 iBGP)", "3 peers (3 iBGP)"),
                        text.replace("  |- metrics: http://0.0.0.0:9179/metrics\n", ""),
                        text.replace("  rustbgpd 0.82.0", "  rustbgpd 0.81.0"),
                        banner + trace, startup + banner + banner + trace,
                        text + "\nunexpected stderr warning\n", text[:-1]):
             with self.subTest(broken=broken), self.assertRaises(ValueError):
-                parse_logs({"rr.log": broken})
+                parse_logs({"rr.log": broken, **receiver_logs})
         with self.assertRaises(ValueError):
             parse_logs({"source.log": text})
 
     def test_driver_verdict_requires_final_capture_and_logs(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(runner, "OUT", Path(directory)):
             out = Path(directory)
-            for name in ("rr.log", "source.log", "client.log"):
+            for name in ("rr.log", *runner.PEER_LOGS.values()):
                 (out / name).write_text(trace_fixture().get(name, ""))
             # Final capture catches the late close even if the live phase passed.
             (out / "capture.tsv").write_text("\n".join(fixture() + collision_rows()))
@@ -702,6 +737,18 @@ class OracleTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             oracle.check_client(rows, [1], llgr=True)
 
+    def test_non_llgr_ibgp_requires_both_communities_and_explicit_zero_on_every_path(self):
+        communities = [oracle.LLGR_STALE, oracle.NO_EXPORT]
+        attrs = [{"type": 8, "communities": communities}, {"type": 5, "value": 0}]
+        rows = {oracle.client_key(t, 1): [{"attrs": attrs}] for t in range(1, 6)}
+        oracle.check_client(rows, [1], llgr=True, partial=True)
+        for broken in ([attrs[0]], [attrs[0], {"type": 5, "value": 100}],
+                       [{"type": 8, "communities": [oracle.LLGR_STALE]}, attrs[1]],
+                       [{"type": 8, "communities": [oracle.NO_EXPORT]}, attrs[1]]):
+            rows[oracle.client_key(4, 1)][0]["attrs"] = broken
+            with self.subTest(broken=broken), self.assertRaises(ValueError):
+                oracle.check_client(rows, [1], llgr=True, partial=True)
+
     def test_missing_stale_metric_never_becomes_zero(self):
         with patch.object(runner, "docker", return_value=""):
             with self.assertRaises(ValueError):
@@ -717,10 +764,16 @@ class OracleTests(unittest.TestCase):
             for row in rr:
                 row["communities"] = ["LLGR_STALE"] if llgr else []
             sink = {oracle.client_key(t, 1): [{"attrs": [{"type": 8, "communities": communities}]}] for t in range(1, 6)}
+            ibgp = copy.deepcopy(sink)
+            for paths in ibgp.values():
+                if llgr:
+                    paths[0]["attrs"][0]["communities"].append(oracle.NO_EXPORT)
+                paths[0]["attrs"].append({"type": 5, "value": 0 if llgr else 100})
+            sinks = {runner.SINK: sink, runner.IBGP_SINK: ibgp, runner.EBGP_SINK: {} if llgr else sink}
             for gauge in (0, 5):
                 with self.subTest(phase=phase, gauge=gauge), \
                         patch.object(runner, "rr_rows", return_value=rr), \
-                        patch.object(runner, "sink_rows", return_value=sink), \
+                        patch.object(runner, "sink_rows", side_effect=lambda container=runner.SINK: sinks[container]), \
                         patch.object(runner, "flaps", return_value=0), \
                         patch.object(runner, "metric", return_value=gauge), \
                         patch.object(runner, "save") as saved, \

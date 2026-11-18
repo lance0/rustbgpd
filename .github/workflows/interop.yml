@@ -2463,6 +2463,8 @@ jobs:
             ${{ runner.temp }}/m122-evidence/rr.log
             ${{ runner.temp }}/m122-evidence/source.log
             ${{ runner.temp }}/m122-evidence/client.log
+            ${{ runner.temp }}/m122-evidence/ibgp.log
+            ${{ runner.temp }}/m122-evidence/ebgp.log
           if-no-files-found: warn
           retention-days: 14
 

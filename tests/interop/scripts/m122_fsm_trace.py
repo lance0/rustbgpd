@@ -20,6 +20,10 @@ def endpoint(value):
 
 def parse_logs(logs):
     """Normalize JSON daemon logs, retaining file/line provenance and local order."""
+    # The original M122 receipts captured only the source and LLGR client.
+    topology = ["  |- 2 peers (2 iBGP)"]
+    if "ibgp.log" in logs or "ebgp.log" in logs:
+        topology = ["  |- 4 peers (1 eBGP, 3 iBGP)", "  |- 1 named policy"]
     events = []
     for name, text in logs.items():
         lines = text.splitlines()
@@ -32,7 +36,7 @@ def parse_logs(logs):
             if name == "rr.log" and version is not None:
                 banner = [
                     "", f"  rustbgpd {version} | AS 65001 | router-id 10.0.122.1",
-                    "  |- 2 peers (2 iBGP)",
+                    *topology,
                     "  |- grpc: tcp://0.0.0.0:50051 (token auth)",
                     "  |- grpc: unix:///var/lib/rustbgpd/grpc.sock",
                     "  |- metrics: http://0.0.0.0:9179/metrics", "",

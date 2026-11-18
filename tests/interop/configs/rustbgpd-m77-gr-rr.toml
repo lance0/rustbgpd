@@ -1,8 +1,8 @@
 # M77 — GR/LLGR RR-family stale-preservation receipt.
 #
-# iBGP route reflector with three clients: a restartable VPNv4/VPNv6+RTC PE, a
-# VPNv4/VPNv6+RTC client bound to an ORR vantage, and a linkstate-only BGP-LS
-# source. GR helper timers:
+# The RR peers with a restarting VPN/RTC PE, a VPN/RTC client using ORR,
+# a BGP-LS source, and iBGP and eBGP VPN receivers without LLGR.
+# GR helper timers:
 #   - The GR stale window uses the PEER's advertised restart-time
 #     (RFC 4724 §4.2): 60 s on the PE, 30 s on the LS source.
 #   - gr_stale_routes_time bounds the post-re-establish End-of-RIB wait.
@@ -55,6 +55,23 @@ route_reflector_client = true
 families = ["linkstate"]
 graceful_restart = true
 gr_stale_routes_time = 60
+
+[[neighbors]]
+address = "10.0.3.2"
+remote_asn = 65001
+description = "vpn-ibgp-receiver"
+route_reflector_client = true
+families = ["l3vpn_ipv4_unicast", "l3vpn_ipv6_unicast"]
+graceful_restart = true
+llgr_stale_time = 120
+
+[[neighbors]]
+address = "10.0.4.2"
+remote_asn = 65002
+description = "vpn-ebgp-receiver"
+families = ["l3vpn_ipv4_unicast", "l3vpn_ipv6_unicast"]
+graceful_restart = true
+llgr_stale_time = 120
 
 [security.grpc]
 enforcement = "tier"

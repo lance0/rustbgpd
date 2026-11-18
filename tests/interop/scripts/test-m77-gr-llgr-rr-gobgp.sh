@@ -38,10 +38,10 @@
 #   6. LLGR two-phase (PE killed again, never returns): at GR-timer expiry
 #      the PE's routes promote to llgr_stale (visible in rbgp rib vpn/rtc
 #      -j) instead of purging, and the client's copies of blue are
-#      re-advertised carrying the LLGR_STALE community (65535:6 — the
-#      client advertises the LLGR capability; rustbgpd strips the
-#      community toward LLGR-incapable peers); at LLGR-timer expiry
-#      everything is swept and the client finally sees the withdraw.
+#      re-advertised carrying LLGR_STALE (65535:6). The iBGP receiver without
+#      LLGR also receives NO_EXPORT and LOCAL_PREF 0. The eBGP receiver
+#      without LLGR sees both blue routes withdrawn at promotion. LLGR
+#      expiry sweeps the remaining stale routes.
 #   7. BGP-LS/ORR survival: killing the LS source leaves the topology feed
 #      intact (stale) — rbgp topology stays 4 nodes / 4 links and the ORR
 #      vantage stays RESOLVED through the GR window; the source never
@@ -65,6 +65,8 @@ export INTEROP_TEST_OPERATOR_AUTH
 GOBGP_PE="clab-${TOPO}-gobgp-pe"
 GOBGP_CLIENT="clab-${TOPO}-gobgp-client"
 GOBGP_LS="clab-${TOPO}-gobgp-ls"
+GOBGP_IBGP="clab-${TOPO}-gobgp-ibgp"
+GOBGP_EBGP="clab-${TOPO}-gobgp-ebgp"
 readonly GOBGP_IMAGE="gobgp:v4.11.0-m77"
 readonly GOBGP_VERSION="gobgp version 4.11.0"
 readonly GOBGPD_VERSION="gobgpd version 4.11.0"
@@ -97,6 +99,7 @@ PE_UNIQUE_RT="65001:222"
 
 # RFC 9494 LLGR_STALE community 65535:6 as GoBGP's JSON renders it (u32).
 LLGR_STALE_COMMUNITY=4294901766
+NO_EXPORT_COMMUNITY=4294967041
 
 require_exact() {
     local actual=${1:?} expected=${2:?} label=${3:?}
@@ -201,7 +204,7 @@ preflight_gobgp_identity() {
     image_id=$(docker image inspect -f '{{.Id}}' "$GOBGP_IMAGE")
     require_exact "$(docker image inspect -f '{{.Architecture}}' "$GOBGP_IMAGE")" \
         amd64 "GoBGP image architecture"
-    for container in "$GOBGP_PE" "$GOBGP_CLIENT" "$GOBGP_LS"; do
+    for container in "$GOBGP_PE" "$GOBGP_CLIENT" "$GOBGP_LS" "$GOBGP_IBGP" "$GOBGP_EBGP"; do
         require_exact "$(docker inspect -f '{{.Config.Image}}' "$container")" \
             "$GOBGP_IMAGE" "$container configured image"
         require_exact "$(docker inspect -f '{{.Image}}' "$container")" \
@@ -770,11 +773,8 @@ test_capabilities() {
     assert_gr_cap_family "$GOBGP_PE" 10.0.1.1 "long-lived-graceful-restart" "l3vpn-ipv6-unicast" "pe"
     assert_gr_cap_family "$GOBGP_PE" 10.0.1.1 "long-lived-graceful-restart" "rtc" "pe"
     assert_gr_cap_family "$GOBGP_LS" 10.0.2.1 "graceful-restart" "ls" "ls-source"
-    # The client's LLGR capability is load-bearing for Test 5: rustbgpd
-    # strips the LLGR_STALE community toward LLGR-incapable peers. One-sided
-    # on purpose — the strip gate keys on what the CLIENT advertised, and
-    # the RR (no llgr_stale_time on the client neighbor) advertises none
-    # back, so there is no "advertised and received" or Remote section.
+    # Export uses the capability the receiver advertised in its OPEN.
+    # The RR does not offer LLGR back to this client.
     local client_llgr local_families family
     client_llgr=$(cap_block "$GOBGP_CLIENT" 10.0.0.1 "long-lived-graceful-restart")
     local_families=$(awk '
@@ -790,6 +790,25 @@ test_capabilities() {
             echo "$client_llgr" >&2
         fi
     done
+    assert_receiver_capabilities "$GOBGP_IBGP" 10.0.3.1 10.0.3.2 65001
+    assert_receiver_capabilities "$GOBGP_EBGP" 10.0.4.1 10.0.4.2 65002
+}
+
+assert_receiver_capabilities() {
+    local container=$1 rr=$2 receiver=$3 asn=$4 neighbor block
+    neighbor=$(rustbgpd_neighbor_json "$receiver")
+    block=$(cap_block "$container" "$rr" "long-lived-graceful-restart")
+    if jq -e --argjson asn "$asn" --arg v4 "$VPN4_FAMILY" --arg v6 "$VPN6_FAMILY" '
+        .state == "Established" and .negotiated_session.remote_asn == $asn
+        and (.negotiated_session.families | sort) == ([$v4, $v6] | sort)
+        ' <<<"$neighbor" >/dev/null \
+        && grep -Eq '^    long-lived-graceful-restart:[[:space:]]+received$' <<<"$block"; then
+        ok "$receiver negotiated VPNv4 and VPNv6 as AS $asn and only received the LLGR capability"
+    else
+        fail "unexpected VPN negotiation or LLGR direction at $receiver"
+        printf '%s\n' "$neighbor" "$block" >&2
+        return 1
+    fi
 }
 
 test_baseline() {
@@ -820,6 +839,9 @@ test_baseline() {
     wait_vpnv4_key "$GOBGP_PE" "${CLIENT_RD}:${CLIENT_PREFIX}" "pe"
     wait_client_vpn6_inventory baseline \
         "${BLUE_RD}:${BLUE_V6_PREFIX}" "${RED_RD}:${RED_V6_PREFIX}"
+
+    check_receiver_blue "$GOBGP_IBGP" 10.0.3.1 fresh
+    check_receiver_blue "$GOBGP_EBGP" 10.0.4.1 fresh
 
     wait_topology_counts 4 4 "square injected"
     wait_vantage_resolved true "square injected"
@@ -947,17 +969,56 @@ test_relaunch_gr_completes() {
     assert_no_flap "$CLIENT_ADDR" "$client_flaps" "restart/client"
 }
 
+# The receiver's Adj-RIB-In identifies the RR as the sender even if the
+# receiver would reject an advertisement during its own route selection.
+receiver_has_blue() {
+    local container=$1 rr=$2 family=$3 key=$4 phase=$5
+    gobgp "$container" neighbor "$rr" adj-in -a "$family" -j |
+        jq -e --arg key "$key" --arg phase "$phase" --arg rr "$rr" \
+            --argjson stale "$LLGR_STALE_COMMUNITY" --argjson no_export "$NO_EXPORT_COMMUNITY" '
+            select(type == "object")
+            | if $phase == "withdrawn" then has($key) | not
+              else .[$key] | select(length == 1) | .[0] | select(.["peer-address"] == $rr)
+                | [.attrs[] | select(.type == 8) | .communities[]] as $c
+                | if $phase == "fresh" then ($c | index($stale) == null and index($no_export) == null)
+                  else $phase == "LLGR_STALE+NO_EXPORT+LOCAL_PREF_0"
+                    and ($c | index($stale) != null and index($no_export) != null)
+                    and ([.attrs[] | select(.type == 5) | .value] == [0])
+                  end
+              end' >/dev/null
+}
+
+check_receiver_blue() {
+    local container=$1 rr=$2 phase=$3 family prefix
+    for family in vpnv4 vpnv6; do
+        prefix=$BLUE_PREFIX
+        if [[ "$family" == vpnv6 ]]; then prefix=$BLUE_V6_PREFIX; fi
+        if wait_until 8 1 receiver_has_blue "$container" "$rr" "$family" "${BLUE_RD}:${prefix}" "$phase"; then
+            ok "$container $family blue route is $phase"
+        else
+            fail "$container $family blue route did not reach $phase"
+            gobgp "$container" neighbor "$rr" adj-in -a "$family" -j >&2 || true
+            return 1
+        fi
+    done
+}
+
 test_llgr_two_phase() {
     log "Test 5: PE killed and never returns — LLGR promotion, then sweep"
 
-    local expired_before
+    local expired_before ibgp_flaps ebgp_flaps
     expired_before=$(gr_timer_expired_count)
+    ibgp_flaps=$(flap_count 10.0.3.2)
+    ebgp_flaps=$(flap_count 10.0.4.2)
 
     kill_gobgpd "$GOBGP_PE"
     wait_gr_active 1 "second PE kill"
     wait_vpn_row "$VPN4_FAMILY" "$BLUE_RD" "$BLUE_PREFIX" "$PE_ADDR" stale "pre-promotion"
     wait_vpn_row "$VPN6_FAMILY" "$BLUE_RD" "$BLUE_V6_PREFIX" "$PE_ADDR" stale "pre-promotion"
     wait_client_vpn6_inventory "second GR window" "${BLUE_RD}:${BLUE_V6_PREFIX}"
+
+    check_receiver_blue "$GOBGP_IBGP" 10.0.3.1 fresh
+    check_receiver_blue "$GOBGP_EBGP" 10.0.4.1 fresh
 
     # GR restart-time is 60 s (PE-advertised): poll well past it for the
     # LLGR promotion instead of sleeping blind.
@@ -972,10 +1033,18 @@ test_llgr_two_phase() {
         fail "bgp_gr_timer_expired_total did not increment"
     fi
 
-    # RFC 9494 §4.6 toward the client: both retained routes are re-advertised
+    # RFC 9494 §4.2 toward the LLGR-capable client: both retained routes are re-advertised
     # carrying LLGR_STALE (65535:6), including the new VPNv6 peer proof.
     wait_client_llgr_stale vpnv4 "${BLUE_RD}:${BLUE_PREFIX}" "blue VPNv4"
     wait_client_llgr_stale vpnv6 "${BLUE_RD}:${BLUE_V6_PREFIX}" "blue VPNv6"
+
+    check_receiver_blue "$GOBGP_EBGP" 10.0.4.1 withdrawn
+    check_receiver_blue "$GOBGP_IBGP" 10.0.3.1 "LLGR_STALE+NO_EXPORT+LOCAL_PREF_0"
+    assert_no_flap 10.0.4.2 "$ebgp_flaps" "promotion/eBGP receiver"
+    assert_no_flap 10.0.3.2 "$ibgp_flaps" "promotion/iBGP receiver"
+    # A late eBGP withdrawal at final expiry must fail this witness.
+    wait_vpn_row "$VPN4_FAMILY" "$BLUE_RD" "$BLUE_PREFIX" "$PE_ADDR" llgr "receivers observed" 1
+    wait_vpn_row "$VPN6_FAMILY" "$BLUE_RD" "$BLUE_V6_PREFIX" "$PE_ADDR" llgr "receivers observed" 1
 
     # Effective LLGR stale time = min(local 120, PE per-family 30) = 30 s.
     wait_vpn_row_gone "$VPN4_FAMILY" "$BLUE_RD" "$BLUE_PREFIX" "$PE_ADDR" "LLGR sweep" 40
@@ -1105,6 +1174,8 @@ main() {
     start_gobgpd "$GOBGP_PE"
     start_gobgpd "$GOBGP_CLIENT"
     start_gobgpd "$GOBGP_LS"
+    start_gobgpd "$GOBGP_IBGP"
+    start_gobgpd "$GOBGP_EBGP"
     # M77 uses the topology-bound default config.
     # shellcheck disable=SC2119
     start_rustbgpd
@@ -1112,6 +1183,9 @@ main() {
     wait_gobgp_established "$GOBGP_PE" 10.0.1.1 "pe" || exit 1
     wait_gobgp_established "$GOBGP_CLIENT" 10.0.0.1 "client" || exit 1
     wait_gobgp_established "$GOBGP_LS" 10.0.2.1 "ls-source" || exit 1
+
+    wait_gobgp_established "$GOBGP_IBGP" 10.0.3.1 "iBGP VPN receiver" || exit 1
+    wait_gobgp_established "$GOBGP_EBGP" 10.0.4.1 "eBGP VPN receiver" || exit 1
 
     wait_default_rtc_accepted "$GOBGP_PE" 10.0.1.1 "pe"
     wait_default_rtc_accepted "$GOBGP_CLIENT" 10.0.0.1 "client"

@@ -13,11 +13,10 @@
 # the lower-address client copy always wins, and the client's wire stays
 # provably silent at GR entry.
 #
-# graceful-restart + long-lived-enabled make the client advertise the LLGR
-# capability for both VPN families and RTC: rustbgpd strips the LLGR_STALE community
-# toward LLGR-incapable peers (strip_llgr_stale_if_needed), so observing
-# the community on the client's copy during the LLGR phase requires the
-# capability. The client itself never restarts in this test.
+# This client advertises LLGR for both VPN families and RTC. On promotion
+# it receives LLGR_STALE. Of the two VPN receivers without LLGR, the iBGP
+# peer receives LLGR_STALE with NO_EXPORT and LOCAL_PREF 0 (§4.6), and
+# the eBGP peer receives withdrawals (§4.3). None of the receivers restarts.
 
 [global.config]
 as = 65001

@@ -12,6 +12,11 @@ SOURCE = "10.0.122.2"
 RR = "10.0.122.1"
 RR_CLIENT = "10.0.123.1"
 CLIENT = "10.0.123.2"
+IBGP = "10.0.124.2"
+RR_IBGP = "10.0.124.1"
+EBGP = "10.0.125.2"
+RR_EBGP = "10.0.125.1"
+NO_EXPORT = 0xFFFFFF01
 RT = int.from_bytes(struct.pack("!BBHI", 0, 2, 65001, 122), "big")
 VXLAN = int.from_bytes(bytes.fromhex("030c000000000008"), "big")
 LLGR_STALE = 0xFFFF0006
@@ -60,7 +65,7 @@ def client_key(t, s):
     }[t]
 
 
-def check_client(rows, sets, llgr=False):
+def check_client(rows, sets, llgr=False, partial=False):
     need(isinstance(rows, dict), "client RIB is not an object")
     want = {client_key(t, s) for s in sets for t in range(1, 6)}
     need(set(rows) == want, f"client identities differ: {set(rows) ^ want}")
@@ -69,6 +74,10 @@ def check_client(rows, sets, llgr=False):
         attrs = paths[0]["attrs"]
         communities = [c for a in attrs if a["type"] == 8 for c in a["communities"]]
         need((LLGR_STALE in communities) == llgr, f"{key}: LLGR_STALE differs")
+        need((NO_EXPORT in communities) == (partial and llgr), f"{key}: NO_EXPORT differs")
+        if partial:
+            prefs = [a["value"] for a in attrs if a["type"] == 5]
+            need(prefs == [0 if llgr else 100], f"{key}: explicit LOCAL_PREF differs")
 
 
 def check_rr(rows, sets, llgr=False):
@@ -144,11 +153,11 @@ def capture_row(line):
     return stream, src, dst, int(seq), payload, connection
 
 
-def client_withdrawals(lines):
+def client_withdrawals(lines, pair=(RR_CLIENT, CLIENT)):
     parts = defaultdict(list)
     for line in lines:
         stream, src, dst, seq, payload, _ = capture_row(line)
-        if (src, dst) == (RR_CLIENT, CLIENT) and payload:
+        if (src, dst) == pair and payload:
             parts[stream].append((int(seq), bytes.fromhex(payload.replace(":", ""))))
     need(bool(parts), "client TCP stream absent")
     found = set()
@@ -164,8 +173,10 @@ def client_withdrawals(lines):
     return found
 
 
-def admit_open(body):
+def admit_open(body, source=SOURCE):
     caps = capabilities(body)
+    asn = int.from_bytes(body[1:3], "big")
+    need(asn == (65002 if source == EBGP else 65001), f"{source}: OPEN AS differs")
     need(bytes.fromhex("00190046") in caps.get(1, []), "OPEN lacks EVPN MP25/70")
     gr = caps.get(64, [])
     need(len(gr) == 1 and len(gr[0]) >= 6 and (len(gr[0]) - 2) % 4 == 0, "invalid GR capability")
@@ -175,11 +186,16 @@ def admit_open(body):
     evpn = [v for v in tuples if v[:3] == bytes.fromhex("001946")]
     need(len(evpn) == 1, "GR lacks one EVPN tuple")
     llgr = caps.get(71, [])
-    need(len(llgr) == 1 and len(llgr[0]) % 7 == 0, "invalid LLGR capability")
-    lt = [llgr[0][i:i + 7] for i in range(0, len(llgr[0]), 7) if llgr[0][i:i + 3] == bytes.fromhex("001946")]
-    need(len(lt) == 1 and int.from_bytes(lt[0][4:], "big") > 0, "LLGR lacks positive EVPN timer")
-    return {"mp": "00190046", "gr": gr[0].hex(), "llgr": lt[0].hex(),
-            "restart": bool(flags_time & 0x8000), "forwarding": bool(evpn[0][3] & 0x80)}
+    witness = {"asn": asn, "mp": "00190046", "gr": gr[0].hex(), "llgr": None,
+               "restart": bool(flags_time & 0x8000), "forwarding": bool(evpn[0][3] & 0x80)}
+    if source in (IBGP, EBGP):
+        need(71 not in caps, f"{source}: receiver advertised LLGR")
+    else:
+        need(len(llgr) == 1 and len(llgr[0]) % 7 == 0, "invalid LLGR capability")
+        lt = [llgr[0][i:i + 7] for i in range(0, len(llgr[0]), 7) if llgr[0][i:i + 3] == bytes.fromhex("001946")]
+        need(len(lt) == 1 and int.from_bytes(lt[0][4:], "big") > 0, "LLGR lacks positive EVPN timer")
+        witness["llgr"] = lt[0].hex()
+    return witness
 
 
 def completed_messages(segments):
@@ -286,7 +302,7 @@ def analyze_wire(lines, traces=()):
         for position, typ, body in decoded:
             need(typ != 3, "captured BGP NOTIFICATION")
             if typ == 1:
-                witness = admit_open(body)
+                witness = admit_open(body, src)
                 opens.append({"stream": stream, "source": src, "destination": dst, **witness})
                 is_restart = src == SOURCE and dst == RR and witness["restart"]
                 if (src, dst) == (SOURCE, RR):

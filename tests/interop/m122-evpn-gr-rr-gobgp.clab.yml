@@ -19,6 +19,10 @@ topology:
         - ip link set eth1 up
         - ip addr add 10.0.123.1/24 dev eth2
         - ip link set eth2 up
+        - ip addr add 10.0.124.1/24 dev eth3
+        - ip link set eth3 up
+        - ip addr add 10.0.125.1/24 dev eth4
+        - ip link set eth4 up
     gobgp-source:
       kind: linux
       image: gobgp:m122-fsm-trace
@@ -37,6 +41,26 @@ topology:
       exec:
         - ip addr add 10.0.123.2/24 dev eth1
         - ip link set eth1 up
+    gobgp-ibgp:
+      kind: linux
+      image: gobgp:m122-fsm-trace
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m122-ibgp.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.0.124.2/24 dev eth1
+        - ip link set eth1 up
+    gobgp-ebgp:
+      kind: linux
+      image: gobgp:m122-fsm-trace
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m122-ebgp.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.0.125.2/24 dev eth1
+        - ip link set eth1 up
   links:
     - endpoints: [rustbgpd:eth1, gobgp-source:eth1]
     - endpoints: [rustbgpd:eth2, gobgp-client:eth1]
+    - endpoints: [rustbgpd:eth3, gobgp-ibgp:eth1]
+    - endpoints: [rustbgpd:eth4, gobgp-ebgp:eth1]
