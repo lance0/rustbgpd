@@ -197,6 +197,7 @@ async fn main() -> anyhow::Result<()> {
         router_id: args.router_id,
         hold_time: args.hold_time,
         families: vec![(Afi::L2Vpn, Safi::Evpn)],
+        extended_message: false,
     };
 
     let mut handle = establish(cfg).await?;

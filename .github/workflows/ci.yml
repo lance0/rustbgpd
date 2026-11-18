@@ -619,6 +619,11 @@ jobs:
           # timing and only reports its wire witness (gated at the full shape).
           cargo run --locked -p rrtransport -- credit-restart-churn unicast "$restart_smoke" --reduced
           cargo run --locked -p rrtransport -- credit-restart-churn evpn "$restart_smoke" --reduced
+          # An unpaced burst and a healthy source through real sessions, and
+          # its control. `check` fails the step if either is INVALID: the
+          # reduced burst must still outlast three healthy updates.
+          cargo run --locked -p rrtransport -- credit-source-burst "$restart_smoke" --reduced
+          cargo run --locked -p rrtransport -- credit-source-burst "$restart_smoke" --reduced --control
           python3 bench/scale/rrtransport/credit_bars.py check "$restart_smoke"
           python3 -m unittest discover -s bench/scale/rrtransport -p 'test_*.py'
           shellcheck -x bench/scale/rrtransport/run-credit-cells.sh

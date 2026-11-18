@@ -578,6 +578,138 @@ the slope's standard error. The analyzer compares the estimate with the
 candidate's charge (row element plus 146 bytes) and flags a family more than
 25% above it.
 
+### Unpaced source burst through real sessions
+
+The cells above inject their sources' routes straight into the RIB's
+channel and pace the ordinary burst, so they cannot see what a session does
+with a peer that sends faster than the RIB distributes. `credit-source-burst`
+(runner cell `source-burst`) covers that path. Both sources are stub peers
+over TCP loopback, so every route passes the production session read path
+and its admission into the RIB:
+
+- the burst source writes 150,000 unicast routes, 1,024 to an UPDATE, as
+  fast as its socket accepts them, then withdraws every 100th route and
+  announces every other one of those again at a new MED. 1,024 is the RIB's
+  route chunk and the distribution window's affected-prefix bound, so each
+  burst message is one window, as one from a production peer of that size
+  would be. Such a message is past 4,096 bytes, so the burst source
+  negotiates Extended Message (RFC 8654) with its session; the other stubs
+  do not;
+- 150 private receivers read normally and must end with exactly that table;
+- a healthy source sends one single-route UPDATE every 20 ms from 500 ms
+  before the burst until 300 ms after it settles, toward one more receiver
+  that gets nothing of the burst.
+
+`--reduced` runs 8 receivers, 16,000 routes and a 5 ms healthy cadence.
+`--rows N` sets the burst size and marks the run a correctness run.
+`--control` (runner cell `source-burst-control`) sends no healthy update and
+records the burst's uncontended ingest rate.
+
+**Stamps.** The harness owns the channel between the sessions and the RIB
+and puts a forwarding tap on it. Sessions admit into the tap's ingress
+channel; one dedicated thread forwards every message in order into the RIB's
+channel. Each half holds 2,048 messages, so together they hold what the
+daemon's 4,096-message channel holds. Per healthy update the result records,
+in ms from the start of the healthy cadence:
+
+| Column | Taken |
+| --- | --- |
+| `sent_ms` | by the healthy source before it hands the UPDATE to its writer |
+| `admitted_ms` | when the session's message reaches the tap |
+| `dispatched_ms` | when the RIB answers a `QueryLocRibCount` marker the tap sends immediately ahead of the update; the primary lane is served in order, so this is when the RIB reached the update's place in the queue |
+| `received_ms` | when the healthy receiver decodes that sequence, or a later one that replaced it |
+| `burst_ahead` | burst messages sent before the update that the RIB had not finished when it was admitted, the one it was serving included |
+| `queue_depth` | all messages in the RIB's channel at that moment |
+
+A marker behind every burst message tells when the RIB finished it; those
+stamps give `burst_ahead`, and the last gives `burst.rib_done_ms`. The
+readings are admission to dispatch (the time queued behind earlier work),
+dispatch to receipt (the update's own distribution pass) and send to receipt.
+
+Limits of the instrument:
+
+- The tap adds one thread hand-off to admission.
+- A marker is not route input, so it ends the distribution window ahead of
+  every healthy update: healthy updates never coalesce with each other, as
+  contiguous healthy updates in production would. The markers behind burst
+  messages end no window, since a 1,024-route message closes its own.
+- The dispatch and finish stamps are taken when the stamper thread wakes,
+  a little after the RIB answers. The healthy receiver can decode an
+  update before its dispatch stamp (by up to 0.21 ms in debug runs), so
+  dispatch to receipt can read slightly negative; a burst message finished
+  within that time of an admission can count as still ahead.
+- Each healthy update and its marker take two slots in the RIB's half of
+  the channel, so it holds 1,024 healthy updates rather than 2,048, and the
+  two halves together about 3,072 rather than the daemon's 4,096. Once the
+  RIB's half is full, later messages wait in the ingress half unstamped
+  and their readings start late;
+  `healthy.stamped_late` counts them. The longest reading is the update
+  admitted first behind the burst, which is unaffected.
+
+**Verdict.** `credit_bars.py` judges each result. It FAILs when a
+correctness check failed: every burst receiver's table exact and the last
+healthy sequence delivered (`final_state_exact`), burst messages admitted in
+the order sent and healthy sequences admitted and received in order
+(`per_source_order`), every session Established with no reset or flap
+(`sessions_established`). It is INVALID when the instrument could not have
+seen a healthy update queued behind the burst, or its timing is unusable:
+
+- the burst was paced (`shape.burst_interval_ms` or `burst.paced_sleep_ms`
+  above zero);
+- a healthy update lacks a stamp, has stamps out of order, or a marker was
+  never answered;
+- fewer than three healthy updates were admitted while the burst was
+  unfinished;
+- the run carried a seeded stall;
+- a measured run is not the fixed shape, saw a compiler (`cargo`, `rustc`,
+  `rustdoc`, `clippy-driver`, sampled every second during the cell), or
+  could not read the process table.
+
+A run is also INVALID when the tap did not recognize every burst message
+the source sent (a new message variant would leave it blind, and the run
+waits out its deadline), or when a dispatch stamp trails the healthy
+receiver by more than 50 ms (the stamper stalled). A flap, stub reset or
+session not Established recorded under `wire` FAILs the run even where
+`sessions_established` reads true: it is the daemon's behavior, not the
+instrument's. Such a record, or `sessions_established` false, FAILs before
+any INVALID reason is weighed, so a burst source that went down before its
+last UPDATE fails although the tap missed the messages it never sent. The
+table and order checks, which follow the tap, FAIL only once the tap
+recognized the whole burst.
+
+Otherwise it PASSes and prints the readings: the longest and median
+admission-to-dispatch time, the most burst messages queued ahead, the
+longest send-to-receive and dispatch-to-receive times, how many admission
+stamps were late, when the burst finished in the RIB and on every receiver,
+routes per second, the bucket edges around the longest `distribute_flush`
+pass, and peak RSS (the result also carries the cgroup peak). All of these
+are report-only; no bar is frozen. Nothing requires that a queue formed:
+a parent whose burst never queued a healthy update, or a long wait with no
+burst message ahead of it, still PASSes with those readings in its line.
+`analyze` adds a REPORT line with the candidate's readings over the
+parent's.
+
+**Seeded defects.** `--stall-ms N` holds healthy update 5, inside the lead,
+for N ms between its admission stamp and its marker; the analyzer prints
+the stalled reading beside the other pre-burst updates. It proves the stamp
+arithmetic: a delay between the two stamps reads as that delay. It sleeps
+on the tap's thread, so it says nothing about time spent in the RIB.
+`--burst-interval-ms N` paces the burst. Either marks the run a correctness
+run and INVALID.
+
+**RIB-side residence.** `--rows N` proves that the reading follows time
+spent queued in the RIB: the first healthy update admitted behind the burst
+waits for all of it, so doubling the burst roughly doubles the longest
+admission-to-dispatch time. This is a manual check, not a CI gate. One
+debug build, `--reduced`, on one host (all runs PASS):
+
+| `--rows` | Runs | Longest admission to dispatch, median (range) | Burst finished in the RIB, median |
+| --- | --- | --- | --- |
+| 16,000 (the default) | 20 | 903 ms (882–925 ms) | 957 ms |
+| 32,000 | 10 | 1,934 ms (1,833–2,346 ms) | 1,994 ms |
+
+The ratio is 2.14 for the reading and 2.08 for the burst.
+
 ### Running
 
 Build one binary per arm from its own tree, and check that the two differ.

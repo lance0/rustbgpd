@@ -466,6 +466,7 @@ async fn smoke_run(
             router_id: Ipv4Addr::new(127, 0, 1, u8::try_from(index + 1).unwrap()),
             hold_time: 30,
             families: vec![(Afi::Ipv4, Safi::Unicast)],
+            extended_message: false,
         };
         tasks
             .handshakes
@@ -589,6 +590,7 @@ fn main() -> Result<()> {
              \x20      rrtransport credit-release-mixed|credit-release-timer <output-dir> [--reduced] [--correctness-only]\n\
              \x20      rrtransport credit-paused <output-dir> [--reduced] [--correctness-only] [--seconds N]\n\
              \x20      rrtransport credit-fill <unicast|evpn|vpn|flowspec> <output-dir> [--reduced] [--correctness-only]\n\
+             \x20      rrtransport credit-source-burst <output-dir> [--reduced] [--control] [--stall-ms N] [--burst-interval-ms N] [--rows N]\n\
              \x20      rrtransport credit-probe <output-dir> [--reduced]"
         ),
     }
@@ -633,6 +635,15 @@ fn credit_main(mode: &str, args: &[String]) -> Result<()> {
                 cell,
                 Path::new(output),
                 &options(rest)?,
+            ))?
+        }
+        ("credit-source-burst", [output, rest @ ..]) => {
+            let mut rest = rest.to_vec();
+            let variant = credit::source_burst::Variant::take(&mut rest)?;
+            harness.block_on(credit::source_burst::run(
+                Path::new(output),
+                &options(&rest)?,
+                variant,
             ))?
         }
         ("credit-paused", [output, rest @ ..]) => {

@@ -126,6 +126,22 @@ class Runner(unittest.TestCase):
             )
             self.assertEqual(calls.read_text().splitlines(), commands)
 
+    def test_source_burst_cells_dispatch_only_when_selected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            body = 'echo "$1 ${3:-}" >>"$(dirname "$0")/calls"\n'
+            self.assertEqual(self.run_runner(root, 0, body=body), 0)
+            calls = root / "calls"
+            self.assertNotIn("credit-source-burst", calls.read_text())
+            calls.write_text("")
+            cells = ("source-burst", "source-burst-control")
+            self.assertEqual(self.run_runner(root, 0, *cells, body=body), 0)
+            # The runner's own `--correctness-only` follows the cell's flags.
+            self.assertEqual(
+                calls.read_text().splitlines(),
+                ["credit-source-burst --correctness-only", "credit-source-burst --control"],
+            )
+
     def test_each_burst_cell_runs_its_own_trigger(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
