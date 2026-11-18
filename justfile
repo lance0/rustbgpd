@@ -305,8 +305,7 @@ fuzz crate target *args:
     fi
     RUSTUP_TOOLCHAIN="$(cat fuzz/rust-nightly.txt)"
     export RUSTUP_TOOLCHAIN
-    # Build the versions the workspace lockfile pins, as the nightly does.
-    cp Cargo.lock "${crate}/fuzz/Cargo.lock"
+    fuzz/seed-fuzz-lockfiles.sh
     cd "${crate}"
     exec cargo fuzz run "${target}" "$@"
 
