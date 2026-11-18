@@ -300,12 +300,22 @@ complete to read still gets Hold Timer Expired.
 
 Consequences:
 
-- An unrelated peer's update waits behind at most about two distribution
-  passes per bursting source, not behind a burst. The wait still grows with the number
-  of sources bursting at the same time.
+- An unrelated peer's update waits behind a bounded number of a bursting
+  source's route entries, not behind a burst: up to 1,536 unfinished, plus
+  the one message that crosses the mark. The limit counts route entries,
+  not messages or passes. At roughly 1,000 routes per UPDATE that is about
+  two messages and two distribution passes. Smaller unicast UPDATEs are
+  coalesced by the RIB's distribution window, which closes at 256 messages,
+  1,024 distinct prefixes or 5 ms, so the same entries take about two passes
+  down to a few routes per UPDATE and up to six smaller ones at one route
+  per UPDATE (1,536 messages), more if windows close on time. The window
+  takes unicast-only input; a message of another family is distributed on
+  its own, so there the count of passes follows the count of messages,
+  still within 1,536 entries. The wait still grows with the number of
+  sources bursting at the same time.
 - Timer cutoffs cover received input only, and the budget shrinks what is
-  received ahead of the RIB from up to the whole channel to about two
-  messages per source. Input a peer sent before a graceful-restart,
+  received ahead of the RIB from up to the whole channel to about 1,536
+  route entries per source. Input a peer sent before a graceful-restart,
   long-lived or refresh deadline that is still unread in its socket is not
   applied before the sweep.
 - Route input that does not come from a session (injection, local

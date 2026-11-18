@@ -82,10 +82,17 @@ resolved.
     after v0.83.0 a session stops reading its socket while 1,536 routes it
     already sent are unfinished in the RIB
     ([ADR-0078](../adr/0078-inbound-rib-backpressure.md)), so the other
-    peer's update waits behind at most about two distribution passes per
-    bursting source. The evidence is a count in unit-level tests (at most two burst
-    messages queued ahead of another source) and untimed reduced-shape
-    harness runs, not a timed measurement at 150 receivers. The wait still
+    peer's update waits behind at most about 1,536 route entries per
+    bursting source (reading resumes at 1,024). The limit counts route
+    entries, not messages: at roughly 1,000 routes per UPDATE it is about
+    two messages and two distribution passes, while a source sending
+    one-route UPDATEs can have 1,536 messages queued, which the RIB's
+    distribution window (256 messages, 1,024 distinct prefixes or 5 ms)
+    works through in six or more smaller passes for unicast and one message
+    at a time for other families. The evidence is a count in unit-level
+    tests (at most two 1,200-route burst messages queued ahead of another
+    source) and untimed reduced-shape harness runs, not a timed measurement
+    at 150 receivers. The wait still
     grows with the number of sources bursting at once, and route input
     that does not come from a session is not bounded this way.
   - Paced EVPN bursts, still on main: at one 1,024-route UPDATE per 500 ms
