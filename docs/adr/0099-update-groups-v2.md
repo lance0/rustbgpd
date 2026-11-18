@@ -727,7 +727,12 @@ bounded list maintenance. What differs is where the keys come from:
   sends its other families and leaves its EVPN table to one unit after
   the release, because the release logs the Loc-RIB for the positions
   and a row only the receiver still holds is named nowhere in it. The
-  release turn builds no table for it. What reaches such a receiver
+  release turn builds no table for it. Limitation: from that resync until
+  the release, a later resync, an operator soft refresh or a peer route
+  refresh for that receiver is not served for any family; each waits for
+  the unit. The selection-deferral timeout bounds the wait: the largest
+  `gr_restart_time` among planned-restart neighbors (default 120 s),
+  measured from process start. What reaches such a receiver
   first is handled for that receiver alone: a session end or a regroup
   ends the debt (a regroup marks its own member dirty, as for any member
   that owes), an operator refresh marks it dirty and leaves the table to

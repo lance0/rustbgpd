@@ -153,7 +153,13 @@ resolved.
     A receiver that fell behind is not rebuilt inside an EVPN selection
     hold; its resync follows the release. A receiver resynced inside the
     hold for another reason while it holds EVPN rows gets its EVPN table
-    from one such resync after the release, not from the list.
+    from one such resync after the release, not from the list. Still on
+    main: until that release, a later resync, an operator soft refresh or
+    a peer route refresh for that receiver is not served for any family;
+    each waits for the rebuild. The wait ends with the selection-deferral
+    timeout at the latest: the largest `gr_restart_time` among
+    planned-restart neighbors (default 120 s), measured from process
+    start.
     An EVPN family owned by an update group, and a receiver in a private
     handoff, keep the recovery path and its complete feed.
   - Whole-family sends of the other families, still on main: labeled

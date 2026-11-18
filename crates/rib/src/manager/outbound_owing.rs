@@ -41,7 +41,7 @@
 //! | `N` not owing | none | no | no |
 //! | `K` keyed | set | no | no |
 //! | `C` cursor | whole, live position | no | no |
-//! | `W` waiting | whole with a dead position, or none | no | yes |
+//! | `W` waiting | whole with a dead position, a keyed set, or none | no | yes |
 //! | `D` evicted, dirty | kept (member) or dropped | yes | yes |
 //! | `R` ordinary resync | any | yes | no |
 //!
