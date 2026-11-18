@@ -69,7 +69,7 @@ const _: () = {
 /// Give the EVPN slab room for `additional` routes that are new to the
 /// index. Both the batch reserve and a single insert size it here.
 ///
-/// The slab's first segment grows by copying its routes, so it is a power
+/// Growing the first segment can copy its routes, so its capacity is a power
 /// of two of at most `EVPN_FIRST_SEGMENT_AT` slots, or the whole segment.
 /// The first request past that threshold grows the segment once, with at
 /// most `EVPN_FIRST_SEGMENT_AT` initialized slots (1.18 MB). Vacant slots
@@ -1965,8 +1965,8 @@ mod tests {
         }
     }
 
-    /// The production shape: every message reserves for its 1,024 rows and
-    /// then commits them, from empty to past two slab segments. The slab's
+    /// Consecutive commits under a readiness owner reserve 1,024 new rows
+    /// each, from empty to past two slab segments. The slab's
     /// first segment is made whole once, inside the reserve of the message
     /// that crosses `EVPN_FIRST_SEGMENT_AT` rows.
     /// Red proof: the old reserve grew the segment to 16,384 slots and
