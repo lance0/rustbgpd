@@ -801,14 +801,15 @@ def run_cell(output, manifest, arm, index, correctness):
               "correctness_only": correctness, "scope": SCOPE, "terminal_only_qualified": False}
     try:
         Q.cell_gate(output, manifest, leg, correctness)
-        scenario(fixture, output / "sources/candidate", clients)
-        identities = json.loads((output / "binaries.json").read_text())
-        binary, harness = output / "bin" / f"rustbgpd-{arm}", output / "bin/evpn-rr-soak"
-        client = output / "bin/rbgp"
-        for path in (binary, harness, client):
-            Q.require(Q.digest(path) == identities[path.name], "binary changed after build")
-        record["reload_client_sha256"] = identities[client.name]
-        with (leg / "daemon.log").open("x") as log, (leg / "observer.log").open("x") as observer:
+        with (Q.watch_compilers(correctness), (leg / "daemon.log").open("x") as log,
+              (leg / "observer.log").open("x") as observer):
+            scenario(fixture, output / "sources/candidate", clients)
+            identities = json.loads((output / "binaries.json").read_text())
+            binary, harness = output / "bin" / f"rustbgpd-{arm}", output / "bin/evpn-rr-soak"
+            client = output / "bin/rbgp"
+            for path in (binary, harness, client):
+                Q.require(Q.digest(path) == identities[path.name], "binary changed after build")
+            record["reload_client_sha256"] = identities[client.name]
             subprocess.run(["taskset", "-c", manifest["daemon_cpus"], str(binary), "--check", "--strict",
                             str(fixture / "config.toml")], stdout=log, stderr=subprocess.STDOUT, check=True)
             if not correctness:

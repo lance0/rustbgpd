@@ -44,3 +44,18 @@ or as archive pointers in their sealed receipts under `docs/perf/`.
 
 The deterministic CPU and DHAT classifiers, fixtures, and revision-pinned
 receipt procedure live in [`rebaseline/`](rebaseline/).
+
+## Quiet-host checks
+
+The EVPN qualification and terminal-debt drivers sample for Rust compilers
+during each timed cell. Five other scale drivers use `host-quiet.sh` only at
+admission. An accepted quiet TSV from these drivers cannot rule out a compiler
+that ran during measurement.
+
+| Driver | Quiet-host sampling |
+|---|---|
+| `matrix/run-matrix.sh` | Before each selected cell |
+| `irrreload/run-irr-reload.sh` | Before each measured cell |
+| `enhanced-route-refresh/run-receipt.sh` | Once before daemon launch |
+| `reloadstall/run-converged-rejoin.sh` | Before each cell with the quiet gate enabled |
+| `rrtransport/run-credit-cells.sh` | Before each measured credit cell |

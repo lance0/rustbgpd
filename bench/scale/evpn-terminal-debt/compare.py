@@ -153,7 +153,7 @@ def plan(correctness):
     schedule = CORRECTNESS_SCHEDULE if correctness else SCHEDULE
     for index, ((stage, side), (_, slot)) in enumerate(zip(schedule, slots(schedule), strict=True)):
         print(f"cell {index:02}  stage {stage:<12}  binary {side:<9}  compared as {slot:<9}  overlap, owned arm, "
-              f"{'correctness only' if correctness else 'timed: UTC window, quiet gate, window recheck'}")
+              f"{'correctness only' if correctness else 'timed: UTC window, quiet gate, window recheck, in-cell compiler watch'}")
     print(f"gated fields: {', '.join(FIELDS)}; a field fails when ABBA and confirmation ratios both exceed "
           f"max({FLOOR}, A/A ratio + {MARGIN}); report-only cells: none")
     return 0

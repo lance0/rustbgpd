@@ -698,7 +698,7 @@ class RecoveryTests(unittest.TestCase):
                 Q.write_json(root / "binaries.json", identities)
                 manifest = {"recovery": Q.RECOVERY_BARS, "daemon_cpus": "0", "harness_cpus": "1",
                             "timing_window": Q.timing_window("2030-01-02T03:30:00Z", "2030-01-02T07:30:00Z")}
-                with patch.object(Q, "datetime", wraps=datetime) as clock, \
+                with patch.object(Q, "watch_compilers"), patch.object(Q, "datetime", wraps=datetime) as clock, \
                      patch.object(R, "scenario", side_effect=lambda fixture, *_: (fixture / "config.toml").write_text("fixture")), \
                      patch.object(Q, "digest", side_effect=lambda path, identities=identities: identities[path.name]), \
                      patch.object(R.subprocess, "run", return_value=Mock(returncode=quiet_status)), \
