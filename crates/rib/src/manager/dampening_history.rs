@@ -577,6 +577,7 @@ impl RibManager {
         pending.source = source;
         pending.dampening_source = admitted;
         pending.original_unicast_withdrawals = original_unicast_withdrawals;
+        pending.ingest_permit = self.dispatching_ingest_permit.take();
     }
 
     pub(super) fn record_dampening_input(

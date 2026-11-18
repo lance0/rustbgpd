@@ -68,7 +68,7 @@ control-plane-only processes keep the lazy RIB layout.
 
 **Redesign triggers (instrumented from day one):**
 - `bgp_rib_ingest_channel_depth` — queued `RibUpdate` messages (not routes), including at most one held by a distribution window's lookahead, sampled once per manager loop. Producers block only when the channel itself is full: capacity + 1 while an update is held, capacity otherwise. A sustained reading at or above the channel capacity means the channel is full or within one message of full; evaluate sharding or batch coalescing. The `bgp_rib_outbound_prefix_limit_actor_duration_seconds` and `bgp_rib_route_refresh_actor_duration_seconds` histograms time the actor operations that hold the loop.
-- `bgp_inbound_rib_backpressure_total` — any non-zero sustained rate means session tasks are stalling on a full RIB channel (ADR-0078).
+- `bgp_inbound_rib_backpressure_total` — any non-zero sustained rate means session tasks are stalling on a full RIB channel (ADR-0078). A session pausing its reads for its own ingest budget (ADR-0078, 2026-11-18 amendment) is ordinary pacing and is not counted.
 - `bgp_outbound_route_drops_total` — non-zero means a peer's writer channel was full or closed and outbound work of some family was deferred to dirty-peer resync.
 - `bgp_event_stream_lagged_total` — non-zero means a live event-stream subscriber is too slow to keep up and is missing events.
 

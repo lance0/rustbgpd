@@ -1133,6 +1133,9 @@ pub struct RibManager {
     replacement_readiness_receipts: Vec<ReplacementReadinessReceipt>,
     /// Large route batches that are being processed in chunks.
     pending_route_batches: VecDeque<PendingRoutesReceived>,
+    /// The ingest permit of the session message being dispatched, for the
+    /// batch it queues to take. Empty between dispatches.
+    dispatching_ingest_permit: Option<crate::ingest_budget::IngestPermit>,
     /// An inbound EVPN chunk's private fanout parked at a receiver boundary.
     /// The route chunk queue finishes it before any other chunk, and it
     /// survives a purge of its source's batches: a parked withdrawal must
@@ -2573,6 +2576,9 @@ struct PendingRoutesReceived {
     /// or finishes its message, once [`RibManager::pending_evpn_fanout`]
     /// drains.
     fanout_parked: bool,
+    /// The sending session's ingest budget for this message, returned when
+    /// the batch is dropped: finished, or purged with its peer.
+    ingest_permit: Option<crate::ingest_budget::IngestPermit>,
 }
 
 impl PendingRoutesReceived {
@@ -2612,6 +2618,7 @@ impl PendingRoutesReceived {
             validated_with,
             phase: PendingRoutePhase::Withdrawn,
             fanout_parked: false,
+            ingest_permit: None,
         }
     }
 
@@ -3121,6 +3128,7 @@ impl RibManager {
             #[cfg(test)]
             replacement_readiness_receipts: Vec::new(),
             pending_route_batches: VecDeque::new(),
+            dispatching_ingest_permit: None,
             pending_evpn_fanout: None,
             flowspec_validation: flowspec_validation::ValidationState::default(),
             pending_clean_policy_transition: None,
@@ -3497,7 +3505,7 @@ impl RibManager {
     async fn maybe_stall_test_ingest(&self, update: &RibUpdate) {
         if let Some(stall) = self.test_ingest_stall
             && matches!(
-                update,
+                update.unmetered(),
                 RibUpdate::RoutesReceived { .. } | RibUpdate::WireRoutesReceived(_)
             )
         {
@@ -4659,11 +4667,11 @@ impl RibManager {
         }
         // Only a following BGP-LS UPDATE may see the cache behind its inputs.
         if self.orr_rebuild_owed_updates > 0
-            && !matches!(update, RibUpdate::BgpLsRoutesReceived { .. })
+            && !matches!(update.unmetered(), RibUpdate::BgpLsRoutesReceived { .. })
         {
             self.rebuild_orr_and_resync();
         }
-        let receipt_peer = match &update {
+        let receipt_peer = match update.unmetered() {
             RibUpdate::BgpLsRoutesReceived { peer, .. }
             | RibUpdate::VpnRoutesReceived { peer, .. }
             | RibUpdate::LabeledRoutesReceived { peer, .. }
@@ -4715,6 +4723,14 @@ impl RibManager {
         );
         self.advance_route_pages_for_update(&update);
         match update {
+            RibUpdate::SessionRoutes { permit, routes } => {
+                // A queued batch takes the permit and keeps it until its last
+                // chunk, parked fan-out and settling pass are done. A message
+                // applied or discarded within this turn returns it here.
+                self.dispatching_ingest_permit = Some(permit);
+                self.dispatch_update(*routes);
+                self.dispatching_ingest_permit = None;
+            }
             RibUpdate::WireRoutesReceived(batch) => self.admit_received_batch(batch, true),
             batch @ RibUpdate::RoutesReceived { .. } => {
                 self.admit_received_batch(crate::update::WireRoutesReceived::new(batch, 0), false);
@@ -7217,7 +7233,7 @@ impl RibManager {
                 self.primary_lookahead = self.rx.try_recv().ok();
             }
             if matches!(
-                self.primary_lookahead,
+                self.primary_lookahead.as_ref().map(RibUpdate::unmetered),
                 Some(RibUpdate::BgpLsRoutesReceived { .. })
             ) {
                 self.orr_rebuild_owed_updates += 1;

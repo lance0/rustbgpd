@@ -4122,7 +4122,7 @@ async fn promoted_candidate_imports_with_edit_made_while_pending() {
             .await
             .expect("the promoted session must import the marker")
             .expect("RIB channel open");
-        if let RibUpdate::RoutesReceived { announced, .. } = update {
+        if let RibUpdate::RoutesReceived { announced, .. } = update.unmetered() {
             assert!(
                 announced.iter().all(|route| route.prefix != denied),
                 "the edited import chain denies 198.51.100.0/24"
@@ -4495,7 +4495,7 @@ async fn promoted_candidate_names_the_registered_primary_it_replaces() {
 
     send_bgp_message(&mut candidate, &peer_update([203, 0, 113, 0], None)).await;
     relay_to_rib(&mut rib_rx, &rib, primary_id, &mut held, |update| {
-        matches!(update, RibUpdate::RoutesReceived { session_id, announced, .. }
+        matches!(update.unmetered(), RibUpdate::RoutesReceived { session_id, announced, .. }
             if *session_id == candidate_id && !announced.is_empty())
     })
     .await;

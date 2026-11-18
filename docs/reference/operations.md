@@ -2947,10 +2947,26 @@ What to do when it fires:
    continues serving timers, input, and operator snapshots. If no writer
    capacity becomes available before the resource-admission deadline, the
    session sends `Cease/Out of Resources` (`6/8`). Admission progress resets
-   this deadline. The same Cease closes a session whose inbound RIB
-   admission stays blocked for about three hold times since its last
-   processed message, logged as `RIB admission stalled past local budget`
-   (ADR-0078). Its interval is the configured nonzero `send_hold_time`,
+   this deadline. The same Cease closes a session whose peer input has
+   waited for the RIB for about three hold times since its last processed
+   message, logged as `RIB admission stalled past local budget` (ADR-0078).
+   Input waits for the RIB while its channel is full. A session also leaves
+   its socket unread while 1,536 routes it already sent are unfinished in
+   the RIB (its ingest budget). Each hold expiry then processes one pending
+   message from the peer, and a peer with none pending gets Hold Timer
+   Expired. A hold expiry that instead finds the connection closed by the
+   peer, or failed, ends the session as that TCP failure and sends no
+   NOTIFICATION, so a graceful-restart peer's routes are retained as stale.
+   Messages the peer sent before closing are processed first: a
+   NOTIFICATION among them ends the session as a received NOTIFICATION
+   (routes deleted, or retained only under RFC 8538), and UPDATEs ahead of
+   it reach the RIB before the session end. A close behind more unread
+   input than two maximum-size messages is not found while input waits for
+   a full RIB channel; that wait ends with the Cease below. After eight consecutive such expiries without the RIB returning
+   the budget, no further message is processed and the same three-hold-time
+   bound applies, so that wait closes the session with this Cease after
+   about ten hold times. Its
+   interval is the configured nonzero `send_hold_time`,
    or `max(480, 2 × hold_time)` seconds when `send_hold_time = 0`; disabling
    the RFC timer does not disable the resource bound.
 
