@@ -12147,8 +12147,8 @@ mod tests {
             };
             let (response, ()) = tokio::join!(service.list_best_routes(request), serve_page);
             let response = response.unwrap().into_inner();
-            assert!(response.routes.is_empty());
-            assert!(response.next_page_token.is_empty());
+            assert_eq!(response.routes, []);
+            assert_eq!(response.next_page_token, "");
             assert_eq!(
                 response.selection_release.unwrap().releasing_families,
                 expected
