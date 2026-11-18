@@ -9094,8 +9094,9 @@ impl RibManager {
 
     /// [`Self::distribute_changes`] for the resync tick's sliced pass, which
     /// hides withheld dirty peers until it restores them, so it leaves the
-    /// stale exempt flush to the tick.
-    pub(super) fn distribute_changes_without_stale_flush(&mut self) {
+    /// stale exempt flush to the tick. Returns whether the pass built a
+    /// whole-table resync, whether or not its commit was then admitted.
+    pub(super) fn distribute_changes_without_stale_flush(&mut self) -> bool {
         self.distribute_changes_inner(
             &HashSet::new(),
             &HashSet::new(),
@@ -9103,7 +9104,7 @@ impl RibManager {
             false,
             HashMap::new(),
             None,
-        );
+        )
     }
 
     pub(super) fn distribute_changes(
@@ -9227,13 +9228,13 @@ impl RibManager {
         advertised_generation_already_advanced: bool,
         evpn_feeds: HashMap<PeerId, super::evpn_recovery::EvpnCompleteFeed>,
         targets: Option<&HashSet<PeerId>>,
-    ) {
+    ) -> bool {
         if self.selection_release_staging
             && best_changed.is_empty()
             && all_affected.is_empty()
             && evpn_feeds.is_empty()
         {
-            return;
+            return false;
         }
         let pass = |manager: &mut Self, owned: bool| {
             manager.distribute_changes_with_readiness::<false>(
@@ -9245,22 +9246,23 @@ impl RibManager {
                 targets,
                 owned,
                 None,
-            );
+            )
         };
         // A replay pass, or one whose shared staging refreshes a group's
         // rejection inventory, owns its shared preparation and retirement;
         // keep executor opportunities across the whole pass. Clean
         // incremental fanout keeps its synchronous fast path.
-        if self.dirty_peers.is_empty()
+        let built = if self.dirty_peers.is_empty()
             && self.force_outbound_peers.is_empty()
             && !self.shared_rejection_work(best_changed, all_affected, targets)
         {
-            pass(self, false);
+            pass(self, false)
         } else {
-            super::with_executor_handoff(|| pass(self, true));
-        }
+            super::with_executor_handoff(|| pass(self, true))
+        };
         // No member body is open any more.
         self.settle_eor_after_pass();
+        built
     }
 
     /// Whether shared staging refreshes a per-client-best group's denial
@@ -9294,7 +9296,7 @@ impl RibManager {
         targets: &HashSet<PeerId>,
         drain: &mut super::outbound_owing::OwingDrain,
     ) {
-        self.distribute_changes_with_readiness::<true>(
+        let _ = self.distribute_changes_with_readiness::<true>(
             empty,
             empty,
             false,
@@ -9324,7 +9326,7 @@ impl RibManager {
         targets: Option<&HashSet<PeerId>>,
         owned: bool,
         drain: Option<&mut super::outbound_owing::OwingDrain>,
-    ) {
+    ) -> bool {
         // The two callers fix the mode; ordinary passes carry no drain state.
         debug_assert_eq!(DRAINING, drain.is_some());
         let mut drain = if DRAINING { drain } else { None };
@@ -9378,6 +9380,11 @@ impl RibManager {
             })
             .copied()
             .collect();
+        // Receivers that owe a unicast family whole stage and mark nothing
+        // below: the pass logs its keys for their cursors once, here.
+        if !draining {
+            self.log_owed_rows(&best_changed, &all_affected);
+        }
         // FIB install-candidate wake. Route events fire only when the
         // Loc-RIB best `(peer, path_id)` or its payload changes; an
         // equal-cost member added, withdrawn, or re-advertised with a new
@@ -9402,7 +9409,7 @@ impl RibManager {
         {
             drop(readiness);
             self.finish_readiness_owner(prep_installed);
-            return;
+            return false;
         }
 
         // Group-table commits and member-local exact-export overlay changes
@@ -9486,6 +9493,9 @@ impl RibManager {
         // member transactions. A genuine outer owner remains unchanged.
         drop(readiness);
         self.finish_readiness_owner(prep_installed);
+        // Whether a member's whole-table resync was built: past every
+        // preflight refusal, whatever its commit then meets.
+        let mut resync_built = false;
         let distribute_peers = || {
             // The unicast AFIs this pass carries, read once for the first
             // peer that owes one of them whole.
@@ -9593,6 +9603,13 @@ impl RibManager {
                     let drain_whole_operation = drain
                         .as_deref()
                         .is_some_and(|drain| drain.whole && drain.slot.is_none());
+                    // A receiver the owed-row cap evicted is built by the
+                    // resync tick alone, one receiver per unit: any other
+                    // pass leaves it dirty, as when its channel has no room.
+                    if is_dirty && self.owed_row_evicted.contains(&peer) {
+                        self.defer_unsent_outbound_pass(peer, member_of, &group_stage, &checkpoint);
+                        break 'member;
+                    }
                     if is_dirty || is_force || drain_whole_operation {
                         let flush = usize::from((is_dirty || is_force) && self.eor.owes_peer(peer));
                         match self.begin_outbound_operation(peer, 1 + flush) {
@@ -9678,6 +9695,7 @@ impl RibManager {
                         complete_evpn_feed =
                             self.prepare_complete_evpn_feed(peer, gid, None, false);
                     }
+                    resync_built |= resync;
                     #[cfg(test)]
                     if resync {
                         self.adj_rib_out_commit_stats.resync_builds = self
@@ -9693,11 +9711,9 @@ impl RibManager {
                         bench_per_client_best_resync.then(std::time::Instant::now);
                     let group_resync_assembles =
                         resync && member_of.is_some_and(|gid| self.group_ribs.contains_key(&gid));
-                    let unicast_whole = whole(super::outbound_owing::OwedFamily::IPV4_UNICAST)
-                        || whole(super::outbound_owing::OwedFamily::IPV6_UNICAST);
-                    let mut effective_prefixes: Cow<'_, HashSet<Prefix>> = if resync
-                        || unicast_whole
-                    {
+                    // Unicast has no whole-family drain: a receiver that
+                    // owes it whole reads a row cursor, as keyed steps.
+                    let mut effective_prefixes: Cow<'_, HashSet<Prefix>> = if resync {
                         let mut capacity = self.loc_rib.len();
                         if let Some(gid) = member_of {
                             if let Some(group) = self.group_ribs.get(&gid) {
@@ -9832,13 +9848,6 @@ impl RibManager {
                         // initial export does.
                         if let Some(history) = self.policy_filtered_routes.get(&peer) {
                             all.extend(history.keys().inspect(|_| checkpoint()).copied());
-                        }
-                        // A whole-family drain enumerates one AFI.
-                        if !resync {
-                            all.retain(|prefix| {
-                                drain_whole
-                                    == Some(super::outbound_owing::OwedFamily::unicast_of(prefix))
-                            });
                         }
                         Cow::Owned(all)
                     } else if let Some(drain) = drain.as_deref_mut() {
@@ -10890,6 +10899,11 @@ impl RibManager {
                     let mut staged_rows = 0usize;
                     let mut unstaged_prefixes: Vec<Prefix> = Vec::new();
                     let mut drain_unstaged: Vec<super::outbound_owing::OwedKey> = Vec::new();
+                    #[cfg(test)]
+                    if draining {
+                        self.adj_rib_out_commit_stats.owed_drain_rows_read +=
+                            staging_prefixes.len();
+                    }
                     for prefix in staging_prefixes {
                         checkpoint();
                         if unicast_budget.is_some_and(|budget| staged_rows >= budget) {
@@ -11940,6 +11954,11 @@ impl RibManager {
         } else {
             distribute_peers();
         }
+        // After the member loop, so an evicted receiver's resync is a unit
+        // of the dirty ring and never part of this pass.
+        if !draining {
+            self.cap_owed_rows();
+        }
         for (peer, basis) in clean_evpn_regroups {
             let started = std::time::Instant::now();
             self.settle_clean_evpn_regroup(peer, &basis);
@@ -12004,5 +12023,6 @@ impl RibManager {
         } else {
             retire();
         }
+        resync_built
     }
 }

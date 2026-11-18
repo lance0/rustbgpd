@@ -3194,6 +3194,7 @@ impl RibManager {
     /// `PeerDown` path; this only stops the retry.
     pub(in crate::manager) fn drop_gone_dirty_peer(&mut self, peer: PeerId) {
         self.dirty_peers.remove(&peer);
+        self.owed_row_evicted.remove(&peer);
         self.release_group_admitted_keys(peer);
         if let Some(gid) = self.grouped_member_of(peer)
             && let Some(group) = self.group_ribs.get_mut(&gid)

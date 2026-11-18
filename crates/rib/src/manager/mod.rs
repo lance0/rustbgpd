@@ -302,6 +302,17 @@ struct AdjRibOutCommitStats {
     /// Per-peer passes that built a full resync (dirty or force).
     #[cfg(test)]
     resync_builds: usize,
+    /// Owed-drain work: unicast keys a drain, absorption or close flush
+    /// read, the drain steps that read any, and the most one step read.
+    #[cfg(test)]
+    owed_drain_rows_read: usize,
+    #[cfg(test)]
+    owed_drain_steps: usize,
+    #[cfg(test)]
+    owed_drain_step_rows_max: usize,
+    /// Owing peers visited by the owed-row trim and cap scans.
+    #[cfg(test)]
+    owed_peer_scans: usize,
     /// Distinct keys collected into per-peer VPN resync enumerations.
     #[cfg(test)]
     vpn_resync_key_inserts: usize,
@@ -689,6 +700,17 @@ pub struct RibManager {
     owing_peers: BTreeSet<PeerId>,
     /// Ring position of the owed-key drain: the last peer it visited.
     owing_cursor: Option<PeerId>,
+    /// Per unicast AFI: the keys passes carried while a receiver owed the
+    /// family whole, read by those receivers' cursors (`outbound_owing`).
+    owed_rows: [outbound_owing::OwedRows; 2],
+    /// Dirty receivers the owed-row cap evicted
+    /// ([`Self::cap_owed_rows`]). Only the resync tick builds their
+    /// resync, one receiver per unit: an ordinary pass leaves them dirty,
+    /// as it does a receiver whose channel has no room, so a pass never
+    /// builds a table for each receiver the cap cut loose. Cleared when the
+    /// tick's resync leaves the receiver clean and wherever its owed state
+    /// is dropped (a flap, a registration, a regroup).
+    owed_row_evicted: HashSet<PeerId>,
     /// Fixed floor of every owed set's byte cap, for tests and bench builds.
     owing_theta_floor: Option<usize>,
     /// Owed keys and whole families recorded since the last read, so the
@@ -2918,6 +2940,8 @@ impl RibManager {
             outbound_stagings: HashMap::new(),
             owing_peers: BTreeSet::new(),
             owing_cursor: None,
+            owed_rows: Default::default(),
+            owed_row_evicted: HashSet::new(),
             owing_theta_floor: None,
             #[cfg(test)]
             owing_log: HashMap::new(),
@@ -4188,7 +4212,10 @@ impl RibManager {
     /// message makes it runnable and the next event loop turn arms this timer
     /// again.
     fn resync_tick_pending(&self) -> bool {
-        self.resync_tick_pending_unowed() || self.owing_runnable() || self.owing_latch_pending()
+        self.resync_tick_pending_unowed()
+            || self.owing_runnable()
+            || self.owing_latch_pending()
+            || self.owed_rows_trimming()
     }
 
     /// [`Self::resync_tick_pending`] apart from owed keys: dirty peers and
@@ -4251,6 +4278,7 @@ impl RibManager {
         if !self.owing_peers.is_empty()
             && !self.resync_tick_pending_unowed()
             && !self.owing_tick_due()
+            && !self.owed_rows_trimming()
         {
             // Polling for returned credit at the backlog cadence; owed work
             // that waits only on a latch keeps the ordinary interval, and
@@ -4290,7 +4318,7 @@ impl RibManager {
         // checks the shared budget, so owed keys never starve the dirty
         // ring or the refresh retries behind them.
         let recovered = self.drain_owing_bounded(poll_start) || recovered;
-        let recovered = self.owing_runnable() || recovered;
+        let recovered = self.owing_runnable() || self.owed_rows_trimming() || recovered;
         let recovered = self.retry_deferred_refreshes(poll_start) || recovered;
         // Peers whose outbound channel is gone can never resync: drop them
         // before selecting the slice, so a backlog of dead sessions (e.g.
@@ -4358,10 +4386,35 @@ impl RibManager {
                 .filter(|peer| self.force_outbound_peers.remove(peer))
                 .collect();
             self.dirty_peers = selected;
-            self.distribute_changes_without_stale_flush();
+            // This unit is where a receiver the owed-row cap evicted is
+            // built; it stays marked while it stays dirty.
+            let evicted = self.owed_row_evicted.remove(&last);
+            let built = self.distribute_changes_without_stale_flush();
+            let still_dirty = self.dirty_peers.contains(&last);
+            if evicted && still_dirty {
+                self.owed_row_evicted.insert(last);
+            }
+            let ran = evicted && (!still_dirty || self.selection_partial_caught_up(last));
             self.dirty_peers.extend(withheld);
             self.dirty_since.extend(withheld_since);
             self.force_outbound_peers.extend(withheld_force);
+            // An evicted receiver's resync is a whole table whatever the
+            // poll budget says: it is the tick's last unit, so the actor
+            // loop takes queued input before the next receiver's. Refused
+            // before anything was built (a live whole-table operation, a
+            // full channel), the unit is no backlog and the tick goes on;
+            // the release of what refused it wakes the tick. Refused after
+            // the build (its commit was not admitted), the unit still ends
+            // the tick, and the receiver waits for the ordinary retry, as
+            // any dirty peer whose send failed: a backlog re-arm would
+            // rebuild its table at that cadence for as long as the refusal
+            // lasts.
+            if ran {
+                return true;
+            }
+            if evicted && built {
+                return recovered;
+            }
             let unattempted_remain = self
                 .dirty_peers
                 .iter()

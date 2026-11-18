@@ -3050,3 +3050,150 @@ fn queued_bgpls_burst_exports_equal_one_update_per_turn() {
         "the feed never moved the client ({moved}) or never coalesced ({coalesced})"
     );
 }
+
+/// An ORR client under a unicast row cursor: its export for a key is its
+/// vantage best, not the Loc-RIB best. When that vantage best changes on a
+/// row the cursor has passed while the Loc-RIB best stays, the pass reports
+/// the key as affected only, and the row is visited again. Red when a pass
+/// logs only the keys whose best changed: the client keeps the old path.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the topology, the walk and the change form one scenario"
+)]
+fn orr_client_non_best_change_behind_a_row_cursor_is_revisited() {
+    use super::super::outbound_owing::OwedFamily;
+    const V4: (Afi, Safi) = (Afi::Ipv4, Safi::Unicast);
+    const ROWS: u8 = 40;
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(
+        rx,
+        dummy_query_rx(),
+        None,
+        Some(Ipv4Addr::new(10, 255, 0, 1)),
+        BgpMetrics::new(),
+    )
+    .with_outbound_row_credit(16);
+    manager.test_force_ungrouped = true;
+    manager.flush_poll_budget = Duration::ZERO;
+    for source in [ORR_SRC_X, ORR_SRC_Y] {
+        let mut registration = registering_peer_up(peer_v4(source), 0);
+        if let RibUpdate::PeerUp {
+            is_ebgp, peer_asn, ..
+        } = &mut registration
+        {
+            *is_ebgp = false;
+            *peer_asn = 65000;
+        }
+        manager.handle_update(registration);
+    }
+    manager.handle_update(registering_peer_up(peer_v4(ORR_FEED), 0));
+    manager.handle_update(feed_update(
+        crate::orr::fixtures::square_topology(ORR_FEED),
+        vec![],
+    ));
+    let client = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
+    let (outbound_tx, mut out) = mpsc::channel(4096);
+    manager.handle_update(RibUpdate::PeerUp {
+        supersedes: None,
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer: client,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        orr_vantage: Some(vantage_at_node_b()),
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    });
+    while out.try_recv().is_ok() {}
+    manager.owe_eor(client, V4);
+    manager.owe_whole_family(client, OwedFamily::IPV4_UNICAST);
+    let prefix = |index: u8| Ipv4Prefix::new(Ipv4Addr::new(198, 51, index, 0), 24);
+    let announce = |manager: &mut RibManager, source: Ipv4Addr, announced: Vec<Route>| {
+        manager.handle_update(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: peer_v4(source),
+            announced,
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        });
+        drain_route_chunks(manager);
+    };
+    for (source, next_hop) in [(ORR_SRC_X, orr_nh_x()), (ORR_SRC_Y, orr_nh_y())] {
+        let routes = (0..ROWS)
+            .map(|index| ibgp_route(prefix(index), source, next_hop))
+            .collect();
+        announce(&mut manager, source, routes);
+    }
+    assert!(out.try_recv().is_err(), "owed, not staged");
+    // Every announcement written so far: prefix, next hop, communities.
+    let mut written: Vec<(Prefix, IpAddr, bool)> = Vec::new();
+    let mut markers = 0;
+    let mut write = |out: &mut mpsc::Receiver<OutboundRouteUpdate>,
+                     written: &mut Vec<(Prefix, IpAddr, bool)>| {
+        while let Ok(update) = out.try_recv() {
+            for route in update.announce.iter() {
+                let tagged = format!("{:?}", route.attributes).contains("Communities");
+                written.push((route.prefix, route.next_hop, tagged));
+            }
+            markers += update.end_of_rib.len();
+        }
+    };
+    for _ in 0..3 {
+        manager.resync_dirty_peers_bounded();
+        write(&mut out, &mut written);
+    }
+    assert!(manager.owes_whole(client, OwedFamily::IPV4_UNICAST));
+    let (passed, next_hop, _) = written[0];
+    assert_eq!(
+        next_hop,
+        orr_nh_y(),
+        "the vantage best, not the Loc-RIB best"
+    );
+    let Prefix::V4(passed_v4) = passed else {
+        unreachable!("IPv4 fixture");
+    };
+    assert_eq!(
+        manager.loc_rib.get(&passed).map(|route| route.peer),
+        Some(peer_v4(ORR_SRC_X))
+    );
+    // The vantage best gains a community; the Loc-RIB best stays.
+    let mut changed = ibgp_route(passed_v4, ORR_SRC_Y, orr_nh_y());
+    changed.attributes = AttrSet::new(vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::LocalPref(100),
+        PathAttribute::Communities(vec![0xFDE8_0001]),
+    ]);
+    let before = written.len();
+    announce(&mut manager, ORR_SRC_Y, vec![changed]);
+    assert_eq!(
+        manager.loc_rib.get(&passed).map(|route| route.peer),
+        Some(peer_v4(ORR_SRC_X)),
+        "the best did not change"
+    );
+    for _ in 0..1000 {
+        if !manager.resync_tick_pending() {
+            break;
+        }
+        manager.resync_dirty_peers_bounded();
+        write(&mut out, &mut written);
+    }
+    assert!(!manager.owes(client, V4));
+    assert!(
+        written[before..].contains(&(passed, orr_nh_y(), true)),
+        "the vantage best's change behind the cursor is lost"
+    );
+    assert_eq!(markers, 1);
+}

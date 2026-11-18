@@ -71,8 +71,9 @@ resolved.
     the End-of-RIB markers whose table is complete, and the resync ticks
     deliver each owed family, one family of one receiver per step, after
     reading that receiver's credit. The evidence is work counts in
-    unit-level tests, not timings. Each owed family still goes out as one
-    operation, like the whole-family sends below.
+    unit-level tests, not timings. Each owed family other than IPv4 and
+    IPv6 unicast still goes out as one operation, like the whole-family
+    sends below.
   - Ordinary UPDATE bursts, still on main and not yet attributed: 150,000
     routes sent at once as ordinary UPDATEs toward 150 private receivers
     delayed an unrelated peer's updates by 27–34 s. Paced at one
@@ -80,14 +81,48 @@ resolved.
     4.6 s for EVPN. These are single untimed harness runs on a shared host,
     and the cause, one long unit of work or many short units served in
     arrival order, is not yet established.
-  - Whole-family sends, still on main: these are outside the outbound
-    credit. A receiver that is owed a released family, or whose owed keys
-    exceed the keyed threshold (a quarter of its table), is sent the whole
-    family as one operation that is not charged against the outbound
-    credit. Each such send is one table-sized RIB turn, 278–632 ms at
-    150,000 rows. Recovery after credit exhaustion past the threshold is one
-    table walk per receiver: 54.9 s at 150 receivers × 190,000 rows, in a
-    single untimed run.
+  - Whole-family sends of IPv4 and IPv6 unicast, v0.83.0 and earlier: a
+    receiver that was owed a released family, or whose owed keys exceeded
+    the keyed threshold (a quarter of its table), was sent the whole family
+    as one operation that was not charged against the outbound credit. Each
+    such send was one table-sized RIB turn, 278–632 ms at 150,000 rows, and
+    recovery after credit exhaustion past the threshold was one table walk
+    per receiver: 54.9 s at 150 receivers × 190,000 rows, in a single
+    untimed run. Fixed on main after v0.83.0: the receiver is sent the
+    routes that changed since it began to owe the family, at most 1,024 per
+    step, and each step is an ordinary update charged against its credit.
+    The evidence is work counts in unit-level tests, not timings. A
+    ROUTE-REFRESH answer or an operator replay for a family still owed sends
+    the remainder as one operation, as before. So does the fallback for a
+    receiver that falls behind while new routes keep replacing old ones (it
+    has stopped reading, or reads more slowly than the table turns over)
+    for one to three tables' worth of prefixes not seen since it began to
+    owe the family (three after a selection release, whose update carries
+    the whole table): it is resynced as a whole peer and counted in
+    `bgp_rib_outbound_owing_fallback_total`. That resync is one whole-table
+    operation outside the outbound credit, in one RIB turn that grows with
+    the table; only the resync tick runs it, one receiver per unit, and no
+    update pass does. One large withdrawal, a peer loss or a selection
+    release does not cause it. Every receiver that far behind is marked in
+    the same update pass. While they are resynced, the other receivers'
+    steps still run on every tick, but for about 25 ms per resync, so their
+    tables arrive more slowly, not later than the resyncs. A ROUTE-REFRESH
+    from a receiver waiting for that resync is answered after it, behind
+    the initial End-of-RIB, with its BoRR and EoRR. Until then the list of
+    changed routes such a receiver holds back is, between updates, at most
+    twice the most routes one update accounted for plus 4,096 (two to four
+    times the family's table), and the routes of one update more while that
+    update runs. At a modeled 126 bytes a route (two ordered-map entries at
+    their worst node fill, not a daemon measurement) that is about 38 MB at
+    150,000 routes when updates are small against the table and 76 MB after
+    a selection release, and 253 MB and 505 MB at 1,000,000 routes. A
+    receiver's own owed routes, kept when they exceed the keyed threshold,
+    stay owed until all are sent: updates that arrive meanwhile go to the
+    shared list, and the End-of-RIB follows both.
+  - Whole-family sends of the other families, still on main: labeled
+    unicast, VPN, EVPN, FlowSpec, BGP-LS and RT-Constrain owed whole still
+    go out as one operation per receiver that is not charged against the
+    outbound credit, in one RIB turn that grows with the family's table.
 
 - **A GR helper can keep a deleted RTBH whose prefix still has another
   route until End-of-RIB.** This applies after a planned restart, when a

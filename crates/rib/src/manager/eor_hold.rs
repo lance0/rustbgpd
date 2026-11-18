@@ -11,7 +11,8 @@
 //! or the admission of the table it follows ([`RibManager::settle_eor`]).
 //! A release stages no routes: a marker whose family still owes keys stays
 //! behind [`EorHold::OwedKeys`] for the owed-key drain, which reads the
-//! peer's credit and absorbs one family per step
+//! peer's credit. A unicast marker leaves when its family's charged steps
+//! have caught up; any other family is absorbed whole, one per step
 //! ([`RibManager::absorb_owed_eor`]).
 //!
 //! The obligation stores the reasons nothing else owns: the ORF table hold,
@@ -559,11 +560,15 @@ impl RibManager {
     }
 
     /// The first owed marker of `peer` that waits only for its family's
-    /// owed keys to be absorbed, as the owed-key drain sees it.
+    /// owed keys to be absorbed, as the owed-key drain sees it. A unicast
+    /// marker is never absorbed: it leaves when the family's charged drain
+    /// steps have caught up.
     fn eor_waiting_on_owed_keys(&self, peer: PeerId) -> Option<(Afi, Safi)> {
         let owed_keys = HoldSet::EMPTY.with(EorHold::OwedKeys);
         self.eor.families(peer).find(|&family| {
-            self.owes(peer, family) && self.eor_free_for(peer, family, Offer::Retry, owed_keys)
+            family.1 != Safi::Unicast
+                && self.owes(peer, family)
+                && self.eor_free_for(peer, family, Offer::Retry, owed_keys)
         })
     }
 
@@ -605,7 +610,8 @@ impl RibManager {
     /// Send the owed markers of `peer` that nothing holds for this
     /// `trigger`. A family that owes keys sends its marker only behind
     /// them, and this call stages no routes: that marker stays owed until
-    /// the owed-key drain absorbs the family ([`Self::absorb_owed_eor`]).
+    /// the owed-key drain has sent the family (unicast) or absorbs it
+    /// ([`Self::absorb_owed_eor`]).
     /// A refused marker marks the peer dirty, so its resync carries it.
     pub(super) fn settle_eor(&mut self, peer: PeerId, trigger: EorTrigger<'_>) {
         let (offer, operation) = trigger.offer();

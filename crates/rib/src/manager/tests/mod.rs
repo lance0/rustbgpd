@@ -1747,6 +1747,7 @@ mod outbound_owing;
 mod outbound_prefix_limits;
 mod outbound_resync_state;
 mod owed_cancellation;
+mod owed_row_cursor;
 mod paged_query;
 mod peer_identity;
 mod per_client_best;
