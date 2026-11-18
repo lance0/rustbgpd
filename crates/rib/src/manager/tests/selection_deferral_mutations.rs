@@ -75,6 +75,7 @@ fn inject(
 fn snapshot(manager: &mut RibManager, scope: RouteQueryScope) -> Vec<Route> {
     let (reply, mut response) = oneshot::channel();
     manager.handle_update(RibUpdate::QueryRoutesPage {
+        accept_releasing: false,
         scope,
         filter: None,
         after: None,

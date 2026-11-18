@@ -18,7 +18,9 @@
 //!   The receiver holds a sequence number; a drain step sends the next keys
 //!   after it as an ordinary charged envelope, with no operation latch. Its
 //!   set drains ahead of the cursor, which lives until the set is empty
-//!   and the list has been read to its end. Under a cursor the set takes
+//!   and the list has been read to its end. During a paced unicast release,
+//!   a caught-up cursor parks until the next batch or the producer seals.
+//!   Under a cursor the set takes
 //!   no key a pass logged, so ordinary changes stop growing it at θ; it
 //!   still takes the keys no list entry after the position names for this
 //!   receiver (EVPN: an RT-Constrain restage, up to the table and what the
@@ -86,9 +88,11 @@
 //! Inside the hold the tick is not armed for `W` or `D` on their own
 //! account. A ROUTE-REFRESH pending from such a receiver keeps it armed
 //! through the deferred-refresh lane: each tick re-defers the answer and
-//! builds nothing, until the release or the deferral timeout. A unicast
-//! or VPN hold alone does not hold `D`: its unit runs, stays dirty behind
-//! that hold and runs again at its release.
+//! builds nothing, until the release or the deferral timeout. During an
+//! ordinary unicast or VPN selection hold a unit can run and stay dirty for
+//! that family. While a paced unicast release is publishing a family the
+//! receiver can send, `W` and `D` wait for its final batch. Other receivers'
+//! evictions remain eligible under the usual EVPN selection rule.
 
 use std::collections::{BTreeMap, HashSet};
 use std::hash::Hash;
@@ -257,6 +261,8 @@ pub(super) struct OwedRows<K> {
     /// Sequence of the newest entry ever logged; it never goes back, so a
     /// cursor taken from it stays valid across a trim.
     head: u64,
+    /// A phased unicast release can append another batch after consumers reach the head.
+    release_open: bool,
     /// The slowest cursor at the last trim (the head with no cursor):
     /// entries up to it are behind every cursor and wait to be dropped.
     floor: u64,
@@ -278,6 +284,7 @@ impl<K> Default for OwedRows<K> {
             order: BTreeMap::new(),
             live: BTreeMap::new(),
             head: 0,
+            release_open: false,
             floor: 0,
             peak: 0,
             #[cfg(test)]
@@ -1107,6 +1114,19 @@ impl RibManager {
         true
     }
 
+    /// Keep the private cursors enrolled until the family inventory is complete.
+    pub(super) fn set_owed_release_open(&mut self, family: (Afi, Safi), open: bool) {
+        if let Some(family) = OwedFamily::of(family).filter(|family| family.is_unicast()) {
+            self.owed_rows[family.unicast_index()].release_open = open;
+        }
+    }
+
+    pub(super) fn owed_release_open(&self, family: (Afi, Safi)) -> bool {
+        OwedFamily::of(family).is_some_and(|family| {
+            family.is_unicast() && self.owed_rows[family.unicast_index()].release_open
+        })
+    }
+
     /// The head of cursor family `index`'s shared list.
     fn owed_rows_head(&self, index: usize) -> u64 {
         if index == OwedFamily::EVPN_CURSOR {
@@ -1414,19 +1434,17 @@ impl RibManager {
     }
 
     /// A resync committed (or found nothing to send) for `peer`: it covered
-    /// every family it enumerated, so nothing of those is owed any more.
-    /// Selection-deferred families were not enumerated and stay owed.
+    /// every family it enumerated. A selection hold hides rows, and an
+    /// open producer can still append more; both retain the debt.
     pub(super) fn owing_resync_covered(&mut self, peer: PeerId) {
         let Some(mut owing) = self.take_owing(peer) else {
             return;
         };
         let cursors = OwedFamily::CURSORS.map(|family| owing.is_whole(family));
         for family in OwedFamily::ALL {
-            if !family
-                .afi_safis()
-                .iter()
-                .any(|&afi_safi| self.selection_deferred(afi_safi))
-            {
+            if !family.afi_safis().iter().any(|&afi_safi| {
+                self.selection_deferred(afi_safi) || self.owed_release_open(afi_safi)
+            }) {
                 owing.clear_family(family);
             }
         }
@@ -1632,9 +1650,16 @@ impl RibManager {
         // The cap evicted this cursor: the tick's resync sends the family.
         if let Some(index) = family.cursor_index()
             && owing.is_whole(family)
-            && self.live_cursor(peer, owing, index).is_none()
         {
-            return None;
+            let at = self.live_cursor(peer, owing, index)?;
+            if family.is_unicast()
+                && self.owed_rows[index].release_open
+                && owing.keyed_len(family) == 0
+                && at >= self.owed_rows[index].head()
+            {
+                // No work until the producer appends or seals the inventory.
+                return None;
+            }
         }
         self.owed_drain_scope(peer, owing, family)
     }
@@ -2023,21 +2048,38 @@ impl RibManager {
             self.adj_rib_out_commit_stats.owed_peer_scans += self.owing_peers.len();
         }
         for &peer in &self.owing_peers {
-            let Some(owing) = self.owing(peer) else {
-                continue;
-            };
-            // An evicted receiver's cursor waits for nothing.
-            for (index, floor) in floors.iter_mut().enumerate() {
-                if let Some(cursor) = self.live_cursor(peer, owing, index) {
-                    *floor = Some(floor.map_or(cursor, |floor| floor.min(cursor)));
-                }
+            self.fold_owed_floors(peer, &mut floors);
+        }
+        self.trim_at_owed_floors(floors);
+        floors
+    }
+
+    /// A release classifies its live peers in pages under one distribution
+    /// transaction. Fold their cursor positions without another roster walk.
+    pub(super) fn collect_owed_floors(&mut self, peer: PeerId, floors: &mut [Option<u64>; 3]) {
+        #[cfg(test)]
+        {
+            self.adj_rib_out_commit_stats.owed_peer_scans += 1;
+        }
+        self.fold_owed_floors(peer, floors);
+    }
+
+    fn fold_owed_floors(&self, peer: PeerId, floors: &mut [Option<u64>; 3]) {
+        let Some(owing) = self.owing(peer) else {
+            return;
+        };
+        for (index, floor) in floors.iter_mut().enumerate() {
+            if let Some(cursor) = self.live_cursor(peer, owing, index) {
+                *floor = Some(floor.map_or(cursor, |floor| floor.min(cursor)));
             }
         }
+    }
+
+    fn trim_at_owed_floors(&mut self, floors: [Option<u64>; 3]) {
         for (rows, floor) in self.owed_rows.iter_mut().zip(floors) {
             rows.trim(floor);
         }
         self.owed_evpn_rows.trim(floors[OwedFamily::EVPN_CURSOR]);
-        floors
     }
 
     /// Whether no cursor list holds a key and no receiver owes anything:
@@ -2086,20 +2128,37 @@ impl RibManager {
             return;
         }
         let floors = self.trim_owed_rows();
-        if floors[..2] == [None, None] {
-            return;
-        }
         let changed = best_changed.iter().chain(
             all_affected
                 .iter()
                 .filter(|prefix| !best_changed.contains(*prefix)),
         );
+        self.log_unicast_keys(changed.copied(), floors);
+    }
+
+    pub(super) fn log_release_owed_rows(
+        &mut self,
+        keys: &HashSet<Prefix>,
+        floors: [Option<u64>; 3],
+    ) {
+        self.trim_at_owed_floors(floors);
+        self.log_unicast_keys(keys.iter().copied(), floors);
+    }
+
+    fn log_unicast_keys(
+        &mut self,
+        changed: impl Iterator<Item = Prefix>,
+        floors: [Option<u64>; 3],
+    ) {
+        if floors[..2] == [None, None] {
+            return;
+        }
         let mut carried = [0usize; 2];
         for prefix in changed {
             self.replacement_checkpoint(false);
-            let index = afi_index(prefix);
+            let index = afi_index(&prefix);
             if floors[index].is_some() {
-                self.owed_rows[index].touch(*prefix);
+                self.owed_rows[index].touch(prefix);
                 carried[index] += 1;
             }
         }
@@ -2136,6 +2195,48 @@ impl RibManager {
         self.cap_owed_rows_of(OwedFamily::EVPN_CURSOR);
     }
 
+    /// A release has logged at most its prefix batch. Only an overflowing
+    /// list requires another (paged) pass over the peers.
+    pub(super) fn release_owed_over_cap(&self) -> [Option<u64>; 2] {
+        self.owed_rows
+            .each_ref()
+            .map(|rows| rows.over(2 * rows.peak + OWED_ROWS_SLACK))
+    }
+
+    pub(super) fn cap_release_owed_peer(
+        &mut self,
+        peer: PeerId,
+        over: [Option<u64>; 2],
+        floors: &mut [Option<u64>; 3],
+    ) {
+        if let Some(owing) = self.owing(peer) {
+            for (index, cut) in over.into_iter().enumerate() {
+                if let Some(cut) = cut
+                    && self
+                        .live_cursor(peer, owing, index)
+                        .is_some_and(|at| at < cut)
+                {
+                    self.evict_owed_cursor(peer, OwedFamily::CURSORS[index]);
+                    break;
+                }
+            }
+        }
+        self.collect_owed_floors(peer, floors);
+    }
+
+    pub(super) fn finish_release_owed_cap(
+        &mut self,
+        over: [Option<u64>; 2],
+        floors: [Option<u64>; 3],
+    ) {
+        self.trim_at_owed_floors(floors);
+        for (rows, cut) in self.owed_rows.iter_mut().zip(over) {
+            if cut.is_some() {
+                rows.drop_over(2 * rows.peak + OWED_ROWS_SLACK);
+            }
+        }
+    }
+
     fn cap_owed_rows_of(&mut self, index: usize) {
         let family = OwedFamily::CURSORS[index];
         let evpn = index == OwedFamily::EVPN_CURSOR;
@@ -2167,24 +2268,7 @@ impl RibManager {
             })
             .collect();
         for peer in behind {
-            debug!(%peer, ?family, "owed-row list over its cap — receiver resyncs");
-            self.metrics.record_rib_outbound_owing_fallback();
-            // A group member's dirty mark walks its group's table to
-            // capture what it was sent, and this pass may evict many
-            // members: the mark waits for the resync tick, one receiver a
-            // tick ([`Self::promote_evicted_receiver`]). Until its resync
-            // covers the family its debt stays, with a cursor no drain
-            // reads: EVPN passes skip the receiver and its End-of-RIB
-            // waits, as before, while its group's families flow to it.
-            if evpn && self.grouped_member_of(peer).is_some() {
-                self.owed_row_evicted.insert(peer);
-                continue;
-            }
-            self.owing_peers.remove(&peer);
-            drop(self.take_owing(peer));
-            if self.mark_outbound_dirty(peer) {
-                self.owed_row_evicted.insert(peer);
-            }
+            self.evict_owed_cursor(peer, family);
         }
         self.trim_owed_rows();
         if evpn {
@@ -2194,18 +2278,38 @@ impl RibManager {
         }
     }
 
-    /// Whether evicted `peer`'s resync must wait for an EVPN selection
-    /// hold: inside one a resync enumerates no EVPN key, so its unit would
-    /// clear the dirty flag and the eviction with the family not rebuilt.
-    /// The receiver keeps its state, dirty or waiting, until the release.
+    fn evict_owed_cursor(&mut self, peer: PeerId, family: OwedFamily) {
+        debug!(%peer, ?family, "owed-row list over its cap — receiver resyncs");
+        self.metrics.record_rib_outbound_owing_fallback();
+        // A group member's dirty mark walks its group's table to
+        // capture what it was sent, and this pass may evict many
+        // members: the mark waits for the resync tick, one receiver a
+        // tick ([`Self::promote_evicted_receiver`]). Until its resync
+        // covers the family its debt stays, with a cursor no drain
+        // reads: EVPN passes skip the receiver and its End-of-RIB
+        // waits, as before, while its group's families flow to it.
+        if self.grouped_member_of(peer).is_some() {
+            self.owed_row_evicted.insert(peer);
+            return;
+        }
+        self.owing_peers.remove(&peer);
+        drop(self.take_owing(peer));
+        if self.mark_outbound_dirty(peer) {
+            self.owed_row_evicted.insert(peer);
+        }
+    }
+
+    /// A resync cannot close an eviction while selection hides EVPN keys
+    /// or a unicast release still has inventory to publish.
     pub(super) fn evicted_unit_held(&self, peer: PeerId) -> bool {
         const EVPN: (Afi, Safi) = (Afi::L2Vpn, Safi::Evpn);
         self.owed_row_evicted.contains(&peer)
-            && self.selection_deferred(EVPN)
-            && self
-                .peer_sendable_families
-                .get(&peer)
-                .is_some_and(|families| families.contains(&EVPN))
+            && (self.release_resync_waits(peer)
+                || (self.selection_deferred(EVPN)
+                    && self
+                        .peer_sendable_families
+                        .get(&peer)
+                        .is_some_and(|families| families.contains(&EVPN))))
     }
 
     /// Whether a group member the cap evicted still waits to be made dirty
@@ -2250,14 +2354,16 @@ impl RibManager {
     /// After a drain of `family` ended without a refusal: a whole family
     /// clears its bit (a cursor family once its kept set is empty and its
     /// cursor has caught up with the list: until both hold, passes log
-    /// their keys for the cursor and the set takes only unlogged marks), and the
+    /// their keys for the cursor and the set takes only unlogged marks). An open
+    /// release keeps its cursor between batches. The
     /// End-of-RIB of a family that no longer owes anything, if one waits,
     /// goes out now.
     fn owing_family_settled(&mut self, peer: PeerId, family: OwedFamily) {
         if let Some(mut owing) = self.take_owing(peer) {
             let cursor = family.cursor_index();
             let caught_up = cursor.is_some_and(|index| {
-                owing.keyed_len(family) == 0
+                (!family.is_unicast() || !self.owed_rows[index].release_open)
+                    && owing.keyed_len(family) == 0
                     && self
                         .live_cursor(peer, &owing, index)
                         .is_some_and(|at| at >= self.owed_rows_head(index))
@@ -2323,6 +2429,12 @@ impl RibManager {
         family: (Afi, Safi),
         operation: &mut OutboundOperation,
     ) -> Result<(), OutboundCommitFailure> {
+        if self.owed_release_open(family) {
+            // A refresh cannot absorb the rows of batches still to be published.
+            return Err(OutboundCommitFailure::Refused(
+                rustbgpd_telemetry::reason_labels::OutboundCommitRefusal::SelectionGate,
+            ));
+        }
         let Some(family) = OwedFamily::of(family) else {
             return Ok(());
         };

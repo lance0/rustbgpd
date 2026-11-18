@@ -1159,6 +1159,136 @@ fn strip_communities_chain(comms: Vec<u32>) -> PolicyChain {
     }])
 }
 
+#[test]
+fn release_ranks_crowded_per_client_best_candidates_in_pages() {
+    let mut manager = staging_manager();
+    let prefix = prefix(1);
+    let denied_paths = 1_024;
+    for path_id in 0..denied_paths {
+        let mut denied = cand(prefix, OTHER1, 500 + path_id);
+        denied.path_id = path_id;
+        seed(&mut manager, denied);
+    }
+    seed(&mut manager, cand(prefix, OTHER2, 250));
+    seed(&mut manager, cand(prefix, MEMBER, 100));
+    manager.group_ribs.insert(
+        PCB_GID,
+        per_client_best_group(Some(deny_sources_chain(&[OTHER1.addr()]))),
+    );
+    let mut walk = crate::manager::distribution::release_pcb::ReleasePcb::default();
+    let mut polls = 0;
+    let mut visits = 0;
+    let _ = AdjRibIn::take_path_visits();
+    let prepared = loop {
+        let result = manager.poll_release_pcb(PCB_GID, prefix, &mut walk);
+        let examined = AdjRibIn::take_path_visits();
+        polls += 1;
+        visits += examined;
+        assert!(
+            examined <= 128,
+            "one ranking poll examined {examined} inbound paths"
+        );
+        if let Some(prepared) = result {
+            break prepared;
+        }
+    };
+    assert_eq!(visits, usize::try_from(denied_paths).unwrap() + 2);
+    assert!(
+        polls >= 16,
+        "collecting and evaluating candidates each uses a work budget"
+    );
+    let totals = prepared
+        .evals
+        .iter()
+        .map(eval_totals)
+        .fold((0, 0), |(a, b), (c, d)| (a + c, b + d));
+    assert_eq!(totals, (2, u64::from(denied_paths)));
+    assert_eq!(prepared.rows.announce[0].peer, OTHER2);
+    assert_eq!(prepared.stage.runner_up.unwrap().route.peer, MEMBER);
+    assert_eq!(
+        prepared.rows.policy_filtered.len(),
+        usize::try_from(denied_paths).unwrap()
+    );
+}
+
+#[test]
+fn large_release_denials_page_old_keys_and_emit_only_new_member_events() {
+    use crate::manager::distribution::release_denials::ReleaseDenials;
+    let p = prefix(1);
+    let mut manager = staging_manager();
+    manager
+        .group_ribs
+        .insert(PCB_GID, per_client_best_group(None));
+    let mut events = manager.route_events_tx.subscribe();
+    let mut reconcile =
+        |range: std::ops::Range<u32>, new_events: std::ops::Range<u32>, old_size: usize| {
+            let rows: Vec<_> = range
+                .clone()
+                .map(|path_id| {
+                    (
+                        PolicyFilteredRouteKey {
+                            target_peer: LOCAL_PEER,
+                            source_peer: OTHER1,
+                            prefix: p,
+                            path_id,
+                        },
+                        Some(Arc::<str>::from("denied")),
+                    )
+                })
+                .collect();
+            let total = rows.len();
+            let group = manager.group_ribs.get_mut(&PCB_GID).unwrap();
+            let mut work = ReleaseDenials::new(group, p, rows);
+            let mut polls = 1;
+            while !work.poll_group(group) {
+                polls += 1;
+            }
+            assert!(
+                polls >= (old_size + total).div_ceil(128),
+                "retired and inserted denial keys share one page budget"
+            );
+            assert_eq!(group.policy_filtered.get(&p).map_or(0, AddrMap::len), total);
+
+            // MEMBER did not source these paths and sees each newly denied key
+            // exactly once. OTHER1 sourced all of them and receives no denial.
+            let mut observed = Vec::new();
+            for peer in [MEMBER, OTHER1] {
+                let mut polls = 0;
+                loop {
+                    let done = work.poll_member(&mut manager, peer);
+                    polls += 1;
+                    let before = observed.len();
+                    while let Ok(event) = events.try_recv() {
+                        assert_eq!(event.target_peer, Some(MEMBER.addr()));
+                        assert_eq!(event.peer, Some(OTHER1.addr()));
+                        assert_eq!(event.prefix, p);
+                        observed.push(event.path_id);
+                    }
+                    assert!(observed.len() - before <= 128);
+                    if done {
+                        break;
+                    }
+                }
+                assert!(polls >= total.div_ceil(128));
+            }
+            observed.sort_unstable();
+            assert_eq!(observed, new_events.collect::<Vec<_>>());
+            let retained: HashSet<_> = manager
+                .policy_filtered_routes
+                .get(&MEMBER)
+                .and_then(|by_prefix| by_prefix.get(&p))
+                .into_iter()
+                .flat_map(|bucket| bucket.iter())
+                .map(|key| key.path_id)
+                .collect();
+            assert_eq!(retained, range.collect());
+            assert!(!manager.policy_filtered_routes.contains_key(&OTHER1));
+        };
+    reconcile(0..513, 0..513, 0);
+    reconcile(256..768, 513..768, 513);
+    reconcile(0..0, 0..0, 512);
+}
+
 /// Winner = best permitted candidate, lane = first distinct-source
 /// permitted candidate, early exit before the third candidate.
 #[test]

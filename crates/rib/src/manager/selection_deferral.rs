@@ -7,7 +7,7 @@
 
 use crate::PeerId;
 use crate::fast_hash::ShardedMap;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::Hash;
 use std::mem::size_of;
 use std::sync::Arc;
@@ -19,6 +19,12 @@ use rustbgpd_wire::{Afi, Safi};
 use super::RibManager;
 use super::eor_hold::EorTrigger;
 use super::evpn_recovery::EvpnCompleteFeed;
+
+mod inventory;
+mod rejections;
+mod unicast_release;
+pub(super) use inventory::UnicastReleaseInventory;
+pub(super) use unicast_release::UnicastReleases;
 
 /// Process-wide ceiling across every typed identity retained while route
 /// selection is frozen.  One million matches the documented per-neighbor
@@ -147,7 +153,7 @@ impl DeferredSelectionKeyCharge for crate::route::RtcRibRouteKey {
 
 #[derive(Debug, Default)]
 pub(super) struct DeferredSelectionKeys {
-    unicast: ShardedMap<rustbgpd_wire::Prefix, ()>,
+    unicast: BTreeMap<rustbgpd_wire::Prefix, ()>,
     flowspec: ShardedMap<crate::route::FlowSpecKey, ()>,
     evpn: ShardedMap<rustbgpd_wire::EvpnRouteKey, ()>,
     vpn: ShardedMap<crate::route::VpnRibRouteKey, ()>,
@@ -163,7 +169,37 @@ pub(super) struct DeferredSelectionKeys {
     retained_key_bytes_by_family: HashMap<(Afi, Safi), usize>,
     /// O(1) process-wide sum of `retained_key_bytes_by_family`.
     retained_key_bytes: usize,
+    /// Committed ledger keys have left the tree, but the active walk still
+    /// reserves their bytes until it finishes or another waiter re-arms it.
+    retired_unicast_bytes: [usize; 2],
     limits: DeferredSelectionLimits,
+}
+
+/// Both ledger layouts admit a distinct identity only after checking the
+/// process budget. Unicast also needs an ordered seek across release turns.
+trait DeferredKeySet<K> {
+    fn contains(&self, key: &K) -> bool;
+    fn admit(&mut self, key: K);
+}
+
+impl<K: Eq + Hash> DeferredKeySet<K> for ShardedMap<K, ()> {
+    fn contains(&self, key: &K) -> bool {
+        self.contains_key(key)
+    }
+
+    fn admit(&mut self, key: K) {
+        self.insert(key, ());
+    }
+}
+
+impl<K: Ord> DeferredKeySet<K> for BTreeMap<K, ()> {
+    fn contains(&self, key: &K) -> bool {
+        self.contains_key(key)
+    }
+
+    fn admit(&mut self, key: K) {
+        self.insert(key, ());
+    }
 }
 
 impl DeferredSelectionKeys {
@@ -183,13 +219,14 @@ impl DeferredSelectionKeys {
             && self.overflowed_families.is_empty()
             && self.retained_key_bytes_by_family.is_empty()
             && self.retained_key_bytes == 0
+            && self.retired_unicast_bytes == [0; 2]
     }
 
     /// Insert distinct typed identities until the process-wide ledger limit is
     /// reached.  Returns each family that entered overflow fallback during
     /// this call; an already-overflowed family stops retaining further keys.
     fn extend_bounded<'a, T>(
-        set: &mut ShardedMap<T, ()>,
+        set: &mut impl DeferredKeySet<T>,
         overflowed_families: &mut HashSet<(Afi, Safi)>,
         retained_key_bytes_by_family: &mut HashMap<(Afi, Safi), usize>,
         retained_key_bytes: &mut usize,
@@ -198,15 +235,15 @@ impl DeferredSelectionKeys {
         limits: DeferredSelectionLimits,
     ) -> Vec<((Afi, Safi), DeferredSelectionOverflowReason)>
     where
-        T: Clone + DeferredSelectionKeyCharge + Eq + Hash + 'a,
+        T: Clone + DeferredSelectionKeyCharge + 'a,
     {
         let mut remaining = limits.identities.saturating_sub(current_len);
         let mut newly_overflowed = Vec::new();
         for (family, identity) in identities {
-            // Once a family is sticky-overflowed, skip even the borrowed hash
+            // Once a family is sticky-overflowed, skip even the borrowed key
             // lookup. Otherwise duplicate delivery never consumes identity or
             // byte budget and never clones the key.
-            if overflowed_families.contains(&family) || set.contains_key(identity) {
+            if overflowed_families.contains(&family) || set.contains(identity) {
                 continue;
             }
             let charge = identity.logical_retained_bytes();
@@ -227,17 +264,36 @@ impl DeferredSelectionKeys {
             }
             // Admission is proven before cloning potentially nested FlowSpec
             // or BGP-LS data into the ledger.
-            if set.insert(identity.clone(), ()).is_none() {
-                remaining -= 1;
-                *retained_key_bytes = retained_key_bytes.saturating_add(charge);
-                let family_bytes = retained_key_bytes_by_family.entry(family).or_default();
-                *family_bytes = family_bytes.saturating_add(charge);
-            }
+            set.admit(identity.clone());
+            remaining -= 1;
+            *retained_key_bytes = retained_key_bytes.saturating_add(charge);
+            let family_bytes = retained_key_bytes_by_family.entry(family).or_default();
+            *family_bytes = family_bytes.saturating_add(charge);
         }
         newly_overflowed
     }
 
+    fn cancel_unicast_release(&mut self, family: (Afi, Safi)) {
+        debug_assert!(matches!(family, (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast)));
+        let retired =
+            std::mem::take(&mut self.retired_unicast_bytes[usize::from(family.0 == Afi::Ipv6)]);
+        if retired > 0 {
+            let reserved = self
+                .retained_key_bytes_by_family
+                .get_mut(&family)
+                .expect("retired keys retain their byte charge");
+            *reserved -= retired;
+            self.retained_key_bytes -= retired;
+            if *reserved == 0 {
+                self.retained_key_bytes_by_family.remove(&family);
+            }
+        }
+    }
+
     fn complete_family_release(&mut self, family: (Afi, Safi)) {
+        if matches!(family, (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast)) {
+            self.retired_unicast_bytes[usize::from(family.0 == Afi::Ipv6)] = 0;
+        }
         self.overflowed_families.remove(&family);
         if let Some(released) = self.retained_key_bytes_by_family.remove(&family) {
             self.retained_key_bytes = self.retained_key_bytes.saturating_sub(released);
@@ -412,6 +468,8 @@ impl WaiterState {
 #[derive(Debug)]
 struct FamilyGate {
     waiters: HashMap<PeerId, WaiterState>,
+    // The winning final trigger owns its cohort while the release spans turns.
+    finishing: bool,
     selection_staged: bool,
     armed: bool,
 }
@@ -496,6 +554,7 @@ impl SelectionDeferral {
             for family in waiter.families {
                 let gate = active.entry(family).or_insert_with(|| FamilyGate {
                     waiters: HashMap::new(),
+                    finishing: false,
                     selection_staged: false,
                     armed: false,
                 });
@@ -539,7 +598,7 @@ impl SelectionDeferral {
             return;
         };
         for family in families {
-            if let Some(gate) = self.active.get_mut(&family) {
+            if let Some(gate) = self.active.get_mut(&family).filter(|g| !g.finishing) {
                 gate.waiters
                     .entry(peer)
                     .or_insert(WaiterState::AwaitingSession);
@@ -573,10 +632,6 @@ impl SelectionDeferral {
         self.active.get(&family).is_some_and(|gate| gate.armed)
     }
 
-    pub(super) fn has_active_gates(&self) -> bool {
-        self.active.values().any(|gate| gate.armed)
-    }
-
     /// Whether a family is still unreleased: its gate is armed, or a waiter
     /// can still arm it before the deadline.
     pub(super) fn may_hold(&self) -> bool {
@@ -605,7 +660,7 @@ impl SelectionDeferral {
         family: (Afi, Safi),
         release_reason: SelectionDeferralReleaseReason,
     ) -> Option<SelectionDeferralTransition> {
-        let gate = self.active.get_mut(&family)?;
+        let gate = self.active.get_mut(&family).filter(|g| !g.finishing)?;
         if !gate.armed {
             return None;
         }
@@ -638,7 +693,10 @@ impl SelectionDeferral {
     }
 
     pub(super) fn deadline(&self) -> Option<tokio::time::Instant> {
-        (!self.active.is_empty()).then_some(self.deadline)
+        self.active
+            .values()
+            .any(|gate| !gate.finishing)
+            .then_some(self.deadline)
     }
 
     pub(super) fn peer_snapshot(
@@ -728,7 +786,7 @@ impl SelectionDeferral {
         let families: Vec<_> = self.active.keys().copied().collect();
         let mut transitions = Vec::new();
         for family in families {
-            let Some(gate) = self.active.get_mut(&family) else {
+            let Some(gate) = self.active.get_mut(&family).filter(|g| !g.finishing) else {
                 continue;
             };
             if !gate.waiters.contains_key(&peer) {
@@ -766,7 +824,7 @@ impl SelectionDeferral {
         metrics: &BgpMetrics,
     ) {
         self.bind_interface(peer);
-        for (&family, gate) in &mut self.active {
+        for (&family, gate) in self.active.iter_mut().filter(|(_, gate)| !gate.finishing) {
             if let Some(state) = gate.waiters.get_mut(&peer) {
                 gate.armed = true;
                 gate.selection_staged = false;
@@ -828,7 +886,7 @@ impl SelectionDeferral {
         let mut classified = false;
         let mut transitions = Vec::new();
         for family in families {
-            let Some(gate) = self.active.get_mut(&family) else {
+            let Some(gate) = self.active.get_mut(&family).filter(|g| !g.finishing) else {
                 continue;
             };
             if gate.waiters.get(&peer) != Some(&WaiterState::AwaitingSession) {
@@ -866,7 +924,7 @@ impl SelectionDeferral {
     /// Remove a departed current session from the blocking cohort. Release
     /// waits until teardown or collision-survivor registration has settled.
     pub(super) fn session_down(&mut self, peer: PeerId, session_id: u64, metrics: &BgpMetrics) {
-        for (&family, gate) in &mut self.active {
+        for (&family, gate) in self.active.iter_mut().filter(|(_, gate)| !gate.finishing) {
             if matches!(
                 gate.waiters.get(&peer),
                 Some(
@@ -915,7 +973,7 @@ impl SelectionDeferral {
         let families: Vec<_> = self.active.keys().copied().collect();
         let mut transitions = Vec::new();
         for family in families {
-            let Some(gate) = self.active.get_mut(&family) else {
+            let Some(gate) = self.active.get_mut(&family).filter(|g| !g.finishing) else {
                 continue;
             };
             let present = if keep_series {
@@ -952,7 +1010,7 @@ impl SelectionDeferral {
         if session_id == 0 {
             return None;
         }
-        let gate = self.active.get_mut(&family)?;
+        let gate = self.active.get_mut(&family).filter(|g| !g.finishing)?;
         if gate.waiters.get(&peer) != Some(&WaiterState::AwaitingEor { session_id }) {
             return None;
         }
@@ -971,7 +1029,7 @@ impl SelectionDeferral {
         session_id: u64,
         family: (Afi, Safi),
     ) -> Option<SelectionDeferralTransition> {
-        let gate = self.active.get_mut(&family)?;
+        let gate = self.active.get_mut(&family).filter(|g| !g.finishing)?;
         if gate.waiters.get(&peer)
             != Some(&WaiterState::AwaitingRefresh {
                 session_id,
@@ -997,7 +1055,7 @@ impl SelectionDeferral {
         family: (Afi, Safi),
         metrics: &BgpMetrics,
     ) -> Option<SelectionDeferralTransition> {
-        let gate = self.active.get_mut(&family)?;
+        let gate = self.active.get_mut(&family).filter(|g| !g.finishing)?;
         if gate.waiters.get(&peer)
             != Some(&WaiterState::AwaitingRefresh {
                 session_id,
@@ -1021,6 +1079,7 @@ impl SelectionDeferral {
     pub(super) fn expire(&self) -> Vec<SelectionDeferralTransition> {
         self.active
             .iter()
+            .filter(|(_, gate)| !gate.finishing)
             .map(|(&family, gate)| SelectionDeferralTransition::Release {
                 family,
                 // Timer fallback rebuilds the complete family even after collision staging.
@@ -1105,6 +1164,7 @@ impl RibManager {
     }
 
     pub(super) fn record_deferred_unicast(&mut self, affected: &HashSet<rustbgpd_wire::Prefix>) {
+        self.invalidate_release_selection(affected);
         self.with_deferred_selection_recording(affected, |manager| {
             manager
                 .record_deferred_unicast_bounded(affected, manager.deferred_selection_keys.limits);
@@ -1441,7 +1501,8 @@ impl RibManager {
     ) -> (usize, usize) {
         let keys = &self.deferred_selection_keys;
         match family.1 {
-            Safi::Unicast => (keys.unicast.len(), keys.unicast.capacity()),
+            // The ordered tree has no reserved bucket array.
+            Safi::Unicast => (keys.unicast.len(), 0),
             Safi::FlowSpec => (keys.flowspec.len(), keys.flowspec.capacity()),
             Safi::Evpn => (keys.evpn.len(), keys.evpn.capacity()),
             Safi::MplsVpn => (keys.vpn.len(), keys.vpn.capacity()),
@@ -1519,6 +1580,9 @@ impl RibManager {
             return;
         }
         self.with_selection_readiness(|manager| {
+            for &family in &families {
+                manager.cancel_rearmed_release(family);
+            }
             manager.suspend_conditional_advertisement_families(&families);
             manager.retain_selection_group_admission();
             let readiness = manager.replacement_readiness.clone();
@@ -1586,6 +1650,13 @@ impl RibManager {
         }
         self.with_selection_readiness(|manager| {
         for transition in transitions {
+            let idle = !manager.unicast_release_runnable();
+            if manager.start_unicast_release(transition, reason) {
+                if idle {
+                    manager.finish_small_unicast_release();
+                }
+                continue;
+            }
             match transition {
                 SelectionDeferralTransition::Stage { family } => {
                     tracing::info!(
@@ -1630,6 +1701,8 @@ impl RibManager {
                     }
                     if let Some(selection) = manager.selection_deferral.as_mut() {
                         selection.release(family, release_reason, &manager.metrics);
+                        manager.update_selection_inventory_index();
+                        manager.retire_release_peers_if_idle();
                     }
                     if armed {
                         manager.complete_selection_family(family, &resynced, reason);
@@ -1641,6 +1714,72 @@ impl RibManager {
         // A family released before it ever armed skips the completion, so
         // retire what no held End-of-RIB can still need here too.
         self.request_helper_stale_retire();
+    }
+
+    pub(super) fn selection_peer_convergence_held(
+        &self,
+        peer: PeerId,
+        family: (Afi, Safi),
+    ) -> bool {
+        self.selection_convergence_held(family) || self.release_marker_pending(peer, family)
+    }
+
+    /// The dirty ring owns a deferred forced resync too. A sibling gate's
+    /// earlier partial resync did not cover the rows about to be selected.
+    pub(super) fn wake_unicast_release_resync(&mut self, peer: PeerId, family: (Afi, Safi)) {
+        if self
+            .peer_sendable_families
+            .get(&peer)
+            .is_some_and(|families| families.contains(&family))
+        {
+            if self.force_outbound_peers.contains(&peer) && !self.dirty_peers.contains(&peer) {
+                self.mark_outbound_dirty(peer);
+            } else if self.dirty_peers.contains(&peer) {
+                self.set_selection_partial_caught_up(peer, false);
+            }
+        }
+    }
+
+    /// Complete one current registration after the producer has sealed. Clean
+    /// member rows were admitted in the release batches; private cursors and
+    /// dirty/forced peers retain their own table-before-marker obligations.
+    pub(super) fn finish_unicast_release_peer(&mut self, peer: PeerId, family: (Afi, Safi)) {
+        let owed_marker = self.eor.owes(peer, family);
+        if self.force_outbound_peers.contains(&peer)
+            && !self.dirty_peers.contains(&peer)
+            && !self.selection_partial_caught_up(peer)
+        {
+            // A force may have arrived after this peer's enrollment.
+            self.mark_outbound_dirty(peer);
+        }
+        let missing_group_rows_admitted = self.take_release_missing_admitted(peer, family);
+        if owed_marker {
+            self.settle_unicast_release_eor(peer, family, missing_group_rows_admitted);
+            if self.dirty_peers.contains(&peer)
+                && self.selection_partial_caught_up(peer)
+                && self.owes(peer, family)
+                && self.eor_resync_ready(peer).contains(&family)
+            {
+                self.set_selection_partial_caught_up(peer, false);
+            }
+        }
+        if super::route_refresh::remove_family_drop_empty(
+            &mut self.selection_deferred_refresh,
+            peer,
+            family,
+        ) {
+            self.defer_refresh_answer(peer, family, owed_marker);
+        }
+        // Peers without an owed marker, including a source-suppressed group
+        // member, can also own startup admission proof.
+        if self.retain_initial_group_admitted(peer)
+            && !self.dirty_peers.contains(&peer)
+            && !self.force_outbound_peers.contains(&peer)
+            && !self.selection_resync_held(peer)
+        {
+            self.complete_initial_selection_replay(peer);
+            self.retire_completed_initial_group_admitted(peer);
+        }
     }
 
     /// Finish the release of `family`, whose routes were selected under the
@@ -1819,7 +1958,7 @@ impl RibManager {
     /// Pending peers wait until release has updated both selection and the
     /// shared group tables; their existing resync obligation covers the delta.
     pub(super) fn selection_release_resync_pending(&self, peer: PeerId) -> bool {
-        self.selection_release_staging
+        (self.selection_release_staging || self.release_resync_waits(peer))
             && (self.dirty_peers.contains(&peer) || self.force_outbound_peers.contains(&peer))
     }
 
@@ -1960,59 +2099,6 @@ impl RibManager {
             .deferred_selection_keys
             .overflowed_families
             .contains(&family);
-        let mut prefixes = ReleaseKeys::new();
-        prefixes.extend(
-            self.ribs
-                .values()
-                .inspect(|_| checkpoint())
-                .flat_map(crate::adj_rib_in::AdjRibIn::iter_slots)
-                .inspect(|_| checkpoint())
-                .flatten()
-                .filter(|route| super::helpers::prefix_family(&route.prefix) == family)
-                .map(|route| route.prefix),
-        );
-        if overflowed && family.1 == Safi::Unicast {
-            prefixes.extend(
-                self.loc_rib
-                    .iter()
-                    .inspect(|_| checkpoint())
-                    .filter(|route| super::helpers::prefix_family(&route.prefix) == family)
-                    .map(|route| route.prefix),
-            );
-        }
-        prefixes.extend(
-            self.deferred_selection_keys
-                .unicast
-                .keys()
-                .inspect(|_| checkpoint())
-                .filter(|prefix| super::helpers::prefix_family(prefix) == family)
-                .copied(),
-        );
-        self.deferred_selection_keys.unicast.retain(|prefix, ()| {
-            checkpoint();
-            super::helpers::prefix_family(prefix) != family
-        });
-        let mut prefixes = prefixes.into_set(&mut checkpoint);
-        if !prefixes.is_empty() {
-            self.recompute_best(&prefixes);
-            // A joining peer may not have received an unchanged frozen best.
-            self.distribute_changes(&prefixes, &prefixes);
-            // A frozen row kept its exact rejections live; retire those whose
-            // row the release removed. Retiring after the release's
-            // distribution is the conservative order: that pass still sees
-            // every rejection that was live while the row was held.
-            if !self.peer_unexportable.is_empty() {
-                let gone: Vec<_> = prefixes
-                    .iter()
-                    .inspect(|_| checkpoint())
-                    .filter(|prefix| self.loc_rib.get(prefix).is_none())
-                    .map(|prefix| crate::update::ExactExportKey::Unicast(*prefix, 0))
-                    .collect();
-                self.retire_exact_export_rejections(gone);
-            }
-            super::retire_hash_set(&mut prefixes, &mut checkpoint);
-        }
-
         let mut flowspec = ReleaseKeys::new();
         flowspec.extend(
             self.ribs
@@ -2301,7 +2387,7 @@ mod ledger_tests {
     #[test]
     fn cleared_witness_ignores_empty_shards_and_checks_accounting() {
         let mut keys = DeferredSelectionKeys {
-            unicast: ShardedMap::with_capacity(crate::fast_hash::SHARD_SPLIT_AT),
+            flowspec: ShardedMap::with_capacity(crate::fast_hash::SHARD_SPLIT_AT),
             ..DeferredSelectionKeys::default()
         };
         assert!(keys.is_cleared());

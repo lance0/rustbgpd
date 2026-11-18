@@ -392,6 +392,10 @@ struct Record {
 }
 
 impl Record {
+    fn entries(&self) -> usize {
+        self.masked + self.keys.0.len()
+    }
+
     fn charge(&self) -> usize {
         size_of::<Self>()
             + self.keys.0.capacity() * size_of::<Key>()
@@ -405,6 +409,8 @@ pub(in crate::manager) struct AdmittedRecovery {
     records: Records,
     snapshots: Snapshots,
     next_snapshot: Option<u64>,
+    /// Sparse keys plus set mask bits across capturing and sealed records.
+    entries: usize,
     used: usize,
     peak: usize,
     peer_limit: usize,
@@ -433,6 +439,7 @@ impl AdmittedRecovery {
             records: Records::new(),
             snapshots: Snapshots::new(),
             next_snapshot: Some(1),
+            entries: 0,
             used: size_of::<Self>(),
             peak: size_of::<Self>(),
             peer_limit,
@@ -475,17 +482,8 @@ impl AdmittedRecovery {
         self.optional_share_refusals
     }
 
-    pub(in crate::manager) fn entries_with_checkpoint(
-        &self,
-        checkpoint: &mut impl FnMut(bool),
-    ) -> usize {
-        self.records
-            .iter()
-            .map(|record| {
-                checkpoint(false);
-                record.masked + record.keys.0.len()
-            })
-            .sum()
+    pub(in crate::manager) const fn entries(&self) -> usize {
+        self.entries
     }
 
     pub(in crate::manager) fn bytes(&self) -> usize {
@@ -1351,6 +1349,7 @@ impl AdmittedRecovery {
             .and_then(|snapshot| snapshot.vpn_changes(table))
             .filter(|_| shape.vpn_identity && shape.vpn == table.vpn_len());
         let record = &mut self.records[index];
+        let prior = record.entries();
         let mut count = 0_usize;
         let mut mismatches = 0;
         let mut comparisons = 0;
@@ -1394,6 +1393,7 @@ impl AdmittedRecovery {
                 Ok(())
             },
         );
+        self.entries = self.entries - prior + record.entries();
         if let Err(error) = population {
             return Err(self.fail(index, error, checkpoint));
         }
@@ -1403,6 +1403,7 @@ impl AdmittedRecovery {
         if let (Some((range, changes)), Some(snapshot_index)) = (all_vpn, snapshot_index) {
             let snapshot = &self.snapshots[snapshot_index];
             let record = &mut self.records[index];
+            let prior = record.entries();
             let mut position = range.start;
             while position < range.end {
                 checkpoint(false);
@@ -1438,6 +1439,7 @@ impl AdmittedRecovery {
                     _ => {}
                 }
             }
+            self.entries = self.entries - prior + record.entries();
             if overflow {
                 return Err(self.fail(index, invalid, checkpoint));
             }
@@ -1727,6 +1729,7 @@ impl AdmittedRecovery {
     fn free_keys(&mut self, index: usize, checkpoint: &mut impl FnMut(bool)) {
         checkpoint(true);
         let record = &mut self.records[index];
+        self.entries -= record.entries();
         let bytes = record.keys.0.capacity() * size_of::<Key>()
             + record.words.capacity() * size_of::<u64>();
         record.keys.0.clear();
@@ -1782,6 +1785,7 @@ impl AdmittedRecovery {
                 if self.records[index].words[position / 64] & bit == 0 {
                     self.records[index].words[position / 64] |= bit;
                     self.records[index].masked += 1;
+                    self.entries += 1;
                 }
                 return Ok(());
             }
@@ -1799,6 +1803,7 @@ impl AdmittedRecovery {
             }
         }
         self.records[index].keys.0.push(key);
+        self.entries += 1;
         Ok(())
     }
 
@@ -1816,7 +1821,9 @@ impl AdmittedRecovery {
             State::Capturing => {}
         }
         let keys = &mut self.records[index].keys.0;
+        let prior = keys.len();
         Self::sort_keys(keys, checkpoint);
+        self.entries -= prior - keys.len();
         self.records[index].state = State::Complete;
         Ok(())
     }
@@ -2012,6 +2019,27 @@ impl AdmittedRecovery {
             .and_then(|handle| self.snapshot_index(handle))
             .map_or(&[][..], |snapshot| self.snapshots[snapshot].keys.as_slice());
         let record = &mut self.records[index];
+        let prior = record.entries();
+        let applied =
+            Self::apply_reserved_keys(record, universe, announcements, withdrawals, checkpoint);
+        self.entries = self.entries - prior + record.entries();
+        if !applied {
+            return Err(self.fail(index, self.missing_proof(peer), checkpoint));
+        }
+        Ok(true)
+    }
+
+    fn apply_reserved_keys<A, W>(
+        record: &mut Record,
+        universe: &[Key],
+        announcements: A,
+        withdrawals: W,
+        checkpoint: &mut impl FnMut(bool),
+    ) -> bool
+    where
+        A: Iterator<Item = Key>,
+        W: Clone + Iterator<Item = Key>,
+    {
         // Replay only after complete validation and reservation. Each direct
         // position is retained for clearing; no matched-position allocation.
         let mut base_cursor = None;
@@ -2055,7 +2083,7 @@ impl AdmittedRecovery {
                     continue;
                 };
                 if keys.len() == keys.capacity() {
-                    return Err(self.fail(index, self.missing_proof(peer), checkpoint));
+                    return false;
                 }
                 let end = keys.len();
                 keys.push(key);
@@ -2067,7 +2095,7 @@ impl AdmittedRecovery {
                 }
             } else if keys[..old_len].binary_search(&key).is_err() {
                 if keys.len() == keys.capacity() {
-                    return Err(self.fail(index, self.missing_proof(peer), checkpoint));
+                    return false;
                 }
                 // Sorted appends preserve the proof without a full key walk.
                 needs_sort |= keys.last().is_some_and(|last| *last >= key);
@@ -2077,7 +2105,7 @@ impl AdmittedRecovery {
         if needs_sort {
             Self::sort_keys(keys, checkpoint);
         }
-        Ok(true)
+        true
     }
 
     #[expect(
@@ -2120,10 +2148,6 @@ impl AdmittedRecovery {
 
 #[cfg(test)]
 impl AdmittedRecovery {
-    pub(in crate::manager) fn entries(&self) -> usize {
-        self.entries_with_checkpoint(&mut |_| {})
-    }
-
     pub(in crate::manager) fn is_empty(&self) -> bool {
         self.records.is_empty()
     }
@@ -2812,12 +2836,7 @@ mod tests {
             .unwrap();
         assert!(events.iter().filter(|force| **force).count() >= 10);
         events.clear();
-        assert_eq!(
-            ledger.entries_with_checkpoint(&mut |force| events.push(force)),
-            3
-        );
-        assert_eq!(events, [false]);
-        events.clear();
+        assert_eq!(ledger.entries(), 3);
         ledger
             .reserve_admitted_with_checkpoint(
                 peer(1),
@@ -2944,8 +2963,10 @@ mod tests {
         let raw: Vec<_> = (1..=100).map(key).collect();
         let handle = shared_capture(&mut ledger, peer(1).addr(), None, &raw, &raw);
         let first = ledger.bytes();
+        assert_eq!(ledger.entries(), 100);
         let handle2 = shared_capture(&mut ledger, peer(2).addr(), Some(handle), &raw, &raw[..50]);
         assert_eq!(handle, handle2);
+        assert_eq!(ledger.entries(), 150);
         assert_eq!(ledger.snapshots.len(), 1);
         assert_eq!(ledger.snapshots[0].references, 2);
         let local = ledger.records.capacity() * size_of::<Record>()
@@ -2973,6 +2994,7 @@ mod tests {
         assert_eq!(ledger.get(&peer(1)).unwrap().len(), 100);
         assert_eq!(ledger.get(&peer(2)).unwrap().len(), 50);
         assert!(ledger.remove(&peer(1)));
+        assert_eq!(ledger.entries(), 50);
         assert_eq!(ledger.snapshots[0].references, 1);
         assert_eq!(ledger.get(&peer(2)).unwrap().len(), 50);
         assert!(ledger.remove(&peer(2)));
@@ -3025,11 +3047,13 @@ mod tests {
         );
         assert_eq!(ledger.records[0].keys.0.as_slice(), &[key(3)]);
         assert_eq!(ledger.records[0].masked, 2);
+        assert_eq!(ledger.entries(), 3);
         assert_eq!(ledger.records[0].snapshot, Some(handle));
         let error = ledger
             .apply_admitted(peer(1), [].into_iter(), [key(4)].into_iter())
             .unwrap_err();
         assert_eq!(error.cause, FailureCause::MissingProof);
+        assert_eq!(ledger.entries(), 0);
         assert!(ledger.get(&peer(1)).is_none());
         assert!(ledger.snapshots.is_empty());
     }
@@ -4176,6 +4200,10 @@ mod tests {
     }
 
     fn assert_retained_credit(ledger: &AdmittedRecovery) {
+        assert_eq!(
+            ledger.entries(),
+            ledger.records.iter().map(Record::entries).sum::<usize>()
+        );
         let record_buffers = ledger
             .records
             .iter()

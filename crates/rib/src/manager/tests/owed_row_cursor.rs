@@ -308,6 +308,61 @@ fn assert_settled(manager: &RibManager, receivers: &[Receiver], rows: &[(u32, u3
     assert_eq!(manager.owed_rows[0].len(), 0, "{case}: the list is freed");
 }
 
+#[test]
+fn a_release_cursor_parks_between_batches_and_ends_after_an_empty_seal() {
+    let (mut manager, mut receivers) = owing(1, 1, CREDIT);
+    let peer = receivers[0].peer;
+    manager.set_owed_release_open(V4, true);
+
+    tick(&mut manager, &mut receivers);
+    assert!(manager.owes_whole(peer, UNICAST));
+    assert!(!manager.owing_runnable(), "park at the temporary head");
+    assert_eq!(receivers[0].wire.table, table(&[(0, 0)]));
+    assert_eq!(receivers[0].wire.markers, 0);
+
+    manager.owing_resync_covered(peer);
+    assert!(
+        manager.owes_whole(peer, UNICAST),
+        "partial resync cannot seal"
+    );
+    let before = manager.adj_rib_out_commit_stats.owed_drain_rows_read;
+    received(&mut manager, &[(1, 2)], &[0]);
+    assert!(manager.owing_runnable(), "the next batch wakes the cursor");
+    tick(&mut manager, &mut receivers);
+    assert_eq!(
+        manager.adj_rib_out_commit_stats.owed_drain_rows_read - before,
+        2
+    );
+    assert_eq!(receivers[0].wire.table, table(&[(1, 2)]));
+    assert_eq!(receivers[0].wire.markers, 0);
+    assert!(!manager.owing_runnable());
+
+    manager.set_owed_release_open(V4, false);
+    assert!(
+        manager.owing_runnable(),
+        "seal with no new rows wakes settlement"
+    );
+    drain(&mut manager, &mut receivers);
+    assert_settled(&manager, &receivers, &[(1, 2)], "producer sealed");
+}
+
+#[test]
+fn a_force_arriving_after_enrollment_retries_on_the_dirty_ring() {
+    let (mut manager, mut receivers) = owing(1, 1, CREDIT);
+    let peer = receivers[0].peer;
+    manager.force_outbound_peers.insert(peer);
+    assert!(!manager.dirty_peers.contains(&peer));
+    let builds = manager.adj_rib_out_commit_stats.resync_builds;
+
+    manager.finish_unicast_release_peer(peer, V4);
+    assert!(manager.dirty_peers.contains(&peer));
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
+    drain(&mut manager, &mut receivers);
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds - builds, 1);
+    assert_settled(&manager, &receivers, &[(0, 0)], "late force");
+    assert!(!manager.force_outbound_peers.contains(&peer));
+}
+
 /// Work count (E1): a whole-family debt of N keys drains in ceil(N / B)
 /// steps per receiver, none reading more than B keys, whatever N is. Red
 /// with an unbounded step: one step of N keys per receiver.
@@ -812,6 +867,7 @@ fn a_cursor_inside_a_selection_hold_sends_exempt_rows_only() {
     assert_eq!(receivers[0].wire.markers, 0);
     // The release reads the held rows again.
     manager.expire_selection_deferral();
+    drain_unicast_release(&mut manager);
     drain(&mut manager, &mut receivers);
     let wire = &receivers[0].wire;
     assert_eq!(wire.count(0), (2, 0), "each row once per variant");
@@ -1077,6 +1133,7 @@ fn a_selection_release_larger_than_its_table_evicts_no_reading_receiver() {
     }
     let builds = manager.adj_rib_out_commit_stats.resync_builds;
     manager.expire_selection_deferral();
+    drain_unicast_release(&mut manager);
     for receiver in &receivers {
         assert!(manager.owes_whole(receiver.peer, UNICAST), "owed whole");
     }
@@ -2139,6 +2196,34 @@ fn a_refresh_from_an_evicted_receiver_follows_its_resync_with_its_markers() {
         drain_sent(&mut manager, &mut receivers, 1),
         [Sent::Answer(expected.len())]
     );
+}
+
+#[test]
+fn an_evicted_receivers_resync_and_refresh_wait_for_the_final_batch() {
+    let (mut manager, mut receivers, mut expected) = evict_stalled(1);
+    let peer = receivers[1].peer;
+    manager.release_readiness_count = Some(manager.loc_rib.len());
+    manager.set_owed_release_open(V4, true);
+    receivers[1].write();
+    let builds = manager.adj_rib_out_commit_stats.resync_builds;
+    refresh_request(&mut manager, peer);
+    manager.resync_dirty_peers_bounded();
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
+    assert!(sent(&mut receivers[1]).is_empty());
+    assert!(manager.eor.owes(peer, V4));
+
+    received(&mut manager, &[(1, 2)], &[]);
+    expected[1] = (1, 2);
+    // This receiver only sends IPv4: an overlapping IPv6 producer leaves
+    // its completed family's resync and refresh eligible.
+    manager.set_owed_release_open((Afi::Ipv6, Safi::Unicast), true);
+    manager.set_owed_release_open(V4, false);
+    assert_eq!(
+        drain_sent(&mut manager, &mut receivers, 1),
+        [Sent::Rows, Sent::Eor, Sent::Answer(expected.len())]
+    );
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds - builds, 1);
+    assert_eq!(receivers[1].wire.table, table(&expected));
 }
 
 /// An operator's token certifies its own replay. A peer request already

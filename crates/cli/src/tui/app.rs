@@ -1551,6 +1551,7 @@ mod tests {
 
     fn page(prefix: &str, next: &str) -> ListRoutesResponse {
         ListRoutesResponse {
+            selection_release: None,
             routes: vec![crate::proto::Route {
                 prefix: prefix.into(),
                 prefix_length: 24,

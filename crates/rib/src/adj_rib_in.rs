@@ -1217,6 +1217,14 @@ impl AdjRibIn {
         self.routes.iter()
     }
 
+    /// Seek directly to prefix identities, without inspecting their Add-Path siblings.
+    pub(crate) fn release_prefixes_from(
+        &self,
+        start: Option<Prefix>,
+    ) -> impl Iterator<Item = Prefix> {
+        self.prefix_index.iter_from(start).map(|(key, _)| key)
+    }
+
     /// Unicast routes grouped by prefix, in [`Prefix`] order, for the
     /// prefixes strictly after `after`.
     pub(crate) fn iter_prefix_groups_after(
@@ -1495,11 +1503,24 @@ impl AdjRibIn {
 
     /// Iterate all paths of one exact prefix through its existing index.
     pub fn iter_prefix(&self, prefix: &Prefix) -> impl Iterator<Item = &Route> + use<'_> {
-        let routes = &self.routes;
+        self.iter_prefix_after(prefix, None)
+    }
+
+    /// Resume selection at the path after `after`, seeking within this exact prefix.
+    pub(crate) fn iter_prefix_after(
+        &self,
+        prefix: &Prefix,
+        after: Option<u32>,
+    ) -> impl Iterator<Item = &Route> + use<'_> {
         self.prefix_index
             .get(prefix)
-            .map_or(PathIndexIter::One(None), PathIndex::iter)
-            .filter_map(move |(_, handle)| routes.get(handle))
+            .map_or(PathIndexIter::One(None), |paths| paths.iter_after(after))
+            .filter_map(move |(_, handle)| self.routes.get(handle))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_path_visits() -> usize {
+        tests::take_path_visits()
     }
 
     /// Mark all routes matching the given address family as stale
@@ -4155,6 +4176,10 @@ mod tests {
 
     fn path_comparisons() -> usize {
         PATH_COMPARISONS.with(|count| count.replace(0))
+    }
+
+    pub(super) fn take_path_visits() -> usize {
+        PATH_VISITS.with(|count| count.replace(0))
     }
 
     pub(super) fn record_path_visit() {

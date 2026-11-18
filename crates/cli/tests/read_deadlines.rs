@@ -207,6 +207,7 @@ async fn later_page_stalls(json: bool) {
         .lock()
         .await
         .push(proto::ListRoutesResponse {
+            selection_release: None,
             routes: vec![proto::Route {
                 prefix: "203.0.113.0".into(),
                 prefix_length: 24,
@@ -241,6 +242,7 @@ async fn seed_first_route_page(server: &test_support::MockServerHandle) {
         .lock()
         .await
         .push(proto::ListRoutesResponse {
+            selection_release: None,
             routes: vec![proto::Route {
                 prefix: "203.0.113.0".into(),
                 prefix_length: 24,
@@ -323,6 +325,7 @@ async fn json_lines_end_token_continues_a_limited_walk() {
             .lock()
             .await
             .push(proto::ListRoutesResponse {
+                selection_release: None,
                 routes: vec![proto::Route {
                     prefix: "198.51.100.0".into(),
                     prefix_length: 24,
@@ -580,6 +583,7 @@ async fn legacy_json_array_and_limited_envelope_keep_their_shapes() {
             .lock()
             .await
             .push(proto::ListRoutesResponse {
+                selection_release: None,
                 routes: vec![proto::Route {
                     prefix: "203.0.113.0".into(),
                     prefix_length: 24,

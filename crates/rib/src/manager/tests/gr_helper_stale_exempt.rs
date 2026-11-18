@@ -967,6 +967,45 @@ fn settled_waiting_key() -> (
     (manager, rib, session, rtbh, kept, vec![source, waiter])
 }
 
+#[test]
+fn a_release_rechecks_touched_helper_carries_after_its_own_family_seals() {
+    let (mut manager, mut rib, mut session, rtbh, kept, _registrations) = settled_waiting_key();
+    let peer = peer_v4(OBSERVER);
+    let prefix = Prefix::V4(rtbh);
+    let needs_retry = |manager: &RibManager| {
+        manager.helper_stale_needs_rescan(peer, &manager.helper_stale_exempt[&peer])
+    };
+    let sibling = (Afi::Ipv6, Safi::Unicast);
+    manager.set_owed_release_open(sibling, true);
+    manager.set_owed_release_open(FAMILY, true);
+    manager.note_release_helper_stale_change(peer, &HashSet::from([Prefix::V4(host(2, 4))]));
+    manager.set_owed_release_open(FAMILY, false);
+    assert!(
+        !needs_retry(&manager),
+        "an unrelated batch walked the carry"
+    );
+
+    manager.set_owed_release_open(FAMILY, true);
+    assert!(
+        manager
+            .ribs
+            .get_mut(&peer_v4(SOURCE))
+            .unwrap()
+            .withdraw(&prefix, 0)
+    );
+    manager.note_release_helper_stale_change(peer, &HashSet::from([prefix]));
+    assert!(
+        !needs_retry(&manager),
+        "the incomplete family woke the full helper scan"
+    );
+    manager.set_owed_release_open(FAMILY, false);
+    assert!(
+        needs_retry(&manager),
+        "IPv6 must not delay the IPv4 helper retry"
+    );
+    assert_timer_withdraws(&mut manager, &mut session.1, &mut rib, rtbh, Some(kept));
+}
+
 fn assert_timer_withdraws_nothing(
     manager: &mut RibManager,
     rx: &mut mpsc::Receiver<OutboundRouteUpdate>,

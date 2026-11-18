@@ -43,6 +43,7 @@ use std::num::NonZeroU64;
 pub struct InjectionService {
     max_tier: AuthTier,
     rib_tx: mpsc::Sender<RibUpdate>,
+    rib_query_tx: mpsc::Sender<RibUpdate>,
     leases: Arc<InjectionLeases>,
     /// Published managed-peer roster, for `include_configured` export reads.
     roster: Option<crate::import_roster::ImportRosterReader>,
@@ -61,10 +62,18 @@ impl InjectionService {
     ) -> Self {
         Self {
             max_tier,
+            rib_query_tx: rib_tx.clone(),
             rib_tx,
             leases,
             roster: None,
         }
+    }
+
+    /// Route export-disposition reads through the daemon's priority query
+    /// channel, keeping a flood of fenced RPCs off the primary mutation FIFO.
+    pub(crate) fn with_export_queries(mut self, queries: mpsc::Sender<RibUpdate>) -> Self {
+        self.rib_query_tx = queries;
+        self
     }
 
     /// List managed peers from this roster for `include_configured`.
@@ -193,7 +202,7 @@ impl InjectionService {
         } else {
             None
         };
-        let page = rib_manager_read(&self.rib_tx, |reply| {
+        let page = rib_manager_read(&self.rib_query_tx, |reply| {
             query(managed, resume, page_size, reply)
         })
         .await?
@@ -2949,12 +2958,15 @@ mod tests {
             key: 0,
             after: Some((peer2.addr(), Some(Arc::from("eth0")))),
         };
-        let (tx, mut rx) = mpsc::channel(16);
+        let (query_tx, mut rx) = mpsc::channel(16);
+        let (primary_tx, primary_rx) = mpsc::channel(1);
+        drop(primary_rx);
         let svc = InjectionService::new(
-            tx,
+            primary_tx,
             AuthTier::SensitiveRead,
             Arc::new(InjectionLeases::new()),
-        );
+        )
+        .with_export_queries(query_tx);
         let responder_cursor = cursor.clone();
         let responder = tokio::spawn(async move {
             let mut seen: Vec<Seen> = Vec::new();

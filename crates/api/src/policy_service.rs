@@ -2552,6 +2552,7 @@ async fn query_test_policy_page(
     use rustbgpd_rib::{RibUpdate, RoutePageError};
 
     rib_manager_read(rib_tx, |reply| RibUpdate::QueryRoutesPage {
+        accept_releasing: false,
         scope,
         filter: None,
         after,
@@ -4514,6 +4515,7 @@ policy customer-in(peer_lp: u32) {
             while let Some(update) = rib_rx.recv().await {
                 match update {
                     rustbgpd_rib::RibUpdate::QueryRoutesPage {
+                        accept_releasing: _,
                         scope,
                         filter,
                         after,
@@ -4557,6 +4559,7 @@ policy customer-in(peer_lp: u32) {
                         last_cursor = page_routes.last().map(rustbgpd_rib::route_query_key);
                         query_index += 1;
                         let _ = reply.send(Ok(rustbgpd_rib::RoutePage {
+                            releasing: [false; 2],
                             peer_scope: rustbgpd_rib::PeerScope::default(),
                             routes: page_routes,
                             total: scoped.len() as u64,
@@ -5277,6 +5280,7 @@ policy customer-in(peer_lp: u32) {
                 None,
                 deadline,
                 rustbgpd_rib::RoutePage {
+                    releasing: [false; 2],
                     peer_scope: rustbgpd_rib::PeerScope::default(),
                     routes: vec![customer_route(0)],
                     total: 2,

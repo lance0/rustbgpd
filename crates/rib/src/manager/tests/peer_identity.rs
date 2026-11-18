@@ -471,6 +471,7 @@ async fn a_page_boundary_between_same_address_neighbors_skips_no_row() {
         async move {
             let (reply, rx) = oneshot::channel();
             tx.send(RibUpdate::QueryRoutesPage {
+                accept_releasing: false,
                 scope: RouteQueryScope::Received { peer: None },
                 filter: None,
                 after,

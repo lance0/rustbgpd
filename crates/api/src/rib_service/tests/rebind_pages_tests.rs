@@ -18,6 +18,7 @@ async fn received_page(
 ) -> Result<RoutePage, RoutePageError> {
     let (reply, rx) = tokio::sync::oneshot::channel();
     tx.send(RibUpdate::QueryRoutesPage {
+        accept_releasing: false,
         scope: RouteQueryScope::Received { peer: None },
         filter: None,
         after,

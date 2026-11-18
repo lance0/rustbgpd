@@ -129,7 +129,7 @@ async fn dormant_observers_plain_refresh_retains_its_completion_marker() {
     .unwrap();
     assert!(!query_state(&tx, a).await.selection_deferral[0].active);
     assert_eq!(a_rx.try_recv().unwrap().end_of_rib, vec![FAMILY]);
-    let response = observer_rx.try_recv().unwrap();
+    let response = observer_rx.recv().await.unwrap();
     assert_eq!(
         response.end_of_rib,
         vec![FAMILY],
@@ -2487,7 +2487,7 @@ fn bgpls_rejected_sendability_scan_services_readiness_per_key() {
 #[test]
 #[expect(
     clippy::too_many_lines,
-    reason = "all typed stores share one release while readiness records exact unicast count changes and other lanes remain fenced"
+    reason = "all typed stores share one release while readiness observes complete unicast counts and other lanes remain fenced"
 )]
 fn overflow_fallback_sweeps_every_typed_loc_rib_store() {
     use std::sync::{Arc, Mutex};
@@ -2653,14 +2653,16 @@ fn overflow_fallback_sweeps_every_typed_loc_rib_store() {
         .unwrap()
         .push((stage, response.try_recv().unwrap().unwrap()));
     let observed = observed.lock().unwrap();
+    let mut counts = observed
+        .iter()
+        .filter(|(stage, _)| *stage == "selection_recompute")
+        .map(|(_, count)| *count)
+        .collect::<Vec<_>>();
+    counts.dedup();
     assert_eq!(
-        observed
-            .iter()
-            .filter(|(stage, _)| *stage == "selection_recompute")
-            .map(|(_, count)| *count)
-            .collect::<Vec<_>>(),
-        vec![1, 0],
-        "readiness follows each complete unicast withdrawal, never the frozen entry count"
+        counts,
+        vec![2, 0],
+        "readiness publishes the complete unicast count when the release seals"
     );
     for stage in [
         "selection_inventory",
@@ -2684,6 +2686,7 @@ fn overflow_fallback_sweeps_every_typed_loc_rib_store() {
     ));
 
     assert!(manager.loc_rib.get(&unicast_key).is_none());
+    assert!(manager.loc_rib.get(&second_unicast.prefix).is_none());
     assert!(manager.loc_rib.get_flowspec(&flowspec_key).is_none());
     assert!(manager.loc_rib.get_evpn(&evpn_key).is_none());
     assert!(manager.loc_rib.get_vpn(&vpn_key).is_none());
@@ -2897,7 +2900,7 @@ async fn queued_route_is_applied_before_simultaneous_eor_and_timer_release() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn full_outbound_channel_keeps_eor_pending_until_dirty_resync() {
+async fn full_outbound_channel_retries_only_the_marker_after_the_released_table() {
     let source = peer(1);
     let observer = peer(2);
     let (tx, rx) = mpsc::channel(32);
@@ -2947,12 +2950,11 @@ async fn full_outbound_channel_keeps_eor_pending_until_dirty_resync() {
     assert_eq!(table.end_of_rib.len(), 0);
     assert_eq!(source_rx.recv().await.unwrap().end_of_rib, vec![FAMILY]);
 
-    // The one-slot observer channel rejected the first EoR attempt. Once
-    // capacity is available, dirty resync must finish and only then flush it.
+    // The one-slot writer refused the marker after it admitted the full table.
     tokio::time::advance(Duration::from_secs(1)).await;
-    let resync = observer_rx.recv().await.unwrap();
-    assert_eq!(resync.announce.len(), 1);
-    assert_eq!(resync.end_of_rib, vec![FAMILY]);
+    let marker = observer_rx.recv().await.unwrap();
+    assert!(marker.announce.is_empty());
+    assert_eq!(marker.end_of_rib, vec![FAMILY]);
 
     drop(tx);
     handle.await.unwrap();
@@ -3215,6 +3217,8 @@ fn release_sends_single_eor_to_refresh_deferred_peer() {
             .unwrap()
     };
     manager.apply_selection_deferral_transitions([release], "test refresh completion");
+    super::drain_unicast_release(&mut manager);
+    manager.resync_dirty_peers_bounded();
 
     let mut eor_updates = 0;
     let mut saw_refresh_markers = false;

@@ -516,8 +516,9 @@ async fn assert_held_refresh_keeps_table_first(old: Open, refresh_before_cap: bo
         afi: FAMILY.0,
         safi: FAMILY.1,
     });
+    drain_unicast_release(&mut manager);
     assert!(!manager.selection_convergence_held(FAMILY));
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.resync_dirty_peers_bounded();
     assert_eq!(apply(&mut rx, &mut rib), vec!["table", "eor"]);
     assert_eq!(rib.get(&host().1), Some(&false));
 }
@@ -788,6 +789,28 @@ async fn held_marker_of_a_non_retaining_peer_has_the_cap() {
     );
     release_hold(&mut manager);
     assert_eq!(apply(&mut rx, &mut rib), vec!["eor"]);
+}
+
+/// After the cap the release can send an empty marker. Refusal by a full
+/// writer keeps that authorized marker runnable even without a peer refresh.
+#[tokio::test(start_paused = true)]
+async fn capped_orf_marker_refused_at_release_retries_without_a_refresh() {
+    let (mut manager, _waiter, _tx) = held_manager();
+    let peer = peer_v4(OBSERVER);
+    let mut rx = register(&mut manager, 182, Open::NoGr);
+    let mut rib = PeerRib::new();
+    let writer = manager.outbound_peers[&peer].clone();
+    let occupied: Vec<_> = std::iter::from_fn(|| writer.clone().try_reserve_owned().ok()).collect();
+    tokio::time::advance(ORF_EOR_HOLD_CAP).await;
+    manager.expire_eor_holds(tokio::time::Instant::now());
+    release_hold(&mut manager);
+    assert!(manager.eor.owes(peer, FAMILY));
+    assert!(apply(&mut rx, &mut rib).is_empty());
+    drop(occupied);
+    let builds = manager.adj_rib_out_commit_stats.resync_builds;
+    manager.resync_dirty_peers_bounded();
+    assert_eq!(apply(&mut rx, &mut rib), vec!["eor"]);
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
 }
 
 /// A stale-holding peer's registration waits past its cap and then dumps

@@ -1152,11 +1152,8 @@ impl RibManager {
             // the member's slot without touching the shared entries.
             if !rs_asns.is_empty()
                 && !super::payload::rs_fallback_equal(
-                    source.rs_fallback.get(&route.prefix).map(|list| &**list),
-                    destination
-                        .rs_fallback
-                        .get(&route.prefix)
-                        .map(|list| &**list),
+                    source.rs_fallback.get(&route.prefix),
+                    destination.rs_fallback.get(&route.prefix),
                 )
             {
                 rejected = true;

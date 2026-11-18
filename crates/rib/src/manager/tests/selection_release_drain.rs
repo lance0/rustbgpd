@@ -115,6 +115,7 @@ fn release(manager: &mut RibManager, by_timer: bool) {
             safi: FAMILY.1,
         });
     }
+    drain_unicast_release(manager);
     assert!(!manager.selection_convergence_held(FAMILY));
 }
 
@@ -128,6 +129,44 @@ fn drain(manager: &mut RibManager, receivers: &mut Receivers, wires: &mut [Wire]
         }
     }
     assert!(!manager.resync_tick_pending());
+}
+
+/// After the global gate opens, an intervening grace expiry or teardown can
+/// retire helper state. Peers awaiting a marker visit still need theirs.
+#[test]
+fn helper_ledger_survives_until_its_release_marker_visit() {
+    let (mut manager, receivers) = held(70, 1);
+    manager.expire_selection_deferral();
+    while manager.selection_convergence_held(FAMILY) {
+        assert!(manager.unicast_release_runnable());
+        manager.advance_unicast_release();
+    }
+    let peer = receivers
+        .iter()
+        .map(|(peer, _)| *peer)
+        .find(|&peer| manager.release_marker_pending(peer, FAMILY))
+        .expect("a later marker page");
+    assert!(manager.helper_stale_may_hold(peer));
+    let owner = super::super::HoldWithdrawOwner::Peer(peer);
+    let bound = crate::outbound_credit::CHUNK_ROWS;
+    let rows = 3 * bound;
+    let keys = (0..u32::try_from(rows).unwrap())
+        .map(|index| (Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(index), 32)), 0));
+    manager.record_hold_exempt_withdrawn(owner, keys, "helper_stale_exempt");
+    manager.request_helper_stale_retire();
+    assert_eq!(manager.hold_exempt_withdrawn[&owner].len(), rows);
+    let mut remaining = rows;
+    while manager.unicast_release_runnable() {
+        manager.advance_unicast_release();
+        let next = manager
+            .hold_exempt_withdrawn
+            .get(&owner)
+            .map_or(0, BTreeSet::len);
+        assert!(remaining - next <= bound, "one cleanup page");
+        remaining = next;
+    }
+    assert!(!manager.helper_stale_may_hold(peer));
+    assert_eq!(remaining, 0);
 }
 
 fn wires(receivers: &Receivers) -> Vec<Wire> {
@@ -310,6 +349,7 @@ fn a_refresh_of_an_owed_family_follows_the_table_and_its_end_of_rib() {
             manager.handle_update(refresh);
             assert!(receivers[0].1.try_recv().is_err(), "deferred by the hold");
             release(&mut manager, false);
+            manager.retry_deferred_refreshes(std::time::Instant::now());
         } else {
             release(&mut manager, false);
             assert!(receivers[0].1.try_recv().is_err(), "owed, not sent");
@@ -695,6 +735,7 @@ fn timer_releases(manager: &mut RibManager, families: &[(Afi, Safi)]) {
     transitions.sort_by_key(order);
     assert_eq!(transitions.len(), families.len());
     manager.apply_selection_deferral_transitions(transitions, "Selection_Deferral_Timer expired");
+    drain_unicast_release(manager);
     manager.settle_eor_after_pass();
     for &family in families {
         assert!(!manager.selection_convergence_held(family));

@@ -2837,6 +2837,77 @@ fn evicted_receivers_meet_a_hold(grouped: bool, dirty: bool, admitted: bool) {
     assert_eq!(manager.owed_evpn_rows.len(), 0, "{case}: the list is freed");
 }
 
+/// A re-armed collision Stage keeps its unfinished unicast cursor and read
+/// fence. EVPN can still complete the mixed receiver's evicted unit while
+/// unicast is held again, whether the receiver is waiting or already dirty.
+#[test]
+fn parked_unicast_release_allows_mixed_eviction_recovery() {
+    for grouped in [false, true] {
+        let waiter = peer_v4(WAITER);
+        let mut manager = manager(CREDIT).with_selection_deferral(SelectionDeferralConfig {
+            timeout: Duration::from_secs(60),
+            waiters: vec![SelectionDeferralWaiterConfig {
+                peer: waiter.into(),
+                families: vec![V4],
+            }],
+        });
+        manager.test_force_ungrouped = !grouped;
+        let (mut manager, mut receivers, expected) =
+            evict_stalled_of(owing_from(manager, &[V4, EVPN], 2, 8, 4096));
+        let peer = receivers[1].peer;
+        assert_eq!(manager.dirty_peers.contains(&peer), !grouped);
+        let metrics = manager.metrics.clone();
+        let families = HashSet::from([V4]);
+        let selection = manager.selection_deferral.as_mut().unwrap();
+        assert!(
+            selection
+                .classify_session(waiter, 7, false, &families, &metrics)
+                .is_empty()
+        );
+        // The inventory needs a continuation, so the new session can
+        // re-arm this Stage before its final batch.
+        received_unicast(&mut manager, 0..32);
+        let selection = manager.selection_deferral.as_mut().unwrap();
+        selection.session_down(waiter, 7, &metrics);
+        let stage = selection
+            .await_collision_failback_refresh(waiter, 7, false, &families, true, &metrics)
+            .unwrap();
+        assert_eq!(stage.len(), 1);
+        manager.apply_selection_deferral_transitions(stage, "test collision survivor");
+        assert!(manager.evicted_unit_held(peer), "active producer");
+        let selection = manager.selection_deferral.as_mut().unwrap();
+        assert!(
+            selection
+                .classify_session(waiter, 8, false, &families, &metrics)
+                .is_empty()
+        );
+        manager.reselect_newly_deferred_local(&HashSet::new());
+        assert!(manager.selection_deferred(V4) && manager.owed_release_open(V4));
+        assert!(!manager.evicted_unit_held(peer), "parked producer");
+        received_unicast(&mut manager, 32..33);
+        for _ in 0..32 {
+            tick(&mut manager, &mut receivers);
+        }
+        assert!(manager.dirty_peers.contains(&peer));
+        assert!(
+            manager.selection_partial_caught_up(peer),
+            "park the successor for IPv4"
+        );
+        assert_eq!(receivers[1].wire.table, table(&expected));
+        assert_eq!(receivers[1].wire.markers, 1);
+        assert_eq!(receivers[1].wire.rows_after_marker, 0);
+        assert!(receivers[1].wire.unicast_table.is_empty());
+        manager.expire_selection_deferral();
+        drain_unicast_release(&mut manager);
+        drain(&mut manager, &mut receivers);
+        assert!(!manager.dirty_peers.contains(&peer));
+        assert!(!manager.owed_row_evicted.contains(&peer));
+        assert_eq!(receivers[1].wire.unicast_table, unicast_table(33));
+        assert_eq!(receivers[1].wire.table, table(&expected));
+        assert_eq!(receivers[1].wire.markers, 1);
+    }
+}
+
 /// Red when the tick promotes a waiting member inside the hold (its unit
 /// clears the eviction with EVPN not enumerated, the kept position is read
 /// again, and row 5 stays for good).

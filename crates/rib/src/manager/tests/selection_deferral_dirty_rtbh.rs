@@ -378,6 +378,7 @@ fn assert_rtbh_dirty_recovery_preserves_frozen_ordinary(grouped: bool, regroup: 
         );
         let (reply, mut page) = oneshot::channel();
         manager.handle_update(RibUpdate::QueryRoutesPage {
+            accept_releasing: false,
             scope: crate::update::RouteQueryScope::Advertised { peer: observer },
             filter: None,
             after: None,
@@ -1386,6 +1387,20 @@ fn partial_family_release_wakes_omitted_data_before_its_initial_eor() {
             .count(),
         0
     );
+    let ordinary_admission = updates
+        .iter()
+        .position(|update| {
+            update
+                .announce
+                .iter()
+                .any(|row| row.prefix == Prefix::V4(ordinary))
+        })
+        .unwrap();
+    let ipv4_marker = updates
+        .iter()
+        .position(|update| update.end_of_rib.contains(&FAMILY))
+        .unwrap();
+    assert!(ordinary_admission <= ipv4_marker);
     assert!(manager.selection_deferred(v6));
     assert!(manager.dirty_peers.contains(&observer));
     manager.handle_update(RibUpdate::EndOfRib {
@@ -1395,8 +1410,17 @@ fn partial_family_release_wakes_omitted_data_before_its_initial_eor() {
         safi: v6.1,
     });
     let mut updates = apply_wire(&mut rx, &mut wire);
-    // With one channel slot, the admitted table can defer its marker until
-    // the writer drains. The production retry sends no second table.
+    // Dirty recovery can admit its table on the first post-seal tick.
+    // Once that table is admitted, a full channel can defer only the marker.
+    manager.resync_dirty_peers_bounded();
+    updates.extend(apply_wire(&mut rx, &mut wire));
+    assert!(
+        updates
+            .iter()
+            .filter(|update| !update.announce.is_empty())
+            .count()
+            <= 1
+    );
     manager.resync_dirty_peers_bounded();
     let retried = apply_wire(&mut rx, &mut wire);
     assert!(retried.iter().all(|update| update.announce.is_empty()));
@@ -1416,6 +1440,15 @@ fn partial_family_release_wakes_omitted_data_before_its_initial_eor() {
             .filter(|family| **family == FAMILY)
             .count(),
         0
+    );
+    let ipv6_marker = updates
+        .iter()
+        .position(|update| update.end_of_rib.contains(&v6))
+        .unwrap();
+    assert!(
+        updates[ipv6_marker + 1..]
+            .iter()
+            .all(|update| update.announce.is_empty())
     );
     assert!(!manager.dirty_peers.contains(&observer));
     assert!(!manager.pending_group_admitted.contains_record(observer));
@@ -2178,6 +2211,7 @@ fn assert_late_waiter_advertised_truth(
         .sum();
     let (reply, mut listing) = oneshot::channel();
     manager.handle_update(RibUpdate::QueryRoutesPage {
+        accept_releasing: false,
         scope: crate::update::RouteQueryScope::Advertised { peer: observer },
         filter: None,
         after: None,
