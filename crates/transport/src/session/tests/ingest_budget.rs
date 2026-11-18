@@ -145,6 +145,41 @@ async fn spent_budget_holds_buffered_input_and_resumes_in_stream_order() {
     assert!(!session.ingest_gate_closed);
 }
 
+/// The stop mark against the message size peers send most: of full
+/// standard-size UPDATEs, about 1,008 routes in 4,096 bytes, two close the
+/// gate, and the return of one reopens it for exactly one more. The RIB has
+/// one in progress and one decoded ahead, never three.
+/// Red proof: with the stop mark at two whole windows (2,048) two such
+/// UPDATEs leave the gate open and the third is queued with them.
+#[tokio::test]
+async fn two_full_standard_updates_close_the_gate_and_one_return_admits_one_more() {
+    const STANDARD: usize = 1008;
+    let Metered {
+        mut session,
+        mut rib_rx,
+        budget,
+        commands: _commands,
+        server: _server,
+    } = metered_session().await;
+    let pdus = [10, 20, 30, 40].map(|block| block_pdu(block, STANDARD, 24));
+    assert!(pdus[0].len() <= usize::from(rustbgpd_wire::MAX_MESSAGE_LEN));
+    assert!(block_pdu(10, STANDARD + 8, 24).len() > usize::from(rustbgpd_wire::MAX_MESSAGE_LEN));
+    buffer_and_process(&mut session, &pdus).await;
+    assert_eq!(rib_rx.len(), 2, "two close the gate");
+    assert_eq!(budget.unfinished(), 2 * STANDARD);
+
+    drop(rib_rx.try_recv().unwrap());
+    session.reopen_ingest_gate().await;
+    assert_eq!(rib_rx.len(), 2, "one returned admits one more");
+    assert_eq!(budget.unfinished(), 2 * STANDARD);
+    assert!(session.ingest_gate_closed);
+    assert_eq!(
+        session.read_buf.buf.len(),
+        pdus[3].len(),
+        "the fourth waits"
+    );
+}
+
 /// The starvation regression, as a count: an unpaced burst source has at
 /// most two messages in the RIB's queue, so another source's update is
 /// dispatched after at most two of them, and the burst still arrives whole
@@ -740,6 +775,8 @@ async fn budget_returned_before_the_run_loop_looks_still_processes_the_buffered_
 /// below it, leaves the third UPDATE in the socket.
 #[tokio::test]
 async fn budget_returned_to_exactly_the_resume_mark_wakes_the_run_loop() {
+    // Two messages of the resume mark close the gate; one returned leaves
+    // the budget exactly on the mark.
     const _: () = assert!(2 * INGEST_RESUME_ROUTES >= INGEST_BUDGET_ROUTES);
     let Metered {
         mut session,

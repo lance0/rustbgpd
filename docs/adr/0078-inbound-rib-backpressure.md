@@ -233,11 +233,15 @@ the bounded per-source input the Context names as the standard shape, kept at
 the source instead of in a queue.
 
 Each session charges every route-bearing message of every family to its own
-ingest budget, one route per announced or withdrawn entry. When 2,048 of its
+ingest budget, one route per announced or withdrawn entry. When 1,536 of its
 routes are unfinished in the RIB the session reads nothing more from its
-socket and processes no further buffered PDU; it resumes at 1,024. That is
-two distribution windows, resuming at one, so the RIB has the session's next
-1,024-route message decoded and queued while it works on the current one. Nothing
+socket and processes no further buffered PDU; it resumes at 1,024. A full
+standard 4,096-byte IPv4 UPDATE carries about 1,008 routes, so two of them
+close the gate and the return of one reopens it: the RIB has one message in
+progress and the session's next one decoded and queued. A stop mark of two
+whole windows (2,048) would admit a third such message. The 512 routes
+between the marks keep a stream of small messages from stopping and resuming
+once per message. Nothing
 already read is held for budget, so a message larger than the whole budget
 is admitted whenever the gate is open, and End-of-RIB, route-refresh markers
 and session ends are sent in stream order without waiting. The shared
@@ -278,7 +282,7 @@ Consequences:
   of sources bursting at the same time.
 - Timer cutoffs cover received input only, and the budget shrinks what is
   received ahead of the RIB from up to the whole channel to about two
-  windows per source. Input a peer sent before a graceful-restart,
+  messages per source. Input a peer sent before a graceful-restart,
   long-lived or refresh deadline that is still unread in its socket is not
   applied before the sweep.
 - Route input that does not come from a session (injection, local

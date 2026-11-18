@@ -2951,7 +2951,7 @@ What to do when it fires:
    waited for the RIB for about three hold times since its last processed
    message, logged as `RIB admission stalled past local budget` (ADR-0078).
    Input waits for the RIB while its channel is full. A session also leaves
-   its socket unread while 2,048 routes it already sent are unfinished in
+   its socket unread while 1,536 routes it already sent are unfinished in
    the RIB (its ingest budget), but is not closed for that alone: each hold
    expiry then processes one pending message from the peer, and a peer with
    none pending gets Hold Timer Expired. Its

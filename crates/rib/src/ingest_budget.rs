@@ -13,16 +13,31 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Unfinished routes at which a session stops reading its socket: two
-/// distribution windows of affected prefixes.
+/// Unfinished routes at which a session stops reading its socket: one and a
+/// half distribution windows of affected prefixes. A full standard
+/// 4,096-byte IPv4 UPDATE carries about 1,008 routes, so two of them close
+/// the gate; at two whole windows they would not, and a third would be
+/// queued.
 // ponytail: one fixed budget for every session and family. Make it a
-// per-neighbor setting if a source needs a deeper pipeline than two windows.
-pub const INGEST_BUDGET_ROUTES: usize = 2048;
+// per-neighbor setting if a source needs a deeper pipeline than one message
+// in progress and one decoded ahead.
+pub const INGEST_BUDGET_ROUTES: usize = 1536;
 /// Unfinished routes at which a stopped session reads again: one
-/// distribution window, so the RIB has the session's next full-window
-/// message decoded and queued while it works on the current one, and a
-/// stream of small messages does not stop and resume once per message.
-pub const INGEST_RESUME_ROUTES: usize = INGEST_BUDGET_ROUTES / 2;
+/// distribution window. When the RIB returns one of two full messages the
+/// gate reopens, so the RIB has the session's next message decoded and
+/// queued while it works on the current one, and the 512 routes between the
+/// marks keep a stream of small messages from stopping and resuming once per
+/// message.
+pub const INGEST_RESUME_ROUTES: usize = 1024;
+
+// With about 1,008 routes in a full standard UPDATE: one leaves the gate
+// open, two close it, and the return of one reopens it.
+const _: () = assert!(
+    INGEST_RESUME_ROUTES < INGEST_BUDGET_ROUTES
+        && 1008 < INGEST_BUDGET_ROUTES
+        && 2 * 1008 >= INGEST_BUDGET_ROUTES
+        && 2 * 1008 - 1008 <= INGEST_RESUME_ROUTES
+);
 
 /// One session's count of routes sent to the RIB and not yet finished there.
 #[derive(Debug, Default)]
@@ -102,7 +117,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gate_closes_at_the_budget_and_reopens_at_half() {
+    fn gate_closes_at_the_budget_and_reopens_at_the_resume_mark() {
         let budget = IngestBudget::new();
         let small = budget.charge(INGEST_BUDGET_ROUTES - 1);
         assert!(!budget.gate_closed(false));
