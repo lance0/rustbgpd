@@ -394,7 +394,10 @@ and patches nothing. What each recorded number measures:
 - `actor.eviction_recovery_longest_ms` reports the count and longest
   duration bracket from `bgp_rib_outbound_eviction_recovery_seconds` for
   each observed data commit outcome (`processed` or `commit_refused`).
-  Each sample covers one cap-evicted receiver's recovery build in the RIB.
+  Each sample times one receiver's whole-table recovery build in the RIB.
+  An owed-row cap eviction triggers this build. A dirty resync that leaves
+  EVPN state to rebuild during a selection hold also triggers it after release.
+  Both triggers share the same outcome series.
   An empty object means the run observed no build. A null means its binary
   lacked the instrument. The report identifies the cell, repetition and arm
   in paired analysis, or the result path in a single-arm check, and gives
