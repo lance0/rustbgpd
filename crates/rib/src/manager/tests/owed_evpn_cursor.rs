@@ -761,8 +761,9 @@ fn evict_stalled(stalled: u8) -> (RibManager, Vec<Receiver>, Vec<(u32, u32)>) {
 /// export encoder); it is answered after the admitted resync and its
 /// End-of-RIB. Each marker is counted once. Red when the walk's remaining
 /// rows are left out of the absorption (the End-of-RIB leaves ahead of
-/// them), and when the request is spent while the evicted receiver's
-/// initial End-of-RIB is still owed.
+/// them). An answer ahead of a marker still owed is refused by two checks
+/// here, the evicted receiver's deferral and the refresh path's own; each
+/// has its own test below.
 #[test]
 fn an_evpn_refresh_before_the_initial_end_of_rib_is_answered_after_it() {
     let rows = 40u32;
@@ -1736,4 +1737,396 @@ fn a_group_owned_evpn_sibling_never_acquires_a_private_cursor() {
     }
     assert_eq!(receivers[0].wire.count(3), (1, 1));
     assert_eq!(manager.owed_evpn_rows.len(), 0);
+}
+
+/// One inbound message of a single kind whose paced fanout parks having
+/// served exactly one of `receivers` (two that read and owe nothing).
+/// Returns the index of the one it has not reached. Nothing here drains the
+/// fanout: the caller's next events land between its slices.
+fn park(
+    manager: &mut RibManager,
+    receivers: &[Receiver],
+    announce: &[(u32, u32)],
+    withdraw: &[u32],
+) -> usize {
+    assert_eq!(receivers.len(), 2);
+    assert!(announce.is_empty() != withdraw.is_empty(), "one mutation");
+    let before: Vec<_> = receivers
+        .iter()
+        .map(|receiver| manager.outbound_stagings(receiver.peer))
+        .collect();
+    manager.handle_update(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: peer_v4(SOURCE),
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: announce
+            .iter()
+            .map(|&(index, variant)| route(index, variant))
+            .collect(),
+        evpn_withdrawn: withdraw.iter().map(|&index| key(index)).collect(),
+        validated_with: None,
+    });
+    for _ in 0..=manager.outbound_peers.len() {
+        let served: Vec<usize> = (0..2)
+            .filter(|&index| manager.outbound_stagings(receivers[index].peer) != before[index])
+            .collect();
+        if let [served] = served[..] {
+            assert!(manager.pending_evpn_fanout.is_some(), "parked");
+            return 1 - served;
+        }
+        assert!(served.is_empty(), "one receiver per slice: {served:?}");
+        assert!(manager.process_next_route_chunk());
+    }
+    panic!("the fanout reached no receiver");
+}
+
+/// A local origination of row `index`: one unpaced EVPN mutation.
+fn inject(manager: &mut RibManager, index: u32) {
+    let (reply, _result) = oneshot::channel();
+    manager.handle_update(RibUpdate::InjectEvpn {
+        route: route(index, 0),
+        reply,
+    });
+}
+
+/// A local withdrawal of row `index`.
+fn withdraw_injected(manager: &mut RibManager, index: u32) {
+    let (reply, _result) = oneshot::channel();
+    manager.handle_update(RibUpdate::WithdrawEvpn {
+        key: key(index),
+        reply,
+    });
+}
+
+/// Fresh local rows rotate through the table, one in and one out, past
+/// receivers that read nothing, until the list cap evicts `peer`. Returns
+/// the row left in the table.
+fn rotate_until_evicted(manager: &mut RibManager, peer: PeerId) -> u32 {
+    let mut index = 2000;
+    inject(manager, index);
+    while !manager.owed_row_evicted.contains(&peer) {
+        assert!(index < 20_000, "the receiver was never evicted");
+        index += 1;
+        inject(manager, index);
+        withdraw_injected(manager, index - 1);
+    }
+    index
+}
+
+/// A ROUTE-REFRESH from a receiver the cap evicted long after its initial
+/// End-of-RIB builds nothing in the request's turn: the tick's resync
+/// sends the table, and the bracketed answer follows it, once. Red when
+/// the request is answered in its own turn.
+#[test]
+fn an_evpn_refresh_from_an_evicted_receiver_that_owes_no_marker_follows_its_resync() {
+    let mut manager = manager(CREDIT).with_owing_theta_floor(1);
+    std::mem::forget(up_sized(&mut manager, peer_v4(SOURCE), 0, 4096, &[V4]));
+    let mut receivers = vec![Receiver::up(&mut manager, receiver(0), 4096, &[EVPN])];
+    let peer = receivers[0].peer;
+    received(&mut manager, &all(4), &[]);
+    drain(&mut manager, &mut receivers);
+    let last = rotate_until_evicted(&mut manager, peer);
+    receivers[0].write();
+    receivers[0].wire.sent.clear();
+    assert!(
+        !manager.eor.owes(peer, EVPN),
+        "its End-of-RIB left long ago"
+    );
+    let builds = manager.adj_rib_out_commit_stats.resync_builds;
+    refresh_request(&mut manager, peer);
+    receivers[0].write();
+    assert_eq!(receivers[0].wire.sent, [], "built in the request's turn");
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
+    assert!(manager.pending_refresh.contains_key(&peer), "still asked");
+    assert!(manager.owed_row_evicted.contains(&peer));
+    drain(&mut manager, &mut receivers);
+    let mut expected = all(4);
+    expected.push((last, 0));
+    assert_eq!(
+        receivers[0].wire.sent,
+        [Sent::Rows, Sent::Answer(expected.len())],
+        "the resync, then the bracketed answer"
+    );
+    assert_eq!(receivers[0].wire.table, table(&expected));
+    assert_eq!(receivers[0].wire.markers, 0);
+    assert!(!manager.pending_refresh.contains_key(&peer), "answered");
+    assert!(manager.owed_row_evicted.is_empty());
+}
+
+/// A paced fanout logs its keys once and may park between receivers. A
+/// receiver whose cursor starts while it is parked (local originations
+/// spend its credit and take its owed set past the byte cap) has the
+/// parked keys neither after its position nor, without the marks its start
+/// adds, in its own set: it gets the parked announcements and the parked
+/// withdrawal all the same, charged, with no resync. Both when no cursor
+/// existed at the log (nothing was logged) and when another receiver's did.
+/// Red when a cursor start ignores the parked fanout: the late receiver
+/// never gets the parked rows and owes nothing.
+#[test]
+fn a_cursor_started_while_an_evpn_fanout_is_parked_gets_the_parked_keys() {
+    for (cursor_at_log, withdrawal) in [(false, false), (false, true), (true, false), (true, true)]
+    {
+        let case = format!("cursor_at_log={cursor_at_log} withdrawal={withdrawal}");
+        let mut manager = manager(CREDIT).with_owing_theta_floor(1);
+        std::mem::forget(up_sized(&mut manager, peer_v4(SOURCE), 0, 4096, &[V4]));
+        let mut receivers: Vec<Receiver> = (0..3)
+            .map(|index| Receiver::up(&mut manager, receiver(index), 4096, &[EVPN]))
+            .collect();
+        received(&mut manager, &all(4), &[]);
+        drain(&mut manager, &mut receivers);
+        let mut expected = all(4);
+        if cursor_at_log {
+            // The third receiver stops reading and falls to a cursor.
+            for index in 1000..1200 {
+                inject(&mut manager, index);
+                receivers[0].write();
+                receivers[1].write();
+                expected.push((index, 0));
+            }
+            assert!(manager.owes_whole(receivers[2].peer, FAMILY), "{case}");
+        }
+        for receiver in &receivers[..2] {
+            assert!(!manager.owes(receiver.peer, EVPN), "{case}: streaming");
+        }
+        let logs = manager.adj_rib_out_commit_stats.owed_evpn_logs;
+        let late = if withdrawal {
+            expected.retain(|row| row.0 != 0);
+            park(&mut manager, &receivers[..2], &[], &[0])
+        } else {
+            expected.extend([(10, 0), (11, 0)]);
+            park(&mut manager, &receivers[..2], &[(10, 0), (11, 0)], &[])
+        };
+        assert_eq!(
+            manager.adj_rib_out_commit_stats.owed_evpn_logs - logs,
+            usize::from(cursor_at_log),
+            "{case}: logged only for a cursor that exists"
+        );
+        let late_peer = receivers[late].peer;
+        assert!(
+            !manager.owes(late_peer, EVPN),
+            "{case}: not reached, nothing owed"
+        );
+        // Unpaced local originations while the fanout is parked; nobody reads.
+        for index in 2000..2200 {
+            inject(&mut manager, index);
+            expected.push((index, 0));
+        }
+        assert!(
+            manager.pending_evpn_fanout.is_some(),
+            "{case}: still parked"
+        );
+        assert!(
+            manager.owes_whole(late_peer, FAMILY),
+            "{case}: started mid-park"
+        );
+        let builds = manager.adj_rib_out_commit_stats.resync_builds;
+        drain_route_chunks(&mut manager);
+        assert!(manager.pending_evpn_fanout.is_none());
+        drain(&mut manager, &mut receivers);
+        for receiver in &receivers {
+            assert_eq!(receiver.wire.table, table(&expected), "{case}");
+            assert!(!manager.owes(receiver.peer, EVPN), "{case}");
+            assert!(!manager.dirty_peers.contains(&receiver.peer), "{case}");
+            assert_eq!(receiver.wire.uncharged + receiver.wire.latched, 0);
+        }
+        let parked = if withdrawal { (1, 1) } else { (1, 0) };
+        let row = if withdrawal { 0 } else { 10 };
+        assert_eq!(receivers[late].wire.count(row), parked, "{case}: once");
+        assert_eq!(fallbacks(&manager), 0.0, "{case}: no resync");
+        assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
+        assert_eq!(manager.owed_evpn_rows.len(), 0, "{case}");
+    }
+}
+
+/// A selection hold begins and is released while a fanout carrying a
+/// withdrawal is parked. The release starts every receiver's cursor and
+/// logs the inventory, which no longer names the withdrawn key: the
+/// receiver the fanout had not reached still withdraws it, once. Red when
+/// a cursor start ignores the parked fanout: that receiver keeps the row.
+#[test]
+fn a_release_while_an_evpn_fanout_is_parked_keeps_the_parked_withdrawal() {
+    let mut manager = deferral_manager(CREDIT);
+    std::mem::forget(up_sized(&mut manager, peer_v4(SOURCE), 0, 4096, &[V4]));
+    let mut receivers: Vec<Receiver> = (0..2)
+        .map(|index| Receiver::up(&mut manager, receiver(index), 4096, &[EVPN]))
+        .collect();
+    received(&mut manager, &all(4), &[]);
+    drain(&mut manager, &mut receivers);
+    let late = park(&mut manager, &receivers, &[], &[0]);
+    let late_peer = receivers[late].peer;
+    assert!(manager.loc_rib.get_evpn(&key(0)).is_none());
+    assert_eq!(receivers[late].wire.count(0), (1, 0), "not reached");
+    let waiter = hold(&mut manager);
+    release(&mut manager);
+    assert!(manager.pending_evpn_fanout.is_some(), "still parked");
+    assert!(manager.owes_whole(late_peer, FAMILY), "owed by the release");
+    drain_route_chunks(&mut manager);
+    assert!(manager.pending_evpn_fanout.is_none());
+    receivers.push(waiter);
+    drain(&mut manager, &mut receivers);
+    let expected: Vec<_> = (1..4).map(|index| (index, 0)).collect();
+    for receiver in &receivers {
+        assert_eq!(receiver.wire.table, table(&expected));
+        assert!(!manager.owes(receiver.peer, EVPN));
+        assert!(!manager.dirty_peers.contains(&receiver.peer));
+    }
+    assert_eq!(receivers[late].wire.count(0), (1, 1), "withdrawn once");
+    assert_eq!(fallbacks(&manager), 0.0, "no resync");
+    assert_eq!(manager.owed_evpn_rows.len(), 0);
+}
+
+/// Receivers whose table is built while a fanout is parked: one the list
+/// cap evicts, the tick resyncs and local originations take back to a
+/// cursor, and one that registers. Each build reads the Loc-RIB the parked
+/// mutation already changed, so both end exact, and the marks a restarted
+/// cursor takes from the parked fanout repeat no row.
+#[test]
+fn evpn_receivers_built_while_a_fanout_is_parked_end_exact() {
+    let mut manager = manager(CREDIT).with_owing_theta_floor(1);
+    std::mem::forget(up_sized(&mut manager, peer_v4(SOURCE), 0, 4096, &[V4]));
+    let mut receivers: Vec<Receiver> = (0..2)
+        .map(|index| Receiver::up(&mut manager, receiver(index), 4096, &[EVPN]))
+        .collect();
+    received(&mut manager, &all(4), &[]);
+    drain(&mut manager, &mut receivers);
+    let late = park(&mut manager, &receivers, &[(10, 0), (11, 0)], &[]);
+    let late_peer = receivers[late].peer;
+    // Fresh local keys rotate through the table past receivers that read
+    // nothing: both fall to cursors, then the cap evicts them.
+    let index = rotate_until_evicted(&mut manager, late_peer);
+    assert!(manager.pending_evpn_fanout.is_some(), "still parked");
+    // A receiver registers mid-park.
+    let rx = up_sized(&mut manager, receiver(2), 0, 4096, &[EVPN]);
+    receivers.push(Receiver {
+        peer: receiver(2),
+        rx,
+        wire: Wire::default(),
+    });
+    // The tick resyncs the evicted receivers; the late one then stops
+    // reading again and local originations restart its cursor.
+    drain(&mut manager, &mut receivers);
+    assert!(manager.owed_row_evicted.is_empty());
+    assert!(!manager.owes(late_peer, EVPN));
+    assert_eq!(receivers[late].wire.count(10), (1, 0), "by its resync");
+    let mut expected: Vec<_> = all(4);
+    expected.extend([(10, 0), (11, 0), (index, 0)]);
+    for row in 30_000..30_200 {
+        inject(&mut manager, row);
+        expected.push((row, 0));
+    }
+    assert!(manager.owes_whole(late_peer, FAMILY), "restarted mid-park");
+    assert!(manager.pending_evpn_fanout.is_some(), "still parked");
+    drain_route_chunks(&mut manager);
+    drain(&mut manager, &mut receivers);
+    for receiver in &receivers {
+        assert_eq!(receiver.wire.table, table(&expected));
+        assert_eq!(receiver.wire.count(10), (1, 0), "the parked row, once");
+        assert!(!manager.owes(receiver.peer, EVPN));
+        assert!(!manager.dirty_peers.contains(&receiver.peer));
+    }
+    assert_eq!(manager.owed_evpn_rows.len(), 0);
+}
+
+/// A targeted restage no pass logged (an RT-Constrain membership change),
+/// large enough to take the kept set past its byte cap, leaves a live
+/// cursor where it is: the keys it has not read are named only by the
+/// list after its position. Red when the cap check restarts the cursor at
+/// the head: the unread rows are never sent and the End-of-RIB leaves.
+#[test]
+fn an_unlogged_restage_past_the_byte_cap_leaves_a_live_evpn_cursor_in_place() {
+    let rows = 40u32;
+    let (manager, mut receivers) = owing(1, rows, CREDIT);
+    let mut manager = manager.with_owing_theta_floor(1);
+    let peer = receivers[0].peer;
+    tick(&mut manager, &mut receivers);
+    let passed = |manager: &RibManager| -> Vec<u32> {
+        (0..rows)
+            .filter(|index| manager.owed_evpn_cursor_passed(peer, &key(*index)))
+            .collect()
+    };
+    let before = passed(&manager);
+    assert_eq!(before.len(), STEP);
+    // Every key it has read and most it has not; ten stay named only by
+    // the list after its position.
+    let unread: Vec<u32> = (0..rows).filter(|index| !before.contains(index)).collect();
+    let restaged: HashSet<_> = before
+        .iter()
+        .chain(&unread[10..])
+        .map(|&index| key(index))
+        .collect();
+    manager.distribute_evpn_keys_to_peer(peer, &restaged, &mut || {});
+    assert_eq!(manager.owed_key_count(peer, FAMILY), restaged.len());
+    assert_eq!(passed(&manager), before, "the position did not move");
+    drain(&mut manager, &mut receivers);
+    assert_settled(&manager, &receivers, &all(rows), "unlogged restage");
+}
+
+/// A selection release that changes no winner logs its inventory and
+/// returns before any fanout: the list is still cut back to its cap there,
+/// and a receiver that reads nothing is evicted. Red when that return skips
+/// the cap: the list grows with every such release.
+#[test]
+fn a_release_that_changes_no_winner_still_caps_the_evpn_list() {
+    const BATCH: u32 = 512;
+    let (mut manager, receivers) = owing(1, 8, CREDIT);
+    let peer = receivers[0].peer;
+    let cap = 2 * (8 + BATCH as usize) + 4 * CHUNK_ROWS;
+    for round in 0..40 {
+        // Keys a hold recorded that no table holds any more.
+        let inventory: HashSet<_> = (0..BATCH)
+            .map(|index| key(100_000 + round * BATCH + index))
+            .collect();
+        manager.recompute_and_distribute_released_evpn(&inventory);
+        assert!(
+            manager.owed_evpn_rows.len() <= cap,
+            "round {round}: {} entries over the cap {cap}",
+            manager.owed_evpn_rows.len()
+        );
+    }
+    assert!(
+        manager.owed_row_evicted.contains(&peer),
+        "evicted, not pinned"
+    );
+    assert!(manager.dirty_peers.contains(&peer));
+}
+
+/// A mid-walk ROUTE-REFRESH whose absorption is admitted while the initial
+/// End-of-RIB is held for another reason (the peer's RT-Constrain
+/// membership): the rest of the walk goes out, the answer waits, and once
+/// the hold ends the End-of-RIB leaves first and the bracketed answer
+/// follows (RFC 7313 section 4). Red when the answer does not wait for the
+/// marker: `BoRR` is sent ahead of the initial End-of-RIB.
+#[test]
+fn an_evpn_refresh_mid_walk_waits_for_a_held_initial_end_of_rib() {
+    let rows = 40u32;
+    let (mut manager, mut receivers) = owing(1, rows, CREDIT);
+    let peer = receivers[0].peer;
+    tick(&mut manager, &mut receivers);
+    assert_eq!(receivers[0].wire.table.len(), STEP);
+    manager.hold_eor_for_rt_membership(
+        peer,
+        tokio::time::Instant::now() + Duration::from_secs(3600),
+    );
+    refresh_request(&mut manager, peer);
+    receivers[0].write();
+    assert!(!manager.owes(peer, EVPN), "the refresh absorbed the walk");
+    assert_eq!(receivers[0].wire.table, table(&all(rows)));
+    assert!(manager.eor.owes(peer, EVPN), "the marker stays held");
+    assert!(manager.pending_refresh.contains_key(&peer), "still asked");
+    for _ in 0..4 {
+        tick(&mut manager, &mut receivers);
+    }
+    assert_eq!(receivers[0].wire.sent, [Sent::Rows], "held: no answer");
+    manager.end_rt_membership_hold(peer);
+    drain(&mut manager, &mut receivers);
+    assert_eq!(
+        receivers[0].wire.sent,
+        [Sent::Rows, Sent::Eor, Sent::Answer(rows as usize)],
+        "the initial End-of-RIB, then the bracketed answer"
+    );
+    assert!(!manager.pending_refresh.contains_key(&peer), "answered");
+    assert_settled(&manager, &receivers, &all(rows), "refresh behind a hold");
 }
