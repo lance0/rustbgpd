@@ -613,6 +613,17 @@ and its admission into the RIB:
 `--control` (runner cell `source-burst-control`) sends no healthy update and
 records the burst's uncontended ingest rate.
 
+Runner cell `source-burst-two` (`credit-source-burst --two-sources`) splits
+the reduced plan's 16,000 routes evenly between two loopback sessions. It
+uses the same eight receivers, UPDATE size, churn subset and healthy cadence
+as `source-burst --reduced`. A smaller `--rows N` selects the same total
+work for either run. Splitting a chunk at the boundary can add an UPDATE.
+Both writers finish their first socket write before either continues. The
+receipt records route and message counts, write completion and the RIB's
+final marker per source. Each burst receiver must converge on the combined
+table and the healthy receiver on its last sent /24 and MED. The two-source
+cell is opt-in and correctness-only.
+
 **Stamps.** The harness owns the channel between the sessions and the RIB
 and puts a forwarding tap on it. Sessions admit into the tap's ingress
 channel; one dedicated thread forwards every message in order into the RIB's

@@ -134,12 +134,16 @@ class Runner(unittest.TestCase):
             calls = root / "calls"
             self.assertNotIn("credit-source-burst", calls.read_text())
             calls.write_text("")
-            cells = ("source-burst", "source-burst-control")
+            cells = ("source-burst", "source-burst-control", "source-burst-two")
             self.assertEqual(self.run_runner(root, 0, *cells, body=body), 0)
             # The runner's own `--correctness-only` follows the cell's flags.
             self.assertEqual(
                 calls.read_text().splitlines(),
-                ["credit-source-burst --correctness-only", "credit-source-burst --control"],
+                [
+                    "credit-source-burst --correctness-only",
+                    "credit-source-burst --control",
+                    "credit-source-burst --two-sources",
+                ],
             )
 
     def test_each_burst_cell_runs_its_own_trigger(self):

@@ -67,6 +67,7 @@ OPTIONAL_RELEASE_CHECKS = {
 SOURCE_BURST = (
     "source-burst",
     "source-burst-control",
+    "source-burst-two",
     "source-burst-small",
     "source-burst-small-control",
 )
@@ -1752,6 +1753,8 @@ def healthy_readings(run: dict, what: str, start: float, done: float) -> dict:
         )
     during = [wait for wait, row in waits if start <= row[2] <= done]
     if len(during) < SOURCE_BURST_MIN_DURING:
+        if run.get("cell") == "source-burst-two":
+            return {"short_overlap": len(during)}
         raise Invalid(
             f"{what}: {len(during)} of {len(rows)} healthy updates were admitted while the "
             f"burst was unfinished (need {SOURCE_BURST_MIN_DURING}): none could queue behind it"
@@ -1843,16 +1846,80 @@ def source_burst_readings(run: dict, what: str) -> dict:
     return readings
 
 
+def burst_sources(run: dict, what: str) -> list[str]:
+    sources = need(run, "burst.sources", what)
+    if (
+        need(run, "shape.burst_sources", what) != 2
+        or not isinstance(sources, list)
+        or len(sources) != 2
+    ):
+        raise Invalid(f"{what}: expected two burst sources")
+    peers = [need(s, "peer", what) for s in sources]
+    if peers[0] == peers[1]:
+        raise Invalid(f"{what}: duplicate burst peer")
+    rows = number(run, "shape.routes", what)
+    if run.get("mode") != "correctness" or type(rows) is not int or not 2 <= rows <= 16_000:
+        raise Invalid(f"{what}: inconsistent two-source correctness shape")
+    if (
+        number(run, "shape.receivers", what) != 8
+        or number(run, "shape.registered_peers", what) != 12
+    ):
+        raise Invalid(f"{what}: incorrect two-source session count")
+    planned = 0
+    final_marker = 0.0
+    notes = []
+    start = number(run, "burst.first_sent_ms", what)
+    for index, source in enumerate(sources):
+        count = number(source, "messages_planned", what)
+        planned += count
+        routes = number(source, "routes", what)
+        if (
+            count < 1
+            or number(source, "messages_admitted", what) != count
+            or routes != (index + 1) * rows // 2 - index * rows // 2
+            or source.get("in_order") is not True
+        ):
+            raise Invalid(f"{what}: inconsistent work for burst peer {peers[index]}")
+        written = number(source, "written_ms", what)
+        marker = number(source, "rib_done_ms", what)
+        done = marker - start
+        if not math.isfinite(written) or written < start or not math.isfinite(done) or done < 0:
+            raise Invalid(f"{what}: invalid RIB completion for burst peer {peers[index]}")
+        final_marker = max(final_marker, marker)
+        notes.append(
+            f"peer {peers[index]} {routes:g} routes, {count:g} messages, RIB done {done:.1f} ms"
+        )
+    if (
+        planned != number(run, "shape.burst_messages", what)
+        or planned != number(run, "burst.messages_finished", what)
+        or final_marker != number(run, "burst.rib_done_ms", what)
+    ):
+        raise Invalid(f"{what}: per-source completions disagree with the burst")
+    if number(run, "wire.exact_receivers", what) != 8 or number(run, "wire.missing_routes", what):
+        raise Invalid(f"{what}: incomplete burst receiver tables")
+    if (
+        need(run, "healthy.last_received", what) != need(run, "healthy.last_sent", what)
+        or number(run, "wire.healthy_decode_failures", what) != 0
+        or number(run, "wire.healthy_table_errors", what) != 0
+    ):
+        raise Invalid(f"{what}: healthy wire evidence disagrees with convergence check")
+    return notes
+
+
 def source_burst(run: dict, what: str) -> tuple[str, str]:
     """One source-burst result's verdict and its report-only readings. A
     recorded failure outranks every INVALID, except where the tap judged it."""
     checks = run.get("checks")
+    required = SOURCE_BURST_CHECKS
+    two_sources = run.get("cell") == "source-burst-two"
+    if two_sources:
+        required += ("sources_complete", "healthy_converged")
     well_formed = (
         isinstance(checks, dict)
-        and set(checks) == set(SOURCE_BURST_CHECKS)
+        and set(checks) == set(required)
         and all(isinstance(value, bool) for value in checks.values())
     )
-    failed = [key for key in SOURCE_BURST_CHECKS if well_formed and not checks[key]]
+    failed = [key for key in required if well_formed and not checks[key]]
     # A flap, reset or session down is a correctness failure even where the
     # result's own check missed it, and whatever else the result holds: the
     # sessions' state does not depend on the tap.
@@ -1885,6 +1952,10 @@ def source_burst(run: dict, what: str) -> tuple[str, str]:
         f"tables exact, order kept, sessions Established; report-only, {mode} run, "
         f"{need(run, 'shape.rows_per_update', what)} routes per UPDATE"
     ]
+    if two_sources:
+        parts.extend(burst_sources(run, what))
+        if "short_overlap" in r:
+            parts.append(f"{r['short_overlap']} healthy updates admitted during burst; too few for latency readings")
     if "updates" in r:
         lead = r["lead_dispatch_max_ms"]
         before = "no update" if lead is None else f"at most {lead:.1f} ms"
@@ -1965,6 +2036,8 @@ def source_burst_compare(parent: Arm, candidate: Arm, cell: str) -> tuple[str, s
     mean of its passing repetitions; None unless both arms have one. Runs
     with different routes per UPDATE are different shapes: neither averaged
     nor compared."""
+    if cell == "source-burst-two":
+        return None  # Fixed correctness fixture.
     means, sizes = [], set()
     for arm in (parent, candidate):
         readings = []

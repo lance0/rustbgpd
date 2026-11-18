@@ -423,6 +423,8 @@ pub struct ChurnState {
     pub arrivals: Vec<(u32, Instant)>,
     pub resets: u64,
     pub decode_failures: u64,
+    /// UPDATEs other than the initial EoR and replacements of the churn /24.
+    pub unexpected_updates: usize,
 }
 
 /// The single churn prefix.
@@ -434,13 +436,28 @@ impl ChurnState {
             Message::Notification(_) => self.resets += 1,
             Message::Update(update) => match update.parse(true, false, &[]) {
                 Ok(parsed) => {
+                    let sequence = med(&parsed.attributes);
                     let churn = parsed
                         .announced
                         .iter()
-                        .any(|entry| IpAddr::V4(entry.prefix.addr) == IpAddr::V4(CHURN_PREFIX));
-                    if let Some(sequence) = med(&parsed.attributes).filter(|_| churn) {
+                        .any(|entry| entry.prefix.addr == CHURN_PREFIX && entry.prefix.len == 24);
+                    if let Some(sequence) = sequence.filter(|_| churn) {
                         self.arrivals.push((sequence, now));
                     }
+                    let eor = parsed.announced.is_empty()
+                        && parsed.withdrawn.is_empty()
+                        && parsed.attributes.is_empty();
+                    let only_churn = churn
+                        && sequence.is_some()
+                        && parsed.announced.len() == 1
+                        && parsed.withdrawn.is_empty()
+                        && !parsed.attributes.iter().any(|attr| {
+                            matches!(
+                                attr,
+                                PathAttribute::MpReachNlri(_) | PathAttribute::MpUnreachNlri(_)
+                            )
+                        });
+                    self.unexpected_updates += usize::from(!eor && !only_churn);
                 }
                 Err(_) => self.decode_failures += 1,
             },

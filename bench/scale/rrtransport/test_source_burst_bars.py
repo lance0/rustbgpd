@@ -100,6 +100,60 @@ class SourceBurst(unittest.TestCase):
         self.assertEqual(got[0], expected, got)
         self.assertIn(reason, got[1])
 
+    def test_two_sources_need_distinct_peers_completion_and_healthy_convergence(self):
+        run = burst(measured=False)
+        run["cell"] = "source-burst-two"
+        run["shape"].update(
+            burst_sources=2, routes=16_000, receivers=8, registered_peers=12, burst_messages=20
+        )
+        run["checks"].update(sources_complete=True, healthy_converged=True)
+        run["healthy"].update(last_sent=6, last_received=6)
+        run["wire"].update(
+            healthy_table_errors=0, healthy_decode_failures=0, exact_receivers=8, missing_routes=0
+        )
+        run["burst"].update(messages_admitted=20, messages_finished=20)
+        sources = [
+            dict(
+                peer=ip,
+                routes=8_000,
+                in_order=True,
+                messages_planned=10,
+                messages_admitted=10,
+                written_ms=530.0,
+                rib_done_ms=done,
+            )
+            for ip, done in (("127.0.0.1", 550.0), ("127.0.0.2", BURST_DONE))
+        ]
+        run["burst"]["sources"] = sources
+        self.assert_verdict(run, "PASS", "peer 127.0.0.2 8000 routes")
+        for key, value, reason in [
+            ("peer", sources[0]["peer"], "duplicate"),
+            ("rib_done_ms", None, "rib_done_ms"),
+            ("messages_admitted", 9, "inconsistent work"),
+            ("routes", 16_000, "inconsistent work"),
+        ]:
+            with self.subTest(key=key):
+                broken = copy.deepcopy(run)
+                broken["burst"]["sources"][1][key] = value
+                self.assert_verdict(broken, "INVALID", reason)
+        for group, key, value, reason in [
+            ("wire", "healthy_decode_failures", 1, "healthy wire"),
+            ("wire", "exact_receivers", 7, "incomplete burst"),
+            ("burst", "messages_finished", 19, "per-source completions"),
+            ("burst", "rib_done_ms", BURST_DONE + 1, "per-source completions"),
+        ]:
+            with self.subTest(key=key):
+                broken = copy.deepcopy(run)
+                broken[group][key] = value
+                self.assert_verdict(broken, "INVALID", reason)
+        short = copy.deepcopy(run)
+        short["burst"]["first_admitted_ms"] = BURST_DONE - 2
+        self.assert_verdict(short, "PASS", "too few for latency readings")
+        run["healthy"]["last_received"] = 5
+        self.assert_verdict(run, "INVALID", "healthy wire")
+        run["checks"]["healthy_converged"] = False
+        self.assert_verdict(run, "FAIL", "healthy_converged")
+
     def test_clean_runs_pass_and_report_their_readings(self):
         self.assert_verdict(burst(), "PASS", "healthy admission to dispatch max 36000.0 ms")
         self.assert_verdict(burst(), "PASS", "at most 146 burst messages queued ahead")
