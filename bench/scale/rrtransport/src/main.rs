@@ -590,7 +590,7 @@ fn main() -> Result<()> {
              \x20      rrtransport credit-release-mixed|credit-release-timer <output-dir> [--reduced] [--correctness-only]\n\
              \x20      rrtransport credit-paused <output-dir> [--reduced] [--correctness-only] [--seconds N]\n\
              \x20      rrtransport credit-fill <unicast|evpn|vpn|flowspec> <output-dir> [--reduced] [--correctness-only]\n\
-             \x20      rrtransport credit-source-burst <output-dir> [--reduced] [--control] [--stall-ms N] [--burst-interval-ms N] [--rows N] [--routes-per-update N]\n\
+             \x20      rrtransport credit-source-burst <output-dir> [--reduced] [--two-sources] [--control] [--stall-ms N] [--burst-interval-ms N] [--rows N] [--routes-per-update N]\n\
              \x20      rrtransport credit-probe <output-dir> [--reduced]"
         ),
     }
@@ -656,7 +656,12 @@ fn credit_main(mode: &str, args: &[String]) -> Result<()> {
         ))?,
         ("credit-probe", [output, rest @ ..]) => {
             let options = credit::Options::parse(rest)?;
-            credit_probe::run(Path::new(output), options.reduced, options.correctness_only)?
+            credit_probe::run(
+                &harness,
+                Path::new(output),
+                options.reduced,
+                options.correctness_only,
+            )?
         }
         _ => bail!("bad {mode} arguments; run without arguments for usage"),
     };

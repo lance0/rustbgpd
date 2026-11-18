@@ -67,6 +67,7 @@ OPTIONAL_RELEASE_CHECKS = {
 SOURCE_BURST = (
     "source-burst",
     "source-burst-control",
+    "source-burst-two",
     "source-burst-small",
     "source-burst-small-control",
 )
@@ -1498,18 +1499,75 @@ def verdicts(
             results.extend(optional_release_reports(directory, arm, rep))
             results.extend(source_burst_reports(directory, arm, rep))
             for cell in sorted(arm.attempted[rep]):
-                if not cell.startswith(("restart-", "exhaust-")):
-                    continue
                 try:
                     run = arm.run(rep, cell)
                 except (Invalid, AttributeError, TypeError, ValueError):
                     continue  # The campaign cells above report unusable results.
-                if run and (note := eviction_reading(run, f"{arm.name} {rep} {cell}")):
-                    results.append(note)
+                if run:
+                    source = f"{arm.name} {rep} {cell}"
+                    if note := allocator_reading(run, source):
+                        results.append(note)
+                    if cell.startswith(("restart-", "exhaust-")) and (note := eviction_reading(run, source)):
+                        results.append(note)
     for cell in SOURCE_BURST:
         if note := source_burst_compare(parent, candidate, cell):
             results.append(note)
     return results
+
+
+def allocator_reading(run: dict, source: str) -> tuple[str, str, str] | None:
+    memory = run.get("memory")
+    if not isinstance(memory, dict) or "peak_jemalloc_allocated_bytes" not in memory:
+        return None
+
+    def value(raw):
+        # 0 is a gauge the allocator never refreshed: no reading.
+        if type(raw) is int or (isinstance(raw, float) and math.isfinite(raw)):
+            return raw if raw > 0 else None
+        return None
+
+    def reading(raw):
+        return "n/a" if (raw := value(raw)) is None else f"{raw:.0f}"
+
+    fields = ["jemalloc_" + name + "_bytes" for name in ("allocated", "active", "resident")]
+    at = memory.get("at_peak_sampled_rss")
+    at = at if isinstance(at, dict) else {}
+    triples = [
+        [memory.get("peak_" + field) for field in fields],
+        [at.get(field) for field in fields],
+    ]
+    peaks, paired = ("/".join(map(reading, triple)) for triple in triples)
+    rss, hwm = (reading(memory.get(key)) for key in ("peak_sampled_rss_kib", "vmhwm_kib"))
+    detail = (
+        f"allocated/active/resident bytes: independent peaks {peaks}, "
+        f"at sampled RSS peak ({rss} KiB, VmHWM {hwm} KiB) {paired}"
+    )
+    # jemalloc's own invariant: resident >= active >= allocated.
+    for triple in triples:
+        known = [value(raw) for raw in triple]
+        if None not in known and not known[0] <= known[1] <= known[2]:
+            reason = f"out of order, not resident >= active >= allocated: {detail}"
+            return f"{source} jemalloc", "INVALID", reason
+    return f"{source} jemalloc", "REPORT", detail
+
+
+def check_allocator_readings(directory: Path):
+    cells = [
+        "paused", "probes", *OPTIONAL_RELEASES, *SOURCE_BURST,
+        *(f"fill-{family}" for family in FILL_FAMILIES),
+        *(f"{kind}-{family}" for kind in ("exhaust", "restart", "restart-churn") for family in FAMILIES),
+    ]
+    files = {result_file(cell): identity(cell) for cell in cells}
+    for path in sorted(directory.rglob("*.json")):
+        if path.name not in files:
+            continue
+        try:
+            run = read(path)
+        except Invalid:
+            continue
+        if (run.get("cell"), run.get("family")) == files[path.name]:
+            if note := allocator_reading(run, str(path)):
+                yield note
 
 
 def eviction_reading(run: dict, source: str) -> tuple[str, str, str] | None:
@@ -1707,6 +1765,8 @@ def healthy_readings(run: dict, what: str, start: float, done: float) -> dict:
         )
     during = [wait for wait, row in waits if start <= row[2] <= done]
     if len(during) < SOURCE_BURST_MIN_DURING:
+        if run.get("cell") == "source-burst-two":
+            return {"short_overlap": len(during)}
         raise Invalid(
             f"{what}: {len(during)} of {len(rows)} healthy updates were admitted while the "
             f"burst was unfinished (need {SOURCE_BURST_MIN_DURING}): none could queue behind it"
@@ -1798,16 +1858,130 @@ def source_burst_readings(run: dict, what: str) -> dict:
     return readings
 
 
+def burst_sources(run: dict, what: str) -> list[str]:
+    sources = need(run, "burst.sources", what)
+    if (
+        need(run, "shape.burst_sources", what) != 2
+        or not isinstance(sources, list)
+        or len(sources) != 2
+    ):
+        raise Invalid(f"{what}: expected two burst sources")
+    peers = [need(s, "peer", what) for s in sources]
+    if peers[0] == peers[1]:
+        raise Invalid(f"{what}: duplicate burst peer")
+    rows = number(run, "shape.routes", what)
+    if run.get("mode") != "correctness" or type(rows) is not int or not 2 <= rows <= 16_000:
+        raise Invalid(f"{what}: inconsistent two-source correctness shape")
+    if (
+        number(run, "shape.receivers", what) != 8
+        or number(run, "shape.registered_peers", what) != 12
+    ):
+        raise Invalid(f"{what}: incorrect two-source session count")
+    planned = 0
+    final_marker = 0.0
+    notes = []
+    ranges = []
+    start = number(run, "burst.first_sent_ms", what)
+    for index, source in enumerate(sources):
+        count = number(source, "messages_planned", what)
+        planned += count
+        # The prefixes the source's plan carried, read back from its UPDATEs.
+        routes = number(source, "routes", what)
+        span = need(source, "prefix_range", what)
+        if not (
+            isinstance(span, list)
+            and len(span) == 2
+            and all(type(edge) is int for edge in span)
+            and 0 <= span[0] < span[1] <= rows
+            and type(routes) is int
+            and 1 <= routes <= span[1] - span[0]
+        ):
+            raise Invalid(f"{what}: burst peer {peers[index]} has no usable prefix range")
+        ranges.append(span)
+        if (
+            count < 1
+            or number(source, "messages_admitted", what) != count
+            or source.get("in_order") is not True
+        ):
+            raise Invalid(f"{what}: inconsistent work for burst peer {peers[index]}")
+        written = number(source, "written_ms", what)
+        marker = number(source, "rib_done_ms", what)
+        done = marker - start
+        if not math.isfinite(written) or written < start or not math.isfinite(done) or done < 0:
+            raise Invalid(f"{what}: invalid RIB completion for burst peer {peers[index]}")
+        final_marker = max(final_marker, marker)
+        notes.append(
+            f"peer {peers[index]} {routes:g} routes {span[0]}..{span[1]}, {count:g} messages, "
+            f"RIB done {done:.1f} ms"
+        )
+    # The split must divide the single-source work, not repeat it. Each of
+    # the plan's three stages (announce, withdraw, announce again) can gain
+    # one UPDATE where the split cuts a chunk.
+    low, high = sorted(ranges)
+    single = number(run, "shape.single_source_messages", what)
+    if (
+        low[1] > high[0]
+        or sum(number(s, "routes", what) for s in sources) != rows
+        or planned > single + 3
+    ):
+        raise Invalid(
+            f"{what}: the sources' plans do not split the {rows}-route table "
+            f"(ranges {low} and {high}, {planned:g} messages for {single:g} from one source)"
+        )
+    # Both sockets finished their first write before either writer went on.
+    first = [number(s, "first_written_ms", what) for s in sources]
+    went_on = [number(s, "continued_ms", what) for s in sources]
+    if max(first) > min(went_on):
+        raise Invalid(
+            f"{what}: a writer continued at {min(went_on):.3f} ms, before the other socket's "
+            f"first write at {max(first):.3f} ms"
+        )
+    if (
+        planned != number(run, "shape.burst_messages", what)
+        or planned != number(run, "burst.messages_finished", what)
+        or final_marker != number(run, "burst.rib_done_ms", what)
+    ):
+        raise Invalid(f"{what}: per-source completions disagree with the burst")
+    if number(run, "wire.exact_receivers", what) != 8 or number(run, "wire.missing_routes", what):
+        raise Invalid(f"{what}: incomplete burst receiver tables")
+    if (
+        need(run, "healthy.last_received", what) != need(run, "healthy.last_sent", what)
+        or number(run, "wire.healthy_decode_failures", what) != 0
+        or number(run, "wire.healthy_table_errors", what) != 0
+    ):
+        raise Invalid(f"{what}: healthy wire evidence disagrees with convergence check")
+    return notes
+
+
+def one_source_starved(run: dict) -> bool:
+    """One burst source's plan was admitted in full and the other's was not."""
+    sources = (run.get("burst") or {}).get("sources")
+    if not isinstance(sources, list) or len(sources) != 2:
+        return False
+    full = []
+    for source in sources:
+        counts = [source.get(key) if isinstance(source, dict) else None
+                  for key in ("messages_planned", "messages_admitted")]
+        if not all(type(count) is int for count in counts) or counts[0] < 1:
+            return False
+        full.append(counts[0] == counts[1])
+    return sorted(full) == [False, True]
+
+
 def source_burst(run: dict, what: str) -> tuple[str, str]:
     """One source-burst result's verdict and its report-only readings. A
     recorded failure outranks every INVALID, except where the tap judged it."""
     checks = run.get("checks")
+    required = SOURCE_BURST_CHECKS
+    two_sources = run.get("cell") == "source-burst-two"
+    if two_sources:
+        required += ("sources_complete", "healthy_converged")
     well_formed = (
         isinstance(checks, dict)
-        and set(checks) == set(SOURCE_BURST_CHECKS)
+        and set(checks) == set(required)
         and all(isinstance(value, bool) for value in checks.values())
     )
-    failed = [key for key in SOURCE_BURST_CHECKS if well_formed and not checks[key]]
+    failed = [key for key in required if well_formed and not checks[key]]
     # A flap, reset or session down is a correctness failure even where the
     # result's own check missed it, and whatever else the result holds: the
     # sessions' state does not depend on the tap.
@@ -1820,6 +1994,11 @@ def source_burst(run: dict, what: str) -> tuple[str, str]:
     if not well_formed:
         raise Invalid(f"{what}: incomplete or malformed checks")
     need(run, "wire", what)
+    # One source admitted in full shows the tap recognizes burst messages:
+    # the other source's shortfall is the session's, a read gate that never
+    # reopened or a writer blocked past the deadline.
+    if two_sources and "sources_complete" in failed and one_source_starved(run):
+        return "FAIL", f"failed checks: {', '.join(failed)}"
     # A tap that no longer recognizes what the session admits sees no burst
     # and leaves the run to time out: its table and order checks then judge
     # the instrument, not the daemon.
@@ -1840,6 +2019,10 @@ def source_burst(run: dict, what: str) -> tuple[str, str]:
         f"tables exact, order kept, sessions Established; report-only, {mode} run, "
         f"{need(run, 'shape.rows_per_update', what)} routes per UPDATE"
     ]
+    if two_sources:
+        parts.extend(burst_sources(run, what))
+        if "short_overlap" in r:
+            parts.append(f"{r['short_overlap']} healthy updates admitted during burst; too few for latency readings")
     if "updates" in r:
         lead = r["lead_dispatch_max_ms"]
         before = "no update" if lead is None else f"at most {lead:.1f} ms"
@@ -1920,6 +2103,8 @@ def source_burst_compare(parent: Arm, candidate: Arm, cell: str) -> tuple[str, s
     mean of its passing repetitions; None unless both arms have one. Runs
     with different routes per UPDATE are different shapes: neither averaged
     nor compared."""
+    if cell == "source-burst-two":
+        return None  # Fixed correctness fixture.
     means, sizes = [], set()
     for arm in (parent, candidate):
         readings = []
@@ -1959,10 +2144,12 @@ def source_burst_compare(parent: Arm, candidate: Arm, cell: str) -> tuple[str, s
     return name, "REPORT", "; ".join(parts)
 
 
-def report(results: list[tuple[str, str, str]]) -> int:
-    for name, verdict, reason in results:
+def report(results: list[tuple[str, str, str]], readings=()) -> int:
+    readings = list(readings)
+    for name, verdict, reason in [*results, *readings]:
         print(f"{verdict:<7} {name}: {reason}")
-    found = {verdict for _, verdict, _ in results}
+    # A report-only reading counts only when its instrument is unusable.
+    found = {verdict for _, verdict, _ in [*results, *readings] if verdict != "REPORT"}
     return 1 if "FAIL" in found else 2 if "INVALID" in found or not results else 0
 
 
@@ -1978,7 +2165,8 @@ def main(argv: list[str]) -> int:
     if len(args) == 3 and args[0] == "analyze" and known:
         return report(verdicts(Path(args[1]), Path(args[2]), tuple(require)))
     if len(args) == 2 and args[0] == "check" and not require:
-        return report(check(Path(args[1])))
+        directory = Path(args[1])
+        return report(check(directory), check_allocator_readings(directory))
     print(__doc__, file=sys.stderr)
     return 2
 

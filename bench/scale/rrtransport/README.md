@@ -115,6 +115,26 @@ never from the daemon's Adj-RIB-Out.
 | 4 | `credit-probe` | in-process healthy-lag cells (unicast and EVPN, 150 and 1,000 peers, 0.5 s and 2 s stalls) and the 150-peer restart-during-dump probe, whose receivers join through the production `PeerUp` path and keep their 150,000-row initial tables queued while the 50,000-row tail arrives | dirty episodes and queued rows per receiver |
 | 6 | `credit-fill unicast\|evpn\|vpn\|flowspec` | 150 paused private receivers (unicast and VPN through the same peer-context policy); one source sends 150,000 fresh routes of the family; FlowSpec rules carry a prefix, 16 ports and 8 length ranges | bytes per queued row (report-only) |
 
+Each cell reports the independent sampled peaks of jemalloc allocated, active,
+and resident bytes. `memory.at_peak_sampled_rss` records all three from the
+first sample at the highest observed process RSS (`peak_sampled_rss_kib`).
+Linux records `VmHWM` separately and can see a higher peak between samples.
+Both analyzer commands print these as report-only readings, with the paired
+RSS and `vmhwm_kib` beside them. An unavailable reading prints as `n/a`. This
+includes a field absent from an older receipt and a gauge that reads 0, which
+the allocator never refreshed. Readings that break jemalloc's order (resident
+at least active, active at least allocated) read INVALID.
+
+- *allocated*: bytes in live allocations.
+- *active*: allocated plus the unused space in the pages those allocations
+  occupy (fragmentation).
+- *resident*: jemalloc's upper bound on its resident pages: metadata, active
+  pages and unused dirty pages. It counts pages the process never touched, so
+  it can exceed the RSS of the same sample.
+
+"Resident minus allocated" therefore over-attributes memory to allocator
+retention unless it is compared with the RSS of the same sample.
+
 Cell 5 (Criterion) is not part of this harness.
 
 **Cell 2.** The burst routes carry distinct attributes (one UPDATE a route,
@@ -605,6 +625,25 @@ and its admission into the RIB:
 `--routes-per-update N` sets the UPDATE size (see Small UPDATEs below).
 `--control` (runner cell `source-burst-control`) sends no healthy update and
 records the burst's uncontended ingest rate.
+
+Runner cell `source-burst-two` (`credit-source-burst --two-sources`) splits
+the reduced plan's 16,000 routes evenly between two loopback sessions. It
+uses the same eight receivers, UPDATE size, churn subset and healthy cadence
+as `source-burst --reduced`. A smaller `--rows N` selects the same total
+work for either run. Each of the plan's three stages (announce, withdraw,
+announce again) can gain an UPDATE where the split cuts a chunk: 20 messages
+for the single source's 18 at 16,000 routes. Both writers finish their first
+socket write before either continues. Per source, the receipt records the
+prefix count and range its UPDATEs carry (read back from the planned wire
+messages), message counts, when its first write finished and when it went
+on, write completion and the RIB's final marker. The analyzer requires
+disjoint ranges that sum to the table, at most three messages more than the
+single-source plan, and no writer going on before the other's first write. Each burst receiver must converge on the combined table
+and the healthy receiver on its last sent /24 and MED. A writer the session
+stops reading gives up at the deadline, so the result is still written. When
+one source was admitted in full and the other was not, the cell reads FAIL on
+`sources_complete` ahead of the tap-recognition INVALID. The two-source cell
+is opt-in and correctness-only.
 
 **Stamps.** The harness owns the channel between the sessions and the RIB
 and puts a forwarding tap on it. Sessions admit into the tap's ingress

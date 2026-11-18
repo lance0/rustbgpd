@@ -28,6 +28,7 @@
 //! the last; a burst message then counts as ahead until the marker of its
 //! group is answered.
 
+use std::collections::BTreeSet;
 use std::thread;
 
 use rustbgpd_wire::{Ipv4NlriEntry, Ipv4UnicastMode, UpdateMessage};
@@ -62,6 +63,8 @@ const COMPILER_WATCH_EVERY: Duration = Duration::from_secs(1);
 /// The cell's own flags, taken out of `args` before [`Options::parse`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Variant {
+    /// Split the reduced workload between two established burst sessions.
+    pub two_sources: bool,
     /// No healthy updates: the burst's uncontended ingest rate.
     pub control: bool,
     /// Seeded defect: hold one healthy update this long between its
@@ -89,6 +92,7 @@ impl Variant {
                 Ok(Duration::from_millis(value.parse()?))
             };
             match arg.as_str() {
+                "--two-sources" => variant.two_sources = true,
                 "--control" => variant.control = true,
                 "--stall-ms" => variant.stall = Some(millis()?),
                 "--burst-interval-ms" => variant.burst_interval = Some(millis()?),
@@ -119,6 +123,18 @@ impl Variant {
                 .is_none_or(|routes| (1..=ROWS_PER_UPDATE).contains(&routes)),
             "--routes-per-update must be 1 to {ROWS_PER_UPDATE}"
         );
+        if variant.two_sources {
+            ensure!(
+                !variant.control
+                    && !variant.seeded()
+                    && variant.routes_per_update() == ROWS_PER_UPDATE,
+                "--two-sources uses the ordinary unpaced UPDATE size and a healthy source"
+            );
+            ensure!(
+                variant.rows.is_none_or(|n| (2..=16_000).contains(&n)),
+                "--two-sources needs 2 to 16000 total routes"
+            );
+        }
         Ok(variant)
     }
 
@@ -132,6 +148,9 @@ impl Variant {
 
     /// The result's cell name: a smaller UPDATE is its own shape.
     fn cell(self) -> &'static str {
+        if self.two_sources {
+            return "source-burst-two";
+        }
         match (self.routes_per_update() == ROWS_PER_UPDATE, self.control) {
             (true, false) => "source-burst",
             (true, true) => "source-burst-control",
@@ -183,7 +202,7 @@ struct TapLog {
     healthy: Vec<Admitted>,
     /// When the marker ahead of each healthy sequence was answered.
     dispatched: Vec<(u32, Instant)>,
-    burst: Vec<(Instant, BurstMessage)>,
+    burst: Vec<(Instant, usize, BurstMessage)>,
     /// When each burst marker was answered, in order, with the burst
     /// messages forwarded ahead of it: the RIB had finished those.
     finished: Vec<(Instant, usize)>,
@@ -196,6 +215,7 @@ struct TapLog {
 
 struct TapConfig {
     burst: PeerId,
+    second: Option<PeerId>,
     healthy: PeerId,
     stall: Option<Duration>,
     /// Per burst message in order: whether a marker goes behind it.
@@ -204,7 +224,7 @@ struct TapConfig {
 
 enum Class {
     Healthy(u32),
-    Burst(BurstMessage),
+    Burst(usize, BurstMessage),
     Other,
 }
 
@@ -230,16 +250,19 @@ fn classify(update: &RibUpdate, config: &TapConfig) -> Class {
     if peer == config.healthy {
         let sequence = announced.first().and_then(Route::med_attr);
         sequence.map_or(Class::Other, Class::Healthy)
-    } else if peer == config.burst {
+    } else if peer == config.burst || Some(peer) == config.second {
         let first = announced
             .first()
             .map(|route| route.prefix)
             .or_else(|| withdrawn.first().map(|&(prefix, _)| prefix));
-        Class::Burst(BurstMessage {
-            announced: announced.len(),
-            withdrawn: withdrawn.len(),
-            first: first.and_then(unicast_index),
-        })
+        Class::Burst(
+            usize::from(Some(peer) == config.second),
+            BurstMessage {
+                announced: announced.len(),
+                withdrawn: withdrawn.len(),
+                first: first.and_then(unicast_index),
+            },
+        )
     } else {
         Class::Other
     }
@@ -313,8 +336,11 @@ fn tap(
                     }
                     ahead = Some(Mark::Healthy(sequence));
                 }
-                Class::Burst(message) => {
-                    log.lock().expect("tap log").burst.push((at, message));
+                Class::Burst(source, message) => {
+                    log.lock()
+                        .expect("tap log")
+                        .burst
+                        .push((at, source, message));
                     burst_seen += 1;
                     if config.marked.get(burst_seen - 1) == Some(&true) {
                         behind = Some(Mark::Burst(burst_seen));
@@ -403,17 +429,23 @@ fn healthy_update(sequence: u32) -> Message {
 /// version, so the final table is exact only if the source's order held.
 /// Also returns whether a marker goes behind each message ([`marked`]).
 fn burst_plan(
-    rows: usize,
+    range: std::ops::Range<usize>,
     per_update: usize,
-) -> (Vec<(Message, BurstMessage)>, Vec<bool>, Reference) {
-    let all: Vec<usize> = (0..rows).collect();
-    let (withdrawn, reannounced) = churn_plan(rows);
+    withdrawn: &[usize],
+    reannounced: &[usize],
+) -> (Vec<(Message, BurstMessage)>, Vec<bool>) {
+    let owned = |indices: &[usize]| {
+        indices.partition_point(|i| *i < range.start)..indices.partition_point(|i| *i < range.end)
+    };
+    let withdrawn = &withdrawn[owned(withdrawn)];
+    let reannounced = &reannounced[owned(reannounced)];
+    let all: Vec<usize> = range.collect();
     let mut plan = Vec::new();
     let mut prefixes = Vec::new();
     let stages: [(&[usize], bool, u32); 3] = [
         (&all, true, BURST_VERSION),
-        (&withdrawn, false, 0),
-        (&reannounced, true, CHURN_VERSION),
+        (withdrawn, false, 0),
+        (reannounced, true, CHURN_VERSION),
     ];
     for (indices, announce, med) in stages {
         for chunk in indices.chunks(per_update) {
@@ -431,9 +463,7 @@ fn burst_plan(
         }
     }
     let marked = marked(&prefixes, per_update);
-    let reference =
-        Reference::churned(rows, BURST_VERSION, &withdrawn, &reannounced, CHURN_VERSION);
-    (plan, marked, reference)
+    (plan, marked)
 }
 
 /// Which burst messages carry a marker behind them, given each message's
@@ -540,11 +570,105 @@ fn deny_all() -> PolicyChain {
     }])
 }
 
+#[derive(Default)]
+struct WriteResult {
+    /// Every message handed to the writer.
+    submitted: Option<Instant>,
+    written: Option<Instant>,
+    paced: Duration,
+    /// With a start barrier: this socket's first write finished, and the
+    /// writer passed the barrier.
+    first_written: Option<Instant>,
+    continued: Option<Instant>,
+}
+
+/// Write `plan` on `receiver`'s socket. A writer the session stops reading
+/// blocks; at `until` it gives up and its result records how far it got.
+async fn send_burst(
+    receiver: &mut Receiver,
+    plan: &[(Message, BurstMessage)],
+    interval: Duration,
+    start: Option<&tokio::sync::Barrier>,
+    until: tokio::time::Instant,
+) -> Result<WriteResult> {
+    let mut result = WriteResult::default();
+    for (index, (message, _)) in plan.iter().enumerate() {
+        if index != 0 && !interval.is_zero() {
+            let slept = Instant::now();
+            tokio::time::sleep(interval).await;
+            result.paced += slept.elapsed();
+        }
+        let Ok(sent) = tokio::time::timeout_at(until, receiver.stub_tx.send(message.clone())).await
+        else {
+            return Ok(result);
+        };
+        sent?;
+        if let Some(start) = start.filter(|_| index == 0) {
+            // Both sockets finish their first write before either writer continues.
+            let Ok(drained) = tokio::time::timeout_at(until, receiver.io.drain_writes(1)).await
+            else {
+                return Ok(result);
+            };
+            drained?;
+            result.first_written = Some(Instant::now());
+            if tokio::time::timeout_at(until, start.wait()).await.is_err() {
+                return Ok(result);
+            }
+            result.continued = Some(Instant::now());
+        }
+    }
+    result.submitted = Some(Instant::now());
+    result.written = tokio::time::timeout_at(until, receiver.io.drain_writes(plan.len() as u64))
+        .await
+        .is_ok_and(|drained| drained.is_ok())
+        .then(Instant::now);
+    Ok(result)
+}
+
+/// The tap's admissions from `source`, and when the RIB finished them: the
+/// first burst marker answered behind that source's last planned message.
+fn source_completion(
+    burst: &[(Instant, usize, BurstMessage)],
+    finished: &[(Instant, usize)],
+    source: usize,
+    planned: usize,
+) -> (Vec<BurstMessage>, Option<Instant>) {
+    let received: Vec<(usize, BurstMessage)> = burst
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, peer, _))| *peer == source)
+        .map(|(position, &(_, _, message))| (position + 1, message))
+        .collect();
+    let done = received
+        .last()
+        .filter(|_| received.len() == planned)
+        .and_then(|&(through, _)| finished.iter().find(|&&(_, seen)| seen >= through))
+        .map(|&(at, _)| at);
+    (
+        received.into_iter().map(|(_, message)| message).collect(),
+        done,
+    )
+}
+
+/// The distinct prefixes a plan's UPDATEs carry, decoded from the wire.
+fn planned_prefixes(plan: &[(Message, BurstMessage)]) -> Result<BTreeSet<usize>> {
+    let mut prefixes = BTreeSet::new();
+    for (message, _) in plan {
+        let Message::Update(update) = message else {
+            bail!("a burst message is not an UPDATE");
+        };
+        let observed = crate::credit_wire::observe(update, WireFamily::Unicast)?;
+        prefixes.extend(observed.announced.iter().map(|&(index, _)| index));
+        prefixes.extend(observed.withdrawn);
+    }
+    Ok(prefixes)
+}
+
 /// The cell, or with `variant.control` its control without healthy updates.
 pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<bool> {
     let cell = variant.cell();
     let per_update = variant.routes_per_update();
-    let (receivers, rows, every, deadline) = if options.reduced {
+    let (receivers, rows, every, deadline) = if options.reduced || variant.two_sources {
         (
             8,
             16_000,
@@ -576,14 +700,42 @@ pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<b
         receivers: Vec::new(),
         sources: Vec::new(),
     };
-    // Burst receivers, the healthy receiver, then the two sources, which
-    // are sessions like the others and are exported nothing.
-    let (healthy, burst_source, healthy_source) = (receivers, receivers + 1, receivers + 2);
-    let (plan, marked, reference) = burst_plan(rows, per_update);
-    let reference = Arc::new(reference);
-    let expected: Vec<BurstMessage> = plan.iter().map(|&(_, message)| message).collect();
+    // Burst receivers, the healthy receiver, then the burst and healthy sources.
+    let sources = if variant.two_sources { 2 } else { 1 };
+    let (healthy, burst_source) = (receivers, receivers + 1);
+    let healthy_source = burst_source + sources;
+    let (withdrawn, reannounced) = churn_plan(rows);
+    let reference = Arc::new(Reference::churned(
+        rows,
+        BURST_VERSION,
+        &withdrawn,
+        &reannounced,
+        CHURN_VERSION,
+    ));
+    let mut plans = Vec::new();
+    let mut marked = Vec::new();
+    for source in 0..sources {
+        let range = source * rows / sources..(source + 1) * rows / sources;
+        let (plan, marks) = burst_plan(range, per_update, &withdrawn, &reannounced);
+        plans.push(plan);
+        marked.extend(marks);
+    }
+    // What each source's plan carries, read back from its UPDATEs, and the
+    // single-source plan's length for the same table.
+    let carried = plans
+        .iter()
+        .map(|plan| planned_prefixes(plan))
+        .collect::<Result<Vec<_>>>()?;
+    let single_source_messages = variant.two_sources.then(|| {
+        burst_plan(0..rows, per_update, &withdrawn, &reannounced)
+            .0
+            .len()
+    });
+    // Two sources use the standard UPDATE size, with a marker on every
+    // message, so their arrival order cannot change the marker placement.
+    let messages = marked.len();
     let burst_markers = marked.iter().filter(|&&mark| mark).count();
-    let extended = plan.iter().any(|(message, _)| {
+    let extended = plans.iter().flatten().any(|(message, _)| {
         matches!(message, Message::Update(update)
             if update.encoded_len() > usize::from(rustbgpd_wire::MAX_MESSAGE_LEN))
     });
@@ -591,6 +743,9 @@ pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<b
     let tap_threads = tap(
         TapConfig {
             burst: PeerId::from_ipv4(receiver_ip(burst_source)),
+            second: variant
+                .two_sources
+                .then(|| PeerId::from_ipv4(receiver_ip(burst_source + 1))),
             healthy: PeerId::from_ipv4(receiver_ip(healthy_source)),
             stall: variant.stall,
             marked,
@@ -603,11 +758,11 @@ pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<b
         .map(|_| (unicast.clone(), Some(private_unicast_policy())))
         .collect();
     specs.push((unicast.clone(), Some(healthy_policy())));
-    specs.extend((0..2).map(|_| (unicast.clone(), Some(deny_all()))));
-    // Only the burst source can need messages past 4,096 bytes.
+    specs.extend((0..=sources).map(|_| (unicast.clone(), Some(deny_all()))));
+    // Only burst sources can need messages past 4,096 bytes.
     fixture
         .connect_extended(specs, Duration::from_secs(120), |index| {
-            extended && index == burst_source
+            extended && (burst_source..healthy_source).contains(&index)
         })
         .await?;
     let registered_peers = fixture.receivers.len();
@@ -646,8 +801,8 @@ pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<b
     // streams only have to stay open.
     let churn_state = Arc::new(Mutex::new(ChurnState::default()));
     let mut observers = Vec::new();
-    for index in [healthy, burst_source, healthy_source] {
-        let mut rx = fixture.receivers[index].rx.take().expect("peer stream");
+    for (offset, receiver) in fixture.receivers[healthy..].iter_mut().enumerate() {
+        let mut rx = receiver.rx.take().expect("peer stream");
         let mut stop_rx = stop.1.clone();
         let shared = Arc::clone(&churn_state);
         observers.push(tokio::spawn(async move {
@@ -657,7 +812,9 @@ pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<b
                         let now = Instant::now();
                         let mut state = shared.lock().expect("churn state");
                         match message {
-                            Some(message) => state.apply(&message, now),
+                            Some(message) if offset == 0 => state.apply(&message, now),
+                            Some(Message::Notification(_)) => state.resets += 1,
+                            Some(_) => {}
                             None => return state.resets += 1,
                         }
                     }
@@ -718,27 +875,34 @@ pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<b
 
     // The burst: every message handed to the source's writer back to back.
     let until = tokio::time::Instant::now() + deadline;
-    let burst_tx = fixture.receivers[burst_source].stub_tx.clone();
     let first_sent = Instant::now();
-    let mut paced = Duration::ZERO;
-    for (index, (message, _)) in plan.iter().enumerate() {
-        if index != 0 && !interval.is_zero() {
-            let slept = Instant::now();
-            tokio::time::sleep(interval).await;
-            paced += slept.elapsed();
-        }
-        burst_tx.send(message.clone()).await?;
-    }
-    let submitted = Instant::now();
-    let written = tokio::time::timeout_at(
+    let (first, rest) = fixture.receivers[burst_source..healthy_source].split_at_mut(1);
+    let barrier = tokio::sync::Barrier::new(sources);
+    let first = send_burst(
+        &mut first[0],
+        &plans[0],
+        interval,
+        variant.two_sources.then_some(&barrier),
         until,
-        fixture.receivers[burst_source]
-            .io
-            .drain_writes(plan.len() as u64),
-    )
-    .await
-    .is_ok_and(|drained| drained.is_ok())
-    .then(Instant::now);
+    );
+    let writers = if let Some(second) = rest.first_mut() {
+        let second = send_burst(second, &plans[1], interval, Some(&barrier), until);
+        let (a, b) = tokio::try_join!(first, second)?;
+        vec![a, b]
+    } else {
+        vec![first.await?]
+    };
+    let submitted = writers
+        .iter()
+        .map(|w| w.submitted)
+        .collect::<Option<Vec<_>>>()
+        .and_then(|times| times.into_iter().max());
+    let written = writers
+        .iter()
+        .map(|w| w.written)
+        .collect::<Option<Vec<_>>>()
+        .and_then(|times| times.into_iter().max());
+    let paced: Duration = writers.iter().map(|w| w.paced).sum();
     eprintln!("{cell}: burst written at {:?}", written.map(|at| at - t0));
     // Finished: the RIB answered the marker behind the burst and every
     // burst receiver's table is exact.
@@ -809,7 +973,7 @@ pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<b
     };
     let log = std::mem::take(&mut *log.lock().expect("tap log"));
     let messages_finished = log.finished.last().map_or(0, |&(_, through)| through);
-    let burst_done = (messages_finished == plan.len())
+    let burst_done = (messages_finished == messages)
         .then(|| log.finished.last().map(|&(at, _)| at))
         .flatten();
     // Per healthy update: its four stamps and what was queued ahead of it.
@@ -840,18 +1004,36 @@ pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<b
         .map(|a| a.sequence)
         .eq(sent.iter().map(|&(sequence, _)| sequence));
     let arrivals_in_order = arrivals.windows(2).all(|pair| pair[0].0 < pair[1].0);
-    let burst_order: Vec<BurstMessage> = log.burst.iter().map(|&(_, message)| message).collect();
-    let first_admitted = log.burst.first().map(|&(at, _)| at);
+    let mut in_order = true;
+    let mut sources_done = true;
+    let mut source_results = Vec::new();
+    for (source, plan) in plans.iter().enumerate() {
+        let (received, done) = source_completion(&log.burst, &log.finished, source, plan.len());
+        let ordered = received.iter().eq(plan.iter().map(|(_, msg)| msg));
+        let writer = &writers[source];
+        in_order &= ordered;
+        sources_done &= done.is_some() && writer.written.is_some() && received.len() == plan.len();
+        let prefixes = &carried[source];
+        source_results.push(json!({
+            "peer": receiver_ip(burst_source + source).to_string(),
+            "routes": prefixes.len(),
+            "prefix_range": prefixes.first().zip(prefixes.last()).map(|(lo, hi)| [*lo, hi + 1]),
+            "messages_planned": plan.len(), "messages_admitted": received.len(),
+            "in_order": ordered, "written_ms": writer.written.map(ms), "rib_done_ms": done.map(ms),
+            "first_written_ms": writer.first_written.map(ms), "continued_ms": writer.continued.map(ms),
+        }));
+    }
+    let first_admitted = log.burst.first().map(|&(at, _, _)| at);
     let rate = |to: Option<Instant>| {
         to.map(|to| rows as f64 / to.saturating_duration_since(first_sent).as_secs_f64())
     };
-    let last_admitted = log.burst.last().map(|&(at, _)| at);
+    let last_admitted = log.burst.last().map(|&(at, _, _)| at);
     let flaps = Snapshot::take(&fixture.metrics).total("bgp_session_flaps_total");
-    let result = json!({
+    let mut result = json!({
         "schema": "rrtransport-credit/1",
         "cell": cell,
         "family": "unicast",
-        "mode": if options.correctness_only || variant.seeded() || variant.rows.is_some() {
+        "mode": if options.correctness_only || variant.two_sources || variant.seeded() || variant.rows.is_some() {
             "correctness"
         } else {
             "measured"
@@ -860,7 +1042,7 @@ pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<b
             "receivers": receivers,
             "routes": rows,
             "rows_per_update": per_update,
-            "burst_messages": plan.len(),
+            "burst_messages": messages,
             "burst_markers": burst_markers,
             "extended_message": extended,
             "burst_interval_ms": interval.as_secs_f64() * 1e3,
@@ -885,7 +1067,7 @@ pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<b
         // Every time is in ms from t0, when the healthy source started.
         "burst": {
             "first_sent_ms": ms(first_sent),
-            "submitted_ms": ms(submitted),
+            "submitted_ms": submitted.map(ms),
             "written_ms": written.map(ms),
             "paced_sleep_ms": paced.as_secs_f64() * 1e3,
             "messages_admitted": log.burst.len(),
@@ -918,13 +1100,13 @@ pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<b
             "final_state_exact": settled
                 && exact == receivers
                 && arrivals.last().map(|&(sequence, _)| sequence) == last_sent,
-            "per_source_order": burst_order == expected && admitted_in_order && arrivals_in_order,
+            "per_source_order": in_order && admitted_in_order && arrivals_in_order,
             "sessions_established": down.is_empty() && resets + peer_resets == 0 && flaps.unwrap_or(0.0) == 0.0,
         },
         "wire": {
             "exact_receivers": exact,
             "missing_routes": missing,
-            "burst_messages_in_order": burst_order == expected,
+            "burst_messages_in_order": in_order,
             "healthy_admitted_in_order": admitted_in_order,
             "healthy_arrivals_in_order": arrivals_in_order,
             "healthy_decode_failures": decode_failures,
@@ -939,6 +1121,20 @@ pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<b
         },
         "memory": memory_json(&instruments),
     });
+    if variant.two_sources {
+        let errors = churn_state.lock().expect("churn state").unexpected_updates;
+        result["wire"]["healthy_table_errors"] = json!(errors);
+        result["shape"]["burst_sources"] = json!(sources);
+        result["shape"]["single_source_messages"] = json!(single_source_messages);
+        result["burst"]["sources"] = json!(source_results);
+        result["checks"]["sources_complete"] = json!(sources_done);
+        result["checks"]["healthy_converged"] = json!(
+            last_sent.is_some()
+                && received_last() == last_sent
+                && decode_failures == 0
+                && errors == 0
+        );
+    }
     write_result(output, &format!("{cell}.json"), &result)?;
     fixture.close().await?;
     // The tap ends when the last session drops its sender.
@@ -984,6 +1180,7 @@ mod tests {
             let threads = tap(
                 TapConfig {
                     burst: PeerId::from_ipv4(SOURCE),
+                    second: None,
                     healthy: PeerId::from_ipv4(CHURN_SOURCE),
                     stall,
                     marked: vec![true; burst],
@@ -1133,7 +1330,8 @@ mod tests {
 
     #[test]
     fn burst_plan_ends_with_an_order_sensitive_tail() {
-        let (plan, marks, _) = burst_plan(2_500, ROWS_PER_UPDATE);
+        let (withdrawn, reannounced) = churn_plan(2_500);
+        let (plan, marks) = burst_plan(0..2_500, ROWS_PER_UPDATE, &withdrawn, &reannounced);
         let shape: Vec<_> = plan
             .iter()
             .map(|(_, m)| (m.announced, m.withdrawn, m.first))
@@ -1165,6 +1363,113 @@ mod tests {
         assert_eq!(marks, [true; 5], "every message, as before");
     }
 
+    #[test]
+    fn split_preserves_the_single_source_work_and_each_prefix_owner() {
+        let rows = 2_201;
+        let (withdrawn, reannounced) = churn_plan(rows);
+        let entries = |range: std::ops::Range<usize>| {
+            let (plan, _) = burst_plan(range.clone(), ROWS_PER_UPDATE, &withdrawn, &reannounced);
+            let mut by_prefix = BTreeMap::<usize, Vec<Option<u32>>>::new();
+            for (wire, _) in plan {
+                let Message::Update(update) = wire else {
+                    panic!("expected UPDATE")
+                };
+                let observed = crate::credit_wire::observe(&update, WireFamily::Unicast).unwrap();
+                for (index, version) in observed.announced {
+                    assert!(range.contains(&index));
+                    by_prefix.entry(index).or_default().push(version);
+                }
+                for index in observed.withdrawn {
+                    assert!(range.contains(&index));
+                    by_prefix.entry(index).or_default().push(None);
+                }
+            }
+            by_prefix
+        };
+        let mut split = entries(0..rows / 2);
+        split.extend(entries(rows / 2..rows));
+        assert_eq!(split, entries(0..rows));
+        assert_eq!(split.len(), rows);
+    }
+
+    #[test]
+    fn the_tap_labels_each_burst_source_by_its_own_peer() {
+        let update = source_update(Family::Unicast, 0..1, BURST_VERSION, 100);
+        let other = PeerId::from_ipv4(Ipv4Addr::new(127, 0, 0, 9));
+        let label = |burst, second| {
+            let config = TapConfig {
+                burst,
+                second,
+                healthy: PeerId::from_ipv4(CHURN_SOURCE),
+                stall: None,
+                marked: Vec::new(),
+            };
+            match classify(&update, &config) {
+                Class::Burst(source, _) => Some(source),
+                _ => None,
+            }
+        };
+        let source = PeerId::from_ipv4(SOURCE);
+        assert_eq!(label(source, None), Some(0));
+        assert_eq!(label(source, Some(other)), Some(0));
+        assert_eq!(label(other, Some(source)), Some(1));
+        assert_eq!(label(other, None), None);
+    }
+
+    /// Each source is done at the first marker behind its own last message,
+    /// not at the first marker of the run nor at the burst's last.
+    #[test]
+    fn each_source_finishes_at_the_marker_behind_its_own_last_message() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let message = |first| BurstMessage {
+            announced: 1,
+            withdrawn: 0,
+            first: Some(first),
+        };
+        // Admission order: 0, 1, 0, 1, 1, with a marker behind each.
+        let burst: Vec<_> = [(0, 0), (1, 10), (0, 1), (1, 11), (1, 12)]
+            .into_iter()
+            .map(|(source, first)| (at(0), source, message(first)))
+            .collect();
+        let finished: Vec<_> = (1..=5)
+            .map(|through| (at(through * 10), through as usize))
+            .collect();
+        let (received, done) = source_completion(&burst, &finished, 0, 2);
+        assert_eq!(received, [message(0), message(1)]);
+        assert_eq!(done, Some(at(30)));
+        let (received, done) = source_completion(&burst, &finished, 1, 3);
+        assert_eq!(received, [message(10), message(11), message(12)]);
+        assert_eq!(done, Some(at(50)));
+        // A source short of its plan is not done, whatever was answered.
+        assert_eq!(source_completion(&burst, &finished, 1, 4).1, None);
+        // Its last message's marker not yet answered.
+        assert_eq!(source_completion(&burst, &finished[..2], 0, 2).1, None);
+    }
+
+    #[test]
+    fn planned_prefixes_read_what_each_plan_carries() {
+        let rows = 2_201;
+        let (withdrawn, reannounced) = churn_plan(rows);
+        let carried = |range: std::ops::Range<usize>| {
+            planned_prefixes(&burst_plan(range, ROWS_PER_UPDATE, &withdrawn, &reannounced).0)
+                .unwrap()
+        };
+        let low = carried(0..rows / 2);
+        assert_eq!(low, (0..rows / 2).collect());
+        assert_eq!(carried(rows / 2..rows), (rows / 2..rows).collect());
+        assert_eq!(carried(0..rows).len(), rows);
+    }
+
+    #[test]
+    fn healthy_last_sequence_cannot_hide_an_unexpected_route() {
+        let mut state = ChurnState::default();
+        state.apply(&wire_update(&[1], &[], BURST_VERSION), Instant::now());
+        state.apply(&healthy_update(2), Instant::now());
+        assert_eq!(state.arrivals.last().unwrap().0, 2);
+        assert_eq!(state.unexpected_updates, 1);
+    }
+
     /// Positions (1-based) of the messages a marker goes behind.
     fn marker_positions(burst: &[Vec<usize>], per_update: usize) -> Vec<usize> {
         let burst: Vec<&[usize]> = burst.iter().map(Vec::as_slice).collect();
@@ -1177,7 +1482,8 @@ mod tests {
 
     #[test]
     fn small_updates_carry_the_remainder_and_share_a_marker_per_window() {
-        let (plan, marks, _) = burst_plan(2_550, 100);
+        let (withdrawn, reannounced) = churn_plan(2_550);
+        let (plan, marks) = burst_plan(0..2_550, 100, &withdrawn, &reannounced);
         let shape: Vec<_> = plan
             .iter()
             .map(|(_, m)| (m.announced, m.withdrawn, m.first))
@@ -1276,6 +1582,9 @@ mod tests {
             Variant::take(&mut args).map(Variant::cell)
         };
         assert_eq!(named(&[]).expect("default"), "source-burst");
+        assert_eq!(named(&["--two-sources"]).unwrap(), "source-burst-two");
+        assert!(named(&["--two-sources", "--rows", "1"]).is_err());
+        assert!(named(&["--two-sources", "--routes-per-update", "100"]).is_err());
         let control = named(&["--control", "--routes-per-update", "1024"]);
         assert_eq!(control.expect("explicit default"), "source-burst-control");
         let small = named(&["--control", "--routes-per-update", "1"]);

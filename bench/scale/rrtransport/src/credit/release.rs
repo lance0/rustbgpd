@@ -116,6 +116,7 @@ pub async fn run(cell: Cell, output: &Path, options: &Options) -> Result<bool> {
     );
     // Include setup and actor queries in the timeout. A stuck registration
     // still releases every transport session before this command returns.
+    let sampling = MemorySampling::start(fixture.metrics.clone());
     let observe = async {
         fixture
             .sources
@@ -295,8 +296,10 @@ pub async fn run(cell: Cell, output: &Path, options: &Options) -> Result<bool> {
         }))
     };
     let observation = tokio::time::timeout(Duration::from_secs(45), observe).await;
+    let memory = sampling.finish().await;
     fixture.close().await?;
-    let report = observation.context("release observation timed out")??;
+    let mut report = observation.context("release observation timed out")??;
+    report["memory"] = memory?;
     write_result(output, &format!("{name}.json"), &report)?;
     Ok(recorded_pass(&report))
 }

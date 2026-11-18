@@ -22,7 +22,7 @@
 # source-burst and source-burst-control cells (an unpaced source burst
 # through real sessions, and its control without healthy updates) and their
 # source-burst-small counterparts (100 routes per UPDATE), run only when
-# explicitly named.
+# explicitly named. source-burst-two is the two-writer correctness fixture.
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -62,7 +62,7 @@ sha=$(sha256sum "$binary" | cut -d' ' -f1)
 result_of() {
     case $1 in
     release-mixed | release-timer | source-burst | source-burst-control) echo "$1.json" ;;
-    source-burst-small | source-burst-small-control) echo "$1.json" ;;
+    source-burst-two | source-burst-small | source-burst-small-control) echo "$1.json" ;;
     probes) echo probes.json ;;
     paused) echo paused-evpn.json ;;
     exhaust-unicast | exhaust-evpn | restart-unicast | restart-evpn) echo "$1.json" ;;
@@ -91,6 +91,7 @@ for cell in "${cells[@]}"; do
     case $cell in
     release-mixed | release-timer) args=("credit-$cell" "$output") limit=64G ;;
     source-burst) args=(credit-source-burst "$output") limit=64G ;;
+    source-burst-two) args=(credit-source-burst "$output" --two-sources) limit=64G ;;
     source-burst-control) args=(credit-source-burst "$output" --control) limit=64G ;;
     source-burst-small) args=(credit-source-burst "$output" --routes-per-update 100) limit=64G ;;
     source-burst-small-control)
