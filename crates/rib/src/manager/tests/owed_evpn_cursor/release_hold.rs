@@ -239,3 +239,249 @@ fn a_policy_replacement_or_refresh_inside_a_hold_converges() {
         HoldEvent::PeerRefresh,
     ]);
 }
+
+/// The subject missed row 5's withdrawal before the EVPN hold and is ready
+/// to resync in it. Keep the source and the waiter reading alongside it.
+fn missed_withdrawal(manager: &mut RibManager, unicast_rows: u32) -> [Receiver; 3] {
+    let source = peer_v4(SOURCE);
+    let source = Receiver {
+        peer: source,
+        rx: up_sized(manager, source, 0, 16, &[V4]),
+        wire: Wire::default(),
+    };
+    let peer = receiver(0);
+    let mut subject = Receiver::up(manager, peer, 16, &[V4, EVPN]);
+    received(manager, &all(8), &[]);
+    received_unicast(manager, 0..unicast_rows);
+    drain(manager, std::slice::from_mut(&mut subject));
+    prepare_receiver(manager, &subject, ReceiverState::Dirty);
+    let waiter = hold(manager);
+    manager.owe_eor(peer, EVPN);
+    [subject, waiter, source]
+}
+
+#[test]
+fn a_held_evpn_rebuild_serves_ipv4_resync_and_both_refreshes() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    let mut manager = deferral_manager(CREDIT);
+    let mut receivers = missed_withdrawal(&mut manager, UNICAST);
+    let peer = receivers[0].peer;
+    let visits = Arc::new(AtomicUsize::new(0));
+    manager.replacement_readiness_test_hook = Some(Arc::new({
+        let visits = Arc::clone(&visits);
+        move |stage| {
+            if stage == "resync_evpn_key" {
+                visits.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }));
+    drain(&mut manager, &mut receivers);
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert!(receivers[0].wire.table.contains_key(&key(5)));
+
+    manager.mark_outbound_dirty(peer);
+    received_unicast(&mut manager, UNICAST..2 * UNICAST);
+    drain(&mut manager, &mut receivers);
+    let prefixes = unicast_table(2 * UNICAST);
+    assert_eq!(receivers[0].wire.unicast_table, prefixes, "second resync");
+
+    assert_eq!(
+        receivers[0].unicast_rows_on_operator_refresh(&mut manager),
+        prefixes.len(),
+        "operator refresh"
+    );
+    assert!(!manager.force_outbound_peers.contains(&peer));
+
+    manager.handle_update(RibUpdate::RouteRefreshRequest {
+        peer,
+        session_id: 0,
+        afi: V4.0,
+        safi: V4.1,
+        queued: Arc::new(AtomicBool::new(true)),
+    });
+    let answer = receivers[0].rx.try_recv().expect("IPv4 refresh answer");
+    assert_eq!(
+        answer.refresh_markers,
+        BRACKET.map(|(_, _, kind)| (V4.0, V4.1, kind))
+    );
+    assert_eq!(answer.announce.len(), prefixes.len());
+    assert_eq!(
+        answer
+            .announce
+            .iter()
+            .map(|r| r.prefix)
+            .collect::<BTreeSet<_>>(),
+        prefixes
+    );
+    assert!(answer.evpn_announce.is_empty() && answer.evpn_withdraw.is_empty());
+    drop(answer);
+    assert!(!manager.pending_refresh.contains_key(&peer));
+    assert!(!manager.resync_tick_pending());
+    assert!(manager.selection_deferred(EVPN));
+    assert_eq!(
+        visits.load(Ordering::Relaxed),
+        0,
+        "no held EVPN inventory walked"
+    );
+    assert_eq!(receivers[0].wire.markers, 0);
+
+    let builds = manager.adj_rib_out_commit_stats.resync_builds;
+    release(&mut manager);
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
+    assert_eq!(
+        visits.load(Ordering::Relaxed),
+        0,
+        "release only hands off the rebuild"
+    );
+    let (built, _) = drain_one_unit_a_tick(&mut manager, &mut receivers);
+    assert_eq!(built, 1);
+    assert!(visits.load(Ordering::Relaxed) > 0, "the unit walked EVPN");
+    assert_eq!(receivers[0].wire.count(5), (1, 1));
+    assert_eq!(receivers[0].wire.table, selected_evpn(&manager));
+    assert_eq!(receivers[0].wire.markers, 1);
+    assert_eq!(receivers[0].wire.rows_after_marker, 0);
+    assert_idle(&manager, &receivers);
+}
+
+fn mixed_deferral_manager(v4_waiter: PeerId) -> RibManager {
+    manager(CREDIT).with_selection_deferral(SelectionDeferralConfig {
+        timeout: Duration::from_secs(60),
+        waiters: [(peer_v4(WAITER), EVPN), (v4_waiter, V4)]
+            .map(|(peer, family)| SelectionDeferralWaiterConfig {
+                peer: peer.into(),
+                families: vec![family],
+            })
+            .into(),
+    })
+}
+
+#[test]
+fn a_force_waiting_for_unicast_leaves_the_evpn_release_rebuild_to_the_tick() {
+    let v4_waiter = peer_v4(SECOND_SOURCE);
+    let mut manager = mixed_deferral_manager(v4_waiter);
+    // A suppressed IPv4 row would make the forced replay dirty as well.
+    let mut receivers = Vec::from(missed_withdrawal(&mut manager, 0));
+    drain(&mut manager, &mut receivers);
+    let peer = receivers[0].peer;
+    assert!(manager.held_evpn_rebuilds.contains(&peer));
+    receivers.push(hold_family(&mut manager, v4_waiter, V4));
+    let (reply, mut result) = oneshot::channel();
+    manager.handle_update(RibUpdate::RefreshPeerOutbound { peer, reply });
+    result.try_recv().unwrap().unwrap();
+    assert!(manager.force_outbound_peers.contains(&peer));
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert!(manager.selection_partial_caught_up(peer));
+    let builds = manager.adj_rib_out_commit_stats.resync_builds;
+    release(&mut manager);
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
+    drain_one_unit_a_tick(&mut manager, &mut receivers);
+    assert_eq!(receivers[0].wire.count(5), (1, 1));
+    assert_eq!(receivers[0].wire.markers, 1);
+    assert_eq!(receivers[0].wire.rows_after_marker, 0);
+    assert!(manager.selection_deferred(V4));
+    end_of_rib(&mut manager, v4_waiter, 7, V4);
+    drain_unicast_release(&mut manager);
+    drain(&mut manager, &mut receivers);
+    assert!(!manager.force_outbound_peers.contains(&peer));
+    assert_idle(&manager, &receivers);
+}
+
+#[test]
+fn evpn_rebuild_waits_for_active_unicast_and_runs_while_a_late_join_is_parked() {
+    let v4_waiter = peer_v4(SECOND_SOURCE);
+    let mut manager = mixed_deferral_manager(v4_waiter);
+    manager.test_force_ungrouped = false;
+    let mut receivers = Vec::from(missed_withdrawal(&mut manager, UNICAST));
+    let peer = receivers[0].peer;
+    drain(&mut manager, &mut receivers);
+    assert!(manager.grouped_member_of(peer).is_some());
+    assert!(manager.held_evpn_rebuilds.contains(&peer));
+    assert!(!manager.owed_row_evicted.contains(&peer));
+
+    manager.mark_outbound_dirty(peer);
+    received_unicast(&mut manager, UNICAST..UNICAST + 1);
+    drain(&mut manager, &mut receivers);
+    assert_eq!(receivers[0].wire.unicast_table, unicast_table(UNICAST + 1));
+    assert!(receivers[0].wire.table.contains_key(&key(5)));
+    assert_eq!(receivers[0].wire.markers, 0);
+
+    let metrics = manager.metrics.clone();
+    let families = HashSet::from([V4]);
+    let selection = manager.selection_deferral.as_mut().unwrap();
+    assert_eq!(
+        selection.classify_session(v4_waiter, 7, false, &families, &metrics),
+        []
+    );
+    received_unicast(&mut manager, UNICAST + 1..300);
+    let selection = manager.selection_deferral.as_mut().unwrap();
+    selection.session_down(v4_waiter, 7, &metrics);
+    let stage = selection
+        .await_collision_failback_refresh(v4_waiter, 7, false, &families, true, &metrics)
+        .unwrap();
+    manager.apply_selection_deferral_transitions(stage, "test collision survivor");
+    let before = manager.loc_rib.len();
+    manager.advance_unicast_release();
+    assert!(manager.loc_rib.len() > before && manager.owed_release_open(V4));
+
+    let late = receiver(5);
+    receivers.push(Receiver {
+        peer: late,
+        rx: up_sized(&mut manager, late, 0, 64, &[V4]),
+        wire: Wire::default(),
+    });
+    assert!(manager.late_release_join_pending(late, V4));
+    let builds = manager.adj_rib_out_commit_stats.resync_builds;
+    release(&mut manager);
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
+    assert!(manager.held_evpn_rebuild_due(peer));
+    assert!(manager.release_resync_waits(peer));
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert!(
+        !manager.owed_eviction_pending(),
+        "no retry for the blocked rebuild"
+    );
+    let captures = manager.adj_rib_out_commit_stats.group_table_captures;
+    manager.promote_evicted_receiver();
+    assert!(!manager.dirty_peers.contains(&peer), "no early promotion");
+    assert_eq!(
+        manager.adj_rib_out_commit_stats.group_table_captures,
+        captures
+    );
+    for r in &mut receivers {
+        r.write();
+    }
+    assert!(receivers[0].wire.table.contains_key(&key(5)));
+    assert_eq!(receivers[0].wire.markers, 0);
+    assert_eq!(receivers[3].wire.unicast_markers, 0);
+
+    let selection = manager.selection_deferral.as_mut().unwrap();
+    assert_eq!(
+        selection.classify_session(v4_waiter, 8, false, &families, &metrics),
+        []
+    );
+    manager.reselect_newly_deferred_local(&HashSet::new());
+    assert!(manager.selection_deferred(V4) && manager.owed_release_open(V4));
+    assert!(
+        manager.owed_eviction_pending(),
+        "EVPN can now make progress"
+    );
+    let (built, _) = drain_one_unit_a_tick(&mut manager, &mut receivers);
+    assert_eq!(built, 1);
+    assert_eq!(receivers[0].wire.count(5), (1, 1));
+    assert_eq!(receivers[0].wire.table, selected_evpn(&manager));
+    assert_eq!(receivers[0].wire.markers, 1);
+    assert_eq!(receivers[0].wire.rows_after_marker, 0);
+    assert!(manager.late_release_join_pending(late, V4));
+    assert_eq!(receivers[3].wire.unicast_markers, 0);
+
+    manager.expire_selection_deferral();
+    drain_unicast_release(&mut manager);
+    drain(&mut manager, &mut receivers);
+    assert_eq!(receivers[0].wire.unicast_table, unicast_table(300));
+    let late_wire = &receivers[3].wire;
+    assert_eq!(late_wire.unicast_table, unicast_table(300));
+    assert_eq!(late_wire.unicast_markers, 1);
+    assert_eq!(late_wire.unicast_rows_after_marker, 0);
+    assert!(!manager.late_release_join_pending(late, V4));
+}

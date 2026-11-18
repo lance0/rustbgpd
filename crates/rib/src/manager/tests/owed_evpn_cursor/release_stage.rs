@@ -125,6 +125,10 @@ fn stage_case(state: ReceiverState, release: Release, rows: u32, evict: bool) {
     receivers.push(waiter_up(&mut manager, WAITER, 11));
     assert!(manager.selection_deferred(EVPN));
     received(&mut manager, &[(90_000, 1)], &[6]);
+    if state == ReceiverState::Dirty && release.rearmed() {
+        drain(&mut manager, &mut receivers);
+        assert!(manager.held_evpn_rebuilds.contains(&receivers[0].peer));
+    }
     let replacement = waiter_up(&mut manager, WAITER, 22);
     manager.handle_update(RibUpdate::PeerDown {
         peer: replacement.peer,
@@ -150,6 +154,15 @@ fn stage_case(state: ReceiverState, release: Release, rows: u32, evict: bool) {
     if release.rearmed() {
         receivers.push(waiter_up(&mut manager, SECOND, 33));
         assert!(manager.selection_deferred(EVPN));
+        if state == ReceiverState::Dirty {
+            let subject = &mut receivers[0];
+            assert_eq!(
+                subject.unicast_rows_on_operator_refresh(&mut manager),
+                UNICAST as usize,
+                "refresh during rearm"
+            );
+            assert!(subject.wire.table.contains_key(&key(5)), "EVPN still held");
+        }
         received(&mut manager, &[(90_002, 2), (90_000, 2)], &[]);
     }
     received_unicast(&mut manager, UNICAST..UNICAST + 1);
