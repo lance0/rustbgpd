@@ -986,47 +986,46 @@ impl RibManager {
         let family = (afi, safi);
         let (suppress_eor, deferred_eor) = match replay_kind {
             FamilyReplayKind::PeerRefresh { suppress_eor } => {
+                // A first ORF refresh unlocks the initial table. If the cap
+                // released its EoR into another hold, keep it behind that
+                // table even when selection or a full writer defers the flood.
+                let owes_eor = self.eor.owes(peer, family);
+                if owes_eor
+                    && self
+                        .peer_orf_pending
+                        .get(&peer)
+                        .is_some_and(|gated| gated.contains(&family))
+                    && self
+                        .peer_sendable_families
+                        .get(&peer)
+                        .is_some_and(|sendable| sendable.contains(&family))
+                {
+                    self.owe_eor_behind_orf_table(peer, family);
+                }
                 if self.selection_convergence_held(family) {
                     self.selection_deferred_refresh
                         .entry(peer)
                         .or_default()
                         .insert(family);
-                    // The peer's first refresh found the initial marker
-                    // still unsent (an ORF cap released it into the hold):
-                    // it now follows this response's table, as it does when
-                    // the response is not deferred.
-                    let first_refresh = self
-                        .peer_orf_pending
-                        .get(&peer)
-                        .is_some_and(|gated| gated.contains(&family));
-                    if first_refresh
-                        && self.eor.owes(peer, family)
-                        && self
-                            .peer_sendable_families
-                            .get(&peer)
-                            .is_some_and(|sendable| sendable.contains(&family))
-                    {
-                        self.owe_eor_behind_orf_table(peer, family);
-                    }
                     debug!(%peer, ?afi, ?safi, "route-refresh response deferred behind RFC 4724 convergence gate");
                     return FamilyReplayOutcome::Deferred;
                 }
                 // RFC 5291 §6: a peer ROUTE-REFRESH lifts the initial-
                 // advertisement gate. Internal recovery may only observe it.
                 self.lift_orf_gate(peer, family);
-                // A receiver the owed-row cap evicted is built by the resync
-                // tick alone, and its initial End-of-RIB may still be owed:
-                // an answer ahead of that marker carries no BoRR or EoRR
-                // (RFC 7313 section 4) and would spend the request. It
-                // waits for the receiver's resync, which sends the marker
-                // first, as an answer the channel refused does.
-                if self.owed_row_evicted.contains(&peer) {
+                let deferred_eor = self.eor.behind_orf_table(peer, family);
+                // RFC 7313 §4: an ordinary answer must follow the initial
+                // EoR, even when another hold outlasts the dirty resync.
+                // The receiver evicted by the owed-row cap always waits for
+                // the resync tick to rebuild its table.
+                if self.owed_row_evicted.contains(&peer)
+                    || (owes_eor
+                        && !deferred_eor
+                        && (self.dirty_peers.contains(&peer) || self.eor_withheld(peer, family)))
+                {
                     self.defer_refresh_answer(peer, family, suppress_eor);
                     return FamilyReplayOutcome::Failed;
                 }
-                // GR or selection release may owe the ORF-gated initial
-                // flood. Only the peer refresh may consume this obligation.
-                let deferred_eor = self.eor.behind_orf_table(peer, family);
                 (suppress_eor, deferred_eor)
             }
             FamilyReplayKind::PrefixLimitRecovery

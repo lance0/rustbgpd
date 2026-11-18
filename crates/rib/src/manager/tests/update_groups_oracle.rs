@@ -5385,6 +5385,47 @@ fn rtc_interest(src: Ipv4Addr, n: u64) -> RtcRibRoute {
     }
 }
 
+async fn setup_rtc_churn(o: &mut Oracle) {
+    // A: VPN source (no RTC). B/C/D: RTC RR clients, one group.
+    // E: RTC RR client with a modifying chain — its own group.
+    o.peer_up_families(A, false, true, None, 64, vpn_sendable())
+        .await;
+    for peer in [B, C, D] {
+        o.peer_up_families(peer, false, true, None, 64, vpn_rtc_sendable())
+            .await;
+    }
+    o.peer_up_families(
+        E,
+        false,
+        true,
+        Some(permit_all_with(RouteModifications {
+            set_med: Some(42),
+            ..RouteModifications::default()
+        })),
+        64,
+        vpn_rtc_sendable(),
+    )
+    .await;
+
+    // Memberships: B{RT1}, C{default}, D strict-empty, E{RT2}.
+    o.rtc_routes(B, vec![rtc_interest(B, 1)]).await;
+    o.rtc_routes(C, vec![rtc_default(C)]).await;
+    o.rtc_routes(E, vec![rtc_interest(E, 2)]).await;
+    // Complete each initial membership table (including D's empty one)
+    // so its VPN EoR can precede the enhanced refresh below.
+    for peer in [B, C, D, E] {
+        o.tx.send(RibUpdate::EndOfRib {
+            peer: peer_v4(peer),
+            session_id: SESSION,
+            afi: Afi::Ipv4,
+            safi: Safi::RtConstrain,
+        })
+        .await
+        .unwrap();
+    }
+    o.check_vpn_invariant("memberships installed").await;
+}
+
 /// The RTC-churn kitchen sink (design §5): membership widen / narrow /
 /// default add+remove / strict-empty, RT flip via route attr change,
 /// RFC 7313 refresh under heterogeneous memberships, GR re-establish
@@ -5395,38 +5436,8 @@ fn rtc_interest(src: Ipv4Addr, n: u64) -> RtcRibRoute {
 #[tokio::test]
 async fn oracle_rtc_churn_streams_identical() {
     let cluster = Some(Ipv4Addr::new(192, 0, 2, 1));
-    let modifying_chain = || {
-        permit_all_with(RouteModifications {
-            set_med: Some(42),
-            ..RouteModifications::default()
-        })
-    };
     let scenario = async |o: &mut Oracle| {
-        // A: VPN source (no RTC). B/C/D: RTC RR clients, one group.
-        // E: RTC RR client with a modifying chain — its own group.
-        o.peer_up_families(A, false, true, None, 64, vpn_sendable())
-            .await;
-        o.peer_up_families(B, false, true, None, 64, vpn_rtc_sendable())
-            .await;
-        o.peer_up_families(C, false, true, None, 64, vpn_rtc_sendable())
-            .await;
-        o.peer_up_families(D, false, true, None, 64, vpn_rtc_sendable())
-            .await;
-        o.peer_up_families(
-            E,
-            false,
-            true,
-            Some(modifying_chain()),
-            64,
-            vpn_rtc_sendable(),
-        )
-        .await;
-
-        // Memberships: B{RT1}, C{default}, D strict-empty, E{RT2}.
-        o.rtc_routes(B, vec![rtc_interest(B, 1)]).await;
-        o.rtc_routes(C, vec![rtc_default(C)]).await;
-        o.rtc_routes(E, vec![rtc_interest(E, 2)]).await;
-        o.check_vpn_invariant("memberships installed").await;
+        setup_rtc_churn(o).await;
 
         // Flood: identities across the RT pool (incl. RT-less id 4,
         // which only the default membership may receive).
@@ -5514,6 +5525,19 @@ async fn oracle_rtc_churn_streams_identical() {
     };
     let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
     assert_route_parity(&grouped, &ungrouped);
+    let brackets = [
+        rustbgpd_wire::RouteRefreshSubtype::BoRR,
+        rustbgpd_wire::RouteRefreshSubtype::EoRR,
+    ]
+    .map(|marker| (Afi::Ipv4, Safi::MplsVpn, marker));
+    for peer in [B, C, D] {
+        assert!(
+            grouped[&peer_v4(peer)]
+                .iter()
+                .any(|msg| msg.refresh_markers == brackets),
+            "missing VPN refresh brackets for {peer}"
+        );
+    }
     assert!(
         grouped
             .values()

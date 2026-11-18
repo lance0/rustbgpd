@@ -2080,6 +2080,52 @@ fn a_refresh_from_an_evicted_receiver_follows_its_resync_with_its_markers() {
     );
 }
 
+/// An operator's token certifies its own replay. A peer request already
+/// waiting for resync still needs a separate bracketed answer.
+#[test]
+fn operator_replay_keeps_an_evicted_receivers_pending_refresh() {
+    let (mut manager, mut receivers, expected) = evict_stalled(1);
+    let receiver = &mut receivers[1];
+    let peer = receiver.peer;
+    receiver.write();
+    refresh_request(&mut manager, peer);
+    assert!(manager.pending_refresh[&peer].contains(&V4));
+
+    let (token, _enrolled) = rustbgpd_bmp::BmpReplay::new(Duration::from_secs(5));
+    let (reply, mut result) = oneshot::channel();
+    manager.handle_update(RibUpdate::ReplayPeerOutbound {
+        peer,
+        session_id: 0,
+        families: vec![V4],
+        replay: Arc::clone(&token),
+        reply,
+    });
+    result.try_recv().unwrap().unwrap();
+    let mut read = || receiver.rx.try_recv().map(delivered).unwrap();
+    let routes = read();
+    assert_eq!(routes.announce.len(), expected.len());
+    assert_eq!(routes.refresh_markers, []);
+    assert_eq!(routes.end_of_rib, []);
+    let marker = read();
+    assert_eq!(marker.end_of_rib, [V4]);
+    assert!(marker.replay.is_none());
+    let terminal = read();
+    assert!(Arc::ptr_eq(terminal.replay.as_ref().unwrap(), &token));
+    assert_eq!(terminal.end_of_rib, [V4]);
+    assert!(manager.pending_refresh[&peer].contains(&V4));
+
+    let following = drain_sent(&mut manager, &mut receivers, 1);
+    assert_eq!(
+        following
+            .iter()
+            .filter(|event| **event != Sent::Rows)
+            .copied()
+            .collect::<Vec<_>>(),
+        [Sent::Answer(expected.len())]
+    );
+    assert!(!manager.pending_refresh.contains_key(&peer));
+}
+
 /// An operator refresh (`RefreshPeerOutbound`) of an evicted receiver
 /// builds nothing in its own turn either: the receiver stays the tick's,
 /// which sends the forced table and the End-of-RIB once. Red when a forced

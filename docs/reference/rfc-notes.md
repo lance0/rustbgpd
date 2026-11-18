@@ -1607,7 +1607,9 @@ separate from control-plane-only families advertising F=1.
   routes → EoR.
 - A GR restarter's initial flood remains unmarked until its first EoR,
   including ORF-deferred and backpressured initial dumps. Later refreshes
-  use the normal BoRR/EoRR brackets.
+  use the normal BoRR/EoRR brackets. If an ordinary refresh arrives while
+  a backpressured peer still awaits its initial EoR for that family, the
+  RIB retains the request and answers it after the resync and EoR.
 - For peers advertising Enhanced Route Refresh, subtype 1/2 bodies whose
   length is not four bytes close the session with ROUTE-REFRESH Message
   Error / Invalid Message Length (7/1). Data contains the complete received

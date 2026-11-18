@@ -588,6 +588,9 @@ async fn refresh_and_operator_replay_respect_the_hold() {
     let mut manager = manager(Some(&[UPSTREAM]), &metrics);
     let mut rx = connect(&mut manager, UPSTREAM, HELPER);
     inject(&mut manager, KEPT);
+    let mut helper = Helper::retaining(&[KEPT]);
+    helper.observe(&mut rx, |_| true);
+    manager.mark_outbound_dirty(UPSTREAM);
     manager.handle_update(RibUpdate::RouteRefreshRequest {
         peer: UPSTREAM,
         session_id: 1,
@@ -595,13 +598,31 @@ async fn refresh_and_operator_replay_respect_the_hold() {
         safi: Safi::Unicast,
         queued: Arc::default(),
     });
-    let mut helper = Helper::retaining(&[KEPT]);
+    manager.resync_dirty_peers_bounded();
+    assert!(!manager.dirty_peers.contains(&UPSTREAM));
+    assert!(manager.pending_refresh[&UPSTREAM].contains(&V4));
     helper.observe(&mut rx, |_| true);
     assert!(helper.eor.is_empty(), "route refresh sent End-of-RIB");
     assert!(helper.has(KEPT));
     release(&mut manager).await;
     helper.observe(&mut rx, |_| true);
     assert_eq!(helper.eor, vec![V4]);
+
+    manager.resync_dirty_peers_bounded();
+    let answer = rx.try_recv().unwrap();
+    assert!(
+        answer
+            .announce
+            .iter()
+            .any(|route| route.prefix == host(KEPT))
+    );
+    assert_eq!(
+        answer.refresh_markers,
+        [
+            (V4.0, V4.1, rustbgpd_wire::RouteRefreshSubtype::BoRR),
+            (V4.0, V4.1, rustbgpd_wire::RouteRefreshSubtype::EoRR),
+        ]
+    );
 
     // Operator outbound replay ends in a wire End-of-RIB: refused while held.
     let mut manager = manager_with(&metrics);

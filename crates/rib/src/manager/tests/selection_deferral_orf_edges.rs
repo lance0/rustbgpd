@@ -983,7 +983,12 @@ async fn refresh_after_the_cap_inside_a_longer_grace_keeps_table_first() {
     observe(&mut target_rx, true, &mut seen, &mut eors);
     assert_eq!(eors, HashMap::new(), "grace still holds every marker");
     tokio::time::advance(Duration::from_secs(30)).await;
+    let sender = manager.outbound_peers[&target].clone();
+    let full = sender.try_reserve_many(sender.max_capacity()).unwrap();
     refresh(&mut manager, V6);
+    assert!(manager.pending_refresh[&target].contains(&V6));
+    drop(full);
+    manager.resync_dirty_peers_bounded();
     observe(&mut target_rx, true, &mut seen, &mut eors);
     assert!(
         seen.contains(&ordinary_v6(0x100)),
