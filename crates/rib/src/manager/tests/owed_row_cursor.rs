@@ -395,7 +395,7 @@ fn a_cursor_drain_is_charged_and_takes_no_operation() {
         let charge = update.credit.as_ref().expect("charged cursor step");
         assert_eq!(charge.rows(), rows);
         assert_eq!(charge.bytes(), unicast_rows(rows));
-        assert!(update.end_of_rib.is_empty());
+        assert_eq!(update.end_of_rib, [], "marker overtook the stalled cursor");
         held_rows += rows;
         stalled_receiver.wire.apply(&update);
     }
