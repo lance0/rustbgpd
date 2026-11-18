@@ -52,7 +52,7 @@ thread_local! {
 }
 
 #[cfg(test)]
-type EvpnGrowthProbe = (Vec<(usize, usize)>, usize, Vec<*const EvpnRibRoute>);
+type EvpnGrowthProbe = (Vec<usize>, usize, Vec<usize>);
 
 /// EVPN route slots at which [`AdjRibOut::insert_evpn`] reserves the rest of
 /// the slab's first segment.
@@ -887,6 +887,11 @@ impl AdjRibOut {
         self.self_next_hop_count = 0;
         self.prefix_path_ids.retire_with(checkpoint);
         retire_hash_map(&mut self.flowspec_routes, checkpoint);
+        // Slab slot, then index entry: an EVPN row reports `Progress` from
+        // both, as a unicast row does from its slab and its prefix index.
+        // The instrumented build's count of productive callbacks is a
+        // lower bound on retired rows (at least one per row) that no
+        // consumer compares for equality; it is not a row count.
         self.evpn_bodies.retire_with(checkpoint);
         retire_sharded_map(&mut self.evpn_index, checkpoint);
         retire_hash_map(&mut self.bgpls_routes, checkpoint);
@@ -1109,22 +1114,15 @@ impl AdjRibOut {
         self.evpn_bodies.len()
     }
 
-    /// What one EVPN insert can move: each index table's capacity and
-    /// length, the bytes of an index entry, and the address of the first
-    /// route of each slab segment.
+    /// What one EVPN insert can move: each index table's capacity, the
+    /// bytes of an index entry, and each slab segment's capacity.
     #[cfg(test)]
     fn evpn_growth_probe(&self) -> EvpnGrowthProbe {
         let tables = self.evpn_index.shards().iter();
         (
-            tables
-                .map(|table| (table.capacity(), table.len()))
-                .collect(),
+            tables.map(crate::fast_hash::Shard::capacity).collect(),
             std::mem::size_of::<(EvpnRouteKey, u32)>(),
-            (0..self.evpn_bodies.slot_count())
-                .step_by(SEGMENT)
-                .filter_map(|handle| self.evpn_bodies.get(u32::try_from(handle).ok()?))
-                .map(std::ptr::from_ref)
-                .collect(),
+            self.evpn_bodies.segment_capacities(),
         )
     }
 
@@ -1680,56 +1678,66 @@ mod tests {
     const PAST_LARGE_DOUBLING: usize =
         2 * crate::fast_hash::LARGE_SHARD_SPLIT_AT + crate::fast_hash::LARGE_SHARD_SPLIT_AT / 8;
 
-    /// Bytes of stored entries each insert moved while one receiver's EVPN
-    /// table fills to `count` rows, as `(rows before the insert, bytes)` for
-    /// every insert that moved any, and whether a route moved once the
-    /// slab's first segment was full. A regrown index table rehashes its
-    /// entries, a split rehashes all of them, and a reallocated slab segment
-    /// copies its routes.
+    /// Bytes of stored entries the growth between two probes of a table
+    /// that held `rows` rows moved. An index table or slab segment whose
+    /// capacity changed moved what the old allocation held, counted as its
+    /// whole capacity: no address is compared, so a reallocation the
+    /// allocator extends in place counts like one that copies. An index
+    /// split moves every row.
+    fn evpn_moved_bytes(before: &EvpnGrowthProbe, after: &EvpnGrowthProbe, rows: usize) -> usize {
+        let regrown = |old: &[usize], new: &[usize]| -> usize {
+            let changed = old.iter().zip(new).filter(|(old, new)| old != new);
+            changed.map(|(old, _)| *old).sum()
+        };
+        let index_rows = if before.0.len() == after.0.len() {
+            regrown(&before.0, &after.0)
+        } else {
+            rows
+        };
+        index_rows * before.1 + regrown(&before.2, &after.2) * size_of::<Option<EvpnRibRoute>>()
+    }
+
+    /// Bytes each insert moved while one receiver's EVPN table fills to
+    /// `count` rows, as `(rows before the insert, bytes)` for every insert
+    /// that moved any, and whether a slab segment changed capacity once the
+    /// first segment was full.
     fn evpn_growth_moves(count: u32) -> (Vec<(usize, usize)>, bool) {
         let mut rib = AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)));
-        let (mut tables, entry, mut bodies) = rib.evpn_growth_probe();
+        let mut before = rib.evpn_growth_probe();
         let (mut moves, mut late_body_move) = (Vec::new(), false);
         for i in 0..count {
             rib.insert_evpn(evpn_mac_ip(i));
             let rows = i as usize;
-            let (now_tables, _, now_bodies) = rib.evpn_growth_probe();
-            let index_rows = if now_tables.len() == tables.len() {
-                let regrown = tables
-                    .iter()
-                    .zip(&now_tables)
-                    .filter(|(old, new)| old.0 != new.0);
-                regrown.map(|(old, _)| old.1).sum()
-            } else {
-                rows
-            };
-            let moved_segments = bodies.iter().zip(&now_bodies).enumerate();
-            let body_rows: usize = moved_segments
-                .filter(|(_, (old, new))| old != new)
-                .map(|(segment, _)| (rows - segment * SEGMENT).min(SEGMENT))
-                .sum();
-            late_body_move |= body_rows != 0 && rows >= SEGMENT;
-            let bytes = index_rows * entry + body_rows * size_of::<EvpnRibRoute>();
+            let after = rib.evpn_growth_probe();
+            let bytes = evpn_moved_bytes(&before, &after, rows);
             if bytes != 0 {
                 moves.push((rows, bytes));
             }
-            (tables, bodies) = (now_tables, now_bodies);
+            let mut segments = before.2.iter().zip(&after.2);
+            late_body_move |= rows >= SEGMENT && segments.any(|(old, new)| old != new);
+            before = after;
         }
         (moves, late_body_move)
     }
 
+    /// Rows per receiver through which one EVPN insert moves at most 2 MiB.
+    /// Each of the index's 16 tables regrows from 28,672 entries (1.95 MB)
+    /// between about 453,000 and 464,000 rows; the next regrowth, from
+    /// 57,344 entries (3.9 MB), starts past 911,000 rows.
+    const EVPN_BOUNDED_ROWS: u32 = 900_000;
+
     /// All private receivers of a family hold about the same rows, so they
     /// grow inside the same inbound message: what one insert moves is paid
     /// once per receiver in one RIB turn. One receiver's EVPN table filling
-    /// past 28,672, 57,344 and 114,688 rows never moves more than 2 MiB of
-    /// stored entries in one insert, and no route moves once the slab's
-    /// first segment is full. Red proof: routes stored inline in the hash
-    /// table move 5.96 MB at 28,672 rows, 11.9 MB at 57,344 and 23.9 MB at
-    /// 114,688.
+    /// to `EVPN_BOUNDED_ROWS` rows never moves more than 2 MiB of stored
+    /// entries in one insert, and no slab segment reallocates once the
+    /// first is full.
+    /// Red proof: routes stored inline in the hash table move 5.96 MB at
+    /// 28,672 rows, 11.9 MB at 57,344 and 23.9 MB at 114,688.
     #[test]
     fn evpn_growth_moves_at_most_two_mebibytes_per_insert() {
-        let (moves, late_body_move) = evpn_growth_moves(250_000);
-        for (rows, bytes) in moves.iter().filter(|(_, bytes)| *bytes >= 256 << 10) {
+        let (moves, late_body_move) = evpn_growth_moves(EVPN_BOUNDED_ROWS);
+        for (rows, bytes) in moves.iter().filter(|(_, bytes)| *bytes >= 1 << 20) {
             println!("EVPN_GROWTH rows={rows} moved_bytes={bytes}");
         }
         let worst = moves.iter().max_by_key(|(_, bytes)| *bytes).unwrap();
@@ -1740,18 +1748,6 @@ mod tests {
             worst.1
         );
         assert!(!late_body_move, "a route moved after slot {SEGMENT}");
-    }
-
-    /// A small EVPN table keeps a small slab; the first segment is reserved
-    /// whole only once the table reaches `EVPN_FIRST_SEGMENT_AT` rows.
-    #[test]
-    fn evpn_slab_reserves_its_first_segment_once() {
-        let mut rib = AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)));
-        let at = u32::try_from(EVPN_FIRST_SEGMENT_AT).unwrap();
-        (0..at).for_each(|i| rib.insert_evpn(evpn_mac_ip(i)));
-        assert_eq!(rib.evpn_bodies.capacity(), EVPN_FIRST_SEGMENT_AT);
-        rib.insert_evpn(evpn_mac_ip(at));
-        assert_eq!(rib.evpn_bodies.capacity(), SEGMENT);
     }
 
     /// The EVPN index and slab stay one table through inserts, replacements,
@@ -1811,6 +1807,184 @@ mod tests {
                 assert!(rib.is_empty_all_families());
             }
         }
+    }
+
+    /// A small EVPN table keeps a small slab; the first segment is reserved
+    /// whole only once the table reaches `EVPN_FIRST_SEGMENT_AT` rows.
+    #[test]
+    fn evpn_slab_reserves_its_first_segment_once() {
+        let mut rib = AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+        let at = u32::try_from(EVPN_FIRST_SEGMENT_AT).unwrap();
+        (0..at).for_each(|i| rib.insert_evpn(evpn_mac_ip(i)));
+        assert_eq!(rib.evpn_bodies.capacity(), EVPN_FIRST_SEGMENT_AT);
+        rib.insert_evpn(evpn_mac_ip(at));
+        assert_eq!(rib.evpn_bodies.capacity(), SEGMENT);
+    }
+
+    /// A reserve for a known batch sizes the route slab as well as the
+    /// index, so the batch's inserts allocate and copy no slab segment.
+    #[test]
+    fn evpn_reserve_sizes_the_slab_for_the_batch() {
+        const BATCH: u32 = 100_000;
+        let mut rib = AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+        rib.reserve_evpn_with(BATCH as usize, &mut || {});
+        let reserved = rib.evpn_bodies.segment_capacities();
+        assert!(reserved.iter().sum::<usize>() >= BATCH as usize);
+        (0..BATCH).for_each(|i| rib.insert_evpn(evpn_mac_ip(i)));
+        assert_eq!(rib.evpn_bodies.segment_capacities(), reserved);
+    }
+
+    /// Every invariant that ties the EVPN index to its slab, against a
+    /// model: each key reads back its latest route, no two keys share a
+    /// slot, the slab holds no route the index does not name, and the
+    /// family count and emptiness follow the model.
+    fn evpn_agrees_with_model(rib: &AdjRibOut, model: &std::collections::BTreeMap<u32, u32>) {
+        assert_eq!(rib.evpn_len(), model.len());
+        assert_eq!(rib.evpn_index.len(), model.len());
+        assert_eq!(rib.evpn_bodies.iter().count(), model.len(), "orphan slot");
+        let walked: std::collections::BTreeMap<u32, u32> = rib
+            .iter_evpn()
+            .map(|route| {
+                let rustbgpd_wire::EvpnRoute::MacIp(mac_ip) = &route.route else {
+                    panic!("the model stores MAC/IP routes only");
+                };
+                let Some(IpAddr::V4(ip)) = mac_ip.ip else {
+                    panic!("the model stores IPv4 hosts only");
+                };
+                (u32::from(ip), u32::from(route.peer_router_id))
+            })
+            .collect();
+        assert_eq!(&walked, model);
+        let mut handles: Vec<u32> = rib.evpn_index.values().copied().collect();
+        handles.sort_unstable();
+        handles.dedup();
+        assert_eq!(handles.len(), model.len(), "two keys share a slot");
+        let evpn: u64 = rib
+            .family_counts()
+            .into_iter()
+            .filter(|(family, _)| *family == (Afi::L2Vpn, Safi::Evpn))
+            .map(|(_, count)| count)
+            .sum();
+        assert_eq!(evpn, model.len() as u64);
+        assert_eq!(rib.is_empty_all_families(), model.is_empty());
+    }
+
+    /// Random inserts, replacements, removals, reserves and resets (clear,
+    /// retire, release) over `keys` keys. `grow` holds resets back and
+    /// favors inserts so the table passes one slab segment. Returns the
+    /// most rows the table held.
+    fn evpn_model_run(seed: u64, keys: u32, ops: u32, grow: bool) -> usize {
+        let mut rib = AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+        let mut model = std::collections::BTreeMap::new();
+        // Addresses of routes stored while the slab's first segment was
+        // whole: from then on no stored route may move.
+        let mut pinned = std::collections::BTreeMap::new();
+        let (mut high, mut peak, mut insert_bias) = (0, 0, 3);
+        let mut state = seed | 1;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for step in 0..ops {
+            let r = next();
+            let i = u32::try_from((r >> 16) % u64::from(keys)).unwrap();
+            let key = evpn_mac_ip(i).key();
+            if step % 40_000 == 0 {
+                insert_bias = if grow && step < ops / 2 {
+                    4
+                } else {
+                    1 + next() % 4
+                };
+            }
+            match r % 1000 {
+                0 if (r >> 40) % 16 == 0 && !(grow && step < ops / 10 * 9) => {
+                    evpn_agrees_with_model(&rib, &model);
+                    match next() % 3 {
+                        0 => rib.clear(),
+                        1 => rib.retire_with(&mut || {}),
+                        _ => rib.release_evpn_with(&mut || {}),
+                    }
+                    model.clear();
+                    pinned.clear();
+                    high = 0;
+                    evpn_agrees_with_model(&rib, &model);
+                    assert_eq!(rib.evpn_bodies.slot_count(), 0);
+                }
+                1 if (r >> 40) % 4 == 0 => {
+                    let additional = usize::try_from(next() % 90_000).unwrap();
+                    rib.reserve_evpn_with(additional, &mut || {});
+                    assert_eq!(rib.evpn_len(), model.len());
+                    if rib.evpn_bodies.capacity() < SEGMENT {
+                        pinned.clear();
+                    }
+                }
+                x if x % 5 < insert_bias => {
+                    let replaced = model.insert(i, step).is_some();
+                    let slots = rib.evpn_bodies.segment_capacities();
+                    let slot_count = rib.evpn_bodies.slot_count();
+                    let mut route = evpn_mac_ip(i);
+                    route.peer_router_id = Ipv4Addr::from(step);
+                    rib.insert_evpn(route);
+                    high = high.max(model.len());
+                    peak = peak.max(model.len());
+                    let stored = rib.get_evpn(&key).unwrap();
+                    assert_eq!(u32::from(stored.peer_router_id), step);
+                    if replaced {
+                        assert_eq!(rib.evpn_bodies.slot_count(), slot_count, "slot taken");
+                        assert_eq!(rib.evpn_bodies.segment_capacities(), slots);
+                        if let Some(address) = pinned.get(&i) {
+                            assert!(std::ptr::eq(*address, stored), "replace moved it");
+                        }
+                    }
+                    if rib.evpn_bodies.capacity() >= SEGMENT {
+                        pinned.insert(i, std::ptr::from_ref(stored));
+                    } else {
+                        pinned.clear();
+                    }
+                }
+                _ => {
+                    assert_eq!(rib.remove_evpn(&key), model.remove(&i).is_some());
+                    assert!(rib.get_evpn(&key).is_none());
+                    assert!(!rib.remove_evpn(&key));
+                    pinned.remove(&i);
+                }
+            }
+            assert_eq!(rib.evpn_len(), model.len());
+            // Freed slots are reused: the slab never outgrows the most rows
+            // held since it was last emptied.
+            assert!(rib.evpn_bodies.slot_count() <= high);
+            if rib.evpn_bodies.slot_count() > EVPN_FIRST_SEGMENT_AT {
+                assert!(rib.evpn_bodies.capacity() >= SEGMENT);
+            }
+            if step % 64 == 0
+                && let Some((&k, &address)) = pinned.range(i..).next()
+            {
+                let stored = rib.get_evpn(&evpn_mac_ip(k).key()).unwrap();
+                assert!(std::ptr::eq(address, stored), "a stored route moved");
+            }
+            if step % 25_000 == 0 {
+                evpn_agrees_with_model(&rib, &model);
+            }
+        }
+        evpn_agrees_with_model(&rib, &model);
+        peak
+    }
+
+    /// The EVPN index and slab against a model at four table sizes: under
+    /// the first-segment reserve, around it, and past one slab segment.
+    #[test]
+    fn evpn_index_and_slab_follow_a_model() {
+        for (seed, keys, ops) in [
+            (0x2545_f491_4f6c_dd1d, 48, 40_000),
+            (0x6a09_e667_f3bc_c909, 700, 80_000),
+            (0xbb67_ae85_84ca_a73b, 24_000, 200_000),
+        ] {
+            evpn_model_run(seed, keys, ops, false);
+        }
+        let peak = evpn_model_run(0x9e37_79b9_7f4a_7c15, 150_000, 400_000, true);
+        assert!(peak > SEGMENT, "the large run held only {peak} rows");
     }
 
     /// The labeled route map and its prefix index are plain tables up to the

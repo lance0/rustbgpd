@@ -180,6 +180,13 @@ impl<T> RouteSlab<T> {
         self.segments.iter().map(Vec::capacity).sum()
     }
 
+    /// Slot capacity of each segment. A segment whose capacity changes
+    /// reallocated, which may copy every route it held.
+    #[cfg(test)]
+    pub(crate) fn segment_capacities(&self) -> Vec<usize> {
+        self.segments.iter().map(Vec::capacity).collect()
+    }
+
     /// Total slots ever allocated (occupied + free): the bound of a
     /// handle-order walk. Also the tests' leak probe: steady-state churn
     /// must not grow this.
