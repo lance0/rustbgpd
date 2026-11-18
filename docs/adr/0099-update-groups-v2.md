@@ -640,7 +640,9 @@ that pass more.
 That fallback is a whole-peer resync: one uncharged whole-table operation
 per evicted receiver, a turn and a table copy that grow with the table. It
 is paced, not bounded like a step. The pass that finds the list over its cap
-builds nothing; it marks the receivers it evicts dirty, and only the resync
+builds nothing; it marks the receivers it evicts dirty (an EVPN receiver
+that is a member of an update group is marked by the tick instead, see
+below), and only the resync
 tick builds their resyncs, one receiver per tick: the tick ends with that
 unit whatever is left of its poll budget, so queued input runs before the
 next receiver's. An ordinary pass leaves
@@ -703,6 +705,25 @@ bounded list maintenance. What differs is where the keys come from:
   table is named nowhere else.
 - *No hold exemption.* EVPN has no rows exempt from a selection hold, so
   a position does not move inside one.
+- *Eviction of a group member.* A unicast position belongs to a receiver
+  outside every update group; an EVPN position usually belongs to a member
+  of one, which holds unicast or VPN in the group and EVPN privately.
+  Marking a group member dirty captures what it was sent from the group's
+  table, in two walks of that table, so a pass that evicted many members
+  of one group and marked each would do members × rows of work in one
+  turn. The evicting pass does not mark them: each keeps its debt, with a
+  position no step reads and that holds no list entry, so
+  EVPN passes still skip it and its End-of-RIB still waits, while its
+  group's families keep flowing to it. The resync tick marks one such
+  receiver per tick, and only when no evicted receiver already waits for
+  its unit: a tick does at most one capture, then that receiver's
+  whole-table unit, which covers the debt. What reaches such a receiver
+  first is handled for that receiver alone: a session end or a regroup
+  ends the debt (a regroup marks its own member dirty, as for any member
+  that owes), an operator refresh marks it dirty and leaves the table to
+  the tick, and a ROUTE-REFRESH waits for the resync. An EVPN receiver
+  outside every group is marked by the evicting pass, as for unicast: that
+  mark walks no table.
 
 An EVPN family owned by an update group, and a receiver in a private
 handoff, are outside owed-key management as before: they keep the recovery

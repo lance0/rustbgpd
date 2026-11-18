@@ -7923,6 +7923,11 @@ impl RibManager {
         if !self.dirty_peers.contains(&peer) && self.evpn_grouped_member_of(peer).is_some() {
             self.capture_shared_evpn_admitted(peer);
         }
+        // An evicted group member not yet dirty: the forced table is the
+        // resync tick's to build, as any evicted receiver's.
+        if self.owed_row_evicted.contains(&peer) {
+            self.mark_outbound_dirty(peer);
+        }
         self.set_selection_partial_caught_up(peer, false);
         self.force_outbound_peers.insert(peer);
         self.distribute_changes(&HashSet::new(), &HashSet::new());

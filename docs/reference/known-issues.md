@@ -126,6 +126,10 @@ resolved.
     charged against the receiver's credit, with the End-of-RIB after the
     last step. The evidence is work counts and wire content in unit-level
     tests; no timed run at 150 receivers × 150,000 routes has been made.
+    The fallback for a receiver that falls behind is the unicast one. For
+    a receiver that is also a member of an update group, the resync tick
+    first walks that group's table twice to record what the member was
+    sent, for one such receiver per tick and never in the update pass.
     An EVPN family owned by an update group, and a receiver in a private
     handoff, keep the recovery path and its complete feed.
   - Whole-family sends of the other families, still on main: labeled

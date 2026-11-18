@@ -1562,6 +1562,10 @@ impl RibManager {
         if !owing.owes(family) || (owing.is_whole(family) && !family.has_cursor() && !latch_free) {
             return None;
         }
+        // The cap evicted this cursor: the tick's resync sends the family.
+        if family == OwedFamily::EVPN && self.owed_row_evicted.contains(&peer) {
+            return None;
+        }
         self.owed_drain_scope(peer, owing, family)
     }
 
@@ -1952,8 +1956,12 @@ impl RibManager {
             let Some(owing) = self.owing(peer) else {
                 continue;
             };
+            // An evicted group member's EVPN cursor waits for nothing.
+            let evicted = self.owed_row_evicted.contains(&peer);
             for (index, floor) in floors.iter_mut().enumerate() {
-                if owing.is_whole(OwedFamily::CURSORS[index]) {
+                if owing.is_whole(OwedFamily::CURSORS[index])
+                    && !(evicted && index == OwedFamily::EVPN_CURSOR)
+                {
                     let cursor = owing.cursor[index];
                     *floor = Some(floor.map_or(cursor, |floor| floor.min(cursor)));
                 }
@@ -2047,7 +2055,9 @@ impl RibManager {
     /// so they are dropped first and no receiver is evicted for them.
     /// Nothing is built here, and no later pass builds it either: an
     /// evicted receiver is resynced only by the resync tick, one receiver
-    /// per unit ([`Self::owed_row_evicted`]).
+    /// per unit ([`Self::owed_row_evicted`]). A group member is not made
+    /// dirty here either: the capture of its group's table belongs to the
+    /// tick too.
     pub(super) fn cap_owed_rows(&mut self) {
         for index in 0..OwedFamily::UNICAST.len() {
             self.cap_owed_rows_of(index);
@@ -2084,15 +2094,28 @@ impl RibManager {
             .iter()
             .copied()
             .filter(|&peer| {
-                self.owing(peer)
-                    .is_some_and(|owing| owing.is_whole(family) && owing.cursor[index] < over)
+                !self.owed_row_evicted.contains(&peer)
+                    && self
+                        .owing(peer)
+                        .is_some_and(|owing| owing.is_whole(family) && owing.cursor[index] < over)
             })
             .collect();
         for peer in behind {
             debug!(%peer, ?family, "owed-row list over its cap — receiver resyncs");
+            self.metrics.record_rib_outbound_owing_fallback();
+            // A group member's dirty mark walks its group's table to
+            // capture what it was sent, and this pass may evict many
+            // members: the mark waits for the resync tick, one receiver a
+            // tick ([`Self::promote_evicted_receiver`]). Until its resync
+            // covers the family its debt stays, with a cursor no drain
+            // reads: EVPN passes skip the receiver and its End-of-RIB
+            // waits, as before, while its group's families flow to it.
+            if evpn && self.grouped_member_of(peer).is_some() {
+                self.owed_row_evicted.insert(peer);
+                continue;
+            }
             self.owing_peers.remove(&peer);
             drop(self.take_owing(peer));
-            self.metrics.record_rib_outbound_owing_fallback();
             if self.mark_outbound_dirty(peer) {
                 self.owed_row_evicted.insert(peer);
             }
@@ -2102,6 +2125,36 @@ impl RibManager {
             self.owed_evpn_rows.drop_over(cap);
         } else {
             self.owed_rows[index].drop_over(cap);
+        }
+    }
+
+    /// Whether a group member the cap evicted still waits to be made dirty.
+    pub(super) fn owed_eviction_pending(&self) -> bool {
+        self.owed_row_evicted
+            .iter()
+            .any(|peer| !self.dirty_peers.contains(peer))
+    }
+
+    /// The resync tick makes one evicted group member dirty, and only when
+    /// no evicted receiver already waits for its unit: one capture of a
+    /// group's table per tick, ahead of that receiver's whole-table unit.
+    pub(super) fn promote_evicted_receiver(&mut self) {
+        if self.owed_row_evicted.iter().any(|&peer| {
+            self.dirty_peers.contains(&peer) && !self.selection_partial_caught_up(peer)
+        }) {
+            return;
+        }
+        let next = self
+            .owed_row_evicted
+            .iter()
+            .copied()
+            .filter(|peer| !self.dirty_peers.contains(peer))
+            .min();
+        if let Some(peer) = next
+            && !self.mark_outbound_dirty(peer)
+        {
+            // Its channel is gone.
+            self.drop_peer_owing(peer);
         }
     }
 

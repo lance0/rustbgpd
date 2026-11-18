@@ -2536,6 +2536,10 @@ impl RibManager {
                 Ok(())
             })()
         } else if let Some(group) = gid.and_then(|gid| self.group_ribs.get_mut(&gid)) {
+            #[cfg(test)]
+            {
+                self.adj_rib_out_commit_stats.group_table_captures += 1;
+            }
             let rejected = self.peer_unexportable.get(&peer);
             let limits = self.outbound_prefix_limits.get(&peer);
             let projected: &GroupRibOut = group;

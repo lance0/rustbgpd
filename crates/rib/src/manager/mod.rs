@@ -314,6 +314,10 @@ struct AdjRibOutCommitStats {
     /// Owing peers visited by the owed-row trim and cap scans.
     #[cfg(test)]
     owed_peer_scans: usize,
+    /// Captures of a member's admitted keys from its group's table (two
+    /// walks of the table each).
+    #[cfg(test)]
+    group_table_captures: usize,
     /// EVPN passes that logged their keys for the cursors.
     #[cfg(test)]
     owed_evpn_logs: usize,
@@ -709,8 +713,10 @@ pub struct RibManager {
     owed_rows: [outbound_owing::OwedRows<Prefix>; 2],
     /// The same list for EVPN, keyed by route key.
     owed_evpn_rows: outbound_owing::OwedRows<rustbgpd_wire::EvpnRouteKey>,
-    /// Dirty receivers the owed-row cap evicted
-    /// ([`Self::cap_owed_rows`]). Only the resync tick builds their
+    /// Receivers the owed-row cap evicted ([`Self::cap_owed_rows`]): dirty,
+    /// except a group member, which the resync tick makes dirty one a tick
+    /// and which keeps its debt (and a cursor no drain reads) until its
+    /// resync covers it. Only the resync tick builds their
     /// resync, one receiver per unit: an ordinary pass leaves them dirty,
     /// as it does a receiver whose channel has no room, so a pass never
     /// builds a table for each receiver the cap cut loose. Cleared when the
@@ -4248,6 +4254,7 @@ impl RibManager {
             })
             || self.outbound_limit_recovery_runnable()
             || self.deferred_refresh_pending()
+            || self.owed_eviction_pending()
     }
 
     /// The outcome label of a resync tick that re-arms: `still_dirty` while
@@ -4327,6 +4334,7 @@ impl RibManager {
         let recovered = self.drain_owing_bounded(poll_start) || recovered;
         let recovered = self.owing_runnable() || self.owed_rows_trimming() || recovered;
         let recovered = self.retry_deferred_refreshes(poll_start) || recovered;
+        self.promote_evicted_receiver();
         // Peers whose outbound channel is gone can never resync: drop them
         // before selecting the slice, so a backlog of dead sessions (e.g.
         // after shutdown tore the TCP sessions down) quiesces in one cheap
