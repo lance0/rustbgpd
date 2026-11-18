@@ -23,7 +23,8 @@
 //! itself, so those markers end no window the RIB would have extended.
 //! Smaller burst messages (`--routes-per-update`) share a window, so a
 //! marker goes only behind the message that brings a window begun after
-//! the previous marker to its affected-prefix or message bound, and behind
+//! the previous marker to one of its bounds (distinct affected prefixes,
+//! route entries or messages), and behind
 //! the last; a burst message then counts as ahead until the marker of its
 //! group is answered.
 
@@ -39,8 +40,10 @@ use crate::credit_wire::unicast_index;
 /// window. That is past 4,096 bytes, so the burst source then negotiates
 /// Extended Message.
 const ROWS_PER_UPDATE: usize = 1_024;
-/// The distribution window's affected-prefix and message bounds.
+/// The distribution window's bounds: distinct affected prefixes, route
+/// entries and messages.
 const WINDOW_PREFIXES: usize = 1_024;
+const WINDOW_ROUTES: usize = 4 * WINDOW_PREFIXES;
 const WINDOW_MESSAGES: usize = 256;
 /// Capacity of each half of the tapped channel; the daemon's is 4,096.
 const TAP_CAPACITY: usize = 2_048;
@@ -396,10 +399,15 @@ fn healthy_update(sequence: u32) -> Message {
 /// The burst source's messages in order: every route announced, then the
 /// churn plan's subset withdrawn and half of that announced again at a new
 /// version, so the final table is exact only if the source's order held.
-fn burst_plan(rows: usize, per_update: usize) -> (Vec<(Message, BurstMessage)>, Reference) {
+/// Also returns whether a marker goes behind each message ([`marked`]).
+fn burst_plan(
+    rows: usize,
+    per_update: usize,
+) -> (Vec<(Message, BurstMessage)>, Vec<bool>, Reference) {
     let all: Vec<usize> = (0..rows).collect();
     let (withdrawn, reannounced) = churn_plan(rows);
     let mut plan = Vec::new();
+    let mut prefixes = Vec::new();
     let stages: [(&[usize], bool, u32); 3] = [
         (&all, true, BURST_VERSION),
         (&withdrawn, false, 0),
@@ -417,29 +425,38 @@ fn burst_plan(rows: usize, per_update: usize) -> (Vec<(Message, BurstMessage)>, 
                     first: chunk.first().copied(),
                 },
             ));
+            prefixes.push(chunk);
         }
     }
+    let marked = marked(&prefixes, per_update);
     let reference =
         Reference::churned(rows, BURST_VERSION, &withdrawn, &reannounced, CHURN_VERSION);
-    (plan, reference)
+    (plan, marked, reference)
 }
 
-/// Which burst messages carry a marker behind them: the one that brings a
-/// window begun after the previous marker to the window's affected-prefix
-/// or message bound, where the RIB closes it anyway, and the last. With
+/// Which burst messages carry a marker behind them, given each message's
+/// prefixes: the one that brings a window begun after the previous marker
+/// to a bound where the RIB closes it anyway, and the last. The bounds are
+/// distinct affected prefixes (a churn tail that withdraws and announces a
+/// prefix again counts it once), route entries and messages. With
 /// 1,024-route messages, every one, the tail's shorter messages included.
-fn marked(burst: &[BurstMessage], per_update: usize) -> Vec<bool> {
+fn marked(burst: &[&[usize]], per_update: usize) -> Vec<bool> {
     if per_update >= WINDOW_PREFIXES {
         return vec![true; burst.len()];
     }
+    let mut affected = HashSet::new();
     let (mut routes, mut messages) = (0, 0);
     let mut marked: Vec<bool> = burst
         .iter()
-        .map(|message| {
-            routes += message.announced + message.withdrawn;
+        .map(|&message| {
+            affected.extend(message.iter().copied());
+            routes += message.len();
             messages += 1;
-            let closes = routes >= WINDOW_PREFIXES || messages >= WINDOW_MESSAGES;
+            let closes = affected.len() >= WINDOW_PREFIXES
+                || routes >= WINDOW_ROUTES
+                || messages >= WINDOW_MESSAGES;
             if closes {
+                affected.clear();
                 (routes, messages) = (0, 0);
             }
             closes
@@ -560,10 +577,9 @@ pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<b
     // Burst receivers, the healthy receiver, then the two sources, which
     // are sessions like the others and are exported nothing.
     let (healthy, burst_source, healthy_source) = (receivers, receivers + 1, receivers + 2);
-    let (plan, reference) = burst_plan(rows, per_update);
+    let (plan, marked, reference) = burst_plan(rows, per_update);
     let reference = Arc::new(reference);
     let expected: Vec<BurstMessage> = plan.iter().map(|&(_, message)| message).collect();
-    let marked = marked(&expected, per_update);
     let burst_markers = marked.iter().filter(|&&mark| mark).count();
     let extended = plan.iter().any(|(message, _)| {
         matches!(message, Message::Update(update)
@@ -1115,7 +1131,7 @@ mod tests {
 
     #[test]
     fn burst_plan_ends_with_an_order_sensitive_tail() {
-        let (plan, _) = burst_plan(2_500, ROWS_PER_UPDATE);
+        let (plan, marks, _) = burst_plan(2_500, ROWS_PER_UPDATE);
         let shape: Vec<_> = plan
             .iter()
             .map(|(_, m)| (m.announced, m.withdrawn, m.first))
@@ -1144,13 +1160,22 @@ mod tests {
             full.encoded_len() > 4_096,
             "a full message needs Extended Message"
         );
-        let messages: Vec<BurstMessage> = plan.iter().map(|&(_, message)| message).collect();
-        assert_eq!(marked(&messages, ROWS_PER_UPDATE), [true; 5], "as before");
+        assert_eq!(marks, [true; 5], "every message, as before");
+    }
+
+    /// Positions (1-based) of the messages a marker goes behind.
+    fn marker_positions(burst: &[Vec<usize>], per_update: usize) -> Vec<usize> {
+        let burst: Vec<&[usize]> = burst.iter().map(Vec::as_slice).collect();
+        marked(&burst, per_update)
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &mark)| mark.then_some(index + 1))
+            .collect()
     }
 
     #[test]
     fn small_updates_carry_the_remainder_and_share_a_marker_per_window() {
-        let (plan, _) = burst_plan(2_550, 100);
+        let (plan, marks, _) = burst_plan(2_550, 100);
         let shape: Vec<_> = plan
             .iter()
             .map(|(_, m)| (m.announced, m.withdrawn, m.first))
@@ -1175,30 +1200,32 @@ mod tests {
                 "a 100-route message needs no Extended Message"
             );
         }
-        // A marker where 1,024 routes have accumulated since the last one
+        // A marker where 1,024 prefixes have accumulated since the last one
         // (the 11th and 22nd messages), and behind the last.
-        let messages: Vec<BurstMessage> = plan.iter().map(|&(_, message)| message).collect();
-        let marks: Vec<usize> = marked(&messages, 100)
+        let marks: Vec<usize> = marks
             .iter()
             .enumerate()
             .filter_map(|(index, &mark)| mark.then_some(index + 1))
             .collect();
         assert_eq!(marks, [11, 22, 28]);
         // One-route messages: the window's message bound closes it first.
-        let single = vec![
-            BurstMessage {
-                announced: 1,
-                withdrawn: 0,
-                first: None,
-            };
-            600
-        ];
-        let marks: Vec<usize> = marked(&single, 1)
-            .iter()
-            .enumerate()
-            .filter_map(|(index, &mark)| mark.then_some(index + 1))
-            .collect();
-        assert_eq!(marks, [256, 512, 600]);
+        let single: Vec<Vec<usize>> = (0..600).map(|index| vec![index]).collect();
+        assert_eq!(marker_positions(&single, 1), [256, 512, 600]);
+    }
+
+    /// The window's affected-prefix bound counts distinct prefixes: a churn
+    /// tail that withdraws prefixes and announces them again counts each
+    /// once, so a marker there would close a window the RIB extends.
+    #[test]
+    fn markers_count_distinct_prefixes_not_route_entries() {
+        let withdrawn: Vec<usize> = (0..600).collect();
+        let fresh: Vec<usize> = (600..1_100).collect();
+        let tail = [withdrawn.clone(), withdrawn.clone(), fresh, vec![2_000]];
+        // 1,200 entries but 600 prefixes after the second message.
+        assert_eq!(marker_positions(&tail, 100), [3, 4]);
+        // The route-entry bound (4,096) still closes a window first.
+        let repeated = vec![(0..1_000).collect::<Vec<usize>>(); 6];
+        assert_eq!(marker_positions(&repeated, 100), [5, 6]);
     }
 
     /// A message whose group's marker is unanswered still counts as ahead.

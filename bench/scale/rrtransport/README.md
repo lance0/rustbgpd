@@ -729,8 +729,10 @@ At small N the instrument changes in three ways:
 
 - A marker behind every burst message would end every window after one
   message. The tap instead puts a marker behind the message that brings a
-  window begun after the previous marker to 1,024 routes or 256 messages,
-  where the RIB closes it anyway, and behind the last (`shape.burst_markers`).
+  window begun after the previous marker to 1,024 distinct prefixes (a
+  prefix withdrawn and announced again in the churn tail counts once),
+  4,096 route entries or 256 messages, where the RIB closes it anyway, and
+  behind the last (`shape.burst_markers`).
   A window that a healthy update or the 5 ms bound started mid-group still
   ends at the next marker, short of its bound.
 - `burst_ahead` counts a message as ahead until its group's marker is
