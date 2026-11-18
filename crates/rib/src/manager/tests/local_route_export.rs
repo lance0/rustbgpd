@@ -2505,6 +2505,7 @@ fn dormant_selection_arming_replays_frozen_routes_to_late_joiners() {
     fn check_advertised(manager: &mut RibManager, peer: PeerId, expected: &BTreeSet<Prefix>) {
         let (reply, mut response) = oneshot::channel();
         manager.handle_update(RibUpdate::QueryRoutesPage {
+            accept_releasing: false,
             scope: crate::update::RouteQueryScope::Advertised { peer },
             filter: None,
             after: None,

@@ -625,6 +625,7 @@ async fn import_policy_filters_aspa_invalid_with_snapshot() {
 async fn received_validation_routes(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> Vec<Route> {
     let (reply, response) = oneshot::channel();
     tx.send(RibUpdate::QueryRoutesPage {
+        accept_releasing: false,
         scope: rustbgpd_rib::RouteQueryScope::Received {
             peer: Some(PeerId::from_addr(peer)),
         },

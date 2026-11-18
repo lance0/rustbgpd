@@ -515,8 +515,56 @@ fn recorder_growth_is_bounded(recorder: Recorder) {
 }
 
 #[test]
-fn unicast_selection_recorder_growth_is_bounded() {
-    recorder_growth_is_bounded(Recorder::Unicast);
+fn unicast_selection_recorder_charges_each_distinct_prefix_once() {
+    let mut manager = recording_manager(vec![UNICAST]);
+    let count = u32::try_from(crate::fast_hash::SHARD_SPLIT_AT * 2).unwrap();
+    for index in (0..count).rev().chain(0..count) {
+        Recorder::Unicast.record(&mut manager, index);
+    }
+    let count = count as usize;
+    assert_eq!(
+        manager.deferred_selection_storage_shape_for_test(UNICAST).0,
+        count
+    );
+    assert_eq!(
+        manager.deferred_selection_ledger_state_for_test(UNICAST),
+        (count * size_of::<Prefix>(), false)
+    );
+}
+
+#[test]
+fn rearmed_walk_reclaims_its_committed_key_charges_before_recording_again() {
+    let ipv6 = (Afi::Ipv6, Safi::Unicast);
+    let mut manager = recording_manager(vec![UNICAST, ipv6]);
+    let charge = size_of::<Prefix>();
+    manager.set_deferred_selection_limits_for_test(3, 3 * charge);
+    let committed = recording_prefix(1, false);
+    let pending = recording_prefix(2, false);
+    let sibling = recording_prefix(3, true);
+    manager.record_deferred_unicast(&HashSet::from([committed, pending, sibling]));
+
+    manager.retire_unicast_release_key(committed);
+    assert_eq!(
+        manager.deferred_selection_ledger_state_for_test(UNICAST),
+        (3 * charge, false)
+    );
+    // Reclassifying a waiter starts a fresh v4 hold. The already committed
+    // key can reappear without double charging; the pending vanished key and
+    // the v6 sibling keep their charges.
+    manager.reselect_newly_deferred_local(&HashSet::from([ipv6]));
+    assert_eq!(
+        manager.deferred_selection_ledger_state_for_test(UNICAST),
+        (2 * charge, false)
+    );
+    manager.record_deferred_unicast(&HashSet::from([committed]));
+    assert_eq!(
+        manager.deferred_selection_ledger_state_for_test(UNICAST),
+        (3 * charge, false)
+    );
+    assert_eq!(
+        manager.deferred_selection_storage_shape_for_test(UNICAST).0,
+        3
+    );
 }
 
 #[test]
@@ -750,8 +798,119 @@ fn release_destination_growth_is_bounded(recorder: Recorder) {
 }
 
 #[test]
-fn unicast_release_destination_growth_is_bounded() {
-    release_destination_growth_is_bounded(Recorder::Unicast);
+fn unicast_release_inventory_charges_sparse_sources_and_duplicate_keys() {
+    let ipv6 = (Afi::Ipv6, Safi::Unicast);
+    let mut manager = recording_manager(vec![UNICAST, ipv6]);
+    let source = peer_v4(SOURCE);
+    let other = peer_v4(Ipv4Addr::new(192, 0, 2, 111));
+    let retired = peer_v4(Ipv4Addr::new(192, 0, 2, 112));
+    let mut expected: HashSet<_> = manager.loc_rib.prefixes().collect();
+    let duplicate = recording_unicast(1, false);
+    let default_v6 = Prefix::V6(Ipv6Prefix::new(Ipv6Addr::UNSPECIFIED, 0));
+    for peer in [source, other, retired] {
+        let mut route = duplicate.clone();
+        set_peer(&mut route, peer);
+        for path in 0..128 {
+            route.path_id = path;
+            manager
+                .ribs
+                .entry(peer)
+                .or_insert_with(|| AdjRibIn::new(peer))
+                .insert(route.clone());
+        }
+        manager.register_unicast_announcer(peer, route.prefix);
+        route.prefix = default_v6;
+        manager.ribs.get_mut(&peer).unwrap().insert(route);
+        manager.register_unicast_announcer(peer, default_v6);
+    }
+    manager.unicast_prefix_peers.retire_peer(retired);
+    manager.ribs.remove(&retired);
+    expected.insert(duplicate.prefix);
+    let vanished = recording_prefix(2, false);
+    expected.insert(vanished);
+    // The release owns the vanished identity until its downstream commit.
+    manager.record_deferred_unicast(&HashSet::from([duplicate.prefix, vanished, default_v6]));
+    let frozen = recording_unicast(3, false);
+    assert!(
+        manager
+            .loc_rib
+            .recompute(frozen.prefix, std::iter::once(&frozen))
+    );
+    expected.insert(frozen.prefix);
+    manager.mark_deferred_selection_overflow_for_test(UNICAST);
+
+    // One unfinished walk can be discarded before any key has committed.
+    let mut canceled = manager.unicast_release_inventory(Afi::Ipv4);
+    loop {
+        let (keys, done) = manager.next_unicast_release_batch(&mut canceled, 1);
+        if keys.contains(&vanished) {
+            break;
+        }
+        assert!(!done);
+    }
+
+    let mut inventory = manager.unicast_release_inventory(Afi::Ipv4);
+    let mut received = HashSet::new();
+    loop {
+        let before = inventory.source_steps;
+        let (batch, done) = manager.next_unicast_release_batch(&mut inventory, 1);
+        assert!(batch.len() <= 1);
+        assert_eq!(inventory.source_steps - before, usize::from(!done));
+        for prefix in batch {
+            assert!(received.insert(prefix), "duplicate release of {prefix}");
+            manager.retire_unicast_release_key(prefix);
+        }
+        if done {
+            break;
+        }
+    }
+    assert_eq!(received, expected);
+    // Five source seeks (ledger, frozen, three epochs), two ledger keys,
+    // three frozen rows and four input prefixes. Add-Path siblings cost
+    // no inventory steps; the repeated prefix costs one step per source.
+    assert_eq!(inventory.source_steps, 5 + 2 + 3 + 4);
+    let mut inventory = manager.unicast_release_inventory(Afi::Ipv6);
+    let (keys, done) = manager.next_unicast_release_batch(&mut inventory, 10);
+    assert!(done);
+    assert_eq!(keys, HashSet::from([default_v6]));
+}
+
+#[test]
+fn parked_inventory_source_cannot_resume_on_a_replacement_incarnation() {
+    let mut manager = recording_manager(vec![UNICAST]);
+    let old = recording_unicast(1, false);
+    let new = recording_unicast(2, false);
+    let reused_peer = peer_v4(Ipv4Addr::new(192, 0, 2, 111));
+    let install = |manager: &mut RibManager, mut route: Route| {
+        let prefix = route.prefix;
+        set_peer(&mut route, reused_peer);
+        manager
+            .ribs
+            .entry(reused_peer)
+            .or_insert_with(|| AdjRibIn::new(reused_peer))
+            .insert(route);
+        manager.register_unicast_announcer(reused_peer, prefix);
+    };
+    install(&mut manager, old.clone());
+    let mut inventory = manager.unicast_release_inventory(Afi::Ipv4);
+    let (seeded, done) = manager.next_unicast_release_batch(&mut inventory, 3);
+    assert!(
+        seeded.is_empty() && !done,
+        "ledger and two live input sources initialized"
+    );
+
+    manager.ribs.remove(&reused_peer);
+    manager.unicast_prefix_peers.retire_peer(reused_peer);
+    install(&mut manager, new.clone());
+
+    // The key already on the frontier is re-evaluated by identity. The
+    // replacement's own UPDATE handles its new prefix; the retired seek
+    // must never advance into the new incarnation.
+    let (keys, done) = manager.next_unicast_release_batch(&mut inventory, 16);
+    assert!(done && keys.contains(&old.prefix) && !keys.contains(&new.prefix));
+    let mut restarted = manager.unicast_release_inventory(Afi::Ipv4);
+    let (keys, done) = manager.next_unicast_release_batch(&mut restarted, 16);
+    assert!(done && !keys.contains(&old.prefix) && keys.contains(&new.prefix));
 }
 
 #[test]

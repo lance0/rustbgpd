@@ -31,6 +31,13 @@ fn ancestor_probe_lengths(query: &Prefix) -> impl Iterator<Item = u8> {
     (0..=query.prefix_len().min(family_max)).rev()
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OrderedIndexMode {
+    Lazy,
+    StartupRelease,
+    Dataplane,
+}
+
 /// The local RIB storing the best route per prefix.
 pub struct LocRib {
     /// Best route per prefix, paired with its wall-clock install time —
@@ -47,7 +54,7 @@ pub struct LocRib {
     /// per hit) for only ~4 MiB of the ~19 MiB the Adj-RIB slab conversion
     /// saved at the 2p×100k profile shape.
     routes: ShardedMap<Prefix, (Route, SystemTime)>,
-    /// Compact ordered prefix index used only by resumable route listings.
+    /// Compact ordered prefix index for resumable listings and release walks.
     /// The lookup-hot best-path table stays hash-backed; this second index
     /// adds ordered continuation without retaining per-walk snapshots.
     ///
@@ -64,10 +71,9 @@ pub struct LocRib {
     /// rebuilding, and an unqueried flapping table must not grow the journal
     /// without bound). The next listing rebuilds the index from scratch.
     ordered_rebuild: bool,
-    /// Whether the ordered prefix index is maintained eagerly for bounded
-    /// internal dataplane walks. This mode is opt-in on an empty manager;
-    /// ordinary route listings retain the lazy journal/rebuild path above.
-    dataplane_index_eager: bool,
+    /// Dataplane readers keep the index eager throughout. A startup
+    /// unicast gate needs it only until the last family releases.
+    ordered_index_mode: OrderedIndexMode,
     /// `FlowSpec` Loc-RIB: best route per `FlowSpec` rule.
     flowspec_routes: HashMap<FlowSpecKey, FlowSpecRoute>,
     /// EVPN Loc-RIB: best route per RFC 7432 route identity.
@@ -159,7 +165,7 @@ impl LocRib {
             // never allocates on the hot path.
             ordered_journal: Vec::with_capacity(ORDERED_JOURNAL_MIN_CAP),
             ordered_rebuild: false,
-            dataplane_index_eager: false,
+            ordered_index_mode: OrderedIndexMode::Lazy,
             flowspec_routes: HashMap::default(),
             evpn_routes: ShardedMap::default(),
             evpn_es_keys: std::collections::BTreeSet::new(),
@@ -235,7 +241,7 @@ impl LocRib {
     /// also bounds journal memory when no listing ever runs.
     #[inline]
     fn note_membership_change(&mut self, prefix: Prefix) {
-        if self.dataplane_index_eager {
+        if self.ordered_index_mode != OrderedIndexMode::Lazy {
             if self.routes.contains_key(&prefix) {
                 self.ordered_prefixes.entry_or_default(prefix);
             } else {
@@ -323,6 +329,30 @@ impl LocRib {
             .filter(move |route| after.is_none_or(|cursor| route_query_key(route) > cursor))
     }
 
+    /// Called when the startup roster is installed, before the actor runs.
+    /// An embedding that installs it on a seeded manager pays any existing
+    /// listing-index synchronization here, outside the release turn.
+    pub(crate) fn set_release_index_eager(&mut self, enabled: bool) {
+        match (self.ordered_index_mode, enabled) {
+            (OrderedIndexMode::Lazy, true) => {
+                self.sync_ordered_index();
+                self.ordered_index_mode = OrderedIndexMode::StartupRelease;
+            }
+            (OrderedIndexMode::StartupRelease, false) => {
+                self.ordered_index_mode = OrderedIndexMode::Lazy;
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn release_prefixes_from(
+        &self,
+        start: Option<Prefix>,
+    ) -> impl Iterator<Item = Prefix> {
+        debug_assert!(self.ordered_index_mode != OrderedIndexMode::Lazy);
+        self.ordered_prefixes.iter_from(start).map(|(key, ())| key)
+    }
+
     /// Enable eager ordered-prefix maintenance for internal dataplane pages.
     ///
     /// The caller must select this mode before any unicast best route exists;
@@ -336,13 +366,13 @@ impl LocRib {
         {
             return false;
         }
-        self.dataplane_index_eager = true;
+        self.ordered_index_mode = OrderedIndexMode::Dataplane;
         true
     }
 
     /// Whether bounded dataplane pages may read the eager index.
     pub(crate) const fn dataplane_prefix_index_enabled(&self) -> bool {
-        self.dataplane_index_eager
+        matches!(self.ordered_index_mode, OrderedIndexMode::Dataplane)
     }
 
     /// Iterate live best routes strictly after a prefix cursor without
@@ -353,7 +383,7 @@ impl LocRib {
         &self,
         after: Option<Prefix>,
     ) -> impl Iterator<Item = &Route> {
-        debug_assert!(self.dataplane_index_eager);
+        debug_assert!(self.dataplane_prefix_index_enabled());
         self.ordered_prefixes
             .iter_after(after)
             .filter_map(|(prefix, ())| self.routes.get(&prefix).map(|(route, _)| route))
@@ -412,7 +442,7 @@ impl LocRib {
     #[cfg(test)]
     pub(crate) fn dataplane_index_probe(&self) -> (bool, usize, usize, bool) {
         (
-            self.dataplane_index_eager,
+            self.dataplane_prefix_index_enabled(),
             self.ordered_prefixes.iter_from(None).count(),
             self.ordered_journal.len(),
             self.ordered_rebuild,
@@ -3056,6 +3086,33 @@ mod tests {
         // The next listing resolves both journal entries (-1 +1 = n rows).
         assert_eq!(loc.iter_ordered_from(None).count(), n);
         assert_eq!(loc.ordered_index_probe(), (n, 0));
+    }
+
+    #[test]
+    fn release_index_tracks_frozen_winners_until_the_gate_closes() {
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 10, 0, 0), 16);
+        let route = make_route(1, prefix, 100);
+        for dataplane in [false, true] {
+            let mut loc = LocRib::new();
+            if dataplane {
+                assert!(loc.enable_dataplane_prefix_index());
+            }
+            assert!(loc.recompute(route.prefix, std::iter::once(&route)));
+            loc.set_release_index_eager(true);
+            assert_eq!(
+                loc.release_prefixes_from(None).collect::<Vec<_>>(),
+                [route.prefix]
+            );
+            assert_eq!(loc.dataplane_prefix_index_enabled(), dataplane);
+
+            loc.set_release_index_eager(false);
+            assert!(loc.recompute(route.prefix, std::iter::empty()));
+            assert_eq!(loc.dataplane_prefix_index_enabled(), dataplane);
+            assert_eq!(
+                loc.ordered_index_probe(),
+                if dataplane { (0, 0) } else { (1, 1) }
+            );
+        }
     }
 
     #[test]

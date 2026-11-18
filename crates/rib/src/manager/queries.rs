@@ -363,6 +363,7 @@ pub(super) fn page_routes<'a, F: Fn(&crate::route::Route) -> bool + ?Sized>(
         .collect();
     let has_more = remaining > routes.len() as u64;
     RoutePage {
+        releasing: [false; 2],
         peer_scope: crate::PeerScope::capture(),
         routes,
         total,
@@ -469,6 +470,7 @@ fn page_ordered_routes<'a>(
     let has_more = routes.len() > n;
     routes.truncate(n);
     RoutePage {
+        releasing: [false; 2],
         peer_scope: crate::PeerScope::capture(),
         routes,
         total,
@@ -548,6 +550,7 @@ where
     let has_more = routes.len() > n;
     routes.truncate(n);
     RoutePage {
+        releasing: [false; 2],
         peer_scope: crate::PeerScope::capture(),
         routes,
         total,
@@ -1253,6 +1256,7 @@ impl RibManager {
             debug!("route page query canceled before scan; skipping");
             return;
         }
+        let releasing = [Afi::Ipv4, Afi::Ipv6].map(|afi| self.unicast_release_in_progress(afi));
         let version = match self.route_page_version(scope) {
             Ok(version) => version,
             Err(error) => {
@@ -1282,7 +1286,11 @@ impl RibManager {
                 let page = page_routes(baseline.unicast.values(), filter, after, page_size);
                 // Advertised rows carry outbound path IDs, so they are not
                 // tagged; see `tag_injected_rows`.
-                let _ = reply.send(Ok(RoutePage { version, ..page }));
+                let _ = reply.send(Ok(RoutePage {
+                    releasing,
+                    version,
+                    ..page
+                }));
                 return;
             }
         }
@@ -1444,7 +1452,11 @@ impl RibManager {
                 }
             }
         };
-        let mut page = RoutePage { version, ..page };
+        let mut page = RoutePage {
+            releasing,
+            version,
+            ..page
+        };
         if let RouteQueryScope::Advertised { peer } = scope {
             self.rewrite_grouped_advertised_rows(peer, &mut page.routes);
         } else {
@@ -4250,7 +4262,7 @@ impl RibManager {
         &mut self,
         reply: tokio::sync::oneshot::Sender<usize>,
     ) {
-        let _ = reply.send(self.loc_rib.len());
+        let _ = reply.send(self.completed_loc_rib_count());
     }
     pub(super) fn handle_query_advertised_count(
         &mut self,

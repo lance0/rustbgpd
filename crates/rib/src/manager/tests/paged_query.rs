@@ -36,6 +36,7 @@ async fn query_page_at(
 ) -> Result<RoutePage, RoutePageError> {
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::QueryRoutesPage {
+        accept_releasing: false,
         scope,
         filter,
         after,
@@ -53,6 +54,7 @@ fn public_route_query_filter_and_command_remain_closure_compatible() {
     let f: RouteQueryFilter = Box::new(|_: &Route| true);
     let (reply, _receiver) = oneshot::channel();
     let _query = RibUpdate::QueryRoutesPage {
+        accept_releasing: false,
         scope: RouteQueryScope::Best,
         filter: Some(f),
         after: None,
@@ -884,6 +886,7 @@ async fn canceled_paged_query_skips_the_scan() {
     let (reply_tx, reply_rx) = oneshot::channel();
     drop(reply_rx); // caller gone before the actor dequeues the query
     tx.send(RibUpdate::QueryRoutesPage {
+        accept_releasing: false,
         scope: RouteQueryScope::Received { peer: None },
         filter: Some(Box::new(move |_: &Route| {
             probe_in_filter.fetch_add(1, Ordering::Relaxed);

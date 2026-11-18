@@ -1096,6 +1096,7 @@ async fn read_back_captures_tags_with_the_snapshot() {
 
     let (reply, rx) = oneshot::channel();
     h.tx.send(RibUpdate::QueryRoutesPage {
+        accept_releasing: false,
         scope: RouteQueryScope::Received {
             peer: Some(LOCAL_PEER),
         },
@@ -1386,6 +1387,7 @@ fn lease_variants_do_not_grow_rib_update() {
 async fn route_page(tx: &mpsc::Sender<RibUpdate>, scope: RouteQueryScope) -> RoutePage {
     let (reply, rx) = oneshot::channel();
     tx.send(RibUpdate::QueryRoutesPage {
+        accept_releasing: false,
         scope,
         filter: None,
         after: None,

@@ -65,6 +65,7 @@ fn make_route_request(
     };
 
     Ok(ListRoutesRequest {
+        accept_releasing: false,
         neighbor_address: neighbor.unwrap_or_default().to_string(),
         afi_safi: family.unwrap_or(0),
         page_size: 0,
@@ -231,6 +232,7 @@ pub(super) fn check_page_token(seen: &mut HashSet<String>, next: &str) -> Result
 }
 
 struct RouteListing {
+    releasing_families: Option<Vec<&'static str>>,
     routes: Vec<Route>,
     total_count: u64,
     next_page_token: String,
@@ -248,17 +250,26 @@ struct RouteListing {
 async fn fetch_route_listing(
     client: &mut RibClient,
     rpc: &RouteListRpc,
-    req: ListRoutesRequest,
+    mut req: ListRoutesRequest,
     limit: Option<u32>,
 ) -> Result<RouteListing, CliError> {
     let mut routes = Vec::new();
     let continued = !req.page_token.is_empty();
-    let (total_count, next_page_token) = walk_route_pages(client, rpc, req, limit, |page| {
-        routes.extend(page);
-        Ok(())
-    })
-    .await?;
+    req.accept_releasing = limit.is_some();
+    let (total_count, next_page_token, releasing) =
+        walk_route_pages(client, rpc, req, limit, |page| {
+            routes.extend(page);
+            Ok(())
+        })
+        .await?;
     Ok(RouteListing {
+        releasing_families: releasing.map(|state| {
+            state
+                .releasing_families
+                .into_iter()
+                .map(output::format_family)
+                .collect()
+        }),
         routes,
         total_count,
         next_page_token,
@@ -276,7 +287,7 @@ async fn walk_route_pages(
     mut req: ListRoutesRequest,
     limit: Option<u32>,
     mut consume: impl FnMut(Vec<Route>) -> Result<(), CliError>,
-) -> Result<(u64, String), CliError> {
+) -> Result<(u64, String, Option<crate::proto::SelectionReleaseState>), CliError> {
     req.page_size = limit.unwrap_or(ROUTE_PAGE_SIZE);
     let mut seen_tokens = HashSet::from([req.page_token.clone()]);
     loop {
@@ -308,7 +319,7 @@ async fn walk_route_pages(
         routes.iter_mut().for_each(scope_route);
         consume(routes)?;
         if limit.is_some() || resp.next_page_token.is_empty() {
-            return Ok((total_count, resp.next_page_token));
+            return Ok((total_count, resp.next_page_token, resp.selection_release));
         }
         req.page_token = resp.next_page_token;
     }
@@ -362,20 +373,21 @@ async fn write_route_json_lines(
         },
     )?;
     let mut returned_count = 0;
-    let (total_count, next_page_token) = walk_route_pages(client, &rpc, request, limit, |page| {
-        for route in page {
-            output::write_json_line(
-                writer,
-                &JsonLinesRoute {
-                    r#type: "route",
-                    route: JsonRouteRef(&route),
-                },
-            )?;
-            returned_count += 1;
-        }
-        Ok(())
-    })
-    .await?;
+    let (total_count, next_page_token, _) =
+        walk_route_pages(client, &rpc, request, limit, |page| {
+            for route in page {
+                output::write_json_line(
+                    writer,
+                    &JsonLinesRoute {
+                        r#type: "route",
+                        route: JsonRouteRef(&route),
+                    },
+                )?;
+                returned_count += 1;
+            }
+            Ok(())
+        })
+        .await?;
     output::write_json_line(
         writer,
         &JsonLinesEnd {
@@ -654,12 +666,28 @@ fn print_routes(
 
 #[derive(Serialize)]
 struct JsonBoundedRoutes<'a> {
+    /// Startup selection is publishing these families. Pagination may still be complete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    releasing_families: Option<&'a [&'static str]>,
     routes: JsonRoutes<'a>,
     returned_count: u64,
     total_count: u64,
     complete: bool,
     /// Pass to `--page-token` with the same `--limit` and filters; empty when complete.
     next_page_token: &'a str,
+}
+
+impl<'a> From<&'a RouteListing> for JsonBoundedRoutes<'a> {
+    fn from(listing: &'a RouteListing) -> Self {
+        Self {
+            releasing_families: listing.releasing_families.as_deref(),
+            routes: JsonRoutes(&listing.routes),
+            returned_count: listing.routes.len() as u64,
+            total_count: listing.total_count,
+            complete: listing.next_page_token.is_empty(),
+            next_page_token: &listing.next_page_token,
+        }
+    }
 }
 
 fn print_route_listing(
@@ -672,13 +700,7 @@ fn print_route_listing(
         if listing.limit.is_none() {
             return print_routes(&listing.routes, show_age, true);
         }
-        return output::print_json_pretty(&JsonBoundedRoutes {
-            routes: JsonRoutes(&listing.routes),
-            returned_count: listing.routes.len() as u64,
-            total_count: listing.total_count,
-            complete: listing.next_page_token.is_empty(),
-            next_page_token: &listing.next_page_token,
-        });
+        return output::print_json_pretty(&JsonBoundedRoutes::from(listing));
     }
 
     pager::write_payload(pager_mode, &render_human_route_listing(listing, show_age))
@@ -693,11 +715,24 @@ fn render_human_route_listing(listing: &RouteListing, show_age: bool) -> String 
         };
     };
 
+    let mut payload = if listing.routes.is_empty() {
+        "No matching routes.\n".to_string()
+    } else {
+        output::render_route_table_text(&listing.routes, show_age)
+    };
+    match listing.releasing_families.as_deref() {
+        Some([]) => {}
+        Some(families) => {
+            payload.push_str("Selection releasing: ");
+            payload.push_str(&families.join(", "));
+            payload.push('\n');
+        }
+        None => payload.push_str("Startup selection release status unavailable.\n"),
+    }
     if listing.routes.is_empty() {
-        return "No matching routes.\n".to_string();
+        return payload;
     }
 
-    let mut payload = output::render_route_table_text(&listing.routes, show_age);
     let returned = listing.routes.len();
     let total = listing.total_count;
     payload.push_str(
@@ -3216,12 +3251,14 @@ mod tests {
                 };
                 *server.state.list_route_pages.lock().await = vec![
                     rustbgpd_api::proto::ListRoutesResponse {
+                        selection_release: None,
                         routes: vec![route.clone()],
                         next_page_token: "opaque-second".into(),
                         total_count: 2,
                         page_version: None,
                     },
                     rustbgpd_api::proto::ListRoutesResponse {
+                        selection_release: None,
                         routes: vec![rustbgpd_api::proto::Route {
                             path_id: 8,
                             ..route
@@ -5455,6 +5492,7 @@ mod tests {
         next_page_token: &str,
     ) -> rustbgpd_api::proto::ListRoutesResponse {
         rustbgpd_api::proto::ListRoutesResponse {
+            selection_release: None,
             routes: vec![rustbgpd_api::proto::Route {
                 prefix: prefix.to_string(),
                 prefix_length: 24,
@@ -5483,6 +5521,7 @@ mod tests {
 
     fn count_page(total_count: u64) -> rustbgpd_api::proto::ListRoutesResponse {
         rustbgpd_api::proto::ListRoutesResponse {
+            selection_release: None,
             routes: vec![rustbgpd_api::proto::Route {
                 prefix: "2001:db8::".to_string(),
                 prefix_length: 32,
@@ -5497,6 +5536,7 @@ mod tests {
     }
 
     fn assert_count_request(request: &rustbgpd_api::proto::ListRoutesRequest, neighbor: &str) {
+        assert!(!request.accept_releasing);
         assert_eq!(request.neighbor_address, neighbor);
         assert_eq!(request.afi_safi, AddressFamily::Ipv6Unicast as i32);
         assert_eq!(request.page_size, 1);
@@ -5764,6 +5804,51 @@ mod tests {
         assert!(requests[0].page_token.is_empty());
     }
 
+    #[tokio::test]
+    async fn bounded_listing_marks_an_empty_releasing_family() {
+        let server = spawn_mock_server(None).await;
+        server
+            .state
+            .list_route_pages
+            .lock()
+            .await
+            .push(rustbgpd_api::proto::ListRoutesResponse {
+                selection_release: Some(rustbgpd_api::proto::SelectionReleaseState {
+                    releasing_families: vec![
+                        rustbgpd_api::proto::AddressFamily::Ipv6Unicast as i32,
+                    ],
+                }),
+                ..Default::default()
+            });
+        let mut client = connect(&server.addr, None)
+            .await
+            .unwrap()
+            .rib_listing_client();
+        let listing = fetch_route_listing(
+            &mut client,
+            &RouteListRpc::Best,
+            ListRoutesRequest::default(),
+            Some(1),
+        )
+        .await
+        .unwrap();
+        assert!(server.state.list_route_requests.lock().await[0].accept_releasing);
+        assert_eq!(
+            listing.releasing_families.as_deref(),
+            Some(["ipv6_unicast"].as_slice())
+        );
+        assert_eq!(
+            render_human_route_listing(&listing, false),
+            "No matching routes.\nSelection releasing: ipv6_unicast\n"
+        );
+        let page = serde_json::to_value(JsonBoundedRoutes::from(&listing)).unwrap();
+        assert_eq!(
+            page["releasing_families"],
+            serde_json::json!(["ipv6_unicast"])
+        );
+        assert_eq!(page["complete"], true);
+    }
+
     /// `--limit` + `--page-token` round trip: the first page prints the
     /// server's continuation, and passing it back resumes from it.
     #[tokio::test]
@@ -5817,6 +5902,7 @@ mod tests {
     #[test]
     fn bounded_route_json_exposes_completeness() {
         let listing = RouteListing {
+            releasing_families: None,
             routes: vec![crate::proto::Route {
                 prefix: "10.0.0.0".to_string(),
                 prefix_length: 24,
@@ -5827,14 +5913,8 @@ mod tests {
             continued: false,
             limit: Some(1),
         };
-        let value = serde_json::to_value(JsonBoundedRoutes {
-            routes: JsonRoutes(&listing.routes),
-            returned_count: listing.routes.len() as u64,
-            total_count: listing.total_count,
-            complete: listing.next_page_token.is_empty(),
-            next_page_token: &listing.next_page_token,
-        })
-        .unwrap();
+        assert!(render_human_route_listing(&listing, false).contains("release status unavailable"));
+        let value = serde_json::to_value(JsonBoundedRoutes::from(&listing)).unwrap();
         assert_eq!(
             value,
             serde_json::json!({
@@ -5848,6 +5928,7 @@ mod tests {
     #[test]
     fn bounded_human_listing_keeps_table_then_footer_bytes() {
         let listing = RouteListing {
+            releasing_families: Some(Vec::new()),
             routes: vec![crate::proto::Route {
                 prefix: "10.0.0.0".to_string(),
                 prefix_length: 24,
@@ -5858,6 +5939,8 @@ mod tests {
             continued: false,
             limit: Some(1),
         };
+        let page = serde_json::to_value(JsonBoundedRoutes::from(&listing)).unwrap();
+        assert_eq!(page["releasing_families"], serde_json::json!([]));
         let table = output::render_route_table_text(&listing.routes, false);
         assert_eq!(
             render_human_route_listing(&listing, false),
@@ -5892,5 +5975,6 @@ mod tests {
 
         let requests = server.state.list_route_requests.lock().await;
         assert_eq!(requests.len(), 1);
+        assert!(!requests[0].accept_releasing);
     }
 }

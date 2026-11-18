@@ -1078,7 +1078,7 @@ impl RibManager {
                 }
                 LIMITED_FAMILIES.into_iter().any(|afi| {
                     families.contains(&afi)
-                        && !self.selection_convergence_held((afi, Safi::Unicast))
+                        && !self.selection_peer_convergence_held(peer, (afi, Safi::Unicast))
                         && !self
                             .peer_orf_pending
                             .get(&peer)
@@ -1146,7 +1146,7 @@ impl RibManager {
         'peers: for (&peer, families) in &self.outbound_limit_control.recovery {
             for afi in LIMITED_FAMILIES {
                 if families.contains(&afi)
-                    && !self.selection_convergence_held((afi, Safi::Unicast))
+                    && !self.selection_peer_convergence_held(peer, (afi, Safi::Unicast))
                     && !self
                         .peer_orf_pending
                         .get(&peer)

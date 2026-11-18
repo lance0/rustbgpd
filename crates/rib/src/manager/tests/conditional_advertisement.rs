@@ -565,6 +565,59 @@ async fn selection_deferral_holds_pending_until_release() {
     assert_eq!(applied(&manager), AppliedConditionalState::Advertise);
 }
 
+/// A ranged condition includes received candidates throughout selection
+/// deferral. Opening the gate and replaying its inventory must start the full
+/// interval without inspecting those candidates a second time.
+#[tokio::test(start_paused = true)]
+async fn unicast_release_uses_the_condition_observed_during_the_hold() {
+    let waiter = peer(9);
+    let source = peer(1);
+    let family = (Afi::Ipv4, Safi::Unicast);
+    let mut manager = manager().with_selection_deferral(SelectionDeferralConfig {
+        timeout: Duration::from_secs(30),
+        waiters: vec![SelectionDeferralWaiterConfig {
+            peer: waiter.into(),
+            families: vec![family],
+        }],
+    });
+    super::arm_selection_waiter(&mut manager, waiter, &[family]);
+    peer_up(&mut manager, source, 1);
+    let _ = manager.install_conditional_advertisements(vec![ranged(
+        NAME,
+        vec![range(v4(0, 0, 0, 8), None, Some(32))],
+        SETTLE,
+    )]);
+    let routes = (0..=63)
+        .map(|octet| route_with_med(source, v4(0, 0, octet, 32), None))
+        .collect();
+    received(&mut manager, source, 1, routes, vec![]);
+    received(
+        &mut manager,
+        source,
+        1,
+        vec![],
+        vec![(Prefix::V4(v4(0, 0, 17, 32)), 0)],
+    );
+    assert_eq!(status(&manager, NAME).conditions[0].present_count, 63);
+    assert_eq!(state(&manager).2, None);
+    let before = manager.conditional_advertisement_candidate_visits();
+
+    advance(Duration::from_secs(30)).await;
+    manager.expire_selection_deferral();
+    assert_eq!(
+        state(&manager),
+        (
+            ConditionObservation::Present,
+            AppliedConditionalState::Pending,
+            Some(Instant::now() + SETTLE),
+        )
+    );
+    drain_unicast_release(&mut manager);
+    assert_eq!(manager.conditional_advertisement_candidate_visits(), before);
+    settle(&mut manager, SETTLE).await;
+    assert_eq!(applied(&manager), AppliedConditionalState::Suppress);
+}
+
 /// A later install keeps unchanged definitions' state and applies a changed
 /// definition immediately. Compensation restores the prior applied state and
 /// deadline without evaluating again; a RIB change during the failed
@@ -636,24 +689,19 @@ async fn install_and_rollback_preserve_the_debounce() {
     assert_ne!(restored_at, started + Duration::from_secs(10));
 }
 
-/// A dataset swap re-observes only the definitions whose `condition_policy`
-/// references the swapped dataset, under the ordinary debounce.
-#[tokio::test(start_paused = true)]
-async fn dataset_swap_reobserves_only_dependent_definitions() {
-    use rustbgpd_policy::datasets::{DatasetBindings, DatasetData, DatasetHandle, DatasetKind};
-    use rustbgpd_policy::sets::{PrefixSet, PrefixSetEntry};
+fn allowed_prefixes(listed: bool) -> rustbgpd_policy::datasets::DatasetData {
+    rustbgpd_policy::datasets::DatasetData::Prefix(rustbgpd_policy::sets::PrefixSet::new(
+        listed.then_some(PrefixSetEntry::exact(condition())),
+    ))
+}
 
-    let data = |listed: bool| {
-        DatasetData::Prefix(PrefixSet::new(listed.then_some(PrefixSetEntry {
-            prefix: condition(),
-            ge: None,
-            le: None,
-        })))
-    };
+fn dataset_guard() -> (Arc<rustbgpd_policy::datasets::DatasetHandle>, PolicyChain) {
+    use rustbgpd_policy::datasets::{DatasetBindings, DatasetHandle, DatasetKind};
+
     let handle = Arc::new(DatasetHandle::new(
         "allowed",
         DatasetKind::Prefix,
-        data(false),
+        allowed_prefixes(false),
     ));
     let mut bindings = DatasetBindings::new();
     bindings.insert(Arc::clone(&handle));
@@ -669,6 +717,14 @@ async fn dataset_swap_reobserves_only_dependent_definitions() {
         Arc::new(compiled),
     )]);
 
+    (handle, policy)
+}
+
+/// A dataset swap re-observes only the definitions whose `condition_policy`
+/// references the swapped dataset, under the ordinary debounce.
+#[tokio::test(start_paused = true)]
+async fn dataset_swap_reobserves_only_dependent_definitions() {
+    let (handle, policy) = dataset_guard();
     let mut manager = manager();
     let _ = manager.install_conditional_advertisements(vec![definition(
         ConditionalAdvertiseIf::Present,
@@ -678,7 +734,7 @@ async fn dataset_swap_reobserves_only_dependent_definitions() {
     inject(&mut manager, prefix(1), None);
     assert_eq!(state(&manager).0, ConditionObservation::Absent);
 
-    handle.refresh(data(true));
+    handle.refresh(allowed_prefixes(true));
     let visits = manager.conditional_advertisement_candidate_visits();
     let _ = manager.reevaluate_conditional_advertisement_datasets(&["unrelated".to_string()], &[]);
     assert_eq!(manager.conditional_advertisement_candidate_visits(), visits);
@@ -702,6 +758,43 @@ async fn dataset_swap_reobserves_only_dependent_definitions() {
             AppliedConditionalState::Advertise,
             None
         )
+    );
+}
+
+/// Dataset contents publish outside the RIB actor. Release can precede the
+/// dependent refresh in the mailbox; a zero-interval condition must already
+/// use the published data at release.
+#[tokio::test(start_paused = true)]
+async fn unicast_release_observes_a_dataset_published_before_its_refresh() {
+    let waiter = peer(9);
+    let family = (Afi::Ipv4, Safi::Unicast);
+    let mut manager = manager().with_selection_deferral(SelectionDeferralConfig {
+        timeout: Duration::from_secs(30),
+        waiters: vec![SelectionDeferralWaiterConfig {
+            peer: waiter.into(),
+            families: vec![family],
+        }],
+    });
+    super::arm_selection_waiter(&mut manager, waiter, &[family]);
+    let (handle, policy) = dataset_guard();
+    let _ = manager.install_conditional_advertisements(vec![definition(
+        ConditionalAdvertiseIf::Present,
+        Some(policy),
+        Duration::ZERO,
+    )]);
+    inject(&mut manager, prefix(1), None);
+    assert_eq!(state(&manager).0, ConditionObservation::Absent);
+    handle.refresh(allowed_prefixes(true));
+
+    advance(Duration::from_secs(30)).await;
+    manager.expire_selection_deferral();
+    assert_eq!(
+        state(&manager),
+        (
+            ConditionObservation::Present,
+            AppliedConditionalState::Advertise,
+            None
+        ),
     );
 }
 

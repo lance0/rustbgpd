@@ -2298,6 +2298,17 @@ generation. In particular, `page_version.generation` must never be compared
 with or substituted for a producer-local `rbgp-ribsnap/1` header generation.
 Older daemons omit this additive message field.
 
+During startup unicast selection release, clients may set `accept_releasing`
+to read the rows already committed. The same response names each releasing
+address family in `selection_release.releasing_families`, including on empty
+and final pages. A present `selection_release` with no families means that
+none of the requested families was releasing when the actor answered. An
+absent message means the daemon did not report its release state.
+A zero count therefore means that no matching rows are visible yet. Release
+batches invalidate continuations through the usual scope generations. Clients
+that omit the opt-in receive their page after release. Older daemons ignore the
+opt-in and finish the synchronous release before answering.
+
 Every response also carries `total_count`: the exact filtered count for the
 whole selected view, regardless of page size. This is the contract behind
 `rbgp rib --count` and

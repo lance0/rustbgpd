@@ -2784,6 +2784,9 @@ message ListRoutesRequest {
   // Presence is explicit so ASN 0 can be rejected rather than treated as no
   // filter.
   optional uint32 as_path_contains = 13;
+  // Accept a page from an in-progress startup selection release. Clients
+  // opting in must surface selection_release even on empty and final pages.
+  bool accept_releasing = 14;
 }
 
 enum RouteAspaValidation {
@@ -2814,6 +2817,15 @@ message ListRoutesResponse {
   // compare this pair across pages and peer walks from the same process, but
   // must not compare it with producer-local snapshot generations.
   RoutePageVersion page_version = 4;
+  // Present on every page from daemons that report startup selection release.
+  // Absence means the daemon did not report its release state.
+  SelectionReleaseState selection_release = 5;
+}
+
+message SelectionReleaseState {
+  // Requested unicast families whose startup release was still publishing
+  // prefixes when this page was read. An empty list means none was releasing.
+  repeated AddressFamily releasing_families = 1;
 }
 
 enum ExplainDecision {

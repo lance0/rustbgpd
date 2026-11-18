@@ -333,6 +333,81 @@ impl RibManager {
         self.bump_export_counters(peer, &rows);
     }
 
+    /// Count one permit per eligible adv(m) slot. For an own-sourced winner
+    /// this uses the runner-up and its decision label, when the lane has one.
+    fn walk_replay_permits(
+        &self,
+        group: &GroupRibOut,
+        peer: PeerId,
+        family: Option<(Afi, Safi)>,
+        held: [bool; 2],
+        rows: &mut Vec<(Option<String>, PolicyAction, u64)>,
+    ) {
+        for route in group.table.iter() {
+            self.replacement_checkpoint(false);
+            if family.is_some_and(|f| f != crate::manager::helpers::prefix_family(&route.prefix)) {
+                continue;
+            }
+            let Some(adv) = group.adv_entry(peer, &route.prefix, route.path_id) else {
+                continue;
+            };
+            if !held[usize::from(matches!(route.prefix, Prefix::V6(_)))]
+                || adv
+                    .local_source
+                    .is_some_and(|source| source.deferral_exempt)
+            {
+                bump_counter_row(rows, adv.policy_label, PolicyAction::Permit);
+            }
+        }
+    }
+
+    fn plain_replay_permits(
+        &self,
+        group: &GroupRibOut,
+        peer: PeerId,
+        family: Option<(Afi, Safi)>,
+        held: [bool; 2],
+    ) -> u64 {
+        if held == [false; 2] {
+            return group.plain_permit_count(peer, family);
+        }
+        // Open families use the staged counts. Held families evaluate only
+        // exempt local sources, indexed independently of the received table.
+        let open: u64 = [Afi::Ipv4, Afi::Ipv6]
+            .into_iter()
+            .zip(held)
+            .filter(|(afi, held)| !*held && family.is_none_or(|f| f == (*afi, Safi::Unicast)))
+            .map(|(afi, _)| group.plain_permit_count(peer, Some((afi, Safi::Unicast))))
+            .sum();
+        open + group
+            .table
+            .local_export_sources()
+            .filter(|((prefix, _), source)| {
+                self.replacement_checkpoint(false);
+                let source_family = crate::manager::helpers::prefix_family(prefix);
+                held[usize::from(source_family.0 == Afi::Ipv6)]
+                    && family.is_none_or(|f| f == source_family)
+                    && source.deferral_exempt
+            })
+            .count() as u64
+    }
+
+    pub(in crate::manager) fn initial_unicast_denial_evaluated(
+        &self,
+        held: [bool; 2],
+        prefix: Prefix,
+        source: PeerId,
+        path_id: u32,
+    ) -> bool {
+        !held[usize::from(matches!(prefix, Prefix::V6(_)))]
+            || (source == PeerId::LOCAL
+                && self
+                    .ribs
+                    .get(&source)
+                    .and_then(|rib| rib.get(&prefix, path_id))
+                    .is_some_and(crate::manager::helpers::unicast_deferral_exempt))
+    }
+
     /// Reconstruct a joining member's export counters from the group's
     /// staged residue: one permit per `adv(m)` slot (labelled by its
     /// retained decision attribution — the lane entry's where the member
@@ -349,6 +424,16 @@ impl RibManager {
         gid: usize,
         family: Option<(Afi, Safi)>,
     ) {
+        self.apply_group_replay_counters(peer, gid, family, [false; 2]);
+    }
+
+    pub(in crate::manager) fn apply_group_replay_counters(
+        &mut self,
+        peer: PeerId,
+        gid: usize,
+        family: Option<(Afi, Safi)>,
+        held: [bool; 2],
+    ) {
         self.replacement_checkpoint(true);
         // The member's Φ: the per-peer path's RT gate precedes the policy
         // evaluation, so an RT-failed entry records NO eval — the replay
@@ -362,34 +447,15 @@ impl RibManager {
             let in_family = |prefix: &Prefix| {
                 family.is_none_or(|f| crate::manager::helpers::prefix_family(prefix) == f)
             };
-            // One permit per `adv(m)` slot (`adv_entry`, ADR-0126
-            // Decision 4): the staged entry's label for a non-own
-            // slot; the LANE entry's label where the member sourced
-            // the winner — the runner-up's permit WAS evaluated
-            // (Decision 2's over-replay posture), and its retained
-            // decision-attribution label is exactly what the walk recorded.
-            // Nothing for an own-sourced slot with no substitution.
-            let walk_permits = |rows: &mut Vec<(Option<String>, PolicyAction, u64)>| {
-                for route in group.table.iter() {
-                    self.replacement_checkpoint(false);
-                    if !in_family(&route.prefix) {
-                        continue;
-                    }
-                    let Some(adv) = group.adv_entry(peer, &route.prefix, route.path_id) else {
-                        continue;
-                    };
-                    bump_counter_row(rows, adv.policy_label, PolicyAction::Permit);
-                }
-            };
             if group.per_client_best {
-                walk_permits(&mut rows);
+                self.walk_replay_permits(group, peer, family, held, &mut rows);
             } else {
                 // A plain group has no lane and stages every slot with its
                 // one permit label, so the member's permits are the staged
                 // count minus its own-sourced slots (the O(1)
                 // `family_counts_for` synthesis) — no table walk per joining
                 // member.
-                let permits = group.plain_permit_count(peer, family);
+                let permits = self.plain_replay_permits(group, peer, family, held);
                 if permits > 0 {
                     rows.push((
                         group.permit_policy_label.as_ref().map(ToString::to_string),
@@ -400,7 +466,7 @@ impl RibManager {
                 #[cfg(test)]
                 {
                     let mut walked = Vec::new();
-                    walk_permits(&mut walked);
+                    self.walk_replay_permits(group, peer, family, held, &mut walked);
                     assert_eq!(
                         rows, walked,
                         "plain-group permit synthesis diverged from the adv(m) walk"
@@ -415,9 +481,16 @@ impl RibManager {
                 if !in_family(prefix) {
                     continue;
                 }
-                for (&(source_peer, _), label) in denials {
+                for (&(source_peer, path_id), label) in denials {
                     self.replacement_checkpoint(false);
-                    if source_peer == peer {
+                    if source_peer == peer
+                        || !self.initial_unicast_denial_evaluated(
+                            held,
+                            *prefix,
+                            source_peer,
+                            path_id,
+                        )
+                    {
                         continue;
                     }
                     bump(label, PolicyAction::Deny);

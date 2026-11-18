@@ -135,6 +135,26 @@ pub(super) fn group_replay_rs_inert(
     })
 }
 
+/// Position in the release's retirement of helper keys, including owners
+/// that have disconnected since their rows were admitted.
+#[derive(Clone, Copy)]
+pub(super) enum ReleaseHelperRetirement {
+    Carries(Option<PeerId>),
+    Ledgers(Option<super::HoldWithdrawOwner>),
+}
+
+fn retire_helper_keys(
+    keys: &mut std::collections::BTreeSet<(Prefix, u32)>,
+    budget: &mut usize,
+) -> bool {
+    let rows = keys.len().min(*budget);
+    for _ in 0..rows {
+        keys.pop_first();
+    }
+    *budget -= rows;
+    keys.is_empty()
+}
+
 /// Insert `keys` until `set` holds [`super::HELPER_STALE_EXEMPT_LIMIT`]
 /// keys; a key already present costs nothing.
 pub(super) fn insert_bounded(
@@ -1173,6 +1193,7 @@ impl RibManager {
                         ended: ended.clone(),
                         keys: std::collections::BTreeSet::new(),
                         settled: false,
+                        release_changed: [false; 2],
                         orf_blocked: Vec::new(),
                         gate_blocked: Vec::new(),
                     });
@@ -1372,6 +1393,24 @@ impl RibManager {
         false
     }
 
+    /// Record one receiver's changed carry in a single-family release batch.
+    /// A large Add-Path carry is probed by prefix and rechecked on the helper
+    /// retry lane when the family seals.
+    pub(super) fn note_release_helper_stale_change(
+        &mut self,
+        peer: PeerId,
+        changed: &HashSet<Prefix>,
+    ) {
+        if let Some(carried) = self.helper_stale_exempt.get_mut(&peer)
+            && let Some(prefix) = changed.iter().next()
+        {
+            let family = usize::from(matches!(prefix, Prefix::V6(_)));
+            if !carried.release_changed[family] && touches_changed(&carried.keys, changed) {
+                carried.release_changed[family] = true;
+            }
+        }
+    }
+
     /// Withdraw the carried stale exempt keys a caught-up session does not
     /// advertise while our End-of-RIB for their family is held. Its live
     /// exempt rows are already on the wire, so no prefix loses its last
@@ -1477,6 +1516,9 @@ impl RibManager {
                 carried.settled = false;
             } else {
                 carried.settled = true;
+                if rescan {
+                    carried.release_changed = [false; 2];
+                }
                 carried.orf_blocked = orf_blocked;
                 carried.gate_blocked = gate_blocked;
             }
@@ -1512,6 +1554,9 @@ impl RibManager {
         self.selection_deferral
             .as_ref()
             .is_some_and(super::selection_deferral::SelectionDeferral::may_hold)
+            || [Afi::Ipv4, Afi::Ipv6]
+                .into_iter()
+                .any(|afi| self.release_marker_pending(peer, (afi, Safi::Unicast)))
             || self.eor_grace_covers(peer, None)
     }
 
@@ -1520,6 +1565,7 @@ impl RibManager {
         self.selection_deferral
             .as_ref()
             .is_some_and(super::selection_deferral::SelectionDeferral::may_hold)
+            || self.release_markers_active()
             || self.eor_grace_open()
     }
 
@@ -1528,6 +1574,7 @@ impl RibManager {
         self.selection_deferral
             .as_ref()
             .is_some_and(|selection| selection.may_hold_family(family))
+            || self.release_marker_pending(peer, family)
             || self.eor_grace_covers(peer, Some(family))
     }
 
@@ -1538,6 +1585,87 @@ impl RibManager {
         self.retire_helper_stale_exempt();
     }
 
+    /// A terminal unicast release can free carriers and ledgers unrelated
+    /// to its live receiver roster. Page both owner indexes and their keys.
+    pub(super) fn schedule_release_helper_retirement(&mut self) {
+        if (!self.helper_stale_exempt.is_empty() || !self.hold_exempt_withdrawn.is_empty())
+            && !self.release_markers_active()
+            && !self
+                .selection_deferral
+                .as_ref()
+                .is_some_and(super::selection_deferral::SelectionDeferral::may_hold)
+        {
+            self.release_helper_retirement = Some(ReleaseHelperRetirement::Carries(None));
+            self.advance_release_helper_retirement();
+        }
+    }
+
+    pub(super) fn release_helper_retirement_pending(&self) -> bool {
+        self.release_helper_retirement.is_some()
+    }
+
+    pub(super) fn advance_release_helper_retirement(&mut self) {
+        use std::ops::Bound::{Excluded, Unbounded};
+        let mut budget = crate::outbound_credit::CHUNK_ROWS;
+        while budget > 0 {
+            budget -= 1; // the owner lookup, even when a grace window keeps it
+            match self.release_helper_retirement {
+                Some(ReleaseHelperRetirement::Carries(after)) => {
+                    let next = self
+                        .helper_stale_exempt
+                        .range((after.map_or(Unbounded, Excluded), Unbounded))
+                        .next()
+                        .map(|(&peer, _)| peer);
+                    let Some(peer) = next else {
+                        self.release_helper_retirement =
+                            Some(ReleaseHelperRetirement::Ledgers(None));
+                        continue;
+                    };
+                    if !self.helper_stale_may_hold(peer) {
+                        let carried = self
+                            .helper_stale_exempt
+                            .get_mut(&peer)
+                            .expect("owner found above");
+                        if !retire_helper_keys(&mut carried.keys, &mut budget) {
+                            return;
+                        }
+                        self.helper_stale_exempt.remove(&peer);
+                    }
+                    self.release_helper_retirement =
+                        Some(ReleaseHelperRetirement::Carries(Some(peer)));
+                }
+                Some(ReleaseHelperRetirement::Ledgers(after)) => {
+                    let next = self
+                        .hold_exempt_withdrawn
+                        .range((after.map_or(Unbounded, Excluded), Unbounded))
+                        .next()
+                        .map(|(&owner, _)| owner);
+                    let Some(owner) = next else {
+                        self.release_helper_retirement = None;
+                        return;
+                    };
+                    let keep = match owner {
+                        super::HoldWithdrawOwner::Peer(peer) => self.helper_stale_may_hold(peer),
+                        super::HoldWithdrawOwner::Group(_) => self.helper_stale_may_hold_any(),
+                    };
+                    if !keep {
+                        let ledger = self
+                            .hold_exempt_withdrawn
+                            .get_mut(&owner)
+                            .expect("owner found above");
+                        if !retire_helper_keys(ledger, &mut budget) {
+                            return;
+                        }
+                        self.hold_exempt_withdrawn.remove(&owner);
+                    }
+                    self.release_helper_retirement =
+                        Some(ReleaseHelperRetirement::Ledgers(Some(owner)));
+                }
+                None => return,
+            }
+        }
+    }
+
     /// Retire what no held End-of-RIB can still need: every carry and ledger
     /// once no peer's End-of-RIB can be held, else each carry and private
     /// ledger of a peer whose End-of-RIB can no longer be held. A carry
@@ -1546,6 +1674,14 @@ impl RibManager {
     /// retirable when a hold source goes away, which requests a pass, and
     /// none can while a selection gate is unreleased.
     pub(super) fn retire_helper_stale_exempt(&mut self) {
+        if self.release_helper_retirement_pending() {
+            if self.helper_stale_hold_ends != 0 {
+                // A grace window could have ended behind the current cursor.
+                self.schedule_release_helper_retirement();
+                self.helper_stale_hold_ends = 0;
+            }
+            return;
+        }
         if self.helper_stale_exempt.is_empty() && self.hold_exempt_withdrawn.is_empty() {
             self.helper_stale_hold_ends = 0;
             return;
@@ -1553,6 +1689,7 @@ impl RibManager {
         let any = self.helper_stale_may_hold_any();
         if any
             && (self.helper_stale_hold_ends == 0
+                || self.release_markers_active()
                 || self
                     .selection_deferral
                     .as_ref()
@@ -1580,11 +1717,11 @@ impl RibManager {
             super::replacement_readiness_checkpoint_at(&readiness, "helper_stale_retire", false);
         };
         if !any {
-            for (_, carried) in self.helper_stale_exempt.drain() {
+            for (_, carried) in std::mem::take(&mut self.helper_stale_exempt) {
                 checkpoint();
                 drop(carried);
             }
-            for (_, ledger) in self.hold_exempt_withdrawn.drain() {
+            for (_, ledger) in std::mem::take(&mut self.hold_exempt_withdrawn) {
                 checkpoint();
                 drop(ledger);
             }
@@ -1641,6 +1778,8 @@ impl RibManager {
         carried: &super::HelperStaleExempt,
     ) -> bool {
         !carried.settled
+            || (carried.release_changed[0] && !self.unicast_release_in_progress(Afi::Ipv4))
+            || (carried.release_changed[1] && !self.unicast_release_in_progress(Afi::Ipv6))
             || carried.orf_blocked.iter().any(|family| {
                 !self
                     .peer_orf_pending
@@ -1678,6 +1817,9 @@ impl RibManager {
     /// without an exact export encoder fails closed: no withdrawal can carry
     /// its export snapshot, so it never runs (and never arms the timer).
     pub(super) fn helper_stale_exempt_runnable(&self, peer: PeerId) -> bool {
+        if self.release_helper_retirement_pending() && !self.helper_stale_may_hold(peer) {
+            return false;
+        }
         if !self.peer_export_encoders.contains_key(&peer) {
             return false;
         }
@@ -1716,6 +1858,7 @@ impl RibManager {
         self.retire_evpn_recovery(peer);
         let was_registered = self.outbound_peers.remove(&peer).is_some();
         self.outbound_session_ids.remove(&peer);
+        self.untrack_release_peer(peer);
         // Owed keys belong to the ended session; a new one's initial table
         // owns its state.
         self.drop_peer_owing(peer);
@@ -1811,7 +1954,13 @@ impl RibManager {
         self.peer_is_ebgp.remove(&peer);
         self.peer_local_roles.remove(&peer);
         self.peer_export_encoders.remove(&peer);
-        self.peer_unexportable.remove(&peer);
+        if let Some(keys) = self.peer_unexportable.remove(&peer)
+            && self.unicast_release.rejections.len() != 0
+        {
+            for key in &keys {
+                self.unicast_release.rejections.record(peer, key, false);
+            }
+        }
         // RFC 9234 denies every OTC route toward a provider, peer or route
         // server, so these hold an entry per blocked prefix: up to a full
         // table learned from another provider. Their release takes the
@@ -2184,6 +2333,7 @@ impl RibManager {
             evpn_admitted_count: 0,
             group_recovery_fallback: None,
             selection_initial_pending: false,
+            release_missing_admitted: [false; 2],
             selection_partial_pending: [false; 4],
             selection_initial_admitted: [0; 6],
             selection_partial_caught_up: false,
@@ -2668,6 +2818,7 @@ impl RibManager {
         // earlier session carries over, even under a reused session id.
         self.drop_peer_owing(peer);
         self.outbound_session_ids.insert(peer, session_id);
+        self.track_release_peer(peer);
         self.metrics.set_rib_outbound_registered_peers(
             i64::try_from(self.outbound_peers.len()).unwrap_or(i64::MAX),
         );
@@ -3086,7 +3237,7 @@ impl RibManager {
             super::replacement_readiness_checkpoint_at(&self.replacement_readiness, label, false);
             let route_family = prefix_family(&route.prefix);
             if family.is_some_and(|family| family != route_family)
-                || (self.selection_deferred(route_family)
+                || (self.initial_selection_deferred(route_family)
                     && !self
                         .unicast_export_deferral_exempt(route, &mut unicast_deferral_exemptions))
             {
@@ -3187,7 +3338,7 @@ impl RibManager {
             else {
                 continue;
             };
-            if self.selection_deferred(prefix_family(&entry.route.prefix))
+            if self.initial_selection_deferred(prefix_family(&entry.route.prefix))
                 && !self
                     .unicast_export_deferral_exempt(entry.route, &mut unicast_deferral_exemptions)
             {
@@ -3255,6 +3406,25 @@ impl RibManager {
             .get(&peer)
             .cloned()
             .unwrap_or_default();
+        // Register the table owner before preparing any other family's feed:
+        // an EVPN refusal can return early with the whole initial dump deferred.
+        let late_release_join = self.track_late_release_join(peer);
+        if late_release_join
+            && let Some(session) = self.outbound_session_ids.get(&peer).copied()
+            && let Some(record) = self.newest_live_session_mut(peer, session)
+        {
+            record.selection_initial_pending = true;
+        }
+        // Record selection-held initial markers so release does not repeat an
+        // EoR already sent by a session that joined while the roster was dormant.
+        for family in negotiated_sendable.iter().flatten().copied() {
+            if self.selection_peer_convergence_held(peer, family) {
+                self.owe_eor(peer, family);
+                if orf_gated.contains(&family) {
+                    self.defer_orf_initial_eor(peer, family);
+                }
+            }
+        }
         let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
         let interpret_rfc1997 = self.peer_interpret_rfc1997.contains(&peer);
         let rs_control_asn = self.peer_rs_control.get(&peer).copied();
@@ -3373,6 +3543,8 @@ impl RibManager {
         let mut vpn_group_replayed = false;
         let mut grouped_otc_blocked = Vec::new();
         let mut grouped_unicast = None;
+        let held_unicast =
+            [Afi::Ipv4, Afi::Ipv6].map(|afi| self.initial_selection_deferred((afi, Safi::Unicast)));
         if let Some(group) = member_of.and_then(|gid| self.group_ribs.get(&gid)) {
             // LAN-474: per-target divergence at the replay seam — a
             // table entry whose captured SOURCE communities tag it may
@@ -3442,15 +3614,25 @@ impl RibManager {
                     vpn_announce.push(route.clone());
                 }
             }
+            let mut group_denials = group.policy_filtered_for_member_with_checkpoint(
+                peer,
+                &all_prefixes,
+                &mut checkpoint,
+            );
+            if held_unicast != [false; 2] {
+                group_denials.retain(|key| {
+                    checkpoint();
+                    self.initial_unicast_denial_evaluated(
+                        held_unicast,
+                        key.prefix,
+                        key.source_peer,
+                        key.path_id,
+                    )
+                });
+            }
             super::extend_policy_filtered_routes_with_readiness(
                 &mut current_policy_filtered_routes,
-                group
-                    .policy_filtered_for_member_with_checkpoint(
-                        peer,
-                        &all_prefixes,
-                        &mut checkpoint,
-                    )
-                    .into_iter(),
+                group_denials.into_iter(),
                 &readiness,
             );
             grouped_otc_blocked = group.otc_blocked_for_member_with_checkpoint(
@@ -3463,7 +3645,7 @@ impl RibManager {
         if let Some(gid) = member_of {
             // Export counters for the join, reconstructed from the
             // group's staged residue (per-peer initial-dump parity).
-            self.apply_group_join_counters(peer, gid, None);
+            self.apply_group_replay_counters(peer, gid, None, held_unicast);
         }
         let empty_prefixes: HashSet<Prefix> = HashSet::new();
         let staging_prefixes = if member_of.is_none() {
@@ -3512,9 +3694,7 @@ impl RibManager {
                     self.peer_local_roles.get(&peer).copied().flatten(),
                     &self.peer_is_rr_client,
                     prefix,
-                    self.selection_deferral.as_ref().is_some_and(|deferral| {
-                        deferral.selection_deferred(crate::manager::helpers::prefix_family(prefix))
-                    }),
+                    self.initial_selection_deferred(family),
                     peer,
                     target_peer_asn,
                     target_peer_group.as_deref(),
@@ -3566,9 +3746,7 @@ impl RibManager {
                     self.peer_local_roles.get(&peer).copied().flatten(),
                     &self.peer_is_rr_client,
                     prefix,
-                    self.selection_deferral.as_ref().is_some_and(|deferral| {
-                        deferral.selection_deferred(crate::manager::helpers::prefix_family(prefix))
-                    }),
+                    self.initial_selection_deferred(family),
                     peer,
                     target_peer_asn,
                     target_peer_group.as_deref(),
@@ -3610,9 +3788,7 @@ impl RibManager {
                     orr_topology,
                     orr_spf,
                     prefix,
-                    self.selection_deferral.as_ref().is_some_and(|deferral| {
-                        deferral.selection_deferred(crate::manager::helpers::prefix_family(prefix))
-                    }),
+                    self.initial_selection_deferred(family),
                     peer,
                     target_peer_asn,
                     target_peer_group.as_deref(),
@@ -3654,9 +3830,7 @@ impl RibManager {
                     &initial_view,
                     &self.peer_is_rr_client,
                     prefix,
-                    self.selection_deferral
-                        .as_ref()
-                        .is_some_and(|deferral| deferral.selection_deferred(prefix_family(prefix))),
+                    self.initial_selection_deferred(family),
                     &mut target,
                     target_is_ebgp,
                     interpret_rfc1997,
@@ -3973,16 +4147,6 @@ impl RibManager {
         // will send nothing there, and a restarting peer must not wait out
         // its RFC 4724 §4.1 selection deferral for it. Both go through the
         // same GR/ORF and convergence holds below.
-        // Record selection-held initial markers so release does not repeat an
-        // EoR already sent by a session that joined while the roster was dormant.
-        for family in negotiated_sendable.iter().flatten().copied() {
-            if self.selection_convergence_held(family) {
-                self.owe_eor(peer, family);
-                if orf_gated.contains(&family) {
-                    self.defer_orf_initial_eor(peer, family);
-                }
-            }
-        }
         // Empty/new groups omit no preselected row. Retaining their proof
         // would charge each ordinary replay against every later local add.
         let mut unicast_deferral_exemptions = crate::fast_hash::FastMap::default();
@@ -4022,7 +4186,7 @@ impl RibManager {
                                 || super::update_groups::rt_passes(filter.as_ref(), route))
                     })
             });
-        let selection_initial_pending = omitted_unicast || omitted_vpn;
+        let selection_initial_pending = late_release_join || omitted_unicast || omitted_vpn;
         if let Some(session_id) = self.outbound_session_ids.get(&peer).copied()
             && let Some(record) = self.newest_live_session_mut(peer, session_id)
         {

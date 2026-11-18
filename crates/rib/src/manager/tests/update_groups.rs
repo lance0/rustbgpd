@@ -6452,6 +6452,7 @@ fn advertised_page_at_transition_seam(
     let (reply, mut response) = oneshot::channel();
     query_tx
         .try_send(RibUpdate::QueryRoutesPage {
+            accept_releasing: false,
             scope: RouteQueryScope::Advertised { peer },
             filter: None,
             after: None,

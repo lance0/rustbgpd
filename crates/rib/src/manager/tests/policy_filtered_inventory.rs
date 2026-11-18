@@ -484,6 +484,7 @@ fn collect_pages(manager: &mut RibManager, scope: RouteQueryScope, total: u64) -
     loop {
         let (reply, mut response) = oneshot::channel();
         manager.handle_update(RibUpdate::QueryRoutesPage {
+            accept_releasing: false,
             scope,
             filter: None,
             after,
