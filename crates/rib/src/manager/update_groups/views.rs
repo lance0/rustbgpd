@@ -333,6 +333,34 @@ impl RibManager {
         self.bump_export_counters(peer, &rows);
     }
 
+    /// Count one permit per eligible adv(m) slot. For an own-sourced winner
+    /// this uses the runner-up and its decision label, when the lane has one.
+    fn walk_replay_permits(
+        &self,
+        group: &GroupRibOut,
+        peer: PeerId,
+        family: Option<(Afi, Safi)>,
+        held: [bool; 2],
+        rows: &mut Vec<(Option<String>, PolicyAction, u64)>,
+    ) {
+        for route in group.table.iter() {
+            self.replacement_checkpoint(false);
+            if family.is_some_and(|f| f != crate::manager::helpers::prefix_family(&route.prefix)) {
+                continue;
+            }
+            let Some(adv) = group.adv_entry(peer, &route.prefix, route.path_id) else {
+                continue;
+            };
+            if !held[usize::from(matches!(route.prefix, Prefix::V6(_)))]
+                || adv
+                    .local_source
+                    .is_some_and(|source| source.deferral_exempt)
+            {
+                bump_counter_row(rows, adv.policy_label, PolicyAction::Permit);
+            }
+        }
+    }
+
     fn plain_replay_permits(
         &self,
         group: &GroupRibOut,
@@ -366,7 +394,7 @@ impl RibManager {
 
     pub(in crate::manager) fn initial_unicast_denial_evaluated(
         &self,
-        held: &[bool; 2],
+        held: [bool; 2],
         prefix: Prefix,
         source: PeerId,
         path_id: u32,
@@ -419,33 +447,8 @@ impl RibManager {
             let in_family = |prefix: &Prefix| {
                 family.is_none_or(|f| crate::manager::helpers::prefix_family(prefix) == f)
             };
-            // One permit per `adv(m)` slot (`adv_entry`, ADR-0126
-            // Decision 4): the staged entry's label for a non-own
-            // slot; the LANE entry's label where the member sourced
-            // the winner — the runner-up's permit WAS evaluated
-            // (Decision 2's over-replay posture), and its retained
-            // decision-attribution label is exactly what the walk recorded.
-            // Nothing for an own-sourced slot with no substitution.
-            let walk_permits = |rows: &mut Vec<(Option<String>, PolicyAction, u64)>| {
-                for route in group.table.iter() {
-                    self.replacement_checkpoint(false);
-                    if !in_family(&route.prefix) {
-                        continue;
-                    }
-                    let Some(adv) = group.adv_entry(peer, &route.prefix, route.path_id) else {
-                        continue;
-                    };
-                    if !held[usize::from(matches!(route.prefix, Prefix::V6(_)))]
-                        || adv
-                            .local_source
-                            .is_some_and(|source| source.deferral_exempt)
-                    {
-                        bump_counter_row(rows, adv.policy_label, PolicyAction::Permit);
-                    }
-                }
-            };
             if group.per_client_best {
-                walk_permits(&mut rows);
+                self.walk_replay_permits(group, peer, family, held, &mut rows);
             } else {
                 // A plain group has no lane and stages every slot with its
                 // one permit label, so the member's permits are the staged
@@ -463,7 +466,7 @@ impl RibManager {
                 #[cfg(test)]
                 {
                     let mut walked = Vec::new();
-                    walk_permits(&mut walked);
+                    self.walk_replay_permits(group, peer, family, held, &mut walked);
                     assert_eq!(
                         rows, walked,
                         "plain-group permit synthesis diverged from the adv(m) walk"
@@ -482,7 +485,7 @@ impl RibManager {
                     self.replacement_checkpoint(false);
                     if source_peer == peer
                         || !self.initial_unicast_denial_evaluated(
-                            &held,
+                            held,
                             *prefix,
                             source_peer,
                             path_id,

@@ -3623,7 +3623,7 @@ impl RibManager {
                 group_denials.retain(|key| {
                     checkpoint();
                     self.initial_unicast_denial_evaluated(
-                        &held_unicast,
+                        held_unicast,
                         key.prefix,
                         key.source_peer,
                         key.path_id,
