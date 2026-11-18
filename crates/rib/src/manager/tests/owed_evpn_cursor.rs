@@ -3,6 +3,11 @@
 //! carried since its debt began, in bounded steps charged against its
 //! outbound credit, and its End-of-RIB leaves when it has caught up.
 
+mod private_orf;
+mod release_filters;
+mod release_hold;
+mod release_stage;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use rustbgpd_wire::EvpnRouteKey;
@@ -49,6 +54,17 @@ fn up_sized(
     channel: usize,
     families: &[(Afi, Safi)],
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
+    up_sized_with_orf(manager, peer, session_id, channel, families, &[])
+}
+
+fn up_sized_with_orf(
+    manager: &mut RibManager,
+    peer: PeerId,
+    session_id: u64,
+    channel: usize,
+    families: &[(Afi, Safi)],
+    orf_recv: &[(Afi, Safi)],
+) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (outbound_tx, output) = mpsc::channel(channel);
     manager.handle_update(RibUpdate::PeerUp {
         supersedes: None,
@@ -66,7 +82,7 @@ fn up_sized(
         orr_vantage: None,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        negotiated_orf_recv: Vec::new(),
+        negotiated_orf_recv: orf_recv.to_vec(),
         negotiated_llgr_families: Vec::new(),
     });
     output
@@ -272,6 +288,38 @@ fn table(rows: &[(u32, u32)]) -> BTreeMap<EvpnRouteKey, String> {
         .collect()
 }
 
+fn end_of_rib(manager: &mut RibManager, peer: PeerId, session_id: u64, family: (Afi, Safi)) {
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer,
+        session_id,
+        afi: family.0,
+        safi: family.1,
+    });
+}
+
+fn selected_evpn(manager: &RibManager) -> BTreeMap<EvpnRouteKey, String> {
+    manager
+        .loc_rib
+        .iter_evpn()
+        .map(|route| (route.key(), format!("{:?}", route.attributes)))
+        .collect()
+}
+
+fn assert_idle(manager: &RibManager, receivers: &[Receiver]) {
+    for receiver in receivers {
+        assert!(
+            manager.eor_pending(receiver.peer).is_empty(),
+            "{}",
+            receiver.peer
+        );
+        assert!(manager.owing(receiver.peer).is_none(), "{}", receiver.peer);
+        assert!(!manager.dirty_peers.contains(&receiver.peer));
+        assert!(!manager.owed_row_evicted.contains(&receiver.peer));
+    }
+    assert_eq!(manager.owed_evpn_rows.len(), 0);
+    assert!(manager.owed_rows.iter().all(|list| list.len() == 0));
+}
+
 struct Receiver {
     peer: PeerId,
     rx: mpsc::Receiver<OutboundRouteUpdate>,
@@ -301,6 +349,77 @@ impl Receiver {
             wire: Wire::default(),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReceiverState {
+    Clean,
+    Keyed,
+    Cursor,
+    Evicted,
+    Dirty,
+}
+
+impl ReceiverState {
+    const ALL: [Self; 5] = [
+        Self::Clean,
+        Self::Keyed,
+        Self::Cursor,
+        Self::Evicted,
+        Self::Dirty,
+    ];
+}
+
+/// Stop reading after admitting rows 0..8. Except in the clean control,
+/// row 5 is withdrawn before the hold while the receiver still holds it.
+fn prepare_receiver(manager: &mut RibManager, subject: &Receiver, state: ReceiverState) {
+    let peer = subject.peer;
+    assert!(subject.wire.table.contains_key(&key(5)));
+    assert!(!manager.owes(peer, EVPN));
+    assert!(!manager.dirty_peers.contains(&peer));
+    if state == ReceiverState::Clean {
+        return;
+    }
+    if state == ReceiverState::Dirty {
+        let sender = &manager.outbound_peers[&peer];
+        while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
+        regroup(manager, peer, Some(permit_all()));
+        received(manager, &[], &[5]);
+        assert!(manager.dirty_peers.contains(&peer));
+        assert!(!manager.owed_row_evicted.contains(&peer));
+        return;
+    }
+
+    // Distinct payloads spend credit without increasing the keyed debt.
+    for variant in 1..=16 {
+        received(manager, &[(0, variant), (1, variant), (2, variant)], &[]);
+        if manager.owes(peer, EVPN) {
+            break;
+        }
+    }
+    received(manager, &[], &[5]);
+    assert!(manager.owed_key_count(peer, FAMILY) > 0 && !manager.owes_whole(peer, FAMILY));
+    if state == ReceiverState::Keyed {
+        return;
+    }
+
+    // Rotate disjoint batches so the live table stays small while the
+    // unread receiver first crosses the kept-key cap, then the list cap.
+    let mut previous = Vec::new();
+    for round in 0..256 {
+        let base = 1000 + round * 64;
+        let rows: Vec<_> = (base..base + 64).map(|i| (i, 0)).collect();
+        received(manager, &rows, &previous);
+        if state == ReceiverState::Cursor && manager.owes_whole(peer, FAMILY) {
+            assert!(!manager.owed_row_evicted.contains(&peer));
+            return;
+        }
+        if state == ReceiverState::Evicted && manager.owed_row_evicted.contains(&peer) {
+            return;
+        }
+        previous = (base..base + 64).collect();
+    }
+    panic!("receiver never reached {state:?}");
 }
 
 /// `receivers` receivers that owe their End-of-RIB and EVPN whole (as a
@@ -1190,12 +1309,7 @@ fn hold(manager: &mut RibManager) -> Receiver {
 
 /// The waiter's End-of-RIB: the hold is released.
 fn release(manager: &mut RibManager) {
-    manager.handle_update(RibUpdate::EndOfRib {
-        peer: peer_v4(WAITER),
-        session_id: 7,
-        afi: EVPN.0,
-        safi: EVPN.1,
-    });
+    end_of_rib(manager, peer_v4(WAITER), 7, EVPN);
     assert!(!manager.selection_deferred(EVPN));
 }
 
