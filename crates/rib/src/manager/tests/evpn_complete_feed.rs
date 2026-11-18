@@ -3789,3 +3789,153 @@ fn operator_replay_of_a_clean_member_keeps_the_proof_cycle() {
     );
     assert_eq!(proof_keys(&manager, peer), None);
 }
+
+/// One envelope as the EVPN receiver sees it: ANN count, whether it carries
+/// the EVPN End-of-RIB, and its refresh markers.
+type EvpnWire = (usize, bool, Vec<RouteRefreshSubtype>);
+
+/// A refresh of `peer`'s EVPN family, then up to four resync ticks while
+/// the tick has work: everything the peer was sent.
+fn refresh_evpn_and_tick(
+    manager: &mut RibManager,
+    peer: PeerId,
+    output: &mut mpsc::Receiver<OutboundRouteUpdate>,
+) -> Vec<EvpnWire> {
+    fn drain(output: &mut mpsc::Receiver<OutboundRouteUpdate>, wire: &mut Vec<EvpnWire>) {
+        while let Ok(update) = output.try_recv().map(delivered) {
+            assert_eq!(update.evpn_withdraw, [] as [rustbgpd_wire::EvpnRouteKey; 0]);
+            let markers = update
+                .refresh_markers
+                .iter()
+                .map(|&(afi, safi, subtype)| {
+                    assert_eq!((afi, safi), EVPN);
+                    subtype
+                })
+                .collect();
+            wire.push((
+                update.evpn_announce.len(),
+                update.end_of_rib.contains(&EVPN),
+                markers,
+            ));
+        }
+    }
+    let mut wire = Vec::new();
+    manager.handle_update(RibUpdate::RouteRefreshRequest {
+        peer,
+        session_id: 7,
+        afi: EVPN.0,
+        safi: EVPN.1,
+        queued: Arc::default(),
+    });
+    drain(output, &mut wire);
+    for _ in 0..4 {
+        if !manager.resync_tick_pending() {
+            break;
+        }
+        manager.resync_dirty_peers_bounded();
+        drain(output, &mut wire);
+    }
+    wire
+}
+
+/// The initial End-of-RIB once, then one `BoRR`, the replay of the one
+/// admitted route and one `EoRR` (RFC 7313 §4). The answer's own End-of-RIB
+/// rides with its `EoRR`.
+fn assert_marker_then_bracketed_answer(wire: &[EvpnWire]) {
+    let position = |subtype| {
+        wire.iter()
+            .position(|(_, _, markers)| markers.contains(&subtype))
+    };
+    let (Some(eor), Some(borr), Some(eorr)) = (
+        wire.iter().position(|(_, eor, _)| *eor),
+        position(RouteRefreshSubtype::BoRR),
+        position(RouteRefreshSubtype::EoRR),
+    ) else {
+        panic!("the marker or the answer was never sent: {wire:?}");
+    };
+    assert_eq!(
+        wire[..borr].iter().filter(|(_, eor, _)| *eor).count(),
+        1,
+        "{wire:?}"
+    );
+    assert!(wire[borr..eorr].iter().all(|(_, eor, _)| !eor), "{wire:?}");
+    assert!(wire[eorr + 1..].is_empty(), "{wire:?}");
+    assert_eq!(
+        wire.iter()
+            .flat_map(|(_, _, markers)| markers)
+            .copied()
+            .collect::<Vec<_>>(),
+        [RouteRefreshSubtype::BoRR, RouteRefreshSubtype::EoRR],
+        "{wire:?}"
+    );
+    assert!(eor < borr && borr <= eorr, "{wire:?}");
+    let replayed: usize = wire[borr..=eorr].iter().map(|(ann, _, _)| ann).sum();
+    assert_eq!(replayed, 1, "{wire:?}");
+}
+
+fn assert_refresh_settled(manager: &RibManager, peer: PeerId) {
+    assert!(manager.eor_pending(peer).is_empty());
+    assert!(!manager.pending_refresh.contains_key(&peer));
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert!(!manager.evpn_recovery_reset_pending(peer));
+    assert!(!manager.resync_tick_pending());
+}
+
+/// A clean group-owned member whose initial EVPN End-of-RIB waits only for
+/// a complete feed that is no longer current. The answer that would build
+/// that feed waits for the marker, so the peer is resynced: the resync
+/// builds the feed and sends the marker, then answers the request.
+#[test]
+fn refresh_behind_an_invalidated_owned_feed_resyncs_then_answers() {
+    let (mut manager, peer, gid, mut output) = fixture();
+    admit_waiting_for_eor(&mut manager, peer, gid, &received(1));
+    output.try_recv().map(delivered).unwrap();
+    manager.invalidate_evpn_feed_completion(peer);
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert!(manager.eor_waits_for_evpn_feed(peer, EVPN));
+    let wire = refresh_evpn_and_tick(&mut manager, peer, &mut output);
+    assert_marker_then_bracketed_answer(&wire);
+    assert_refresh_settled(&manager, peer);
+}
+
+/// The private-handoff form of the same hold: the peer left its group
+/// still owing the marker, and the handoff's feed is no longer current.
+#[test]
+fn refresh_behind_an_invalidated_private_handoff_resyncs_then_answers() {
+    let (mut manager, peer, gid, mut output) = fixture();
+    admit_waiting_for_eor(&mut manager, peer, gid, &received(1));
+    output.try_recv().map(delivered).unwrap();
+    manager.hold_eor_for_rt_membership(peer, tokio::time::Instant::now() + Duration::from_secs(60));
+    manager.handle_update(RibUpdate::PeerSlowState {
+        peer,
+        session_id: 7,
+        slow: true,
+    });
+    assert!(manager.has_private_evpn_handoff(peer));
+    manager.invalidate_evpn_feed_completion(peer);
+    manager.end_rt_membership_hold(peer);
+    assert!(output.try_recv().map(delivered).is_err());
+    assert!(manager.eor_pending(peer).contains(&EVPN));
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert!(manager.eor_waits_for_evpn_feed(peer, EVPN));
+    let wire = refresh_evpn_and_tick(&mut manager, peer, &mut output);
+    assert_marker_then_bracketed_answer(&wire);
+    assert_refresh_settled(&manager, peer);
+}
+
+/// A group-owned member whose feed is current but whose marker is still
+/// owed (left to the tick) is not resynced: the marker leaves once, ahead
+/// of the bracketed answer.
+#[test]
+fn refresh_of_an_owned_member_owing_its_marker_sends_it_once_first() {
+    let (mut manager, peer, gid, mut output) = fixture();
+    admit_waiting_for_eor(&mut manager, peer, gid, &received(1));
+    output.try_recv().map(delivered).unwrap();
+    assert!(manager.evpn_feed_is_current(peer));
+    assert!(!manager.eor_waits_for_evpn_feed(peer, EVPN));
+    let builds = manager.adj_rib_out_commit_stats.resync_builds;
+    let wire = refresh_evpn_and_tick(&mut manager, peer, &mut output);
+    assert_marker_then_bracketed_answer(&wire);
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
+    assert_refresh_settled(&manager, peer);
+}

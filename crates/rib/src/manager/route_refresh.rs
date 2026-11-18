@@ -1148,6 +1148,12 @@ impl RibManager {
             && !deferred_eor
             && self.eor.owes(peer, family)
         {
+            // An EVPN marker held by its feed waits for a build of the feed,
+            // which this answer no longer is. A clean peer has none coming:
+            // its resync builds the feed, sends the marker and then answers.
+            if self.eor_waits_for_evpn_feed(peer, family) && !self.dirty_peers.contains(&peer) {
+                self.mark_outbound_dirty(peer);
+            }
             self.defer_refresh_answer(peer, family, suppress_eor);
             return FamilyReplayOutcome::Failed;
         }
