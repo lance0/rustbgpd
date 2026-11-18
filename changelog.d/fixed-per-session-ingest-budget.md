@@ -18,4 +18,8 @@
   expiry processes one pending message from the peer, and a peer with none
   pending gets Hold Timer Expired. After eight consecutive such expiries
   without the RIB finishing those routes, the session is closed with
-  `Cease/Out of Resources` within about two more hold times.
+  `Cease/Out of Resources` within about two more hold times. A hold expiry
+  that finds the peer has closed the connection, while input waited for the
+  RIB, ends the session as a TCP failure, after processing the messages the
+  peer sent before closing; a NOTIFICATION among them ends the session as a
+  received NOTIFICATION.

@@ -2954,7 +2954,15 @@ What to do when it fires:
    its socket unread while 1,536 routes it already sent are unfinished in
    the RIB (its ingest budget). Each hold expiry then processes one pending
    message from the peer, and a peer with none pending gets Hold Timer
-   Expired. After eight consecutive such expiries without the RIB returning
+   Expired. A hold expiry that instead finds the connection closed by the
+   peer, or failed, ends the session as that TCP failure and sends no
+   NOTIFICATION, so a graceful-restart peer's routes are retained as stale.
+   Messages the peer sent before closing are processed first: a
+   NOTIFICATION among them ends the session as a received NOTIFICATION
+   (routes deleted, or retained only under RFC 8538), and UPDATEs ahead of
+   it reach the RIB before the session end. A close behind more unread
+   input than two maximum-size messages is not found while input waits for
+   a full RIB channel; that wait ends with the Cease below. After eight consecutive such expiries without the RIB returning
    the budget, no further message is processed and the same three-hold-time
    bound applies, so that wait closes the session with this Cease after
    about ten hold times. Its

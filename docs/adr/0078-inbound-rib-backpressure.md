@@ -298,6 +298,30 @@ policy does the same when its probe reaches the close; before, it sent
 Cease/Out of Resources there. A peer with the connection open and nothing
 complete to read still gets Hold Timer Expired.
 
+Under the full-channel policy, complete frames can be buffered ahead of the
+close the probe finds. They are processed first, all of them and in order,
+past the gate and behind the messages already held, as the read loop would
+have processed them before it saw the end of the stream. A NOTIFICATION
+among them therefore ends the session as a received NOTIFICATION, not as a
+TCP failure: the peer's routes are deleted unless the Notification bit was
+exchanged, and after a Hard Reset in every case (RFC 4724, RFC 8538).
+UPDATEs ahead of the NOTIFICATION or of the close reach the RIB before the
+session end, so routes retained as stale are the peer's last advertisements.
+Scanning for the NOTIFICATION alone and dropping the UPDATEs was rejected:
+retained routes would then include ones the peer had withdrawn. The frames
+processed this way are bounded by the read buffer (two maximum-size messages
+under the probes), once per connection.
+
+A close is found only once everything ahead of it has been read. Under the
+full-channel policy the probes stop at two maximum-size messages, so a close
+behind more unread data than that is not found, and the wait ends with
+Cease/Out of Resources, which deletes a restarting peer's routes unless the
+Notification bit was exchanged. The socket does report such a close without
+reading the data, but acting on it was rejected: the unread data can hold
+withdrawals and a NOTIFICATION, and retaining routes without having read
+them is the error described above, while reading it all would admit a whole
+receive buffer past the budget.
+
 Consequences:
 
 - An unrelated peer's update waits behind a bounded number of a bursting

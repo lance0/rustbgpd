@@ -616,7 +616,7 @@ impl PeerSession {
             // peer: RFC 4724 retains a restarting peer's routes for it,
             // where a hold expiry without the RFC 8538 N bit flushes them.
             SocketInput::Closed(result) => {
-                self.handle_tcp_read_result(result).await;
+                self.end_unread_connection(result).await;
                 return;
             }
         };
@@ -635,7 +635,8 @@ impl PeerSession {
                 }
                 self.gate_hold_admissions = self.gate_hold_admissions.saturating_add(1);
             }
-            self.process_buffered_input(true).await;
+            self.process_buffered_input(super::io::Admit::OnePastGate)
+                .await;
             // Processing may have torn the session down (the pending
             // frame was a NOTIFICATION, or failed decode): the FSM has
             // already stopped the hold timer and closed the connection
@@ -675,7 +676,7 @@ impl PeerSession {
         let renewed = match self.renew_parked_hold() {
             Ok(renewed) => renewed,
             Err(result) => {
-                self.handle_tcp_read_result(result).await;
+                self.end_unread_connection(result).await;
                 return;
             }
         };
@@ -701,6 +702,32 @@ impl PeerSession {
             self.trigger_outbound_out_of_resources_teardown(
                 crate::handle::SessionFailureCause::RibAdmissionStalled,
             );
+        }
+    }
+
+    /// The one way a session ends when a hold expiry finds its connection
+    /// closed or failed while input was left unread (held for a full RIB
+    /// channel, or behind the ingest gate): as if the input had been read
+    /// when it arrived. The read arm processes every complete frame before
+    /// it sees the end of the stream, so the same happens here, in order and
+    /// past the gate and any held messages, before the TCP failure:
+    ///
+    /// - a NOTIFICATION the peer sent before closing takes the received
+    ///   NOTIFICATION path and ends the session itself. RFC 4724 retains a
+    ///   restarting peer's routes on TCP failure only; after a NOTIFICATION
+    ///   they are kept only with the RFC 8538 N bit, and never after a Hard
+    ///   Reset;
+    /// - UPDATEs ahead of it, or ahead of the close, reach the RIB first:
+    ///   routes then retained as stale are the peer's last advertisements.
+    ///
+    /// The session end joins the RIB messages those frames produced, behind
+    /// any already held. What is processed past the gate is bounded by the
+    /// read buffer, once per connection.
+    async fn end_unread_connection(&mut self, result: std::io::Result<usize>) {
+        self.process_buffered_input(super::io::Admit::All).await;
+        // Still connected: no buffered frame ended the session.
+        if self.read_half.is_some() {
+            self.handle_tcp_read_result(result).await;
         }
     }
 
@@ -1855,12 +1882,8 @@ pub(super) fn session_down_reason_for_batch(
     None
 }
 
-/// Return true when this event/action batch represents a
-/// NOTIFICATION-triggered teardown path.
-///
-/// RFC 8538: when teardown is triggered by NOTIFICATION semantics, route
-/// preservation requires negotiated Notification GR (N-bit).
-/// What a non-blocking read at a hold expiry found on the peer's socket.
+/// What a non-blocking read at a hold expiry found on the peer's socket,
+/// which the run loop was not reading.
 enum SocketInput {
     /// Bytes read (or, from `take_pending_input`, a complete frame pending).
     Bytes(usize),
@@ -1871,6 +1894,8 @@ enum SocketInput {
 }
 
 impl SocketInput {
+    /// Classify a `try_read` result as the read arm would act on it: zero
+    /// bytes and any error but `WouldBlock` end the connection.
     fn of(read: std::io::Result<usize>) -> Self {
         match read {
             Ok(0) => Self::Closed(Ok(0)),
@@ -1881,6 +1906,11 @@ impl SocketInput {
     }
 }
 
+/// Return true when this event/action batch represents a
+/// NOTIFICATION-triggered teardown path.
+///
+/// RFC 8538: when teardown is triggered by NOTIFICATION semantics, route
+/// preservation requires negotiated Notification GR (N-bit).
 pub(super) fn notification_teardown_event(event: &Event, actions: &[Action]) -> bool {
     let has_session_down = actions.iter().any(|a| matches!(a, Action::SessionDown));
     if !has_session_down {
