@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Bound::{Excluded, Unbounded};
+use std::task::Poll;
 
 use rustbgpd_wire::{Afi, Prefix, Safi};
 
@@ -26,9 +27,19 @@ pub(in crate::manager) struct UnicastReleases {
     // Only startup deferral needs ordered traversal of the registered sessions.
     peers: Option<BTreeSet<PeerId>>,
     retiring_peers: bool,
+    // Sessions that omitted a partially published family from their initial dump.
+    late_joins: [BTreeSet<LateJoin>; 2],
     pub(in crate::manager) rejections: ReleaseRejections,
     // After the family gate opens, each unvisited peer still owns its marker.
     markers: HashMap<Afi, Option<PeerId>>,
+}
+
+// Ready entries sort first so an AFI with only evicted receivers needs no scan.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum LateJoin {
+    Ready(PeerId),
+    // The cap's whole-table owner checks the writer and any EVPN hold.
+    Evicted(PeerId),
 }
 
 struct Release {
@@ -72,6 +83,7 @@ impl RibManager {
     }
 
     pub(in crate::manager) fn track_release_peer(&mut self, peer: PeerId) {
+        self.forget_late_release_join(peer);
         if !self.unicast_release.retiring_peers
             && let Some(peers) = self.unicast_release.peers.as_mut()
         {
@@ -79,7 +91,147 @@ impl RibManager {
         }
     }
 
+    /// Until the walk has staged every key, neither a frozen group row nor
+    /// the Loc-RIB inventory is an authoritative initial table for this AFI.
+    pub(in crate::manager) fn initial_selection_deferred(&self, family: (Afi, Safi)) -> bool {
+        self.selection_deferred(family) || self.owed_release_open(family)
+    }
+
+    pub(in crate::manager) fn late_release_join_pending(
+        &self,
+        peer: PeerId,
+        family: (Afi, Safi),
+    ) -> bool {
+        matches!(family, (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast)) && {
+            let joins = &self.unicast_release.late_joins[usize::from(family.0 == Afi::Ipv6)];
+            joins.contains(&LateJoin::Ready(peer)) || joins.contains(&LateJoin::Evicted(peer))
+        }
+    }
+
+    pub(in crate::manager) fn next_late_release_join(&self) -> Option<(usize, PeerId)> {
+        [Afi::Ipv4, Afi::Ipv6]
+            .into_iter()
+            .enumerate()
+            .find_map(|(index, afi)| {
+                let &LateJoin::Ready(peer) = self.unicast_release.late_joins[index].first()? else {
+                    return None;
+                };
+                (!self.initial_selection_deferred((afi, Safi::Unicast))).then_some((index, peer))
+            })
+    }
+
+    /// Another operation took over or dropped the eviction. Recheck any
+    /// initial-table duty that its whole-table resync had yet to admit.
+    pub(in crate::manager) fn wake_evicted_late_join(&mut self, peer: PeerId) {
+        for joins in &mut self.unicast_release.late_joins {
+            if joins.remove(&LateJoin::Evicted(peer)) {
+                joins.insert(LateJoin::Ready(peer));
+            }
+        }
+    }
+
+    pub(in crate::manager) fn take_late_joins_for_resync(&mut self, peer: PeerId) {
+        for (index, afi) in [Afi::Ipv4, Afi::Ipv6].into_iter().enumerate() {
+            let family = (afi, Safi::Unicast);
+            if !self.initial_selection_deferred(family) {
+                let joins = &mut self.unicast_release.late_joins[index];
+                if joins.remove(&LateJoin::Evicted(peer)) || joins.remove(&LateJoin::Ready(peer)) {
+                    self.handoff_late_refresh(peer, family);
+                }
+            }
+        }
+    }
+
+    fn handoff_late_refresh(&mut self, peer: PeerId, family: (Afi, Safi)) {
+        if !self.selection_peer_convergence_held(peer, family)
+            && crate::manager::route_refresh::remove_family_drop_empty(
+                &mut self.selection_deferred_refresh,
+                peer,
+                family,
+            )
+        {
+            self.defer_refresh_answer(peer, family, self.eor.owes(peer, family));
+        }
+    }
+
+    pub(in crate::manager) fn recover_late_release_join(&mut self) {
+        use crate::manager::route_refresh::{FamilyReplayKind, FamilyReplayOutcome};
+
+        let Some((index, peer)) = self.next_late_release_join() else {
+            return;
+        };
+        self.unicast_release.late_joins[index].remove(&LateJoin::Ready(peer));
+        if self.outbound_channel_gone(peer) {
+            return;
+        }
+        if self.owed_row_evicted.contains(&peer) {
+            // A waiting group member continues to receive ordinary deltas.
+            // Only the evicted receiver's own admissible unit can promote it.
+            self.unicast_release.late_joins[index].insert(LateJoin::Evicted(peer));
+            if self.dirty_peers.contains(&peer) {
+                self.set_selection_partial_caught_up(peer, false);
+            }
+            return;
+        }
+        let family = ([Afi::Ipv4, Afi::Ipv6][index], Safi::Unicast);
+        self.handoff_late_refresh(peer, family);
+        if self.dirty_peers.contains(&peer) || self.force_outbound_peers.contains(&peer) {
+            self.wake_unicast_release_resync(peer, family);
+        } else if self.grouped_member_of(peer).is_some()
+            && self.send_route_refresh_response_inner(
+                peer,
+                family.0,
+                family.1,
+                FamilyReplayKind::SelectionRelease,
+            ) == FamilyReplayOutcome::Committed
+        {
+            self.settle_eor_of(
+                peer,
+                &[family],
+                crate::manager::eor_hold::EorTrigger::Release,
+            );
+        } else {
+            self.mark_outbound_dirty(peer);
+        }
+    }
+
+    /// An ordinary update from a source registered after inventory capture can
+    /// already be in the group table, yet never occur in the rest of the walk.
+    /// Reconcile from this session's actual admission once staging is complete.
+    pub(in crate::manager) fn track_late_release_join(&mut self, peer: PeerId) -> bool {
+        let mut pending = false;
+        for (index, afi) in [Afi::Ipv4, Afi::Ipv6].into_iter().enumerate() {
+            let family = (afi, Safi::Unicast);
+            if self.late_release_join_pending(peer, family) {
+                // An existing session can repeat its initial dump on a Paths-Limit
+                // change. Its earlier obligation survives a refusal of this one.
+                pending = true;
+            } else if self.owed_release_open(family)
+                && self
+                    .peer_sendable_families
+                    .get(&peer)
+                    .is_some_and(|set| set.contains(&family))
+                && !self
+                    .peer_orf_pending
+                    .get(&peer)
+                    .is_some_and(|held| held.contains(&family))
+            {
+                self.unicast_release.late_joins[index].insert(LateJoin::Ready(peer));
+                pending = true;
+            }
+        }
+        pending
+    }
+
+    fn forget_late_release_join(&mut self, peer: PeerId) {
+        for joins in &mut self.unicast_release.late_joins {
+            joins.remove(&LateJoin::Ready(peer));
+            joins.remove(&LateJoin::Evicted(peer));
+        }
+    }
+
     pub(in crate::manager) fn untrack_release_peer(&mut self, peer: PeerId) {
+        self.forget_late_release_join(peer);
         if let Some(peers) = self.unicast_release.peers.as_mut() {
             peers.remove(&peer);
         }
@@ -179,13 +331,13 @@ impl RibManager {
 
     fn small_unicast_release(&self) -> bool {
         const LIMIT: usize = 16;
-        self.unicast_release.jobs.len() == 1
+        let small = self.unicast_release.jobs.len() == 1
             && self.unicast_release.rejections.len() <= LIMIT
             && self.outbound_peers.len() <= LIMIT
             && self.update_groups.group_key(LIMIT).is_none()
             && (0..LIMIT)
                 .filter_map(|gid| self.group_ribs.get(&gid))
-                .all(|group| !group.per_client_best && group.table.len() <= LIMIT)
+                .all(|group| group.table.len() <= LIMIT)
             && self.unicast_prefix_peers.next_epoch <= 32
             && self.deferred_selection_keys.unicast.len() <= LIMIT
             && self.loc_rib.len() <= LIMIT
@@ -195,7 +347,38 @@ impl RibManager {
                 .values()
                 .map(crate::adj_rib_in::AdjRibIn::len)
                 .sum::<usize>()
-                <= LIMIT
+                <= LIMIT;
+        if !small {
+            return false;
+        }
+        // Held withdrawals can leave much more history than there are current candidates.
+        let afi = self.unicast_release.jobs[0].afi;
+        let (keys, exhausted) = self
+            .next_unicast_release_batch(&mut self.unicast_release_inventory(afi), INVENTORY_STEPS);
+        if !exhausted || keys.len() > LIMIT {
+            return false;
+        }
+        let groups = (0..LIMIT).filter_map(|gid| self.group_ribs.get(&gid));
+        for group in groups {
+            if keys
+                .iter()
+                .any(|key| !group.small_release_history(key, LIMIT))
+            {
+                return false;
+            }
+        }
+        for peer in self.release_peer_batch(None, LIMIT) {
+            if let Some(routes) = self.policy_filtered_routes.get(&peer) {
+                for key in &keys {
+                    if let Some(crate::manager::PolicyFilteredBucket::Many(paths)) = routes.get(key)
+                        && paths.len() > LIMIT
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
     }
 
     pub(super) fn invalidate_release_selection(&mut self, affected: &HashSet<Prefix>) {
@@ -440,6 +623,7 @@ impl RibManager {
             }
             walk.keys.extend(walk.retry.take());
             let mut committed = false;
+            let mut removed_best = false;
             let mut budget = SELECTION_STEPS;
             while budget > 0
                 && walk.covered.len() < CHUNK_ROWS
@@ -448,9 +632,11 @@ impl RibManager {
                 let selection = walk
                     .selection
                     .get_or_insert_with(|| ReleaseSelection::new(key));
-                if !self.poll_release_selection(selection, &mut budget) {
+                let Poll::Ready(withdrawn) = self.poll_release_selection(selection, &mut budget)
+                else {
                     break;
-                }
+                };
+                removed_best |= withdrawn;
                 committed = true;
                 walk.keys.pop_front();
                 walk.selection = None;
@@ -461,7 +647,16 @@ impl RibManager {
             }
             // Inventory and selection have independent work budgets. Fill an ordinary
             // outbound envelope across polls; only prefix identities survive these seams.
-            if walk.covered.len() == CHUNK_ROWS
+            // An overflowed family can owe a withdrawal that only its frozen
+            // Loc-RIB row identified. Hand it to the fenced batch before a
+            // waiter re-arm or timer can restart this walk.
+            let flush_withdrawals = removed_best
+                && self
+                    .deferred_selection_keys
+                    .overflowed_families
+                    .contains(&(afi, Safi::Unicast));
+            if flush_withdrawals
+                || walk.covered.len() == CHUNK_ROWS
                 || (!walk.covered.is_empty()
                     && walk.exhausted
                     && (walk.keys.is_empty() || walk.selection.is_some()))

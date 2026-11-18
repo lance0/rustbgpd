@@ -10,8 +10,10 @@ use rustbgpd_wire::{Afi, Ipv4Prefix, RouteRefreshSubtype, Safi};
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
-    dummy_query_rx, make_bgpls_route, make_evpn_imet, make_flowspec_route, make_labeled_rib_route,
-    make_route_with_lp, make_rtc_rib_route, make_vpn_rib_route, query_best_routes,
+    drain_resync_ticks, drain_route_chunks, drain_unicast_release, dummy_query_rx,
+    make_bgpls_route, make_evpn_imet, make_flowspec_route, make_indexed_route,
+    make_labeled_rib_route, make_route_with_lp, make_rtc_rib_route, make_vpn_rib_route,
+    query_best_routes,
 };
 use crate::manager::distribution::{OutboundCommitBatch, OutboundCommitFailure};
 use crate::manager::selection_deferral::SelectionDeferralTransition;
@@ -2392,6 +2394,95 @@ fn collision_failback_overflow_receipt(
         (0, false),
         "complete release must reclaim retained bytes and sticky overflow state"
     );
+}
+
+/// A timer can restart a staged walk once between its selection polls. With
+/// a full deferred ledger, each disappeared route has only its frozen best
+/// left to identify the withdrawal owed to a previously advertised peer.
+#[test]
+fn timer_restarting_overflowed_stage_preserves_frozen_only_withdrawals() {
+    let source = peer(1);
+    let observer = peer(2);
+    let metrics = BgpMetrics::new();
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let (out_tx, mut out_rx) = mpsc::channel(32);
+    manager.handle_update(peer_up(observer, 7, out_tx));
+    while out_rx.try_recv().is_ok() {}
+    let routes: Vec<_> = (0..600)
+        .map(|n| make_indexed_route(n, Ipv4Addr::new(10, 0, 0, 1)))
+        .collect();
+    let expected: HashSet<_> = routes.iter().map(|route| route.prefix).collect();
+    manager.enqueue_routes_received(source, routes, vec![], vec![], vec![], vec![], vec![], None);
+    drain_route_chunks(&mut manager);
+    let mut advertised = HashSet::new();
+    while let Ok(update) = out_rx.try_recv() {
+        advertised.extend(update.announce.iter().map(|route| route.prefix));
+    }
+    assert_eq!(advertised, expected);
+
+    manager = manager.with_selection_deferral(config(Duration::from_mins(1), &[source]));
+    super::arm_selection_waiter(&mut manager, source, &[FAMILY]);
+    manager.owe_eor(observer, FAMILY);
+    manager.set_deferred_selection_limits_for_test(0, 0);
+    manager.enqueue_routes_received(
+        source,
+        vec![],
+        expected.iter().map(|&key| (key, 0)).collect(),
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+        None,
+    );
+    drain_route_chunks(&mut manager);
+    assert_eq!(
+        manager.deferred_selection_ledger_state_for_test(FAMILY),
+        (0, true)
+    );
+    assert_eq!(manager.loc_rib.len(), expected.len());
+    let selection = manager.selection_deferral.as_mut().unwrap();
+    selection.session_down(source, 77, &metrics);
+    let transitions = selection
+        .await_collision_failback_refresh(
+            source,
+            77,
+            false,
+            &HashSet::from([FAMILY]),
+            true,
+            &metrics,
+        )
+        .unwrap();
+    assert_eq!(
+        transitions,
+        [SelectionDeferralTransition::Stage { family: FAMILY }]
+    );
+    manager.apply_selection_deferral_transitions(transitions, "test staged selection");
+    while manager.loc_rib.len() == expected.len() || manager.release_delivery_pending() {
+        assert!(manager.unicast_release_runnable());
+        manager.advance_unicast_release();
+    }
+    assert!(!manager.loc_rib.is_empty(), "timer fires during the walk");
+
+    manager.expire_selection_deferral();
+    drain_unicast_release(&mut manager);
+    drain_resync_ticks(&mut manager);
+    let mut markers = 0;
+    while let Ok(update) = out_rx.try_recv() {
+        for &(key, _) in update.unicast_withdrawals() {
+            assert!(advertised.remove(&key), "duplicate withdrawal of {key}");
+        }
+        if update.end_of_rib.contains(&FAMILY) {
+            assert!(
+                advertised.is_empty(),
+                "{} frozen routes still advertised at EoR",
+                advertised.len()
+            );
+            markers += 1;
+        }
+    }
+    assert_eq!(markers, 1);
+    assert!(advertised.is_empty());
 }
 
 #[test]

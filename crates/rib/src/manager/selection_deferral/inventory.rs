@@ -83,7 +83,7 @@ impl RibManager {
                     .unicast
                     .range((lower, Bound::Unbounded))
                     .next()
-                    .map(|(key, ())| *key)
+                    .copied()
             }
             Source::Frozen => self
                 .loc_rib
@@ -150,7 +150,7 @@ impl RibManager {
     /// Retained-byte charges stay with the family until its full release.
     pub(in crate::manager) fn retire_unicast_release_key(&mut self, key: Prefix) {
         let ledger = &mut self.deferred_selection_keys;
-        if ledger.unicast.remove(&key).is_some() {
+        if ledger.unicast.remove(&key) {
             ledger.retired_unicast_bytes[usize::from(matches!(key, Prefix::V6(_)))] +=
                 size_of::<Prefix>();
         }

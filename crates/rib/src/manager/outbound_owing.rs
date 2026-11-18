@@ -1101,7 +1101,9 @@ impl RibManager {
     /// regroup, an escalation). Returns whether it owed anything.
     pub(super) fn drop_peer_owing(&mut self, peer: PeerId) -> bool {
         self.owing_peers.remove(&peer);
-        self.owed_row_evicted.remove(&peer);
+        if self.owed_row_evicted.remove(&peer) {
+            self.wake_evicted_late_join(peer);
+        }
         let Some(owing) = self.take_owing(peer) else {
             return false;
         };

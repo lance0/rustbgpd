@@ -2214,6 +2214,16 @@ impl GroupRibOut {
         }
     }
 
+    pub(in crate::manager) fn small_release_history(&self, prefix: &Prefix, limit: usize) -> bool {
+        self.policy_filtered
+            .get(prefix)
+            .is_none_or(|paths| paths.len() <= limit)
+            && self
+                .rs_fallback
+                .get(prefix)
+                .is_none_or(|paths| paths.len() <= limit)
+    }
+
     /// Whether any group denial falls in `prefixes`, walking the smaller side.
     pub(in crate::manager) fn has_policy_filtered_in(&self, prefixes: &HashSet<Prefix>) -> bool {
         if prefixes.len() <= self.policy_filtered.len() {
@@ -3106,7 +3116,9 @@ impl RibManager {
         // its actual admitted rows until both release frontiers have passed.
         let release_pending = [Afi::Ipv4, Afi::Ipv6].into_iter().any(|afi| {
             let family = (afi, Safi::Unicast);
-            (self.owed_release_open(family) || self.release_marker_pending(peer, family))
+            (self.owed_release_open(family)
+                || self.release_marker_pending(peer, family)
+                || self.late_release_join_pending(peer, family))
                 && self
                     .peer_sendable_families
                     .get(&peer)

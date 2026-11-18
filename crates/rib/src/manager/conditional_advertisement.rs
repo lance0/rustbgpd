@@ -698,7 +698,7 @@ impl RibManager {
 
     /// Start a fresh settle interval at RFC 4724 selection release. Candidate
     /// changes update the range matches before selection filtering, even while
-    /// held. Both EoR and timer expiry follow the admitted batch's observation
+    /// held. Both End-of-RIB and timer expiry follow the admitted batch's observation
     /// flush. Only a published dataset still awaiting its RIB refresh can
     /// invalidate the accumulated observations.
     pub(super) fn release_conditional_advertisement_family(&mut self, family: (Afi, Safi)) {

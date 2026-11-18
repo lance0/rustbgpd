@@ -1,6 +1,8 @@
 //! Resumable unicast best selection during startup release. A prefix is
 //! published only after every announcing session and path has been examined.
 
+use std::task::Poll;
+
 use rustbgpd_wire::{Afi, Prefix};
 
 use super::{BestSource, RibManager};
@@ -90,12 +92,13 @@ impl UnicastPrefixPeers {
 
 impl RibManager {
     /// Charge every candidate visit, including a failed source seek and the
-    /// final commit. Ordinary affected-prefix mutations invalidate this fold.
+    /// final commit. A ready result reports whether selection removed the
+    /// prior Loc-RIB row. Ordinary affected-prefix mutations invalidate this fold.
     pub(in crate::manager) fn poll_release_selection(
         &mut self,
         selection: &mut ReleaseSelection,
         budget: &mut usize,
-    ) -> bool {
+    ) -> Poll<bool> {
         let prefix = selection.prefix;
         while *budget > 0 {
             let epoch = self
@@ -110,7 +113,8 @@ impl RibManager {
                 }
                 let previous_best = self.loc_rib.get(&prefix).map(BestSource::of);
                 let best = selection.best.as_ref().map(|(route, _)| route);
-                if self.loc_rib.recompute(prefix, best.into_iter()) {
+                let changed = self.loc_rib.recompute(prefix, best.into_iter());
+                if changed {
                     if self.bmp_tx.is_some() {
                         let reason = best
                             .zip(selection.runner_up.as_ref())
@@ -119,7 +123,7 @@ impl RibManager {
                     }
                     self.publish_best_change_events(prefix, previous_best);
                 }
-                return true;
+                return Poll::Ready(changed && best.is_none());
             };
             let mut paths = self
                 .unicast_prefix_peers
@@ -148,7 +152,7 @@ impl RibManager {
                 }
             }
         }
-        false
+        Poll::Pending
     }
 
     pub(in crate::manager) fn publish_unicast_selection_counts(&self) {
@@ -252,7 +256,11 @@ mod tests {
         let mut selection = ReleaseSelection::new(key);
         let mut budget = 12;
         AdjRibIn::take_path_visits();
-        assert!(!manager.poll_release_selection(&mut selection, &mut budget));
+        assert!(
+            manager
+                .poll_release_selection(&mut selection, &mut budget)
+                .is_pending()
+        );
         assert_eq!(budget, 0);
         assert_eq!(AdjRibIn::take_path_visits(), 6);
         assert!(manager.loc_rib.get(&key).is_none());
@@ -271,7 +279,7 @@ mod tests {
             assert!(visited <= 7 - remaining);
             work += 7 - remaining;
             reads += visited;
-            if complete {
+            if complete.is_ready() {
                 break;
             }
             assert!(manager.loc_rib.get(&key).is_none());
@@ -297,7 +305,10 @@ mod tests {
             .reason
         );
         let mut replay = ReleaseSelection::new(key);
-        assert!(manager.poll_release_selection(&mut replay, &mut 128));
+        assert_eq!(
+            manager.poll_release_selection(&mut replay, &mut 128),
+            Poll::Ready(false)
+        );
         assert_eq!(manager.route_event_history.len(), 1);
         assert!(bmp_rx.try_recv().is_err());
     }

@@ -333,6 +333,53 @@ impl RibManager {
         self.bump_export_counters(peer, &rows);
     }
 
+    fn plain_replay_permits(
+        &self,
+        group: &GroupRibOut,
+        peer: PeerId,
+        family: Option<(Afi, Safi)>,
+        held: [bool; 2],
+    ) -> u64 {
+        if held == [false; 2] {
+            return group.plain_permit_count(peer, family);
+        }
+        // Open families use the staged counts. Held families evaluate only
+        // exempt local sources, indexed independently of the received table.
+        let open: u64 = [Afi::Ipv4, Afi::Ipv6]
+            .into_iter()
+            .zip(held)
+            .filter(|(afi, held)| !*held && family.is_none_or(|f| f == (*afi, Safi::Unicast)))
+            .map(|(afi, _)| group.plain_permit_count(peer, Some((afi, Safi::Unicast))))
+            .sum();
+        open + group
+            .table
+            .local_export_sources()
+            .filter(|((prefix, _), source)| {
+                self.replacement_checkpoint(false);
+                let source_family = crate::manager::helpers::prefix_family(prefix);
+                held[usize::from(source_family.0 == Afi::Ipv6)]
+                    && family.is_none_or(|f| f == source_family)
+                    && source.deferral_exempt
+            })
+            .count() as u64
+    }
+
+    pub(in crate::manager) fn initial_unicast_denial_evaluated(
+        &self,
+        held: &[bool; 2],
+        prefix: Prefix,
+        source: PeerId,
+        path_id: u32,
+    ) -> bool {
+        !held[usize::from(matches!(prefix, Prefix::V6(_)))]
+            || (source == PeerId::LOCAL
+                && self
+                    .ribs
+                    .get(&source)
+                    .and_then(|rib| rib.get(&prefix, path_id))
+                    .is_some_and(crate::manager::helpers::unicast_deferral_exempt))
+    }
+
     /// Reconstruct a joining member's export counters from the group's
     /// staged residue: one permit per `adv(m)` slot (labelled by its
     /// retained decision attribution — the lane entry's where the member
@@ -348,6 +395,16 @@ impl RibManager {
         peer: PeerId,
         gid: usize,
         family: Option<(Afi, Safi)>,
+    ) {
+        self.apply_group_replay_counters(peer, gid, family, [false; 2]);
+    }
+
+    pub(in crate::manager) fn apply_group_replay_counters(
+        &mut self,
+        peer: PeerId,
+        gid: usize,
+        family: Option<(Afi, Safi)>,
+        held: [bool; 2],
     ) {
         self.replacement_checkpoint(true);
         // The member's Φ: the per-peer path's RT gate precedes the policy
@@ -378,7 +435,13 @@ impl RibManager {
                     let Some(adv) = group.adv_entry(peer, &route.prefix, route.path_id) else {
                         continue;
                     };
-                    bump_counter_row(rows, adv.policy_label, PolicyAction::Permit);
+                    if !held[usize::from(matches!(route.prefix, Prefix::V6(_)))]
+                        || adv
+                            .local_source
+                            .is_some_and(|source| source.deferral_exempt)
+                    {
+                        bump_counter_row(rows, adv.policy_label, PolicyAction::Permit);
+                    }
                 }
             };
             if group.per_client_best {
@@ -389,7 +452,7 @@ impl RibManager {
                 // count minus its own-sourced slots (the O(1)
                 // `family_counts_for` synthesis) — no table walk per joining
                 // member.
-                let permits = group.plain_permit_count(peer, family);
+                let permits = self.plain_replay_permits(group, peer, family, held);
                 if permits > 0 {
                     rows.push((
                         group.permit_policy_label.as_ref().map(ToString::to_string),
@@ -415,9 +478,16 @@ impl RibManager {
                 if !in_family(prefix) {
                     continue;
                 }
-                for (&(source_peer, _), label) in denials {
+                for (&(source_peer, path_id), label) in denials {
                     self.replacement_checkpoint(false);
-                    if source_peer == peer {
+                    if source_peer == peer
+                        || !self.initial_unicast_denial_evaluated(
+                            &held,
+                            *prefix,
+                            source_peer,
+                            path_id,
+                        )
+                    {
                         continue;
                     }
                     bump(label, PolicyAction::Deny);

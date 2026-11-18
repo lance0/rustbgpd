@@ -805,7 +805,7 @@ async fn capped_orf_marker_refused_at_release_retries_without_a_refresh() {
     manager.expire_eor_holds(tokio::time::Instant::now());
     release_hold(&mut manager);
     assert!(manager.eor.owes(peer, FAMILY));
-    assert!(apply(&mut rx, &mut rib).is_empty());
+    assert_eq!(apply(&mut rx, &mut rib), [] as [&str; 0]);
     drop(occupied);
     let builds = manager.adj_rib_out_commit_stats.resync_builds;
     manager.resync_dirty_peers_bounded();

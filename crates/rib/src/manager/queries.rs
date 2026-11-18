@@ -1287,8 +1287,8 @@ impl RibManager {
                 // Advertised rows carry outbound path IDs, so they are not
                 // tagged; see `tag_injected_rows`.
                 let _ = reply.send(Ok(RoutePage {
-                    version,
                     releasing,
+                    version,
                     ..page
                 }));
                 return;
@@ -1453,8 +1453,8 @@ impl RibManager {
             }
         };
         let mut page = RoutePage {
-            version,
             releasing,
+            version,
             ..page
         };
         if let RouteQueryScope::Advertised { peer } = scope {

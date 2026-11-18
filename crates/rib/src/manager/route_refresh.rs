@@ -1027,7 +1027,14 @@ impl RibManager {
                     .peer_orf_pending
                     .get(&peer)
                     .is_some_and(|pending| pending.contains(&family));
-                if self.selection_peer_convergence_held(peer, family) || orf_pending {
+                // A sealed collision Stage can admit its late member's missing
+                // rows even while the survivor still holds the protocol marker.
+                let staged_initial = matches!(replay_kind, FamilyReplayKind::SelectionRelease)
+                    && safi == Safi::Unicast
+                    && !self.initial_selection_deferred(family);
+                if (self.selection_peer_convergence_held(peer, family) && !staged_initial)
+                    || orf_pending
+                {
                     return FamilyReplayOutcome::Deferred;
                 }
                 (true, false)

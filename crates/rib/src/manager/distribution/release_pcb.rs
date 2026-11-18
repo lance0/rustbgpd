@@ -93,9 +93,7 @@ impl RibManager {
         };
         let precedes = |a, b| crate::best_path::best_path_cmp(route(a), route(b)).is_lt();
         let mut budget = CANDIDATES_PER_POLL;
-        if !group.sendable.contains(&family) {
-            pcb.gathered = true;
-        }
+        pcb.gathered |= !group.sendable.contains(&family);
         while !pcb.gathered && budget > 0 {
             let Some(epoch) = self.unicast_prefix_peers.epochs(&prefix).nth(pcb.source) else {
                 pcb.gathered = true;

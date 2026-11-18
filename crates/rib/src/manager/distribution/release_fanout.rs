@@ -1,7 +1,7 @@
 //! One unicast release batch. The actor owns this transaction until every member
 //! has received the staged delta or transferred it to corrective resync.
 
-use super::super::update_groups::{GroupStageOutput, ReleaseFallback};
+use super::super::update_groups::{GroupRibOut, GroupStageOutput, ReleaseFallback};
 use super::release_denials::{MemberVerdicts, ReleaseDenials};
 use super::release_pcb::{PreparedPcb, ReleasePcb};
 use super::{
@@ -91,6 +91,10 @@ impl ReleaseDistribution {
 impl RibManager {
     /// Complete one member page or stage one group over the bounded prefix
     /// batch. No other mutation may run between the first and last poll.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one match keeps the release phase, next owner and yield boundary together for each state"
+    )]
     pub(in crate::manager) fn poll_unicast_release_distribution(
         &mut self,
         pass: &mut ReleaseDistribution,
@@ -389,14 +393,14 @@ impl RibManager {
     }
 
     fn finish_release_group(&self, pass: &mut ReleaseDistribution, staged_gid: Option<usize>) {
-        if !pass.pcb_keys.is_empty() {
-            pass.phase = Phase::StagePcb(staged_gid.expect("staged PCB group"));
-        } else {
+        if pass.pcb_keys.is_empty() {
             if let Some(group) = staged_gid.and_then(|gid| self.group_ribs.get(&gid)) {
                 pass.lane_entries += group.runner_up_count();
             }
             pass.pcb_scope.clear();
             pass.phase = Phase::Stage;
+        } else {
+            pass.phase = Phase::StagePcb(staged_gid.expect("staged PCB group"));
         }
     }
 
@@ -404,7 +408,7 @@ impl RibManager {
         if self
             .group_ribs
             .get(&gid)
-            .is_some_and(|group| group.has_rs_members())
+            .is_some_and(GroupRibOut::has_rs_members)
         {
             Phase::RemoveRsCounts(gid)
         } else {

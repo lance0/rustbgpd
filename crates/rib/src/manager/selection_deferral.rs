@@ -7,7 +7,7 @@
 
 use crate::PeerId;
 use crate::fast_hash::ShardedMap;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::Hash;
 use std::mem::size_of;
 use std::sync::Arc;
@@ -153,7 +153,7 @@ impl DeferredSelectionKeyCharge for crate::route::RtcRibRouteKey {
 
 #[derive(Debug, Default)]
 pub(super) struct DeferredSelectionKeys {
-    unicast: BTreeMap<rustbgpd_wire::Prefix, ()>,
+    unicast: BTreeSet<rustbgpd_wire::Prefix>,
     flowspec: ShardedMap<crate::route::FlowSpecKey, ()>,
     evpn: ShardedMap<rustbgpd_wire::EvpnRouteKey, ()>,
     vpn: ShardedMap<crate::route::VpnRibRouteKey, ()>,
@@ -192,13 +192,13 @@ impl<K: Eq + Hash> DeferredKeySet<K> for ShardedMap<K, ()> {
     }
 }
 
-impl<K: Ord> DeferredKeySet<K> for BTreeMap<K, ()> {
+impl<K: Ord> DeferredKeySet<K> for BTreeSet<K> {
     fn contains(&self, key: &K) -> bool {
-        self.contains_key(key)
+        BTreeSet::contains(self, key)
     }
 
     fn admit(&mut self, key: K) {
-        self.insert(key, ());
+        self.insert(key);
     }
 }
 
@@ -1721,7 +1721,9 @@ impl RibManager {
         peer: PeerId,
         family: (Afi, Safi),
     ) -> bool {
-        self.selection_convergence_held(family) || self.release_marker_pending(peer, family)
+        self.selection_convergence_held(family)
+            || self.release_marker_pending(peer, family)
+            || self.late_release_join_pending(peer, family)
     }
 
     /// The dirty ring owns a deferred forced resync too. A sibling gate's
@@ -1773,6 +1775,7 @@ impl RibManager {
         // Peers without an owed marker, including a source-suppressed group
         // member, can also own startup admission proof.
         if self.retain_initial_group_admitted(peer)
+            && !self.late_release_join_pending(peer, family)
             && !self.dirty_peers.contains(&peer)
             && !self.force_outbound_peers.contains(&peer)
             && !self.selection_resync_held(peer)
@@ -2396,7 +2399,7 @@ mod ledger_tests {
             "192.0.2.0".parse().unwrap(),
             24,
         ));
-        keys.unicast.insert(prefix, ());
+        keys.unicast.insert(prefix);
         assert!(!keys.is_cleared());
         keys.unicast.clear();
         assert!(keys.is_cleared());
@@ -2771,7 +2774,7 @@ mod ledger_tests {
             )]
         );
 
-        assert!(ledger.unicast.remove(&keys[0]).is_some());
+        assert!(ledger.unicast.remove(&keys[0]));
         assert_eq!(
             ledger.retained_key_bytes,
             charge * 2,
@@ -2793,10 +2796,10 @@ mod ledger_tests {
         );
         assert_eq!(overflowed.len(), 0);
         assert!(
-            !ledger.unicast.contains_key(&keys[2]),
+            !ledger.unicast.contains(&keys[2]),
             "overflow remains sticky even after another family releases budget"
         );
-        assert!(ledger.unicast.contains_key(&keys[3]));
+        assert!(ledger.unicast.contains(&keys[3]));
         assert_eq!(ledger.retained_key_bytes, charge * 2);
         assert!(ledger.overflowed_families.contains(&overflowed_family));
     }

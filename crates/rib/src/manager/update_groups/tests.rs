@@ -1278,7 +1278,7 @@ fn large_release_denials_page_old_keys_and_emit_only_new_member_events() {
                 .get(&MEMBER)
                 .and_then(|by_prefix| by_prefix.get(&p))
                 .into_iter()
-                .flat_map(|bucket| bucket.iter())
+                .flat_map(super::super::PolicyFilteredBucket::iter)
                 .map(|key| key.path_id)
                 .collect();
             assert_eq!(retained, range.collect());

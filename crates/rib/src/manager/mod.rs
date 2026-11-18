@@ -4399,7 +4399,8 @@ impl RibManager {
         self.dirty_peers.iter().any(|&peer| {
             self.replacement_checkpoint(false);
             self.dirty_unit_due(peer)
-        }) || !self.pending_inbound_refresh.is_empty()
+        }) || self.next_late_release_join().is_some()
+            || !self.pending_inbound_refresh.is_empty()
             || self.helper_stale_exempt.iter().any(|(&peer, carried)| {
                 self.replacement_checkpoint(false);
                 self.helper_stale_needs_rescan(peer, carried)
@@ -4489,6 +4490,7 @@ impl RibManager {
         // between the chunks of an open distribution window: settle it
         // (flush and exact-export retirement) before any recovery runs.
         self.settle_distribution_window();
+        self.recover_late_release_join();
         // ADR-0113 capacity recovery is family-scoped and already coalesced.
         // One live peer/family is replayed per timer tick; any runnable
         // remainder keeps `resync_tick_pending` true and re-arms the timer.
@@ -4574,6 +4576,7 @@ impl RibManager {
             // This unit is where a receiver the owed-row cap evicted is
             // built; it stays marked while it stays dirty.
             let evicted = self.owed_row_evicted.remove(&last);
+            self.take_late_joins_for_resync(last);
             let built = self.distribute_changes_without_stale_flush(evicted.then_some(last));
             let still_dirty = self.dirty_peers.contains(&last);
             if evicted && still_dirty {
@@ -4722,7 +4725,7 @@ impl RibManager {
     /// While an interrupted Stage waits for its replacement session, backpressure
     /// primary reads after one mailbox. The one-shot startup timer may also drain
     /// its captured backlog (at most one mailbox and the held lookahead), so an
-    /// already admitted EoR can win the race even with the read buffer full.
+    /// already admitted `EoR` can win the race even with the read buffer full.
     fn release_primary_has_room(&mut self) -> bool {
         // The peer manager samples both BMP statistics every minute with a
         // reply deadline. A parked Stage must not accumulate abandoned samples.
@@ -6407,12 +6410,11 @@ impl RibManager {
                 unprobed.insert(found);
             }
         }
-        let walk = unresolved;
-        if walk.contains(&true) {
+        if unresolved.contains(&true) {
             // The walk is table-sized, so it takes the readiness lane.
             self.with_ingest_readiness(|manager| {
                 let readiness = manager.replacement_readiness.clone();
-                let mut settle = |identity: ExactExportKey| {
+                manager.visit_unindexed_export_identities(unresolved, |identity| {
                     #[cfg(test)]
                     reads.set(reads.get() + 1);
                     replacement_readiness_checkpoint_at(
@@ -6423,24 +6425,7 @@ impl RibManager {
                     if let Some(found) = live.get_mut(&identity) {
                         *found = true;
                     }
-                };
-                for rib in manager.ribs.values() {
-                    if walk[0] {
-                        for route in rib.iter_flowspec() {
-                            settle(ExactExportKey::FlowSpec(route.selection_key()));
-                        }
-                    }
-                    if walk[1] {
-                        for route in rib.iter_bgpls() {
-                            settle(ExactExportKey::BgpLs(route.key()).nlri_identity());
-                        }
-                    }
-                    if walk[2] {
-                        for route in rib.iter_rtc() {
-                            settle(ExactExportKey::Rtc(route.key()).nlri_identity());
-                        }
-                    }
-                }
+                });
             });
         }
         overlay.retain(|peer, rejected| {
@@ -6471,6 +6456,32 @@ impl RibManager {
         #[cfg(test)]
         {
             self.test_exact_export_liveness_reads += reads.get();
+        }
+    }
+
+    /// Walk the requested families whose received NLRI cannot be looked up
+    /// by identity independently of its input path ID.
+    fn visit_unindexed_export_identities(
+        &self,
+        walk: [bool; 3],
+        mut visit: impl FnMut(ExactExportKey),
+    ) {
+        for rib in self.ribs.values() {
+            if walk[0] {
+                for route in rib.iter_flowspec() {
+                    visit(ExactExportKey::FlowSpec(route.selection_key()));
+                }
+            }
+            if walk[1] {
+                for route in rib.iter_bgpls() {
+                    visit(ExactExportKey::BgpLs(route.key()).nlri_identity());
+                }
+            }
+            if walk[2] {
+                for route in rib.iter_rtc() {
+                    visit(ExactExportKey::Rtc(route.key()).nlri_identity());
+                }
+            }
         }
     }
 
@@ -6750,10 +6761,6 @@ impl RibManager {
         let _ = self.route_events_tx.send(event);
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "prefix-scoped rejection mutation and transition event publication share one commit"
-    )]
     pub(super) fn update_policy_filtered_routes_for_prefixes(
         &mut self,
         target_peer: PeerId,

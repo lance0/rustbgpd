@@ -814,3 +814,100 @@ fn a_group_family_release_leaves_an_owed_private_family_to_the_drain() {
         }
     }
 }
+
+#[test]
+fn mid_release_join_skips_a_buffered_group_withdrawal_and_recovers_uncaptured_source_rows() {
+    let mut manager = manager_with_dormant_waiter();
+    let mut existing = connect(&mut manager, receiver(0), 64, false, false);
+    let gid = manager.grouped_member_of(peer_v4(receiver(0))).unwrap();
+    register_test_peer(&mut manager, peer_v4(SOURCE), 0);
+    let received = |source, announced, withdrawn| RibUpdate::RoutesReceived {
+        peer: peer_v4(source),
+        session_id: 0,
+        announced,
+        withdrawn,
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    };
+    let routes: Vec<_> = (0..2049).map(|i| make_indexed_route(i, SOURCE)).collect();
+    let gone = routes[0].prefix;
+    let mut expected: BTreeSet<_> = routes.iter().map(|r| r.prefix).collect();
+    expected.remove(&gone);
+    manager.handle_update(received(SOURCE, routes, vec![]));
+    drain_route_chunks(&mut manager);
+    assert!(
+        std::iter::from_fn(|| existing.try_recv().ok())
+            .any(|message| message.announce.iter().any(|route| route.prefix == gone))
+    );
+
+    let _waiter = connect(&mut manager, WAITER, 64, true, false);
+    manager.handle_update(received(SOURCE, vec![], vec![(gone, 0)]));
+    drain_route_chunks(&mut manager);
+    assert!(
+        manager.loc_rib.get(&gone).is_some(),
+        "frozen before release"
+    );
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: peer_v4(WAITER),
+        session_id: u64::from(WAITER.octets()[3]),
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    });
+    while manager.loc_rib.get(&gone).is_some() {
+        assert!(manager.unicast_release_runnable());
+        manager.advance_unicast_release();
+    }
+    assert!(
+        !manager.release_delivery_pending(),
+        "ordinary registration can run"
+    );
+    assert!(
+        manager.group_ribs[&gid].table.get(&gone, 0).is_some(),
+        "withdrawal selected but not yet staged"
+    );
+
+    let late_source = Ipv4Addr::new(198, 51, 100, 33);
+    register_test_peer(&mut manager, peer_v4(late_source), 0);
+    let extra = make_indexed_route(9999, late_source);
+    expected.insert(extra.prefix);
+    manager.handle_update(received(late_source, vec![extra], vec![]));
+    drain_route_chunks(&mut manager);
+    let mut receivers = vec![];
+    let mut wires = vec![];
+    for (address, private) in [(receiver(1), false), (receiver(2), true)] {
+        let mut rx = connect(&mut manager, address, 64, false, private);
+        assert_eq!(
+            manager.grouped_member_of(peer_v4(address)),
+            (!private).then_some(gid)
+        );
+        let mut wire = Wire::default();
+        wire.write(&mut rx, true);
+        assert!(!wire.announced.contains(&gone), "stale initial replay");
+        assert_eq!(
+            manager
+                .export_policy_counters
+                .get(&peer_v4(address))
+                .map_or(0, |counts| counts.snapshot().export_policy_routes_permitted,),
+            0,
+            "joining while initial selection is held evaluates no ordinary permits",
+        );
+        assert_eq!(wire.markers, 0);
+        receivers.push((peer_v4(address), rx));
+        wires.push(wire);
+    }
+    drain_unicast_release(&mut manager);
+    drain(&mut manager, &mut receivers, &mut wires);
+    for wire in wires {
+        assert!(!wire.announced.contains(&gone));
+        assert_eq!(
+            wire.announced.len(),
+            expected.len(),
+            "each healthy join admits each row once"
+        );
+        assert_eq!(wire.table, expected);
+        assert_eq!(wire.markers, 1);
+    }
+}

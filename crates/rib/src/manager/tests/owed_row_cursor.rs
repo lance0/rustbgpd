@@ -2209,7 +2209,7 @@ fn an_evicted_receivers_resync_and_refresh_wait_for_the_final_batch() {
     refresh_request(&mut manager, peer);
     manager.resync_dirty_peers_bounded();
     assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
-    assert!(sent(&mut receivers[1]).is_empty());
+    assert_eq!(sent(&mut receivers[1]), []);
     assert!(manager.eor.owes(peer, V4));
 
     received(&mut manager, &[(1, 2)], &[]);

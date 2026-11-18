@@ -135,7 +135,7 @@ async fn input_queued_mid_release_precedes_the_last_batch_and_its_marker() {
         }
         while let Ok(envelope) = outbound.try_recv() {
             apply(&mut admitted, &envelope);
-            assert!(envelope.end_of_rib.is_empty());
+            assert_eq!(envelope.end_of_rib, []);
         }
         if !admitted.is_empty() && !manager.release_delivery_pending() {
             break;
@@ -186,7 +186,7 @@ async fn input_queued_mid_release_precedes_the_last_batch_and_its_marker() {
     assert!(!final_state.eor_pending(peer_v4(TARGET)).contains(&FAMILY));
     assert!(!final_state.owes(peer_v4(TARGET), FAMILY));
     while let Ok(envelope) = outbound.try_recv() {
-        assert!(envelope.end_of_rib.is_empty());
+        assert_eq!(envelope.end_of_rib, []);
         assert!(envelope.announce.is_empty());
         assert_eq!(envelope.unicast_withdrawals().count(), 0);
     }
@@ -654,7 +654,7 @@ fn live_joins_on_both_sides_of_enrollment_receive_the_full_released_family() {
         assert_eq!(table.rows, expected);
     }
     assert!(manager.selection_deferred(v6));
-    assert!(!manager.release_peer_batch(None, 1).is_empty());
+    assert_ne!(manager.release_peer_batch(None, 1), []);
     manager.handle_update(RibUpdate::EndOfRib {
         peer: v6_waiter,
         session_id: 1,
@@ -665,11 +665,11 @@ fn live_joins_on_both_sides_of_enrollment_receive_the_full_released_family() {
     manager.resync_dirty_peers_bounded();
     assert_eq!(v6_receiver.try_recv().unwrap().end_of_rib, [v6]);
     assert!(!manager.unicast_release_runnable());
-    assert!(manager.release_peer_batch(None, 1).is_empty());
+    assert_eq!(manager.release_peer_batch(None, 1), []);
     let later = peer_v4(Ipv4Addr::new(203, 0, 113, 2));
     register_test_peer(&mut manager, later, 7);
     assert_eq!(manager.current_session_id(later), Some(7));
-    assert!(manager.release_peer_batch(None, 1).is_empty());
+    assert_eq!(manager.release_peer_batch(None, 1), []);
 }
 
 #[test]

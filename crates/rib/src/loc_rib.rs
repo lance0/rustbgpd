@@ -339,7 +339,7 @@ impl LocRib {
                 self.ordered_index_mode = OrderedIndexMode::StartupRelease;
             }
             (OrderedIndexMode::StartupRelease, false) => {
-                self.ordered_index_mode = OrderedIndexMode::Lazy
+                self.ordered_index_mode = OrderedIndexMode::Lazy;
             }
             _ => {}
         }

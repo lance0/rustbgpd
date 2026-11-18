@@ -3237,7 +3237,7 @@ impl RibManager {
             super::replacement_readiness_checkpoint_at(&self.replacement_readiness, label, false);
             let route_family = prefix_family(&route.prefix);
             if family.is_some_and(|family| family != route_family)
-                || (self.selection_deferred(route_family)
+                || (self.initial_selection_deferred(route_family)
                     && !self
                         .unicast_export_deferral_exempt(route, &mut unicast_deferral_exemptions))
             {
@@ -3338,7 +3338,7 @@ impl RibManager {
             else {
                 continue;
             };
-            if self.selection_deferred(prefix_family(&entry.route.prefix))
+            if self.initial_selection_deferred(prefix_family(&entry.route.prefix))
                 && !self
                     .unicast_export_deferral_exempt(entry.route, &mut unicast_deferral_exemptions)
             {
@@ -3406,6 +3406,25 @@ impl RibManager {
             .get(&peer)
             .cloned()
             .unwrap_or_default();
+        // Register the table owner before preparing any other family's feed:
+        // an EVPN refusal can return early with the whole initial dump deferred.
+        let late_release_join = self.track_late_release_join(peer);
+        if late_release_join
+            && let Some(session) = self.outbound_session_ids.get(&peer).copied()
+            && let Some(record) = self.newest_live_session_mut(peer, session)
+        {
+            record.selection_initial_pending = true;
+        }
+        // Record selection-held initial markers so release does not repeat an
+        // EoR already sent by a session that joined while the roster was dormant.
+        for family in negotiated_sendable.iter().flatten().copied() {
+            if self.selection_peer_convergence_held(peer, family) {
+                self.owe_eor(peer, family);
+                if orf_gated.contains(&family) {
+                    self.defer_orf_initial_eor(peer, family);
+                }
+            }
+        }
         let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
         let interpret_rfc1997 = self.peer_interpret_rfc1997.contains(&peer);
         let rs_control_asn = self.peer_rs_control.get(&peer).copied();
@@ -3524,6 +3543,8 @@ impl RibManager {
         let mut vpn_group_replayed = false;
         let mut grouped_otc_blocked = Vec::new();
         let mut grouped_unicast = None;
+        let held_unicast =
+            [Afi::Ipv4, Afi::Ipv6].map(|afi| self.initial_selection_deferred((afi, Safi::Unicast)));
         if let Some(group) = member_of.and_then(|gid| self.group_ribs.get(&gid)) {
             // LAN-474: per-target divergence at the replay seam — a
             // table entry whose captured SOURCE communities tag it may
@@ -3593,15 +3614,25 @@ impl RibManager {
                     vpn_announce.push(route.clone());
                 }
             }
+            let mut group_denials = group.policy_filtered_for_member_with_checkpoint(
+                peer,
+                &all_prefixes,
+                &mut checkpoint,
+            );
+            if held_unicast != [false; 2] {
+                group_denials.retain(|key| {
+                    checkpoint();
+                    self.initial_unicast_denial_evaluated(
+                        &held_unicast,
+                        key.prefix,
+                        key.source_peer,
+                        key.path_id,
+                    )
+                });
+            }
             super::extend_policy_filtered_routes_with_readiness(
                 &mut current_policy_filtered_routes,
-                group
-                    .policy_filtered_for_member_with_checkpoint(
-                        peer,
-                        &all_prefixes,
-                        &mut checkpoint,
-                    )
-                    .into_iter(),
+                group_denials.into_iter(),
                 &readiness,
             );
             grouped_otc_blocked = group.otc_blocked_for_member_with_checkpoint(
@@ -3614,7 +3645,7 @@ impl RibManager {
         if let Some(gid) = member_of {
             // Export counters for the join, reconstructed from the
             // group's staged residue (per-peer initial-dump parity).
-            self.apply_group_join_counters(peer, gid, None);
+            self.apply_group_replay_counters(peer, gid, None, held_unicast);
         }
         let empty_prefixes: HashSet<Prefix> = HashSet::new();
         let staging_prefixes = if member_of.is_none() {
@@ -3663,9 +3694,7 @@ impl RibManager {
                     self.peer_local_roles.get(&peer).copied().flatten(),
                     &self.peer_is_rr_client,
                     prefix,
-                    self.selection_deferral.as_ref().is_some_and(|deferral| {
-                        deferral.selection_deferred(crate::manager::helpers::prefix_family(prefix))
-                    }),
+                    self.initial_selection_deferred(family),
                     peer,
                     target_peer_asn,
                     target_peer_group.as_deref(),
@@ -3717,9 +3746,7 @@ impl RibManager {
                     self.peer_local_roles.get(&peer).copied().flatten(),
                     &self.peer_is_rr_client,
                     prefix,
-                    self.selection_deferral.as_ref().is_some_and(|deferral| {
-                        deferral.selection_deferred(crate::manager::helpers::prefix_family(prefix))
-                    }),
+                    self.initial_selection_deferred(family),
                     peer,
                     target_peer_asn,
                     target_peer_group.as_deref(),
@@ -3761,9 +3788,7 @@ impl RibManager {
                     orr_topology,
                     orr_spf,
                     prefix,
-                    self.selection_deferral.as_ref().is_some_and(|deferral| {
-                        deferral.selection_deferred(crate::manager::helpers::prefix_family(prefix))
-                    }),
+                    self.initial_selection_deferred(family),
                     peer,
                     target_peer_asn,
                     target_peer_group.as_deref(),
@@ -3805,9 +3830,7 @@ impl RibManager {
                     &initial_view,
                     &self.peer_is_rr_client,
                     prefix,
-                    self.selection_deferral
-                        .as_ref()
-                        .is_some_and(|deferral| deferral.selection_deferred(prefix_family(prefix))),
+                    self.initial_selection_deferred(family),
                     &mut target,
                     target_is_ebgp,
                     interpret_rfc1997,
@@ -4124,16 +4147,6 @@ impl RibManager {
         // will send nothing there, and a restarting peer must not wait out
         // its RFC 4724 §4.1 selection deferral for it. Both go through the
         // same GR/ORF and convergence holds below.
-        // Record selection-held initial markers so release does not repeat an
-        // EoR already sent by a session that joined while the roster was dormant.
-        for family in negotiated_sendable.iter().flatten().copied() {
-            if self.selection_peer_convergence_held(peer, family) {
-                self.owe_eor(peer, family);
-                if orf_gated.contains(&family) {
-                    self.defer_orf_initial_eor(peer, family);
-                }
-            }
-        }
         // Empty/new groups omit no preselected row. Retaining their proof
         // would charge each ordinary replay against every later local add.
         let mut unicast_deferral_exemptions = crate::fast_hash::FastMap::default();
@@ -4173,7 +4186,7 @@ impl RibManager {
                                 || super::update_groups::rt_passes(filter.as_ref(), route))
                     })
             });
-        let selection_initial_pending = omitted_unicast || omitted_vpn;
+        let selection_initial_pending = late_release_join || omitted_unicast || omitted_vpn;
         if let Some(session_id) = self.outbound_session_ids.get(&peer).copied()
             && let Some(record) = self.newest_live_session_mut(peer, session_id)
         {

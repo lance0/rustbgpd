@@ -221,7 +221,7 @@ impl RibManager {
         prefix: Prefix,
         members: &[PeerId],
         stage: &mut PerClientBestPrefixStage,
-        state: &mut ReleaseFallback,
+        progress: &mut ReleaseFallback,
     ) -> bool {
         let group = self.group_ribs.get_mut(&gid).expect("fenced PCB group");
         let mut old = group.rs_fallback.get_mut(&prefix);
@@ -231,9 +231,9 @@ impl RibManager {
             if let (Some(before), Some(after)) = (old.as_deref(), new.as_deref())
                 && before.len() == after.len()
             {
-                while state.compared < before.len() && budget > 0 {
-                    let index = state.compared;
-                    state.compared += 1;
+                while progress.compared < before.len() && budget > 0 {
+                    let index = progress.compared;
+                    progress.compared += 1;
                     budget -= 1;
                     if !super::payload::runner_up_equal(&before[index], &after[index]) {
                         stage.release_fallback_equal = Some(false);
@@ -241,7 +241,7 @@ impl RibManager {
                     }
                 }
                 if stage.release_fallback_equal.is_none() {
-                    if state.compared < before.len() {
+                    if progress.compared < before.len() {
                         return false;
                     }
                     stage.release_fallback_equal = Some(true);
@@ -256,7 +256,7 @@ impl RibManager {
                 .copied()
                 .zip(self.peer_asn.get(&peer).copied())
         };
-        if !state
+        if !progress
             .old
             .install(old.as_deref_mut(), members, context, &mut budget)
         {
@@ -269,12 +269,12 @@ impl RibManager {
                 .expect("equal large lists")
                 .prepared
                 .clone_from(&old.as_ref().expect("equal large lists").prepared);
-        } else if !state.new.install(new, members, context, &mut budget) {
+        } else if !progress.new.install(new, members, context, &mut budget) {
             return false;
         }
         if let Some(old) = old.filter(|list| list.len() > FALLBACK_PAGE) {
-            state.displaced = Some(Arc::clone(&old.rows));
-            state.old_contexts.clone_from(&old.prepared);
+            progress.displaced = Some(Arc::clone(&old.rows));
+            progress.old_contexts.clone_from(&old.prepared);
         }
         true
     }
@@ -283,35 +283,36 @@ impl RibManager {
         &mut self,
         gid: usize,
         prefix: Prefix,
-        state: &mut ReleaseFallback,
+        progress: &mut ReleaseFallback,
     ) -> bool {
-        if !state.retiring {
-            state.retiring = true;
-            if let Some(rows) = state.displaced.take().and_then(Arc::into_inner) {
-                state.retired_rows = rows;
+        if !progress.retiring {
+            progress.retiring = true;
+            if let Some(rows) = progress.displaced.take().and_then(Arc::into_inner) {
+                progress.retired_rows = rows;
             }
             let live = self
                 .group_ribs
                 .get_mut(&gid)
                 .and_then(|group| group.rs_fallback.get_mut(&prefix));
             let new = live.and_then(|list| list.prepared.take());
-            for (target, map) in state
+            for (target, map) in progress
                 .retired_contexts
                 .iter_mut()
-                .zip([state.old_contexts.take(), new])
+                .zip([progress.old_contexts.take(), new])
             {
                 if let Some(map) = map.and_then(Arc::into_inner) {
                     *target = map;
                 }
             }
         }
-        let mut budget = FALLBACK_PAGE - state.retired_rows.retire_page();
-        for map in &mut state.retired_contexts {
+        let mut budget = FALLBACK_PAGE - progress.retired_rows.retire_page();
+        for map in &mut progress.retired_contexts {
             while budget > 0 && map.pop_first().is_some() {
                 budget -= 1;
             }
         }
-        state.retired_rows.is_empty() && state.retired_contexts.iter().all(Projections::is_empty)
+        progress.retired_rows.is_empty()
+            && progress.retired_contexts.iter().all(Projections::is_empty)
     }
 }
 
@@ -371,22 +372,23 @@ mod tests {
                 rs_fallback: Some(list(changed)),
                 ..Default::default()
             };
-            let mut state = ReleaseFallback::default();
+            let mut progress = ReleaseFallback::default();
             assert!(manager.release_fallback_needs_pages(0, key, &stage));
             loop {
-                let before = state.compared + state.old.visits + state.new.visits;
+                let before = progress.compared + progress.old.visits + progress.new.visits;
                 let ready =
-                    manager.prepare_release_fallback(0, key, &[peer], &mut stage, &mut state);
-                let checked = state.compared + state.old.visits + state.new.visits - before;
+                    manager.prepare_release_fallback(0, key, &[peer], &mut stage, &mut progress);
+                let checked =
+                    progress.compared + progress.old.visits + progress.new.visits - before;
                 assert!(checked <= FALLBACK_PAGE);
                 if ready {
                     break;
                 }
             }
             assert_eq!(stage.release_fallback_equal, Some(!changed));
-            assert_eq!(state.compared, FALLBACK_PAGE * 2 + 1);
+            assert_eq!(progress.compared, FALLBACK_PAGE * 2 + 1);
             assert_eq!(
-                state.new.visits,
+                progress.new.visits,
                 if changed { FALLBACK_PAGE * 2 + 1 } else { 0 }
             );
             manager
@@ -397,9 +399,9 @@ mod tests {
             let mut drops = Vec::new();
             let mut remaining = FALLBACK_PAGE * 2 + 1;
             loop {
-                let done = manager.retire_release_fallback(0, key, &mut state);
-                drops.push(remaining - state.retired_rows.len());
-                remaining = state.retired_rows.len();
+                let done = manager.retire_release_fallback(0, key, &mut progress);
+                drops.push(remaining - progress.retired_rows.len());
+                remaining = progress.retired_rows.len();
                 if done {
                     break;
                 }

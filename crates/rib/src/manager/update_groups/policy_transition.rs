@@ -757,9 +757,13 @@ impl RibManager {
             .get(&peer)
             .is_some_and(|families| {
                 !families.is_empty()
-                    && families
-                        .iter()
-                        .all(|(_, safi)| *safi == rustbgpd_wire::Safi::Unicast)
+                    && families.iter().all(|&family| {
+                        family.1 == rustbgpd_wire::Safi::Unicast
+                            // A shared old→new delta cannot represent an
+                            // unpublished group table or a partial initial dump.
+                            && !self.owed_release_open(family)
+                            && !self.late_release_join_pending(peer, family)
+                    })
             });
         only_unicast
             && self.adj_ribs_out.get(&peer).is_none_or(|rib| {

@@ -2859,10 +2859,9 @@ fn parked_unicast_release_allows_mixed_eviction_recovery() {
         let metrics = manager.metrics.clone();
         let families = HashSet::from([V4]);
         let selection = manager.selection_deferral.as_mut().unwrap();
-        assert!(
-            selection
-                .classify_session(waiter, 7, false, &families, &metrics)
-                .is_empty()
+        assert_eq!(
+            selection.classify_session(waiter, 7, false, &families, &metrics),
+            []
         );
         // The inventory needs a continuation, so the new session can
         // re-arm this Stage before its final batch.
@@ -2876,10 +2875,9 @@ fn parked_unicast_release_allows_mixed_eviction_recovery() {
         manager.apply_selection_deferral_transitions(stage, "test collision survivor");
         assert!(manager.evicted_unit_held(peer), "active producer");
         let selection = manager.selection_deferral.as_mut().unwrap();
-        assert!(
-            selection
-                .classify_session(waiter, 8, false, &families, &metrics)
-                .is_empty()
+        assert_eq!(
+            selection.classify_session(waiter, 8, false, &families, &metrics),
+            []
         );
         manager.reselect_newly_deferred_local(&HashSet::new());
         assert!(manager.selection_deferred(V4) && manager.owed_release_open(V4));
@@ -3464,4 +3462,84 @@ fn a_private_handoff_resynced_inside_an_evpn_hold_withdraws_after_the_release() 
     assert_eq!(receivers[1].wire.count(0), (1, 1), "X withdrawn once");
     assert!(!manager.dirty_peers.contains(&peer));
     assert!(manager.owed_row_evicted.is_empty());
+}
+
+#[test]
+fn late_unicast_join_waits_for_its_evicted_unit_to_admit_the_table() {
+    let mut manager = manager(CREDIT).with_selection_deferral(SelectionDeferralConfig {
+        timeout: Duration::from_secs(60),
+        waiters: vec![SelectionDeferralWaiterConfig {
+            peer: peer_v4(WAITER).into(),
+            families: vec![V4],
+        }],
+    });
+    manager.test_force_ungrouped = false;
+    let _source = up_sized(&mut manager, peer_v4(SOURCE), 0, 256, &[V4]);
+    manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
+        peer: peer_v4(WAITER),
+        session_id: 7,
+        peer_restart_state: false,
+        peer_gr_helper: true,
+        peer_gr_families: vec![V4],
+        peer_enhanced_refresh: false,
+        peer_llgr_families: vec![],
+        local_llgr_stale_time: 0,
+    });
+    let _waiter = up_sized(&mut manager, peer_v4(WAITER), 7, 256, &[V4]);
+    received_unicast(&mut manager, 0..32);
+    manager.expire_selection_deferral();
+    assert!(manager.owed_release_open(V4));
+
+    let peer = receiver(0);
+    let rx = up_sized(&mut manager, peer, 0, 64, &[V4, EVPN]);
+    let mut target = Receiver {
+        peer,
+        rx,
+        wire: Wire::default(),
+    };
+    target.write();
+    assert_eq!(target.wire.markers, 1, "unheld EVPN initial marker");
+    assert!(manager.late_release_join_pending(peer, V4));
+    assert!(manager.grouped_member_of(peer).is_some());
+    assert!(manager.evpn_grouped_member_of(peer).is_none());
+
+    // The grouped receiver's private EVPN cursor falls behind the cap.
+    manager.owe_whole_family(peer, FAMILY);
+    let mut fresh = Vec::<(u32, u32)>::new();
+    for round in 0..128u32 {
+        let base = 1000 + round * 128;
+        let gone: Vec<_> = fresh.iter().map(|&(row, _)| row).collect();
+        fresh = (base..base + 128).map(|row| (row, 0)).collect();
+        received(&mut manager, &fresh, &gone);
+        if manager.owed_row_evicted.contains(&peer) {
+            break;
+        }
+    }
+    assert!(manager.owed_row_evicted.contains(&peer));
+    assert!(!manager.dirty_peers.contains(&peer));
+    drain_unicast_release(&mut manager);
+    target.write();
+    assert_eq!(target.wire.unicast_markers, 0);
+
+    // Neither an outstanding operation nor a full writer permits promotion.
+    let operation = manager.begin_outbound_operation(peer, 1).unwrap();
+    for _ in 0..3 {
+        manager.resync_dirty_peers_bounded();
+    }
+    assert!(manager.owed_row_evicted.contains(&peer));
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert!(manager.eor.owes(peer, V4));
+    drop(operation);
+    let tx = manager.outbound_peers[&peer].clone();
+    let full: Vec<_> = std::iter::from_fn(|| tx.clone().try_reserve_owned().ok()).collect();
+    manager.resync_dirty_peers_bounded();
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert!(manager.late_release_join_pending(peer, V4));
+    drop(full);
+    drain_one_unit_a_tick(&mut manager, std::slice::from_mut(&mut target));
+    assert_eq!(target.wire.table, table(&fresh));
+    assert_eq!(target.wire.unicast_table, unicast_table(32));
+    assert_eq!(target.wire.unicast_markers, 1);
+    assert_eq!(target.wire.unicast_rows_after_marker, 0);
+    assert!(!manager.late_release_join_pending(peer, V4));
 }
