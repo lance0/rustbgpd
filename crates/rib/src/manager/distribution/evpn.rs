@@ -909,9 +909,11 @@ impl RibManager {
 
         // Receivers that owe EVPN whole stage and mark nothing in the
         // fanout below: the mutation logs its keys for their cursors once,
-        // here, never per receiver or paced slice. A release logs its whole
-        // inventory before the unchanged winners are left out: a receiver
-        // that joined during the hold has none of them.
+        // here, never per receiver or paced slice. A cursor that starts
+        // while the fanout is parked takes the keys into its own set
+        // (`owe_parked_evpn_fanout`). A release logs its whole inventory
+        // before the unchanged winners are left out: a receiver that joined
+        // during the hold has none of them.
         self.log_owed_evpn_rows(if release { affected } else { &changed_keys });
 
         if changed_keys.is_empty() {
@@ -972,6 +974,33 @@ impl RibManager {
             self.pending_evpn_fanout = Some(fanout);
         }
         parked
+    }
+
+    /// `peer`'s EVPN cursor has just started, at the head of the shared
+    /// list. A fanout parked across turns logged its keys before that head
+    /// (or logged nothing, with no cursor to read them), and its later
+    /// slices skip a receiver that owes EVPN whole: the keys it has not yet
+    /// brought to `peer` join `peer`'s own set, which drains ahead of the
+    /// cursor. At most the keys of one inbound chunk, once per cursor
+    /// start, after one scan of the receivers the fanout still has to
+    /// reach; nothing while no fanout is parked.
+    pub(in crate::manager) fn owe_parked_evpn_fanout(&mut self, peer: PeerId) {
+        // Taken while it is marked: a slice in progress holds the fanout
+        // itself, and its own gate marks the receiver it is serving.
+        let Some(fanout) = self.pending_evpn_fanout.take() else {
+            return;
+        };
+        if fanout.peers.contains(&peer) {
+            self.mark_owed_unlogged(
+                peer,
+                fanout
+                    .keys
+                    .iter()
+                    .copied()
+                    .map(super::super::outbound_owing::OwedKey::Evpn),
+            );
+        }
+        self.pending_evpn_fanout = Some(fanout);
     }
 
     /// Send `fanout.keys` to its remaining private receivers. With a budget,

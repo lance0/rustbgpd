@@ -17,8 +17,13 @@
 //!   carried since the oldest debt began, in the order they last changed.
 //!   The receiver holds a sequence number; a drain step sends the next keys
 //!   after it as an ordinary charged envelope, with no operation latch. Its
-//!   set stops growing at θ and drains ahead of the cursor, which lives
-//!   until the set is empty and the list has been read to its end.
+//!   set drains ahead of the cursor, which lives until the set is empty
+//!   and the list has been read to its end. Under a cursor the set takes
+//!   no key a pass logged, so ordinary changes stop growing it at θ; it
+//!   still takes the keys no list entry after the position names for this
+//!   receiver (EVPN: an RT-Constrain restage, up to the table and what the
+//!   receiver holds; a fanout parked when the cursor started, one inbound
+//!   chunk), and so is not bounded at θ.
 //! - Any other family owed whole drains as one family-scoped resync under
 //!   an operation latch.
 //! - A refresh answer and a replay first absorb their family's owed keys
@@ -735,8 +740,9 @@ impl PeerOwing {
 
     /// Owe cursor family `index` whole from `head` of its [`OwedRows`]: every key
     /// a later pass carries. The keys already owed stay in their set, which
-    /// stops growing and drains ahead of the cursor; the cursor ends when
-    /// the set is empty and the list has been read to its end.
+    /// takes no logged key from here on and drains ahead of the cursor; the
+    /// cursor ends when the set is empty and the list has been read to its
+    /// end.
     fn start_cursor(&mut self, index: usize, head: u64) {
         self.whole |= OwedFamily::CURSORS[index].bit();
         (self.cursor[index], self.hold_cursor[index]) = (head, 0);
@@ -1215,6 +1221,7 @@ impl RibManager {
         let mut rejected = None;
         let mut pending_otc = None;
         let mut touched = 0u16;
+        let mut evpn_cursor_started = false;
         for key in keys {
             self.replacement_checkpoint(false);
             let family = key.family();
@@ -1245,12 +1252,16 @@ impl RibManager {
             super::retire_hash_set(&mut prefixes, &mut || self.replacement_checkpoint(false));
         }
         for family in OwedFamily::ALL {
+            // A live cursor stays where it is however large an unlogged
+            // mark makes its set: the keys it has not read are named only
+            // after its position.
             if touched & family.bit() != 0
                 && !owing.is_whole(family)
                 && owing.set_bytes(family) > self.owing_theta(peer, family)
             {
                 if let Some(index) = family.cursor_index() {
                     owing.start_cursor(index, self.owed_rows_head(index));
+                    evpn_cursor_started |= family == OwedFamily::EVPN;
                 } else {
                     owing.flip_whole(family);
                 }
@@ -1271,6 +1282,9 @@ impl RibManager {
         self.put_owing(peer, owing);
         if settled {
             self.defer_eor_settle(peer);
+        }
+        if evpn_cursor_started {
+            self.owe_parked_evpn_fanout(peer);
         }
     }
 
@@ -1302,7 +1316,8 @@ impl RibManager {
         let mut owing = self
             .take_owing(peer)
             .unwrap_or_else(|| Box::new(PeerOwing::new(session_id)));
-        if !owing.is_whole(family) {
+        let started = !owing.is_whole(family);
+        if started {
             if let Some(index) = family.cursor_index() {
                 owing.start_cursor(index, self.owed_rows_head(index));
             } else {
@@ -1313,6 +1328,9 @@ impl RibManager {
         // New debt inside a selection hold gets its own exempt pass.
         owing.hold_drained &= !family.bit();
         self.put_owing(peer, owing);
+        if started && family == OwedFamily::EVPN {
+            self.owe_parked_evpn_fanout(peer);
+        }
     }
 
     fn note_owing_whole(&mut self, peer: PeerId, family: OwedFamily) {
@@ -2090,7 +2108,7 @@ impl RibManager {
     /// After a drain of `family` ended without a refusal: a whole family
     /// clears its bit (a cursor family once its kept set is empty and its
     /// cursor has caught up with the list: until both hold, passes log
-    /// their keys for the cursor and the set stays frozen), and the
+    /// their keys for the cursor and the set takes only unlogged marks), and the
     /// End-of-RIB of a family that no longer owes anything, if one waits,
     /// goes out now.
     fn owing_family_settled(&mut self, peer: PeerId, family: OwedFamily) {
@@ -3008,6 +3026,55 @@ mod fifo_tests {
             assert_eq!(owing.keyed_len(family), left);
         }
         assert_eq!(owing.set_bytes(family), 0);
+        assert!(owing.is_whole(family), "the cursor is ended by its step");
+    }
+
+    /// As above for the EVPN set, whose removal has its own arm: under a
+    /// cursor it only drains, with no compaction and no capacity release.
+    #[test]
+    fn an_evpn_set_kept_under_a_cursor_drains_without_rebuilding() {
+        const KEYS: u32 = 50_000;
+        let family = OwedFamily::EVPN;
+        let key = |index: u32| {
+            rustbgpd_wire::EvpnRoute::Imet(rustbgpd_wire::EvpnImet {
+                rd: rustbgpd_wire::RouteDistinguisher([0; 8]),
+                ethernet_tag: rustbgpd_wire::EthernetTagId(index),
+                originator_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            })
+            .key()
+        };
+        let mut owing = PeerOwing::new(1);
+        for index in 0..KEYS {
+            owing.insert(OwedKey::Evpn(key(index)), false);
+        }
+        owing.start_cursor(OwedFamily::EVPN_CURSOR, 0);
+        let shape = |owing: &PeerOwing| {
+            let set = &owing.evpn;
+            (set.order.capacity(), set.live.capacity(), set.order.len())
+        };
+        let mut left = KEYS as usize;
+        while left != 0 {
+            for key in owing.copy_keys(family, DrainScope::All, CHUNK_ROWS) {
+                let before = shape(&owing);
+                owing.remove(&key);
+                left -= 1;
+                if left == 0 {
+                    assert_eq!(owing.set_bytes(family), 0, "an empty set is freed");
+                    continue;
+                }
+                let after = shape(&owing);
+                assert!(
+                    after.0 == before.0 && before.1 - after.1 <= 1,
+                    "a capacity changed with {left} keys left: {before:?} to {after:?}"
+                );
+                assert!(
+                    before.2 - after.2 <= 1,
+                    "{} entries moved",
+                    before.2 - after.2
+                );
+            }
+            assert_eq!(owing.keyed_len(family), left);
+        }
         assert!(owing.is_whole(family), "the cursor is ended by its step");
     }
 

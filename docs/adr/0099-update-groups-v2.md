@@ -670,7 +670,16 @@ bounded list maintenance. What differs is where the keys come from:
 - *Mutations.* Each EVPN mutation logs the keys whose winner changed
   (payload changes under the same key and withdrawals included) once,
   after selection and before the receiver loop. The loop may park across
-  turns; a later slice logs nothing again.
+  turns, and its later slices log nothing again and skip a receiver that
+  holds a position. A position that starts while the loop is parked (the
+  receiver's set passed its byte cap, or a selection release) is at or
+  past the parked keys, or they were never logged because no position
+  existed: at that start the keys of the parked loop that has not yet
+  reached the receiver join the receiver's own owed set. That is at most
+  one inbound chunk of keys per start, after one scan of the receivers the
+  loop still has to reach, and nothing while no loop is parked. A receiver
+  whose table is built while the loop is parked (a registration, a
+  resync) reads the Loc-RIB the mutation already changed.
 - *Selection release.* The release starts the positions first, then logs
   its whole inventory once (every key any Adj-RIB-In holds, every key
   recorded during the hold, and the frozen Loc-RIB when that record
@@ -683,7 +692,12 @@ bounded list maintenance. What differs is where the keys come from:
   of that restage (the EVPN Loc-RIB and what the receiver holds) join the
   receiver's own owed set, which drains ahead of the position in the same
   charged steps. Keys the position already read are visited again for
-  that receiver alone; no other receiver reads them twice.
+  that receiver alone; no other receiver reads them twice. These keys are
+  not held to the set's byte cap: one membership change during a walk can
+  make that receiver's set as large as the restage (up to the EVPN table
+  plus what the receiver holds), marked in one turn of that size, until
+  its steps drain it. Passing the cap there would mean the whole-table
+  resync this mechanism replaces.
 - *Kept set.* A receiver's owed keys survive the byte-cap flip and a
   following release, as for unicast: a withdrawal whose key has left every
   table is named nowhere else.
@@ -697,8 +711,13 @@ never hold a position. Labeled unicast, VPN, FlowSpec, BGP-LS and
 RT-Constrain owed whole still drain as one operation.
 
 The step histogram records EVPN steps under scope `cursor` with the unicast
-ones and carries no family label: the bound is the same for both, and a
-label would split every series for a distinction the bound does not need.
+ones and carries no family label: the bound on a step's rows and credit
+is the same for both, and a label would split every series for a
+distinction that bound does not need. Step time is not the same: an EVPN
+step commits into the receiver's EVPN Adj-RIB-Out map, which rebuilds as
+it grows, so its longest steps are longer than a unicast step of the same
+rows (seen in one untimed fixture run; the cause is read from the code,
+not attributed by measurement).
 Not measured: no timed run and no memory measurement of the EVPN list has
 been made; an EVPN route key is larger than a prefix, so the modeled bytes
 per key above do not carry over.
