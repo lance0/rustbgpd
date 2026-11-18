@@ -131,7 +131,9 @@ resolved.
     first walks that group's table twice to record what the member was
     sent, for one such receiver per tick and never in the update pass.
     A receiver that fell behind is not rebuilt inside an EVPN selection
-    hold; its resync follows the release.
+    hold; its resync follows the release. A receiver resynced inside the
+    hold for another reason while it holds EVPN rows gets its EVPN table
+    from one such resync after the release, not from the list.
     An EVPN family owned by an update group, and a receiver in a private
     handoff, keep the recovery path and its complete feed.
   - Whole-family sends of the other families, still on main: labeled

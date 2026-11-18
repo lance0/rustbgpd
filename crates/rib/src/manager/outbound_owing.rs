@@ -41,11 +41,16 @@
 //! | `N` not owing | none | no | no |
 //! | `K` keyed | set | no | no |
 //! | `C` cursor | whole, live position | no | no |
-//! | `W` waiting (group member) | whole, dead position | no | yes |
+//! | `W` waiting | whole with a dead position, or none | no | yes |
 //! | `D` evicted, dirty | kept (member) or dropped | yes | yes |
 //! | `R` ordinary resync | any | yes | no |
 //!
-//! `evicted` is [`RibManager::owed_row_evicted`]. A position is read only
+//! `evicted` is [`RibManager::owed_row_evicted`]: the receiver's EVPN table
+//! is owed to a whole-table unit of the resync tick. The owed-row cap puts
+//! a group member that fell behind in `W`, and so does a dirty resync that
+//! ran inside an EVPN selection hold for a receiver holding EVPN rows (or
+//! a private recovery proof): it enumerated no EVPN key, and the release
+//! logs the Loc-RIB, not a row only the receiver holds. A position is read only
 //! through [`RibManager::live_cursor`], which has none for `W` and `D`:
 //! the drain, the list trim and its cap, the settle check, an absorption
 //! (refused as for capacity) and the shutdown flush all see no cursor.
@@ -57,20 +62,33 @@
 //! | cap pass | `C` behind: `W` (member) or `D` | skipped | skipped |
 //! | tick, unit admissible | – | `D` (one capture, lowest first), then its unit | unit: `N`, End-of-RIB behind it |
 //! | tick, channel full or operation live | – | stays `W`, no capture | refused before the build, stays `D` |
-//! | tick, channel gone | dropped | dropped | dropped |
+//! | tick, channel gone | dropped | dropped | dropped, record and mark together |
 //! | tick inside an EVPN selection hold | waits | stays `W` | stays `D`, nothing built |
-//! | hold release | inventory logged | unchanged; next tick promotes | unchanged; next tick builds |
+//! | dirty resync inside the hold (`R`) | `W` if it holds EVPN rows, else as before | – | – |
+//! | hold release | inventory logged | owes whole, position dead; next tick promotes | unchanged; next tick builds |
 //! | peer refresh | absorbs the debt | deferred to the unit | deferred to the unit |
 //! | operator refresh, failed send | `R` | `D` (that turn's one capture) | `D` |
+//! | operator replay, limit recovery | absorbs the debt | absorption refused as for capacity; stays `W` | as any dirty peer |
+//! | forced resync (ORF IMMEDIATE) | covers the record | record covered, stays evicted: one more unit | left to the tick |
+//! | selection-partial mark (unicast, VPN) | `R` | `D`, no capture | `D` |
 //! | regroup | `R` | `R` (mark and record dropped) | `R` |
 //! | session end or registration | `N` | `N` | `N` |
 //! | shutdown flush | set and remainder | set only | set only |
 //!
 //! A unit that builds an evicted receiver is the only exit from `W`/`D`
-//! besides a session end or a regroup, and it runs only when EVPN is
-//! enumerated ([`RibManager::evicted_unit_held`]), so the dead position is
-//! never read again and the withdrawals its dropped entries named are sent
-//! by that unit's diff against what the receiver holds.
+//! besides a session end, and it runs only when EVPN is enumerated
+//! ([`RibManager::evicted_unit_held`]), so the dead position is never read
+//! again and the withdrawals its dropped entries named are sent by that
+//! unit's diff against what the receiver holds. A regroup's `R` is resynced
+//! in its own transaction: outside a hold that resync is the exit, inside
+//! one it leaves `W` again.
+//!
+//! Inside the hold the tick is not armed for `W` or `D` on their own
+//! account. A ROUTE-REFRESH pending from such a receiver keeps it armed
+//! through the deferred-refresh lane: each tick re-defers the answer and
+//! builds nothing, until the release or the deferral timeout. A unicast
+//! or VPN hold alone does not hold `D`: its unit runs, stays dirty behind
+//! that hold and runs again at its release.
 
 use std::collections::{BTreeMap, HashSet};
 use std::hash::Hash;

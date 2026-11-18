@@ -9530,6 +9530,7 @@ impl RibManager {
                 let mut installed = false;
                 let mut eviction_started = None;
                 let mut commit_refused = false;
+                let mut evpn_rebuild_owed = false;
                 'member: {
                     let readiness = self.replacement_readiness.clone();
                     let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
@@ -10048,6 +10049,15 @@ impl RibManager {
                             }));
                         }
                         if self.selection_deferred((Afi::L2Vpn, Safi::Evpn)) {
+                            // The hold's release logs the Loc-RIB for the
+                            // receiver's cursor, not a row only the
+                            // receiver holds.
+                            evpn_rebuild_owed = is_dirty
+                                && (private_evpn_recovery.is_some()
+                                    || self
+                                        .adj_ribs_out
+                                        .get(&peer)
+                                        .is_some_and(|rib_out| rib_out.evpn_len() != 0));
                             super::retire_hash_set(&mut all, &mut || checkpoint());
                         }
                         all
@@ -11966,6 +11976,13 @@ impl RibManager {
                         super::retire_hash_set(prefixes, &mut || checkpoint());
                     }
                     self.replacement_checkpoint(true);
+                }
+                // A dirty resync inside an EVPN selection hold enumerated no
+                // EVPN key, so the rows the receiver holds were not diffed:
+                // once clean it waits, as a receiver the owed-row cap
+                // evicted, for the tick's unit after the release.
+                if evpn_rebuild_owed && !self.dirty_peers.contains(&peer) {
+                    self.owed_row_evicted.insert(peer);
                 }
                 self.finish_readiness_owner(installed);
                 if let Some(started) = eviction_started {

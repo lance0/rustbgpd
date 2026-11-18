@@ -721,7 +721,13 @@ bounded list maintenance. What differs is where the keys come from:
   covers the debt, and a receiver that cannot build holds no other. Inside
   an EVPN selection hold a resync enumerates no EVPN key, so no evicted
   receiver is marked or built there: each keeps its state and its eviction
-  until the release, and its unit follows. What reaches such a receiver
+  until the release, and its unit follows. The same holds for any
+  receiver that is resynced inside the hold for another reason (a failed
+  send, a policy change, a regroup) while it holds EVPN rows: that resync
+  sends its other families and leaves its EVPN table to one unit after
+  the release, because the release logs the Loc-RIB for the positions
+  and a row only the receiver still holds is named nowhere in it. The
+  release turn builds no table for it. What reaches such a receiver
   first is handled for that receiver alone: a session end or a regroup
   ends the debt (a regroup marks its own member dirty, as for any member
   that owes), an operator refresh marks it dirty and leaves the table to

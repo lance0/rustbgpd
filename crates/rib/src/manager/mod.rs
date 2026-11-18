@@ -716,7 +716,9 @@ pub struct RibManager {
     /// Receivers the owed-row cap evicted ([`Self::cap_owed_rows`]): dirty,
     /// except a group member, which the resync tick makes dirty one a tick
     /// and which keeps its debt (and a cursor no drain reads) until its
-    /// resync covers it. Only the resync tick builds their
+    /// resync covers it. Also a receiver holding EVPN rows whose dirty
+    /// resync ran inside an EVPN selection hold and so enumerated none of
+    /// them: clean, it waits here for the release. Only the resync tick builds their
     /// resync, one receiver per unit: an ordinary pass leaves them dirty,
     /// as it does a receiver whose channel has no room, so a pass never
     /// builds a table for each receiver the cap cut loose. Cleared when the
