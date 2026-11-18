@@ -63,7 +63,7 @@ OPTIONAL_RELEASE_CHECKS = {
 # latency, count, completion, rate and memory readings are report-only.
 SOURCE_BURST = ("source-burst", "source-burst-control")
 SOURCE_BURST_CHECKS = ("final_state_exact", "per_source_order", "sessions_established")
-SOURCE_BURST_SHAPE = {"receivers": 150, "routes": 150_000, "rows_per_update": 1_000}
+SOURCE_BURST_SHAPE = {"receivers": 150, "routes": 150_000, "rows_per_update": 1_024}
 SOURCE_BURST_COLUMNS = [
     "sequence",
     "sent_ms",
@@ -76,6 +76,9 @@ SOURCE_BURST_COLUMNS = [
 # With fewer healthy updates admitted while the burst was unfinished, the
 # cell had nothing that could queue behind it.
 SOURCE_BURST_MIN_DURING = 3
+# The dispatch stamp is taken when the tap's stamper thread wakes, so it can
+# trail the healthy receiver's decode; past this the stamper itself stalled.
+SOURCE_BURST_DISPATCH_TRAIL_MS = 50.0
 
 GIB = 1 << 30
 # Cell 1: the candidate's cgroup peak must be at least this far below the parent's.
@@ -1670,8 +1673,13 @@ def healthy_readings(run: dict, what: str, start: float, done: float) -> dict:
         ):
             raise Invalid(f"{what}: a healthy update is missing a stamp: {row!r}")
         sequence, sent, admitted, dispatched, received = row[:5]
-        if not sent <= admitted <= dispatched <= received:
+        if not (sent <= admitted <= dispatched and admitted <= received):
             raise Invalid(f"{what}: healthy update {sequence} has stamps out of order")
+        if (trail := dispatched - received) > SOURCE_BURST_DISPATCH_TRAIL_MS:
+            raise Invalid(
+                f"{what}: healthy update {sequence}'s dispatch stamp trails its receipt by "
+                f"{trail:.1f} ms (at most {SOURCE_BURST_DISPATCH_TRAIL_MS:g}): the stamper stalled"
+            )
     waits = [(row[3] - row[2], row) for row in rows]
     # The run's own baseline: updates the RIB reached before the burst.
     lead = [wait for wait, row in waits if row[3] < start]
@@ -1702,6 +1710,10 @@ def healthy_readings(run: dict, what: str, start: float, done: float) -> dict:
         "lead_dispatch_max_ms": max(lead, default=None),
         "burst_ahead_max": max(row[5] for row in rows),
         "delivery_max_ms": max(row[4] - row[1] for row in rows),
+        # Dispatch to receipt: the update's own distribution pass. Negative
+        # where the dispatch stamp trailed the receiver.
+        "own_pass_max_ms": max(row[4] - row[3] for row in rows),
+        "stamped_late": number(run, "healthy.stamped_late", what),
     }
 
 
@@ -1717,12 +1729,16 @@ def source_burst_readings(run: dict, what: str) -> dict:
         )
     sent = number(run, "burst.first_sent_ms", what)
     done = number(run, "burst.rib_done_ms", what)
+    # Bucket edges bracketing the longest distribution pass in the run.
+    flush = (run.get("actor", {}).get("work_longest_ms") or {}).get("distribute_flush") or {}
     readings = {
         "rib_done_ms": done - sent,
         "completion_ms": number(run, "burst.completion_ms", what) - sent,
         "ingest_routes_per_s": number(run, "burst.ingest_routes_per_s", what),
         "admit_routes_per_s": number(run, "burst.admit_routes_per_s", what),
         "vmhwm_kib": number(run, "memory.vmhwm_kib", what),
+        "flush_above_ms": flush.get("above_ms"),
+        "flush_at_most_ms": flush.get("at_most_ms"),
     }
     if need(run, "cell", what) != "source-burst-control":
         start = number(run, "burst.first_admitted_ms", what)
@@ -1754,7 +1770,23 @@ def source_burst(run: dict, what: str) -> tuple[str, str]:
         or any(not isinstance(value, bool) for value in checks.values())
     ):
         raise Invalid(f"{what}: incomplete or malformed checks")
-    if failed := [key for key in SOURCE_BURST_CHECKS if not checks[key]]:
+    # A tap that no longer recognizes what the session admits sees no burst
+    # and leaves the run to time out: that is the instrument, not a FAIL.
+    admitted = number(run, "burst.messages_admitted", what)
+    planned = number(run, "shape.burst_messages", what)
+    if admitted != planned:
+        raise Invalid(
+            f"{what}: the tap recognized {admitted:.0f} of the {planned:.0f} burst messages "
+            "the source sent"
+        )
+    failed = [key for key in SOURCE_BURST_CHECKS if not checks[key]]
+    # A flap, reset or session down is a correctness failure even where the
+    # result's own check missed it.
+    wire = need(run, "wire", what)
+    flaps, resets = wire.get("session_flaps_total") or 0, wire.get("stub_resets") or 0
+    if (flaps or resets or wire.get("not_established")) and "sessions_established" not in failed:
+        failed.append("sessions_established")
+    if failed:
         return "FAIL", f"failed checks: {', '.join(failed)}"
     mode = need(run, "mode", what)
     if mode not in ("correctness", "measured"):
@@ -1769,13 +1801,20 @@ def source_burst(run: dict, what: str) -> tuple[str, str]:
             f"{r['dispatch_median_ms']:.1f} ms over the {r['during']} of {r['updates']} updates "
             f"admitted during the burst; {before} before it), at most "
             f"{r['burst_ahead_max']} burst messages queued ahead, send to receive max "
-            f"{r['delivery_max_ms']:.1f} ms"
+            f"{r['delivery_max_ms']:.1f} ms, dispatch to receive (its own pass) max "
+            f"{r['own_pass_max_ms']:.1f} ms, {r['stamped_late']:.0f} admission stamps late"
         )
     parts.append(
         f"burst finished in the RIB {r['rib_done_ms']:.0f} ms and on every receiver "
         f"{r['completion_ms']:.0f} ms after its first write, {r['ingest_routes_per_s']:,.0f} "
         f"routes/s ({r['admit_routes_per_s']:,.0f} routes/s admitted by the session)"
     )
+    if r["flush_above_ms"] is None:
+        parts.append("no distribution pass recorded")
+    else:
+        most = r["flush_at_most_ms"]
+        bound = "past the top bucket" if most is None else f"at most {most:g} ms"
+        parts.append(f"longest distribution pass above {r['flush_above_ms']:g} ms, {bound}")
     parts.append(f"peak RSS {r['vmhwm_kib'] / 1024:.0f} MiB")
     return "PASS", "; ".join(parts)
 
@@ -1809,6 +1848,13 @@ def source_burst_reports(
     return lines
 
 
+def mean_readings(readings: list[dict]) -> dict:
+    """Each reading's mean over the repetitions; a reading null in any of
+    them (no update before the burst, no pass recorded) is left out."""
+    keys = [key for key in readings[0] if all(r.get(key) is not None for r in readings)]
+    return {key: statistics.fmean(r[key] for r in readings) for key in keys}
+
+
 def source_burst_compare(parent: Arm, candidate: Arm, cell: str) -> tuple[str, str, str] | None:
     """Report-only: the candidate's readings beside the parent's, each the
     mean of its passing repetitions; None unless both arms have one."""
@@ -1826,8 +1872,7 @@ def source_burst_compare(parent: Arm, candidate: Arm, cell: str) -> tuple[str, s
                 continue  # The repetition's own line says why.
         if not readings:
             return None
-        keys = [key for key, value in readings[0].items() if value is not None]
-        means.append({key: statistics.fmean(r[key] for r in readings) for key in keys})
+        means.append(mean_readings(readings))
     old, new = means
     parts = [
         f"burst completion x{new['completion_ms'] / old['completion_ms']:.2f}",

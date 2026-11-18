@@ -20,9 +20,9 @@ use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use rustbgpd_wire::capability::{Afi, Capability, Safi};
-use rustbgpd_wire::constants::{HEADER_LEN, MAX_MESSAGE_LEN};
+use rustbgpd_wire::constants::{EXTENDED_MAX_MESSAGE_LEN, HEADER_LEN, MAX_MESSAGE_LEN};
 use rustbgpd_wire::header::peek_message_length;
-use rustbgpd_wire::message::{Message, decode_message, encode_message};
+use rustbgpd_wire::message::{Message, decode_message, encode_message, encode_message_with_limit};
 use rustbgpd_wire::open::OpenMessage;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -66,6 +66,9 @@ pub struct PeerConfig {
     pub hold_time: u16,
     /// Address families to activate via `MultiProtocol` capability.
     pub families: Vec<(Afi, Safi)>,
+    /// Advertise Extended Message (RFC 8654). When the peer's OPEN carries
+    /// it too, messages up to 65,535 bytes are sent and accepted.
+    pub extended_message: bool,
 }
 
 impl PeerConfig {
@@ -78,6 +81,7 @@ impl PeerConfig {
             router_id,
             hold_time: 90,
             families: vec![(Afi::L2Vpn, Safi::Evpn)],
+            extended_message: false,
         }
     }
 }
@@ -261,7 +265,17 @@ async fn establish_stream_with_read_hold(
 
     // Read the peer's OPEN.
     let mut buf = BytesMut::with_capacity(4096);
-    let _peer_open = read_expected_open(&mut stream, &mut buf).await?;
+    let peer_open = read_expected_open(&mut stream, &mut buf).await?;
+    let max_len = if cfg.extended_message
+        && peer_open
+            .capabilities
+            .iter()
+            .any(|c| matches!(c, Capability::ExtendedMessage))
+    {
+        EXTENDED_MAX_MESSAGE_LEN
+    } else {
+        MAX_MESSAGE_LEN
+    };
 
     // Send KEEPALIVE to confirm. At this point we treat the session as
     // Established. Hold-timer enforcement is wired in the reader task
@@ -301,7 +315,7 @@ async fn establish_stream_with_read_hold(
                         // disabled on close and `else` never reached, so the task
                         // would send KEEPALIVEs forever after the run ends.
                         let Some(msg) = msg else { return };
-                        match encode_message(&msg) {
+                        match encode_message_with_limit(&msg, max_len) {
                             Ok(bytes) => {
                                 if writer.write_all(&bytes).await.is_err() {
                                     return;
@@ -324,7 +338,7 @@ async fn establish_stream_with_read_hold(
             }
         }
         while let Some(msg) = tx_rx.recv().await {
-            let bytes = match encode_message(&msg) {
+            let bytes = match encode_message_with_limit(&msg, max_len) {
                 Ok(bytes) => bytes,
                 Err(e) => {
                     tracing::error!(?e, "encode failed in writer task");
@@ -397,7 +411,7 @@ async fn establish_stream_with_read_hold(
                 if have < HEADER_LEN {
                     break;
                 }
-                let peek = peek_message_length(&frame_buf[..have], MAX_MESSAGE_LEN);
+                let peek = peek_message_length(&frame_buf[..have], max_len);
                 let total = match peek {
                     Ok(Some(len)) => usize::from(len),
                     Ok(None) => break,
@@ -411,7 +425,7 @@ async fn establish_stream_with_read_hold(
                 }
                 let msg_bytes = frame_buf.split_to(total).freeze();
                 let mut mb = msg_bytes;
-                match decode_message(&mut mb, MAX_MESSAGE_LEN) {
+                match decode_message(&mut mb, max_len) {
                     Ok(m) => {
                         if rx_tx.send(m).await.is_err() {
                             return;
@@ -466,6 +480,9 @@ fn build_open(cfg: &PeerConfig) -> OpenMessage {
         .collect();
     caps.push(Capability::FourOctetAs { asn: cfg.local_as });
     caps.push(Capability::RouteRefresh);
+    if cfg.extended_message {
+        caps.push(Capability::ExtendedMessage);
+    }
 
     OpenMessage {
         version: 4,
@@ -658,6 +675,7 @@ mod tests {
             router_id: Ipv4Addr::LOCALHOST,
             hold_time,
             families: vec![(Afi::Ipv4, Safi::Unicast)],
+            extended_message: false,
         };
         let (held, silent) =
             tokio::join!(establish_on_with_read_hold(listener, cfg(30), 3), async {
@@ -678,6 +696,61 @@ mod tests {
         drop(silent);
     }
 
+    /// A pair that both advertise Extended Message carries an UPDATE past
+    /// 4,096 bytes; a pair where one side does not refuses to encode it.
+    #[tokio::test]
+    async fn extended_message_raises_the_limit_only_when_both_advertise_it() {
+        use rustbgpd_wire::{Ipv4NlriEntry, Ipv4Prefix, Ipv4UnicastMode, UpdateMessage};
+        let nlri: Vec<Ipv4NlriEntry> = (0..1_100_u32)
+            .map(|index| Ipv4NlriEntry {
+                path_id: 0,
+                prefix: Ipv4Prefix::new(Ipv4Addr::from((10 << 24) | (index << 8)), 24),
+            })
+            .collect();
+        let attributes = [
+            rustbgpd_wire::PathAttribute::Origin(rustbgpd_wire::Origin::Igp),
+            rustbgpd_wire::PathAttribute::AsPath(rustbgpd_wire::AsPath { segments: vec![] }),
+            rustbgpd_wire::PathAttribute::NextHop(Ipv4Addr::new(192, 0, 2, 1)),
+        ];
+        let update =
+            UpdateMessage::build(&nlri, &[], &attributes, true, false, Ipv4UnicastMode::Body);
+        assert!(update.encoded_len() > usize::from(MAX_MESSAGE_LEN));
+        for (sender, receiver, carried) in [(true, true, true), (true, false, false)] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let cfg = |extended_message| PeerConfig {
+                listen: address,
+                local_as: 64512,
+                router_id: Ipv4Addr::LOCALHOST,
+                hold_time: 30,
+                families: vec![(Afi::Ipv4, Safi::Unicast)],
+                extended_message,
+            };
+            let (from, to) = tokio::join!(establish_on(listener, cfg(sender)), async {
+                establish_stream(TcpStream::connect(address).await.unwrap(), cfg(receiver)).await
+            });
+            let (from, mut to) = (from.unwrap(), to.unwrap());
+            from.tx.send(Message::Update(update.clone())).await.unwrap();
+            let got = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    match to.rx.recv().await {
+                        Some(Message::Update(got)) => return Some(got),
+                        Some(_) => {}
+                        None => return None,
+                    }
+                }
+            })
+            .await
+            .ok()
+            .flatten();
+            assert_eq!(
+                got.is_some(),
+                carried,
+                "sender {sender}, receiver {receiver}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn establish_on_accepts_the_supplied_ephemeral_listener() {
         let configured: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -690,6 +763,7 @@ mod tests {
             router_id: Ipv4Addr::LOCALHOST,
             hold_time: 30,
             families: vec![(Afi::Ipv4, Safi::Unicast)],
+            extended_message: false,
         };
 
         let peer = tokio::spawn(establish_on(listener, cfg));

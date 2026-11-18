@@ -741,6 +741,17 @@ impl Fixture {
 
     /// Establish one receiver per `(families, export policy)`.
     async fn connect(&mut self, specs: Vec<ReceiverSpec>, deadline: Duration) -> Result<()> {
+        self.connect_extended(specs, deadline, |_| false).await
+    }
+
+    /// [`Self::connect`], with the stubs at the indices `extended` picks
+    /// (counted from the first of `specs`) advertising Extended Message.
+    async fn connect_extended(
+        &mut self,
+        specs: Vec<ReceiverSpec>,
+        deadline: Duration,
+        extended: impl Fn(usize) -> bool,
+    ) -> Result<()> {
         let mut pending = Vec::new();
         for (index, (families, policy)) in specs.into_iter().enumerate() {
             let ip = receiver_ip(self.receivers.len() + index);
@@ -755,6 +766,7 @@ impl Fixture {
                 router_id: ip,
                 hold_time: HOLD_SECS,
                 families: families.clone(),
+                extended_message: extended(index),
             };
             let handshake =
                 tokio::spawn(establish_on_with_read_hold(listener, stub, READ_HOLD_SECS));

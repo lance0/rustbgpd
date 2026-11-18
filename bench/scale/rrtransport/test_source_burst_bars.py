@@ -28,7 +28,8 @@ def burst(control=False, measured=True):
         "shape": {
             "receivers": 150,
             "routes": 150_000,
-            "rows_per_update": 1_000,
+            "rows_per_update": 1_024,
+            "burst_messages": 150,
             "burst_interval_ms": 0.0,
         },
         "seeded": None,
@@ -38,6 +39,7 @@ def burst(control=False, measured=True):
         "burst": {
             "first_sent_ms": BURST_START,
             "first_admitted_ms": BURST_START + 1,
+            "messages_admitted": 150,
             "paced_sleep_ms": 0.0,
             "rib_done_ms": BURST_DONE,
             "completion_ms": BURST_DONE + 20,
@@ -45,12 +47,19 @@ def burst(control=False, measured=True):
             "admit_routes_per_s": 300_000.0,
         },
         "checks": dict.fromkeys(credit_bars.SOURCE_BURST_CHECKS, True),
+        "wire": {"session_flaps_total": None, "stub_resets": 0, "not_established": []},
+        "actor": {
+            "work_longest_ms": {
+                "distribute_flush": {"above_ms": 250.0, "at_most_ms": 500.0, "observations": 300}
+            }
+        },
         "memory": {"vmhwm_kib": 2_097_152},
     }
     if not control:
         run["healthy"] = {
             "columns": list(credit_bars.SOURCE_BURST_COLUMNS),
             "markers_lost": 0,
+            "stamped_late": 0,
             "updates": [
                 update(1, 100.0, 0.2),
                 update(2, 120.0, 0.3),
@@ -99,6 +108,70 @@ class SourceBurst(unittest.TestCase):
         late = credit_bars.source_burst_readings(run, "run")
         self.assertEqual(late["dispatch_max_ms"], after["dispatch_max_ms"])
         self.assertEqual(late["delivery_max_ms"] - after["delivery_max_ms"], 100.0)
+
+    def test_dispatch_stamp_may_trail_receipt_by_a_wakeup_but_not_a_stall(self):
+        """The stamper wakes after the RIB answers, so the receiver can
+        decode first; measured runs trailed by up to 0.21 ms."""
+        run = burst()
+        row = run["healthy"]["updates"][2]
+        row[4] = row[3] - 0.21
+        self.assert_verdict(run, "PASS", "dispatch to receive (its own pass) max 1.0 ms")
+        self.assertEqual(credit_bars.source_burst_readings(run, "run")["own_pass_max_ms"], 1.0)
+        row[4] = row[3] - 60.0
+        self.assert_verdict(run, "INVALID", "trails its receipt by 60.0 ms")
+        run = burst()
+        run["healthy"]["updates"][2][4] = run["healthy"]["updates"][2][2] - 1
+        self.assert_verdict(run, "INVALID", "healthy update 3 has stamps out of order")
+
+    def test_own_pass_late_stamps_and_longest_flush_are_reported(self):
+        run = burst()
+        run["healthy"]["updates"][3][4] += 40.0
+        run["healthy"]["stamped_late"] = 7
+        got = verdict(run)[1]
+        self.assertIn("dispatch to receive (its own pass) max 41.0 ms", got)
+        self.assertIn("7 admission stamps late", got)
+        self.assertIn("longest distribution pass above 250 ms, at most 500 ms", got)
+        run["actor"]["work_longest_ms"]["distribute_flush"]["at_most_ms"] = None
+        self.assert_verdict(run, "PASS", "above 250 ms, past the top bucket")
+        del run["actor"]["work_longest_ms"]["distribute_flush"]
+        self.assert_verdict(run, "PASS", "no distribution pass recorded")
+        del run["healthy"]["stamped_late"]
+        self.assert_verdict(run, "INVALID", "missing instrument run: healthy.stamped_late")
+
+    def test_burst_the_tap_did_not_recognize_is_invalid_not_a_failure(self):
+        run = burst()
+        run["burst"]["messages_admitted"] = 0
+        run["checks"] = dict.fromkeys(credit_bars.SOURCE_BURST_CHECKS, False)
+        self.assert_verdict(run, "INVALID", "the tap recognized 0 of the 150 burst messages")
+
+    def test_a_flap_reset_or_down_session_fails_whatever_the_check_says(self):
+        for field, value in (
+            ("session_flaps_total", 1.0),
+            ("stub_resets", 2),
+            ("not_established", ["127.0.1.3: None"]),
+        ):
+            run = burst()
+            run["wire"][field] = value
+            self.assert_verdict(run, "FAIL", "failed checks: sessions_established")
+        run = burst()
+        run["checks"]["sessions_established"] = False
+        run["wire"]["session_flaps_total"] = 1.0
+        self.assert_verdict(run, "FAIL", "failed checks: sessions_established")
+        self.assertNotIn("sessions_established, sessions_established", verdict(run)[1])
+
+    def test_readings_without_a_queue_still_pass_and_say_so(self):
+        """Report-only: nothing requires that a queue formed, nor that a long
+        wait had burst messages ahead of it. The line shows both readings."""
+        run = burst()
+        for row in run["healthy"]["updates"]:
+            row[3], row[4], row[5] = row[2] + 0.2, row[2] + 1.2, 0
+        self.assert_verdict(run, "PASS", "max 0.2 ms")
+        self.assert_verdict(run, "PASS", "at most 0 burst messages queued ahead")
+        run = burst()
+        for row in run["healthy"]["updates"]:
+            row[5] = 0
+        self.assert_verdict(run, "PASS", "max 36000.0 ms")
+        self.assert_verdict(run, "PASS", "at most 0 burst messages queued ahead")
 
     def test_failed_check_fails_before_any_instrument_question(self):
         for check in credit_bars.SOURCE_BURST_CHECKS:
@@ -182,6 +255,19 @@ class SourceBurst(unittest.TestCase):
             run = burst(control)
             run["mode"] = "timed"
             self.assert_verdict(run, "INVALID", "unknown mode 'timed'")
+
+
+class Means(unittest.TestCase):
+    def test_a_reading_null_in_one_repetition_is_left_out(self):
+        first = credit_bars.source_burst_readings(burst(), "run")
+        run = burst()
+        # No healthy update reached the RIB before the burst.
+        run["healthy"]["updates"] = run["healthy"]["updates"][2:]
+        second = credit_bars.source_burst_readings(run, "run")
+        self.assertIsNone(second["lead_dispatch_max_ms"])
+        means = credit_bars.mean_readings([first, second])
+        self.assertNotIn("lead_dispatch_max_ms", means)
+        self.assertEqual(means["dispatch_max_ms"], 36_000.0)
 
 
 class Directories(unittest.TestCase):

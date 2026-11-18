@@ -466,6 +466,7 @@ async fn smoke_run(
             router_id: Ipv4Addr::new(127, 0, 1, u8::try_from(index + 1).unwrap()),
             hold_time: 30,
             families: vec![(Afi::Ipv4, Safi::Unicast)],
+            extended_message: false,
         };
         tasks
             .handshakes
@@ -589,7 +590,7 @@ fn main() -> Result<()> {
              \x20      rrtransport credit-release-mixed|credit-release-timer <output-dir> [--reduced] [--correctness-only]\n\
              \x20      rrtransport credit-paused <output-dir> [--reduced] [--correctness-only] [--seconds N]\n\
              \x20      rrtransport credit-fill <unicast|evpn|vpn|flowspec> <output-dir> [--reduced] [--correctness-only]\n\
-             \x20      rrtransport credit-source-burst <output-dir> [--reduced] [--control] [--stall-ms N] [--burst-interval-ms N]\n\
+             \x20      rrtransport credit-source-burst <output-dir> [--reduced] [--control] [--stall-ms N] [--burst-interval-ms N] [--rows N]\n\
              \x20      rrtransport credit-probe <output-dir> [--reduced]"
         ),
     }

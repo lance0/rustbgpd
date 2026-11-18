@@ -16,9 +16,12 @@
 //! the moment the RIB reached the update's place in the queue (dispatch).
 //! The marker is not unicast route input, so it also ends the distribution
 //! window before each healthy update: healthy updates never coalesce with
-//! what precedes them.
+//! what precedes them. A marker behind every burst message tells when the
+//! RIB finished it, so the burst messages queued ahead of a healthy update
+//! are those sent before it and not finished at its admission. A burst
+//! message of 1,024 routes fills the window's affected-prefix bound by
+//! itself, so those markers end no window the RIB would have extended.
 
-use std::collections::VecDeque;
 use std::thread;
 
 use rustbgpd_wire::{Ipv4NlriEntry, Ipv4UnicastMode, UpdateMessage};
@@ -26,9 +29,10 @@ use rustbgpd_wire::{Ipv4NlriEntry, Ipv4UnicastMode, UpdateMessage};
 use super::*;
 use crate::credit_wire::unicast_index;
 
-/// Burst routes per UPDATE: the most /24s that fit a 4,096-byte message
-/// beside the burst's attributes, rounded down.
-const ROWS_PER_UPDATE: usize = 1_000;
+/// Burst routes per UPDATE: the RIB's route chunk and the distribution
+/// window's affected-prefix bound, so each message is one window. That is
+/// past 4,096 bytes, so the burst source negotiates Extended Message.
+const ROWS_PER_UPDATE: usize = 1_024;
 /// Capacity of each half of the tapped channel; the daemon's is 4,096.
 const TAP_CAPACITY: usize = 2_048;
 /// Healthy updates sent before the burst starts: the run's own baseline.
@@ -53,6 +57,9 @@ pub struct Variant {
     pub stall: Option<Duration>,
     /// Seeded defect: sleep this long between burst UPDATEs.
     pub burst_interval: Option<Duration>,
+    /// Burst routes instead of the shape's own: the RIB-side residence
+    /// proof runs two sizes and compares the readings.
+    pub rows: Option<usize>,
 }
 
 impl Variant {
@@ -71,6 +78,10 @@ impl Variant {
                 "--control" => variant.control = true,
                 "--stall-ms" => variant.stall = Some(millis()?),
                 "--burst-interval-ms" => variant.burst_interval = Some(millis()?),
+                "--rows" => {
+                    let value = taken.next().context("--rows needs a value")?;
+                    variant.rows = Some(value.parse()?);
+                }
                 _ => rest.push(arg),
             }
         }
@@ -83,6 +94,7 @@ impl Variant {
             !(variant.control && variant.stall.is_some()),
             "the control sends no healthy update to stall"
         );
+        ensure!(variant.rows != Some(0), "--rows needs at least one route");
         Ok(variant)
     }
 
@@ -104,11 +116,24 @@ struct BurstMessage {
 struct Admitted {
     sequence: u32,
     at: Instant,
-    /// Messages in the RIB's channel when the update reached the tap, and
-    /// how many of them were burst messages. Neither counts the message
-    /// the RIB was serving nor one it had taken to look ahead.
+    /// Messages in the RIB's channel when the update reached the tap; not
+    /// the message the RIB was serving nor one it had taken to look ahead.
     depth: usize,
-    burst_ahead: usize,
+    /// Burst messages forwarded before this update.
+    burst_before: usize,
+    /// The forwarder had waited for room in the RIB's channel while this
+    /// update sat in the ingress channel, so its admission stamp is late.
+    late: bool,
+}
+
+impl Admitted {
+    /// Burst messages ahead of this update at its admission: forwarded
+    /// before it and not yet finished. A message finished within the
+    /// stamper's wake-up time of the admission can read as still ahead.
+    fn burst_ahead(&self, finished: &[Instant]) -> usize {
+        let before = &finished[..self.burst_before.min(finished.len())];
+        self.burst_before - before.partition_point(|&done| done <= self.at)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -117,8 +142,9 @@ struct TapLog {
     /// When the marker ahead of each healthy sequence was answered.
     dispatched: Vec<(u32, Instant)>,
     burst: Vec<(Instant, BurstMessage)>,
-    /// The marker behind the last burst message: the RIB finished the burst.
-    burst_done: Option<Instant>,
+    /// When the marker behind each burst message was answered, in order:
+    /// the RIB had finished that message.
+    finished: Vec<Instant>,
     markers_lost: usize,
     peak_depth: usize,
 }
@@ -126,7 +152,6 @@ struct TapLog {
 struct TapConfig {
     burst: PeerId,
     healthy: PeerId,
-    burst_messages: usize,
     stall: Option<Duration>,
 }
 
@@ -138,7 +163,7 @@ enum Class {
 
 enum Mark {
     Healthy(u32),
-    BurstDone,
+    Burst,
 }
 
 fn classify(update: &RibUpdate, config: &TapConfig) -> Class {
@@ -184,36 +209,40 @@ fn tap(
     let stamps = Arc::clone(&log);
     let stamper = thread::spawn(move || {
         for (mark, answer) in answers {
+            // Taken when this thread wakes, a little after the RIB answered.
             let answered = answer.blocking_recv().is_ok();
             let now = Instant::now();
             let mut log = stamps.lock().expect("tap log");
             match (answered, mark) {
                 (false, _) => log.markers_lost += 1,
                 (true, Mark::Healthy(sequence)) => log.dispatched.push((sequence, now)),
-                (true, Mark::BurstDone) => log.burst_done = Some(now),
+                (true, Mark::Burst) => log.finished.push(now),
             }
         }
     });
     let forwarder = thread::spawn(move || {
-        // Whether each of the latest forwards was a burst message.
-        let mut forwarded = VecDeque::with_capacity(TAP_CAPACITY + 1);
-        let forward = |forwarded: &mut VecDeque<bool>, update: RibUpdate, burst: bool| {
-            if forwarded.len() > TAP_CAPACITY {
-                forwarded.pop_front();
+        // Forward one message; `Some(true)` when it had to wait for room.
+        let forward = |update: RibUpdate| match rib.try_send(update) {
+            Ok(()) => Some(false),
+            Err(mpsc::error::TrySendError::Full(update)) => {
+                rib.blocking_send(update).ok().map(|()| true)
             }
-            forwarded.push_back(burst);
-            rib.blocking_send(update).is_ok()
+            Err(mpsc::error::TrySendError::Closed(_)) => None,
         };
+        // Messages that sat in `ingress` while a forward waited for room.
+        let mut delayed: usize = 0;
         let mut burst_seen = 0;
         while let Some(update) = ingress.blocking_recv() {
             let at = Instant::now();
+            let late = delayed > 0;
+            delayed = delayed.saturating_sub(1);
             let class = classify(&update, &config);
-            // A marker goes ahead of a healthy update and behind the burst.
+            // A marker goes ahead of a healthy update and behind each
+            // burst message.
             let (mut ahead, mut behind) = (None, None);
             match class {
                 Class::Healthy(sequence) => {
                     let depth = rib.max_capacity() - rib.capacity();
-                    let burst_ahead = forwarded.iter().rev().take(depth).filter(|&&b| b).count();
                     {
                         let mut log = log.lock().expect("tap log");
                         log.peak_depth = log.peak_depth.max(depth);
@@ -221,7 +250,8 @@ fn tap(
                             sequence,
                             at,
                             depth,
-                            burst_ahead,
+                            burst_before: burst_seen,
+                            late,
                         });
                     }
                     if let Some(stall) = config.stall.filter(|_| sequence == STALL_SEQUENCE) {
@@ -232,27 +262,26 @@ fn tap(
                 Class::Burst(message) => {
                     log.lock().expect("tap log").burst.push((at, message));
                     burst_seen += 1;
-                    if burst_seen == config.burst_messages {
-                        behind = Some(Mark::BurstDone);
-                    }
+                    behind = Some(Mark::Burst);
                 }
                 Class::Other => {}
             }
-            let burst = matches!(class, Class::Burst(_));
             for (mark, update) in [(ahead, None), (None, Some(update)), (behind, None)] {
-                let (update, burst) = match (mark, update) {
+                let update = match (mark, update) {
                     (Some(mark), _) => {
                         let (reply, answer) = oneshot::channel();
                         if marks.send((mark, answer)).is_err() {
                             return;
                         }
-                        (RibUpdate::QueryLocRibCount { reply }, false)
+                        RibUpdate::QueryLocRibCount { reply }
                     }
-                    (None, Some(update)) => (update, burst),
+                    (None, Some(update)) => update,
                     (None, None) => continue,
                 };
-                if !forward(&mut forwarded, update, burst) {
-                    return;
+                match forward(update) {
+                    None => return,
+                    Some(true) => delayed = delayed.max(ingress.len()),
+                    Some(false) => {}
                 }
             }
         }
@@ -363,15 +392,24 @@ fn compilers_running() -> std::io::Result<Option<String>> {
         {
             continue;
         }
-        // A process may exit between the listing and the read.
-        let Ok(name) = std::fs::read_to_string(entry.path().join("comm")) else {
-            continue;
+        let name = match std::fs::read_to_string(entry.path().join("comm")) {
+            Ok(name) => name,
+            Err(error) if process_gone(&error) => continue,
+            // Any other failure leaves the process unchecked.
+            Err(error) => return Err(error),
         };
         if COMPILERS.contains(&name.trim()) {
             return Ok(Some(name.trim().to_string()));
         }
     }
     Ok(None)
+}
+
+/// A process that exited between the listing and the read: its directory
+/// is gone (`ENOENT`) or it went while being read (`ESRCH`).
+fn process_gone(error: &std::io::Error) -> bool {
+    const ESRCH: i32 = 3;
+    error.kind() == std::io::ErrorKind::NotFound || error.raw_os_error() == Some(ESRCH)
 }
 
 /// Sample the process table for a compiler until `stop`, as the timed
@@ -422,6 +460,7 @@ pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<b
     } else {
         (150, 150_000, CHURN_EVERY, Duration::from_secs(900))
     };
+    let rows = variant.rows.unwrap_or(rows);
     let interval = variant.burst_interval.unwrap_or(Duration::ZERO);
     let unicast = vec![(Afi::Ipv4, Safi::Unicast)];
 
@@ -454,7 +493,6 @@ pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<b
         TapConfig {
             burst: PeerId::from_ipv4(receiver_ip(burst_source)),
             healthy: PeerId::from_ipv4(receiver_ip(healthy_source)),
-            burst_messages: plan.len(),
             stall: variant.stall,
         },
         ingress_rx,
@@ -466,7 +504,12 @@ pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<b
         .collect();
     specs.push((unicast.clone(), Some(healthy_policy())));
     specs.extend((0..2).map(|_| (unicast.clone(), Some(deny_all()))));
-    fixture.connect(specs, Duration::from_secs(120)).await?;
+    // Only the burst source needs messages past 4,096 bytes.
+    fixture
+        .connect_extended(specs, Duration::from_secs(120), |index| {
+            index == burst_source
+        })
+        .await?;
     let registered_peers = fixture.receivers.len();
     eprintln!("{cell}: {registered_peers} sessions established");
 
@@ -600,7 +643,7 @@ pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<b
     // Finished: the RIB answered the marker behind the burst and every
     // burst receiver's table is exact.
     let settled = loop {
-        let done = log.lock().expect("tap log").burst_done.is_some();
+        let done = log.lock().expect("tap log").finished.len() == plan.len();
         if done
             && collectors
                 .iter()
@@ -665,6 +708,9 @@ pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<b
         (state.arrivals.clone(), state.resets, state.decode_failures)
     };
     let log = std::mem::take(&mut *log.lock().expect("tap log"));
+    let burst_done = (log.finished.len() == plan.len())
+        .then(|| log.finished.last().copied())
+        .flatten();
     // Per healthy update: its four stamps and what was queued ahead of it.
     // A sequence the RIB replaced before delivery counts as received at
     // the first later sequence's arrival.
@@ -682,7 +728,7 @@ pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<b
                 admitted.map(|a| ms(a.at)),
                 dispatched.map(|&(_, at)| ms(at)),
                 received.map(|&(_, at)| ms(at)),
-                admitted.map(|a| a.burst_ahead),
+                admitted.map(|a| a.burst_ahead(&log.finished)),
                 admitted.map(|a| a.depth),
             ])
         })
@@ -704,7 +750,11 @@ pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<b
         "schema": "rrtransport-credit/1",
         "cell": cell,
         "family": "unicast",
-        "mode": if options.correctness_only || variant.seeded() { "correctness" } else { "measured" },
+        "mode": if options.correctness_only || variant.seeded() || variant.rows.is_some() {
+            "correctness"
+        } else {
+            "measured"
+        },
         "shape": {
             "receivers": receivers,
             "routes": rows,
@@ -738,12 +788,13 @@ pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<b
             "messages_admitted": log.burst.len(),
             "first_admitted_ms": first_admitted.map(ms),
             "last_admitted_ms": last_admitted.map(ms),
-            "rib_done_ms": log.burst_done.map(ms),
+            "messages_finished": log.finished.len(),
+            "rib_done_ms": burst_done.map(ms),
             "completion_ms": completion.filter(|_| settled).map(ms),
             // Routes over the time from the first write to the session's
             // last admission, and to the RIB finishing the last message.
             "admit_routes_per_s": rate(last_admitted),
-            "ingest_routes_per_s": rate(log.burst_done),
+            "ingest_routes_per_s": rate(burst_done),
         },
         "healthy": {
             "sent": sent.len(),
@@ -756,6 +807,9 @@ pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<b
             "last_received": arrivals.last().map(|&(sequence, _)| sequence),
             "markers_lost": log.markers_lost,
             "peak_queue_depth": log.peak_depth,
+            // Admitted after waiting in the ingress channel for room in the
+            // RIB's: their admission stamps, and so their readings, are late.
+            "stamped_late": log.healthy.iter().filter(|a| a.late).count(),
         },
         "checks": {
             "final_state_exact": settled
@@ -800,10 +854,16 @@ mod tests {
 
     const HELD: Duration = Duration::from_millis(150);
 
-    /// One healthy update's admission-to-dispatch time and burst count
-    /// behind `burst` burst messages, with a RIB stand-in that starts
-    /// serving `held` after the healthy update was offered.
-    fn reading(burst: usize, held: Duration, stall: Option<Duration>) -> (Duration, usize) {
+    struct Reading {
+        wait: Duration,
+        burst_ahead: usize,
+        late: bool,
+    }
+
+    /// One healthy update's reading behind `burst` burst messages, with a
+    /// RIB stand-in that serves the first `taken` forwarded messages before
+    /// the healthy update is offered, and the rest `held` after it.
+    fn reading(burst: usize, taken: usize, held: Duration, stall: Option<Duration>) -> Reading {
         let (ingress, ingress_rx) = mpsc::channel(TAP_CAPACITY);
         let (rib, mut rib_rx) = mpsc::channel(TAP_CAPACITY);
         let log = Arc::new(Mutex::new(TapLog::default()));
@@ -811,7 +871,6 @@ mod tests {
             TapConfig {
                 burst: PeerId::from_ipv4(SOURCE),
                 healthy: PeerId::from_ipv4(CHURN_SOURCE),
-                burst_messages: burst,
                 stall,
             },
             ingress_rx,
@@ -821,6 +880,17 @@ mod tests {
         for start in 0..burst {
             let update = source_update(Family::Unicast, start..start + 1, BURST_VERSION, 100);
             ingress.blocking_send(update).expect("tap open");
+        }
+        let mut answered = 0;
+        for _ in 0..taken {
+            if let Some(RibUpdate::QueryLocRibCount { reply }) = rib_rx.blocking_recv() {
+                reply.send(0).expect("marker waiting");
+                answered += 1;
+            }
+        }
+        // The stamper has logged every answer before the update is offered.
+        while log.lock().expect("tap log").finished.len() < answered {
+            thread::sleep(Duration::from_millis(1));
         }
         ingress
             .blocking_send(churn_update(STALL_SEQUENCE))
@@ -838,32 +908,65 @@ mod tests {
         let log = log.lock().expect("tap log");
         assert_eq!(log.markers_lost, 0);
         assert_eq!(log.burst.len(), burst);
-        assert_eq!(log.burst_done.is_some(), burst > 0);
+        assert_eq!(log.finished.len(), burst);
         let (admitted, dispatched) = (&log.healthy[0], log.dispatched[0]);
         assert_eq!(
             (admitted.sequence, dispatched.0),
             (STALL_SEQUENCE, STALL_SEQUENCE)
         );
-        (dispatched.1 - admitted.at, admitted.burst_ahead)
+        Reading {
+            wait: dispatched.1 - admitted.at,
+            burst_ahead: admitted.burst_ahead(&log.finished),
+            late: admitted.late,
+        }
     }
 
     #[test]
     fn reading_follows_how_long_the_rib_left_the_update_queued() {
-        let (prompt, ahead) = reading(0, Duration::ZERO, None);
-        assert!(prompt < HELD / 2, "unqueued update read {prompt:?}");
-        assert_eq!(ahead, 0);
-        let (queued, ahead) = reading(3, HELD, None);
+        let prompt = reading(0, 0, Duration::ZERO, None);
         assert!(
-            queued >= HELD - Duration::from_millis(20),
-            "queued update read {queued:?}"
+            prompt.wait < HELD / 2,
+            "unqueued update read {:?}",
+            prompt.wait
         );
-        assert!(queued < HELD * 3, "queued update read {queued:?}");
-        assert_eq!(ahead, 3, "every burst message was still queued ahead");
+        assert_eq!(prompt.burst_ahead, 0);
+        let queued = reading(3, 0, HELD, None);
+        let wait = queued.wait;
+        assert!(
+            wait >= HELD - Duration::from_millis(20),
+            "queued update read {wait:?}"
+        );
+        assert!(wait < HELD * 3, "queued update read {wait:?}");
+        assert_eq!(
+            queued.burst_ahead, 3,
+            "every burst message was still queued ahead"
+        );
+        assert!(!queued.late);
+    }
+
+    /// A burst message the RIB has taken but not finished is still ahead:
+    /// the channel no longer holds it, its marker is not yet answered.
+    #[test]
+    fn burst_ahead_counts_the_message_the_rib_is_serving() {
+        assert_eq!(reading(3, 1, HELD, None).burst_ahead, 3);
+        // Its marker answered: the RIB finished the first message.
+        assert_eq!(reading(3, 2, HELD, None).burst_ahead, 2);
+    }
+
+    /// More forwards than the RIB's channel holds: the forwarder waits for
+    /// room while the healthy update sits in the ingress channel.
+    #[test]
+    fn an_update_held_in_ingress_by_a_full_channel_is_stamped_late() {
+        let burst = TAP_CAPACITY / 2 + 8;
+        let held = reading(burst, 0, HELD, None);
+        assert!(held.late);
+        // What the RIB finished while the update waited unstamped is missed.
+        assert!(held.burst_ahead < burst, "read {}", held.burst_ahead);
     }
 
     #[test]
     fn reading_follows_a_seeded_stall_behind_the_admission_stamp() {
-        let (stalled, _) = reading(0, Duration::ZERO, Some(HELD));
+        let stalled = reading(0, 0, Duration::ZERO, Some(HELD)).wait;
         assert!(stalled >= HELD, "stalled update read {stalled:?}");
         assert!(stalled < HELD * 3, "stalled update read {stalled:?}");
     }
@@ -878,9 +981,9 @@ mod tests {
         assert_eq!(
             shape,
             [
-                (1_000, 0, Some(0)),
-                (1_000, 0, Some(1_000)),
-                (500, 0, Some(2_000)),
+                (1_024, 0, Some(0)),
+                (1_024, 0, Some(1_024)),
+                (452, 0, Some(2_048)),
                 (0, 25, Some(0)),
                 (13, 0, Some(0)),
             ]
@@ -889,25 +992,51 @@ mod tests {
             let Message::Update(update) = message else {
                 panic!("burst message is not an UPDATE");
             };
-            assert!(
-                update.encoded_len() <= 4_096,
-                "{} bytes",
-                update.encoded_len()
-            );
+            let bytes = update.encoded_len();
+            assert!(bytes <= usize::from(rustbgpd_wire::EXTENDED_MAX_MESSAGE_LEN));
         }
+        let Message::Update(full) = &plan[0].0 else {
+            panic!("burst message is not an UPDATE");
+        };
+        assert!(
+            full.encoded_len() > 4_096,
+            "a full message needs Extended Message"
+        );
     }
 
     #[test]
     fn variant_takes_only_its_own_flags() {
-        let mut args: Vec<String> = ["--reduced", "--stall-ms", "200", "--burst-interval-ms", "5"]
-            .map(String::from)
-            .into();
+        let mut args: Vec<String> = [
+            "--reduced",
+            "--stall-ms",
+            "200",
+            "--burst-interval-ms",
+            "5",
+            "--rows",
+            "32000",
+        ]
+        .map(String::from)
+        .into();
         let variant = Variant::take(&mut args).expect("flags");
         assert_eq!(args, ["--reduced"]);
         assert_eq!(variant.stall, Some(Duration::from_millis(200)));
         assert_eq!(variant.burst_interval, Some(Duration::from_millis(5)));
+        assert_eq!(variant.rows, Some(32_000));
         assert!(variant.seeded() && !variant.control);
         let mut late = vec!["--stall-ms".to_string(), "400".to_string()];
         assert!(Variant::take(&mut late).is_err(), "a stall past the lead");
+        let mut empty = vec!["--rows".to_string(), "0".to_string()];
+        assert!(Variant::take(&mut empty).is_err(), "an empty burst");
+    }
+
+    #[test]
+    fn only_a_vanished_process_is_skipped() {
+        assert!(process_gone(&std::io::Error::from(
+            std::io::ErrorKind::NotFound
+        )));
+        assert!(process_gone(&std::io::Error::from_raw_os_error(3)));
+        assert!(!process_gone(&std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied
+        )));
     }
 }

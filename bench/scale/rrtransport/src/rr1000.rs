@@ -375,6 +375,7 @@ async fn run_owned(
                 router_id: peer_ip(index),
                 hold_time: 30,
                 families: vec![(Afi::Ipv4, Safi::Unicast)],
+                extended_message: false,
             },
         )));
         tasks.sessions.push(PeerHandle::spawn(
