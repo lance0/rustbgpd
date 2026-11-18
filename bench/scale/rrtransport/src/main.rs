@@ -585,7 +585,8 @@ fn main() -> Result<()> {
         [mode, rest @ ..] if mode.starts_with("credit-") => credit_main(mode, rest),
         _ => bail!(
             "usage: rrtransport smoke | rrtransport rr1000 <output-dir> | rrtransport rrtiny <output-dir>\n\
-             \x20      rrtransport credit-exhaust <unicast|evpn> <output-dir> [--reduced] [--correctness-only] [--pause-ms N]\n\
+             \x20      rrtransport credit-exhaust|credit-restart|credit-restart-churn <unicast|evpn> <output-dir> [--reduced] [--correctness-only] [--pause-ms N]\n\
+             \x20      rrtransport credit-release-mixed|credit-release-timer <output-dir> [--reduced] [--correctness-only]\n\
              \x20      rrtransport credit-paused <output-dir> [--reduced] [--correctness-only] [--seconds N]\n\
              \x20      rrtransport credit-fill <unicast|evpn|vpn|flowspec> <output-dir> [--reduced] [--correctness-only]\n\
              \x20      rrtransport credit-probe <output-dir> [--reduced]"
@@ -605,11 +606,35 @@ fn credit_main(mode: &str, args: &[String]) -> Result<()> {
         Ok(options)
     };
     let passed = match (mode, args) {
-        ("credit-exhaust", [family, output, rest @ ..]) => harness.block_on(credit::exhaust(
-            credit::Family::parse(family)?,
-            Path::new(output),
-            &options(rest)?,
-        ))?,
+        (
+            "credit-exhaust" | "credit-restart" | "credit-restart-churn",
+            [family, output, rest @ ..],
+        ) => {
+            let trigger = if mode == "credit-exhaust" {
+                credit::Trigger::Ordinary
+            } else {
+                credit::Trigger::Restart
+            };
+            harness.block_on(credit::exhaust(
+                credit::Family::parse(family)?,
+                trigger,
+                mode == "credit-restart-churn",
+                Path::new(output),
+                &options(rest)?,
+            ))?
+        }
+        ("credit-release-mixed" | "credit-release-timer", [output, rest @ ..]) => {
+            let cell = if mode == "credit-release-mixed" {
+                credit::release::Cell::Mixed
+            } else {
+                credit::release::Cell::Timer
+            };
+            harness.block_on(credit::release::run(
+                cell,
+                Path::new(output),
+                &options(rest)?,
+            ))?
+        }
         ("credit-paused", [output, rest @ ..]) => {
             harness.block_on(credit::paused(Path::new(output), &options(rest)?))?
         }

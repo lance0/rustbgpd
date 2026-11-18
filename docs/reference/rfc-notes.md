@@ -653,9 +653,9 @@ its last processed peer message
 overload close, not a hold-timer expiry. The session is torn down; the
 maximum-prefix limit uses Cease subcode 1 instead. There is no fallback to
 another subcode, with one exception: a Cease/8 raised while an administrative
-reset drains queued output to a peer that negotiated the RFC 8538 N bit is
-sent as Cease / Hard Reset carrying 6/8 (RFC 8538 §3.1), so the reset leaves
-neither side's routes retained.
+reset, a disable or a neighbor deletion drains queued output to a peer that
+negotiated the RFC 8538 N bit is sent as Cease / Hard Reset carrying 6/8 (RFC
+8538 §3.1), so the teardown leaves neither side's routes retained.
 
 ### Message Size Limits (RFC 4271 + RFC 8654)
 
@@ -2146,6 +2146,18 @@ carries inactive (absent), unlimited (zero), or finite.
   [§3](https://www.rfc-editor.org/rfc/rfc9003.html#section-3); the receiver
   accepts the full 255-octet RFC 9003 limit. The send cap is not the RFC's
   maximum receive length.
+- When the peer negotiated the RFC 8538 N bit, a disable (`DisableNeighbor`
+  or a config `admin_down`), a neighbor deletion (gRPC, CLI or reload) and
+  the removal of a dynamic peer that a config rollback leaves without an
+  admitting range send Cease / Hard Reset whose data is the Administrative
+  Shutdown code and subcode followed by the RFC 9003 communication, as
+  [RFC 8538 §5.1 and §5.2](https://www.rfc-editor.org/rfc/rfc8538.html#section-5)
+  advise for Administrative Shutdown and Peer De-configured: the session is
+  not coming back, so neither side keeps the other's routes as stale. A
+  deletion carries subcode 2, not 3 (Peer De-configured). Daemon shutdown, a
+  neighbor rebuilt by a reload and a dynamic peer bounced onto new
+  peer-group configuration still send a plain Cease / Administrative
+  Shutdown, so both sides may retain across the reconnect.
 - Receive-side extraction handles both direct administrative subcodes and
   one [RFC 8538 Hard Reset envelope](https://www.rfc-editor.org/rfc/rfc8538.html#section-3.1)
   encapsulating either subcode. Other inner errors, nested envelopes, and

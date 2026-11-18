@@ -272,14 +272,17 @@ impl RibManager {
             return Ok(ReplayComplete::Recorded { awaiting });
         }
         for peer in holding {
-            let (helper_session, held) =
+            let (helper_session, held, pending) =
                 self.release_eor_grace_peer(&peer, GrEorGraceReleaseReason::ReplayComplete);
             info!(
                 %peer,
                 owner = %owner,
                 helper_session,
                 held_families = %held,
-                "every listed controller signalled replay complete; releasing held End-of-RIB"
+                pending_families = %pending,
+                "every listed controller signalled replay complete; releasing held End-of-RIB. \
+                 A pending family's End-of-RIB is still held or still owed: it leaves when \
+                 another hold ends or after the table still owed to the peer"
             );
         }
         // One retirement for the whole batch: a carry kept for these windows
@@ -290,33 +293,49 @@ impl RibManager {
     }
 
     /// End `peer`'s window: count the release and emit its held markers.
-    /// A dirty peer keeps them pending for its resync, after the routes it
-    /// replays. Returns the session's helper flag and the held families.
-    fn release_eor_grace_peer(
+    /// A marker another hold still keeps (the selection gate, the
+    /// RT-Constrain membership hold, the EVPN feed) stays pending, and so
+    /// does one whose table is still owed to the peer: a dirty peer's for
+    /// its resync, an owed family's for the owed-key drain. Returns the
+    /// session's helper flag, the held families and those of them still
+    /// pending.
+    pub(super) fn release_eor_grace_peer(
         &mut self,
         target: &EorGraceTarget,
         reason: GrEorGraceReleaseReason,
-    ) -> (bool, String) {
+    ) -> (bool, String, String) {
+        fn labels(families: impl Iterator<Item = (Afi, Safi)>) -> String {
+            let mut labels: Vec<&str> = families
+                .map(|(afi, safi)| super::helpers::afi_safi_label(afi, safi))
+                .collect();
+            labels.sort_unstable();
+            labels.join(",")
+        }
         self.eor_grace_deadlines.remove(target);
         let Some(grace) = self.eor_grace.remove(target) else {
-            return (false, String::new());
+            return (false, String::new(), String::new());
         };
         self.helper_stale_hold_ends = self.helper_stale_hold_ends.saturating_add(1);
-        let mut held: Vec<&str> = grace
+        let held: Vec<(Afi, Safi)> = grace
             .peer
             .into_iter()
             .flat_map(|peer| self.eor.families(peer))
             .filter(|family| grace.helper_session && grace.families.contains(family))
-            .map(|(afi, safi)| super::helpers::afi_safi_label(afi, safi))
             .collect();
-        held.sort_unstable();
-        let held = held.join(",");
         self.metrics
             .record_gr_eor_grace_released(&target.label(), reason);
         if let Some(peer) = grace.peer {
             self.release_eor_hold(peer, EorHold::Grace, EorTrigger::Release);
         }
-        (grace.helper_session, held)
+        let pending = held
+            .iter()
+            .copied()
+            .filter(|&family| grace.peer.is_some_and(|peer| self.eor.owes(peer, family)));
+        (
+            grace.helper_session,
+            labels(held.iter().copied()),
+            labels(pending),
+        )
     }
 
     fn eor_grace_target(&self, peer: PeerId) -> EorGraceTarget {
@@ -429,7 +448,7 @@ impl RibManager {
             // A controller that signalled only after this window's deadline,
             // while a longer window was still open, missed this one.
             let awaiting = self.eor_replay.awaiting_at(Some(deadline));
-            let (helper_session, held) =
+            let (helper_session, held, pending) =
                 self.release_eor_grace_peer(&peer, GrEorGraceReleaseReason::Deadline);
             if awaiting.is_empty() {
                 info!(
@@ -437,9 +456,12 @@ impl RibManager {
                     late_ms,
                     helper_session,
                     held_families = %held,
+                    pending_families = %pending,
                     "End-of-RIB grace window ended at its deadline; releasing held End-of-RIB. \
                      Controller replay completion is not verified: a route not re-injected by now \
-                     is removed by the helper at this End-of-RIB"
+                     is removed by the helper at this End-of-RIB. A pending family's End-of-RIB is \
+                     still held or still owed: it leaves when another hold ends or after the \
+                     table still owed to the peer"
                 );
             } else {
                 warn!(
@@ -447,10 +469,13 @@ impl RibManager {
                     late_ms,
                     helper_session,
                     held_families = %held,
+                    pending_families = %pending,
                     awaiting = %awaiting.join(","),
                     "End-of-RIB grace window ended at its deadline before every listed controller \
                      signalled replay complete; releasing held End-of-RIB. A route the awaited \
-                     controllers have not re-injected is removed by the helper at this End-of-RIB"
+                     controllers have not re-injected is removed by the helper at this End-of-RIB. \
+                     A pending family's End-of-RIB is still held or still owed: it leaves when \
+                     another hold ends or after the table still owed to the peer"
                 );
             }
         }

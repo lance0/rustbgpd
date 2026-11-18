@@ -340,6 +340,20 @@ fn operator_query_wait_buckets() -> Vec<f64> {
     buckets
 }
 
+/// Closed `scope` labels of `bgp_rib_outbound_owed_drain_step_seconds`.
+const OWED_DRAIN_STEP_SCOPES: [&str; 3] = ["cursor", "keyed", "whole"];
+
+/// The shared actor buckets plus 250 ms, so the 50 ms step bound and the
+/// 250 ms turn bound are both exact edges. Used by the owed-drain step,
+/// actor turn and actor work histograms; the other actor families keep the
+/// shared layout.
+fn actor_buckets_with_250ms() -> Vec<f64> {
+    let mut buckets = RIB_ACTOR_DURATION_BUCKETS.to_vec();
+    buckets.push(0.250);
+    buckets.sort_by(f64::total_cmp);
+    buckets
+}
+
 /// Closed operation labels for outbound prefix-limit actor work.
 const OUTBOUND_PREFIX_LIMIT_ACTOR_OPERATIONS: [&str; 2] = ["apply", "recovery"];
 /// `server` label of `bgp_management_server_crashes_total` for the
@@ -754,6 +768,7 @@ struct BgpMetricsInner {
     rib_dirty_resync: IntCounterVec,
     rib_outbound_owing_fallback: IntCounter,
     rib_outbound_owing_flips: IntCounter,
+    rib_outbound_owed_drain_step_seconds: HistogramVec,
     rib_outbound_dirty_peers: IntGauge,
     rib_outbound_credit_rows: IntGauge,
     rib_outbound_credit_bytes: IntGauge,
@@ -1918,6 +1933,18 @@ impl BgpMetrics {
              pass found the peer without credit.",
         )
         .expect("valid metric definition");
+        let rib_outbound_owed_drain_step_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "bgp_rib_outbound_owed_drain_step_seconds",
+                "Wall-clock duration of one owed-route drain step toward one receiver on the RIB actor, by scope: cursor (up to 1,024 unicast keys of a family owed whole, a charged ordinary envelope), keyed (up to 1,024 keys of an owed-key set), whole (one whole-family pass of a labeled-unicast, VPN, EVPN, FlowSpec, BGP-LS or RT-Constrain family, including one absorbed for a waiting End-of-RIB).",
+            )
+            .buckets(actor_buckets_with_250ms()),
+            &["scope"],
+        )
+        .expect("valid metric definition");
+        for scope in OWED_DRAIN_STEP_SCOPES {
+            rib_outbound_owed_drain_step_seconds.with_label_values(&[scope]);
+        }
 
         let rib_outbound_dirty_peers = IntGauge::new(
             "bgp_rib_outbound_dirty_peers",
@@ -2082,7 +2109,7 @@ impl BgpMetrics {
                 "bgp_rib_actor_work_duration_seconds",
                 "Wall-clock duration of RIB actor work components: `route_chunk` covers chunk construction and processing excluding its drained-batch tail, `distribute_flush` covers one outbound pass for a distribution window (one route batch plus any already-queued unicast route messages that joined it, so one observation can cover many UPDATE messages) including its internal readiness servicing, `exact_export_retire` covers the rejection retirement when that window settles, `attribute_gc` covers deadline-triggered attribute collection outside ingest chunks, and `flowspec_validation` covers a receive-side validation slice including completed selection/distribution. Correlate with readiness waits; component durations do not bound probe latency or cover all actor work.",
             )
-            .buckets(RIB_ACTOR_DURATION_BUCKETS.to_vec()),
+            .buckets(actor_buckets_with_250ms()),
             &["work_unit"],
         )
         .expect("valid metric definition");
@@ -2095,7 +2122,7 @@ impl BgpMetrics {
                 "bgp_rib_actor_turn_duration_seconds",
                 "Wall-clock duration of one RIB actor turn: the synchronous handling of one inbound RIB message, by message kind. A turn never yields, so it is one actor poll's share; readiness queries answered at checkpoints inside the turn are included. Operator summaries answered from a synchronous replacement's frozen projection are not observed as query; their time belongs to whichever turn or work unit holds the replacement. VPN, BGP-LS, labeled and RTC routes are processed and distributed inside their routes turn; unicast, FlowSpec and EVPN routes are only admitted there, and their chunks and distribution windows are bgp_rib_actor_work_duration_seconds route_chunk and distribute_flush units. Later policy-transition polls are in bgp_rib_policy_transition_actor_poll_duration_seconds. Other timer expiries (GR/LLGR stale sweeps, refresh windows, End-of-RIB holds, selection deferral, conditional advertisement), dirty-resync ticks, destination pre-staging and deferred initial dumps are not message turns and no histogram covers the whole unit (see bgp_rib_actor_slice_seconds). Answers which message kind holds the actor.",
             )
-            .buckets(RIB_ACTOR_DURATION_BUCKETS.to_vec()),
+            .buckets(actor_buckets_with_250ms()),
             &["kind"],
         )
         .expect("valid metric definition");
@@ -3607,6 +3634,9 @@ impl BgpMetrics {
             .register(Box::new(rib_outbound_owing_flips.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(rib_outbound_owed_drain_step_seconds.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(rib_ingest_channel_depth.clone()))
             .expect("metric not already registered");
         registry
@@ -4185,6 +4215,7 @@ impl BgpMetrics {
             rib_dirty_resync,
             rib_outbound_owing_fallback,
             rib_outbound_owing_flips,
+            rib_outbound_owed_drain_step_seconds,
             rib_outbound_dirty_peers,
             rib_outbound_credit_rows,
             rib_outbound_credit_bytes,
@@ -6216,6 +6247,19 @@ impl BgpMetrics {
     /// Record a private family a peer began to owe whole.
     pub fn record_rib_outbound_owing_flip(&self) {
         self.0.rib_outbound_owing_flips.inc();
+    }
+
+    /// Observe one owed-route drain step toward one receiver. `scope` is
+    /// `cursor`, `keyed` or `whole`.
+    pub fn observe_rib_outbound_owed_drain_step(&self, scope: &str, duration: std::time::Duration) {
+        debug_assert!(
+            OWED_DRAIN_STEP_SCOPES.contains(&scope),
+            "unbounded owed-drain step scope label: {scope:?}"
+        );
+        self.0
+            .rib_outbound_owed_drain_step_seconds
+            .with_label_values(&[scope])
+            .observe(duration.as_secs_f64());
     }
 
     /// Record one terminal actor-owned RIB export-policy transition.
@@ -9811,7 +9855,14 @@ mod tests {
         let m = BgpMetrics::new();
         let observed =
             gathered_histogram_series(&m, "bgp_rib_actor_work_duration_seconds", "work_unit");
-        let expected_buckets = RIB_ACTOR_DURATION_BUCKETS.map(f64::to_bits).to_vec();
+        let expected_buckets: Vec<u64> = actor_buckets_with_250ms()
+            .into_iter()
+            .map(f64::to_bits)
+            .collect();
+        assert!(
+            expected_buckets.contains(&0.250_f64.to_bits()),
+            "250 ms edge"
+        );
 
         assert_eq!(
             observed.keys().map(String::as_str).collect::<Vec<_>>(),
@@ -9839,6 +9890,34 @@ mod tests {
         assert_eq!(observed["route_chunk"].0, 0);
     }
 
+    /// The step and turn bounds a drain is judged on must be exact bucket
+    /// edges, and every scope must exist at 0 so "no long step" is never
+    /// read from a missing series.
+    #[test]
+    fn owed_drain_step_histogram_registers_closed_scopes_and_bound_edges() {
+        let m = BgpMetrics::new();
+        let family = "bgp_rib_outbound_owed_drain_step_seconds";
+        let observed = gathered_histogram_series(&m, family, "scope");
+        assert_eq!(
+            observed.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["cursor", "keyed", "whole"]
+        );
+        let edges: Vec<u64> = actor_buckets_with_250ms()
+            .into_iter()
+            .map(f64::to_bits)
+            .collect();
+        assert!(edges.contains(&0.050_f64.to_bits()));
+        assert!(edges.contains(&0.250_f64.to_bits()));
+        for (scope, (sample_count, buckets)) in &observed {
+            assert_eq!(*sample_count, 0, "fresh {scope} series is zeroed");
+            assert_eq!(*buckets, edges, "step buckets for {scope}");
+        }
+        m.observe_rib_outbound_owed_drain_step("cursor", std::time::Duration::from_millis(4));
+        let observed = gathered_histogram_series(&m, family, "scope");
+        assert_eq!(observed["cursor"].0, 1);
+        assert_eq!(observed["whole"].0, 0);
+    }
+
     /// Dropping the closed-label initialization or the registration makes a
     /// fresh scrape omit a kind, so a receipt could read "no slow peer-down
     /// turns" from a series that was never emitted.
@@ -9846,7 +9925,14 @@ mod tests {
     fn rib_actor_turn_histogram_registers_closed_zeroed_labels_and_actor_buckets() {
         let m = BgpMetrics::new();
         let observed = gathered_histogram_series(&m, "bgp_rib_actor_turn_duration_seconds", "kind");
-        let expected_buckets = RIB_ACTOR_DURATION_BUCKETS.map(f64::to_bits).to_vec();
+        let expected_buckets: Vec<u64> = actor_buckets_with_250ms()
+            .into_iter()
+            .map(f64::to_bits)
+            .collect();
+        assert!(
+            expected_buckets.contains(&0.250_f64.to_bits()),
+            "250 ms edge"
+        );
 
         let mut kinds = RibActorTurnKind::ALL.map(RibActorTurnKind::as_str).to_vec();
         kinds.sort_unstable();

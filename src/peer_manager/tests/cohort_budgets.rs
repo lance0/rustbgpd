@@ -202,6 +202,7 @@ async fn assert_api_policy_reads(entry: ApiPolicyEntry) {
             command_tx
                 .send(PeerManagerCommand::RestoreResolvedPolicySnapshot {
                     priors: targets,
+                    dynamic_ranges: Vec::new(),
                     reply,
                 })
                 .await

@@ -523,11 +523,10 @@ refresh answers with the whole table. A receiver that is dirty or forced at
 the release is not owed either; its resync covers the family. The resync tick
 reads a receiver's credit before it absorbs owed state for a waiting
 End-of-RIB, so a receiver that has stopped reading delays only its own table
-and marker. The credit is counted in estimated bytes, and the read asks only
-whether it is spent: a family sent whole from owed state is a whole-table
-operation, bounded by the one-operation latch and charged no credit, so a
-family larger than the receiver's credit goes out in one step and is never
-split to fit the bytes that remain. The selection-release replay remains for
+and marker. The tick budgets unicast cursor steps from the estimated bytes
+remaining. For other families it checks whether credit is spent before
+starting one whole-table operation. That operation holds the latch and
+carries no ordinary credit. The selection-release replay remains for
 unicast and VPN group members only.
 
 The release sends only the released family's End-of-RIB, and only when that
@@ -536,10 +535,148 @@ another in its own Adj-RIB-Out, and the release of the first does not absorb
 the second. A ROUTE-REFRESH for a family still owed absorbs the owed table
 into the answer's operation, sends the End-of-RIB that waited only for it,
 and then the answer between BoRR and EoRR, because RFC 7313 section 4 allows
-no BoRR before that End-of-RIB. The other releases of an End-of-RIB hold (a
-grace window ending, the RT-Constrain membership and ORF caps, a pass that
-cancels a family's last owed key) still absorb every family the receiver
-owes in their own turn, without reading its credit.
+no BoRR before that End-of-RIB.
+
+Every other release of an End-of-RIB hold (a grace window ending, the
+RT-Constrain membership hold and its cap, the ORF cap, a pass that cancels a
+family's last owed key) follows the same rule. It sends the markers whose
+family owes nothing and stages no routes; a family the receiver is still
+owed keeps its End-of-RIB for the drain. Grace windows share a deadline and
+end together, so a release that absorbed would stage receivers times rows in
+one turn, past the credit of a receiver that has stopped reading. Only the
+drain step absorbs a family for its waiting End-of-RIB, after it has read
+the receiver's credit, and one family per step: the family's table and its
+End-of-RIB go out in one operation, and the receiver's next owed family
+waits for a later step, which for a whole family runs once the session has
+written that operation. An absorption that cannot be admitted for a reason
+other than capacity turns the receiver over to a resync, which carries its
+markers.
+
+**IPv4 and IPv6 unicast owed whole: a row cursor.** A unicast family owed
+whole is not sent as one operation, and no drain step absorbs it for a
+waiting End-of-RIB. Each address family has one list, shared by every
+receiver, of the keys that passes carried while any receiver owed the family
+whole, in the order they last changed; a key that changes again moves to the
+back. A receiver that owes the family whole holds one position in the list.
+A drain step sends the next keys after it, at most 1,024 and at most what
+the receiver's credit allows, by diff against its admitted Adj-RIB-Out, as
+an ordinary envelope charged against that credit, with no operation latch.
+The position moves once the envelope is admitted. A walk that spans turns
+keeps this contract:
+
+- *Current state only.* Each step stages by diff at that moment; a version
+  superseded before its step is never built.
+- *Coverage.* A key that changes behind the position is visited again. One
+  that changes ahead is visited once, at its newer state. A key withdrawn
+  during the walk is withdrawn if the receiver holds it and sends nothing
+  otherwise. A key that returns to the state the receiver holds sends
+  nothing. A second owe leaves the position where it is.
+- *No interleaving.* While the receiver owes the family, a pass stages and
+  marks nothing of it toward that receiver; the pass logs its keys in the
+  list once, however many receivers hold a position.
+- *Marker last.* The End-of-RIB leaves when the position has caught up with
+  the list and the receiver's owed-key set is empty. The position lives
+  until both hold: with the position at the end of the list and keys left
+  in the set, the family is still owed whole, so passes go on logging their
+  keys for the position and mark nothing in the set.
+- *Session fence.* A flap, a regroup or a resync drops the position.
+- *Charged.* A receiver that reads nothing is queued at most its credit plus
+  one step.
+
+A selection release starts the position at the end of the list, and the
+release pass that follows carries every key with a candidate and every key
+recorded during the hold. A set that outgrows its byte cap is kept: it stops
+growing, drains ahead of the position in the same charged steps, and the
+position starts at the end of the list. No table is walked to seed it,
+because a row the receiver holds for a key that has left every table is
+named only by that set. While it drains under a position the set is not
+compacted and releases no capacity, since either would move a share of the
+set in one step; it is freed when its last key leaves.
+
+Inside a selection hold the position does not move. Steps read on from a
+second position and send only the rows the hold exempts (local host and
+BLACKHOLE routes, and the withdrawal of a local row the receiver holds); the
+release reads the held rows again.
+
+The list holds one entry per key, in two ordered maps (by sequence and by
+key). A key that changes again moves its entry, so the list has no dead
+entries and a step reads only the keys it sends. No call does list work
+that grows with the table: logging a key moves one entry, and the maps have
+no capacity to rehash or relocate. The list is trimmed behind the slowest
+position, so a receiver that falls behind pins it. When a position leaves
+(its receiver caught up, flapped or was evicted), the entries behind the
+next slowest are dropped at most 4,096 per trim and two per key logged, on
+the passes and resync ticks that follow, and it is empty some ticks after
+the last position has left.
+
+Its cap is twice the family's peak plus 4,096 keys, where the peak is the
+most keys one pass has accounted for while any receiver held a position:
+the family's Loc-RIB after the pass plus the keys the pass carried. One
+value per address family, zero again when the list has emptied. The cap is
+enforced after each pass's member loop, on what each position still has to
+read: every receiver with more than the cap after its position is resynced
+instead (the slice 1a path, counted by
+`bgp_rib_outbound_owing_fallback_total`), all of them in that pass, with
+one scan of the owing receivers and one trim however many are evicted. The
+entries over
+the cap are then behind every position and are dropped there, at most the
+keys that pass logged. Entries an earlier trim left are the oldest, so
+they go first: they neither delay an eviction nor cause one. So the list
+holds at most the cap at the end of a pass, and inside a pass at most the
+cap plus the keys that pass logged: three times the peak plus 4,096 keys.
+A pass's withdrawals count toward the peak, so one large withdrawal, a peer
+loss or a selection release that carries more keys than the released table
+does not reach the cap. Fresh keys that keep rotating through the table past
+a receiver that does not keep up do (a receiver that reads nothing, or one
+that reads more slowly than the table turns over): after one to three
+tables' worth of prefixes the list has not held before, one when passes are
+small against the table and three when one pass carried the whole table,
+as a selection release does.
+
+Memory, modeled and not measured: an entry in each of the two ordered maps
+at the worst node fill is about 126 bytes a key. At the cap that is about
+38 MB at 150,000 routes when passes are small against the table and 76 MB
+when one pass carried the whole table, as a selection release does; 253 MB
+and 505 MB at 1,000,000 routes. Inside a pass the list may hold the keys of
+that pass more.
+
+That fallback is a whole-peer resync: one uncharged whole-table operation
+per evicted receiver, a turn and a table copy that grow with the table. It
+is paced, not bounded like a step. The pass that finds the list over its cap
+builds nothing; it marks the receivers it evicts dirty, and only the resync
+tick builds their resyncs, one receiver per tick: the tick ends with that
+unit whatever is left of its poll budget, so queued input runs before the
+next receiver's. An ordinary pass leaves
+such a receiver dirty, as it leaves one whose channel has no room, so no
+pass builds a table for each evicted receiver. A unit that is refused (the
+receiver has a live whole-table operation, or its channel is full) builds
+nothing and is not a backlog: the tick keeps its ordinary interval, and the
+release of what refused it wakes the tick. While evicted receivers wait,
+the other receivers' steps still run on every tick, ahead of the fallback
+unit, but for about one poll budget (25 ms) per unit: their drain is slowed
+by the fallback wave, not stopped. The tick's units are not
+drain steps and are not observed in
+`bgp_rib_outbound_owed_drain_step_seconds`; they show in
+`bgp_rib_actor_slice_seconds`.
+
+A full outbound channel at a family's last step refuses only the
+End-of-RIB: every owed row was admitted, so the receiver is not resynced
+and the resync tick retries the marker alone.
+
+Three sends for a unicast family still owed stay outside this: a
+ROUTE-REFRESH answer and an operator replay absorb the rest of the walk into
+their own operation, as above, and the shutdown flush sends the withdrawals
+behind the position without moving it. A refresh answer keeps this order:
+the owed rows, the initial End-of-RIB if it waited for them, then the
+answer between its BoRR and EoRR (RFC 7313 section 4 allows no BoRR ahead of
+that End-of-RIB). A ROUTE-REFRESH from a receiver the cap evicted is not
+answered in its own turn: the request stays pending behind the receiver's
+resync, which sends the table and the initial End-of-RIB, and the answer
+follows with its markers, once, in the same operation when the channel has
+room and on a later tick otherwise. An operator refresh of an evicted
+receiver also leaves the table to the tick. Labeled unicast, VPN, EVPN, FlowSpec,
+BGP-LS and RT-Constrain owed whole keep the whole-family operation and its
+absorption, a stated exception until they move to the same list.
 
 Each owed key carries a *logged deferral*: a test-build record of (session,
 receiver, AFI/SAFI, key). It opens when the key becomes owed. It closes when the

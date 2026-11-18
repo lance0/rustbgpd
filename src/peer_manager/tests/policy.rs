@@ -3,6 +3,13 @@ use rustbgpd_rib::PeerId;
 
 use rustbgpd_api::runtime_config_settlement::RuntimeConfigPolicyFailureCode;
 
+fn assert_catalog_success(outcome: &OwnedCatalogMutationOutcome) {
+    assert!(
+        matches!(outcome, OwnedCatalogMutationOutcome::Success),
+        "{outcome:?}"
+    );
+}
+
 #[tokio::test]
 async fn dataset_refresh_distinguishes_partial_delivery_from_lost_acknowledgement() {
     for (accepted_first, drop_reply, report_timeout) in [
@@ -154,17 +161,22 @@ async fn policy_events_publish_successful_policy_mutations() {
     let mut events = subscribe_policy_events(&tx).await;
 
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(PeerManagerCommand::SetPolicy {
-        name: "audit-policy".to_string(),
-        definition: NamedPolicyDefinition {
-            default_action: "permit".to_string(),
-            statements: Vec::<PolicyStatementDefinition>::new(),
+    tx.send(PeerManagerCommand::OwnedCatalogMutation {
+        mutation: OwnedCatalogMutation::SetPolicy {
+            name: "audit-policy".to_string(),
+            definition: Box::new(NamedPolicyDefinition {
+                default_action: "permit".to_string(),
+                statements: Vec::<PolicyStatementDefinition>::new(),
+            }),
         },
         reply: reply_tx,
     })
     .await
     .unwrap();
-    reply_rx.await.unwrap().unwrap();
+    assert!(matches!(
+        reply_rx.await.unwrap(),
+        OwnedCatalogMutationOutcome::Success
+    ));
 
     let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
         .await
@@ -236,20 +248,21 @@ async fn apply_policy_change_fans_out_to_scoped_peers() {
     n1.interface = Some("eth1".to_string());
     *mgr.current_config.neighbors = vec![n0, n1];
 
-    mgr.apply_policy_change(
-        ConfigEvent::SetNeighborSet {
-            name: "unused".to_string(),
-            definition: NeighborSetDefinition {
-                addresses: vec!["192.0.2.1".to_string()],
-                remote_asns: vec![],
-                peer_groups: vec![],
+    let outcome = mgr
+        .apply_policy_change_owned(
+            ConfigEvent::SetNeighborSet {
+                name: "unused".to_string(),
+                definition: NeighborSetDefinition {
+                    addresses: vec!["192.0.2.1".to_string()],
+                    remote_asns: vec![],
+                    peer_groups: vec![],
+                },
+                ack: None,
             },
-            ack: None,
-        },
-        None,
-    )
-    .await
-    .unwrap();
+            None,
+        )
+        .await;
+    assert_catalog_success(&outcome);
 
     assert_eq!(eth0.query_state.load(Ordering::SeqCst), 1);
     assert_eq!(eth1.query_state.load(Ordering::SeqCst), 1);
@@ -257,7 +270,7 @@ async fn apply_policy_change_fans_out_to_scoped_peers() {
     rib_drainer.await.unwrap();
 }
 
-/// ADR-0096: `sync_rpol_policies` adopts the new compiled registry,
+/// ADR-0096: `sync_rpol_policies_owned` adopts the new compiled registry,
 /// re-resolves live chains through it (Route Refresh for the material
 /// import change), and `SetPolicy` cannot shadow an rpol-defined name.
 #[tokio::test]
@@ -314,13 +327,14 @@ async fn sync_rpol_policies_reresolves_chains_and_rejects_shadowing() {
 
     // New registry content: chains re-resolve and the peer's import
     // policy now carries the edited compiled body.
-    mgr.sync_rpol_policies(
-        vec!["policies/core.rpol".to_string()],
-        registry("policy edge-in { term all { set local-pref 250; accept } }"),
-        rustbgpd_policy::datasets::DatasetBindings::default(),
-    )
-    .await
-    .expect("sync succeeds");
+    let outcome = mgr
+        .sync_rpol_policies_owned(
+            vec!["policies/core.rpol".to_string()],
+            registry("policy edge-in { term all { set local-pref 250; accept } }"),
+            rustbgpd_policy::datasets::DatasetBindings::default(),
+        )
+        .await;
+    assert_catalog_success(&outcome);
     let managed = mgr.peers.values().next().expect("peer present");
     let chain = managed.import_policy.as_ref().expect("import chain set");
     assert!(chain.policies[0].rpol.is_some());
@@ -348,8 +362,8 @@ async fn sync_rpol_policies_reresolves_chains_and_rejects_shadowing() {
     assert_eq!(chain.evaluate(&ctx).modifications.set_local_pref, Some(250));
 
     // The rpol name cannot be shadowed by a TOML SetPolicy.
-    let err = mgr
-        .apply_policy_change(
+    let outcome = mgr
+        .apply_policy_change_owned(
             ConfigEvent::SetPolicy {
                 name: "edge-in".to_string(),
                 definition: NamedPolicyDefinition {
@@ -360,15 +374,17 @@ async fn sync_rpol_policies_reresolves_chains_and_rejects_shadowing() {
             },
             None,
         )
-        .await
-        .expect_err("shadowing an rpol policy must be rejected");
-    assert!(err.to_string().contains("rpol"), "{err}");
+        .await;
+    assert!(
+        matches!(&outcome, OwnedCatalogMutationOutcome::RejectedNoEffect(err) if err.to_string().contains("rpol")),
+        "{outcome:?}"
+    );
 
     drop(mgr);
     rib_drainer.await.unwrap();
 }
 
-/// LAN-284: a rejected `sync_rpol_policies` (mid-apply chain resolution
+/// LAN-284: a rejected `sync_rpol_policies_owned` (mid-apply chain resolution
 /// failure) must leave BOTH policy surfaces on the old registry — the
 /// live peer's chain (existing sessions) and `current_config` (what a
 /// session created afterwards resolves against). Asserted at decision
@@ -430,16 +446,17 @@ async fn sync_rpol_policies_rejection_keeps_old_registry_for_live_and_new_sessio
         "policy edge-in { term all { set local-pref 150; accept } }",
     );
     // Materialize the live chain from the OLD registry.
-    mgr.sync_rpol_policies(
-        vec!["policies/core.rpol".to_string()],
-        registry(
-            "edge-in",
-            "policy edge-in { term all { set local-pref 150; accept } }",
-        ),
-        rustbgpd_policy::datasets::DatasetBindings::default(),
-    )
-    .await
-    .expect("baseline sync succeeds");
+    let outcome = mgr
+        .sync_rpol_policies_owned(
+            vec!["policies/core.rpol".to_string()],
+            registry(
+                "edge-in",
+                "policy edge-in { term all { set local-pref 150; accept } }",
+            ),
+            rustbgpd_policy::datasets::DatasetBindings::default(),
+        )
+        .await;
+    assert_catalog_success(&outcome);
 
     // Candidate registry renames the policy, so the static peer's
     // `import_policy_chain = ["edge-in"]` no longer resolves: the sync
@@ -629,16 +646,20 @@ async fn rejected_rpol_sync_freezes_policy_generation_timestamp() {
     // Candidate registry renames the policy, so the static peer's
     // chain no longer resolves: the sync is rejected — and the
     // timestamp must stay frozen at the last ACCEPTED apply.
-    mgr.sync_rpol_policies(
-        vec!["policies/core.rpol".to_string()],
-        registry(
-            "edge-in-renamed",
-            "policy edge-in-renamed { term all { set local-pref 250; accept } }",
-        ),
-        rustbgpd_policy::datasets::DatasetBindings::default(),
-    )
-    .await
-    .expect_err("chain resolution failure must reject the sync");
+    let outcome = mgr
+        .sync_rpol_policies_owned(
+            vec!["policies/core.rpol".to_string()],
+            registry(
+                "edge-in-renamed",
+                "policy edge-in-renamed { term all { set local-pref 250; accept } }",
+            ),
+            rustbgpd_policy::datasets::DatasetBindings::default(),
+        )
+        .await;
+    assert!(
+        matches!(outcome, OwnedCatalogMutationOutcome::RejectedNoEffect(_)),
+        "{outcome:?}"
+    );
     assert_eq!(
         policy_metric_value(&mgr.metrics, FAMILY, None),
         Some(initial),
@@ -646,16 +667,17 @@ async fn rejected_rpol_sync_freezes_policy_generation_timestamp() {
     );
 
     // A successful sync IS an accept: the timestamp advances.
-    mgr.sync_rpol_policies(
-        vec!["policies/core.rpol".to_string()],
-        registry(
-            "edge-in",
-            "policy edge-in { term all { set local-pref 250; accept } }",
-        ),
-        rustbgpd_policy::datasets::DatasetBindings::default(),
-    )
-    .await
-    .expect("sync succeeds");
+    let outcome = mgr
+        .sync_rpol_policies_owned(
+            vec!["policies/core.rpol".to_string()],
+            registry(
+                "edge-in",
+                "policy edge-in { term all { set local-pref 250; accept } }",
+            ),
+            rustbgpd_policy::datasets::DatasetBindings::default(),
+        )
+        .await;
+    assert_catalog_success(&outcome);
     let advanced = policy_metric_value(&mgr.metrics, FAMILY, None).expect("still present");
     assert!(
         advanced > initial,
@@ -955,9 +977,10 @@ async fn rpol_sync_reaps_removed_dataset_series() {
         DatasetKind::Asn,
         DatasetData::Asn(AsnSet::new(std::iter::once(64500))),
     )));
-    mgr.sync_rpol_policies(Vec::new(), RpolPolicySet::default(), bindings)
-        .await
-        .expect("sync with a new dataset succeeds");
+    let outcome = mgr
+        .sync_rpol_policies_owned(Vec::new(), RpolPolicySet::default(), bindings)
+        .await;
+    assert_catalog_success(&outcome);
     assert!(policy_metric_value(&mgr.metrics, LOADED, Some("customers")).is_some());
     mgr.metrics.record_policy_dataset_refresh_error("customers");
     assert_eq!(
@@ -966,13 +989,14 @@ async fn rpol_sync_reaps_removed_dataset_series() {
     );
 
     // Sync #2 removes it from config: both series are reaped.
-    mgr.sync_rpol_policies(
-        Vec::new(),
-        RpolPolicySet::default(),
-        DatasetBindings::default(),
-    )
-    .await
-    .expect("sync removing the dataset succeeds");
+    let outcome = mgr
+        .sync_rpol_policies_owned(
+            Vec::new(),
+            RpolPolicySet::default(),
+            DatasetBindings::default(),
+        )
+        .await;
+    assert_catalog_success(&outcome);
     assert_eq!(
         policy_metric_value(&mgr.metrics, LOADED, Some("customers")),
         None,
@@ -1031,19 +1055,20 @@ async fn apply_policy_change_reaches_live_dynamic_peers() {
     managed.is_dynamic = true;
     managed.peer_group = Some("ix-members".to_string());
 
-    mgr.apply_policy_change(
-        ConfigEvent::SetPolicy {
-            name: "ix-import".to_string(),
-            definition: NamedPolicyDefinition {
-                default_action: "deny".to_string(),
-                statements: Vec::<PolicyStatementDefinition>::new(),
+    let outcome = mgr
+        .apply_policy_change_owned(
+            ConfigEvent::SetPolicy {
+                name: "ix-import".to_string(),
+                definition: NamedPolicyDefinition {
+                    default_action: "deny".to_string(),
+                    statements: Vec::<PolicyStatementDefinition>::new(),
+                },
+                ack: None,
             },
-            ack: None,
-        },
-        None,
-    )
-    .await
-    .unwrap();
+            None,
+        )
+        .await;
+    assert_catalog_success(&outcome);
 
     // The dynamic peer must have been processed: chains resolved against the
     // synthetic peer-group-backed neighbor, hot-applied to the session, and
@@ -1119,14 +1144,20 @@ async fn set_peer_group_policy_only_change_reaches_live_dynamic_peers() {
 
     let manager_task = tokio::spawn(mgr.run());
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(PeerManagerCommand::SetPeerGroup {
-        name: "ix-members".to_string(),
-        definition: next_group,
+    tx.send(PeerManagerCommand::OwnedCatalogMutation {
+        mutation: OwnedCatalogMutation::SetPeerGroup {
+            name: "ix-members".to_string(),
+            definition: Box::new(next_group),
+        },
         reply: reply_tx,
     })
     .await
     .unwrap();
-    reply_rx.await.unwrap().unwrap();
+    let outcome = reply_rx.await.unwrap();
+    assert!(
+        matches!(outcome, OwnedCatalogMutationOutcome::Success),
+        "{outcome:?}"
+    );
 
     assert_eq!(
         counters.query_state.load(Ordering::SeqCst),
@@ -1174,17 +1205,18 @@ async fn set_peer_group_rejects_an_unparseable_orr_vantage_on_apply() {
 
     let manager_task = tokio::spawn(mgr.run());
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(PeerManagerCommand::SetPeerGroup {
-        name: "ix-members".to_string(),
-        definition,
+    tx.send(PeerManagerCommand::OwnedCatalogMutation {
+        mutation: OwnedCatalogMutation::SetPeerGroup {
+            name: "ix-members".to_string(),
+            definition: Box::new(definition),
+        },
         reply: reply_tx,
     })
     .await
     .unwrap();
-    let error = reply_rx
-        .await
-        .unwrap()
-        .expect_err("an unparseable orr_vantage must not apply");
+    let OwnedCatalogMutationOutcome::RejectedNoEffect(error) = reply_rx.await.unwrap() else {
+        panic!("an unparseable orr_vantage must not apply");
+    };
     let message = format!("{error:?}");
     assert!(
         matches!(error, CatalogMutationError::Invalid(_)),
@@ -1785,7 +1817,7 @@ async fn validation_cache_state_timeout_fails_and_arms_pending_refresh() {
 /// be gated on Established and the mutation must still return
 /// Ok. Without the gate, `send_route_refresh` returns "session
 /// not Established" for any peer mid-reconnect, which would
-/// propagate through `apply_policy_change` and fail the gRPC
+/// propagate through `apply_policy_change_owned` and fail the gRPC
 /// call. Operators with even one peer mid-reconnect would see
 /// every `SetPolicy` / `SetGlobalImportChain` fail.
 ///
@@ -1817,7 +1849,7 @@ async fn set_policy_does_not_error_on_idle_peers_when_import_changes() {
     let handle = tokio::spawn(mgr.run());
 
     // sync_config_snapshot = true so PM's current_config tracks
-    // the new neighbor. Otherwise apply_policy_change's per-peer
+    // the new neighbor. Otherwise apply_policy_change_owned's per-peer
     // loop skips it (the neighbor wouldn't be present in
     // next_config) and update_runtime_policies never runs —
     // making the gate untestable.
@@ -1838,18 +1870,23 @@ async fn set_policy_does_not_error_on_idle_peers_when_import_changes() {
     // `import_changed` (no chain references the new policy
     // yet); it's just setup.
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(PeerManagerCommand::SetPolicy {
-        name: "test-policy".to_string(),
-        definition: NamedPolicyDefinition {
-            default_action: "deny".to_string(),
-            statements: Vec::<PolicyStatementDefinition>::new(),
+    tx.send(PeerManagerCommand::OwnedCatalogMutation {
+        mutation: OwnedCatalogMutation::SetPolicy {
+            name: "test-policy".to_string(),
+            definition: Box::new(NamedPolicyDefinition {
+                default_action: "deny".to_string(),
+                statements: Vec::<PolicyStatementDefinition>::new(),
+            }),
         },
         reply: reply_tx,
     })
     .await
     .unwrap();
     assert!(
-        reply_rx.await.unwrap().is_ok(),
+        matches!(
+            reply_rx.await.unwrap(),
+            OwnedCatalogMutationOutcome::Success
+        ),
         "SetPolicy setup step must succeed"
     );
 
@@ -1863,15 +1900,17 @@ async fn set_policy_does_not_error_on_idle_peers_when_import_changes() {
     // Established gate the route-refresh would error and the
     // reply would be Err.
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(PeerManagerCommand::SetGlobalImportChain {
-        policy_names: vec!["test-policy".to_string()],
+    tx.send(PeerManagerCommand::OwnedCatalogMutation {
+        mutation: OwnedCatalogMutation::SetGlobalImportChain {
+            policy_names: vec!["test-policy".to_string()],
+        },
         reply: reply_tx,
     })
     .await
     .unwrap();
     let result = reply_rx.await.unwrap();
     assert!(
-        result.is_ok(),
+        matches!(result, OwnedCatalogMutationOutcome::Success),
         "SetGlobalImportChain with import-changing chain must succeed when the only \
          affected peer is Idle — the auto Route Refresh trigger must be gated on \
          Established or operator gRPC calls would fail every time a peer is mid-reconnect. \
@@ -1900,15 +1939,17 @@ async fn missing_policy_catalog_references_return_not_found_errors() {
     let handle = tokio::spawn(mgr.run());
 
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(PeerManagerCommand::SetGlobalImportChain {
-        policy_names: vec!["missing-policy".to_string()],
+    tx.send(PeerManagerCommand::OwnedCatalogMutation {
+        mutation: OwnedCatalogMutation::SetGlobalImportChain {
+            policy_names: vec!["missing-policy".to_string()],
+        },
         reply: reply_tx,
     })
     .await
     .unwrap();
     assert!(matches!(
         reply_rx.await.unwrap(),
-        Err(CatalogMutationError::NotFound(message)) if message.contains("missing-policy")
+        OwnedCatalogMutationOutcome::RejectedNoEffect(CatalogMutationError::NotFound(message)) if message.contains("missing-policy")
     ));
 
     let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
@@ -1923,16 +1964,20 @@ async fn missing_policy_catalog_references_return_not_found_errors() {
     assert!(reply_rx.await.unwrap().is_ok(), "AddPeer must succeed");
 
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(PeerManagerCommand::SetNeighborPeerGroup {
-        address: addr,
-        peer_group: "missing-group".to_string(),
+    tx.send(PeerManagerCommand::OwnedCatalogMutation {
+        mutation: OwnedCatalogMutation::SetNeighborPeerGroup {
+            address: addr,
+            interface: None,
+            peer_group: "missing-group".to_string(),
+        },
         reply: reply_tx,
     })
     .await
     .unwrap();
     assert!(matches!(
         reply_rx.await.unwrap(),
-        Err(CatalogMutationError::NotFound(message)) if message.contains("missing-group")
+        OwnedCatalogMutationOutcome::RejectedNoEffect(CatalogMutationError::NotFound(message))
+            if message.contains("missing-group")
     ));
 
     tx.send(PeerManagerCommand::Shutdown).await.unwrap();

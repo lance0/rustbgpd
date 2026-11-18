@@ -654,7 +654,7 @@ impl PeerSession {
             .as_deref()
             .or(self.fsm.negotiated())
             .is_some_and(|negotiated| negotiated.peer_notification_gr);
-        let notif = if self.hard_reset_drain && notification_gr {
+        let notif = if self.hard_reset_teardown && notification_gr {
             self.sent_hard_reset = true;
             rustbgpd_wire::NotificationMessage::new(
                 NotificationCode::Cease,

@@ -321,3 +321,34 @@ after a restart. Validation, persistence, rollback-on-failure, and the
 `ABORT_FAILED`/`AUTO_REVERT_FAILED` handling are unchanged, and the
 caller-facing Plan, Apply, and `RollbackConfigTransaction` token checks are
 unchanged.
+
+## Amendment (2026-11-17): a commit-confirmed rollback restores the prior policy
+
+The rollback of a pending confirmed transaction ran the ordinary forward
+executor, so a live policy rollback re-applied the prior chains as a new edit,
+qualified like any other. Decision 5 refuses an import change for an
+Established peer without Route Refresh. A peer that took the candidate and
+reconnected without Route Refresh inside the confirm window therefore made
+abort, gNMI cancel and the timeout auto-revert fail with the candidate still
+running, behind a closed mutation fence, until the operator confirmed the
+candidate or restarted.
+
+The executor now carries whether it restores. Only the rollback of a pending
+confirmed transaction does; ordinary applies, confirmed applies and history
+rollback (`RollbackConfigTransaction`) remain forward edits and keep the
+Route Refresh requirement. A restoring live policy family sends the prior
+config's chains, static targets and dynamic ranges alike, as a restore: it is
+not qualified, every session takes its prior import chain, and a session
+whose peer did not negotiate Route Refresh is reset once that chain is
+installed, so the peer resends its routes under it (ADR-0127 amendment of the
+same date). A rollback that reset a session is still a successful abort or
+auto-revert; its result and status record name the reset peers.
+
+A restore is never unwound back to the candidate it removes. A rollback that
+fails partway, for example on a session that does not answer, is therefore
+`KnownDivergence`: the daemon fences and exits 70, and the restart boot-reverts
+from the retained journal, where the forward re-apply put the candidate back
+and reported `ABORT_FAILED`/`AUTO_REVERT_FAILED`. For the unattended
+auto-revert this is the outcome that actually reverts. A rollback that fails
+before any runtime effect, or whose publication fails after a complete
+restore, still leaves the transaction pending with the failed status.

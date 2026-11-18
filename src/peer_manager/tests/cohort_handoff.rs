@@ -2306,8 +2306,8 @@ async fn export_only_snapshot_services_readiness_without_admitting_mutations() {
 
     let (apply_reply, mut apply_response) = oneshot::channel();
     command_tx
-        .send(PeerManagerCommand::ApplyResolvedPolicySnapshot {
-            targets: peers
+        .send(PeerManagerCommand::ApplyPolicyImpactSnapshot {
+            static_targets: peers
                 .iter()
                 .copied()
                 .map(|address| ResolvedPeerPolicy {
@@ -2317,6 +2317,7 @@ async fn export_only_snapshot_services_readiness_without_admitting_mutations() {
                     export_policy: Some(deny_policy_chain()),
                 })
                 .collect(),
+            dynamic_ranges: Vec::new(),
             reply: apply_reply,
         })
         .await
@@ -2474,8 +2475,8 @@ async fn export_only_snapshot_services_readiness_during_stalled_session_apply() 
 
     let (apply_reply, mut apply_response) = oneshot::channel();
     command_tx
-        .send(PeerManagerCommand::ApplyResolvedPolicySnapshot {
-            targets: [stalled, responsive]
+        .send(PeerManagerCommand::ApplyPolicyImpactSnapshot {
+            static_targets: [stalled, responsive]
                 .into_iter()
                 .map(|address| ResolvedPeerPolicy {
                     address,
@@ -2484,6 +2485,7 @@ async fn export_only_snapshot_services_readiness_during_stalled_session_apply() 
                     export_policy: Some(deny_policy_chain()),
                 })
                 .collect(),
+            dynamic_ranges: Vec::new(),
             reply: apply_reply,
         })
         .await
@@ -3831,7 +3833,8 @@ impl FailedCohortRestore {
                 false,
                 OperatorReadAdmission::Served,
             )
-            .await;
+            .await
+            .map(|restored| restored.reset_sessions);
         Self {
             outcome,
             manager,

@@ -991,6 +991,15 @@ confirmed, or a restart boot-reverts from the retained journal. A gNMI
 `CommitSetRollbackDuration` re-arms the automatic rollback: status returns to
 `PENDING` at the new deadline, and a retry that fails again reports the failed
 status again.
+A rollback that moves import policy restores the prior chains rather than
+applying them as a new edit, so a peer that lost Route Refresh inside the
+confirm window does not block it: that one session is reset (Cease/Administrative
+Reset) once the prior chain is installed, and the peer resends its routes under
+it. The rollback still succeeds, and the abort's `human_text` and the status
+record name each reset peer. A restore that fails partway is never undone back
+to the candidate; it fences the daemon for supervised recovery (exit 70, then a
+boot revert from the retained journal) instead of reporting `ABORT_FAILED` or
+`AUTO_REVERT_FAILED`.
 
 Abort and timer rollback do not depend on the runtime snapshot token. The
 token is a Plan→Apply change detector for callers: it covers the runtime config
@@ -1193,11 +1202,11 @@ added at runtime.
 | RPC | Description |
 |-----|-------------|
 | `AddNeighbor` | Add a peer dynamically through the presence-aware intent (starts session immediately); waits for the atomic config-file update and leaves no runtime change on persistence failure |
-| `DeleteNeighbor` | Remove a peer and tear down its session; waits for the atomic config-file update and rolls runtime back on persistence failure |
+| `DeleteNeighbor` | Remove a peer and tear down its session (Cease / Administrative Shutdown, inside a Cease / Hard Reset when the peer negotiated RFC 8538 Notification GR); waits for the atomic config-file update and rolls runtime back on persistence failure |
 | `ListNeighbors` | List all peers with session state and counters |
 | `GetNeighborState` | Get detailed state for a single peer |
 | `EnableNeighbor` | Re-enable a previously disabled peer |
-| `DisableNeighbor` | Administratively disable a peer (sends NOTIFICATION) |
+| `DisableNeighbor` | Administratively disable a peer (sends NOTIFICATION: Cease / Administrative Shutdown, inside a Cease / Hard Reset when the peer negotiated RFC 8538 Notification GR) |
 | `SoftResetIn` | Request inbound route refresh (RFC 2918/7313) for one or more families |
 | `RefreshOutbound` | Re-emit one peer's current exportable outbound inventory across all negotiated families, without resetting the session |
 | `ReplayOutbound` | Schedule one Established peer's negotiated IPv4/IPv6 unicast replay with terminal UPDATE EoRs; outside the v1 contract |

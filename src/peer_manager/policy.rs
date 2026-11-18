@@ -8,6 +8,7 @@ use rustbgpd_api::peer_types::{
     CatalogMutationError, ConfigEvent, DynamicRangeTarget, HonorKnobPartial,
     ImportValidationDependency, OwnedCatalogMutationOutcome, PeerGroupDefinition, PeerKey,
     PeerManagerNeighborConfig, PolicySnapshotApplyError, ResolvedPeerPolicy,
+    RestoredPolicySnapshot,
 };
 use rustbgpd_api::runtime_config_settlement::RuntimeConfigPolicyFailureCode;
 use rustbgpd_fsm::SessionState;
@@ -553,7 +554,7 @@ fn import_refresh_refusal(peer_key: &PeerKey) -> String {
 const RESTORE_RESET_COMMUNICATION: &str = "import policy restored; peer lacks Route Refresh";
 
 /// How a result names the sessions a restore reset.
-pub(super) fn reset_sessions_without_route_refresh(reset_sessions: &[PeerKey]) -> String {
+pub(crate) fn reset_sessions_without_route_refresh(reset_sessions: &[PeerKey]) -> String {
     let peers = reset_sessions
         .iter()
         .map(ToString::to_string)
@@ -1455,8 +1456,8 @@ impl PeerManager {
     /// attempts to restore the peers already changed (newest first). A successful
     /// restore leaves nothing mutated; a compound rollback failure is returned
     /// and may leave per-peer retry intent armed. On success it returns the
-    /// captured priors — the rollback token the transaction executor replays
-    /// through this same path after a later persistence failure. Targets not
+    /// captured priors — the rollback token a later rollback hands to
+    /// [`Self::restore_resolved_policy_snapshot`]. Targets not
     /// currently in `self.peers` (e.g. a dynamic peer that disconnected) are
     /// skipped and absent from the returned priors. Does NOT touch
     /// `current_config`; snapshot staging owns that.
@@ -1515,15 +1516,15 @@ impl PeerManager {
     /// without Route Refresh while holding the candidate still gets its prior
     /// chain back, and since it cannot be asked to resend its routes under
     /// that chain, its session is reset instead
-    /// ([`Self::reset_unrefreshable_restore`]). Returns the sessions reset.
-    /// A restore that fails partway is reported as ambiguous, not unwound to
-    /// the candidate.
+    /// ([`Self::reset_unrefreshable_restore`]). Returns the chains the
+    /// restore replaced and the sessions it reset. A restore that fails
+    /// partway is reported as ambiguous, not unwound to the candidate.
     pub(super) async fn restore_resolved_policy_snapshot(
         &mut self,
         priors: Vec<ResolvedPeerPolicy>,
         require_clean_convergence: bool,
         operator_reads: OperatorReadAdmission,
-    ) -> Result<Vec<PeerKey>, PolicySnapshotFailure> {
+    ) -> Result<RestoredPolicySnapshot, PolicySnapshotFailure> {
         self.apply_resolved_policy_snapshot_as(
             priors,
             require_clean_convergence,
@@ -1531,7 +1532,10 @@ impl PeerManager {
             rustbgpd_transport::ImportPolicyInstall::Restore,
         )
         .await
-        .map(|(_, reset_sessions)| reset_sessions)
+        .map(|(priors, reset_sessions)| RestoredPolicySnapshot {
+            priors,
+            reset_sessions,
+        })
     }
 
     async fn apply_resolved_policy_snapshot_as(
@@ -3516,10 +3520,43 @@ impl PeerManager {
         static_targets: Vec<ResolvedPeerPolicy>,
         dynamic_ranges: Vec<DynamicRangeTarget>,
     ) -> Result<Vec<ResolvedPeerPolicy>, PolicySnapshotApplyError> {
+        let targets = self.resolve_policy_impact_targets(static_targets, &dynamic_ranges)?;
+        self.apply_resolved_policy_snapshot_with_prestage_reads(
+            targets,
+            false,
+            OperatorReadAdmission::Served,
+        )
+        .await
+        .map_err(PolicySnapshotFailure::into_apply_error)
+    }
+
+    /// Restore the chains a config transaction rolls back to: the captured
+    /// priors of a publication rollback, or the prior config's chains of a
+    /// commit-confirmed abort, cancel or auto-revert. Targets resolve as for
+    /// [`Self::apply_policy_impact_snapshot`]; the walk then restores
+    /// ([`Self::restore_resolved_policy_snapshot`]) instead of applying.
+    pub(super) async fn restore_policy_impact_snapshot(
+        &mut self,
+        priors: Vec<ResolvedPeerPolicy>,
+        dynamic_ranges: Vec<DynamicRangeTarget>,
+    ) -> Result<RestoredPolicySnapshot, PolicySnapshotApplyError> {
+        let targets = self.resolve_policy_impact_targets(priors, &dynamic_ranges)?;
+        self.restore_resolved_policy_snapshot(targets, false, OperatorReadAdmission::Served)
+            .await
+            .map_err(PolicySnapshotFailure::into_apply_error)
+    }
+
+    /// The concrete peers a live-impact transaction targets. Nothing is
+    /// touched before this returns, so a failure has no effect.
+    fn resolve_policy_impact_targets(
+        &self,
+        static_targets: Vec<ResolvedPeerPolicy>,
+        dynamic_ranges: &[DynamicRangeTarget],
+    ) -> Result<Vec<ResolvedPeerPolicy>, PolicySnapshotApplyError> {
         // ADR-0142: an interface-only neighbor's target names its interface
         // with an unspecified address; it applies to the bound peer, and an
         // unbound neighbor takes the chains when it binds.
-        let mut static_targets: Vec<ResolvedPeerPolicy> = static_targets
+        let mut targets: Vec<ResolvedPeerPolicy> = static_targets
             .into_iter()
             .filter_map(|mut target| {
                 if !target.address.is_unspecified() {
@@ -3531,16 +3568,10 @@ impl PeerManager {
             })
             .collect();
         let mut dynamic_targets = self
-            .resolve_dynamic_policy_targets(&dynamic_ranges)
+            .resolve_dynamic_policy_targets(dynamic_ranges)
             .map_err(PolicySnapshotApplyError::NoEffect)?;
-        static_targets.append(&mut dynamic_targets);
-        self.apply_resolved_policy_snapshot_with_prestage_reads(
-            static_targets,
-            false,
-            OperatorReadAdmission::Served,
-        )
-        .await
-        .map_err(PolicySnapshotFailure::into_apply_error)
+        targets.append(&mut dynamic_targets);
+        Ok(targets)
     }
 
     fn resolve_dynamic_policy_targets(
@@ -5384,7 +5415,7 @@ impl PeerManager {
         // For non-Established peers the same staleness exists — the
         // session task may eventually drop the queued command (task
         // dies before processing) and reach Established holding the
-        // prior policy. Without bailing, `apply_policy_change` would
+        // prior policy. Without bailing, `apply_policy_change_owned` would
         // advance `current_config`, leaving no signal that the edit
         // didn't actually land.
         //
@@ -5618,7 +5649,7 @@ impl PeerManager {
         // in this peer's AdjRibIn against the new import policy.
         // Driven from here rather than from the SIGHUP-only reload
         // path so dynamic peers, gRPC mutations, and any other call
-        // site that goes through `apply_policy_change` get the same
+        // site that goes through `apply_policy_change_owned` get the same
         // correctness guarantee — the loop above iterates
         // `self.peers`, which includes dynamic peers.
         //
@@ -5635,7 +5666,7 @@ impl PeerManager {
         // would fail.
         //
         // Failure for an Established peer bubbles up to
-        // `apply_policy_change`'s caller — for SIGHUP reloads, that
+        // `apply_policy_change_owned`'s caller — for SIGHUP reloads, that
         // returns acknowledged partial SIGHUP authority so the failure is
         // surfaced rather than logged-and-forgotten. Before bubbling
         // up, set `pending_refresh` so the next operator action
@@ -5746,55 +5777,6 @@ impl PeerManager {
         Ok(())
     }
 
-    pub(super) async fn apply_policy_change(
-        &mut self,
-        event: ConfigEvent,
-        affected_peers: Option<Vec<PeerKey>>,
-    ) -> Result<(), CatalogMutationError> {
-        if let ConfigEvent::DeletePolicy { name, .. } = &event {
-            let refs = policy_references(&self.current_config, name);
-            if !refs.is_empty() {
-                return Err(CatalogMutationError::StillReferenced {
-                    kind: "policy",
-                    name: name.clone(),
-                    references: refs,
-                });
-            }
-        }
-        if let ConfigEvent::DeleteNeighborSet { name, .. } = &event {
-            let refs = neighbor_set_references(&self.current_config, name);
-            if !refs.is_empty() {
-                return Err(CatalogMutationError::StillReferenced {
-                    kind: "neighbor set",
-                    name: name.clone(),
-                    references: refs,
-                });
-            }
-        }
-        // ADR-0096: TOML definitions and .rpol policies share one
-        // namespace; creating a TOML definition that shadows an .rpol
-        // policy would silently change every chain referencing it.
-        if let ConfigEvent::SetPolicy { name, .. } = &event
-            && let Some(entry) = self.current_config.policy.rpol.policies.get(name)
-        {
-            return Err(CatalogMutationError::internal(format!(
-                "policy {name:?} is defined by rpol file {:?}; \
-                 rpol and TOML policies share one namespace",
-                entry.path
-            )));
-        }
-
-        let mut next_config = self.current_config.clone();
-        apply_config_event(&mut next_config, &event).map_err(catalog_config_error)?;
-
-        // Thirteen command arms await this future: keep the refresh state
-        // out of it, and so out of the command-dispatch poll frame.
-        let applied =
-            super::boxed(|| self.refresh_policies_for_config(next_config, affected_peers)).await?;
-        self.publish_policy_config_event(&event, applied);
-        Ok(())
-    }
-
     pub(super) async fn apply_policy_change_owned(
         &mut self,
         event: ConfigEvent,
@@ -5852,7 +5834,7 @@ impl PeerManager {
             return OwnedCatalogMutationOutcome::Success;
         }
         match self
-            .refresh_policies_for_config_classified(next_config, affected_peers, true)
+            .refresh_policies_for_config(next_config, affected_peers)
             .await
         {
             Ok(applied) => {
@@ -5869,35 +5851,6 @@ impl PeerManager {
     /// resolve-first, rollback-capable fan-out as catalog policy edits. Peers
     /// whose import chain materially changed get a Route Refresh inside
     /// `apply_resolved_policy_snapshot`.
-    #[cfg(test)]
-    pub(super) async fn sync_rpol_policies(
-        &mut self,
-        rpol_files: Vec<String>,
-        rpol: rustbgpd_policy::rpol::RpolPolicySet,
-        dataset_bindings: rustbgpd_policy::datasets::DatasetBindings,
-    ) -> Result<(), CatalogMutationError> {
-        // LAN-888: the manager-side config snapshot clone carries the full
-        // prior rpol registry — stamp it so the receipt→resolve gap can't
-        // hide it.
-        let clone_started = Instant::now();
-        let mut next_config = self.current_config.clone();
-        info!(
-            elapsed_ms = u64::try_from(clone_started.elapsed().as_millis()).unwrap_or(u64::MAX),
-            "rpol sync config snapshot cloned"
-        );
-        next_config.policy.rpol_files = rpol_files;
-        next_config.policy.rpol = rpol;
-        // LAN-305: the new registry's `dataset` declarations resolve
-        // through these handles during the chain re-resolution below.
-        next_config.policy.dataset_bindings = dataset_bindings;
-        let applied = self.refresh_policies_for_config(next_config, None).await?;
-        info!(
-            peers = applied,
-            "rpol policy registry replaced; live peer chains re-resolved"
-        );
-        Ok(())
-    }
-
     pub(super) async fn sync_rpol_policies_owned(
         &mut self,
         rpol_files: Vec<String>,
@@ -5917,10 +5870,7 @@ impl PeerManager {
                     .closed_catalog_error(),
             );
         }
-        match self
-            .refresh_policies_for_config_classified(next_config, None, true)
-            .await
-        {
+        match self.refresh_policies_for_config(next_config, None).await {
             Ok(_) => OwnedCatalogMutationOutcome::Success,
             Err(failure) => failure.into_owned_outcome(),
         }
@@ -5939,7 +5889,6 @@ impl PeerManager {
         &mut self,
         next_config: &Config,
         targets: Vec<ResolvedPeerPolicy>,
-        require_clean_convergence: bool,
     ) -> Result<Vec<ResolvedPeerPolicy>, PolicySnapshotFailure> {
         // Nothing precedes the install, so one that never reached the RIB is
         // a clean rejection; an unacknowledged one may have committed.
@@ -5963,7 +5912,7 @@ impl PeerManager {
         match self
             .apply_resolved_policy_snapshot_with_prestage_reads(
                 targets,
-                require_clean_convergence,
+                true,
                 OperatorReadAdmission::Served,
             )
             .await
@@ -5990,21 +5939,6 @@ impl PeerManager {
         &mut self,
         next_config: Config,
         affected_peers: Option<Vec<PeerKey>>,
-    ) -> Result<usize, CatalogMutationError> {
-        self.refresh_policies_for_config_classified(next_config, affected_peers, false)
-            .await
-            .map_err(|failure| CatalogMutationError::internal(failure.message))
-    }
-
-    #[expect(
-        clippy::too_many_lines,
-        reason = "live target resolution, conditional installation, and accepted-generation publication form one policy apply"
-    )]
-    async fn refresh_policies_for_config_classified(
-        &mut self,
-        next_config: Config,
-        affected_peers: Option<Vec<PeerKey>>,
-        require_clean_convergence: bool,
     ) -> Result<usize, PolicySnapshotFailure> {
         let peers: Vec<PeerKey> = affected_peers.map_or_else(
             || self.peers.keys().cloned().collect(),
@@ -6102,11 +6036,7 @@ impl PeerManager {
             "resolved live peer policy chains"
         );
         let applied = self
-            .apply_policy_snapshot_with_conditional_install(
-                &next_config,
-                targets,
-                require_clean_convergence,
-            )
+            .apply_policy_snapshot_with_conditional_install(&next_config, targets)
             .await?;
 
         // ADR-0110 freshness: adopting `next_config` is the accept moment
@@ -6573,188 +6503,26 @@ impl PeerManager {
         }
     }
 
+    /// Test adapter: a peer-group change through the settlement-owned path,
+    /// with its outcome flattened to the error alone.
+    #[cfg(test)]
     pub(super) async fn apply_peer_group_change(
         &mut self,
         event: ConfigEvent,
         affected_peers: Vec<PeerKey>,
     ) -> Result<(), CatalogMutationError> {
-        // The body clones the running configuration onto its own stack frame;
-        // boxing it keeps every caller's future under clippy's size ceiling.
-        // One import-roster publication for the whole group change.
-        let batch = self.peers.begin_batch();
-        let result = Box::pin(self.apply_peer_group_change_inner(event, affected_peers)).await;
-        self.peers.end_batch(batch);
-        result
-    }
-
-    #[expect(
-        clippy::too_many_lines,
-        reason = "the legacy peer-group path keeps validation, the interface-only policy deltas, apply and their restore in one auditable flow"
-    )]
-    async fn apply_peer_group_change_inner(
-        &mut self,
-        event: ConfigEvent,
-        affected_peers: Vec<PeerKey>,
-    ) -> Result<(), CatalogMutationError> {
-        if let ConfigEvent::DeletePeerGroup { name, .. } = &event {
-            let refs = peer_group_references(&self.current_config, name);
-            if !refs.is_empty() {
-                return Err(CatalogMutationError::StillReferenced {
-                    kind: "peer group",
-                    name: name.clone(),
-                    references: refs,
-                });
-            }
-        }
-
-        let mut next_config = self.current_config.clone();
-        apply_config_event(&mut next_config, &event).map_err(catalog_config_error)?;
-        if next_config == self.current_config {
-            return Ok(());
-        }
-        reject_peer_group_tcp_mss_change(&self.current_config, &next_config)?;
-        reject_peer_group_bfd_change(&self.current_config, &next_config)?;
-        // ADR-0142: a group edit or move must not give neighbors that share
-        // a link-local address a feature they cannot share; the port
-        // reconcile would otherwise retire and refuse a working session.
-        self.validate_live_shared_addresses(&next_config)
-            .map_err(CatalogMutationError::FailedPrecondition)?;
-        let purge_dynamic_group = match &event {
-            ConfigEvent::SetPeerGroup { name, .. } => {
-                let old = self.current_config.peer_groups.get(name).and_then(|group| {
-                    normalized_discard_path_attributes(group.discard_path_attributes.as_ref())
-                });
-                let new = next_config.peer_groups.get(name).and_then(|group| {
-                    normalized_discard_path_attributes(group.discard_path_attributes.as_ref())
-                });
-                (old != new).then(|| name.clone())
-            }
-            _ => None,
-        };
-
-        // Inbound MD5 keys and GTSM selectors derived from a peer group
-        // (static members' host keys, dynamic ranges' prefix keys and TTL
-        // selectors) live on the BGP listener, which only startup and the
-        // SIGHUP reload coordinator can update. Changing them on an existing
-        // group here would leave the listener enforcing the old inventory —
-        // including accepting the old password inbound.
-        if let ConfigEvent::SetPeerGroup { name, .. } = &event
-            && let Some(old_group) = self.current_config.peer_groups.get(name)
-            && let Some(new_group) = next_config.peer_groups.get(name)
-            && (old_group.md5_password != new_group.md5_password
-                || old_group.ttl_security != new_group.ttl_security
-                || old_group.ttl_security_hops != new_group.ttl_security_hops)
-        {
-            return Err(CatalogMutationError::RestartRequired(format!(
-                "peer group {name:?} changes md5_password or ttl_security; inbound listener \
-                 enforcement is updated only by startup or SIGHUP reload — apply this change \
-                 through the config file and SIGHUP"
-            )));
-        }
-
-        // Partition the group edit's changed fields by `ConfigFieldImpact`
-        // the way `diff_neighbors` already does for neighbor edits: when
-        // every changed field is reload-matrix `live`, the members'
-        // effective values are applied in place instead of bouncing every
-        // inheriting session. A mixed set (any field that is session-reset,
-        // restart-required, unclassified, or not described at all) keeps
-        // the reshape path below.
-        if let ConfigEvent::SetPeerGroup { name, .. } = &event
-            && let Some(old_group) = self.current_config.peer_groups.get(name)
-            && let Some(new_group) = next_config.peer_groups.get(name)
-            && crate::config::peer_group_change_hot_applicable(old_group, new_group)
-        {
-            let name = name.clone();
-            let policy_priors = self
-                .apply_interface_only_policy_deltas(&next_config)
-                .await
-                .map_err(|failure| CatalogMutationError::internal(failure.message))?;
-            let result = self
-                .apply_peer_group_hot_change(event, next_config, &name, affected_peers)
-                .await;
-            if result.is_err() {
-                self.restore_interface_only_policies(policy_priors).await;
-            }
-            return result;
-        }
-
-        // ADR-0081: resolve every affected member's next config BEFORE
-        // touching any peer, then commit the whole set through the
-        // captured-prior reshape primitive. A resolution failure rejects with
-        // zero peers touched; a mid-fanout reconfigure failure restores the
-        // already-reshaped members from their captured priors instead of
-        // leaving earlier members on the next config (and the failing member
-        // possibly deleted) while `current_config` never advanced.
-        // Interface-only bindings adopt membership through the port owner,
-        // preserving their safety state across its rebind.
-        let mut seen = BTreeSet::new();
-        let mut targets: Vec<PeerManagerNeighborConfig> = Vec::new();
-        for peer_key in affected_peers
-            .into_iter()
-            .filter(|key| self.peers.contains_key(key) && self.unnumbered_owner_of(key).is_none())
-        {
-            if !seen.insert(peer_key.clone()) {
-                continue;
-            }
-            // A dynamic peer at an affected address is never reshaped here:
-            // delete/re-add is wrong for an ephemeral accepted peer (ADR-0081
-            // decision 4, and the primitive rejects dynamic targets). Its
-            // running session keeps its config until it reconnects; resolved
-            // policy chains hot-apply through the catalog policy fan-out.
-            if self
-                .peers
-                .get(&peer_key)
-                .is_some_and(|managed| managed.is_dynamic)
-            {
-                continue;
-            }
-            let Some(neighbor) = next_config.neighbor_record(&peer_key) else {
-                // Peer-group events never remove `[[neighbors]]` records, so
-                // a static managed peer without one means the config snapshot
-                // and the managed-peer set disagree. The old per-member loop
-                // deleted the peer outright here; refuse instead (still zero
-                // peers touched — this runs before the commit phase).
-                return Err(CatalogMutationError::internal(format!(
-                    "static peer {peer_key} affected by the peer-group change has no neighbor \
-                     record in the updated config; refusing to reshape an inconsistent snapshot"
-                )));
-            };
-            let resolved = next_config
-                .resolve_neighbor(&neighbor)
-                .map_err(catalog_config_error)?;
-            targets.push(Self::peer_manager_config_from_resolved(resolved, false));
-        }
-
-        // ADR-0142: interface-only members that will not rebind take their
-        // new chains live, and get them back if the static members fail.
-        let policy_priors = self
-            .apply_interface_only_policy_deltas(&next_config)
+        match self
+            .apply_peer_group_change_owned(event, affected_peers)
             .await
-            .map_err(|failure| CatalogMutationError::internal(failure.message))?;
-        let priors = match self.apply_peer_reshape_snapshot(targets).await {
-            Ok(priors) => priors,
-            Err(error) => {
-                self.restore_interface_only_policies(policy_priors).await;
-                return Err(CatalogMutationError::from(error));
-            }
-        };
-
-        self.replace_current_config(next_config);
-        if let Some(group) = purge_dynamic_group.as_deref() {
-            self.purge_dynamic_group_inheritors(group)
-                .await
-                .map_err(CatalogMutationError::internal)?;
+        {
+            OwnedCatalogMutationOutcome::Success => Ok(()),
+            OwnedCatalogMutationOutcome::RejectedNoEffect(error)
+            | OwnedCatalogMutationOutcome::FullyCompensated(error)
+            | OwnedCatalogMutationOutcome::CompensationAmbiguous(error) => Err(error),
         }
-        if let ConfigEvent::SetPeerGroup { name, .. } = &event {
-            self.sync_dynamic_max_prefix_restart_for_group(name);
-        }
-        self.reconcile_stale_dynamic_max_prefix_restarts();
-        self.publish_policy_config_event(&event, priors.len());
-        Ok(())
     }
 
-    /// Settlement-owned counterpart of [`Self::apply_peer_group_change`].
-    /// It preserves the legacy behavior while carrying explicit proof of
+    /// Apply a peer-group catalog mutation, carrying explicit proof of
     /// whether an error preceded all effects, was completely restored, or
     /// left runtime state uncertain.
     pub(super) async fn apply_peer_group_change_owned(
@@ -6762,7 +6530,9 @@ impl PeerManager {
         event: ConfigEvent,
         affected_peers: Vec<PeerKey>,
     ) -> OwnedCatalogMutationOutcome {
-        // See `apply_peer_group_change`: boxed for the same stack-size reason.
+        // The body clones the running configuration onto its own stack frame;
+        // boxing it keeps every caller's future under clippy's size ceiling.
+        // One import-roster publication for the whole group change.
         let batch = self.peers.begin_batch();
         let result =
             Box::pin(self.apply_peer_group_change_owned_inner(event, affected_peers)).await;
@@ -7010,7 +6780,7 @@ impl PeerManager {
         }
     }
 
-    /// The all-hot half of [`Self::apply_peer_group_change`]: apply the
+    /// The all-hot half of [`Self::apply_peer_group_change_owned`]: apply the
     /// group's new effective values to every inheriting member in place,
     /// under the same ADR-0081 contract the reshape path honors.
     ///

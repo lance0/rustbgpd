@@ -4,8 +4,8 @@ use crate::fib_runtime::{FibRuntimeCommand, OwnedFibReplaceOutcome};
 use crate::test_support::{assert_tier_authorized_test_config, tier_authorized_uds_test_config};
 use rustbgpd_api::peer_types::{
     CatalogMutationError, ConfigPersistError, FibTableSnapshot, PolicySnapshotApplyError,
-    RuntimeConfigDiff, RuntimeConfigTransactionCandidate, RuntimeConfigTransactionPlan,
-    RuntimeConfigTransactionPlanError,
+    RestoredPolicySnapshot, RuntimeConfigDiff, RuntimeConfigTransactionCandidate,
+    RuntimeConfigTransactionPlan, RuntimeConfigTransactionPlanError,
 };
 use rustbgpd_api::rib_service::FibTableControlError;
 use rustbgpd_policy::PolicyAction;
@@ -820,14 +820,6 @@ fn runtime_config_coordinator_inventory_is_complete_and_closed() {
     let commit = owned_peer_group_body.find("staged.commit_typed()").unwrap();
     assert!(gate < mutating && mutating < stage && stage < actor);
     assert!(actor < settling && settling < commit);
-    for legacy in [
-        "PeerManagerCommand::SetPeerGroup",
-        "PeerManagerCommand::DeletePeerGroup",
-        "PeerManagerCommand::SetNeighborPeerGroup",
-        "PeerManagerCommand::ClearNeighborPeerGroup",
-    ] {
-        assert!(!peer_group.contains(legacy), "PeerGroup4 bypass: {legacy}");
-    }
     assert_eq!(
         peer_manager
             .matches("PeerManagerCommand::OwnedCatalogMutation")
@@ -2522,20 +2514,24 @@ async fn fake_live_policy_peer_manager(
                     }
                 }
             }
-            PeerManagerCommand::RestoreResolvedPolicySnapshot { priors, reply } => {
-                apply_calls.lock().await.push(priors);
-                dynamic_calls.lock().await.push(Vec::new());
+            PeerManagerCommand::RestoreResolvedPolicySnapshot {
+                priors,
+                dynamic_ranges,
+                reply,
+            } => {
+                apply_calls.lock().await.push(priors.clone());
+                dynamic_calls.lock().await.push(dynamic_ranges);
                 let _ = reply.send(
                     apply_results
                         .lock()
                         .await
                         .pop_front()
                         .unwrap_or(Ok(()))
-                        .map(|()| Vec::new()),
+                        .map(|()| RestoredPolicySnapshot {
+                            priors,
+                            reset_sessions: Vec::new(),
+                        }),
                 );
-            }
-            PeerManagerCommand::ApplyResolvedPolicySnapshot { .. } => {
-                panic!("a live-policy rollback must restore its priors, not re-apply them forward")
             }
             _ => panic!("unexpected peer-manager command in live-policy transaction test"),
         }
@@ -6336,6 +6332,426 @@ async fn publication_rollback_resets_a_session_that_lost_route_refresh() {
         &crate::config::persisted_config_document(&runtime).unwrap(),
         &previous_toml,
     );
+}
+
+/// A confirmed transaction that moved the import chain of the one
+/// Established peer from `permit` to `deny`, awaiting confirmation, run by
+/// the real controller and peer manager. With `lose_route_refresh` the peer
+/// reconnected without Route Refresh after taking the candidate: the
+/// capability goes when the forward apply's own refresh is answered, so
+/// every rollback observes it. With `intercept_restore` every
+/// `RestoreResolvedPolicySnapshot` is answered as ambiguous instead of
+/// reaching the peer manager, as when a session times out partway through
+/// the restore.
+struct ConfirmedImportEdit {
+    controller: ConfigTransactionController,
+    peer_tx: mpsc::Sender<PeerManagerCommand>,
+    acks: crate::peer_manager::test_support::EstablishedPolicyPeerAcks,
+    previous_toml: String,
+}
+
+async fn confirmed_import_edit(
+    confirm_timeout_seconds: u32,
+    lose_route_refresh: bool,
+    intercept_restore: bool,
+) -> ConfirmedImportEdit {
+    let previous_toml = live_policy_toml("permit");
+    let candidate_toml = live_policy_toml("deny");
+    let current = Config::load_toml_with_diagnostics(&previous_toml, "confirmed import edit")
+        .expect("current config must parse");
+    let neighbor = current
+        .resolved_neighbors()
+        .expect("neighbors resolve")
+        .into_iter()
+        .next()
+        .unwrap();
+    let (rib_tx, rib_rx) = mpsc::channel(128);
+    let (_query_tx, query_rx) = mpsc::channel(1);
+    tokio::spawn(
+        rustbgpd_rib::RibManager::new(rib_rx, query_rx, None, None, BgpMetrics::new()).run(),
+    );
+    let (peer_tx, peer_rx) = mpsc::channel(64);
+    let (internal_tx, internal_rx) = mpsc::channel(1);
+    let mut peer_manager = crate::peer_manager::PeerManager::new_with_config(
+        peer_rx,
+        internal_rx,
+        current.global.asn,
+        current.global.router_id.parse().unwrap(),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+        None,
+        current,
+    );
+    let acks = if lose_route_refresh {
+        peer_manager.install_established_policy_test_peer_losing_route_refresh(neighbor, 1)
+    } else {
+        peer_manager.install_established_policy_test_peer(neighbor, 1)
+    };
+    tokio::spawn(peer_manager.run());
+    let controller_tx = if intercept_restore {
+        let (proxy_tx, mut proxy_rx) = mpsc::channel(64);
+        let inner = peer_tx.clone();
+        tokio::spawn(async move {
+            while let Some(command) = proxy_rx.recv().await {
+                if let PeerManagerCommand::RestoreResolvedPolicySnapshot { reply, .. } = command {
+                    let _ = reply.send(Err(PolicySnapshotApplyError::CompensationAmbiguous(
+                        "injected: a session timed out partway through the restore".to_string(),
+                    )));
+                } else if inner.send(command).await.is_err() {
+                    return;
+                }
+            }
+        });
+        proxy_tx
+    } else {
+        peer_tx.clone()
+    };
+
+    let planned = plan_candidate(&peer_tx, candidate_toml.clone(), String::new(), true)
+        .await
+        .expect("real plan must succeed");
+    let (config_tx, config_rx) = mpsc::channel(8);
+    tokio::spawn(ack_config_transaction_commits(config_rx));
+    let controller = ConfigTransactionController::new(
+        deps_value(None, controller_tx, Some(config_tx), Vec::new()),
+        BgpMetrics::new(),
+    )
+    .with_preloaded_planner(internal_tx);
+    let applied = controller
+        .clone()
+        .apply(proto::ApplyConfigTransactionRequest {
+            expected_runtime_snapshot_token: planned.runtime_snapshot_token,
+            ..confirmed_dynamic_request(candidate_toml, "deploy-1", confirm_timeout_seconds)
+        })
+        .await
+        .expect("the confirmed import edit applies");
+    assert_eq!(
+        applied.status,
+        proto::ConfigTransactionPlanStatus::Committable as i32
+    );
+    let edit = ConfirmedImportEdit {
+        controller,
+        peer_tx,
+        acks,
+        previous_toml,
+    };
+    assert_eq!(edit.installed_actions(), vec![Some(PolicyAction::Deny)]);
+    edit
+}
+
+impl ConfirmedImportEdit {
+    /// The default action of every import chain the session installed, in
+    /// order.
+    fn installed_actions(&self) -> Vec<Option<PolicyAction>> {
+        self.acks
+            .import_chains()
+            .iter()
+            .map(|chain| {
+                chain
+                    .as_ref()
+                    .map(|chain| chain.policies[0].policy.default_action)
+            })
+            .collect()
+    }
+
+    /// The rollback put the prior chain back, then reset the session once,
+    /// after that install, and the pending transaction ended in `terminal`
+    /// with a record naming the reset peer.
+    async fn assert_restored_and_reset(
+        &self,
+        terminal: proto::ConfigTransactionConfirmationStatus,
+    ) {
+        assert_eq!(
+            self.installed_actions(),
+            vec![Some(PolicyAction::Deny), Some(PolicyAction::Permit)],
+            "the rollback reinstalls the prior import chain"
+        );
+        let resets = tokio::time::timeout(Duration::from_secs(5), self.acks.resets_after(1))
+            .await
+            .expect("the session that lost Route Refresh must be reset");
+        assert_eq!(resets, vec![2], "one reset, after the prior chain");
+        let status = self.controller.status().await.expect("status must succeed");
+        let confirmation = status.confirmation.unwrap();
+        assert_eq!(
+            proto::ConfigTransactionConfirmationStatus::try_from(confirmation.status),
+            Ok(terminal)
+        );
+        assert_names_reset_peer(&confirmation.human_text);
+        let runtime = crate::reload::runtime_config_snapshot(&self.peer_tx)
+            .await
+            .expect("real peer manager must return its runtime config");
+        assert_snapshot_matches_config(
+            &crate::config::persisted_config_document(&runtime).unwrap(),
+            &self.previous_toml,
+        );
+        self.controller
+            .reject_if_pending("test mutation")
+            .await
+            .expect("a completed rollback must reopen the mutation fence");
+    }
+}
+
+fn assert_names_reset_peer(text: &str) {
+    assert!(
+        text.contains("10.0.0.2") && text.contains("did not negotiate Route Refresh"),
+        "the result must name the reset peer: {text:?}"
+    );
+}
+
+/// An abort restores the prior import chain even though the peer lost Route
+/// Refresh inside the confirm window, and resets that one session. Before,
+/// the rollback ran as a forward edit, which refuses an import change for
+/// such a peer, so the abort failed with the candidate still live.
+#[tokio::test]
+async fn confirmed_abort_restores_import_policy_on_a_peer_that_lost_route_refresh() {
+    let edit = confirmed_import_edit(60, true, false).await;
+    let response = edit
+        .controller
+        .clone()
+        .abort(proto::AbortConfigTransactionRequest {
+            confirm_id: "deploy-1".to_string(),
+        })
+        .await
+        .expect("the abort restores the prior import chain");
+    assert_names_reset_peer(&response.human_text);
+    edit.assert_restored_and_reset(proto::ConfigTransactionConfirmationStatus::Aborted)
+        .await;
+    assert_config_transaction_lifecycle_metric(&edit.controller, "abort", "success", 1.0);
+}
+
+#[tokio::test]
+async fn gnmi_commit_cancel_restores_import_policy_on_a_peer_that_lost_route_refresh() {
+    let edit = confirmed_import_edit(60, true, false).await;
+    edit.controller
+        .clone()
+        .apply_gnmi_set(gnmi_set_commit_cancel("deploy-1"))
+        .await
+        .expect("the gNMI cancel restores the prior import chain");
+    edit.assert_restored_and_reset(proto::ConfigTransactionConfirmationStatus::Aborted)
+        .await;
+}
+
+/// The timeout auto-revert has no caller to answer, so its status record
+/// names the reset peer. Virtual time drives the confirm deadline.
+#[tokio::test(start_paused = true)]
+async fn confirm_timeout_auto_revert_restores_import_policy_on_a_peer_that_lost_route_refresh() {
+    let edit = confirmed_import_edit(1, true, false).await;
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    tokio::time::timeout(Duration::from_secs(5), edit.acks.resets_after(1))
+        .await
+        .expect("the auto-revert must reset the session that lost Route Refresh");
+    // The auto-revert owns the coordinator until it has recorded its
+    // outcome, so this acquisition orders the reads below after it.
+    drop(edit.controller.deps.lock.acquire().await.unwrap());
+    edit.assert_restored_and_reset(proto::ConfigTransactionConfirmationStatus::AutoReverted)
+        .await;
+    assert_config_transaction_lifecycle_metric(&edit.controller, "auto_revert", "success", 1.0);
+    assert_config_transaction_lifecycle_metric(&edit.controller, "auto_revert", "failure", 0.0);
+}
+
+/// With every peer able to refresh, the rollback refreshes and resets
+/// nothing, and the abort reads exactly as before.
+#[tokio::test]
+async fn confirmed_abort_with_route_refresh_resets_nothing() {
+    let edit = confirmed_import_edit(60, false, false).await;
+    let response = edit
+        .controller
+        .clone()
+        .abort(proto::AbortConfigTransactionRequest {
+            confirm_id: "deploy-1".to_string(),
+        })
+        .await
+        .expect("the abort restores the prior import chain");
+    assert_eq!(
+        response.human_text,
+        "Aborted confirmed config transaction and restored the previous runtime config.\n"
+    );
+    assert_eq!(
+        edit.installed_actions(),
+        vec![Some(PolicyAction::Deny), Some(PolicyAction::Permit)]
+    );
+    assert_eq!(edit.acks.route_refreshes(), 2, "apply and rollback refresh");
+    assert_eq!(edit.acks.resets_once_drained().await, Vec::<usize>::new());
+    edit.controller
+        .reject_if_pending("test mutation")
+        .await
+        .expect("a completed rollback must reopen the mutation fence");
+}
+
+/// Only the rollback restores: an ordinary import edit, confirmed or not,
+/// for a peer without Route Refresh is still refused before anything is
+/// applied, and no session is reset.
+#[tokio::test]
+async fn forward_import_edit_on_a_peer_without_route_refresh_is_still_refused() {
+    let edit = confirmed_import_edit(60, true, false).await;
+    edit.controller
+        .clone()
+        .confirm(proto::ConfirmConfigTransactionRequest {
+            confirm_id: "deploy-1".to_string(),
+        })
+        .await
+        .expect("the candidate is confirmed");
+    // The forward edit moves only the import chain back, from the running
+    // config, so nothing but that change is planned.
+    let runtime = crate::reload::runtime_config_snapshot(&edit.peer_tx)
+        .await
+        .expect("real peer manager must return its runtime config");
+    let running = crate::config::persisted_config_document(&runtime).unwrap();
+    let forward = running.replace(r#"default_action = "deny""#, r#"default_action = "permit""#);
+    assert_ne!(forward, running);
+    for (confirm_id, confirm_timeout_seconds) in [("", 0), ("deploy-2", 60)] {
+        let planned = plan_candidate(&edit.peer_tx, forward.clone(), String::new(), true)
+            .await
+            .expect("real plan must succeed");
+        assert_eq!(
+            planned.status,
+            RuntimeConfigTransactionStatus::Committable,
+            "{}",
+            planned.human_text
+        );
+        let error = edit
+            .controller
+            .clone()
+            .apply(proto::ApplyConfigTransactionRequest {
+                expected_runtime_snapshot_token: planned.runtime_snapshot_token,
+                ..confirmed_dynamic_request(forward.clone(), confirm_id, confirm_timeout_seconds)
+            })
+            .await
+            .expect_err("a forward import edit for a peer without Route Refresh is refused");
+        assert!(
+            error
+                .to_string()
+                .contains("did not negotiate Route Refresh")
+                && error.fence_reason().is_none(),
+            "{confirm_id:?}: {error:?}"
+        );
+        assert_eq!(
+            edit.installed_actions(),
+            vec![Some(PolicyAction::Deny)],
+            "{confirm_id:?}: nothing is installed"
+        );
+        assert!(
+            edit.acks.resets_once_drained().await.is_empty(),
+            "{confirm_id:?}"
+        );
+        edit.controller
+            .reject_if_pending("test mutation")
+            .await
+            .expect("a refused edit leaves nothing pending");
+    }
+}
+
+/// An operator's history rollback is a forward edit, not a restore: moving
+/// the import chain of a peer without Route Refresh back to a retained
+/// config is refused before anything is applied, and no session is reset.
+#[tokio::test]
+async fn history_rollback_import_edit_on_a_peer_without_route_refresh_is_refused() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let edit = confirmed_import_edit(60, true, false).await;
+    edit.controller
+        .clone()
+        .confirm(proto::ConfirmConfigTransactionRequest {
+            confirm_id: "deploy-1".to_string(),
+        })
+        .await
+        .expect("the candidate is confirmed");
+    let runtime = crate::reload::runtime_config_snapshot(&edit.peer_tx)
+        .await
+        .expect("real peer manager must return its runtime config");
+    let running = crate::config::persisted_config_document(&runtime).unwrap();
+
+    // History: the prior `permit` config at index 1, the running one at 0.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    record_v2_history(dir.path(), &edit.previous_toml);
+    record_v2_history(dir.path(), &running);
+    let config_path = dir.path().join("runtime.toml");
+    std::fs::write(&config_path, &running).unwrap();
+    let accepted = Arc::new(AcceptedConfigSnapshot::load(&config_path, None).unwrap());
+    let (_accepted_tx, accepted_rx) = watch::channel(accepted);
+    let (config_tx, config_rx) = mpsc::channel(8);
+    tokio::spawn(ack_config_transaction_commits(config_rx));
+    let controller = ConfigTransactionController::new_accepted(
+        FibTableControlDeps {
+            config_history_dir: Some(dir.path().to_path_buf()),
+            ..deps_value(None, edit.peer_tx.clone(), Some(config_tx), Vec::new())
+        },
+        BgpMetrics::new(),
+        accepted_rx,
+    )
+    .with_preloaded_planner(edit.controller.peer_mgr_internal_tx.clone().unwrap());
+
+    let error = controller
+        .clone()
+        .rollback(proto::RollbackConfigTransactionRequest {
+            index: 1,
+            ..Default::default()
+        })
+        .await
+        .expect_err("a history rollback of an import edit for a peer without Route Refresh");
+    assert!(
+        error
+            .to_string()
+            .contains("did not negotiate Route Refresh")
+            && error.fence_reason().is_none(),
+        "{error:?}"
+    );
+    assert_eq!(
+        edit.installed_actions(),
+        vec![Some(PolicyAction::Deny)],
+        "the rollback installs nothing"
+    );
+    assert!(
+        edit.acks.resets_once_drained().await.is_empty(),
+        "no session reset"
+    );
+    let runtime = crate::reload::runtime_config_snapshot(&edit.peer_tx)
+        .await
+        .expect("real peer manager must return its runtime config");
+    assert_eq!(
+        crate::config::persisted_config_document(&runtime).unwrap(),
+        running,
+        "the running config is unchanged"
+    );
+    controller
+        .reject_if_pending("test mutation")
+        .await
+        .expect("a refused rollback leaves nothing pending");
+}
+
+/// A rollback restore that fails partway is never unwound back to the
+/// candidate: the abort fences for supervised recovery (the restart
+/// boot-reverts from the retained journal) instead of reporting an abort
+/// failure with the candidate reinstalled.
+#[tokio::test]
+async fn confirmed_abort_whose_restore_fails_partway_fences() {
+    let edit = confirmed_import_edit(60, false, true).await;
+    let error = edit
+        .controller
+        .clone()
+        .abort(proto::AbortConfigTransactionRequest {
+            confirm_id: "deploy-1".to_string(),
+        })
+        .await
+        .expect_err("an ambiguous restore is not a completed abort");
+    assert_eq!(
+        error.fence_reason(),
+        Some(RuntimeConfigFenceReason::KnownDivergence),
+        "{error:?}"
+    );
+    let status = edit.controller.status().await.expect("status must succeed");
+    assert_eq!(
+        proto::ConfigTransactionConfirmationStatus::try_from(status.confirmation.unwrap().status),
+        Ok(proto::ConfigTransactionConfirmationStatus::AbortFailed)
+    );
+    edit.controller
+        .reject_if_pending("test mutation")
+        .await
+        .expect_err("the transaction stays pending with its journal");
 }
 
 #[tokio::test]
@@ -12134,9 +12550,18 @@ async fn enumerated_live_policy_peer(
                 schedule.effect(TransactionTestActor::Peer);
                 transaction_test_reply(reply, Ok(priors), fault).await;
             }
-            PeerManagerCommand::RestoreResolvedPolicySnapshot { priors, reply } => {
-                *live.lock().await = priors;
-                if transaction_test_reply(reply, Ok(Vec::new()), fault).await {
+            PeerManagerCommand::RestoreResolvedPolicySnapshot {
+                priors,
+                dynamic_ranges,
+                reply,
+            } => {
+                assert_eq!(dynamic_ranges.len(), 0);
+                let replaced = std::mem::replace(&mut *live.lock().await, priors);
+                let restored = RestoredPolicySnapshot {
+                    priors: replaced,
+                    reset_sessions: Vec::new(),
+                };
+                if transaction_test_reply(reply, Ok(restored), fault).await {
                     schedule.restored(TransactionTestActor::Peer);
                 }
             }

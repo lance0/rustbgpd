@@ -213,7 +213,9 @@ that rebuild sessions still require fresh scope resolution during planning.
   `rbgp neighbor`.
 - On reload, only a *change* to the resolved `admin_down` acts. Setting it
   disables the peer: an Established session receives Cease/Administrative
-  Shutdown with `admin_down_reason` as its RFC 9003 shutdown communication.
+  Shutdown with `admin_down_reason` as its RFC 9003 shutdown communication,
+  inside a Cease / Hard Reset when the peer negotiated RFC 8538 Notification
+  Graceful Restart, so neither side keeps the other's routes as stale.
   Clearing it enables the peer.
 - While the resolved value is unchanged, a reload keeps the runtime toggle. A
   runtime `enable` of a config-down peer therefore lasts until the next

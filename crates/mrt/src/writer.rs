@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
 
-use chrono::Utc;
+use jiff::Timestamp;
 use nix::dir::Dir;
 use nix::errno::Errno;
 use nix::fcntl::{AtFlags, OFlag, open, openat, renameat};
@@ -246,12 +246,10 @@ pub(crate) struct StreamingDump {
     next_run: u64,
 }
 
-fn dump_filename(config: &MrtWriterConfig) -> String {
-    let now = Utc::now();
-    let timestamp = now.format("%Y%m%d.%H%M%S");
-    let nanos = now.timestamp_subsec_nanos();
+fn dump_filename(config: &MrtWriterConfig, now: Timestamp) -> String {
+    let timestamp = now.strftime("%Y%m%d.%H%M%S.%9f");
     let ext = if config.compress { ".mrt.gz" } else { ".mrt" };
-    format!("{}.{timestamp}.{nanos:09}{ext}", config.file_prefix)
+    format!("{}.{timestamp}{ext}", config.file_prefix)
 }
 
 impl StreamingDump {
@@ -260,7 +258,7 @@ impl StreamingDump {
     }
 
     fn in_dir(dir: &OutputDir, config: &MrtWriterConfig) -> std::io::Result<Self> {
-        let filename = dump_filename(config);
+        let filename = dump_filename(config, Timestamp::now());
         let final_path = dir.path.join(&filename);
         let tmp_name = format!(".{filename}.tmp");
 
@@ -303,7 +301,7 @@ impl StreamingDump {
             mut stage,
             ..
         } = self;
-        let filename = dump_filename(&config);
+        let filename = dump_filename(&config, Timestamp::now());
         stage.final_name.clone_from(&filename);
         let final_path = dir.path.join(&filename);
         let size = stage.finish(cancelled)?;
@@ -861,6 +859,21 @@ mod tests {
         let path = write_dump(&config, b"test").unwrap().0;
         assert!(path.exists());
         assert!(nested.exists());
+    }
+
+    #[test]
+    fn dump_filename_uses_utc_and_nine_fractional_digits() {
+        let now = "2024-03-01T00:02:03.000004200+01:00".parse().unwrap();
+        let mut config = retaining(Path::new("."), 1);
+        assert_eq!(
+            dump_filename(&config, now),
+            "rib.20240229.230203.000004200.mrt"
+        );
+        config.compress = true;
+        assert_eq!(
+            dump_filename(&config, now),
+            "rib.20240229.230203.000004200.mrt.gz"
+        );
     }
 
     #[test]

@@ -204,13 +204,21 @@ async fn run_outbound_refresher(
     }
 }
 
+/// A peer leaving for good (a deletion, or a replacement that disables it):
+/// its primary is sent a `Stop` with this shutdown communication before its
+/// shutdown, so under the RFC 8538 N bit it ends with a Hard Reset and
+/// neither side retains the other's routes. Without one, a replacement that
+/// keeps the peer up gets the plain shutdown, which lets both sides retain
+/// across the re-add.
+pub(super) struct FinalStop(pub(super) Option<bytes::Bytes>);
+
 /// A peer taken out of the table whose sessions have yet to stop
 /// ([`PeerManager::detach_peer_for_delete`]).
 pub(super) struct DetachedPeer {
     primary: PeerHandle,
     primary_session_id: u64,
     pending: Option<super::PendingInbound>,
-    stop_reason: Option<bytes::Bytes>,
+    stop: Option<FinalStop>,
     settlement: DeleteSettlement,
 }
 
@@ -229,7 +237,7 @@ impl DetachedPeer {
             primary,
             primary_session_id,
             pending,
-            stop_reason,
+            stop,
             settlement,
         } = self;
         let address = settlement.peer.address;
@@ -243,20 +251,11 @@ impl DetachedPeer {
             )
             .await;
         }
-        if stop_reason.is_some() && deadline_at > tokio::time::Instant::now() {
-            let commands = primary.commands_sender();
-            let _ = tokio::time::timeout_at(
-                deadline_at,
-                commands.send(PeerCommand::Stop {
-                    reason: stop_reason,
-                }),
-            )
-            .await;
-        }
-        let shutdown = PeerManager::shutdown_handle_until_owned(
+        let shutdown = PeerManager::stop_and_shutdown_handle_until(
             address,
             "delete primary",
             primary,
+            stop,
             deadline_at,
         )
         .await;
@@ -749,6 +748,28 @@ impl PeerManager {
             tokio::time::Instant::now() + PEER_LIFECYCLE_COMMAND_TIMEOUT,
         )
         .await
+    }
+
+    /// [`Self::shutdown_handle_until_owned`], first sending the [`FinalStop`]
+    /// when there is one, both within `deadline_at`. Best effort: an
+    /// Established session sends Cease/Administrative Shutdown (a Hard Reset
+    /// under the RFC 8538 N bit); the shutdown closes it anyway.
+    pub(super) async fn stop_and_shutdown_handle_until(
+        address: std::net::IpAddr,
+        context: &'static str,
+        handle: PeerHandle,
+        stop: Option<FinalStop>,
+        deadline_at: tokio::time::Instant,
+    ) -> PeerShutdownOutcome {
+        if let Some(FinalStop(reason)) = stop
+            && deadline_at > tokio::time::Instant::now()
+        {
+            let commands = handle.commands_sender();
+            let _ =
+                tokio::time::timeout_at(deadline_at, commands.send(PeerCommand::Stop { reason }))
+                    .await;
+        }
+        Self::shutdown_handle_until_owned(address, context, handle, deadline_at).await
     }
 
     pub(super) async fn shutdown_handle_until_owned(
@@ -1509,7 +1530,7 @@ impl PeerManager {
                 config.tcp_ao.as_ref(),
                 false,
                 Some(&config.discard_path_attributes),
-                replacement_stop_reason(was_enabled, enabled, &config),
+                replacement_stop(was_enabled, enabled, &config),
             )
             .await?;
         if let Err(add_error) = self.add_peer_with_admin_state(config, false, enabled).await {
@@ -2220,9 +2241,12 @@ impl PeerManager {
             // its running config until it reconnects, same as a send error.
             signals.push(async move {
                 if !purge_routes {
+                    // The member is expected to dial in again at once, as a
+                    // replaced static peer is re-added: a plain Cease keeps
+                    // retention possible on both sides.
                     return send_session_command(
                         primary,
-                        PeerCommand::Stop {
+                        PeerCommand::StopForReconnect {
                             reason: Some(reason),
                         },
                         "stop",
@@ -2296,7 +2320,7 @@ impl PeerManager {
                     previous.tcp_ao.as_ref(),
                     false,
                     Some(&previous.discard_path_attributes),
-                    replacement_stop_reason(current_enabled, was_enabled, &previous),
+                    replacement_stop(current_enabled, was_enabled, &previous),
                 )
                 .await?;
             }
@@ -2344,7 +2368,7 @@ impl PeerManager {
         next_tcp_ao: Option<&TcpAoKeyring>,
         reap_metric_series: bool,
         next_discard_path_attributes: Option<&[u8]>,
-        stop_reason: Option<bytes::Bytes>,
+        stop: Option<FinalStop>,
     ) -> Result<PeerManagerNeighborConfig, PeerLifecycleError> {
         let detached = self
             .detach_peer_for_delete(
@@ -2353,7 +2377,7 @@ impl PeerManager {
                 next_tcp_ao,
                 reap_metric_series,
                 next_discard_path_attributes,
-                stop_reason,
+                stop,
             )
             .await?;
         Ok(self
@@ -2376,7 +2400,7 @@ impl PeerManager {
         next_tcp_ao: Option<&TcpAoKeyring>,
         reap_metric_series: bool,
         next_discard_path_attributes: Option<&[u8]>,
-        stop_reason: Option<bytes::Bytes>,
+        stop: Option<FinalStop>,
     ) -> Result<DetachedPeer, PeerLifecycleError> {
         let prepared = self
             .prepare_delete(
@@ -2397,7 +2421,7 @@ impl PeerManager {
             self.retire_purged_candidates(retiring).await;
             results.pop().expect("one purge per prepared peer")?;
         }
-        self.detach_prepared(prepared, reap_metric_series, stop_reason)
+        self.detach_prepared(prepared, reap_metric_series, stop)
     }
 
     /// Validate a delete and build its next snapshot, with no effect on the
@@ -2620,7 +2644,7 @@ impl PeerManager {
             peer, next_config, ..
         }: PreparedDelete,
         reap_metric_series: bool,
-        stop_reason: Option<bytes::Bytes>,
+        stop: Option<FinalStop>,
     ) -> Result<DetachedPeer, PeerLifecycleError> {
         let (primary, primary_session_id, mut managed) = self
             .peers
@@ -2642,7 +2666,8 @@ impl PeerManager {
             primary,
             primary_session_id,
             pending,
-            stop_reason,
+            // A deleted peer is de-configured: its session ends for good.
+            stop: stop.or(reap_metric_series.then_some(FinalStop(None))),
             settlement: DeleteSettlement {
                 peer,
                 next_config,
@@ -2655,10 +2680,11 @@ impl PeerManager {
     /// A delete's second half for every peer in `detached`: stop all their
     /// sessions at once, then settle each delete in input order. Per peer the
     /// order is unchanged: the pending inbound candidate stops before the
-    /// primary, and the primary is sent its Cease first when there is a stop
-    /// reason. Up to `PEER_SHUTDOWN_CONCURRENCY` peers' chains run at once
-    /// ([`super::bounded_fan_out`]), so sessions that stopped draining
-    /// commands cost one delete window per 64 of them, not one per peer.
+    /// primary, and the primary is sent its [`FinalStop`] first, within the
+    /// same window as its shutdown. Up to `PEER_SHUTDOWN_CONCURRENCY` peers'
+    /// chains run at once ([`super::bounded_fan_out`]), so sessions that
+    /// stopped draining commands cost one delete window per 64 of them, not
+    /// one per peer.
     pub(super) async fn delete_detached_peers(
         &mut self,
         detached: Vec<DetachedPeer>,
@@ -2669,7 +2695,7 @@ impl PeerManager {
             primary,
             primary_session_id,
             pending,
-            stop_reason,
+            stop,
             settlement,
         } in detached
         {
@@ -2684,15 +2710,14 @@ impl PeerManager {
                     )
                     .await;
                 }
-                if stop_reason.is_some() {
-                    // Best effort: an Established session sends
-                    // Cease/Administrative Shutdown with the reason; the
-                    // shutdown below closes it anyway.
-                    let _ = primary
-                        .stop_timeout(stop_reason, PEER_LIFECYCLE_COMMAND_TIMEOUT)
-                        .await;
-                }
-                Self::shutdown_handle_bounded_owned(address, "delete primary", primary).await
+                Self::stop_and_shutdown_handle_until(
+                    address,
+                    "delete primary",
+                    primary,
+                    stop,
+                    tokio::time::Instant::now() + PEER_LIFECYCLE_COMMAND_TIMEOUT,
+                )
+                .await
             });
             settlements.push((settlement, pending_session_id, primary_session_id));
         }
@@ -3652,16 +3677,14 @@ pub(super) fn config_admin_enable(
     (managed.admin_down.is_some() != next_down).then_some(!next_down)
 }
 
-/// The shutdown communication for a replacement's teardown: the configured
-/// reason when the replacement takes an enabled peer down, as disable sends.
-pub(super) fn replacement_stop_reason(
+/// A replacement's [`FinalStop`]: when it takes an enabled peer down, with
+/// the configured reason, as disable sends.
+pub(super) fn replacement_stop(
     enabled: bool,
     next_enabled: bool,
     next: &PeerManagerNeighborConfig,
-) -> Option<bytes::Bytes> {
-    (enabled && !next_enabled)
-        .then(|| admin_down_shutdown_communication(next))
-        .flatten()
+) -> Option<FinalStop> {
+    (enabled && !next_enabled).then(|| FinalStop(admin_down_shutdown_communication(next)))
 }
 
 /// The RFC 9003 shutdown communication a config-driven disable sends.

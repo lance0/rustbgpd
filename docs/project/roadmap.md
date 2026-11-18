@@ -1736,6 +1736,15 @@ branch is between features.
   benchmark or heap profile identifies a hot, bounded, internal map. Candidate
   follow-ups are RIB-manager temporary prefix/peer sets and other
   non-adversarial control-plane maps that show up in `dhat` or Criterion.
+- [ ] **Unmaintained-crate advisory ignores (`deny.toml`, `.cargo/audit.toml`).**
+  Two informational RUSTSEC "unmaintained" notices are deliberately ignored,
+  neither a vulnerability. RUSTSEC-2024-0436 (`paste`): the sole chain is
+  `tikv-jemalloc-ctl`, a build-time proc-macro surface. RUSTSEC-2026-0543
+  (`chrono`, all versions affected; alternatives `jiff` and `time`): `chrono`
+  remains in the MCP server through `rmcp` and its `schemars/chrono04` feature,
+  and in differential tests through `bgpkit-parser/parser`. Remove its ignore
+  when both paths are gone. Reassess either exception if a vulnerability is
+  published against the corresponding crate.
 
 ---
 

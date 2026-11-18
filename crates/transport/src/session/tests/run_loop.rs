@@ -415,18 +415,19 @@ async fn local_cease8_purges_without_notification_gr_for_every_caller() {
 /// A Cease/8 raised by the drain before a close ends the session through
 /// `finish_drain_teardown`, for every command that drains; it gets the same
 /// RFC 4724 §4 / RFC 8538 §4 session end as any other local Cease/8, except
-/// that an administrative reset sends it as a Hard Reset under the N bit and
-/// so never retains (see `admin_reset_retention.rs`).
+/// that an administrative reset and a final stop send it as a Hard Reset
+/// under the N bit and so never retain (see `admin_reset_retention.rs`).
 /// Mutation-red: without the latch in the shared Cease/8 teardown, every
 /// N-bit-less command queues `PeerGracefulRestart`.
 #[tokio::test]
 async fn close_drain_cease8_purges_without_notification_gr() {
     let mut got = Vec::new();
     let mut want = Vec::new();
-    for path in ["stop", "shutdown", "reset"] {
+    for path in ["stop", "reconnect stop", "shutdown", "reset"] {
         for notification_gr in [false, true] {
             let command = match path {
                 "stop" => PeerCommand::Stop { reason: None },
+                "reconnect stop" => PeerCommand::StopForReconnect { reason: None },
                 "shutdown" => PeerCommand::Shutdown,
                 _ => PeerCommand::AdministrativeReset { reason: None },
             };
@@ -457,7 +458,7 @@ async fn close_drain_cease8_purges_without_notification_gr() {
             want.push((
                 path,
                 notification_gr,
-                notification_end(notification_gr && path != "reset"),
+                notification_end(notification_gr && matches!(path, "reconnect stop" | "shutdown")),
             ));
         }
     }

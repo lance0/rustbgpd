@@ -4,7 +4,7 @@ use super::*;
 /// range keeps its reserved deny when live chains are re-resolved — even in
 /// the worst case, where OPEN replaced the sentinel with the local ASN.
 ///
-/// `sync_rpol_policies` changes no policy content here, so the reserved deny
+/// `sync_rpol_policies_owned` changes no policy content here, so the reserved deny
 /// is the only chain that can arrive. Resolving this peer from
 /// `managed.remote_asn` instead of its pinned classification reads it as iBGP,
 /// leaves both directions permit-all, and makes this red.
@@ -49,13 +49,17 @@ async fn rfc8212_pinned_dynamic_child_keeps_deny_across_chain_reresolution() {
     managed.import_policy = None;
     managed.export_policy = None;
 
-    mgr.sync_rpol_policies(
-        Vec::new(),
-        RpolPolicySet::default(),
-        rustbgpd_policy::datasets::DatasetBindings::default(),
-    )
-    .await
-    .expect("registry sync succeeds");
+    let outcome = mgr
+        .sync_rpol_policies_owned(
+            Vec::new(),
+            RpolPolicySet::default(),
+            rustbgpd_policy::datasets::DatasetBindings::default(),
+        )
+        .await;
+    assert!(
+        matches!(outcome, OwnedCatalogMutationOutcome::Success),
+        "{outcome:?}"
+    );
 
     let managed = mgr.peers.get(&key(addr)).expect("peer still present");
     for (direction, chain) in [

@@ -437,72 +437,6 @@ fn a_stalled_receiver_holds_only_its_own_table_and_end_of_rib() {
     assert_eq!(wires[0].markers, 1);
 }
 
-/// A released family larger than the receiver's byte credit drains whole in
-/// one step: the tick absorbs it into the operation of the End-of-RIB that
-/// waits on it, on a reserved slot, so it holds the peer's latch and charges
-/// no credit, and needs only that the credit is not already spent (the case
-/// above). Twenty times the credit goes out as one envelope ahead of the
-/// End-of-RIB while an ordinary envelope still holds half the credit; only
-/// that envelope's bytes are ever charged, and the credit returns to zero.
-/// Red when the drain's envelope loses its reserved slot and is charged as
-/// an ordinary pass.
-#[test]
-fn a_family_larger_than_the_byte_credit_drains_whole_and_uncharged() {
-    const ROWS: u8 = 40;
-    let (mut manager, mut receivers) = held(1, ROWS);
-    manager.outbound_credit_override = Some(unicast_rows(2));
-    let (peer, rx) = &mut receivers[0];
-    let peer = *peer;
-    let ordinary =
-        crate::OutboundCharge::new(&manager.outbound_credit_handle(peer), 1, unicast_rows(1));
-    release(&mut manager, false);
-    assert!(manager.owes(peer, FAMILY));
-    assert!(manager.owing_tick_due(), "credit remains: the tick is due");
-    manager.resync_dirty_peers_bounded();
-    // The session has read nothing yet: every envelope is still held.
-    let queued: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
-    let table = queued
-        .iter()
-        .position(|update| !update.announce.is_empty())
-        .expect("the family was staged");
-    assert_eq!(queued[table].announce.len(), usize::from(ROWS), "one pass");
-    assert!(
-        queued[table].credit.is_none(),
-        "the drain charges no credit"
-    );
-    assert!(queued[table].latch.is_some(), "the drain holds the latch");
-    assert!(manager.outbound_operation_live(peer));
-    assert_eq!(
-        manager.outbound_credit_bytes(peer),
-        unicast_rows(1),
-        "only the ordinary envelope is charged"
-    );
-    let marker = queued
-        .iter()
-        .rposition(|update| update.end_of_rib.contains(&FAMILY))
-        .expect("the End-of-RIB follows in the same tick");
-    assert!(marker >= table, "End-of-RIB last");
-    assert_eq!(
-        queued
-            .iter()
-            .map(|update| update.announce.len())
-            .sum::<usize>(),
-        usize::from(ROWS),
-        "each row once"
-    );
-    assert!(!manager.owes(peer, FAMILY));
-    assert!(manager.eor_pending(peer).is_empty());
-    assert!(!manager.dirty_peers.contains(&peer));
-    drop(queued);
-    assert!(!manager.outbound_operation_live(peer));
-    assert_eq!(manager.outbound_credit_bytes(peer), unicast_rows(1));
-    drop(ordinary);
-    assert_eq!(manager.outbound_credit_bytes(peer), 0);
-    assert_eq!(manager.outbound_credit_rows(peer), 0);
-    drain_resync_ticks(&mut manager);
-    assert!(rx.try_recv().is_err(), "nothing is sent twice");
-}
-
 /// A receiver that is dirty at the release is left to its resync: the
 /// release records no debt for it, here with the resync refused by a full
 /// channel.
@@ -746,6 +680,39 @@ fn mixed() -> (RibManager, Receivers) {
         })
         .collect();
     (manager, receivers)
+}
+
+/// A non-unicast family owed whole keeps its operation latch even when its
+/// table is larger than the receiver's remaining ordinary credit.
+#[test]
+fn a_flowspec_family_larger_than_the_byte_credit_drains_whole_and_uncharged() {
+    let (mut manager, mut receivers) = mixed();
+    manager.outbound_credit_override = Some(unicast_rows(2));
+    let (peer, rx) = &mut receivers[0];
+    let peer = *peer;
+    let ordinary =
+        crate::OutboundCharge::new(&manager.outbound_credit_handle(peer), 1, unicast_rows(1));
+    timer_releases(&mut manager, &[FLOWSPEC]);
+    assert!(manager.owes(peer, FLOWSPEC));
+    assert!(rx.try_recv().is_err());
+    drain_resync_ticks(&mut manager);
+    let table = rx.try_recv().expect("the family was staged");
+    assert_eq!(table.flowspec_announce.len(), 5);
+    assert!(table.latch.is_some() && table.credit.is_none());
+    assert!(manager.outbound_operation_live(peer));
+    assert_eq!(manager.outbound_credit_bytes(peer), unicast_rows(1));
+    let marker = rx.try_recv().expect("the End-of-RIB follows the family");
+    assert_eq!(marker.end_of_rib, [FLOWSPEC]);
+    assert!(rx.try_recv().is_err(), "each row and marker once");
+    assert!(!manager.owes(peer, FLOWSPEC));
+    assert!(!manager.eor_pending(peer).contains(&FLOWSPEC));
+    assert!(!manager.dirty_peers.contains(&peer));
+    drop((table, marker));
+    assert!(!manager.outbound_operation_live(peer));
+    assert_eq!(manager.outbound_credit_bytes(peer), unicast_rows(1));
+    drop(ordinary);
+    assert_eq!(manager.outbound_credit_bytes(peer), 0);
+    assert_eq!(manager.outbound_credit_rows(peer), 0);
 }
 
 /// One RIB turn in which the deferral timer releases `families`, in this

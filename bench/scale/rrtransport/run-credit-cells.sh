@@ -4,7 +4,10 @@
 #   run-credit-cells.sh [--correctness-only] [--reduced] BINARY OUTPUT_DIR [CELL...]
 #
 # CELL is any of: probes exhaust-unicast exhaust-evpn paused fill-unicast
-# fill-evpn fill-vpn fill-flowspec (default: all, in that order). Each cell
+# fill-evpn fill-vpn fill-flowspec restart-unicast restart-evpn
+# restart-churn-unicast restart-churn-evpn (default: all, in that order; the
+# restart cells are the RFC 4724 selection release, alone or with churn
+# during its drain, whose cell-7 bars read the candidate only). Each cell
 # runs in its own systemd user scope with swap fenced (memory.swap.max=0);
 # the paused-reader cell gets the fixed 12 GiB limit its bar names, the
 # others a 64 GiB safety limit. The runner holds the shared host lock for
@@ -15,7 +18,8 @@
 # limit is recorded as an OOM. Each invocation appends the binary hash and
 # its cell list to `provenance.jsonl`, which tells the analyzer what this
 # directory attempted. Use one directory per repetition and one binary per
-# directory.
+# directory. The report-only release-mixed and release-timer cells run only
+# when explicitly named.
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -28,7 +32,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 [ $# -ge 2 ] || {
-    sed -n '2,15p' "$0" >&2
+    sed -n '2,18p' "$0" >&2
     exit 2
 }
 binary=$(realpath "$1")
@@ -36,7 +40,8 @@ output=$2
 shift 2
 cells=("$@")
 [ ${#cells[@]} -gt 0 ] || cells=(probes exhaust-unicast exhaust-evpn paused
-    fill-unicast fill-evpn fill-vpn fill-flowspec)
+    fill-unicast fill-evpn fill-vpn fill-flowspec restart-unicast restart-evpn
+    restart-churn-unicast restart-churn-evpn)
 # Either flag makes the run a correctness run.
 measured=1
 [ ${#flags[@]} -eq 0 ] || measured=0
@@ -53,9 +58,12 @@ ulimit -n 65536 2>/dev/null || ulimit -n "$(ulimit -Hn)"
 sha=$(sha256sum "$binary" | cut -d' ' -f1)
 result_of() {
     case $1 in
+    release-mixed | release-timer) echo "$1.json" ;;
     probes) echo probes.json ;;
     paused) echo paused-evpn.json ;;
-    exhaust-unicast | exhaust-evpn | fill-unicast | fill-evpn | fill-vpn | fill-flowspec) echo "$1.json" ;;
+    exhaust-unicast | exhaust-evpn | restart-unicast | restart-evpn) echo "$1.json" ;;
+    restart-churn-unicast | restart-churn-evpn) echo "$1.json" ;;
+    fill-unicast | fill-evpn | fill-vpn | fill-flowspec) echo "$1.json" ;;
     *) return 1 ;;
     esac
 }
@@ -77,8 +85,11 @@ echo "rrtransport $sha measured=$measured cells=${cells[*]}"
 status=0
 for cell in "${cells[@]}"; do
     case $cell in
+    release-mixed | release-timer) args=("credit-$cell" "$output") limit=64G ;;
     probes) args=(credit-probe "$output") limit=64G ;;
     exhaust-*) args=(credit-exhaust "${cell#exhaust-}" "$output") limit=64G ;;
+    restart-churn-*) args=(credit-restart-churn "${cell#restart-churn-}" "$output") limit=64G ;;
+    restart-*) args=(credit-restart "${cell#restart-}" "$output") limit=64G ;;
     paused) args=(credit-paused "$output") limit=12G ;;
     fill-*) args=(credit-fill "${cell#fill-}" "$output") limit=64G ;;
     esac

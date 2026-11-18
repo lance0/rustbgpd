@@ -574,10 +574,22 @@ detached), with a few semantics of its own:
   transaction whose candidate could not be published, which then returns
   `INTERNAL` naming the reset peers instead of `FAILED_PRECONDITION`, because
   the peers saw their sessions reset; it also covers the compensation of a
-  failed live policy or peer-group edit. A forward edit is never answered with
-  a reset: an import change for such a peer is still refused before anything
-  is applied. Each reset logs a warning with the peer and
-  `reason="route_refresh_unsupported"`.
+  failed live policy or peer-group edit, and the abort, gNMI cancel or
+  timeout auto-revert of a commit-confirmed transaction, which succeeds and
+  names the reset peers in its result and status record. A forward edit is
+  never answered with a reset: an import change for such a peer is still
+  refused before anything is applied, and that includes `config apply`,
+  a confirmed apply and a history rollback. Each reset logs a warning with the
+  peer and `reason="route_refresh_unsupported"`.
+- **A commit-confirmed rollback that fails partway fences.** The abort, cancel
+  or auto-revert of a live policy change restores the prior chains and is
+  never undone back to the candidate it removes. If a session fails or times
+  out partway through that restore, the runtime matches neither config, so
+  the owner fences `known_divergence`, the daemon exits 70, and the restart
+  boot-reverts from the retained commit-confirm journal. Before, the rollback
+  re-applied the prior chains as a forward edit, put the candidate back on
+  such a failure, and reported `ABORT_FAILED` or `AUTO_REVERT_FAILED` with the
+  candidate still running.
 - **What changed versus the pre-watchdog daemon:** a reload whose
   acknowledgements are lost, or whose reconcile result is not
   authoritative, now fences and exits 70 instead of logging an error

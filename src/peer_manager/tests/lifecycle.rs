@@ -326,7 +326,8 @@ async fn delete_peer_drains_pending_inbound_candidate() {
 
     mgr.delete_peer(key(peer_addr), false).await.unwrap();
 
-    wait_counter(&primary.shutdown, 1).await;
+    // The deleted primary is stopped for good, which ends this fake.
+    wait_counter(&primary.stop, 1).await;
     wait_counter(&pending.shutdown, 1).await;
     assert!(mgr.peers.is_empty());
     assert!(mgr.peer_key_for_session(1).is_none());
@@ -1511,4 +1512,242 @@ async fn the_bmp_tick_keeps_the_deferred_updates_place() {
         "the filler, the deletion that queued first, the later sender, then the release"
     );
     other.await.unwrap();
+}
+
+/// A session stub that logs `Stop` and `Shutdown` as `(peer, command,
+/// reason)` and exits on `Shutdown`.
+fn teardown_logging_session(
+    addr: IpAddr,
+    log: mpsc::UnboundedSender<(IpAddr, &'static str, Option<bytes::Bytes>)>,
+) -> PeerHandle {
+    let (command_tx, mut command_rx) = mpsc::channel(8);
+    let task = tokio::spawn(async move {
+        while let Some(command) = command_rx.recv().await {
+            match command {
+                PeerCommand::Stop { reason } => {
+                    let _ = log.send((addr, "stop", reason));
+                }
+                PeerCommand::Shutdown => {
+                    let _ = log.send((addr, "shutdown", None));
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(command_tx, task)
+}
+
+async fn rib_count(
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    query: impl FnOnce(oneshot::Sender<usize>) -> RibUpdate,
+) -> usize {
+    let (reply, count) = oneshot::channel();
+    rib_tx.send(query(reply)).await.unwrap();
+    count.await.unwrap()
+}
+
+/// What a session of `peer` at `addr` sends the RIB when it comes up with GR,
+/// learns one route and ends gracefully: the route is retained as stale.
+fn graceful_session_with_one_route(peer: PeerId, addr: IpAddr) -> [RibUpdate; 4] {
+    let family = (Afi::Ipv4, Safi::Unicast);
+    let route = rustbgpd_rib::Route {
+        prefix: rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+            Ipv4Addr::new(198, 51, 100, 1),
+            32,
+        )),
+        next_hop: addr,
+        link_local_next_hop: None,
+        next_hop_scope: None,
+        peer,
+        attributes: rustbgpd_rib::AttrSet::new(vec![rustbgpd_wire::PathAttribute::Origin(
+            rustbgpd_wire::Origin::Igp,
+        )]),
+        received_at: rustbgpd_rib::route::ReceivedAt::now(),
+        origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        is_stale: false,
+        is_llgr_stale: false,
+        path_id: 0,
+        validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        received_as_path: None,
+        aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
+    };
+    [
+        RibUpdate::SetPeerGracefulRestartContext {
+            peer,
+            session_id: 1,
+            peer_restart_state: false,
+            peer_gr_helper: true,
+            peer_gr_families: vec![family],
+            peer_enhanced_refresh: true,
+            peer_llgr_families: vec![],
+            local_llgr_stale_time: 0,
+        },
+        RibUpdate::PeerUp {
+            supersedes: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            session_id: 1,
+            peer,
+            peer_asn: 65002,
+            peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+            outbound_tx: mpsc::channel(16).0,
+            export_policy: None,
+            sendable_families: vec![family],
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: None,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        },
+        RibUpdate::RoutesReceived {
+            peer,
+            session_id: 1,
+            announced: vec![route],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        },
+        RibUpdate::PeerGracefulRestart {
+            peer,
+            session_id: 1,
+            restart_time: 120,
+            stale_routes_time: 360,
+            gr_families: vec![family],
+            peer_llgr_capable: false,
+            peer_llgr_families: vec![],
+            llgr_stale_time: 0,
+        },
+    ]
+}
+
+/// A SIGHUP reconcile sends a final `Stop` before the shutdown of a peer that
+/// leaves for good: one deleted from the config, and one whose replacement
+/// takes it down (`admin_down` with no message, so no shutdown
+/// communication). Under the RFC 8538 N bit that `Stop` goes out as a Hard
+/// Reset, so the remote speaker does not keep our routes as stale. A
+/// replacement that keeps the peer up gets only the shutdown, whose plain
+/// Cease lets both sides retain across the re-add. In a real RIB the deleted
+/// peer's routes, retained by a graceful end of its session, are gone once
+/// the delete settles: its `PeerDeleted` purges them.
+/// Mutation-red: without the final stop, the deleted and the downed peer get
+/// only the shutdown.
+#[tokio::test]
+async fn a_peer_leaving_for_good_is_stopped_before_its_shutdown() {
+    let (rib_tx, rib_rx) = mpsc::channel(64);
+    let (_query_tx, query_rx) = mpsc::channel(4);
+    tokio::spawn(
+        rustbgpd_rib::RibManager::new(rib_rx, query_rx, None, None, BgpMetrics::new()).run(),
+    );
+    let mut mgr = PeerManager::new(
+        mpsc::channel(16).1,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx.clone(),
+        None,
+    );
+    let deleted = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let replaced = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let downed = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+    let (log_tx, mut log) = mpsc::unbounded_channel();
+    for addr in [deleted, replaced, downed] {
+        insert_test_managed_peer(
+            &mut mgr,
+            addr,
+            teardown_logging_session(addr, log_tx.clone()),
+            false,
+        );
+    }
+
+    // The deleted peer's last session ended gracefully: its route is
+    // retained as stale.
+    let peer = mgr.peers[&key(deleted)]
+        .transport_config
+        .rib_peer
+        .resolve(|| rustbgpd_rib::PeerEndpoint::new(deleted, None), 65002);
+    for update in graceful_session_with_one_route(peer, deleted) {
+        rib_tx.send(update).await.unwrap();
+    }
+    let retained = |reply| RibUpdate::QueryPeerRetainedStale { peer, reply };
+    assert_eq!(rib_count(&rib_tx, retained).await, 1, "retained as stale");
+
+    let mut keep = make_config(replaced, 65002);
+    keep.description = "replaced".to_string();
+    let mut down = make_config(downed, 65002);
+    down.description = "replaced".to_string();
+    down.admin_down = Some(String::new());
+    let outcome = mgr
+        .reconcile_peers(Vec::new(), vec![key(deleted)], vec![keep, down])
+        .await;
+    assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+    drop(log_tx);
+    let mut got = Vec::new();
+    while let Some(entry) = log.recv().await {
+        got.push(entry);
+    }
+    got.sort_by_key(|(addr, _, _)| *addr);
+    assert_eq!(
+        got,
+        vec![
+            (deleted, "stop", None),
+            (deleted, "shutdown", None),
+            (replaced, "shutdown", None),
+            (downed, "stop", None),
+            (downed, "shutdown", None),
+        ],
+        "(peer, command, shutdown communication) in order per peer"
+    );
+    assert_eq!(
+        (
+            rib_count(&rib_tx, retained).await,
+            rib_count(&rib_tx, |reply| RibUpdate::QueryLocRibCount { reply }).await,
+        ),
+        (0, 0),
+        "(deleted peer's routes retained as stale, Loc-RIB routes)"
+    );
+}
+
+/// A config rollback that leaves a live dynamic peer without an admitting
+/// range de-configures it, so it gets the deleted static peer's final `Stop`
+/// before its shutdown (a Hard Reset under the RFC 8538 N bit). A dynamic
+/// peer that only loses its TCP connection keeps its retention: that is the
+/// `BackToIdle` path, not this one.
+/// Mutation-red: without the final stop, the reaped peer gets only the
+/// shutdown.
+#[tokio::test]
+async fn a_dynamic_peer_reaped_by_a_rollback_is_stopped_before_its_shutdown() {
+    let mut mgr = dynamic_test_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 9));
+    let (log_tx, mut log) = mpsc::unbounded_channel();
+    insert_test_dynamic_managed_peer(
+        &mut mgr,
+        addr,
+        1,
+        teardown_logging_session(addr, log_tx),
+        true,
+        IpAddr::V4(Ipv4Addr::new(127, 0, 0, 0)),
+        8,
+        "ix-members",
+    );
+    mgr.dynamic_ranges.clear();
+    assert_eq!(
+        mgr.reap_dynamic_peers_not_allowed_by_current_ranges().await,
+        1
+    );
+    let mut got = Vec::new();
+    while let Some((_, command, reason)) = log.recv().await {
+        got.push((command, reason));
+    }
+    assert_eq!(got, vec![("stop", None), ("shutdown", None)]);
 }

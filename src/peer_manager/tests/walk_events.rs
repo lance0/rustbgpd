@@ -1084,8 +1084,9 @@ async fn commands_queued_mid_walk_wait_for_it_while_events_are_served() {
 
     let (walk_reply, mut walked) = oneshot::channel();
     command_tx
-        .send(PeerManagerCommand::ApplyResolvedPolicySnapshot {
-            targets: distinct_targets(&peers),
+        .send(PeerManagerCommand::ApplyPolicyImpactSnapshot {
+            static_targets: distinct_targets(&peers),
+            dynamic_ranges: Vec::new(),
             reply: walk_reply,
         })
         .await

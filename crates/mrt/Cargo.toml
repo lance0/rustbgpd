@@ -31,7 +31,7 @@ rustbgpd-wire = { workspace = true }
 rustbgpd-rib = { workspace = true }
 rustbgpd-telemetry.workspace = true
 flate2.workspace = true
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
+jiff = { version = "0.2", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 rustbgpd-wire = { workspace = true, features = ["strict-encode-invariants"] }

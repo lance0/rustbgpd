@@ -730,7 +730,7 @@ pub struct DynamicPeerBounceOutcome {
 
 /// Resolved import/export policy chains for one live peer session.
 ///
-/// Carried by [`PeerManagerCommand::ApplyResolvedPolicySnapshot`]. The same
+/// Carried by [`PeerManagerCommand::ApplyPolicyImpactSnapshot`]. The same
 /// shape is reused for the captured PRIOR chains a forward apply returns,
 /// which a rollback hands back through
 /// [`PeerManagerCommand::RestoreResolvedPolicySnapshot`].
@@ -746,8 +746,19 @@ pub struct ResolvedPeerPolicy {
     pub export_policy: Option<PolicyChain>,
 }
 
-/// A failed [`PeerManagerCommand::ApplyResolvedPolicySnapshot`],
-/// [`PeerManagerCommand::ApplyPolicyImpactSnapshot`] or
+/// A completed [`PeerManagerCommand::RestoreResolvedPolicySnapshot`].
+#[derive(Clone, Debug)]
+pub struct RestoredPolicySnapshot {
+    /// The chains the restore replaced, one entry per live peer, in the
+    /// shape a forward apply returns: restoring them puts back what the
+    /// restore removed.
+    pub priors: Vec<ResolvedPeerPolicy>,
+    /// Sessions the restore reset because their peers did not negotiate
+    /// Route Refresh, in the order they were reset.
+    pub reset_sessions: Vec<PeerKey>,
+}
+
+/// A failed [`PeerManagerCommand::ApplyPolicyImpactSnapshot`] or
 /// [`PeerManagerCommand::RestoreResolvedPolicySnapshot`], classified by what it
 /// left on the live sessions, so the caller can settle without parsing text.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1071,29 +1082,6 @@ pub enum PeerManagerCommand {
         /// Reply returns the redacted effective config TOML.
         reply: oneshot::Sender<Result<String, String>>,
     },
-    /// Apply resolved import/export policy chains to a set of live
-    /// peer sessions, returning each peer's PRIOR chains for rollback.
-    ///
-    /// The forward apply over concrete peers: the same qualified path
-    /// [`PeerManagerCommand::ApplyPolicyImpactSnapshot`] takes once it has
-    /// expanded its dynamic ranges. Each target's prior chains are captured before the
-    /// new ones are hot-applied through the same per-peer path SIGHUP uses. The
-    /// command is rollback-capable at the peer-manager layer: on the first
-    /// per-peer apply failure it attempts to restore the peers it already
-    /// changed (reverse order). A successful restore leaves nothing mutated; a
-    /// compound rollback failure is included in the returned `Err` and may
-    /// leave per-peer retry intent armed. On success it returns the captured
-    /// priors, which a later rollback hands to
-    /// [`PeerManagerCommand::RestoreResolvedPolicySnapshot`]. Targets not currently live
-    /// (e.g. a dynamic peer that disconnected) are skipped and absent from the
-    /// returned priors. Never mutates `current_config` — snapshot staging owns
-    /// that, keeping a single token-advance point.
-    ApplyResolvedPolicySnapshot {
-        /// Resolved chains to apply, one entry per concrete live peer.
-        targets: Vec<ResolvedPeerPolicy>,
-        /// Reply returns the captured prior chains (the rollback token).
-        reply: oneshot::Sender<Result<Vec<ResolvedPeerPolicy>, PolicySnapshotApplyError>>,
-    },
     /// Put back the prior chains a forward policy apply returned, after a
     /// later step of the same config transaction failed (a publication
     /// failure).
@@ -1108,12 +1096,23 @@ pub enum PeerManagerCommand {
     /// leaves the restored chains in place and replies
     /// [`PolicySnapshotApplyError::CompensationAmbiguous`]. Never mutates
     /// `current_config`.
+    ///
+    /// A commit-confirmed abort, gNMI cancel or timeout auto-revert restores
+    /// the prior config's chains the same way: `priors` then holds the prior
+    /// config's resolved static targets (an interface-only neighbor by its
+    /// interface with an unspecified address, as in
+    /// [`PeerManagerCommand::ApplyPolicyImpactSnapshot`]) and
+    /// `dynamic_ranges` the ranges whose accepted peers are expanded against
+    /// the staged prior config.
     RestoreResolvedPolicySnapshot {
-        /// The priors a forward apply returned, one entry per live peer.
+        /// The chains to put back, one entry per live peer.
         priors: Vec<ResolvedPeerPolicy>,
-        /// Reply carries whether the restore completed, and the sessions it
-        /// reset because their peers did not negotiate Route Refresh.
-        reply: oneshot::Sender<Result<Vec<PeerKey>, PolicySnapshotApplyError>>,
+        /// Dynamic-range selectors to expand against live dynamic peers;
+        /// empty for a publication rollback, whose priors are concrete.
+        dynamic_ranges: Vec<DynamicRangeTarget>,
+        /// Reply carries whether the restore completed, the chains it
+        /// replaced, and the sessions it reset.
+        reply: oneshot::Sender<Result<RestoredPolicySnapshot, PolicySnapshotApplyError>>,
     },
     /// Apply resolved import/export policy chains for a live-impact
     /// transaction that may include static neighbors and dynamic ranges.
@@ -1121,9 +1120,17 @@ pub enum PeerManagerCommand {
     /// `static_targets` are already resolved by the transaction controller.
     /// `dynamic_ranges` are expanded inside the peer-manager actor against live
     /// dynamic peers whose stored accepted-range attribution matches the target.
-    /// The expanded concrete target set is then committed through the same
-    /// rollback-capable apply/restore path as
-    /// [`PeerManagerCommand::ApplyResolvedPolicySnapshot`].
+    /// Each expanded target's prior chains are captured before the new ones
+    /// are hot-applied through the same per-peer path SIGHUP uses. On the
+    /// first per-peer apply failure the command attempts to restore the peers
+    /// it already changed (reverse order). A successful restore leaves nothing
+    /// mutated; a compound rollback failure is included in the returned `Err`
+    /// and may leave per-peer retry intent armed. On success it returns the
+    /// captured priors, which a later rollback hands to
+    /// [`PeerManagerCommand::RestoreResolvedPolicySnapshot`]. Targets not
+    /// currently live (e.g. a dynamic peer that disconnected) are skipped and
+    /// absent from the returned priors. Never mutates `current_config`;
+    /// snapshot staging owns that, keeping a single token-advance point.
     ApplyPolicyImpactSnapshot {
         /// Concrete static-neighbor targets.
         static_targets: Vec<ResolvedPeerPolicy>,
@@ -1493,22 +1500,6 @@ pub enum PeerManagerCommand {
         /// Reply channel returning the definition if found.
         reply: oneshot::Sender<Option<NamedPolicyDefinition>>,
     },
-    /// Create or replace a named policy definition.
-    SetPolicy {
-        /// Policy definition name.
-        name: String,
-        /// Full replacement definition.
-        definition: NamedPolicyDefinition,
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
-    },
-    /// Delete a named policy definition.
-    DeletePolicy {
-        /// Policy definition name.
-        name: String,
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
-    },
     /// List all named neighbor sets.
     ListNeighborSets {
         /// Reply channel returning all named neighbor sets.
@@ -1521,50 +1512,10 @@ pub enum PeerManagerCommand {
         /// Reply channel returning the definition if found.
         reply: oneshot::Sender<Option<NeighborSetDefinition>>,
     },
-    /// Create or replace a named neighbor set.
-    SetNeighborSet {
-        /// Neighbor-set name.
-        name: String,
-        /// Full replacement definition.
-        definition: NeighborSetDefinition,
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
-    },
-    /// Delete a named neighbor set.
-    DeleteNeighborSet {
-        /// Neighbor-set name.
-        name: String,
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
-    },
     /// Query global named import/export chains.
     GetGlobalPolicyChains {
         /// Reply channel returning configured chain names.
         reply: oneshot::Sender<PolicyChainAssignment>,
-    },
-    /// Replace the global import policy chain.
-    SetGlobalImportChain {
-        /// Ordered policy names.
-        policy_names: Vec<String>,
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
-    },
-    /// Replace the global export policy chain.
-    SetGlobalExportChain {
-        /// Ordered policy names.
-        policy_names: Vec<String>,
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
-    },
-    /// Clear the global import policy chain.
-    ClearGlobalImportChain {
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
-    },
-    /// Clear the global export policy chain.
-    ClearGlobalExportChain {
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
     },
     /// Hot-apply `[global] honor_graceful_shutdown` by recomputing
     /// effective runtime policies for EBGP peers. When the knob already has
@@ -1593,38 +1544,6 @@ pub enum PeerManagerCommand {
         /// exists on that address and interface.
         reply: oneshot::Sender<Option<PolicyChainAssignment>>,
     },
-    /// Replace the per-neighbor import policy chain.
-    SetNeighborImportChain {
-        /// Neighbor address.
-        address: IpAddr,
-        /// Ordered policy names.
-        policy_names: Vec<String>,
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
-    },
-    /// Replace the per-neighbor export policy chain.
-    SetNeighborExportChain {
-        /// Neighbor address.
-        address: IpAddr,
-        /// Ordered policy names.
-        policy_names: Vec<String>,
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
-    },
-    /// Clear the per-neighbor import policy chain.
-    ClearNeighborImportChain {
-        /// Neighbor address.
-        address: IpAddr,
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
-    },
-    /// Clear the per-neighbor export policy chain.
-    ClearNeighborExportChain {
-        /// Neighbor address.
-        address: IpAddr,
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
-    },
     /// List all peer groups.
     ListPeerGroups {
         /// Reply channel returning all peer-group definitions.
@@ -1636,47 +1555,6 @@ pub enum PeerManagerCommand {
         name: String,
         /// Reply channel returning the definition if found.
         reply: oneshot::Sender<Option<PeerGroupDefinition>>,
-    },
-    /// Create or replace a peer group.
-    SetPeerGroup {
-        /// Peer-group name.
-        name: String,
-        /// Full replacement definition.
-        definition: PeerGroupDefinition,
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
-    },
-    /// Delete a peer group.
-    DeletePeerGroup {
-        /// Peer-group name.
-        name: String,
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
-    },
-    /// Assign a neighbor to a peer group.
-    SetNeighborPeerGroup {
-        /// Neighbor address.
-        address: IpAddr,
-        /// Peer-group name.
-        peer_group: String,
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
-    },
-    /// Clear a neighbor's peer-group membership.
-    ClearNeighborPeerGroup {
-        /// Neighbor address.
-        address: IpAddr,
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), CatalogMutationError>>,
-    },
-    /// Read a neighbor's current peer-group membership (used by the
-    /// persisted catalog CRUD paths to capture prior state for rollback).
-    GetNeighborPeerGroupMembership {
-        /// Neighbor address.
-        address: IpAddr,
-        /// Outer `None` = neighbor not configured; inner `None` = no
-        /// membership.
-        reply: oneshot::Sender<Option<Option<String>>>,
     },
     /// Shut down all peers and exit the peer manager task.
     Shutdown,

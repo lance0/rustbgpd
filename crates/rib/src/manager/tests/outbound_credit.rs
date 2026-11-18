@@ -1219,6 +1219,26 @@ fn a_selection_release_without_credit_stages_nothing() {
         assert!(manager.grouped_member_of(peer).is_none(), "private");
         send_all(&mut rx);
         assert!(manager.eor_pending(peer).contains(&FAMILY), "EoR held");
+        // One row for the release to owe.
+        let source = Ipv4Addr::new(198, 51, 100, 1);
+        register_test_peer(&mut manager, peer_v4(source), 0);
+        manager.handle_update(RibUpdate::RoutesReceived {
+            peer: peer_v4(source),
+            session_id: 0,
+            announced: vec![make_route_with_lp(
+                Ipv4Prefix::new(Ipv4Addr::new(10, 20, 0, 0), 24),
+                source,
+                100,
+            )],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        });
+        drain_route_chunks(&mut manager);
+        assert!(send_all(&mut rx).is_empty(), "held");
         let charge = spent.then(|| {
             crate::OutboundCharge::new(
                 &manager.outbound_credit_handle(peer),

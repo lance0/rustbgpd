@@ -1677,8 +1677,9 @@ admin_down_reason = "quarantined pending abuse review"
 At startup, and whenever the neighbor is added, the peer is added disabled. It
 makes no connection attempts, refuses inbound connections and reads 0 in
 `bgp_peer_admin_enabled`. On `SIGHUP`, setting the key on a running peer sends
-Cease/Administrative Shutdown carrying `admin_down_reason`, and clearing it
-enables the peer. The [reload matrix](reload-matrix.md#administrative-state)
+Cease/Administrative Shutdown carrying `admin_down_reason` (inside a Cease /
+Hard Reset when the peer negotiated RFC 8538 Notification Graceful Restart),
+and clearing it enables the peer. The [reload matrix](reload-matrix.md#administrative-state)
 classifies both.
 
 The runtime `rbgp neighbor <addr> enable|disable` toggle stays transient (it
@@ -2635,7 +2636,14 @@ gr_eor_grace_time = 25   # off by default
   release is timer-driven: rustbgpd does not know whether replay finished, and
   a route not re-injected by then is removed by the helper at that End-of-RIB.
   When listed controllers have not signalled (below), the release is a WARN
-  log whose `awaiting` field names them.
+  log whose `awaiting` field names them. Either release log lists the held
+  families in `held_families` and, in `pending_families`, those whose
+  End-of-RIB did not leave with the release: another hold still keeps it
+  (the selection gate, the RT-Constrain membership hold, the EVPN feed), or
+  its table is still owed to the neighbor (a resync, or the released table
+  of a receiver outside an update group after a selection release). Such an
+  End-of-RIB leaves when that hold ends, or follows its table from the
+  resync ticks, later still for a neighbor that has stopped reading.
 - **Replay-complete signal.** List the controllers in `[global]
   gr_eor_replay_owners`. Each one reads the daemon incarnation
   (`CheckLiveness`) before it replays, re-adds its full desired state, then
@@ -5373,7 +5381,13 @@ until `rbgp config confirm <id>` (or `ConfirmConfigTransaction`) makes it
 permanent. `rbgp config abort <id>` rolls it back immediately, and an
 expired timer automatically re-applies the pre-commit runtime snapshot through
 the same transaction executor. That rollback does not check a runtime snapshot
-token, so session flaps inside the window cannot block it. While a confirmed
+token, so session flaps inside the window cannot block it. It restores import
+policy rather than applying it as a new edit, so a peer that lost Route Refresh
+inside the window cannot block it either: that session is reset once the prior
+policy is installed, the peer resends its routes under it, and the abort result
+and `rbgp config status` name the peer. A policy restore that fails partway
+fences the daemon (exit 70, boot revert from the retained journal) instead of
+reporting `abort_failed` / `auto_revert_failed`. While a confirmed
 transaction is applying or pending, persisted runtime config mutators such as static/dynamic neighbor CRUD,
 policy/peer-group CRUD, FIB-table CRUD, and another config transaction are
 rejected with `FAILED_PRECONDITION`; SIGHUP reload is skipped and logged until

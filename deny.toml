@@ -9,14 +9,22 @@
 # `cargo audit` pre-flight keeps its own copy); every entry MUST carry
 # a tracked follow-up. The lists may differ when cargo-deny treats an
 # advisory class as a warning while cargo-audit reports it; currently
-# both retain only the tracked paste advisory below.
+# both retain only the tracked unmaintained-crate advisories below (paste,
+# chrono).
 
 [advisories]
 ignore = [
     # `paste` unmaintained (informational). The sole remaining chain is
     # tikv-jemalloc-ctl → paste; this is a build-time proc-macro surface.
-    # Tracked in docs/project/roadmap.md.
+    # Tracked in docs/project/roadmap.md (unmaintained-crate advisory ignores).
     "RUSTSEC-2024-0436",
+    # `chrono` unmaintained, all versions affected (informational, not a
+    # vulnerability; alternatives are `jiff` and `time`). Remaining chains:
+    # rmcp and its schemars/chrono04 feature in the MCP server, and
+    # bgpkit-parser/parser in differential tests. Revisit when both paths
+    # are gone or a vulnerability is published against chrono.
+    # Tracked in docs/project/roadmap.md (unmaintained-crate advisory ignores).
+    "RUSTSEC-2026-0543",
 ]
 
 [licenses]

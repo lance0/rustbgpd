@@ -112,6 +112,32 @@ class Runner(unittest.TestCase):
             lines = (root / "out" / "provenance.jsonl").read_text().splitlines()
             self.assertEqual([json.loads(line)["cells"] for line in lines], [["probes"]])
 
+    def test_optional_release_cells_dispatch_only_when_selected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            body = 'echo "$1" >>"$(dirname "$0")/calls"\n'
+            self.assertEqual(self.run_runner(root, 0, body=body), 0)
+            calls = root / "calls"
+            commands = ["credit-release-mixed", "credit-release-timer"]
+            self.assertTrue(set(commands).isdisjoint(calls.read_text().splitlines()))
+            calls.write_text("")
+            self.assertEqual(
+                self.run_runner(root, 0, "release-mixed", "release-timer", body=body), 0
+            )
+            self.assertEqual(calls.read_text().splitlines(), commands)
+
+    def test_each_burst_cell_runs_its_own_trigger(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            body = 'echo "$1 $2" >>"$(dirname "$0")/calls"\n'
+            cells = ("restart-evpn", "exhaust-evpn", "restart-churn-unicast")
+            self.assertEqual(self.run_runner(root, 0, *cells, body=body), 0)
+            calls = (root / "calls").read_text().splitlines()
+            self.assertEqual(
+                calls,
+                ["credit-restart evpn", "credit-exhaust evpn", "credit-restart-churn unicast"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
