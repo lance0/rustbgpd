@@ -3,7 +3,7 @@
 //! carried since its debt began, in bounded steps charged against its
 //! outbound credit, and its End-of-RIB leaves when it has caught up.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rustbgpd_wire::EvpnRouteKey;
 
@@ -182,6 +182,7 @@ struct Wire {
     sent: Vec<Sent>,
     /// IPv4 unicast rows held, its markers, and rows after the first.
     unicast: usize,
+    unicast_table: BTreeSet<Prefix>,
     unicast_markers: usize,
     unicast_rows_after_marker: usize,
 }
@@ -218,6 +219,12 @@ impl Wire {
         }
         self.unicast += update.announce.len();
         self.unicast -= update.unicast_withdrawals().count();
+        for (prefix, _) in update.unicast_withdrawals() {
+            self.unicast_table.remove(prefix);
+        }
+        for route in update.announce.iter() {
+            self.unicast_table.insert(route.prefix);
+        }
         for key in &update.evpn_withdraw {
             assert!(
                 self.table.remove(key).is_some(),
@@ -309,11 +316,21 @@ fn owing_sized(
     credit: usize,
     channel: usize,
 ) -> (RibManager, Vec<Receiver>) {
-    let mut manager = manager(credit);
+    owing_from(manager(credit), &[EVPN], receivers, rows, channel)
+}
+
+/// [`owing_sized`] on `manager`, each receiver negotiating `families`.
+fn owing_from(
+    mut manager: RibManager,
+    families: &[(Afi, Safi)],
+    receivers: u8,
+    rows: u32,
+    channel: usize,
+) -> (RibManager, Vec<Receiver>) {
     std::mem::forget(up_sized(&mut manager, peer_v4(SOURCE), 0, 4096, &[V4]));
     let mut receivers: Vec<Receiver> = (0..receivers)
         .map(|index| {
-            let receiver = Receiver::up(&mut manager, receiver(index), channel, &[EVPN]);
+            let receiver = Receiver::up(&mut manager, receiver(index), channel, families);
             assert!(manager.evpn_grouped_member_of(receiver.peer).is_none());
             manager.owe_eor(receiver.peer, EVPN);
             manager.owe_whole_family(receiver.peer, FAMILY);
@@ -715,7 +732,52 @@ fn refresh_request(manager: &mut RibManager, peer: PeerId) {
 /// fresh keys rotate through the table, until the list cap evicts them.
 /// Returns the table the rotation left.
 fn evict_stalled(stalled: u8) -> (RibManager, Vec<Receiver>, Vec<(u32, u32)>) {
-    let (mut manager, mut receivers) = owing(1 + stalled, 8, CREDIT);
+    evict_stalled_of(owing(1 + stalled, 8, CREDIT))
+}
+
+/// Unicast rows the grouped fixture's group table holds.
+const UNICAST: u32 = 6;
+
+fn unicast_table(rows: u32) -> BTreeSet<Prefix> {
+    (0..rows).map(|index| unicast_route(index).prefix).collect()
+}
+
+/// [`owing`] as a default build has it: every receiver is a member of one
+/// update group for IPv4 unicast, whose table holds [`UNICAST`] rows each
+/// has been sent, and holds EVPN privately.
+fn owing_grouped(receivers: u8) -> (RibManager, Vec<Receiver>) {
+    let mut manager = manager(CREDIT);
+    manager.test_force_ungrouped = false;
+    let (mut manager, mut receivers) = owing_from(manager, &[V4, EVPN], receivers, 8, 4096);
+    received_unicast(&mut manager, 0..UNICAST);
+    let gid = manager.grouped_member_of(receivers[0].peer);
+    assert!(gid.is_some(), "a group member");
+    for receiver in &mut receivers {
+        receiver.write();
+        assert_eq!(manager.grouped_member_of(receiver.peer), gid, "one group");
+        assert_eq!(receiver.wire.unicast_table, unicast_table(UNICAST));
+        assert!(manager.owes_whole(receiver.peer, FAMILY));
+    }
+    (manager, receivers)
+}
+
+/// [`evict_stalled`] grouped ([`owing_grouped`]) or not.
+fn evict_stalled_in(grouped: bool, stalled: u8) -> (RibManager, Vec<Receiver>, Vec<(u32, u32)>) {
+    if grouped {
+        evict_stalled_of(owing_grouped(1 + stalled))
+    } else {
+        evict_stalled(stalled)
+    }
+}
+
+/// [`evict_stalled`] over the receivers of an `owing` fixture: all but the
+/// first stall. The evicting pass builds no resync and walks no group
+/// table; it leaves an ungrouped receiver dirty and a group member for the
+/// resync tick to make dirty.
+fn evict_stalled_of(
+    (mut manager, mut receivers): (RibManager, Vec<Receiver>),
+) -> (RibManager, Vec<Receiver>, Vec<(u32, u32)>) {
+    let stalled = u8::try_from(receivers.len() - 1).unwrap();
     for round in 0..400u32 {
         let base = 1000 + round * 64;
         let fresh: Vec<_> = (base..base + 64).map(|index| (index, 0)).collect();
@@ -726,7 +788,14 @@ fn evict_stalled(stalled: u8) -> (RibManager, Vec<Receiver>, Vec<(u32, u32)>) {
         };
         let before = fallbacks(&manager);
         let builds = manager.adj_rib_out_commit_stats.resync_builds;
-        received(&mut manager, &fresh, &gone);
+        let captures = manager.adj_rib_out_commit_stats.group_table_captures;
+        // Row 0, which every receiver holds, changes once, early: the cap
+        // drops its entry from behind the stalled receivers' positions.
+        let mut announce = fresh.clone();
+        if round == 1 {
+            announce.push((0, 1));
+        }
+        received(&mut manager, &announce, &gone);
         assert!(
             manager.owed_evpn_rows.dropped_max <= 4 * CHUNK_ROWS,
             "one call dropped {} list entries",
@@ -738,11 +807,23 @@ fn evict_stalled(stalled: u8) -> (RibManager, Vec<Receiver>, Vec<(u32, u32)>) {
                 manager.adj_rib_out_commit_stats.resync_builds, builds,
                 "the evicting pass builds no resync"
             );
+            assert_eq!(
+                manager.adj_rib_out_commit_stats.group_table_captures, captures,
+                "the evicting pass walks no group table"
+            );
             for receiver in &receivers[1..] {
-                assert!(manager.dirty_peers.contains(&receiver.peer));
                 assert!(manager.owed_row_evicted.contains(&receiver.peer));
+                assert_eq!(
+                    manager.dirty_peers.contains(&receiver.peer),
+                    manager.grouped_member_of(receiver.peer).is_none(),
+                    "a group member is made dirty by the tick"
+                );
             }
-            let table = (0..8).map(|index| (index, 0)).chain(fresh).collect();
+            assert!(round > 1, "evicted after row 0 changed");
+            let table = (0..8)
+                .map(|index| (index, u32::from(index == 0)))
+                .chain(fresh)
+                .collect();
             return (manager, receivers, table);
         }
         for _ in 0..12 {
@@ -784,8 +865,15 @@ fn an_evpn_refresh_before_the_initial_end_of_rib_is_answered_after_it() {
     assert!(!manager.pending_refresh.contains_key(&peer));
     assert_settled(&manager, &receivers, &all(rows), "refresh mid-walk");
 
-    // After eviction, with the recovery first refused.
-    let (mut manager, mut receivers, expected) = evict_stalled(1);
+    // After eviction, with the recovery first refused: ungrouped, then as
+    // a group member.
+    for grouped in [false, true] {
+        refresh_from_an_evicted_receiver_whose_recovery_is_refused(grouped);
+    }
+}
+
+fn refresh_from_an_evicted_receiver_whose_recovery_is_refused(grouped: bool) {
+    let (mut manager, mut receivers, expected) = evict_stalled_in(grouped, 1);
     let peer = receivers[1].peer;
     receivers[1].write();
     receivers[1].wire.sent.clear();
@@ -1822,10 +1910,18 @@ fn rotate_until_evicted(manager: &mut RibManager, peer: PeerId) -> u32 {
 /// the request is answered in its own turn.
 #[test]
 fn an_evpn_refresh_from_an_evicted_receiver_that_owes_no_marker_follows_its_resync() {
+    for grouped in [false, true] {
+        refresh_from_an_evicted_receiver_that_owes_no_marker(grouped);
+    }
+}
+
+fn refresh_from_an_evicted_receiver_that_owes_no_marker(grouped: bool) {
     let mut manager = manager(CREDIT).with_owing_theta_floor(1);
+    manager.test_force_ungrouped = !grouped;
     std::mem::forget(up_sized(&mut manager, peer_v4(SOURCE), 0, 4096, &[V4]));
     let mut receivers = vec![Receiver::up(&mut manager, receiver(0), 4096, &[EVPN])];
     let peer = receivers[0].peer;
+    assert_eq!(manager.grouped_member_of(peer).is_some(), grouped);
     received(&mut manager, &all(4), &[]);
     drain(&mut manager, &mut receivers);
     let last = rotate_until_evicted(&mut manager, peer);
@@ -2129,4 +2225,270 @@ fn an_evpn_refresh_mid_walk_waits_for_a_held_initial_end_of_rib() {
     );
     assert!(!manager.pending_refresh.contains_key(&peer), "answered");
     assert_settled(&manager, &receivers, &all(rows), "refresh behind a hold");
+}
+
+/// Tick until no resync work is left, every session writing: no tick builds
+/// more than one table or captures more than one member's group table.
+/// Returns the tables built and the captures made.
+fn drain_one_unit_a_tick(manager: &mut RibManager, receivers: &mut [Receiver]) -> (usize, usize) {
+    let start = manager.adj_rib_out_commit_stats;
+    for _ in 0..5000 {
+        if !manager.resync_tick_pending() {
+            break;
+        }
+        let before = manager.adj_rib_out_commit_stats;
+        tick(manager, receivers);
+        let after = manager.adj_rib_out_commit_stats;
+        let built = after.resync_builds - before.resync_builds;
+        let captured = after.group_table_captures - before.group_table_captures;
+        assert!(built <= 1, "{built} tables built in one tick");
+        assert!(
+            captured <= 1,
+            "{captured} group tables captured in one tick"
+        );
+    }
+    assert!(!manager.resync_tick_pending(), "the drain does not finish");
+    let end = manager.adj_rib_out_commit_stats;
+    (
+        end.resync_builds - start.resync_builds,
+        end.group_table_captures - start.group_table_captures,
+    )
+}
+
+/// Work count (group members). In a default build a receiver is a member
+/// of an update group for unicast and holds EVPN privately, and marking a
+/// group member dirty walks its group's table twice to capture what it was
+/// sent. A cap pass that evicts several stalled members of one group walks
+/// no group table and builds nothing in the mutation's turn; the members
+/// stay clean, so their group's unicast rows keep flowing to them while
+/// EVPN waits. The resync tick then takes one member a tick: one capture
+/// and one table, whatever poll budget is left. Each ends with the exact
+/// tables of both families and one End-of-RIB after its last EVPN row. Red
+/// when the cap marks each evicted member dirty: one capture per member in
+/// the evicting turn.
+#[test]
+fn an_evpn_eviction_of_group_members_walks_no_group_table_in_its_turn() {
+    const STALLED: u8 = 3;
+    // The fixture asserts the evicting turn: no capture, no build.
+    let (mut manager, mut receivers, mut expected) = evict_stalled_in(true, STALLED);
+    manager.flush_poll_budget = Duration::from_secs(3600);
+    for receiver in &mut receivers[1..] {
+        receiver.write();
+    }
+    let stats = manager.adj_rib_out_commit_stats;
+    received_unicast(&mut manager, UNICAST..UNICAST + 1);
+    received(&mut manager, &[(5000, 0)], &[]);
+    expected.push((5000, 0));
+    for receiver in &mut receivers[1..] {
+        receiver.write();
+        assert_eq!(
+            receiver.wire.unicast_table,
+            unicast_table(UNICAST + 1),
+            "its group's rows flow to an evicted member"
+        );
+        assert!(!receiver.wire.table.contains_key(&key(5000)), "EVPN waits");
+        assert!(!manager.dirty_peers.contains(&receiver.peer));
+        assert!(manager.owed_row_evicted.contains(&receiver.peer));
+        assert!(manager.eor.owes(receiver.peer, EVPN), "its marker waits");
+    }
+    let now = manager.adj_rib_out_commit_stats;
+    assert_eq!(
+        (now.resync_builds, now.group_table_captures),
+        (stats.resync_builds, stats.group_table_captures),
+        "no mutation builds or captures for an evicted member"
+    );
+    let (built, captured) = drain_one_unit_a_tick(&mut manager, &mut receivers);
+    assert_eq!(built, usize::from(STALLED), "one resync per evicted member");
+    assert_eq!(captured, usize::from(STALLED), "one capture per member");
+    assert_eq!(recoveries_observed(&manager), (u64::from(STALLED), 0));
+    assert!(manager.owed_row_evicted.is_empty());
+    for (index, receiver) in receivers.iter().enumerate() {
+        assert_eq!(receiver.wire.table, table(&expected), "receiver {index}");
+        assert_eq!(
+            receiver.wire.unicast_table,
+            unicast_table(UNICAST + 1),
+            "receiver {index}"
+        );
+        assert_eq!(receiver.wire.markers, 1, "receiver {index}");
+        assert_eq!(receiver.wire.rows_after_marker, 0, "receiver {index}");
+        assert!(!manager.owes(receiver.peer, EVPN), "receiver {index}");
+        assert!(!manager.dirty_peers.contains(&receiver.peer));
+    }
+    assert_eq!(manager.owed_evpn_rows.len(), 0, "the list is freed");
+}
+
+/// Evicted group members wait for the tick, and events reach them first:
+/// one member's export policy moves it to another group (it is dirty as
+/// any regrouped member is, no longer the tick's evicted unit, and its old
+/// position is gone); another asks for an EVPN ROUTE-REFRESH (nothing is
+/// built in the request's turn; the answer follows its resync and its
+/// End-of-RIB); a third is refreshed by the operator (made dirty there, its
+/// forced table left to the tick); unicast and EVPN then change. Every
+/// tick builds at most one table and captures at most one group table, and
+/// every receiver ends with the exact tables of both families, one
+/// End-of-RIB after its last EVPN row (the regrouped member's precedes
+/// the row that changed after its regroup). Red when the operator refresh
+/// builds the table in its own turn, and when the tick never marks a
+/// waiting member.
+#[test]
+fn evicted_group_members_meet_a_regroup_and_refreshes_before_their_units() {
+    const STALLED: u8 = 3;
+    let (mut manager, mut receivers, mut expected) = evict_stalled_in(true, STALLED);
+    for receiver in &mut receivers[1..] {
+        receiver.write();
+        receiver.wire.sent.clear();
+    }
+    let (moved, asked, forced) = (receivers[1].peer, receivers[2].peer, receivers[3].peer);
+
+    // A group change.
+    let captures = manager.adj_rib_out_commit_stats.group_table_captures;
+    regroup(&mut manager, moved, Some(permit_all()));
+    assert!(manager.owing(moved).is_none(), "the old position is gone");
+    assert!(!manager.owed_row_evicted.contains(&moved));
+    assert!(
+        manager.adj_rib_out_commit_stats.group_table_captures - captures <= 1,
+        "the regroup captures its own member only"
+    );
+    receivers[1].write();
+    assert_eq!(receivers[1].wire.markers, 1, "resynced by its regroup");
+
+    // A peer refresh.
+    let stats = manager.adj_rib_out_commit_stats;
+    refresh_request(&mut manager, asked);
+    receivers[2].write();
+    assert_eq!(receivers[2].wire.sent, [], "built in the request's turn");
+    let now = manager.adj_rib_out_commit_stats;
+    assert_eq!(now.resync_builds, stats.resync_builds);
+    assert_eq!(now.group_table_captures, stats.group_table_captures);
+    assert!(manager.pending_refresh.contains_key(&asked), "still asked");
+    assert!(manager.owed_row_evicted.contains(&asked));
+    assert!(!manager.dirty_peers.contains(&asked));
+
+    // An operator refresh.
+    let (reply, mut answer) = oneshot::channel();
+    manager.handle_update(RibUpdate::RefreshPeerOutbound {
+        peer: forced,
+        reply,
+    });
+    assert!(matches!(answer.try_recv(), Ok(Ok(()))));
+    receivers[3].write();
+    assert_eq!(receivers[3].wire.sent, [], "built in the command's turn");
+    let now = manager.adj_rib_out_commit_stats;
+    assert_eq!(now.resync_builds, stats.resync_builds);
+    assert_eq!(now.group_table_captures - stats.group_table_captures, 1);
+    assert!(
+        manager.owed_row_evicted.contains(&forced),
+        "the tick's unit"
+    );
+    assert!(manager.dirty_peers.contains(&forced));
+
+    received_unicast(&mut manager, UNICAST..UNICAST + 1);
+    received(&mut manager, &[(5000, 0)], &[]);
+    expected.push((5000, 0));
+    drain_one_unit_a_tick(&mut manager, &mut receivers);
+
+    assert_eq!(
+        receivers[2].wire.sent,
+        [Sent::Rows, Sent::Eor, Sent::Answer(expected.len())],
+        "the resync, its End-of-RIB, then the bracketed answer"
+    );
+    assert!(!manager.pending_refresh.contains_key(&asked), "answered");
+    assert!(!manager.force_outbound_peers.contains(&forced));
+    assert!(manager.owed_row_evicted.is_empty());
+    for (index, receiver) in receivers.iter().enumerate() {
+        assert_eq!(receiver.wire.table, table(&expected), "receiver {index}");
+        assert_eq!(
+            receiver.wire.unicast_table,
+            unicast_table(UNICAST + 1),
+            "receiver {index}"
+        );
+        assert_eq!(receiver.wire.markers, 1, "receiver {index}");
+        // The regrouped member was resynced in the regroup's turn: the
+        // row that changed afterward follows its End-of-RIB.
+        assert_eq!(
+            receiver.wire.rows_after_marker,
+            usize::from(index == 1),
+            "receiver {index}"
+        );
+        assert!(!manager.owes(receiver.peer, EVPN), "receiver {index}");
+        assert!(!manager.dirty_peers.contains(&receiver.peer));
+    }
+    assert_eq!(manager.owed_evpn_rows.len(), 0, "the list is freed");
+}
+
+/// An evicted group member whose session ends before its unit leaves
+/// nothing behind: no position, no eviction mark, no resync work. Its next
+/// session starts from its own state and ends exact.
+#[test]
+fn an_evicted_group_member_that_flaps_before_its_unit_starts_again() {
+    let (mut manager, mut receivers, expected) = evict_stalled_in(true, 2);
+    let peer = receivers[1].peer;
+    let stats = manager.adj_rib_out_commit_stats;
+    manager.handle_update(RibUpdate::PeerDown {
+        peer,
+        session_id: 0,
+    });
+    assert!(manager.owing(peer).is_none());
+    assert!(!manager.owed_row_evicted.contains(&peer));
+    let mut rx = up_sized(&mut manager, peer, 1, 4096, &[V4, EVPN]);
+    let mut wire = Wire::default();
+    wire.write(&mut rx);
+    receivers[1] = Receiver { peer, rx, wire };
+    assert_eq!(
+        manager.adj_rib_out_commit_stats.group_table_captures, stats.group_table_captures,
+        "a flap captures nothing"
+    );
+    drain_one_unit_a_tick(&mut manager, &mut receivers);
+    assert!(manager.owed_row_evicted.is_empty());
+    for (index, receiver) in receivers.iter().enumerate() {
+        assert_eq!(receiver.wire.table, table(&expected), "receiver {index}");
+        assert_eq!(receiver.wire.unicast_table, unicast_table(UNICAST));
+        assert_eq!(receiver.wire.markers, 1, "receiver {index}");
+        assert_eq!(receiver.wire.rows_after_marker, 0, "receiver {index}");
+        assert!(!manager.dirty_peers.contains(&receiver.peer));
+    }
+}
+
+/// An evicted group member's position holds no list entry while it waits
+/// for its unit: with every receiver evicted and no tick run, fresh keys
+/// that keep rotating are logged for no one and the list is freed. Red
+/// when such a position still counts as the slowest (the list is pinned
+/// and grows with every mutation), when the cap evicts it again on every
+/// pass, and when a drain step reads it: its End-of-RIB then leaves ahead
+/// of the rows the resync sends.
+#[test]
+fn an_evicted_group_members_position_holds_no_list_entry() {
+    let (mut manager, mut receivers, mut expected) = evict_stalled_in(true, 2);
+    let mut fresh: Vec<(u32, u32)> = Vec::new();
+    for round in 0..600u32 {
+        let base = 100_000 + round * 64;
+        let gone: Vec<u32> = fresh.iter().map(|&(index, _)| index).collect();
+        fresh = (base..base + 64).map(|index| (index, 0)).collect();
+        received(&mut manager, &fresh, &gone);
+        if manager.owed_row_evicted.len() == receivers.len() && manager.owed_evpn_rows.len() == 0 {
+            break;
+        }
+    }
+    assert_eq!(
+        manager.owed_row_evicted.len(),
+        receivers.len(),
+        "all evicted"
+    );
+    assert_eq!(manager.owed_evpn_rows.len(), 0, "the list is freed");
+    assert!(
+        manager.dirty_peers.is_empty(),
+        "none is dirty before a tick"
+    );
+    assert!(
+        (fallbacks(&manager) - 3.0).abs() < f64::EPSILON,
+        "each receiver is evicted once"
+    );
+    expected.extend(fresh);
+    let (built, captured) = drain_one_unit_a_tick(&mut manager, &mut receivers);
+    assert_eq!((built, captured), (receivers.len(), receivers.len()));
+    for (index, receiver) in receivers.iter().enumerate() {
+        assert_eq!(receiver.wire.table, table(&expected), "receiver {index}");
+        assert_eq!(receiver.wire.markers, 1, "receiver {index}");
+        assert_eq!(receiver.wire.rows_after_marker, 0, "receiver {index}");
+    }
 }
