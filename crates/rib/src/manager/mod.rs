@@ -302,8 +302,9 @@ struct AdjRibOutCommitStats {
     /// Per-peer passes that built a full resync (dirty or force).
     #[cfg(test)]
     resync_builds: usize,
-    /// Owed-drain work: unicast keys a drain, absorption or close flush
-    /// read, the drain steps that read any, and the most one step read.
+    /// Owed-drain work: unicast and EVPN keys a drain, absorption or close
+    /// flush read, the drain steps that read any, and the most one step
+    /// read.
     #[cfg(test)]
     owed_drain_rows_read: usize,
     #[cfg(test)]
@@ -313,6 +314,9 @@ struct AdjRibOutCommitStats {
     /// Owing peers visited by the owed-row trim and cap scans.
     #[cfg(test)]
     owed_peer_scans: usize,
+    /// EVPN passes that logged their keys for the cursors.
+    #[cfg(test)]
+    owed_evpn_logs: usize,
     /// Distinct keys collected into per-peer VPN resync enumerations.
     #[cfg(test)]
     vpn_resync_key_inserts: usize,
@@ -702,7 +706,9 @@ pub struct RibManager {
     owing_cursor: Option<PeerId>,
     /// Per unicast AFI: the keys passes carried while a receiver owed the
     /// family whole, read by those receivers' cursors (`outbound_owing`).
-    owed_rows: [outbound_owing::OwedRows; 2],
+    owed_rows: [outbound_owing::OwedRows<Prefix>; 2],
+    /// The same list for EVPN, keyed by route key.
+    owed_evpn_rows: outbound_owing::OwedRows<rustbgpd_wire::EvpnRouteKey>,
     /// Dirty receivers the owed-row cap evicted
     /// ([`Self::cap_owed_rows`]). Only the resync tick builds their
     /// resync, one receiver per unit: an ordinary pass leaves them dirty,
@@ -2941,6 +2947,7 @@ impl RibManager {
             owing_peers: BTreeSet::new(),
             owing_cursor: None,
             owed_rows: Default::default(),
+            owed_evpn_rows: outbound_owing::OwedRows::default(),
             owed_row_evicted: HashSet::new(),
             owing_theta_floor: None,
             #[cfg(test)]
@@ -7042,6 +7049,8 @@ impl RibManager {
                         );
                     }
                 }
+                // No winner changed, so no pass logged these keys: under
+                // a cursor they join this receiver's own owed set.
                 self.distribute_evpn_keys_to_peer(peer, &keys, &mut checkpoint);
                 retire_hash_set(&mut keys, &mut checkpoint);
             }

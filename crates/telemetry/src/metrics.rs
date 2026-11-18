@@ -1935,7 +1935,7 @@ impl BgpMetrics {
         let rib_outbound_owed_drain_step_seconds = HistogramVec::new(
             HistogramOpts::new(
                 "bgp_rib_outbound_owed_drain_step_seconds",
-                "Wall-clock duration of one owed-route drain step toward one receiver on the RIB actor, by scope: cursor (up to 1,024 unicast keys of a family owed whole, a charged ordinary envelope), keyed (up to 1,024 keys of an owed-key set), whole (one whole-family pass of a labeled-unicast, VPN, EVPN, FlowSpec, BGP-LS or RT-Constrain family, including one absorbed for a waiting End-of-RIB).",
+                "Wall-clock duration of one owed-route drain step toward one receiver on the RIB actor, by scope: cursor (up to 1,024 keys of a unicast or EVPN family owed whole, a charged ordinary envelope), keyed (up to 1,024 keys of an owed-key set), whole (one whole-family pass of a labeled-unicast, VPN, FlowSpec, BGP-LS or RT-Constrain family, including one absorbed for a waiting End-of-RIB).",
             )
             .buckets(actor_buckets_with_250ms()),
             &["scope"],

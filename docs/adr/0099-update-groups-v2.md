@@ -660,6 +660,49 @@ A full outbound channel at a family's last step refuses only the
 End-of-RIB: every owed row was admitted, so the receiver is not resynced
 and the resync tick retries the marker alone.
 
+**EVPN owed whole: the same row cursor.** EVPN held in a receiver's own
+Adj-RIB-Out and owed whole uses the mechanism above with one list keyed by
+EVPN route key: the same position per receiver, the same steps of at most
+1,024 keys charged against its credit with no operation latch, the same
+End-of-RIB rule, cap, eviction, paced fallback, deferred refresh answer and
+bounded list maintenance. What differs is where the keys come from:
+
+- *Mutations.* Each EVPN mutation logs the keys whose winner changed
+  (payload changes under the same key and withdrawals included) once,
+  after selection and before the receiver loop. The loop may park across
+  turns; a later slice logs nothing again.
+- *Selection release.* The release starts the positions first, then logs
+  its whole inventory once (every key any Adj-RIB-In holds, every key
+  recorded during the hold, and the frozen Loc-RIB when that record
+  overflowed) before selection leaves out the unchanged winners. A
+  receiver that joined during the hold holds none of them, and no fan-out
+  would carry them.
+- *RT-Constrain.* A live membership change toward a receiver that holds
+  VPN in a group and EVPN privately changes what it may be sent with every
+  winner as it was, so no mutation logs it. With a position live, the keys
+  of that restage (the EVPN Loc-RIB and what the receiver holds) join the
+  receiver's own owed set, which drains ahead of the position in the same
+  charged steps. Keys the position already read are visited again for
+  that receiver alone; no other receiver reads them twice.
+- *Kept set.* A receiver's owed keys survive the byte-cap flip and a
+  following release, as for unicast: a withdrawal whose key has left every
+  table is named nowhere else.
+- *No hold exemption.* EVPN has no rows exempt from a selection hold, so
+  a position does not move inside one.
+
+An EVPN family owned by an update group, and a receiver in a private
+handoff, are outside owed-key management as before: they keep the recovery
+path with its complete-feed proof, admission seal and terminal marker, and
+never hold a position. Labeled unicast, VPN, FlowSpec, BGP-LS and
+RT-Constrain owed whole still drain as one operation.
+
+The step histogram records EVPN steps under scope `cursor` with the unicast
+ones and carries no family label: the bound is the same for both, and a
+label would split every series for a distinction the bound does not need.
+Not measured: no timed run and no memory measurement of the EVPN list has
+been made; an EVPN route key is larger than a prefix, so the modeled bytes
+per key above do not carry over.
+
 Three sends for a unicast family still owed stay outside this: a
 ROUTE-REFRESH answer and an operator replay absorb the rest of the walk into
 their own operation, as above, and the shutdown flush sends the withdrawals

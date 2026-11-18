@@ -9984,9 +9984,10 @@ impl RibManager {
                                 .adj_ribs_out
                                 .get(&peer)
                                 .is_some_and(|rib_out| rib_out.evpn_len() != 0));
-                    let mut effective_evpn_keys: HashSet<rustbgpd_wire::EvpnRouteKey> = if (resync
-                        && !evpn_group_owned)
-                        || whole(super::outbound_owing::OwedFamily::EVPN)
+                    // EVPN is never drained whole: owed whole it is a row
+                    // cursor, whose steps bring their keys.
+                    let mut effective_evpn_keys: HashSet<rustbgpd_wire::EvpnRouteKey> = if resync
+                        && !evpn_group_owned
                     {
                         self.replacement_checkpoint(true);
                         let mut all: HashSet<rustbgpd_wire::EvpnRouteKey> = HashSet::with_capacity(
@@ -10028,6 +10029,10 @@ impl RibManager {
                         }
                         all
                     } else if let Some(drain) = drain.as_deref_mut() {
+                        #[cfg(test)]
+                        {
+                            self.adj_rib_out_commit_stats.owed_drain_rows_read += drain.evpn.len();
+                        }
                         std::mem::take(&mut drain.evpn)
                     } else {
                         HashSet::new()

@@ -2083,7 +2083,7 @@ impl RibManager {
             ledger_retirement();
             let mut evpn = evpn.into_set(&mut checkpoint);
             if !evpn.is_empty() {
-                self.recompute_and_distribute_evpn(&evpn);
+                self.recompute_and_distribute_released_evpn(&evpn);
                 // As for unicast: retire rejections whose held row is gone.
                 if !self.peer_unexportable.is_empty() {
                     let gone: Vec<_> = evpn

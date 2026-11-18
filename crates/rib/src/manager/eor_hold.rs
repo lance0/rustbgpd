@@ -560,13 +560,14 @@ impl RibManager {
     }
 
     /// The first owed marker of `peer` that waits only for its family's
-    /// owed keys to be absorbed, as the owed-key drain sees it. A unicast
-    /// marker is never absorbed: it leaves when the family's charged drain
-    /// steps have caught up.
+    /// owed keys to be absorbed, as the owed-key drain sees it. A cursor
+    /// family's marker (unicast, EVPN) is never absorbed: it leaves when
+    /// the family's charged drain steps have caught up.
     fn eor_waiting_on_owed_keys(&self, peer: PeerId) -> Option<(Afi, Safi)> {
         let owed_keys = HoldSet::EMPTY.with(EorHold::OwedKeys);
         self.eor.families(peer).find(|&family| {
-            family.1 != Safi::Unicast
+            !super::outbound_owing::OwedFamily::of(family)
+                .is_some_and(super::outbound_owing::OwedFamily::has_cursor)
                 && self.owes(peer, family)
                 && self.eor_free_for(peer, family, Offer::Retry, owed_keys)
         })

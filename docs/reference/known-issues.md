@@ -72,8 +72,8 @@ resolved.
     deliver each owed family, one family of one receiver per step, after
     reading that receiver's credit. The evidence is work counts in
     unit-level tests, not timings. Each owed family other than IPv4 and
-    IPv6 unicast still goes out as one operation, like the whole-family
-    sends below.
+    IPv6 unicast and EVPN still goes out as one operation, like the
+    whole-family sends below.
   - Ordinary UPDATE bursts, still on main and not yet attributed: 150,000
     routes sent at once as ordinary UPDATEs toward 150 private receivers
     delayed an unrelated peer's updates by 27–34 s. Paced at one
@@ -119,9 +119,18 @@ resolved.
     receiver's own owed routes, kept when they exceed the keyed threshold,
     stay owed until all are sent: updates that arrive meanwhile go to the
     shared list, and the End-of-RIB follows both.
+  - EVPN whole-family sends toward private receivers, fixed on main after
+    v0.83.0: EVPN owed whole (after a selection release, or past the keyed
+    threshold) is sent as unicast is, from a shared list of the route keys
+    that changed, at most 1,024 per step, each step an ordinary update
+    charged against the receiver's credit, with the End-of-RIB after the
+    last step. The evidence is work counts and wire content in unit-level
+    tests; no timed run at 150 receivers × 150,000 routes has been made.
+    An EVPN family owned by an update group, and a receiver in a private
+    handoff, keep the recovery path and its complete feed.
   - Whole-family sends of the other families, still on main: labeled
-    unicast, VPN, EVPN, FlowSpec, BGP-LS and RT-Constrain owed whole still
-    go out as one operation per receiver that is not charged against the
+    unicast, VPN, FlowSpec, BGP-LS and RT-Constrain owed whole still go
+    out as one operation per receiver that is not charged against the
     outbound credit, in one RIB turn that grows with the family's table.
 
 - **A GR helper can keep a deleted RTBH whose prefix still has another
