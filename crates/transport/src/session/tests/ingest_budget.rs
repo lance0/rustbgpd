@@ -566,26 +566,209 @@ async fn reopened_gate_restores_the_hold_admissions() {
     assert_eq!(session.parked_hold_renewals, 1);
 }
 
-/// Behind the gate a peer with no complete frame pending has been silent
-/// for the hold time: the session sends Hold Timer Expired, not a local
-/// overload Cease. Half a frame is not liveness.
-/// Red proof: with the full-channel policy applied to the gate, the expiry
-/// is deferred.
+/// The peer closes its side of the connection; returns once the session's
+/// socket is at end of stream (a peek, so the session still reads it).
+async fn peer_closes(server: &mut TcpStream, session: &mut PeerSession) {
+    server.shutdown().await.unwrap();
+    until_end_of_stream(session).await;
+}
+
+/// Handshake: nothing but the peer's close is left in the session's socket.
+async fn until_end_of_stream(session: &mut PeerSession) {
+    let mut peek = [0_u8; 1];
+    let read_half = session.read_half.as_mut().unwrap();
+    while read_half.peek(&mut peek).await.unwrap() != 0 {}
+}
+
+/// The session end the RIB was sent, or holds queued for a full channel.
+fn session_end(session: &PeerSession, rib_rx: &mut mpsc::Receiver<RibUpdate>) -> &'static str {
+    let name = |update: &RibUpdate| match update {
+        RibUpdate::PeerDown { .. } => Some("PeerDown"),
+        RibUpdate::PeerGracefulRestart { .. } => Some("PeerGracefulRestart"),
+        _ => None,
+    };
+    let mut ends: Vec<_> = std::iter::from_fn(|| rib_rx.try_recv().ok())
+        .filter_map(|update| name(&update))
+        .collect();
+    ends.extend(
+        session
+            .rib_backlog
+            .iter()
+            .filter_map(|(held, _)| name(held)),
+    );
+    assert_eq!(ends.len(), 1, "one session end: {ends:?}");
+    ends[0]
+}
+
+/// The peer closed the connection while the gate kept the socket unread. A
+/// hold expiry that finds the close ends the session as the TCP failure it
+/// is: for a peer with Graceful Restart and without the RFC 8538 N bit the
+/// RIB retains its routes as stale (RFC 4724 section 4.2), where a hold
+/// expiry would have flushed them, and no NOTIFICATION is sent.
+/// Red proof: with end of stream read as silence the session sends Hold
+/// Timer Expired and the RIB gets `PeerDown`.
 #[tokio::test]
-async fn hold_expiry_behind_the_gate_with_a_silent_peer_is_hold_timer_expired() {
+async fn hold_expiry_behind_the_gate_after_the_peer_closed_is_a_tcp_failure() {
     let Metered {
         mut session,
-        rib_rx: _rib_rx,
+        mut rib_rx,
         mut server,
         commands: _commands,
         ..
     } = metered_session().await;
-    buffer_and_process(&mut session, &[burst_pdu(10), burst_pdu(20)]).await;
-    assert!(session.ingest_gate_closed);
+    super::run_loop::negotiate_graceful_restart(&mut session, false);
+    let _held = gated_with_buffered_keepalives(&mut session, &mut rib_rx, 0).await;
+    peer_closes(&mut server, &mut session).await;
+    let (metrics, peer) = (session.metrics.clone(), session.peer_label.clone());
+    assert!(!hold_expiry(&mut session).await);
+    assert_eq!(session_end(&session, &mut rib_rx), "PeerGracefulRestart");
+    for code in ["4", "6"] {
+        let labels = [("peer", peer.as_str()), ("code", code)];
+        assert_eq!(
+            counter(&metrics, "bgp_notifications_sent_total", &labels),
+            0.0
+        );
+    }
+}
+
+/// Complete frames the peer sent before it closed are still admitted, one
+/// per hold expiry; the close behind them is then a TCP failure.
+/// Red proof: with end of stream read as silence the third expiry sends
+/// Hold Timer Expired and the RIB gets `PeerDown`.
+#[tokio::test]
+async fn frames_before_the_peers_close_are_admitted_then_the_close_is_a_tcp_failure() {
+    let Metered {
+        mut session,
+        mut rib_rx,
+        mut server,
+        commands: _commands,
+        ..
+    } = metered_session().await;
+    super::run_loop::negotiate_graceful_restart(&mut session, false);
+    let _held = gated_with_buffered_keepalives(&mut session, &mut rib_rx, 0).await;
+    let frames = [keepalive_pdu(), keepalive_pdu()].concat();
+    peer_sends(&mut server, &mut session, &frames).await;
+    server.shutdown().await.unwrap();
+    for left in [keepalive_pdu().len(), 0] {
+        assert!(hold_expiry(&mut session).await);
+        assert_eq!(session.read_buf.buf.len(), left, "one frame per expiry");
+        assert_eq!(session.fsm.state(), SessionState::Established);
+    }
+    until_end_of_stream(&mut session).await;
+    assert!(!hold_expiry(&mut session).await);
+    assert_eq!(session_end(&session, &mut rib_rx), "PeerGracefulRestart");
+    assert_eq!(notifications_sent(&session, "4"), 0.0);
+}
+
+/// The bounded policy sees a closed connection too, for a full channel and
+/// after the gate's eight admissions alike: the expiry that probes the
+/// socket ends the session as a TCP failure, not with Cease/Out of
+/// Resources, so a restarting peer's routes are retained.
+/// Red proof: with a closed connection read as no new bytes, the second
+/// expiry under the policy sends the Cease and the RIB gets `PeerDown`.
+#[tokio::test]
+async fn bounded_hold_policy_ends_a_closed_connection_as_a_tcp_failure() {
+    for full_channel in [true, false] {
+        let Metered {
+            mut session,
+            mut rib_rx,
+            mut server,
+            commands: _commands,
+            ..
+        } = metered_session().await;
+        super::run_loop::negotiate_graceful_restart(&mut session, false);
+        let _held = if full_channel {
+            fill_rib_channel(&session);
+            buffer_and_process(&mut session, &[block_pdu(40, INGEST_BUDGET_ROUTES, 24)]).await;
+            assert_eq!(session.rib_backlog.len(), 1, "held for the full channel");
+            None
+        } else {
+            let held = gated_with_buffered_keepalives(&mut session, &mut rib_rx, 20).await;
+            for _ in 0..MAX_GATE_HOLD_ADMISSIONS {
+                assert!(hold_expiry(&mut session).await);
+            }
+            Some(held)
+        };
+        peer_closes(&mut server, &mut session).await;
+        assert!(hold_expiry(&mut session).await, "the wait earns a deferral");
+        assert_eq!(session.parked_hold_renewals, 1);
+        let (metrics, peer) = (session.metrics.clone(), session.peer_label.clone());
+        assert!(!hold_expiry(&mut session).await);
+        let labels = [("peer", peer.as_str()), ("code", "6")];
+        assert_eq!(
+            counter(&metrics, "bgp_notifications_sent_total", &labels),
+            0.0,
+            "full channel {full_channel}: no Cease"
+        );
+        assert_eq!(
+            session_end(&session, &mut rib_rx),
+            "PeerGracefulRestart",
+            "full channel {full_channel}: routes retained"
+        );
+    }
+}
+
+/// The bound applies to a stall, not to a budget the RIB has just returned:
+/// with eight admissions spent and the run loop not yet around to reopen the
+/// gate, an expiry reads the live budget and admits a frame as before.
+/// Red proof: judged from the stored gate alone, this expiry spends a
+/// deferral and admits nothing.
+#[tokio::test]
+async fn returned_budget_is_not_a_stall_at_the_hold_admission_bound() {
+    let Metered {
+        mut session,
+        mut rib_rx,
+        budget,
+        commands: _commands,
+        server: _server,
+    } = metered_session().await;
+    let held = gated_with_buffered_keepalives(&mut session, &mut rib_rx, 10).await;
+    for _ in 0..MAX_GATE_HOLD_ADMISSIONS {
+        assert!(hold_expiry(&mut session).await);
+    }
+    drop(held);
+    assert_eq!(budget.unfinished(), 0);
+    assert!(
+        session.ingest_gate_closed,
+        "the run loop has not looked yet"
+    );
+    assert!(hold_expiry(&mut session).await);
+    assert_eq!(
+        session.read_buf.buf.len(),
+        keepalive_pdu().len(),
+        "a ninth frame is admitted"
+    );
+    assert_eq!(session.parked_hold_renewals, 0, "no deferral was spent");
+}
+
+/// Behind the gate a peer with no complete frame pending has been silent
+/// for the hold time: the session sends Hold Timer Expired, not a local
+/// overload Cease. Half a frame is not liveness. The connection is open, so
+/// this is not a TCP failure either: without the RFC 8538 N bit a
+/// restart-capable peer's routes are flushed.
+/// Red proof: with the full-channel policy applied to the gate, the expiry
+/// is deferred; with an open, empty socket read as a closed one, the RIB
+/// gets `PeerGracefulRestart` and no NOTIFICATION is sent.
+#[tokio::test]
+async fn hold_expiry_behind_the_gate_with_a_silent_peer_is_hold_timer_expired() {
+    let Metered {
+        mut session,
+        mut rib_rx,
+        mut server,
+        commands: _commands,
+        ..
+    } = metered_session().await;
+    super::run_loop::negotiate_graceful_restart(&mut session, false);
+    let _held = gated_with_buffered_keepalives(&mut session, &mut rib_rx, 0).await;
     assert!(session.rib_backlog.is_empty(), "the RIB channel has room");
     peer_sends(&mut server, &mut session, &keepalive_pdu()[..10]).await;
     let (metrics, peer) = (session.metrics.clone(), session.peer_label.clone());
     assert!(!hold_expiry(&mut session).await, "the peer was silent");
+    assert_eq!(
+        session_end(&session, &mut rib_rx),
+        "PeerDown",
+        "a hold expiry without the N bit is not a restart"
+    );
     let sent = |code: &str| {
         counter(
             &metrics,

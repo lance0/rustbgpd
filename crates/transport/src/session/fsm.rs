@@ -605,10 +605,22 @@ impl PeerSession {
     /// reopening, the wait continues under the bounded full-channel policy.
     pub(super) async fn handle_hold_timer_expiry(&mut self) {
         if !self.rib_backlog.is_empty() {
-            self.renew_parked_hold_or_close();
+            self.renew_parked_hold_or_close().await;
             return;
         }
-        if self.take_pending_input() {
+        let pending = match self.take_pending_input() {
+            SocketInput::Bytes(_) => true,
+            SocketInput::Empty => false,
+            // The peer closed the connection, or it failed, behind input
+            // this session left unread. That is a TCP failure, not a silent
+            // peer: RFC 4724 retains a restarting peer's routes for it,
+            // where a hold expiry without the RFC 8538 N bit flushes them.
+            SocketInput::Closed(result) => {
+                self.handle_tcp_read_result(result).await;
+                return;
+            }
+        };
+        if pending {
             if self.ingest_gate_closed {
                 // The live budget, not the stored gate: a budget the RIB has
                 // just returned is not a stall.
@@ -618,7 +630,7 @@ impl PeerSession {
                         .as_ref()
                         .is_some_and(|budget| budget.gate_closed(true))
                 {
-                    self.renew_parked_hold_or_close();
+                    self.renew_parked_hold_or_close().await;
                     return;
                 }
                 self.gate_hold_admissions = self.gate_hold_admissions.saturating_add(1);
@@ -656,9 +668,18 @@ impl PeerSession {
 
     /// A hold expiry while peer input waits for the RIB under the bounded
     /// policy of [`Self::renew_parked_hold`]: re-arm the hold timer, or close
-    /// the session with Cease/Out of Resources once the policy is spent.
-    fn renew_parked_hold_or_close(&mut self) {
-        if self.renew_parked_hold() {
+    /// the session with Cease/Out of Resources once the policy is spent. A
+    /// probe that finds the connection closed or failed ends the session as
+    /// that TCP failure instead, as the read arm would have.
+    async fn renew_parked_hold_or_close(&mut self) {
+        let renewed = match self.renew_parked_hold() {
+            Ok(renewed) => renewed,
+            Err(result) => {
+                self.handle_tcp_read_result(result).await;
+                return;
+            }
+        };
+        if renewed {
             self.metrics
                 .record_hold_timer_rearmed_pending_input(&self.peer_label);
             debug!(
@@ -702,20 +723,25 @@ impl PeerSession {
     /// whatever the wait, so repeated waits cannot grow it. Processing a
     /// peer PDU resets the count; a wait that our own message starts does
     /// not, so it cannot buy a silent peer more time.
-    fn renew_parked_hold(&mut self) -> bool {
-        match self.parked_hold_renewals {
-            0 => {}
-            spent if spent < MAX_PARKED_HOLD_RENEWALS => {
-                if self.read_buf.buf.len() < self.parked_input_cap()
-                    && self.probe_parked_input() == 0
-                {
-                    return false;
-                }
+    ///
+    /// `Err` carries the read result of a probe that found the connection
+    /// closed or failed. Every expiry after the first probes while the
+    /// buffer has room, the one that would close the session included.
+    fn renew_parked_hold(&mut self) -> Result<bool, std::io::Result<usize>> {
+        let spent = self.parked_hold_renewals;
+        if spent > 0 {
+            let fresh = self.read_buf.buf.len() >= self.parked_input_cap()
+                || match self.probe_parked_input() {
+                    SocketInput::Bytes(_) => true,
+                    SocketInput::Empty => false,
+                    SocketInput::Closed(result) => return Err(result),
+                };
+            if spent >= MAX_PARKED_HOLD_RENEWALS || !fresh {
+                return Ok(false);
             }
-            _ => return false,
         }
         self.parked_hold_renewals += 1;
-        true
+        Ok(true)
     }
 
     /// Unprocessed input the parked probes may accumulate: two maximum-size
@@ -725,30 +751,24 @@ impl PeerSession {
     }
 
     /// Read at most one [`PARKED_HOLD_PROBE`] from the socket into the read
-    /// buffer, without taking it past [`Self::parked_input_cap`]. Returns
-    /// the bytes read.
-    fn probe_parked_input(&mut self) -> usize {
+    /// buffer, without taking it past [`Self::parked_input_cap`].
+    fn probe_parked_input(&mut self) -> SocketInput {
         let room = self
             .parked_input_cap()
             .saturating_sub(self.read_buf.buf.len())
             .min(PARKED_HOLD_PROBE);
-        if room == 0 {
-            return 0;
-        }
-        let mut probe = [0u8; PARKED_HOLD_PROBE];
-        let read = match self
-            .read_half
-            .as_ref()
-            .map(|half| half.try_read(&mut probe[..room]))
-        {
-            Some(Ok(n)) => n,
-            _ => 0,
+        let Some(read_half) = self.read_half.as_ref().filter(|_| room > 0) else {
+            return SocketInput::Empty;
         };
-        self.read_buf.buf.extend_from_slice(&probe[..read]);
-        read
+        let mut probe = [0u8; PARKED_HOLD_PROBE];
+        let found = SocketInput::of(read_half.try_read(&mut probe[..room]));
+        if let SocketInput::Bytes(read) = found {
+            self.read_buf.buf.extend_from_slice(&probe[..read]);
+        }
+        found
     }
 
-    /// True when at least one complete BGP frame is pending: in the
+    /// [`SocketInput::Bytes`] when at least one complete BGP frame is pending: in the
     /// read buffer, or completed by bytes readable from the socket
     /// right now (pulled into the buffer non-blockingly so the caller
     /// can process them).
@@ -758,13 +778,14 @@ impl PeerSession {
     /// the codec on the normal read path (a malformed header counts as
     /// processable: the parser resolves it as a NOTIFICATION once
     /// processing resumes). A partial frame is NOT liveness — see
-    /// [`Self::handle_hold_timer_expiry`].
-    fn take_pending_input(&mut self) -> bool {
+    /// [`Self::handle_hold_timer_expiry`]. A connection found closed or
+    /// failed before a frame completes is reported as such, not as silence.
+    fn take_pending_input(&mut self) -> SocketInput {
         if self.read_buf.has_complete_frame() {
-            return true;
+            return SocketInput::Bytes(0);
         }
         let Some(read_half) = self.read_half.as_ref() else {
-            return false;
+            return SocketInput::Empty;
         };
         // Drain everything the kernel has buffered, not one probe's
         // worth: with Extended Messages (RFC 8654) a complete frame can
@@ -774,18 +795,16 @@ impl PeerSession {
         // buffer; stops early once a complete frame is found.
         let mut tmp = [0u8; 4096];
         loop {
-            match read_half.try_read(&mut tmp) {
-                Ok(n) if n > 0 => {
+            match SocketInput::of(read_half.try_read(&mut tmp)) {
+                SocketInput::Bytes(n) => {
                     self.read_buf.buf.extend_from_slice(&tmp[..n]);
                     if self.read_buf.has_complete_frame() {
-                        return true;
+                        return SocketInput::Bytes(n);
                     }
                 }
-                // Ok(0) is EOF — let the normal read arm observe and
-                // handle the disconnect; WouldBlock means the kernel
-                // buffer is drained. Either way the hold expiry stands
-                // unless a complete frame was already assembled.
-                _ => return self.read_buf.has_complete_frame(),
+                // The kernel buffer is drained without a complete frame
+                // (the hold expiry stands), or the connection is gone.
+                other => return other,
             }
         }
     }
@@ -1841,6 +1860,27 @@ pub(super) fn session_down_reason_for_batch(
 ///
 /// RFC 8538: when teardown is triggered by NOTIFICATION semantics, route
 /// preservation requires negotiated Notification GR (N-bit).
+/// What a non-blocking read at a hold expiry found on the peer's socket.
+enum SocketInput {
+    /// Bytes read (or, from `take_pending_input`, a complete frame pending).
+    Bytes(usize),
+    /// Nothing to read; the connection is open.
+    Empty,
+    /// End of stream or a read error, as the read arm would have seen it.
+    Closed(std::io::Result<usize>),
+}
+
+impl SocketInput {
+    fn of(read: std::io::Result<usize>) -> Self {
+        match read {
+            Ok(0) => Self::Closed(Ok(0)),
+            Ok(read) => Self::Bytes(read),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Self::Empty,
+            Err(error) => Self::Closed(Err(error)),
+        }
+    }
+}
+
 pub(super) fn notification_teardown_event(event: &Event, actions: &[Action]) -> bool {
     let has_session_down = actions.iter().any(|a| matches!(a, Action::SessionDown));
     if !has_session_down {

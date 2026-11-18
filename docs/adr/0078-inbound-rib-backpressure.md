@@ -289,6 +289,15 @@ above. With hold time 0
 there is no expiry and it is acted on when the gate reopens. KEEPALIVEs to
 the peer come from the writer task and do not depend on the gate.
 
+A hold expiry that finds the connection closed or failed, with no complete
+frame ahead of the close, ends the session as that TCP failure and sends no
+NOTIFICATION. It is not a hold expiry: for a peer with Graceful Restart and
+without the Notification bit, RFC 4724 retains its routes after a TCP
+failure, while a hold expiry flushes them (RFC 8538). The full-channel
+policy does the same when its probe reaches the close; before, it sent
+Cease/Out of Resources there. A peer with the connection open and nothing
+complete to read still gets Hold Timer Expired.
+
 Consequences:
 
 - An unrelated peer's update waits behind at most about two distribution
