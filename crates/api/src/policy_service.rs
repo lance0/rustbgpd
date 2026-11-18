@@ -3868,9 +3868,7 @@ mod tests {
         assert!(response.is_ok());
     }
 
-    /// ADR-0076 contract: a `NACKed` persist rolls the runtime mutation
-    /// back to the captured prior definition, so the RPC failure means
-    /// "nothing changed" instead of leaving runtime ahead of disk.
+    /// A persistence rejection must precede any live policy mutation.
     #[tokio::test]
     async fn set_policy_persist_failure_leaves_the_catalog_alone() {
         let (peer_tx, mut peer_rx) = mpsc::channel(8);
@@ -3881,24 +3879,21 @@ mod tests {
             default_action: "deny".to_string(),
             statements: Vec::new(),
         };
-        let prior_for_pm = prior.clone();
-        let set_definitions = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let set_definitions_pm = set_definitions.clone();
-        tokio::spawn(async move {
+        let mutations = tokio::spawn(async move {
+            let mut mutations = Vec::new();
             while let Some(cmd) = peer_rx.recv().await {
                 match cmd {
                     PeerManagerCommand::GetPolicy { reply, .. } => {
-                        let _ = reply.send(Some(prior_for_pm.clone()));
+                        let _ = reply.send(Some(prior.clone()));
                     }
-                    PeerManagerCommand::SetPolicy {
-                        definition, reply, ..
-                    } => {
-                        set_definitions_pm.lock().await.push(definition);
-                        let _ = reply.send(Ok(()));
+                    PeerManagerCommand::OwnedCatalogMutation { mutation, reply } => {
+                        mutations.push(mutation);
+                        let _ = reply.send(OwnedCatalogMutationOutcome::Success);
                     }
                     _ => panic!("unexpected peer-manager command"),
                 }
             }
+            mutations
         });
 
         let call = tokio::spawn(async move {
@@ -3933,7 +3928,7 @@ mod tests {
         // as "rollback", so peers saw two rounds of churn for a request that
         // was rejected. The candidate is never applied now.
         assert!(
-            set_definitions.lock().await.is_empty(),
+            mutations.await.unwrap().is_empty(),
             "a rejected policy set must not reach any live session"
         );
     }
@@ -4165,27 +4160,21 @@ mod tests {
             default_action: "deny".to_string(),
             statements: Vec::new(),
         };
-        let prior_for_pm = prior.clone();
-        let set_definitions = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let set_definitions_pm = set_definitions.clone();
-        tokio::spawn(async move {
+        let mutations = tokio::spawn(async move {
+            let mut mutations = Vec::new();
             while let Some(cmd) = peer_rx.recv().await {
                 match cmd {
                     PeerManagerCommand::GetPolicy { reply, .. } => {
-                        let _ = reply.send(Some(prior_for_pm.clone()));
+                        let _ = reply.send(Some(prior.clone()));
                     }
-                    PeerManagerCommand::DeletePolicy { reply, .. } => {
-                        let _ = reply.send(Ok(()));
-                    }
-                    PeerManagerCommand::SetPolicy {
-                        definition, reply, ..
-                    } => {
-                        set_definitions_pm.lock().await.push(definition);
-                        let _ = reply.send(Ok(()));
+                    PeerManagerCommand::OwnedCatalogMutation { mutation, reply } => {
+                        mutations.push(mutation);
+                        let _ = reply.send(OwnedCatalogMutationOutcome::Success);
                     }
                     _ => panic!("unexpected peer-manager command"),
                 }
             }
+            mutations
         });
 
         let call = tokio::spawn(async move {
@@ -4214,11 +4203,9 @@ mod tests {
         assert_eq!(error.code(), tonic::Code::FailedPrecondition);
 
         assert!(
-            set_definitions.lock().await.is_empty(),
-            "a rejected policy delete must not re-create anything, because it \
-             never deleted anything"
+            mutations.await.unwrap().is_empty(),
+            "persistence rejected the delete before any live mutation"
         );
-        drop(prior);
     }
 
     #[tokio::test]
@@ -4227,9 +4214,8 @@ mod tests {
         let (config_tx, mut config_rx) = mpsc::channel(4);
         let svc = PolicyService::new(AuthTier::OperatorOnly, peer_tx, Some(config_tx), None);
 
-        let set_chains = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let set_chains_pm = set_chains.clone();
-        tokio::spawn(async move {
+        let mutations = tokio::spawn(async move {
+            let mut mutations = Vec::new();
             while let Some(cmd) = peer_rx.recv().await {
                 match cmd {
                     PeerManagerCommand::GetGlobalPolicyChains { reply } => {
@@ -4238,16 +4224,14 @@ mod tests {
                             export_policy_names: Vec::new(),
                         });
                     }
-                    PeerManagerCommand::SetGlobalImportChain {
-                        policy_names,
-                        reply,
-                    } => {
-                        set_chains_pm.lock().await.push(policy_names);
-                        let _ = reply.send(Ok(()));
+                    PeerManagerCommand::OwnedCatalogMutation { mutation, reply } => {
+                        mutations.push(mutation);
+                        let _ = reply.send(OwnedCatalogMutationOutcome::Success);
                     }
                     _ => panic!("unexpected peer-manager command"),
                 }
             }
+            mutations
         });
 
         let call = tokio::spawn(async move {
@@ -4277,7 +4261,7 @@ mod tests {
         assert_eq!(error.code(), tonic::Code::FailedPrecondition);
 
         assert!(
-            set_chains.lock().await.is_empty(),
+            mutations.await.unwrap().is_empty(),
             "a rejected chain set must not reach any live session"
         );
     }
@@ -4290,24 +4274,21 @@ mod tests {
         let (config_tx, mut config_rx) = mpsc::channel(4);
         let svc = PolicyService::new(AuthTier::OperatorOnly, peer_tx, Some(config_tx), None);
 
-        let cleared = std::sync::Arc::new(tokio::sync::Mutex::new(0_u32));
-        let cleared_pm = cleared.clone();
-        tokio::spawn(async move {
+        let mutations = tokio::spawn(async move {
+            let mut mutations = Vec::new();
             while let Some(cmd) = peer_rx.recv().await {
                 match cmd {
                     PeerManagerCommand::GetGlobalPolicyChains { reply } => {
                         let _ = reply.send(crate::peer_types::PolicyChainAssignment::default());
                     }
-                    PeerManagerCommand::SetGlobalImportChain { reply, .. } => {
-                        let _ = reply.send(Ok(()));
-                    }
-                    PeerManagerCommand::ClearGlobalImportChain { reply } => {
-                        *cleared_pm.lock().await += 1;
-                        let _ = reply.send(Ok(()));
+                    PeerManagerCommand::OwnedCatalogMutation { mutation, reply } => {
+                        mutations.push(mutation);
+                        let _ = reply.send(OwnedCatalogMutationOutcome::Success);
                     }
                     _ => panic!("unexpected peer-manager command"),
                 }
             }
+            mutations
         });
 
         let call = tokio::spawn(async move {
@@ -4334,9 +4315,8 @@ mod tests {
             .expect("call task must not panic")
             .expect_err("set_global_import_chain must fail when persistence fails");
         assert_eq!(error.code(), tonic::Code::FailedPrecondition);
-        assert_eq!(
-            *cleared.lock().await,
-            0,
+        assert!(
+            mutations.await.unwrap().is_empty(),
             "nothing was applied, so nothing needs clearing"
         );
     }
@@ -4347,9 +4327,8 @@ mod tests {
         let (config_tx, mut config_rx) = mpsc::channel(4);
         let svc = PolicyService::new(AuthTier::OperatorOnly, peer_tx, Some(config_tx), None);
 
-        let set_chains = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let set_chains_pm = set_chains.clone();
-        tokio::spawn(async move {
+        let mutations = tokio::spawn(async move {
+            let mut mutations = Vec::new();
             while let Some(cmd) = peer_rx.recv().await {
                 match cmd {
                     PeerManagerCommand::GetNeighborPolicyChains { reply, .. } => {
@@ -4358,18 +4337,14 @@ mod tests {
                             export_policy_names: vec!["prior-export".to_string()],
                         }));
                     }
-                    PeerManagerCommand::SetNeighborImportChain {
-                        address,
-                        policy_names,
-                        reply,
-                    } => {
-                        assert_eq!(address.to_string(), "10.0.0.2");
-                        set_chains_pm.lock().await.push(policy_names);
-                        let _ = reply.send(Ok(()));
+                    PeerManagerCommand::OwnedCatalogMutation { mutation, reply } => {
+                        mutations.push(mutation);
+                        let _ = reply.send(OwnedCatalogMutationOutcome::Success);
                     }
                     _ => panic!("unexpected peer-manager command"),
                 }
             }
+            mutations
         });
 
         let call = tokio::spawn(async move {
@@ -4407,7 +4382,7 @@ mod tests {
         assert_eq!(error.code(), tonic::Code::FailedPrecondition);
 
         assert!(
-            set_chains.lock().await.is_empty(),
+            mutations.await.unwrap().is_empty(),
             "a rejected per-neighbor chain set must not reach the session"
         );
     }

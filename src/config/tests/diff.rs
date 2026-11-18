@@ -2116,7 +2116,7 @@ fn diff_strict_bfd_warns_about_admission_without_forcing_session_replacement() {
 }
 
 /// Policy-only edits are reload-applied (per-named definitions
-/// flow through `apply_policy_change` on SIGHUP).
+/// flow through `apply_policy_change_owned` on SIGHUP).
 #[test]
 fn diff_config_named_policy_only_is_reload_applied() {
     let old = parse(valid_toml()).unwrap();

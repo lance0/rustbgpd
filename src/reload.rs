@@ -4429,7 +4429,7 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
     // automatically inside `PeerManager::update_runtime_policies`
     // for any peer (static or dynamic) on policy / peer-group /
     // chain edits — the SetPolicy / SetPeerGroup / chain commands
-    // above land at `apply_policy_change`, which calls
+    // above land at the owned catalog handler, which calls
     // `update_runtime_policies` per affected peer, which now issues
     // `soft_reset_in` when the import policy materially changed.
     // That covers gRPC mutations and SIGHUP with one mechanism, and
@@ -8159,24 +8159,6 @@ hold_time = 90
                 }
                 _ => "OwnedCatalogMutation".to_string(),
             },
-            PeerManagerCommand::SetPolicy { name, .. } => format!("SetPolicy({name})"),
-            PeerManagerCommand::DeletePolicy { name, .. } => format!("DeletePolicy({name})"),
-            PeerManagerCommand::SetNeighborSet { name, .. } => format!("SetNeighborSet({name})"),
-            PeerManagerCommand::DeleteNeighborSet { name, .. } => {
-                format!("DeleteNeighborSet({name})")
-            }
-            PeerManagerCommand::SetGlobalImportChain { policy_names, .. } => {
-                format!("SetGlobalImportChain({})", policy_names.join(","))
-            }
-            PeerManagerCommand::SetGlobalExportChain { policy_names, .. } => {
-                format!("SetGlobalExportChain({})", policy_names.join(","))
-            }
-            PeerManagerCommand::ClearGlobalImportChain { .. } => {
-                "ClearGlobalImportChain".to_string()
-            }
-            PeerManagerCommand::ClearGlobalExportChain { .. } => {
-                "ClearGlobalExportChain".to_string()
-            }
             PeerManagerCommand::HotUpdatePeer { config, .. } => {
                 format!("HotUpdatePeer({})", config.address)
             }
@@ -10647,10 +10629,6 @@ import_policy_chain = ["origin-guard"]
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "the driver acknowledges every sequential command and the generation command in one mock set"
-    )]
     async fn drive_reloads(
         initial_toml: &str,
         new_toml: &str,
@@ -10677,16 +10655,6 @@ import_policy_chain = ["origin-guard"]
                 match cmd {
                     PeerManagerCommand::OwnedCatalogMutation { reply, .. } => {
                         let _ = reply.send(OwnedCatalogMutationOutcome::Success);
-                    }
-                    PeerManagerCommand::SetPolicy { reply, .. }
-                    | PeerManagerCommand::DeletePolicy { reply, .. }
-                    | PeerManagerCommand::SetNeighborSet { reply, .. }
-                    | PeerManagerCommand::DeleteNeighborSet { reply, .. }
-                    | PeerManagerCommand::SetGlobalImportChain { reply, .. }
-                    | PeerManagerCommand::SetGlobalExportChain { reply, .. }
-                    | PeerManagerCommand::ClearGlobalImportChain { reply }
-                    | PeerManagerCommand::ClearGlobalExportChain { reply } => {
-                        let _ = reply.send(Ok(()));
                     }
                     PeerManagerCommand::SoftResetIn { reply, .. } => {
                         let _ = reply.send(Ok(()));
