@@ -2867,3 +2867,165 @@ fn a_waiting_evicted_member_meets_each_event() {
         assert_eq!(manager.owed_evpn_rows.len(), 0, "{case}: the list is freed");
     }
 }
+
+/// Two group members the cap evicted, still waiting (clean, debt kept),
+/// that had admitted the table; row 5 was withdrawn while they owed EVPN
+/// whole, so the eviction dropped its list entry. Then the EVPN selection
+/// hold begins. Returns the rows received after the first eight.
+fn two_waiting_in_a_hold() -> (RibManager, Vec<Receiver>, Vec<(u32, u32)>) {
+    let mut manager = deferral_manager(CREDIT);
+    manager.test_force_ungrouped = false;
+    let (mut manager, mut receivers) = owing_from(manager, &[V4, EVPN], 3, 8, 4096);
+    received_unicast(&mut manager, 0..UNICAST);
+    drain(&mut manager, &mut receivers);
+    let evicted = [receivers[1].peer, receivers[2].peer];
+    let mut fresh: Vec<(u32, u32)> = Vec::new();
+    let mut withdrawn = false;
+    for _round in 0..900u32 {
+        let base = fresh.last().map_or(1000, |&(index, _)| index + 1);
+        let mut gone: Vec<u32> = fresh.iter().map(|&(index, _)| index).collect();
+        if !withdrawn && evicted.iter().all(|&peer| manager.owes_whole(peer, FAMILY)) {
+            gone.push(5);
+            withdrawn = true;
+        }
+        fresh = (base..base + 64).map(|index| (index, 0)).collect();
+        received(&mut manager, &fresh, &gone);
+        if manager.owed_row_evicted.len() == 2 {
+            break;
+        }
+        for _ in 0..12 {
+            manager.resync_dirty_peers_bounded();
+            receivers[0].write();
+        }
+    }
+    assert!(withdrawn);
+    assert_eq!(manager.owed_row_evicted.len(), 2);
+    let waiter = hold(&mut manager);
+    receivers.push(waiter);
+    (manager, receivers, fresh)
+}
+
+/// A dirty resync inside an EVPN selection hold enumerates no EVPN key. A
+/// receiver that holds row 5, whose withdrawal it missed before the hold,
+/// is resynced there for a reason of its own: it ends clean for its other
+/// families and waits as an evicted receiver does, so the release builds
+/// nothing for it in its own turn and the tick's unit withdraws the row,
+/// one table. A receiver that holds no EVPN row is resynced in the same
+/// hold and is not made to wait: the release's inventory is its whole
+/// table. Red when the in-hold resync leaves the first receiver clean and
+/// owing nothing (row 5 stays for good).
+#[test]
+fn a_dirty_resync_inside_an_evpn_hold_loses_no_withdrawal() {
+    let manager = deferral_manager(CREDIT);
+    let (mut manager, mut receivers) = owing_from(manager, &[V4, EVPN], 2, 8, 4096);
+    drain(&mut manager, &mut receivers);
+    let peer = receivers[1].peer;
+    assert_eq!(receivers[1].wire.table, table(&all(8)));
+    // Unread rows spend the receiver's credit, so the withdrawal is owed.
+    let mut fresh = Vec::new();
+    for round in 0..4u32 {
+        fresh.extend((2000 + round * 8..2008 + round * 8).map(|index| (index, 0)));
+        received(&mut manager, &fresh, &[]);
+    }
+    received(&mut manager, &[], &[5]);
+    assert!(manager.owes(peer, EVPN), "the withdrawal is owed");
+    // As a failed send leaves any receiver: its debt is the dirty mark.
+    manager.drop_peer_owing(peer);
+    manager.mark_outbound_dirty(peer);
+    receivers.push(hold(&mut manager));
+    let empty = receiver(9);
+    receivers.push(Receiver {
+        peer: empty,
+        rx: up_sized(&mut manager, empty, 0, 4096, &[V4, EVPN]),
+        wire: Wire::default(),
+    });
+    manager.mark_outbound_dirty(empty);
+    let stats = manager.adj_rib_out_commit_stats;
+    for _ in 0..50 {
+        tick(&mut manager, &mut receivers);
+    }
+    let held = manager.adj_rib_out_commit_stats;
+    assert_eq!(held.resync_builds - stats.resync_builds, 2, "one each");
+    assert!(!manager.dirty_peers.contains(&peer), "resynced in the hold");
+    assert!(manager.owed_row_evicted.contains(&peer), "and waits");
+    assert!(!manager.owed_row_evicted.contains(&receivers[3].peer));
+    assert!(!manager.dirty_peers.contains(&receivers[3].peer));
+    assert!(!manager.resync_tick_pending(), "the tick rests in the hold");
+    assert!(receivers[1].wire.table.contains_key(&key(5)));
+    release(&mut manager);
+    assert_eq!(
+        manager.adj_rib_out_commit_stats.resync_builds, held.resync_builds,
+        "no table built in the release turn"
+    );
+    assert!(manager.owes_whole(receivers[3].peer, FAMILY), "a cursor");
+    let (built, _) = drain_one_unit_a_tick(&mut manager, &mut receivers);
+    assert_eq!(built, 1, "the waiting receiver's unit only");
+    let expected: Vec<_> = all(8)
+        .into_iter()
+        .filter(|row| row.0 != 5)
+        .chain(fresh)
+        .collect();
+    assert!(manager.owed_row_evicted.is_empty());
+    for index in [0, 1, 3] {
+        let receiver = &receivers[index];
+        assert_eq!(receiver.wire.table, table(&expected), "{index}");
+        assert!(!manager.owes(receiver.peer, EVPN), "{index}");
+        assert!(!manager.dirty_peers.contains(&receiver.peer), "{index}");
+    }
+    assert_eq!(manager.owed_evpn_rows.len(), 0, "the list is freed");
+}
+
+/// The table's `regroup` cell inside an EVPN selection hold, for a waiting
+/// evicted member and for a dirty one: the regroup's own resync runs in
+/// the hold and enumerates no EVPN key, so the member waits again and row
+/// 5, whose list entry the eviction dropped, leaves it by its unit after
+/// the release. Red when the regroup leaves the member clean with no
+/// eviction (row 5 stays for good).
+#[test]
+fn a_regroup_of_an_evicted_member_inside_an_evpn_hold_loses_no_withdrawal() {
+    for dirty in [false, true] {
+        let (mut manager, mut receivers, fresh) = two_waiting_in_a_hold();
+        let moved = receivers[1].peer;
+        if dirty {
+            manager.mark_outbound_dirty(moved);
+        }
+        regroup(&mut manager, moved, Some(permit_all()));
+        for _ in 0..50 {
+            tick(&mut manager, &mut receivers);
+        }
+        assert!(!manager.dirty_peers.contains(&moved), "dirty={dirty}");
+        assert!(manager.owed_row_evicted.contains(&moved), "dirty={dirty}");
+        assert!(!manager.resync_tick_pending(), "dirty={dirty}: rests");
+        release(&mut manager);
+        drain_one_unit_a_tick(&mut manager, &mut receivers);
+        let expected: Vec<_> = all(8)
+            .into_iter()
+            .filter(|row| row.0 != 5)
+            .chain(fresh)
+            .collect();
+        assert!(manager.owed_row_evicted.is_empty(), "dirty={dirty}");
+        for (index, receiver) in receivers[..3].iter().enumerate() {
+            assert_eq!(receiver.wire.table, table(&expected), "{dirty}: {index}");
+            assert!(!manager.owes(receiver.peer, EVPN), "{dirty}: {index}");
+            assert!(!manager.dirty_peers.contains(&receiver.peer));
+        }
+        assert_eq!(manager.owed_evpn_rows.len(), 0, "dirty={dirty}");
+    }
+}
+
+/// The table's `channel gone` cell for a dirty evicted member with a kept
+/// debt: the tick that drops it drops the debt with the eviction mark. Red
+/// when the mark alone is dropped (the dead position is live again).
+#[test]
+fn a_dirty_evicted_member_whose_channel_is_gone_keeps_no_debt() {
+    let (mut manager, mut receivers, _unicast, _expected) = evict_one_stuck(1);
+    let stuck = receivers[1].peer;
+    assert!(manager.dirty_peers.contains(&stuck));
+    assert!(manager.owes_whole(stuck, FAMILY), "debt kept");
+    drop(receivers.remove(1));
+    manager.resync_dirty_peers_bounded();
+    assert!(!manager.dirty_peers.contains(&stuck));
+    assert!(!manager.owed_row_evicted.contains(&stuck));
+    assert!(manager.owing(stuck).is_none(), "in that tick");
+    assert!(!manager.owing_peers.contains(&stuck));
+}

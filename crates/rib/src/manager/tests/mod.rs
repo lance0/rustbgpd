@@ -1706,6 +1706,7 @@ mod evpn;
 mod evpn_clean_regroup;
 mod evpn_complete_feed;
 mod evpn_dataplane_query;
+mod evpn_dirty_in_hold;
 mod evpn_explain;
 mod evpn_group_checkpoints;
 mod evpn_group_fleet;
