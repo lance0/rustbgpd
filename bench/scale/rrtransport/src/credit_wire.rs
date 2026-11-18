@@ -179,7 +179,7 @@ fn observe_mpls(parsed: &ParsedUpdate, afi: Afi, safi: Safi) -> Observed {
     };
     let version = med(&parsed.attributes);
     let expected_next_hop = if afi == Afi::Ipv4 {
-        IpAddr::V4(Ipv4Addr::new(127, 254, 0, 1))
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))
     } else {
         IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1))
     };
@@ -246,7 +246,13 @@ fn observe_mpls(parsed: &ParsedUpdate, afi: Afi, safi: Safi) -> Observed {
             _ => {}
         }
     }
-    observed.outside += usize::from(!saw_mp);
+    let valid = rustbgpd_wire::validate::validate_update_attributes(
+        &parsed.attributes,
+        !observed.announced.is_empty(),
+        !parsed.announced.is_empty(),
+        false,
+    );
+    observed.outside += usize::from(!saw_mp || valid.is_err());
     observed
 }
 
@@ -707,6 +713,9 @@ mod tests {
             safi,
         ];
         attrs.extend_from_slice(payload);
+        if kind == 14 {
+            attrs.extend_from_slice(&[0x40, 1, 1, 0, 0x40, 2, 0]); // ORIGIN and empty AS_PATH
+        }
         if let Some(med) = med {
             attrs.extend_from_slice(&[0x80, 4, 4, 0, 0, 0, med]);
         }
@@ -730,7 +739,7 @@ mod tests {
             let mut next_hop = if vpn { vec![0; 8] } else { Vec::new() };
             let mut prefix = Vec::new();
             if afi == 1 {
-                next_hop.extend_from_slice(&[127, 254, 0, 1]);
+                next_hop.extend_from_slice(&[192, 0, 2, 1]);
                 prefix.extend_from_slice(&[10, 0, u8::from(!vpn)]);
             } else {
                 next_hop
@@ -772,7 +781,7 @@ mod tests {
     fn labeled_release_rejects_wrong_route_attributes_and_foreign_markers() {
         let family = WireFamily::Labeled4;
         // MP_REACH next hop, reserved byte, label 16 and 10.0.0.0/24.
-        let clean = [4, 127, 254, 0, 1, 0, 48, 0, 1, 1, 10, 0, 0];
+        let clean = [4, 192, 0, 2, 1, 0, 48, 0, 1, 1, 10, 0, 0];
         let announcement =
             |payload: &[u8], med| Message::Update(mp_update(14, 1, 4, payload, Some(med)));
         let marker = Message::Update(mp_update(15, 1, 4, &[], None));
@@ -801,12 +810,21 @@ mod tests {
                 "{changed:?}"
             );
         }
+        // The expected MP row and MED still decode alongside an invalid NEXT_HOP.
+        let mut invalid = mp_update(14, 1, 4, &clean, Some(7));
+        invalid.path_attributes = [
+            invalid.path_attributes.as_ref(),
+            &[0x40, 3, 4, 127, 0, 0, 1],
+        ]
+        .concat()
+        .into();
+        assert!(!state(&[&Message::Update(invalid), &marker]).exact());
         let mut two_labels = clean.to_vec();
         two_labels[6] += 24;
         two_labels.splice(7..7, [0, 2, 0]);
         assert!(!state(&[&row, &announcement(&two_labels, 7), &marker]).exact());
         for extra in [
-            mp_update(14, 1, 1, &[4, 127, 254, 0, 1, 0, 24, 10, 0, 0], Some(7)),
+            mp_update(14, 1, 1, &[4, 192, 0, 2, 1, 0, 24, 10, 0, 0], Some(7)),
             mp_update(15, 1, 128, &[], None),  // another SAFI
             mp_update(15, 2, 4, &[], None),    // another AFI
             mp_update(15, 1, 4, &[], Some(7)), // extra attribute on the marker

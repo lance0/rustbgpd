@@ -395,7 +395,7 @@ fn evpn_route(index: usize, attrs: Arc<AttrSet>) -> EvpnRibRoute {
     }
 }
 
-fn mpls_destination(afi: Afi, index: usize) -> (Prefix, IpAddr) {
+fn release_destination(afi: Afi, index: usize) -> (Prefix, IpAddr) {
     if afi == Afi::Ipv6 {
         let subnet = u16::try_from(index).expect("IPv6 fixture subnet fits u16");
         let prefix = Ipv6Addr::new(0x2001, 0xdb8, subnet, 0, 0, 0, 0, 0);
@@ -404,7 +404,7 @@ fn mpls_destination(afi: Afi, index: usize) -> (Prefix, IpAddr) {
     } else {
         (
             Prefix::V4(Ipv4Prefix::new(unicast_prefix(index), 24)),
-            SOURCE.into(),
+            Ipv4Addr::new(192, 0, 2, 1).into(),
         )
     }
 }
@@ -469,7 +469,7 @@ fn release_source_update(family: Family, indices: std::ops::Range<usize>) -> Rib
                         index,
                         attributes(index, BURST_VERSION, 100),
                         rd,
-                        mpls_destination(afi, index / 2),
+                        release_destination(afi, index / 2),
                     )
                 })
                 .collect(),
@@ -480,7 +480,7 @@ fn release_source_update(family: Family, indices: std::ops::Range<usize>) -> Rib
             session_id: 1,
             announced: indices
                 .map(|index| {
-                    let (prefix, next_hop) = mpls_destination(afi, index);
+                    let (prefix, next_hop) = release_destination(afi, index);
                     LabeledRibRoute {
                         nlri: LabeledNlri {
                             labels: vec![route_label(index)],
@@ -576,7 +576,10 @@ fn source_update(
                             index,
                             attrs(index),
                             EVPN_RD,
-                            mpls_destination(Afi::Ipv4, index),
+                            (
+                                Prefix::V4(Ipv4Prefix::new(unicast_prefix(index), 24)),
+                                SOURCE.into(),
+                            ),
                         )
                     })
                     .collect(),
@@ -3290,6 +3293,7 @@ mod tests {
                 }
             );
         }
+        assert_eq!(fill[0].next_hop, std::net::IpAddr::V4(super::SOURCE));
         assert_eq!(release[0].nlri, fill[0].nlri);
         assert_eq!(release[1].nlri.prefix, release[0].nlri.prefix);
         assert_ne!(
