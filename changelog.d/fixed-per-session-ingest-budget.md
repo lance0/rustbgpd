@@ -15,5 +15,6 @@
   see [graceful restart timers](../docs/reference/configuration.md). While a
   session's input waits behind its own unfinished routes, each hold-timer
   expiry processes one pending message from the peer, and a peer with none
-  pending gets Hold Timer Expired; the session is not closed for the wait
-  itself.
+  pending gets Hold Timer Expired. After eight consecutive such expiries
+  without the RIB finishing those routes, the session is closed with
+  `Cease/Out of Resources` within about two more hold times.

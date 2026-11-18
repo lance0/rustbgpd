@@ -227,6 +227,13 @@ impl ConnectFailureEpisode {
 /// blocked for about three hold times since then is closed with
 /// Cease/Out of Resources, as a local overload.
 const MAX_PARKED_HOLD_RENEWALS: u8 = 2;
+/// Consecutive hold expiries that may each admit one frame past a closed
+/// ingest gate. After them the wait uses the bounded policy above, so a peer
+/// that sent many complete frames and then went away does not stay
+/// Established for one hold time per frame. Eight hold times is 12 minutes
+/// at hold 90 and 24 s at hold 3; a bound near three would let one local RIB
+/// stall of a few hold times close every session behind its gate.
+const MAX_GATE_HOLD_ADMISSIONS: u8 = 8;
 /// Bytes one parked hold expiry may read from the socket looking for new
 /// input.
 const PARKED_HOLD_PROBE: usize = 4096;
@@ -347,6 +354,9 @@ pub(crate) struct PeerSession {
     /// Hold renewals spent while peer input waits for the RIB, since the
     /// last peer PDU processed.
     parked_hold_renewals: u8,
+    /// Consecutive hold expiries that admitted a frame past the closed
+    /// ingest gate, since the gate last reopened.
+    gate_hold_admissions: u8,
     /// Canonical `peer` metric/log label from
     /// [`TransportConfig::peer_label`]: the neighbor address, scoped to its
     /// interface for a link-local neighbor (`interface:<name>` for an
@@ -2553,6 +2563,7 @@ impl PeerSession {
             rib_reserve: None,
             rib_epoch: None,
             parked_hold_renewals: 0,
+            gate_hold_admissions: 0,
             peer_label,
             peer_ip,
             link_local_next_hop_scope,

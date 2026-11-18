@@ -264,14 +264,28 @@ the peer's input: the expiry admits one complete frame, already buffered or
 readable from the socket, past the gate, and the hold timer restarts from it
 as from any received message. The overdraft is at most one PDU per hold time
 per session. With no complete frame to admit the peer has been silent, and
-the session sends Hold Timer Expired. A session is therefore never closed
-for the RIB's pace alone, however many sources burst at once. When messages
-are also held for a full channel, the full-channel policy applies unchanged.
+the session sends Hold Timer Expired. When messages are also held for a full
+channel, the full-channel policy applies unchanged.
+
+Frames already received do not show that the peer is still there: a peer
+that sent many complete frames and then went away would stay Established for
+one hold time per frame, and a socket receive buffer holds thousands. The
+admissions are therefore bounded at eight consecutive hold expiries with the
+gate never reopening. From the ninth the wait uses the full-channel policy:
+no further frame is admitted, and the session is closed with Cease/Out of
+Resources after at most two more deferrals, the second only for new bytes
+from the peer. A gate that reopens starts the count again. Eight hold times
+is 12 minutes at hold time 90 and 24 s at hold time 3. A bound near three was
+rejected: one local RIB stall of a few hold times would then close every
+session waiting behind its gate, which is the failure the per-frame rule
+exists to avoid. A session is closed for the RIB's pace alone only after
+about ten hold times behind one closed gate.
 
 While the gate stays closed the session does not read its socket, so a
 NOTIFICATION or a close from the peer is acted on when the gate reopens, or
 when a hold expiry reaches it: at once if nothing complete is pending ahead
-of it, otherwise after one hold time per pending frame. With hold time 0
+of it, otherwise after one hold time per pending frame, up to the eight
+above. With hold time 0
 there is no expiry and it is acted on when the gate reopens. KEEPALIVEs to
 the peer come from the writer task and do not depend on the gate.
 

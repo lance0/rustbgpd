@@ -1522,6 +1522,7 @@ impl PeerSession {
             return;
         }
         self.ingest_gate_closed = false;
+        self.gate_hold_admissions = 0;
         if self.read_buf.has_complete_frame() {
             self.process_read_buffer().await;
         }

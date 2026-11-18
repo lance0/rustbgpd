@@ -453,6 +453,119 @@ async fn hold_expiry_with_the_gate_open_does_not_carry_a_frame_past_a_gate_close
     assert!(session.ingest_gate_closed);
 }
 
+/// A session behind a closed gate with `keepalives` complete frames from the
+/// peer buffered and unprocessed, and the messages that closed the gate,
+/// which the RIB finishes when they are dropped.
+async fn gated_with_buffered_keepalives(
+    session: &mut PeerSession,
+    rib_rx: &mut mpsc::Receiver<RibUpdate>,
+    keepalives: usize,
+) -> [RibUpdate; 2] {
+    buffer_and_process(session, &[burst_pdu(10), burst_pdu(20)]).await;
+    assert!(session.ingest_gate_closed);
+    for _ in 0..keepalives {
+        session.read_buf.buf.extend_from_slice(&keepalive_pdu());
+    }
+    [rib_rx.try_recv().unwrap(), rib_rx.try_recv().unwrap()]
+}
+
+/// Frames a peer sent before it went away are not liveness for ever. With
+/// the gate never reopening, eight consecutive hold expiries each admit one
+/// pending frame; the ninth admits none and the wait continues under the
+/// full-channel policy, which closes the session as a local overload
+/// (Cease/Out of Resources) when the peer sends nothing new.
+/// Red proof: without the bound the ninth expiry admits a ninth frame, and
+/// the session lasts one hold time per buffered frame.
+#[tokio::test]
+async fn hold_expiries_behind_a_gate_that_never_reopens_are_bounded() {
+    const PENDING: usize = 20;
+    let Metered {
+        mut session,
+        mut rib_rx,
+        commands: _commands,
+        server: _server,
+        ..
+    } = metered_session().await;
+    let _held = gated_with_buffered_keepalives(&mut session, &mut rib_rx, PENDING).await;
+    let keepalive = keepalive_pdu().len();
+    let admitted = usize::from(MAX_GATE_HOLD_ADMISSIONS);
+    assert_eq!(admitted, 8);
+    for expiry in 1..=admitted {
+        assert!(hold_expiry(&mut session).await, "expiry {expiry}");
+        assert_eq!(
+            session.read_buf.buf.len(),
+            (PENDING - expiry) * keepalive,
+            "one frame per expiry"
+        );
+        assert_eq!(session.parked_hold_renewals, 0);
+    }
+    assert!(hold_expiry(&mut session).await, "the wait earns a deferral");
+    assert_eq!(
+        session.read_buf.buf.len(),
+        (PENDING - admitted) * keepalive,
+        "the ninth expiry admits no frame"
+    );
+    assert_eq!(session.parked_hold_renewals, 1);
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert_eq!(notifications_sent(&session, "4"), 0.0);
+    assert_eq!(notifications_sent(&session, "6"), 0.0);
+
+    let (metrics, peer) = (session.metrics.clone(), session.peer_label.clone());
+    assert!(
+        !hold_expiry(&mut session).await,
+        "nothing new from the peer closes the session"
+    );
+    let sent = |code: &str| {
+        counter(
+            &metrics,
+            "bgp_notifications_sent_total",
+            &[("peer", &peer), ("code", code)],
+        )
+    };
+    assert_eq!(sent("6"), 1.0, "Cease/Out of Resources");
+    assert_eq!(sent("4"), 0.0, "never Hold Timer Expired");
+}
+
+/// The bound counts consecutive expiries behind one closed gate: a gate
+/// that reopens in between starts the count again.
+/// Red proof: with the count kept across a reopened gate, the fourth expiry
+/// behind the second closed gate admits no frame.
+#[tokio::test]
+async fn reopened_gate_restores_the_hold_admissions() {
+    let Metered {
+        mut session,
+        mut rib_rx,
+        commands: _commands,
+        server: _server,
+        ..
+    } = metered_session().await;
+    let held = gated_with_buffered_keepalives(&mut session, &mut rib_rx, 5).await;
+    for expiry in 1..=5 {
+        assert!(hold_expiry(&mut session).await, "expiry {expiry}");
+    }
+    assert!(session.read_buf.buf.is_empty());
+    assert_eq!(session.gate_hold_admissions, 5);
+    drop(held);
+    session.reopen_ingest_gate().await;
+    assert!(!session.ingest_gate_closed);
+    assert_eq!(session.gate_hold_admissions, 0);
+
+    let pending = usize::from(MAX_GATE_HOLD_ADMISSIONS) + 1;
+    let _held = gated_with_buffered_keepalives(&mut session, &mut rib_rx, pending).await;
+    let keepalive = keepalive_pdu().len();
+    for expiry in 1..=usize::from(MAX_GATE_HOLD_ADMISSIONS) {
+        assert!(hold_expiry(&mut session).await, "expiry {expiry}");
+        assert_eq!(
+            session.read_buf.buf.len(),
+            (pending - expiry) * keepalive,
+            "expiry {expiry} behind the second closed gate admits a frame"
+        );
+    }
+    assert!(hold_expiry(&mut session).await);
+    assert_eq!(session.read_buf.buf.len(), keepalive, "then the bound");
+    assert_eq!(session.parked_hold_renewals, 1);
+}
+
 /// Behind the gate a peer with no complete frame pending has been silent
 /// for the hold time: the session sends Hold Timer Expired, not a local
 /// overload Cease. Half a frame is not liveness.

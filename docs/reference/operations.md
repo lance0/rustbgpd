@@ -2952,9 +2952,12 @@ What to do when it fires:
    message, logged as `RIB admission stalled past local budget` (ADR-0078).
    Input waits for the RIB while its channel is full. A session also leaves
    its socket unread while 1,536 routes it already sent are unfinished in
-   the RIB (its ingest budget), but is not closed for that alone: each hold
-   expiry then processes one pending message from the peer, and a peer with
-   none pending gets Hold Timer Expired. Its
+   the RIB (its ingest budget). Each hold expiry then processes one pending
+   message from the peer, and a peer with none pending gets Hold Timer
+   Expired. After eight consecutive such expiries without the RIB returning
+   the budget, no further message is processed and the same three-hold-time
+   bound applies, so that wait closes the session with this Cease after
+   about ten hold times. Its
    interval is the configured nonzero `send_hold_time`,
    or `max(480, 2 × hold_time)` seconds when `send_hold_time = 0`; disabling
    the RFC timer does not disable the resource bound.

@@ -1,9 +1,9 @@
 use super::{
     Action, AddPathMode, Afi, Arc, BmpEvent, Bytes, Duration, Event, IpAddr, Ipv4Addr,
-    MAX_PARKED_HOLD_RENEWALS, Message, NotificationCode, PARKED_HOLD_PROBE, PeerDownReason,
-    PeerSession, RibUpdate, Safi, SessionDownReason, SessionLifecycleNotification,
-    SessionNotification, SessionNotificationDirection, SessionState, cease_subcode, debug, info,
-    mpsc, warn,
+    MAX_GATE_HOLD_ADMISSIONS, MAX_PARKED_HOLD_RENEWALS, Message, NotificationCode,
+    PARKED_HOLD_PROBE, PeerDownReason, PeerSession, RibUpdate, Safi, SessionDownReason,
+    SessionLifecycleNotification, SessionNotification, SessionNotificationDirection, SessionState,
+    cease_subcode, debug, info, mpsc, warn,
 };
 use crate::link::{LinkDown, LinkSnapshot};
 use rustbgpd_rib::update::ExactExportErrorCode;
@@ -598,34 +598,31 @@ impl PeerSession {
     /// re-arms from it as from any received message. The overdraft is one
     /// PDU per hold time. With no complete frame pending the peer has been
     /// silent and the hold timer expires.
+    ///
+    /// Frames already received say nothing about a peer that has since gone
+    /// away, so those admissions are bounded too: after
+    /// [`MAX_GATE_HOLD_ADMISSIONS`] consecutive ones with the gate never
+    /// reopening, the wait continues under the bounded full-channel policy.
     pub(super) async fn handle_hold_timer_expiry(&mut self) {
         if !self.rib_backlog.is_empty() {
-            if self.renew_parked_hold() {
-                self.metrics
-                    .record_hold_timer_rearmed_pending_input(&self.peer_label);
-                debug!(
-                    peer = %self.peer_label,
-                    renewals = self.parked_hold_renewals,
-                    "hold timer expired while input waits for the RIB; re-arming instead"
-                );
-                if self.timers.hold.is_none()
-                    && let Some(secs) = self.timers.last_hold_secs
-                {
-                    self.timers.start(rustbgpd_fsm::TimerType::Hold, secs);
-                }
-            } else {
-                warn!(
-                    peer = %self.peer_label,
-                    renewals = self.parked_hold_renewals,
-                    "RIB admission stalled past local budget; sending Cease/Out-of-Resources and tearing down"
-                );
-                self.trigger_outbound_out_of_resources_teardown(
-                    crate::handle::SessionFailureCause::RibAdmissionStalled,
-                );
-            }
+            self.renew_parked_hold_or_close();
             return;
         }
         if self.take_pending_input() {
+            if self.ingest_gate_closed {
+                // The live budget, not the stored gate: a budget the RIB has
+                // just returned is not a stall.
+                if self.gate_hold_admissions >= MAX_GATE_HOLD_ADMISSIONS
+                    && self
+                        .ingest_budget
+                        .as_ref()
+                        .is_some_and(|budget| budget.gate_closed(true))
+                {
+                    self.renew_parked_hold_or_close();
+                    return;
+                }
+                self.gate_hold_admissions = self.gate_hold_admissions.saturating_add(1);
+            }
             self.process_buffered_input(true).await;
             // Processing may have torn the session down (the pending
             // frame was a NOTIFICATION, or failed decode): the FSM has
@@ -657,8 +654,38 @@ impl PeerSession {
         self.drive_fsm(Event::HoldTimerExpires).await;
     }
 
+    /// A hold expiry while peer input waits for the RIB under the bounded
+    /// policy of [`Self::renew_parked_hold`]: re-arm the hold timer, or close
+    /// the session with Cease/Out of Resources once the policy is spent.
+    fn renew_parked_hold_or_close(&mut self) {
+        if self.renew_parked_hold() {
+            self.metrics
+                .record_hold_timer_rearmed_pending_input(&self.peer_label);
+            debug!(
+                peer = %self.peer_label,
+                renewals = self.parked_hold_renewals,
+                "hold timer expired while input waits for the RIB; re-arming instead"
+            );
+            if self.timers.hold.is_none()
+                && let Some(secs) = self.timers.last_hold_secs
+            {
+                self.timers.start(rustbgpd_fsm::TimerType::Hold, secs);
+            }
+        } else {
+            warn!(
+                peer = %self.peer_label,
+                renewals = self.parked_hold_renewals,
+                "RIB admission stalled past local budget; sending Cease/Out-of-Resources and tearing down"
+            );
+            self.trigger_outbound_out_of_resources_teardown(
+                crate::handle::SessionFailureCause::RibAdmissionStalled,
+            );
+        }
+    }
+
     /// Local-overload policy for a hold expiry while RIB-bound messages are
-    /// held. Input is deliberately left unprocessed then, so it proves
+    /// held, or after [`MAX_GATE_HOLD_ADMISSIONS`] behind the ingest gate.
+    /// Input is deliberately left unprocessed then, so it proves
     /// nothing about the peer's liveness; renewals are bounded instead,
     /// counted since the last peer PDU processed:
     ///
