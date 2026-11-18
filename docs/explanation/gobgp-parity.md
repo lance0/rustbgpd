@@ -58,7 +58,7 @@ releases rather than carried forward from older measurements.
 | Capability negotiation (RFC 5492) | Yes | Yes | |
 | TCP collision detection (RFC 4271 §6.8) | Yes | Yes | |
 | Graceful Restart (RFC 4724) | Yes | Yes | Helper mode + restarting-speaker `R=1`; per-family F=1 for control-plane-only roles, F=0 for configured kernel installers |
-| Long-Lived GR (RFC 9494) | Yes | Yes | Two-phase timer, three-tier best-path demotion, `LLGR_STALE`/`NO_LLGR` communities, per-AFI family scoping |
+| Long-Lived GR (RFC 9494) | Yes | Yes | Two-phase timer, three-tier best-path demotion, `LLGR_STALE`/`NO_LLGR` communities, per-AFI family scoping. For receivers without LLGR, rustbgpd withdraws stale routes over eBGP. Over iBGP it retains `LLGR_STALE`, adds `NO_EXPORT` and sets `LOCAL_PREF` to zero ([RFC 9494 §§4.3, 4.6](https://www.rfc-editor.org/rfc/rfc9494.html#section-4.3)) |
 | Notification GR (RFC 8538) | Yes | Yes | N-bit (RFC 8538 §2), Cease/Hard Reset bypass |
 | Route Refresh (RFC 2918) | Yes | Yes | |
 | Enhanced Route Refresh (RFC 7313) | Yes | Yes | `BoRR` / `EoRR` demarcation; inbound replacement semantics on `SoftResetIn` |
@@ -176,7 +176,6 @@ releases rather than carried forward from older measurements.
 | BFD (RFC 5880/5881/5882/5883) | Yes | Yes | GoBGP documents native single-hop async BFD for BGP neighbors. rustbgpd ships single-hop and multihop async BFD for static neighbors, plus single-hop BFD on an interface-only neighbor's learned binding and non-strict single-hop BFD for sessions accepted through a `[[dynamic_neighbors]]` range, with inspection, metrics/events, and strict + non-strict RFC 5882 coupling. M51 and M108 validate static single-hop and multihop against FRR `bfdd`. Deferred: echo/demand, authentication, and strict or multihop dynamic-range BFD |
 | RPKI/RTR (RFC 6811/8210) | Yes | Yes | Persistent RTR session with `SerialNotify`, fallback serial polling, and enforced expiry |
 | Private AS removal | Yes | Yes | Three modes: `remove`, `all`, `replace` (ADR-0045) |
-| LLGR_STALE stripping (RFC 9494 §4.6) | N/A | Yes | Strip `LLGR_STALE` from exports to non-LLGR peers |
 
 ## Operations
 

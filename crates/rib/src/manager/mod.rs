@@ -818,7 +818,7 @@ pub struct RibManager {
     /// Families for which each registered outbound peer advertised the
     /// Long-Lived Graceful Restart capability (RFC 9494). Gates the
     /// export of LLGR-stale routes: absent family + eBGP target =
-    /// suppress (§4.4); absent family + iBGP target = advertise with
+    /// suppress (§4.3); absent family + iBGP target = advertise with
     /// `NO_EXPORT` and `LOCAL_PREF` 0, rewritten in transport (§4.6).
     peer_advertised_llgr_families: HashMap<PeerId, Vec<(Afi, Safi)>>,
     /// Whether each registered outbound peer is eBGP (true) or iBGP (false).

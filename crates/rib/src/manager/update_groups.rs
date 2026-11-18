@@ -173,7 +173,7 @@ pub(super) struct GroupKey {
     /// **content** of the peer's effective export chain (per-peer if
     /// set, else the global fallback). `None` = no export chain at all.
     chain: Option<usize>,
-    /// eBGP target (split-horizon / LLGR §4.4 gate input).
+    /// eBGP target (split-horizon / LLGR §4.3 gate input).
     target_is_ebgp: bool,
     /// RFC 4456 route-reflector client (with the global `cluster_id`
     /// this fully captures the reflection semantics split).
@@ -181,7 +181,7 @@ pub(super) struct GroupKey {
     /// RFC 9234 local role (the OTC egress gate is role-dependent).
     target_local_role: Option<u8>,
     /// RFC 1997 `NO_EXPORT` egress enforcement (`interpret_rfc1997`).
-    /// The gate outcome is target-dependent like the LLGR §4.4 gate: an
+    /// The gate outcome is target-dependent like the LLGR §4.3 gate: an
     /// honor-mode eBGP peer and a transparent route-server client must
     /// never share a staged winner for a `NO_EXPORT`-tagged route.
     interpret_rfc1997: bool,

@@ -1818,7 +1818,7 @@ async fn labeled_llgr_no_llgr_community_drops_route_on_promotion() {
     handle.await.unwrap();
 }
 
-// --- RFC 9494 §4.4 export gate ---
+// --- RFC 9494 §4.3 export gate ---
 
 /// An LLGR-stale labeled route is withdrawn from a non-LLGR eBGP peer at
 /// promotion.
@@ -1955,7 +1955,7 @@ async fn labeled_llgr_stale_unchanged_toward_llgr_capable_ebgp_peer() {
     handle.await.unwrap();
 }
 
-/// RFC 9494 §4.4 in the labeled Add-Path branch: each staged candidate is
+/// RFC 9494 §4.3 in the labeled Add-Path branch: each staged candidate is
 /// gated individually — the LLGR-stale path loses its Add-Path rank toward
 /// a non-LLGR eBGP peer while the fresh path keeps flowing.
 #[tokio::test]

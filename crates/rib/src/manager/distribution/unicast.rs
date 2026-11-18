@@ -256,7 +256,7 @@ fn multipath_candidates<'a>(
 
 /// Per-candidate source-route export gates of the multipath / per-client-best
 /// walk: RFC 1997 `NO_ADVERTISE` and `NO_EXPORT`, the RFC 7947 §2.3.2
-/// route-server control gate, and the RFC 9494 §4.4 LLGR gate. A suppressed
+/// route-server control gate, and the RFC 9494 §4.3 LLGR gate. A suppressed
 /// candidate holds no Add-Path rank (or the per-client-best slot). Live
 /// staging and both explain paths call this one predicate.
 pub(in crate::manager) fn multipath_candidate_suppressed(
@@ -294,7 +294,7 @@ pub(in crate::manager) fn multipath_candidate_suppressed(
     {
         return true;
     }
-    // RFC 9494 §4.4: each staged candidate is gated individually —
+    // RFC 9494 §4.3: each staged candidate is gated individually —
     // a stale candidate must not occupy an Add-Path rank (or the
     // filtered-best slot) toward a non-LLGR eBGP peer.
     super::llgr_stale_export_suppressed(
@@ -1088,7 +1088,7 @@ impl RibManager {
             "iBGP split-horizon / RFC 4456 reflection rules permit this route".to_string(),
         );
 
-        // RFC 9494 §4.4 — same helper the live bodies gate with.
+        // RFC 9494 §4.3 — same helper the live bodies gate with.
         if super::llgr_stale_export_suppressed(
             best.is_llgr_stale,
             best.communities(),
@@ -2811,7 +2811,7 @@ impl RibManager {
             format!("peer negotiated {}", family_label(family))
         });
 
-        // RFC 9494 §4.4: LLGR-stale best toward a non-LLGR eBGP peer is
+        // RFC 9494 §4.3: LLGR-stale best toward a non-LLGR eBGP peer is
         // suppressed (withdraw-if-present). See `llgr_stale_export_suppressed`.
         if super::llgr_stale_export_suppressed(
             best.is_llgr_stale,
@@ -3299,7 +3299,7 @@ impl RibManager {
             return;
         };
 
-        // RFC 9494 §4.4: a per-vantage winner can only be LLGR-stale when
+        // RFC 9494 §4.3: a per-vantage winner can only be LLGR-stale when
         // every surviving candidate is (stale ranks below fresh in the
         // comparator), so gating the winner suppresses exactly the
         // stale-only case toward a non-LLGR eBGP peer.

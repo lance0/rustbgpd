@@ -247,7 +247,7 @@ impl RibManager {
                         break;
                     }
 
-                    // RFC 9494 §4.4, per candidate — an LLGR-stale path
+                    // RFC 9494 §4.3, per candidate — an LLGR-stale path
                     // must not occupy an Add-Path rank toward a non-LLGR
                     // eBGP peer. See `llgr_stale_export_suppressed`.
                     if super::llgr_stale_export_suppressed(
@@ -459,7 +459,7 @@ impl RibManager {
                 trace.best_route_type = Some(route_type(best.origin_type));
             }
 
-            // RFC 9494 §4.4: LLGR-stale toward a non-LLGR eBGP peer is
+            // RFC 9494 §4.3: LLGR-stale toward a non-LLGR eBGP peer is
             // suppressed. See `llgr_stale_export_suppressed`.
             if super::llgr_stale_export_suppressed(
                 best.is_llgr_stale,

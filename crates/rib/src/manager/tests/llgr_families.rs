@@ -640,7 +640,7 @@ async fn rtc_llgr_eor_clears_llgr_stale() {
     let handle = tokio::spawn(manager.run());
 
     // iBGP RR-client observer: an eBGP target without LLGR would now
-    // suppress the pre-tagged route below (RFC 9494 §4.4 export gate,
+    // suppress the pre-tagged route below (RFC 9494 §4.3 export gate,
     // pinned by its own tests); this test is about EoR clearing.
     let target = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
     let mut out_rx = rtc_peer_up(&tx, target, false, true).await;
@@ -1318,7 +1318,7 @@ async fn unicast_announce_and_promote_to_llgr(
     assert!(query_best_routes(tx).await[0].is_llgr_stale);
 }
 
-/// RFC 9494 §4.4: an LLGR-stale route is withdrawn from (not announced
+/// RFC 9494 §4.3: an LLGR-stale route is withdrawn from (not announced
 /// to) an eBGP peer that did not advertise the LLGR capability for the
 /// family.
 #[tokio::test]
@@ -1656,7 +1656,7 @@ async fn vpn_llgr_stale_unchanged_toward_llgr_capable_ebgp_peer() {
     handle.await.unwrap();
 }
 
-/// RFC 9494 §4.4 in the VPN Add-Path branch: each staged candidate is
+/// RFC 9494 §4.3 in the VPN Add-Path branch: each staged candidate is
 /// gated individually — the LLGR-stale path loses its Add-Path rank
 /// toward a non-LLGR eBGP peer while the fresh path keeps flowing.
 #[tokio::test]

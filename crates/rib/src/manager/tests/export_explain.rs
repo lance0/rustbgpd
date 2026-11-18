@@ -2236,7 +2236,7 @@ fn add_path_source_explain_skips_an_rs_control_sibling_like_live_staging() {
 }
 
 /// An `LLGR_STALE` sibling is candidate ineligibility toward an eBGP peer
-/// that did not advertise LLGR (RFC 9494 §4.4) in the per-client-best walk,
+/// that did not advertise LLGR (RFC 9494 §4.3) in the per-client-best walk,
 /// as in live staging: with the best path denied by export policy the peer
 /// is sent nothing, and explain says every candidate it walked was denied
 /// rather than electing the stale sibling. The Add-Path fixture above cannot
