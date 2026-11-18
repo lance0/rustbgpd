@@ -242,7 +242,7 @@ fn a_policy_replacement_or_refresh_inside_a_hold_converges() {
 
 /// The subject missed row 5's withdrawal before the EVPN hold and is ready
 /// to resync in it. Keep the source and the waiter reading alongside it.
-fn missed_withdrawal(manager: &mut RibManager) -> [Receiver; 3] {
+fn missed_withdrawal(manager: &mut RibManager, unicast_rows: u32) -> [Receiver; 3] {
     let source = peer_v4(SOURCE);
     let source = Receiver {
         peer: source,
@@ -252,7 +252,7 @@ fn missed_withdrawal(manager: &mut RibManager) -> [Receiver; 3] {
     let peer = receiver(0);
     let mut subject = Receiver::up(manager, peer, 16, &[V4, EVPN]);
     received(manager, &all(8), &[]);
-    received_unicast(manager, 0..UNICAST);
+    received_unicast(manager, 0..unicast_rows);
     drain(manager, std::slice::from_mut(&mut subject));
     prepare_receiver(manager, &subject, ReceiverState::Dirty);
     let waiter = hold(manager);
@@ -265,7 +265,7 @@ fn a_held_evpn_rebuild_serves_ipv4_resync_and_both_refreshes() {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     let mut manager = deferral_manager(CREDIT);
-    let mut receivers = missed_withdrawal(&mut manager);
+    let mut receivers = missed_withdrawal(&mut manager, UNICAST);
     let peer = receivers[0].peer;
     let visits = Arc::new(AtomicUsize::new(0));
     manager.replacement_readiness_test_hook = Some(Arc::new({
@@ -365,7 +365,8 @@ fn mixed_deferral_manager(v4_waiter: PeerId) -> RibManager {
 fn a_force_waiting_for_unicast_leaves_the_evpn_release_rebuild_to_the_tick() {
     let v4_waiter = peer_v4(SECOND_SOURCE);
     let mut manager = mixed_deferral_manager(v4_waiter);
-    let mut receivers = Vec::from(missed_withdrawal(&mut manager));
+    // A suppressed IPv4 row would make the forced replay dirty as well.
+    let mut receivers = Vec::from(missed_withdrawal(&mut manager, 0));
     drain(&mut manager, &mut receivers);
     let peer = receivers[0].peer;
     assert!(manager.held_evpn_rebuilds.contains(&peer));
@@ -385,6 +386,7 @@ fn a_force_waiting_for_unicast_leaves_the_evpn_release_rebuild_to_the_tick() {
     assert_eq!(receivers[0].wire.rows_after_marker, 0);
     assert!(manager.selection_deferred(V4));
     end_of_rib(&mut manager, v4_waiter, 7, V4);
+    drain_unicast_release(&mut manager);
     drain(&mut manager, &mut receivers);
     assert!(!manager.force_outbound_peers.contains(&peer));
     assert_idle(&manager, &receivers);
@@ -395,7 +397,7 @@ fn evpn_rebuild_waits_for_active_unicast_and_runs_while_a_late_join_is_parked() 
     let v4_waiter = peer_v4(SECOND_SOURCE);
     let mut manager = mixed_deferral_manager(v4_waiter);
     manager.test_force_ungrouped = false;
-    let mut receivers = Vec::from(missed_withdrawal(&mut manager));
+    let mut receivers = Vec::from(missed_withdrawal(&mut manager, UNICAST));
     let peer = receivers[0].peer;
     drain(&mut manager, &mut receivers);
     assert!(manager.grouped_member_of(peer).is_some());
