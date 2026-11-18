@@ -1168,6 +1168,10 @@ fn an_evpn_withdrawal_owed_only_in_the_kept_set_survives_a_flip_and_a_release() 
 /// a sibling that still imports RT 100 keeps A and never sees B. Red when
 /// a receiver that owes the family whole discards the targeted restage.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one transcript checks the walk, the membership edit and both receivers' final tables"
+)]
 fn a_live_rtc_change_behind_an_evpn_cursor_revisits_the_keys_it_passed() {
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(
