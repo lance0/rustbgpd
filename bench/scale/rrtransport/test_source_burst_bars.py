@@ -87,6 +87,41 @@ def small(per_update, control=False):
     return run
 
 
+def two_sources():
+    """A passing two-source result: 16,000 routes split at 8,000."""
+    run = burst(measured=False)
+    run["cell"] = "source-burst-two"
+    run["shape"].update(
+        burst_sources=2, routes=16_000, receivers=8, registered_peers=12, burst_messages=20,
+        single_source_messages=18,
+    )
+    run["checks"].update(sources_complete=True, healthy_converged=True)
+    run["healthy"].update(last_sent=6, last_received=6)
+    run["wire"].update(
+        healthy_table_errors=0, healthy_decode_failures=0, exact_receivers=8, missing_routes=0
+    )
+    run["burst"].update(messages_admitted=20, messages_finished=20)
+    run["burst"]["sources"] = [
+        dict(
+            peer=ip,
+            routes=8_000,
+            prefix_range=span,
+            in_order=True,
+            messages_planned=10,
+            messages_admitted=10,
+            first_written_ms=500.5,
+            continued_ms=500.6,
+            written_ms=530.0,
+            rib_done_ms=done,
+        )
+        for ip, span, done in (
+            ("127.0.0.1", [0, 8_000], 550.0),
+            ("127.0.0.2", [8_000, 16_000], BURST_DONE),
+        )
+    ]
+    return run
+
+
 def verdict(run):
     try:
         return credit_bars.source_burst(run, "run")
@@ -101,36 +136,17 @@ class SourceBurst(unittest.TestCase):
         self.assertIn(reason, got[1])
 
     def test_two_sources_need_distinct_peers_completion_and_healthy_convergence(self):
-        run = burst(measured=False)
-        run["cell"] = "source-burst-two"
-        run["shape"].update(
-            burst_sources=2, routes=16_000, receivers=8, registered_peers=12, burst_messages=20
-        )
-        run["checks"].update(sources_complete=True, healthy_converged=True)
-        run["healthy"].update(last_sent=6, last_received=6)
-        run["wire"].update(
-            healthy_table_errors=0, healthy_decode_failures=0, exact_receivers=8, missing_routes=0
-        )
-        run["burst"].update(messages_admitted=20, messages_finished=20)
-        sources = [
-            dict(
-                peer=ip,
-                routes=8_000,
-                in_order=True,
-                messages_planned=10,
-                messages_admitted=10,
-                written_ms=530.0,
-                rib_done_ms=done,
-            )
-            for ip, done in (("127.0.0.1", 550.0), ("127.0.0.2", BURST_DONE))
-        ]
-        run["burst"]["sources"] = sources
-        self.assert_verdict(run, "PASS", "peer 127.0.0.2 8000 routes")
+        run = two_sources()
+        sources = run["burst"]["sources"]
+        self.assert_verdict(run, "PASS", "peer 127.0.0.2 8000 routes 8000..16000")
         for key, value, reason in [
             ("peer", sources[0]["peer"], "duplicate"),
             ("rib_done_ms", None, "rib_done_ms"),
             ("messages_admitted", 9, "inconsistent work"),
-            ("routes", 16_000, "inconsistent work"),
+            ("prefix_range", None, "prefix_range"),
+            ("prefix_range", [8_000, 16_001], "no usable prefix range"),
+            ("routes", 8_001, "no usable prefix range"),
+            ("first_written_ms", None, "first_written_ms"),
         ]:
             with self.subTest(key=key):
                 broken = copy.deepcopy(run)
@@ -153,6 +169,58 @@ class SourceBurst(unittest.TestCase):
         self.assert_verdict(run, "INVALID", "healthy wire")
         run["checks"]["healthy_converged"] = False
         self.assert_verdict(run, "FAIL", "healthy_converged")
+
+    def test_two_sources_must_split_the_table_not_repeat_it(self):
+        # Both sources send the whole table: same final table, double the work.
+        whole = two_sources()
+        for source in whole["burst"]["sources"]:
+            source.update(routes=16_000, prefix_range=[0, 16_000], messages_planned=18,
+                          messages_admitted=18)
+        whole["shape"]["burst_messages"] = whole["burst"]["messages_admitted"] = 36
+        whole["burst"]["messages_finished"] = 36
+        self.assert_verdict(whole, "INVALID", "do not split the 16000-route table")
+        overlap = two_sources()
+        overlap["burst"]["sources"][1]["prefix_range"] = [7_999, 16_000]
+        self.assert_verdict(overlap, "INVALID", "do not split")
+        short = two_sources()
+        short["burst"]["sources"][1].update(routes=7_999, prefix_range=[8_001, 16_000])
+        self.assert_verdict(short, "INVALID", "do not split")
+        # One UPDATE more per stage at most: announce, withdraw, announce again.
+        more = two_sources()
+        more["shape"]["single_source_messages"] = 16
+        self.assert_verdict(more, "INVALID", "20 messages for 16 from one source")
+        more["shape"]["single_source_messages"] = 17
+        self.assert_verdict(more, "PASS", "peer 127.0.0.1")
+
+    def test_two_sources_start_writing_together(self):
+        early = two_sources()
+        early["burst"]["sources"][0]["continued_ms"] = 500.4
+        self.assert_verdict(early, "INVALID", "a writer continued at 500.400 ms")
+        together = two_sources()
+        together["burst"]["sources"][0]["continued_ms"] = 500.5
+        self.assert_verdict(together, "PASS", "peer 127.0.0.1")
+
+    def test_a_starved_source_fails_before_the_tap_rule(self):
+        # One source admitted in full: the tap recognizes burst messages, so
+        # the other's shortfall is a session that stopped reading.
+        starved = two_sources()
+        starved["checks"].update(sources_complete=False, final_state_exact=False)
+        starved["burst"]["sources"][1].update(messages_admitted=4, rib_done_ms=None)
+        starved["burst"]["messages_admitted"] = 14
+        self.assert_verdict(starved, "FAIL", "final_state_exact, sources_complete")
+        # A writer blocked past the deadline: no write completion either.
+        blocked = copy.deepcopy(starved)
+        blocked["burst"]["sources"][1].update(written_ms=None, continued_ms=None)
+        blocked["burst"].update(submitted_ms=None, written_ms=None, rib_done_ms=None)
+        self.assert_verdict(blocked, "FAIL", "sources_complete")
+        # Neither source admitted in full: the tap rule still judges it.
+        both = copy.deepcopy(starved)
+        both["burst"]["sources"][0]["messages_admitted"] = 9
+        self.assert_verdict(both, "INVALID", "the tap recognized 14 of the 20")
+        # The rule needs the result's own check to have failed.
+        recorded = copy.deepcopy(starved)
+        recorded["checks"].update(sources_complete=True, final_state_exact=True)
+        self.assert_verdict(recorded, "INVALID", "the tap recognized 14 of the 20")
 
     def test_clean_runs_pass_and_report_their_readings(self):
         self.assert_verdict(burst(), "PASS", "healthy admission to dispatch max 36000.0 ms")

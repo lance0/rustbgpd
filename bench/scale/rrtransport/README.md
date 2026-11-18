@@ -630,12 +630,20 @@ Runner cell `source-burst-two` (`credit-source-burst --two-sources`) splits
 the reduced plan's 16,000 routes evenly between two loopback sessions. It
 uses the same eight receivers, UPDATE size, churn subset and healthy cadence
 as `source-burst --reduced`. A smaller `--rows N` selects the same total
-work for either run. Splitting a chunk at the boundary can add an UPDATE.
-Both writers finish their first socket write before either continues. The
-receipt records route and message counts, write completion and the RIB's
-final marker per source. Each burst receiver must converge on the combined
-table and the healthy receiver on its last sent /24 and MED. The two-source
-cell is opt-in and correctness-only.
+work for either run. Each of the plan's three stages (announce, withdraw,
+announce again) can gain an UPDATE where the split cuts a chunk: 20 messages
+for the single source's 18 at 16,000 routes. Both writers finish their first
+socket write before either continues. Per source, the receipt records the
+prefix count and range its UPDATEs carry (read back from the planned wire
+messages), message counts, when its first write finished and when it went
+on, write completion and the RIB's final marker. The analyzer requires
+disjoint ranges that sum to the table, at most three messages more than the
+single-source plan, and no writer going on before the other's first write. Each burst receiver must converge on the combined table
+and the healthy receiver on its last sent /24 and MED. A writer the session
+stops reading gives up at the deadline, so the result is still written. When
+one source was admitted in full and the other was not, the cell reads FAIL on
+`sources_complete` ahead of the tap-recognition INVALID. The two-source cell
+is opt-in and correctness-only.
 
 **Stamps.** The harness owns the channel between the sessions and the RIB
 and puts a forwarding tap on it. Sessions admit into the tap's ingress

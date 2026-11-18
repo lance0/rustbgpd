@@ -28,6 +28,7 @@
 //! the last; a burst message then counts as ahead until the marker of its
 //! group is answered.
 
+use std::collections::BTreeSet;
 use std::thread;
 
 use rustbgpd_wire::{Ipv4NlriEntry, Ipv4UnicastMode, UpdateMessage};
@@ -569,12 +570,20 @@ fn deny_all() -> PolicyChain {
     }])
 }
 
+#[derive(Default)]
 struct WriteResult {
-    submitted: Instant,
+    /// Every message handed to the writer.
+    submitted: Option<Instant>,
     written: Option<Instant>,
     paced: Duration,
+    /// With a start barrier: this socket's first write finished, and the
+    /// writer passed the barrier.
+    first_written: Option<Instant>,
+    continued: Option<Instant>,
 }
 
+/// Write `plan` on `receiver`'s socket. A writer the session stops reading
+/// blocks; at `until` it gives up and its result records how far it got.
 async fn send_burst(
     receiver: &mut Receiver,
     plan: &[(Message, BurstMessage)],
@@ -582,30 +591,77 @@ async fn send_burst(
     start: Option<&tokio::sync::Barrier>,
     until: tokio::time::Instant,
 ) -> Result<WriteResult> {
-    let mut paced = Duration::ZERO;
+    let mut result = WriteResult::default();
     for (index, (message, _)) in plan.iter().enumerate() {
         if index != 0 && !interval.is_zero() {
             let slept = Instant::now();
             tokio::time::sleep(interval).await;
-            paced += slept.elapsed();
+            result.paced += slept.elapsed();
         }
-        receiver.stub_tx.send(message.clone()).await?;
+        let Ok(sent) = tokio::time::timeout_at(until, receiver.stub_tx.send(message.clone())).await
+        else {
+            return Ok(result);
+        };
+        sent?;
         if let Some(start) = start.filter(|_| index == 0) {
             // Both sockets finish their first write before either writer continues.
-            tokio::time::timeout_at(until, receiver.io.drain_writes(1)).await??;
-            start.wait().await;
+            let Ok(drained) = tokio::time::timeout_at(until, receiver.io.drain_writes(1)).await
+            else {
+                return Ok(result);
+            };
+            drained?;
+            result.first_written = Some(Instant::now());
+            if tokio::time::timeout_at(until, start.wait()).await.is_err() {
+                return Ok(result);
+            }
+            result.continued = Some(Instant::now());
         }
     }
-    let submitted = Instant::now();
-    let written = tokio::time::timeout_at(until, receiver.io.drain_writes(plan.len() as u64))
+    result.submitted = Some(Instant::now());
+    result.written = tokio::time::timeout_at(until, receiver.io.drain_writes(plan.len() as u64))
         .await
         .is_ok_and(|drained| drained.is_ok())
         .then(Instant::now);
-    Ok(WriteResult {
-        submitted,
-        written,
-        paced,
-    })
+    Ok(result)
+}
+
+/// The tap's admissions from `source`, and when the RIB finished them: the
+/// first burst marker answered behind that source's last planned message.
+fn source_completion(
+    burst: &[(Instant, usize, BurstMessage)],
+    finished: &[(Instant, usize)],
+    source: usize,
+    planned: usize,
+) -> (Vec<BurstMessage>, Option<Instant>) {
+    let received: Vec<(usize, BurstMessage)> = burst
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, peer, _))| *peer == source)
+        .map(|(position, &(_, _, message))| (position + 1, message))
+        .collect();
+    let done = received
+        .last()
+        .filter(|_| received.len() == planned)
+        .and_then(|&(through, _)| finished.iter().find(|&&(_, seen)| seen >= through))
+        .map(|&(at, _)| at);
+    (
+        received.into_iter().map(|(_, message)| message).collect(),
+        done,
+    )
+}
+
+/// The distinct prefixes a plan's UPDATEs carry, decoded from the wire.
+fn planned_prefixes(plan: &[(Message, BurstMessage)]) -> Result<BTreeSet<usize>> {
+    let mut prefixes = BTreeSet::new();
+    for (message, _) in plan {
+        let Message::Update(update) = message else {
+            bail!("a burst message is not an UPDATE");
+        };
+        let observed = crate::credit_wire::observe(update, WireFamily::Unicast)?;
+        prefixes.extend(observed.announced.iter().map(|&(index, _)| index));
+        prefixes.extend(observed.withdrawn);
+    }
+    Ok(prefixes)
 }
 
 /// The cell, or with `variant.control` its control without healthy updates.
@@ -664,6 +720,17 @@ pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<b
         plans.push(plan);
         marked.extend(marks);
     }
+    // What each source's plan carries, read back from its UPDATEs, and the
+    // single-source plan's length for the same table.
+    let carried = plans
+        .iter()
+        .map(|plan| planned_prefixes(plan))
+        .collect::<Result<Vec<_>>>()?;
+    let single_source_messages = variant.two_sources.then(|| {
+        burst_plan(0..rows, per_update, &withdrawn, &reannounced)
+            .0
+            .len()
+    });
     // Two sources use the standard UPDATE size, with a marker on every
     // message, so their arrival order cannot change the marker placement.
     let messages = marked.len();
@@ -820,8 +887,7 @@ pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<b
     );
     let writers = if let Some(second) = rest.first_mut() {
         let second = send_burst(second, &plans[1], interval, Some(&barrier), until);
-        let (a, b) =
-            tokio::time::timeout_at(until, async { tokio::try_join!(first, second) }).await??;
+        let (a, b) = tokio::try_join!(first, second)?;
         vec![a, b]
     } else {
         vec![first.await?]
@@ -829,8 +895,8 @@ pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<b
     let submitted = writers
         .iter()
         .map(|w| w.submitted)
-        .max()
-        .expect("burst writer");
+        .collect::<Option<Vec<_>>>()
+        .and_then(|times| times.into_iter().max());
     let written = writers
         .iter()
         .map(|w| w.written)
@@ -942,31 +1008,19 @@ pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<b
     let mut sources_done = true;
     let mut source_results = Vec::new();
     for (source, plan) in plans.iter().enumerate() {
-        let received: Vec<_> = log
-            .burst
-            .iter()
-            .enumerate()
-            .filter(|(_, (_, peer, _))| *peer == source)
-            .collect();
-        let ordered = received
-            .iter()
-            .map(|(_, (_, _, msg))| msg)
-            .eq(plan.iter().map(|(_, msg)| msg));
-        let last = received
-            .last()
-            .filter(|_| received.len() == plan.len())
-            .map(|(i, _)| i + 1);
-        let done = last
-            .and_then(|last| log.finished.iter().find(|(_, through)| *through >= last))
-            .map(|(at, _)| ms(*at));
+        let (received, done) = source_completion(&log.burst, &log.finished, source, plan.len());
+        let ordered = received.iter().eq(plan.iter().map(|(_, msg)| msg));
+        let writer = &writers[source];
         in_order &= ordered;
-        sources_done &=
-            done.is_some() && writers[source].written.is_some() && received.len() == plan.len();
+        sources_done &= done.is_some() && writer.written.is_some() && received.len() == plan.len();
+        let prefixes = &carried[source];
         source_results.push(json!({
             "peer": receiver_ip(burst_source + source).to_string(),
-            "routes": (source + 1) * rows / sources - source * rows / sources,
+            "routes": prefixes.len(),
+            "prefix_range": prefixes.first().zip(prefixes.last()).map(|(lo, hi)| [*lo, hi + 1]),
             "messages_planned": plan.len(), "messages_admitted": received.len(),
-            "in_order": ordered, "written_ms": writers[source].written.map(ms), "rib_done_ms": done,
+            "in_order": ordered, "written_ms": writer.written.map(ms), "rib_done_ms": done.map(ms),
+            "first_written_ms": writer.first_written.map(ms), "continued_ms": writer.continued.map(ms),
         }));
     }
     let first_admitted = log.burst.first().map(|&(at, _, _)| at);
@@ -1013,7 +1067,7 @@ pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<b
         // Every time is in ms from t0, when the healthy source started.
         "burst": {
             "first_sent_ms": ms(first_sent),
-            "submitted_ms": ms(submitted),
+            "submitted_ms": submitted.map(ms),
             "written_ms": written.map(ms),
             "paced_sleep_ms": paced.as_secs_f64() * 1e3,
             "messages_admitted": log.burst.len(),
@@ -1071,6 +1125,7 @@ pub async fn run(output: &Path, options: &Options, variant: Variant) -> Result<b
         let errors = churn_state.lock().expect("churn state").unexpected_updates;
         result["wire"]["healthy_table_errors"] = json!(errors);
         result["shape"]["burst_sources"] = json!(sources);
+        result["shape"]["single_source_messages"] = json!(single_source_messages);
         result["burst"]["sources"] = json!(source_results);
         result["checks"]["sources_complete"] = json!(sources_done);
         result["checks"]["healthy_converged"] = json!(
@@ -1335,6 +1390,75 @@ mod tests {
         split.extend(entries(rows / 2..rows));
         assert_eq!(split, entries(0..rows));
         assert_eq!(split.len(), rows);
+    }
+
+    #[test]
+    fn the_tap_labels_each_burst_source_by_its_own_peer() {
+        let update = source_update(Family::Unicast, 0..1, BURST_VERSION, 100);
+        let other = PeerId::from_ipv4(Ipv4Addr::new(127, 0, 0, 9));
+        let label = |burst, second| {
+            let config = TapConfig {
+                burst,
+                second,
+                healthy: PeerId::from_ipv4(CHURN_SOURCE),
+                stall: None,
+                marked: Vec::new(),
+            };
+            match classify(&update, &config) {
+                Class::Burst(source, _) => Some(source),
+                _ => None,
+            }
+        };
+        let source = PeerId::from_ipv4(SOURCE);
+        assert_eq!(label(source, None), Some(0));
+        assert_eq!(label(source, Some(other)), Some(0));
+        assert_eq!(label(other, Some(source)), Some(1));
+        assert_eq!(label(other, None), None);
+    }
+
+    /// Each source is done at the first marker behind its own last message,
+    /// not at the first marker of the run nor at the burst's last.
+    #[test]
+    fn each_source_finishes_at_the_marker_behind_its_own_last_message() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let message = |first| BurstMessage {
+            announced: 1,
+            withdrawn: 0,
+            first: Some(first),
+        };
+        // Admission order: 0, 1, 0, 1, 1, with a marker behind each.
+        let burst: Vec<_> = [(0, 0), (1, 10), (0, 1), (1, 11), (1, 12)]
+            .into_iter()
+            .map(|(source, first)| (at(0), source, message(first)))
+            .collect();
+        let finished: Vec<_> = (1..=5)
+            .map(|through| (at(through * 10), through as usize))
+            .collect();
+        let (received, done) = source_completion(&burst, &finished, 0, 2);
+        assert_eq!(received, [message(0), message(1)]);
+        assert_eq!(done, Some(at(30)));
+        let (received, done) = source_completion(&burst, &finished, 1, 3);
+        assert_eq!(received, [message(10), message(11), message(12)]);
+        assert_eq!(done, Some(at(50)));
+        // A source short of its plan is not done, whatever was answered.
+        assert_eq!(source_completion(&burst, &finished, 1, 4).1, None);
+        // Its last message's marker not yet answered.
+        assert_eq!(source_completion(&burst, &finished[..2], 0, 2).1, None);
+    }
+
+    #[test]
+    fn planned_prefixes_read_what_each_plan_carries() {
+        let rows = 2_201;
+        let (withdrawn, reannounced) = churn_plan(rows);
+        let carried = |range: std::ops::Range<usize>| {
+            planned_prefixes(&burst_plan(range, ROWS_PER_UPDATE, &withdrawn, &reannounced).0)
+                .unwrap()
+        };
+        let low = carried(0..rows / 2);
+        assert_eq!(low, (0..rows / 2).collect());
+        assert_eq!(carried(rows / 2..rows), (rows / 2..rows).collect());
+        assert_eq!(carried(0..rows).len(), rows);
     }
 
     #[test]

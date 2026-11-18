@@ -1880,15 +1880,27 @@ def burst_sources(run: dict, what: str) -> list[str]:
     planned = 0
     final_marker = 0.0
     notes = []
+    ranges = []
     start = number(run, "burst.first_sent_ms", what)
     for index, source in enumerate(sources):
         count = number(source, "messages_planned", what)
         planned += count
+        # The prefixes the source's plan carried, read back from its UPDATEs.
         routes = number(source, "routes", what)
+        span = need(source, "prefix_range", what)
+        if not (
+            isinstance(span, list)
+            and len(span) == 2
+            and all(type(edge) is int for edge in span)
+            and 0 <= span[0] < span[1] <= rows
+            and type(routes) is int
+            and 1 <= routes <= span[1] - span[0]
+        ):
+            raise Invalid(f"{what}: burst peer {peers[index]} has no usable prefix range")
+        ranges.append(span)
         if (
             count < 1
             or number(source, "messages_admitted", what) != count
-            or routes != (index + 1) * rows // 2 - index * rows // 2
             or source.get("in_order") is not True
         ):
             raise Invalid(f"{what}: inconsistent work for burst peer {peers[index]}")
@@ -1899,7 +1911,30 @@ def burst_sources(run: dict, what: str) -> list[str]:
             raise Invalid(f"{what}: invalid RIB completion for burst peer {peers[index]}")
         final_marker = max(final_marker, marker)
         notes.append(
-            f"peer {peers[index]} {routes:g} routes, {count:g} messages, RIB done {done:.1f} ms"
+            f"peer {peers[index]} {routes:g} routes {span[0]}..{span[1]}, {count:g} messages, "
+            f"RIB done {done:.1f} ms"
+        )
+    # The split must divide the single-source work, not repeat it. Each of
+    # the plan's three stages (announce, withdraw, announce again) can gain
+    # one UPDATE where the split cuts a chunk.
+    low, high = sorted(ranges)
+    single = number(run, "shape.single_source_messages", what)
+    if (
+        low[1] > high[0]
+        or sum(number(s, "routes", what) for s in sources) != rows
+        or planned > single + 3
+    ):
+        raise Invalid(
+            f"{what}: the sources' plans do not split the {rows}-route table "
+            f"(ranges {low} and {high}, {planned:g} messages for {single:g} from one source)"
+        )
+    # Both sockets finished their first write before either writer went on.
+    first = [number(s, "first_written_ms", what) for s in sources]
+    went_on = [number(s, "continued_ms", what) for s in sources]
+    if max(first) > min(went_on):
+        raise Invalid(
+            f"{what}: a writer continued at {min(went_on):.3f} ms, before the other socket's "
+            f"first write at {max(first):.3f} ms"
         )
     if (
         planned != number(run, "shape.burst_messages", what)
@@ -1916,6 +1951,21 @@ def burst_sources(run: dict, what: str) -> list[str]:
     ):
         raise Invalid(f"{what}: healthy wire evidence disagrees with convergence check")
     return notes
+
+
+def one_source_starved(run: dict) -> bool:
+    """One burst source's plan was admitted in full and the other's was not."""
+    sources = (run.get("burst") or {}).get("sources")
+    if not isinstance(sources, list) or len(sources) != 2:
+        return False
+    full = []
+    for source in sources:
+        counts = [source.get(key) if isinstance(source, dict) else None
+                  for key in ("messages_planned", "messages_admitted")]
+        if not all(type(count) is int for count in counts) or counts[0] < 1:
+            return False
+        full.append(counts[0] == counts[1])
+    return sorted(full) == [False, True]
 
 
 def source_burst(run: dict, what: str) -> tuple[str, str]:
@@ -1944,6 +1994,11 @@ def source_burst(run: dict, what: str) -> tuple[str, str]:
     if not well_formed:
         raise Invalid(f"{what}: incomplete or malformed checks")
     need(run, "wire", what)
+    # One source admitted in full shows the tap recognizes burst messages:
+    # the other source's shortfall is the session's, a read gate that never
+    # reopened or a writer blocked past the deadline.
+    if two_sources and "sources_complete" in failed and one_source_starved(run):
+        return "FAIL", f"failed checks: {', '.join(failed)}"
     # A tap that no longer recognizes what the session admits sees no burst
     # and leaves the run to time out: its table and order checks then judge
     # the instrument, not the daemon.
