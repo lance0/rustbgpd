@@ -108,8 +108,8 @@ FAMILIES = ("unicast", "evpn")
 FILL_FAMILIES = ("unicast", "evpn", "vpn", "flowspec")
 WIRE_CHECKS = ("final_state_exact", "one_eor_before_burst", "no_session_resets")
 RESTART_WIRE_CHECKS = ("final_state_exact", "eor_after_every_route", "no_session_resets")
-# Cell 2's trigger. A selection release owes every private receiver its
-# family whole and spends no ordinary credit, so it cannot witness exhaustion.
+# Cell 2 requires the ordinary burst. A selection release exercises the
+# owed drain and can flip every receiver without exhausting ordinary credit.
 ORDINARY_TRIGGER = "ordinary_announce_burst"
 # Cell 2 witness: each tree's per-peer ordinary credit, as (daemon-wide
 # credit, per-peer floor, per-peer ceiling), in the unit of the gauge the
@@ -1338,7 +1338,7 @@ def check(directory: Path) -> list[tuple[str, str, str]]:
                     reason, witness = single_arm_exhaust(runs, "arm")
                     passed = f"{witness}; wire exact, ordered, no resets"
                 else:
-                    # No witness: a selection release spends no ordinary credit.
+                    # The release cell has its own charge witness.
                     reason = wire_failure(runs, "arm", RESTART_WIRE_CHECKS)
                     notes = [
                         release_readings(run, f"run {index}", family)

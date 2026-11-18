@@ -805,9 +805,9 @@ impl Arm {
         // A credit override applies to the subject; the reference keeps the
         // default credit, which no case reaches.
         if arm == REFERENCE {
-            manager.outbound_row_credit_override = None;
+            manager.outbound_credit_override = None;
         } else if let Some(credit) = subject_credit {
-            manager.outbound_row_credit_override = Some(credit);
+            manager.outbound_credit_override = Some(unicast_rows(credit));
         }
         Self {
             tx,

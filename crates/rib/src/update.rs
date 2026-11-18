@@ -1287,7 +1287,7 @@ pub struct OutboundRouteUpdate {
     /// ordinary row replace it ahead of the RTBH path's own announcement.
     /// `0` = no ordering requirement.
     pub exempt_announce: usize,
-    /// Private-family rows this envelope holds against its peer's outbound
+    /// Private-family rows and bytes this envelope holds against its peer's outbound
     /// credit, released when it drops. `None` for an uncharged envelope.
     pub credit: Option<crate::outbound_credit::OutboundCharge>,
     /// The whole-table operation this envelope belongs to; the operation is
@@ -1319,6 +1319,8 @@ pub struct OutboundOwed {
     pub live_operation: bool,
     /// Private rows the peer's queued envelopes hold against its credit.
     pub credit_rows: usize,
+    /// Estimated bytes of those rows: the credit they hold.
+    pub credit_bytes: usize,
     /// Owed private-family keys, as `(family, key)` with the key rendered as
     /// the oracles render it, or `None` for a family owed whole: everything
     /// owed now or marked since the previous query of this peer.

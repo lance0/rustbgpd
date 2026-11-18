@@ -523,8 +523,11 @@ refresh answers with the whole table. A receiver that is dirty or forced at
 the release is not owed either; its resync covers the family. The resync tick
 reads a receiver's credit before it absorbs owed state for a waiting
 End-of-RIB, so a receiver that has stopped reading delays only its own table
-and marker. The selection-release replay remains for unicast and VPN group
-members only.
+and marker. The tick budgets unicast cursor steps from the estimated bytes
+remaining. For other families it checks whether credit is spent before
+starting one whole-table operation. That operation holds the latch and
+carries no ordinary credit. The selection-release replay remains for
+unicast and VPN group members only.
 
 The release sends only the released family's End-of-RIB, and only when that
 family owes nothing: a receiver can be a group member for one family and hold

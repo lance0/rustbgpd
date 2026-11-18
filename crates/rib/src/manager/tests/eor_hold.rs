@@ -810,7 +810,7 @@ async fn a_peer_resynced_by_the_release_pass_gets_its_marker_and_no_second_table
             }],
             replay_owners: vec![],
         });
-    manager.outbound_row_credit_override = Some(1);
+    manager.outbound_credit_override = Some(unicast_rows(1));
     let mut output = connect_ungrouped(&mut manager, TARGET, 2);
     assert!(manager.grouped_member_of(TARGET).is_none(), "ungrouped");
     while output.try_recv().is_ok() {}

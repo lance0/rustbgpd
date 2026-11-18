@@ -3073,7 +3073,7 @@ fn orr_client_non_best_change_behind_a_row_cursor_is_revisited() {
         Some(Ipv4Addr::new(10, 255, 0, 1)),
         BgpMetrics::new(),
     )
-    .with_outbound_row_credit(16);
+    .with_outbound_credit_bytes(unicast_rows(16));
     manager.test_force_ungrouped = true;
     manager.flush_poll_budget = Duration::ZERO;
     for source in [ORR_SRC_X, ORR_SRC_Y] {

@@ -17,9 +17,9 @@
 //! - `restart`: the same cell behind an RFC 4724 restart. The RIB starts
 //!   with selection deferred and the restarting source's End-of-RIB releases
 //!   every route to every burst receiver behind its held End-of-RIB. The
-//!   release owes each private receiver its family whole and delivers it as
-//!   one uncharged whole-table operation, so this trigger never spends
-//!   ordinary credit: it is a wire and recovery check, not an exhaustion one.
+//!   release owes each private receiver its family whole. Unicast drains in
+//!   charged cursor steps on trees with the cursor. EVPN uses a latched
+//!   whole-family operation. The cell checks release ordering and recovery.
 //! - `paused`: every EVPN receiver paused while one source re-announces
 //!   its table with alternating `LOCAL_PREF` every round.
 //! - `fill`: every receiver paused while one source sends fresh routes of
@@ -123,10 +123,8 @@ const ROUND_TRIP_EVERY: Duration = Duration::from_millis(10);
 /// probe, and the cell's join on it, forever; a probe at the cap is
 /// recorded as unfinished, far past the 250 ms turn bar.
 const ROUND_TRIP_CAP: Duration = Duration::from_secs(30);
-/// The RIB's row-credit constants, crate-private in
-/// `crates/rib/src/outbound_credit.rs`: daemon-wide credit, per-peer floor
-/// and ceiling, and one ordinary pass. Results record them so the analyzer
-/// reads them from the run; a test fails when they drift from the RIB's.
+/// Row-credit baseline for the analyzer's row ceiling on both arms. A test
+/// checks the limits against a row-credit RIB and the pass size on either arm.
 const ROW_CREDIT: [(&str, usize); 4] = [
     ("DAEMON_ROW_CREDIT", 16_777_216),
     ("MIN_ROW_CREDIT", 8_192),
@@ -207,7 +205,7 @@ pub enum Trigger {
     /// Fresh routes from an established source: ordinary passes, charged
     /// to each receiver's credit.
     Ordinary,
-    /// An RFC 4724 selection release: owed whole, uncharged.
+    /// An RFC 4724 selection release: owed whole to each private receiver.
     Restart,
 }
 
@@ -2817,8 +2815,14 @@ mod tests {
 
     #[test]
     fn row_credit_mirror_matches_the_rib() {
+        let byte_credit = Snapshot::take(&rustbgpd_telemetry::BgpMetrics::new())
+            .total("bgp_rib_outbound_credit_bytes")
+            .is_some();
         let source = include_str!("../../../../crates/rib/src/outbound_credit.rs");
         for (name, value) in super::ROW_CREDIT {
+            if byte_credit && name != "CHUNK_ROWS" {
+                continue; // The three row limits belong to the baseline arm.
+            }
             let declaration = format!("const {name}: usize = ");
             let line = source
                 .lines()

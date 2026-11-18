@@ -1008,7 +1008,8 @@ fn spent_credit_keeps_the_carried_set_unwalked() {
     let observer = peer_v4(OBSERVER);
     let charge = crate::OutboundCharge::new(
         &manager.outbound_credit_handle(observer),
-        manager.outbound_row_credit(),
+        1,
+        manager.outbound_credit_limit(),
     );
     let stagings = manager.outbound_stagings(observer);
     let refusals = |manager: &RibManager| -> f64 {
@@ -3173,7 +3174,8 @@ fn oversized_carried_set_retires_chunk_by_chunk() {
     use crate::outbound_credit::CHUNK_ROWS;
     let credit = 2 * CHUNK_ROWS;
     let mut manager = manager_with_dormant_waiter();
-    manager.outbound_row_credit_override = Some(credit);
+    // Credit for `credit` withdrawals, each charged its key.
+    manager.outbound_credit_override = Some(credit * std::mem::size_of::<(Prefix, u32)>());
     let _source = connect(&mut manager, SOURCE, 64, false, false);
     let (_old_tx, mut old_rx, _) = register(&mut manager, 82, false, false);
     let _waiter = connect(&mut manager, WAITER, 64, true, false);

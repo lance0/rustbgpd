@@ -322,7 +322,7 @@ fn first_refresh_of_an_orf_helper_sends_its_table_before_the_eor_without_credit(
         let (mut rx, mut rib) = flapped(&mut manager, Open::HelperOnly);
         assert_eq!(apply(&mut rx, &mut rib), Vec::<&str>::new());
         if spent {
-            manager.outbound_row_credit_override = Some(0);
+            manager.outbound_credit_override = Some(unicast_rows(0));
         }
         refresh(&mut manager, 182);
         let updates: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok().map(delivered)).collect();
@@ -940,7 +940,7 @@ async fn empty_view_resync_answers_the_owed_refresh_and_its_held_eor() {
     let mut manager = manager();
     // A full channel is the refusal under test: the default row credit,
     // whatever a credit sweep sets.
-    manager.outbound_row_credit_override = None;
+    manager.outbound_credit_override = None;
     let peer = peer_v4(OBSERVER);
     let mut old_rx = register_dual_stack(&mut manager, 82, 64);
     permit_all_orf(&mut manager, 82);

@@ -13,7 +13,7 @@ use crate::outbound_credit::CHUNK_ROWS;
 const SOURCE: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
 const V4: (Afi, Safi) = (Afi::Ipv4, Safi::Unicast);
 const UNICAST: OwedFamily = OwedFamily::IPV4_UNICAST;
-/// Rows of outbound credit: a step with the whole credit free takes
+/// Credit in unicast announcements: a step with the whole credit free takes
 /// `CREDIT / 2` keys (a key may stage a withdrawal and an announcement).
 const CREDIT: usize = 16;
 const STEP: usize = CREDIT / 2;
@@ -29,10 +29,19 @@ fn manager(credit: usize) -> RibManager {
         Some(Ipv4Addr::new(10, 0, 0, 100)),
         BgpMetrics::new(),
     )
-    .with_outbound_row_credit(credit);
+    .with_outbound_credit_bytes(unicast_rows(credit));
     manager.test_force_ungrouped = true;
     manager.flush_poll_budget = Duration::ZERO;
     manager
+}
+
+/// Hold the charge for `rows` unicast announcements.
+fn charge_rows(manager: &mut RibManager, peer: PeerId, rows: usize) -> crate::OutboundCharge {
+    crate::OutboundCharge::new(
+        &manager.outbound_credit_handle(peer),
+        rows,
+        unicast_rows(rows),
+    )
 }
 
 fn up_session(
@@ -360,6 +369,9 @@ fn a_step_is_at_most_one_chunk_of_keys() {
 fn a_cursor_drain_is_charged_and_takes_no_operation() {
     let rows = 100;
     let (mut manager, mut receivers) = owing(2, rows, CREDIT);
+    // One byte short of an integral row limit: the last announcement may
+    // spend the remaining credit, so exactly one byte can be overdrawn.
+    manager.outbound_credit_override = Some(unicast_rows(CREDIT) - 1);
     // Receiver 1 never reads.
     for _ in 0..50 {
         manager.resync_dirty_peers_bounded();
@@ -369,16 +381,27 @@ fn a_cursor_drain_is_charged_and_takes_no_operation() {
         }
     }
     let stalled = receivers[1].peer;
-    assert!(
-        manager.outbound_credit_rows(stalled) <= CREDIT + STEP,
-        "{} rows queued toward a receiver that reads nothing",
-        manager.outbound_credit_rows(stalled)
-    );
+    assert_eq!(manager.outbound_credit_rows(stalled), CREDIT);
+    assert_eq!(manager.outbound_credit_bytes(stalled), unicast_rows(CREDIT));
     assert!(manager.owes(stalled, V4));
     assert!(manager.eor_pending(stalled).contains(&V4));
     assert!(!manager.dirty_peers.contains(&stalled));
     // The reader finished meanwhile; the stalled one finishes once it reads.
     assert!(!manager.owes(receivers[0].peer, V4));
+    let stalled_receiver = &mut receivers[1];
+    let mut held_rows = 0;
+    while let Ok(update) = stalled_receiver.rx.try_recv() {
+        let rows = update.announce.len();
+        let charge = update.credit.as_ref().expect("charged cursor step");
+        assert_eq!(charge.rows(), rows);
+        assert_eq!(charge.bytes(), unicast_rows(rows));
+        assert_eq!(update.end_of_rib, [], "marker overtook the stalled cursor");
+        held_rows += rows;
+        stalled_receiver.wire.apply(&update);
+    }
+    assert_eq!(held_rows, CREDIT);
+    assert_eq!(manager.outbound_credit_rows(stalled), 0);
+    assert_eq!(manager.outbound_credit_bytes(stalled), 0);
     drain(&mut manager, &mut receivers);
     let all: Vec<_> = (0..rows).map(|index| (index, 0)).collect();
     assert_settled(&manager, &receivers, &all, "charged");
@@ -907,8 +930,7 @@ fn a_set_past_its_cap_keeps_its_keys_and_starts_a_cursor() {
     assert!(!manager.owes(peer, V4));
     // With the credit spent, rows 0..120 leave in one pass: more keys than
     // a quarter of the family, all of them rows the receiver holds.
-    let charge =
-        crate::outbound_credit::OutboundCharge::new(&manager.outbound_credit_handle(peer), CREDIT);
+    let charge = charge_rows(&mut manager, peer, CREDIT);
     let gone: Vec<u32> = (0..120).collect();
     received(&mut manager, &[], &gone);
     assert!(manager.owes_whole(peer, UNICAST), "past the byte cap");
@@ -963,8 +985,7 @@ fn a_pass_logs_its_keys_once_and_only_while_a_cursor_is_held() {
     std::mem::forget(up_session(&mut keyed, peer_v4(SOURCE), 0));
     let peer = receiver(0);
     std::mem::forget(up_session(&mut keyed, peer, 0));
-    let _charge =
-        crate::outbound_credit::OutboundCharge::new(&keyed.outbound_credit_handle(peer), CREDIT);
+    let _charge = charge_rows(&mut keyed, peer, CREDIT);
     received(&mut keyed, &[(0, 0), (1, 0)], &[]);
     received(&mut keyed, &[(2, 0)], &[]);
     assert_eq!(keyed.owed_key_count(peer, UNICAST), 3);
@@ -1194,10 +1215,7 @@ fn a_key_between_two_cursors_reaches_both_once_at_its_newest_state() {
     let rows = 40u32;
     let (mut manager, mut receivers) = owing(2, rows, CREDIT);
     // The slower receiver has no credit and takes no step.
-    let charge = crate::outbound_credit::OutboundCharge::new(
-        &manager.outbound_credit_handle(receivers[1].peer),
-        CREDIT,
-    );
+    let charge = charge_rows(&mut manager, receivers[1].peer, CREDIT);
     for _ in 0..4 {
         tick(&mut manager, &mut receivers);
     }
@@ -1229,10 +1247,7 @@ fn a_key_between_two_cursors_reaches_both_once_at_its_newest_state() {
 fn a_caught_up_receiver_gets_its_end_of_rib_while_another_is_stalled() {
     let rows = 40u32;
     let (mut manager, mut receivers) = owing(2, rows, CREDIT);
-    let charge = crate::outbound_credit::OutboundCharge::new(
-        &manager.outbound_credit_handle(receivers[1].peer),
-        CREDIT,
-    );
+    let charge = charge_rows(&mut manager, receivers[1].peer, CREDIT);
     let mut caught_up = false;
     for _ in 0..64 {
         tick(&mut manager, &mut receivers);
@@ -1619,10 +1634,7 @@ fn a_tick_resyncs_one_evicted_receiver_whatever_its_budget() {
     // A budget no unit uses up.
     manager.flush_poll_budget = Duration::from_secs(3600);
     // The receiver that keeps up takes no step meanwhile.
-    let charge = crate::outbound_credit::OutboundCharge::new(
-        &manager.outbound_credit_handle(receivers[0].peer),
-        CREDIT,
-    );
+    let charge = charge_rows(&mut manager, receivers[0].peer, CREDIT);
     let builds = manager.adj_rib_out_commit_stats.resync_builds;
     let observed = drain_steps_observed(&manager);
     for unit in 1..=STALLED {
@@ -1952,8 +1964,7 @@ fn a_kept_set_keeps_its_cursor_until_it_is_empty() {
     let peer = receiver(0);
     let mut rx = up_session(&mut manager, peer, 0);
     while rx.try_recv().is_ok() {}
-    let charge =
-        crate::outbound_credit::OutboundCharge::new(&manager.outbound_credit_handle(peer), 2);
+    let charge = charge_rows(&mut manager, peer, 2);
     let rows: Vec<_> = (0..120).map(|index| (index, 0)).collect();
     received(&mut manager, &rows, &[]);
     assert!(manager.owes_whole(peer, UNICAST));
@@ -1994,8 +2005,7 @@ fn churn_past_a_kept_set_flips_once_and_the_end_of_rib_waits_for_both() {
     wire.write(&mut rx);
     wire.markers = 0;
     let mut receivers = vec![Receiver { peer, rx, wire }];
-    let charge =
-        crate::outbound_credit::OutboundCharge::new(&manager.outbound_credit_handle(peer), CREDIT);
+    let charge = charge_rows(&mut manager, peer, CREDIT);
     let mut expected: Vec<_> = (0..120).map(|index| (index, 0)).collect();
     received(&mut manager, &expected, &[]);
     assert!(manager.owes_whole(peer, UNICAST));
@@ -2205,10 +2215,7 @@ fn a_receiver_with_exactly_the_cap_after_its_cursor_is_kept() {
     let (mut manager, mut receivers) = owing(2, 16, CREDIT);
     // Receiver 0 never has credit; receiver 1 takes one step of eight
     // keys, then reads nothing.
-    let stalled = crate::outbound_credit::OutboundCharge::new(
-        &manager.outbound_credit_handle(receivers[0].peer),
-        CREDIT,
-    );
+    let stalled = charge_rows(&mut manager, receivers[0].peer, CREDIT);
     for _ in 0..2 {
         manager.resync_dirty_peers_bounded();
     }
@@ -2334,10 +2341,7 @@ fn a_unit_refused_after_its_build_still_ends_the_tick() {
     let (mut manager, mut receivers, expected) = evict_stalled(3);
     manager.flush_poll_budget = Duration::from_secs(3600);
     // The receiver that keeps up takes no step meanwhile.
-    let charge = crate::outbound_credit::OutboundCharge::new(
-        &manager.outbound_credit_handle(receivers[0].peer),
-        CREDIT,
-    );
+    let charge = charge_rows(&mut manager, receivers[0].peer, CREDIT);
     let refused = next_unit(&manager);
     assert!(manager.owed_row_evicted.contains(&refused));
     let encoder = manager
@@ -2512,10 +2516,7 @@ fn a_tick_trims_the_list_while_no_owing_receiver_can_step() {
     let waiting = receiver(7);
     let mut rx = up_session(&mut manager, waiting, 0);
     while rx.try_recv().is_ok() {}
-    let _charge = crate::outbound_credit::OutboundCharge::new(
-        &manager.outbound_credit_handle(waiting),
-        CREDIT,
-    );
+    let _charge = charge_rows(&mut manager, waiting, CREDIT);
     received(&mut manager, &[(5, 1)], &[]);
     assert_eq!(manager.owed_key_count(waiting, UNICAST), 1);
     assert!(!manager.owes_whole(waiting, UNICAST));

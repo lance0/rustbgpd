@@ -376,6 +376,8 @@ const T1_CREDIT: usize = 2 * CHUNK_ROWS;
 struct StallOutcome {
     /// Rows charged to each stalled receiver's credit.
     charged: Vec<usize>,
+    /// Bytes charged to each stalled receiver's credit.
+    charged_bytes: Vec<usize>,
     /// Every row queued for each stalled receiver.
     retained: Vec<usize>,
     /// Unique route-vector bytes queued across the stalled receivers.
@@ -388,7 +390,7 @@ struct StallOutcome {
 /// receivers that never drain, plus one that drains every round. `fresh`:
 /// every round announces new keys and withdraws the previous round's.
 fn stalled_private_evpn(rounds: u32, fresh: bool) -> StallOutcome {
-    let mut manager = manager().with_outbound_row_credit(T1_CREDIT);
+    let mut manager = manager().with_outbound_credit_bytes(unicast_rows(T1_CREDIT));
     let mut source = up(&mut manager, peer_v4(SOURCE), evpn_sendable(), 4096, 0);
     let control = peer_v4(Ipv4Addr::new(10, 0, 2, 1));
     let mut control_rx = up(&mut manager, control, evpn_sendable(), 4096, 0);
@@ -423,6 +425,7 @@ fn stalled_private_evpn(rounds: u32, fresh: bool) -> StallOutcome {
     }
     let mut outcome = StallOutcome {
         charged: Vec::new(),
+        charged_bytes: Vec::new(),
         retained: Vec::new(),
         bytes: 0,
         owing: true,
@@ -430,6 +433,9 @@ fn stalled_private_evpn(rounds: u32, fresh: bool) -> StallOutcome {
     let mut all = Vec::new();
     for (peer, rx) in &mut stalled {
         outcome.charged.push(manager.outbound_credit_rows(*peer));
+        outcome
+            .charged_bytes
+            .push(manager.outbound_credit_bytes(*peer));
         let queued = held(rx);
         outcome.retained.push(rows(&queued));
         outcome.owing &= manager.owing(*peer).is_some() && !manager.dirty_peers.contains(peer);
@@ -439,8 +445,8 @@ fn stalled_private_evpn(rounds: u32, fresh: bool) -> StallOutcome {
     outcome
 }
 
-/// T1. Stalled private receivers hold no more than their credit plus one
-/// pass, and the bytes they pin do not grow with the churn rounds: 4× the
+/// T1. Stalled private receivers hold no more credit bytes than their
+/// credit plus one pass, and the bytes they pin do not grow with the churn rounds: 4× the
 /// rounds pin the same unique bytes within one pass. Charged rows are every
 /// retained row here (no whole-table operation runs). Red without the
 /// credit check: every round stays queued, so the bytes grow 4×.
@@ -466,10 +472,17 @@ fn stalled_private_receivers_pin_bytes_flat_in_churn_rounds() {
                 outcome.owing,
                 "fresh={fresh}: spent credit leaves the peers owing keys, not dirty"
             );
-            for (&charged, &retained) in outcome.charged.iter().zip(&outcome.retained) {
+            let pass_credit = evpn_rows(pass);
+            for ((&charged, &retained), &bytes) in outcome
+                .charged
+                .iter()
+                .zip(&outcome.retained)
+                .zip(&outcome.charged_bytes)
+            {
                 assert!(
-                    charged <= T1_CREDIT + pass,
-                    "fresh={fresh}: {charged} rows charged against {T1_CREDIT}"
+                    bytes <= unicast_rows(T1_CREDIT) + pass_credit,
+                    "fresh={fresh}: {bytes} bytes charged against {}",
+                    unicast_rows(T1_CREDIT)
                 );
                 assert_eq!(
                     charged, retained,
@@ -490,7 +503,7 @@ fn stalled_private_receivers_pin_bytes_flat_in_churn_rounds() {
 fn stalled_receiver_otc_diagnostics_are_charged_and_bounded() {
     const CREDIT: usize = 64;
     const KEYS: u32 = 16;
-    let mut manager = manager().with_outbound_row_credit(CREDIT);
+    let mut manager = manager().with_outbound_credit_bytes(unicast_rows(CREDIT));
     manager.test_force_ungrouped = true;
     let mut source = up(&mut manager, peer_v4(SOURCE), ipv4_sendable(), 4096, 0);
     let peer = peer_v4(Ipv4Addr::new(10, 0, 4, 1));
@@ -993,7 +1006,7 @@ fn replay_cancelled_after_acceptance_publishes_every_family_and_its_terminal() {
 /// peer goes dirty.
 #[test]
 fn whole_table_operations_and_markers_ignore_exhausted_credit() {
-    let mut manager = manager().with_outbound_row_credit(0);
+    let mut manager = manager().with_outbound_credit_bytes(unicast_rows(0));
     manager.test_force_ungrouped = true;
     let mut source = up(&mut manager, peer_v4(SOURCE), ipv4_sendable(), 4096, 0);
     routes_received(
@@ -1074,7 +1087,7 @@ fn drive_producers(credit: usize, rtc: bool) -> Vec<(&'static str, usize, bool, 
             (Afi::Ipv4, Safi::LabeledUnicast),
         ]
     };
-    let mut manager = manager().with_outbound_row_credit(credit);
+    let mut manager = manager().with_outbound_credit_bytes(unicast_rows(credit));
     manager.test_force_ungrouped = true;
     let mut source = up(&mut manager, peer_v4(SOURCE), families.clone(), 4096, 0);
     let peer = peer_v4(Ipv4Addr::new(10, 0, 8, 1));
@@ -1229,7 +1242,8 @@ fn a_selection_release_without_credit_stages_nothing() {
         let charge = spent.then(|| {
             crate::OutboundCharge::new(
                 &manager.outbound_credit_handle(peer),
-                manager.outbound_row_credit(),
+                1,
+                manager.outbound_credit_limit(),
             )
         });
         let before = manager.outbound_stagings(peer);
@@ -1313,7 +1327,12 @@ fn lagging_receivers_within_credit_never_go_dirty() {
             ipv4_sendable()
         };
         let run = |stall: u32, cycles: u32| {
-            let mut manager = manager().with_outbound_row_credit(CREDIT);
+            let credit = if evpn {
+                evpn_rows(CREDIT)
+            } else {
+                unicast_rows(CREDIT)
+            };
+            let mut manager = manager().with_outbound_credit_bytes(credit);
             manager.test_force_ungrouped = true;
             let mut source = up(&mut manager, peer_v4(SOURCE), families.clone(), 4096, 0);
             let mut receivers: Vec<_> = (0..4u8)
@@ -1379,7 +1398,7 @@ fn evpn_withdrawals(updates: &[OutboundRouteUpdate]) -> usize {
 #[test]
 fn shutdown_withdrawals_bypass_spent_credit_after_begin_close() {
     let run = |begin_close: bool, fill: bool| {
-        let mut manager = manager().with_outbound_row_credit(1 << 20);
+        let mut manager = manager().with_outbound_credit_bytes(unicast_rows(1 << 20));
         let mut source = up(&mut manager, peer_v4(SOURCE), evpn_sendable(), 4096, 0);
         let peer = peer_v4(Ipv4Addr::new(10, 0, 10, 1));
         let (tx, mut rx) = {
@@ -1392,7 +1411,7 @@ fn shutdown_withdrawals_bypass_spent_credit_after_begin_close() {
         send_all(&mut source);
         let stalled = held(&mut rx);
         assert_eq!(rows(&stalled), 20);
-        manager.outbound_row_credit_override = Some(1);
+        manager.outbound_credit_override = Some(unicast_rows(1));
         if fill {
             while tx.try_send(OutboundRouteUpdate::default()).is_ok() {}
         }
@@ -1633,6 +1652,15 @@ fn a_large_private_pass_leaves_as_charged_r_row_chunks() {
             Some(rows(std::slice::from_ref(chunk)))
         );
     }
+    // Each piece is charged its own bytes, and the pieces sum to the pass.
+    assert_charges_are_the_held_envelopes(&manager, peer, &chunks);
+    let charged: usize = chunks
+        .iter()
+        .filter_map(|chunk| chunk.credit.as_ref())
+        .map(crate::OutboundCharge::bytes)
+        .sum();
+    assert_eq!(charged, unicast_rows(3000), "the pieces sum to the pass");
+    assert_eq!(manager.outbound_credit_bytes(peer), unicast_rows(3000));
     assert_eq!(manager.outbound_credit_rows(peer), 3000);
     drop(chunks);
     assert_eq!(manager.outbound_credit_rows(peer), 0);
@@ -1713,27 +1741,28 @@ fn every_release_path_returns_the_credit_to_zero() {
 #[test]
 fn row_credit_follows_the_registered_peer_count() {
     use crate::outbound_credit::{
-        DAEMON_ROW_CREDIT, MAX_ROW_CREDIT, MIN_ROW_CREDIT, row_credit_for,
+        DAEMON_CREDIT_BYTES, MAX_CREDIT_BYTES, MIN_CREDIT_BYTES, credit_bytes_for,
     };
-    assert_eq!(row_credit_for(1), MAX_ROW_CREDIT);
-    assert_eq!(row_credit_for(16), MAX_ROW_CREDIT);
-    assert_eq!(row_credit_for(17), DAEMON_ROW_CREDIT / 17);
-    assert_eq!(row_credit_for(2048), MIN_ROW_CREDIT);
-    assert_eq!(row_credit_for(10_000), MIN_ROW_CREDIT);
+    assert_eq!(credit_bytes_for(1), MAX_CREDIT_BYTES);
+    assert_eq!(credit_bytes_for(8), MAX_CREDIT_BYTES);
+    assert_eq!(credit_bytes_for(9), DAEMON_CREDIT_BYTES / 9);
+    assert_eq!(credit_bytes_for(1024), MIN_CREDIT_BYTES);
+    assert_eq!(credit_bytes_for(10_000), MIN_CREDIT_BYTES);
 
     let mut manager = manager();
     // Sizing under test: no credit override.
-    manager.outbound_row_credit_override = None;
+    manager.outbound_credit_override = None;
     manager.test_force_ungrouped = true;
     let mut source = up(&mut manager, peer_v4(SOURCE), ipv4_sendable(), 4096, 0);
     let peer = peer_v4(Ipv4Addr::new(10, 0, 13, 1));
     let mut rx = up_session(&mut manager, peer, 1, ipv4_sendable(), 4096, 0);
     send_all(&mut rx);
-    assert_eq!(manager.outbound_row_credit(), row_credit_for(2));
+    assert_eq!(manager.outbound_credit_limit(), credit_bytes_for(2));
     // The peer fills the larger credit it had with two registered peers.
     let filled = crate::OutboundCharge::new(
         &manager.outbound_credit_handle(peer),
-        row_credit_for(20) + 1,
+        1,
+        credit_bytes_for(20) + 1,
     );
     let _others: Vec<_> = (0..18u8)
         .map(|index| {
@@ -1746,7 +1775,7 @@ fn row_credit_follows_the_registered_peer_count() {
             )
         })
         .collect();
-    assert_eq!(manager.outbound_row_credit(), row_credit_for(20));
+    assert_eq!(manager.outbound_credit_limit(), credit_bytes_for(20));
     routes_received(&mut manager, vec![source_route(0)], vec![], vec![], vec![]);
     send_all(&mut source);
     assert!(
@@ -1763,10 +1792,10 @@ fn row_credit_follows_the_registered_peer_count() {
         peer,
         session_id: 1,
     });
-    assert_eq!(manager.outbound_row_credit(), row_credit_for(19));
+    assert_eq!(manager.outbound_credit_limit(), credit_bytes_for(19));
     let mut rx = up_session(&mut manager, peer, 2, ipv4_sendable(), 4096, 0);
     send_all(&mut rx);
-    assert!(manager.outbound_credit_rows(peer) > manager.outbound_row_credit());
+    assert!(manager.outbound_credit_bytes(peer) > manager.outbound_credit_limit());
     routes_received(&mut manager, vec![source_route(1)], vec![], vec![], vec![]);
     send_all(&mut source);
     assert!(send_all(&mut rx).is_empty(), "still over the credit");
@@ -1793,10 +1822,10 @@ fn row_credit_follows_the_registered_peer_count() {
 /// peers get the 1M-row ceiling and are admitted.
 #[test]
 fn peers_that_become_private_are_held_to_the_fleet_credit() {
-    use crate::outbound_credit::row_credit_for;
+    use crate::outbound_credit::credit_bytes_for;
     let mut manager = manager();
     // Sizing under test: no credit override.
-    manager.outbound_row_credit_override = None;
+    manager.outbound_credit_override = None;
     let mut source = peer_up_v4(&mut manager, peer_v4(SOURCE), 4096);
     let mut peers: Vec<_> = (0..40u8)
         .map(|index| {
@@ -1804,8 +1833,8 @@ fn peers_that_become_private_are_held_to_the_fleet_credit() {
             (peer, peer_up_v4(&mut manager, peer, 4096))
         })
         .collect();
-    let fleet = row_credit_for(41);
-    assert_eq!(manager.outbound_row_credit(), fleet, "default sizing");
+    let fleet = credit_bytes_for(41);
+    assert_eq!(manager.outbound_credit_limit(), fleet, "default sizing");
     let (moved, slow) = (peers[0].0, peers[1].0);
     assert!(manager.grouped_member_of(moved).is_some());
     assert!(manager.grouped_member_of(slow).is_some());
@@ -1830,7 +1859,7 @@ fn peers_that_become_private_are_held_to_the_fleet_credit() {
         "isolation made it private"
     );
     assert_eq!(
-        manager.outbound_row_credit(),
+        manager.outbound_credit_limit(),
         fleet,
         "the count did not move"
     );
@@ -1838,7 +1867,7 @@ fn peers_that_become_private_are_held_to_the_fleet_credit() {
         send_all(rx);
     }
     let held_charges = [moved, slow]
-        .map(|peer| crate::OutboundCharge::new(&manager.outbound_credit_handle(peer), fleet));
+        .map(|peer| crate::OutboundCharge::new(&manager.outbound_credit_handle(peer), 1, fleet));
     routes_received(&mut manager, vec![source_route(0)], vec![], vec![], vec![]);
     send_all(&mut source);
     for (index, peer) in [moved, slow].into_iter().enumerate() {
@@ -1863,10 +1892,10 @@ fn peers_that_become_private_are_held_to_the_fleet_credit() {
 /// is private, the credit is the 1M-row ceiling and the full one is admitted.
 #[test]
 fn grouped_otc_diagnostics_are_charged_against_the_fleet_credit() {
-    use crate::outbound_credit::row_credit_for;
+    use crate::outbound_credit::credit_bytes_for;
     let mut manager = manager();
     // Sizing under test: no credit override.
-    manager.outbound_row_credit_override = None;
+    manager.outbound_credit_override = None;
     let mut source = peer_up_v4(&mut manager, peer_v4(SOURCE), 4096);
     let peers: Vec<_> = (0..40u8)
         .map(|index| peer_v4(Ipv4Addr::new(10, 0, 19, index + 1)))
@@ -1887,10 +1916,10 @@ fn grouped_otc_diagnostics_are_charged_against_the_fleet_credit() {
             .iter()
             .all(|peer| manager.grouped_member_of(*peer).is_some())
     );
-    let fleet = row_credit_for(41);
-    assert_eq!(manager.outbound_row_credit(), fleet);
+    let fleet = credit_bytes_for(41);
+    assert_eq!(manager.outbound_credit_limit(), fleet);
     let full = peers[0];
-    let held_charge = crate::OutboundCharge::new(&manager.outbound_credit_handle(full), fleet);
+    let held_charge = crate::OutboundCharge::new(&manager.outbound_credit_handle(full), 1, fleet);
     let mut route = source_route(0);
     AttrSet::edit(&mut route.attributes, |attrs| {
         attrs.push(PathAttribute::OnlyToCustomerPartial(64512));
@@ -2087,7 +2116,8 @@ fn an_empty_pass_behind_a_live_operation_does_not_redirty_the_peer() {
     assert_eq!(latches(&answer).len(), 1, "the answer is live");
     let spent = crate::OutboundCharge::new(
         &manager.outbound_credit_handle(peer),
-        manager.outbound_row_credit(),
+        1,
+        manager.outbound_credit_limit(),
     );
     let mut own = source_route(7);
     own.peer = peer;
@@ -2122,7 +2152,7 @@ fn an_empty_pass_behind_a_live_operation_does_not_redirty_the_peer() {
 #[test]
 fn a_dirty_peer_behind_its_resync_is_not_restaged_every_pass() {
     const CREDIT: usize = 8;
-    let mut manager = manager().with_outbound_row_credit(CREDIT);
+    let mut manager = manager().with_outbound_credit_bytes(unicast_rows(CREDIT));
     let mut source = up(&mut manager, peer_v4(SOURCE), evpn_sendable(), 4096, 0);
     let peer = peer_v4(Ipv4Addr::new(10, 0, 50, 1));
     let mut rx = up(&mut manager, peer, evpn_sendable(), 4096, 0);
@@ -2145,7 +2175,11 @@ fn a_dirty_peer_behind_its_resync_is_not_restaged_every_pass() {
     // (spent credit alone now owes keys instead; any other refusal still
     // takes the resync path).
     pass(&mut manager, &mut kept, &mut round);
-    let spent = crate::OutboundCharge::new(&manager.outbound_credit_handle(peer), CREDIT);
+    let spent = crate::OutboundCharge::new(
+        &manager.outbound_credit_handle(peer),
+        CREDIT,
+        unicast_rows(CREDIT),
+    );
     manager.mark_outbound_dirty(peer);
     // A pass the dirty peer misses gives its resync a diff to send.
     pass(&mut manager, &mut kept, &mut round);
@@ -2407,7 +2441,7 @@ fn spent_credit_ignores_a_change_in_a_family_the_peer_lacks() {
         ),
     ];
     for (name, safi, change) in cases {
-        let mut manager = manager().with_outbound_row_credit(4);
+        let mut manager = manager().with_outbound_credit_bytes(unicast_rows(4));
         manager.test_force_ungrouped = true;
         let mut source = up(
             &mut manager,
@@ -2420,7 +2454,8 @@ fn spent_credit_ignores_a_change_in_a_family_the_peer_lacks() {
         let mut rx = up(&mut manager, peer, vec![(Afi::Ipv4, safi)], 4096, 0);
         send_all(&mut rx);
         send_all(&mut source);
-        let spent = crate::OutboundCharge::new(&manager.outbound_credit_handle(peer), 4);
+        let spent =
+            crate::OutboundCharge::new(&manager.outbound_credit_handle(peer), 4, unicast_rows(4));
         let stagings = manager.outbound_stagings(peer);
         manager.handle_update(change);
         drain_route_chunks(&mut manager);
@@ -3140,7 +3175,7 @@ async fn assert_held_peer_never_holds_the_rib(
         Some(Ipv4Addr::new(10, 0, 0, 100)),
         BgpMetrics::new(),
     );
-    manager.outbound_row_credit_override = credit;
+    manager.outbound_credit_override = credit.map(unicast_rows);
     manager.test_force_ungrouped = true;
     let handle = tokio::spawn(manager.run());
     let families = if evpn {
@@ -3238,9 +3273,9 @@ async fn assert_held_peer_never_holds_the_rib(
 /// credit in queued rows and owes the rest, without a resync.
 fn assert_other_source_credit_spent(owed: &crate::update::OutboundOwed, credit: usize) {
     assert!(
-        owed.credit_rows >= credit,
-        "the other source's credit was spent: {} rows held against {credit}",
-        owed.credit_rows
+        owed.credit_bytes >= unicast_rows(credit),
+        "the other source's credit was spent: {} bytes held against {credit} rows",
+        owed.credit_bytes
     );
     assert!(!owed.owed.is_empty(), "the other source owes the rest");
     assert!(!owed.resync, "spent credit owes routes, not a resync");
@@ -3276,5 +3311,326 @@ async fn a_held_private_evpn_peer_never_holds_the_rib() {
     assert_other_source_credit_spent(
         &assert_held_peer_never_holds_the_rib(true, Some(4)).await,
         4,
+    );
+}
+
+/// One round of every private family toward the peers: `count` fresh
+/// announcements keyed by `round`, and withdrawal of the previous round's.
+fn every_family_round(manager: &mut RibManager, round: u8, count: u8, rtc: bool) {
+    let source = peer_v4(SOURCE);
+    let index = |key: u8| round * count + key;
+    let keys = |round: u8| (0..count).map(move |key| round * count + key);
+    let previous = round.checked_sub(1);
+    if rtc {
+        let route = |key: u8| make_rtc_rib_route(SOURCE, u16::from(key) + 1, 100);
+        manager.handle_update(RibUpdate::RtcRoutesReceived {
+            peer: source,
+            session_id: 0,
+            announced: (0..count).map(|key| route(index(key))).collect(),
+            withdrawn: previous
+                .into_iter()
+                .flat_map(keys)
+                .map(|key| route(key).key())
+                .collect(),
+        });
+        drain_route_chunks(manager);
+        return;
+    }
+    let flowspec = make_flowspec_route(SOURCE);
+    manager.handle_update(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: (0..count)
+            .map(|key| source_route(u32::from(index(key))))
+            .collect(),
+        withdrawn: previous
+            .into_iter()
+            .flat_map(keys)
+            .map(|key| (source_route(u32::from(key)).prefix, 0))
+            .collect(),
+        flowspec_announced: if round.is_multiple_of(2) {
+            vec![flowspec.clone()]
+        } else {
+            vec![]
+        },
+        flowspec_withdrawn: if round.is_multiple_of(2) {
+            vec![]
+        } else {
+            vec![flowspec.selection_key()]
+        },
+        evpn_announced: (0..count)
+            .map(|key| evpn_route(u32::from(index(key)), 0))
+            .collect(),
+        evpn_withdrawn: previous
+            .into_iter()
+            .flat_map(keys)
+            .map(|key| evpn_route(u32::from(key), 0).key())
+            .collect(),
+        validated_with: None,
+    });
+    let bgpls = |key: u8| make_bgpls_route(SOURCE, key + 1, 100);
+    manager.handle_update(RibUpdate::BgpLsRoutesReceived {
+        peer: source,
+        session_id: 0,
+        announced: (0..count).map(|key| bgpls(index(key))).collect(),
+        withdrawn: previous
+            .into_iter()
+            .flat_map(keys)
+            .map(|key| bgpls(key).key())
+            .collect(),
+    });
+    let vpn = |key: u8| make_vpn_rib_route(SOURCE, key + 1, 100, 100);
+    manager.handle_update(RibUpdate::VpnRoutesReceived {
+        peer: source,
+        session_id: 0,
+        announced: (0..count).map(|key| vpn(index(key))).collect(),
+        withdrawn: previous
+            .into_iter()
+            .flat_map(keys)
+            .map(|key| vpn(key).key())
+            .collect(),
+    });
+    let labeled = |key: u8| make_labeled_rib_route(SOURCE, key + 1, 100, 100);
+    manager.handle_update(RibUpdate::LabeledRoutesReceived {
+        peer: source,
+        session_id: 0,
+        announced: (0..count).map(|key| labeled(index(key))).collect(),
+        withdrawn: previous
+            .into_iter()
+            .flat_map(keys)
+            .map(|key| labeled(key).key())
+            .collect(),
+    });
+    drain_route_chunks(manager);
+}
+
+/// Each held envelope is charged exactly the rows and bytes it carries, and
+/// the peer's credit in use is exactly the sum of the held charges.
+fn assert_charges_are_the_held_envelopes(
+    manager: &RibManager,
+    peer: PeerId,
+    held: &[OutboundRouteUpdate],
+) {
+    let all = crate::outbound_credit::PrivateFamilies {
+        unicast: true,
+        vpn: true,
+        evpn: true,
+    };
+    let mut rows = 0;
+    let mut bytes = 0;
+    for envelope in held {
+        if let Some(charge) = &envelope.credit {
+            assert_eq!(charge.rows(), all.rows(envelope), "charged its rows");
+            assert_eq!(charge.bytes(), all.bytes(envelope), "charged its bytes");
+            rows += charge.rows();
+            bytes += charge.bytes();
+        } else {
+            assert!(
+                envelope.latch.is_some() || all.rows(envelope) == 0,
+                "only a whole-table operation's envelope holds rows uncharged"
+            );
+        }
+    }
+    assert_eq!(manager.outbound_credit_rows(peer), rows);
+    assert_eq!(manager.outbound_credit_bytes(peer), bytes);
+}
+
+/// Charge equals release in every family: announcements and withdrawals of
+/// unicast, EVPN, `FlowSpec`, BGP-LS, VPN and labeled unicast (and, on its
+/// own peer, RT-Constrain) toward a stalled private receiver whose small
+/// credit refuses commits, held across a session flap, then drained and
+/// torn down. Every held envelope is charged its own rows and bytes, the
+/// peer's credit in use is their sum, and after teardown both are zero, as
+/// are the sampled gauges. Red when a release returns a different figure
+/// than its charge: the credit never returns to zero.
+#[test]
+fn credit_bytes_return_to_zero_after_every_family_cycle() {
+    for rtc in [false, true] {
+        let families = if rtc {
+            rtc_sendable()
+        } else {
+            vec![
+                (Afi::Ipv4, Safi::Unicast),
+                (Afi::L2Vpn, Safi::Evpn),
+                (Afi::Ipv4, Safi::FlowSpec),
+                (Afi::BgpLs, Safi::BgpLs),
+                (Afi::Ipv4, Safi::MplsVpn),
+                (Afi::Ipv4, Safi::LabeledUnicast),
+            ]
+        };
+        let mut manager = manager().with_outbound_credit_bytes(unicast_rows(6));
+        manager.test_force_ungrouped = true;
+        let mut source = up(&mut manager, peer_v4(SOURCE), families.clone(), 4096, 0);
+        let peer = peer_v4(Ipv4Addr::new(10, 0, 40, 1));
+        let mut first = up_session(&mut manager, peer, 1, families.clone(), 4096, 0);
+        send_all(&mut first);
+        let mut kept = Vec::new();
+        let mut refused = false;
+        let mut peak = 0;
+        for round in 0..6 {
+            every_family_round(&mut manager, round, 3, rtc);
+            send_all(&mut source);
+            kept.extend(held(&mut first));
+            assert_charges_are_the_held_envelopes(&manager, peer, &kept);
+            refused |= manager.owing(peer).is_some() || manager.dirty_peers.contains(&peer);
+            peak = peak.max(manager.outbound_credit_bytes(peer));
+        }
+        assert!(peak > 0, "rtc={rtc}: envelopes were charged");
+        assert!(refused, "rtc={rtc}: the small credit refused commits");
+
+        // Torn down mid-flight: the ended session's envelopes still count.
+        manager.handle_update(RibUpdate::PeerDown {
+            peer,
+            session_id: 1,
+        });
+        let mut second = up_session(&mut manager, peer, 2, families.clone(), 4096, 0);
+        let mut queued = held(&mut first);
+        queued.append(&mut kept);
+        let mut next = held(&mut second);
+        queued.append(&mut next);
+        assert_charges_are_the_held_envelopes(&manager, peer, &queued);
+        drop((queued, first));
+        assert_eq!(manager.outbound_credit_bytes(peer), 0, "rtc={rtc}: flap");
+
+        // The new session drains whatever is owed, then ends.
+        for _ in 0..64 {
+            manager.resync_dirty_peers_bounded();
+            let drained = held(&mut second);
+            assert_charges_are_the_held_envelopes(&manager, peer, &drained);
+            if drained.is_empty() {
+                break;
+            }
+        }
+        every_family_round(&mut manager, 6, 3, rtc);
+        send_all(&mut source);
+        let unread = held(&mut second);
+        assert_charges_are_the_held_envelopes(&manager, peer, &unread);
+        manager.handle_update(RibUpdate::PeerDown {
+            peer,
+            session_id: 2,
+        });
+        drop((unread, second));
+        assert_eq!(manager.outbound_credit_rows(peer), 0, "rtc={rtc}: rows");
+        assert_eq!(manager.outbound_credit_bytes(peer), 0, "rtc={rtc}: bytes");
+        manager.sample_outbound_credit_gauges();
+        for gauge in [
+            "bgp_rib_outbound_credit_rows",
+            "bgp_rib_outbound_credit_bytes",
+        ] {
+            assert_eq!(
+                gauge_metric_value(&manager.metrics, gauge, &[]),
+                0.0,
+                "rtc={rtc}: {gauge}"
+            );
+        }
+    }
+}
+
+/// The credit is bytes, not rows: at the same credit a stalled receiver
+/// queues several times more withdrawals, which hold only their keys, than
+/// announcements before it owes the rest, and both stay within the credit
+/// plus one pass. Red with every row charged alike: both queue the same
+/// rows.
+#[test]
+fn small_rows_fill_the_byte_credit_at_more_rows() {
+    const CREDIT: usize = 2 * CHUNK_ROWS;
+    const PASSES: u32 = 16;
+    let pass = |pass: u32| pass * 1024..(pass + 1) * 1024;
+    let stalled = |withdraw: bool| {
+        let mut manager = manager().with_outbound_credit_bytes(unicast_rows(CREDIT));
+        manager.test_force_ungrouped = true;
+        let mut source = up(&mut manager, peer_v4(SOURCE), ipv4_sendable(), 4096, 0);
+        let peer = peer_v4(Ipv4Addr::new(10, 0, 41, 1));
+        let mut rx = up(&mut manager, peer, ipv4_sendable(), 4096, 0);
+        send_all(&mut rx);
+        for index in 0..PASSES {
+            let routes = pass(index).map(source_route).collect();
+            routes_received(&mut manager, routes, vec![], vec![], vec![]);
+            send_all(&mut source);
+            send_all(&mut rx);
+        }
+        // The receiver stops reading.
+        for index in 0..PASSES {
+            if withdraw {
+                let keys = pass(index)
+                    .map(|key| (source_route(key).prefix, 0))
+                    .collect();
+                routes_received(&mut manager, vec![], keys, vec![], vec![]);
+            } else {
+                let routes = pass(PASSES + index).map(source_route).collect();
+                routes_received(&mut manager, routes, vec![], vec![], vec![]);
+            }
+            send_all(&mut source);
+        }
+        assert!(
+            manager.owing(peer).is_some(),
+            "withdraw={withdraw}: owes the rest"
+        );
+        assert!(!manager.dirty_peers.contains(&peer));
+        let bytes = manager.outbound_credit_bytes(peer);
+        assert!(
+            bytes <= unicast_rows(CREDIT + CHUNK_ROWS),
+            "withdraw={withdraw}: {bytes} bytes held against {}",
+            unicast_rows(CREDIT)
+        );
+        rows(&held(&mut rx))
+    };
+    let announced = stalled(false);
+    let withdrawn = stalled(true);
+    eprintln!("rows queued at one byte credit: {announced} announced, {withdrawn} withdrawn");
+    assert!(
+        announced <= CREDIT + CHUNK_ROWS,
+        "{announced} announcements"
+    );
+    assert!(
+        withdrawn >= 4 * announced,
+        "{withdrawn} withdrawals against {announced} announcements"
+    );
+}
+
+/// The credit checks read bytes, never rows: a stalled receiver whose real
+/// queued passes hold its whole byte credit (2,048 rows, far fewer rows than
+/// bytes) is exhausted for the private-family preflight, and the owed-key
+/// tick does not count it as able to progress. Red when either check
+/// compares the row count with the byte limit: 2,048 rows sit far below it.
+#[test]
+fn spent_byte_credit_is_exhausted_whatever_the_row_count() {
+    const CREDIT: usize = 2 * CHUNK_ROWS;
+    let mut manager = manager().with_outbound_credit_bytes(unicast_rows(CREDIT));
+    manager.test_force_ungrouped = true;
+    let mut source = up(&mut manager, peer_v4(SOURCE), ipv4_sendable(), 4096, 0);
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 42, 1));
+    let mut rx = up(&mut manager, peer, ipv4_sendable(), 4096, 0);
+    send_all(&mut rx);
+    for pass in 0..4u32 {
+        let routes = (pass * 1024..(pass + 1) * 1024).map(source_route).collect();
+        routes_received(&mut manager, routes, vec![], vec![], vec![]);
+        send_all(&mut source);
+    }
+    let rows = manager.outbound_credit_rows(peer);
+    let bytes = manager.outbound_credit_bytes(peer);
+    assert_eq!(rows, CREDIT, "two passes queued, the rest owed");
+    assert!(
+        bytes >= manager.outbound_credit_limit(),
+        "{bytes} bytes held"
+    );
+    assert!(
+        rows < manager.outbound_credit_limit() / 100,
+        "rows far below bytes"
+    );
+    assert!(manager.owing(peer).is_some());
+    assert!(
+        manager.outbound_credit_exhausted(peer),
+        "the preflight sees the spent bytes"
+    );
+    assert!(
+        !manager.owing_tick_due(),
+        "no owed drain can progress without credit"
+    );
+    drop(held(&mut rx));
+    assert!(!manager.outbound_credit_exhausted(peer));
+    assert!(
+        manager.owing_tick_due(),
+        "credit returned: the drain may run"
     );
 }

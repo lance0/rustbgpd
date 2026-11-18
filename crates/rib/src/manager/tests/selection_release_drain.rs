@@ -409,7 +409,8 @@ fn a_stalled_receiver_holds_only_its_own_table_and_end_of_rib() {
     let (stalled, healthy) = (receivers[0].0, receivers[1].0);
     let charge = crate::OutboundCharge::new(
         &manager.outbound_credit_handle(stalled),
-        manager.outbound_row_credit(),
+        1,
+        manager.outbound_credit_limit(),
     );
     release(&mut manager, false);
     let mut wires = wires(&receivers);
@@ -679,6 +680,39 @@ fn mixed() -> (RibManager, Receivers) {
         })
         .collect();
     (manager, receivers)
+}
+
+/// A non-unicast family owed whole keeps its operation latch even when its
+/// table is larger than the receiver's remaining ordinary credit.
+#[test]
+fn a_flowspec_family_larger_than_the_byte_credit_drains_whole_and_uncharged() {
+    let (mut manager, mut receivers) = mixed();
+    manager.outbound_credit_override = Some(unicast_rows(2));
+    let (peer, rx) = &mut receivers[0];
+    let peer = *peer;
+    let ordinary =
+        crate::OutboundCharge::new(&manager.outbound_credit_handle(peer), 1, unicast_rows(1));
+    timer_releases(&mut manager, &[FLOWSPEC]);
+    assert!(manager.owes(peer, FLOWSPEC));
+    assert!(rx.try_recv().is_err());
+    drain_resync_ticks(&mut manager);
+    let table = rx.try_recv().expect("the family was staged");
+    assert_eq!(table.flowspec_announce.len(), 5);
+    assert!(table.latch.is_some() && table.credit.is_none());
+    assert!(manager.outbound_operation_live(peer));
+    assert_eq!(manager.outbound_credit_bytes(peer), unicast_rows(1));
+    let marker = rx.try_recv().expect("the End-of-RIB follows the family");
+    assert_eq!(marker.end_of_rib, [FLOWSPEC]);
+    assert!(rx.try_recv().is_err(), "each row and marker once");
+    assert!(!manager.owes(peer, FLOWSPEC));
+    assert!(!manager.eor_pending(peer).contains(&FLOWSPEC));
+    assert!(!manager.dirty_peers.contains(&peer));
+    drop((table, marker));
+    assert!(!manager.outbound_operation_live(peer));
+    assert_eq!(manager.outbound_credit_bytes(peer), unicast_rows(1));
+    drop(ordinary);
+    assert_eq!(manager.outbound_credit_bytes(peer), 0);
+    assert_eq!(manager.outbound_credit_rows(peer), 0);
 }
 
 /// One RIB turn in which the deferral timer releases `families`, in this

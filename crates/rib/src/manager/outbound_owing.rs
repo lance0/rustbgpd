@@ -1,6 +1,6 @@
 //! Owed-key sets for private families (ADR-0099 amendment, slice 1b).
 //!
-//! When a receiver's row credit is spent, a pass over a private family (one
+//! When a receiver's outbound credit is spent, a pass over a private family (one
 //! the peer holds in its own Adj-RIB-Out) records *which keys* the peer is
 //! owed instead of staging them, and the peer stays clean: no whole-peer
 //! resync, no grouped-member capture. The resync tick drains owed keys once
@@ -455,6 +455,32 @@ impl OwedFamily {
             _ => std::mem::size_of::<(Prefix, u64)>(),
         };
         2 * entry + 1
+    }
+
+    /// Estimated credit bytes of one of the family's rows at its largest,
+    /// an announcement (`crate::outbound_credit::announced_row_bytes`).
+    pub(super) fn row_bytes(self) -> usize {
+        use crate::outbound_credit::announced_row_bytes as bytes;
+        use crate::route::{
+            BgpLsRibRoute, EvpnRibRoute, FlowSpecRoute, LabeledRibRoute, Route, RtcRibRoute,
+            VpnRibRoute,
+        };
+        match self {
+            Self::IPV4_UNICAST | Self::IPV6_UNICAST => bytes::<Route>(),
+            Self::IPV4_LABELED | Self::IPV6_LABELED => bytes::<LabeledRibRoute>(),
+            Self::VPNV4 | Self::VPNV6 => bytes::<VpnRibRoute>(),
+            Self::EVPN => bytes::<EvpnRibRoute>(),
+            Self::BGP_LS | Self::BGP_LS_VPN => bytes::<BgpLsRibRoute>(),
+            Self::RTC => bytes::<RtcRibRoute>(),
+            _ => bytes::<FlowSpecRoute>(),
+        }
+    }
+
+    /// The rows of this family that `bytes` of remaining credit stages: at
+    /// least one while any credit remains, as admission takes an envelope
+    /// while the peer is under its credit.
+    fn row_budget(self, bytes: usize) -> usize {
+        bytes.div_ceil(self.row_bytes())
     }
 }
 
@@ -1073,13 +1099,13 @@ impl RibManager {
                 return OwingGate::Owe;
             }
         }
-        let limit = self.outbound_row_credit();
-        let rows = self.outbound_credit[&peer].credit.rows();
-        if rows >= limit || self.outbound_channel_full(peer) {
+        let limit = self.outbound_credit_limit();
+        let bytes = self.outbound_credit[&peer].credit.bytes();
+        if bytes >= limit || self.outbound_channel_full(peer) {
             OwingGate::Owe
         } else {
             OwingGate::Stream {
-                row_budget: limit - rows,
+                row_budget: family.row_budget(limit - bytes),
             }
         }
     }
@@ -1524,13 +1550,13 @@ impl RibManager {
     /// channel room and runnable work. Read before taking the tick's
     /// executor handoff.
     pub(super) fn owing_tick_due(&self) -> bool {
-        let limit = self.outbound_row_credit();
+        let limit = self.outbound_credit_limit();
         self.owing_peers.iter().any(|&peer| {
             self.owing_peer_runnable(peer)
                 && self
                     .outbound_credit
                     .get(&peer)
-                    .is_some_and(|entry| entry.credit.rows() < limit)
+                    .is_some_and(|entry| entry.credit.bytes() < limit)
                 && !self.outbound_channel_full(peer)
         })
     }
@@ -1603,12 +1629,12 @@ impl RibManager {
         // Spent credit holds the marker's absorption too: the family it
         // would stage waits for the receiver to read, and only this
         // receiver's own End-of-RIB waits with it.
-        let limit = self.outbound_row_credit();
-        let rows = self
+        let limit = self.outbound_credit_limit();
+        let bytes = self
             .outbound_credit
             .get(&peer)
-            .map_or(limit, |entry| entry.credit.rows());
-        if rows >= limit || self.outbound_channel_full(peer) {
+            .map_or(limit, |entry| entry.credit.bytes());
+        if bytes >= limit || self.outbound_channel_full(peer) {
             return false;
         }
         // One family per step: a waiting marker's family (unicast never:
@@ -1626,17 +1652,17 @@ impl RibManager {
         }
         // An absorption that did not send its marker may still have used
         // credit.
-        let rows = self
+        let bytes = self
             .outbound_credit
             .get(&peer)
-            .map_or(limit, |entry| entry.credit.rows());
-        if rows >= limit || self.outbound_channel_full(peer) {
+            .map_or(limit, |entry| entry.credit.bytes());
+        if bytes >= limit || self.outbound_channel_full(peer) {
             return false;
         }
         let Some((family, scope)) = self.next_owed_family(peer) else {
             return false;
         };
-        self.owing_drain_step(peer, family, scope, limit - rows)
+        self.owing_drain_step(peer, family, scope, family.row_budget(limit - bytes))
     }
 
     /// One drain step of `family`'s `scope` toward `peer` within `budget`

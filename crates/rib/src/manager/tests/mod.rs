@@ -94,6 +94,17 @@ impl crate::update::ExactExportEncoder for FillChannelOnSnapshot {
     }
 }
 
+/// Outbound credit bytes of `rows` announced unicast rows, the unit most
+/// credit tests size their credit in.
+pub(super) const fn unicast_rows(rows: usize) -> usize {
+    rows * crate::outbound_credit::announced_row_bytes::<Route>()
+}
+
+/// Outbound credit bytes of `rows` announced EVPN rows.
+pub(super) const fn evpn_rows(rows: usize) -> usize {
+    rows * crate::outbound_credit::announced_row_bytes::<EvpnRibRoute>()
+}
+
 /// Every owned readiness checkpoint `work` passes, with whether it ran
 /// inside an executor handoff.
 pub(super) fn owned_checkpoints(

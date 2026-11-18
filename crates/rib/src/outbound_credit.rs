@@ -7,13 +7,19 @@
 //! the queue, the session's active payload, paced retirement and a dropped
 //! channel, across every session generation of the peer:
 //!
-//! - **Row credit** for private families (rows held in the peer's own
+//! - **Byte credit** for private families (rows held in the peer's own
 //!   Adj-RIB-Out). Each ordinary envelope carries an [`OutboundCharge`] for
-//!   its private rows, released when the envelope drops. A new ordinary
-//!   envelope is admitted only while the peer's live rows are below its row
-//!   credit, so a peer with no live rows is always admitted; a refusal marks
-//!   the peer dirty, exactly like a full channel, and the resync timer
-//!   retries from current state.
+//!   its private rows and their estimated bytes (`PrivateFamilies::bytes`),
+//!   released when the envelope drops. A new ordinary envelope is admitted
+//!   only while the peer's live bytes are below its credit, so a peer with
+//!   no live rows is always admitted. The bytes estimate queued work, not
+//!   measured memory: `size_of` does not see heap payloads such as
+//!   `FlowSpec` components or BGP-LS attributes, so those families are
+//!   undercounted. A spent credit makes a peer owe the keys of a private
+//!   family under owed-key management (the peer is not dirty, forced or
+//!   closing) and the peer stays clean; otherwise, or when a commit is
+//!   refused anyway, the refusal marks the peer dirty, exactly like a full
+//!   channel, and the resync timer retries from current state.
 //! - **One whole-table operation per peer** (initial dump, refresh or replay
 //!   response, dirty or forced resync, complete EVPN feed, operator replay).
 //!   Every envelope of one operation holds a clone of its [`OperationLatch`];
@@ -22,7 +28,7 @@
 //!   sends anything: all of them for an operator replay; otherwise its data
 //!   envelope and, when the channel has room, its nested End-of-RIB (a marker
 //!   that finds no reserved slot takes channel capacity alone, as before). It
-//!   charges no rows: it is bounded by the latch, so a whole table never
+//!   charges no credit: it is bounded by the latch, so a whole table never
 //!   exhausts credit.
 //!
 //! Markers and control-only envelopes take channel capacity only.
@@ -35,51 +41,84 @@ use tokio::sync::mpsc::{OwnedPermit, Sender};
 
 use crate::update::OutboundRouteUpdate;
 
-/// Daemon-wide ordinary rows, divided among every registered outbound peer.
+/// Daemon-wide ordinary credit in estimated bytes ([`PrivateFamilies::bytes`]),
+/// divided among every registered outbound peer.
 ///
 /// Every registered peer counts, private family or not, so the per-peer
 /// credits of the live peers sum to at most this (or `P` times
-/// [`MIN_ROW_CREDIT`] above 2,048 peers) with no membership tracking.
+/// [`MIN_CREDIT_BYTES`] above 1,024 peers) with no membership tracking.
+/// 2 GiB is the bound the former row credit was sized for: it allowed 16M
+/// rows at an assumed 121 bytes a row, but a paused-reader EVPN shape
+/// measured about 290 bytes a row ([`ANNOUNCED_ROW_OVERHEAD`]), so 16M rows
+/// let about 4.9 GB accumulate.
+///
 /// The RIB stages private rows at about 0.6 µs per row per peer (measured
 /// with every private peer in each pass), so a peer receives at most about
-/// `1 / (P · 0.6 µs)` rows per second, and a credit of `D / P` rows
-/// tolerates a receiver that drains nothing for about `D · 0.6 µs`, about
-/// 10 s at 16M rows, wherever the credit is unclamped: P = 16 to 2,048.
-/// Below that [`MAX_ROW_CREDIT`] applies (about 0.6 s of stall at P = 1);
-/// above it [`MIN_ROW_CREDIT`] tolerates longer. Grouped peers in the count
-/// and sparse fanout both mean these are not universal stall times. 16M rows
-/// is 2.2× the 50,000 rows a receiver queued when 150 peers restarted during
-/// a 100,000-route source dump.
+/// `1 / (P · 0.6 µs)` rows per second, and a credit of `D / P` bytes
+/// tolerates a receiver that drains nothing for about `D · 0.6 µs / b` at
+/// `b` bytes a row: about 5 s of unicast announcements (250 bytes) and
+/// 4.4 s of EVPN ones (290 bytes), wherever the credit is unclamped: P = 8
+/// to 1,024. Below that [`MAX_CREDIT_BYTES`] applies; above it
+/// [`MIN_CREDIT_BYTES`] tolerates longer. Grouped peers in the count and
+/// sparse fanout both mean these are not universal stall times. At P = 150
+/// a peer's 14.3 MB holds 57,000 unicast announcements, 1.15 times the
+/// 50,000 a receiver queued when 150 peers restarted during a
+/// 100,000-route source dump, but only 49,367 EVPN ones, so in that shape
+/// EVPN binds slightly; past its credit a peer owes keys instead of
+/// queuing rows.
 ///
-/// Bound: charged rows ≤ `max(D, P · MIN_ROW_CREDIT)` plus, per peer, one
-/// oversize pass (a peer under its credit is always admitted) plus a
+/// Bound: charged bytes ≤ `max(D, P · MIN_CREDIT_BYTES)` plus, per peer,
+/// one oversize pass (a peer under its credit is always admitted) plus a
 /// retained excess: envelopes admitted while fewer peers were registered,
 /// under a larger limit, stay charged until they drop, and their peer is
 /// refused until it is back under the current limit. That excess only
 /// drains, but a stalled receiver holds it until its session ends. It is
-/// under [`MAX_ROW_CREDIT`] per peer; in aggregate, with peers registering
-/// one at a time and each filling its credit first, at most
-/// `Σ_{k≤P} C(k) − P · C(P)`, about 37M rows at P = 150. About 2 GiB of
-/// steady-state rows at saturation (about 121 bytes a row). Re-tune by
-/// measuring the staging cost and choosing the tolerated stall.
-pub(crate) const DAEMON_ROW_CREDIT: usize = 16_777_216;
-/// Smallest per-peer credit, whatever the number of peers.
-pub(crate) const MIN_ROW_CREDIT: usize = 8_192;
-/// Largest per-peer credit, whatever the number of peers.
-pub(crate) const MAX_ROW_CREDIT: usize = 1_048_576;
+/// under [`MAX_CREDIT_BYTES`] per peer; in aggregate, with peers
+/// registering one at a time and each filling its credit first, at most
+/// `Σ_{k≤P} C(k) − P · C(P)`. Re-tune by measuring the bytes a queued row
+/// costs and choosing the tolerated stall.
+pub(crate) const DAEMON_CREDIT_BYTES: usize = 2 << 30;
+/// Smallest per-peer credit, whatever the number of peers: the former
+/// 8,192-row floor at 250 bytes a row.
+pub(crate) const MIN_CREDIT_BYTES: usize = 2 << 20;
+/// Largest per-peer credit, whatever the number of peers: the former
+/// 1,048,576-row ceiling at 250 bytes a row.
+pub(crate) const MAX_CREDIT_BYTES: usize = 256 << 20;
 /// Rows per ordinary private envelope once a larger pass is chunked.
 pub(crate) const CHUNK_ROWS: usize = 1_024;
 
-/// Per-peer row credit with `peers` registered outbound peers.
-pub(crate) fn row_credit_for(peers: usize) -> usize {
-    (DAEMON_ROW_CREDIT / peers.max(1)).clamp(MIN_ROW_CREDIT, MAX_ROW_CREDIT)
+/// Bytes an announced row costs beyond its own element: its share of the
+/// attributes, the Adj-RIB-Out entry it adds and allocator slack. Measured
+/// as about 290 bytes of daemon growth per queued private EVPN row in a
+/// paused-reader shape (16.5M rows, about 4.9 GB) less the 144-byte
+/// `EvpnRibRoute`; applied to every announced family.
+pub(crate) const ANNOUNCED_ROW_OVERHEAD: usize = 146;
+
+/// Per-peer byte credit with `peers` registered outbound peers.
+pub(crate) fn credit_bytes_for(peers: usize) -> usize {
+    (DAEMON_CREDIT_BYTES / peers.max(1)).clamp(MIN_CREDIT_BYTES, MAX_CREDIT_BYTES)
 }
 
-/// Live private-family rows owed to one peer, across every session
-/// generation.
+/// Estimated bytes of one announced row of `T`.
+pub(crate) const fn announced_row_bytes<T>() -> usize {
+    std::mem::size_of::<T>() + ANNOUNCED_ROW_OVERHEAD
+}
+
+fn announced<T>(rows: &[T]) -> usize {
+    rows.len() * announced_row_bytes::<T>()
+}
+
+/// A withdrawal holds only its key.
+fn withdrawn<T>(rows: &[T]) -> usize {
+    std::mem::size_of_val(rows)
+}
+
+/// Live private-family rows owed to one peer and their estimated bytes,
+/// across every session generation.
 #[derive(Debug, Default)]
 pub struct OutboundCredit {
     rows: AtomicUsize,
+    bytes: AtomicUsize,
 }
 
 impl OutboundCredit {
@@ -88,24 +127,33 @@ impl OutboundCredit {
     pub fn rows(&self) -> usize {
         self.rows.load(Ordering::Acquire)
     }
+
+    /// Estimated bytes held by envelopes not yet dropped: the credit in use.
+    #[must_use]
+    pub fn bytes(&self) -> usize {
+        self.bytes.load(Ordering::Acquire)
+    }
 }
 
-/// Rows charged by one envelope; released exactly once, when the envelope
-/// drops.
+/// Rows and bytes charged by one envelope; released exactly once, when the
+/// envelope drops, by the figures it was charged.
 #[derive(Debug)]
 pub struct OutboundCharge {
     credit: Arc<OutboundCredit>,
     rows: usize,
+    bytes: usize,
 }
 
 impl OutboundCharge {
-    /// Charge `rows` to `credit` until the returned charge drops.
+    /// Charge `rows` and `bytes` to `credit` until the returned charge drops.
     #[must_use]
-    pub fn new(credit: &Arc<OutboundCredit>, rows: usize) -> Self {
+    pub fn new(credit: &Arc<OutboundCredit>, rows: usize, bytes: usize) -> Self {
         credit.rows.fetch_add(rows, Ordering::Relaxed);
+        credit.bytes.fetch_add(bytes, Ordering::Relaxed);
         Self {
             credit: Arc::clone(credit),
             rows,
+            bytes,
         }
     }
 
@@ -114,12 +162,22 @@ impl OutboundCharge {
     pub fn rows(&self) -> usize {
         self.rows
     }
+
+    /// Estimated bytes this envelope holds against its peer's credit.
+    #[must_use]
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
 }
 
 impl Drop for OutboundCharge {
     fn drop(&mut self) {
         let before = self.credit.rows.fetch_sub(self.rows, Ordering::Release);
         debug_assert!(before >= self.rows, "outbound credit released twice");
+        // Two separate releases: a concurrent reader may briefly see rows
+        // released and bytes not yet, which only delays one admission.
+        let before = self.credit.bytes.fetch_sub(self.bytes, Ordering::Release);
+        debug_assert!(before >= self.bytes, "outbound credit released twice");
     }
 }
 
@@ -256,6 +314,34 @@ pub(crate) struct PrivateFamilies {
 }
 
 impl PrivateFamilies {
+    /// Estimated bytes of `update`'s private-family rows: each announced
+    /// row its element plus [`ANNOUNCED_ROW_OVERHEAD`], each withdrawal its
+    /// key. A function of the rows alone, so the pieces of a chunked
+    /// envelope sum to the whole.
+    pub(crate) fn bytes(self, update: &OutboundRouteUpdate) -> usize {
+        let mut bytes = announced(&update.flowspec_announce)
+            + withdrawn(&update.flowspec_withdraw)
+            + announced(&update.bgpls_announce)
+            + withdrawn(&update.bgpls_withdraw)
+            + announced(&update.labeled_announce)
+            + withdrawn(&update.labeled_withdraw)
+            + announced(&update.rtc_announce)
+            + withdrawn(&update.rtc_withdraw)
+            + announced(&update.otc_blocked);
+        if self.unicast {
+            bytes += announced(&update.announce)
+                + withdrawn(&update.shared_withdraw)
+                + withdrawn(&update.withdraw);
+        }
+        if self.vpn {
+            bytes += announced(&update.vpn_announce) + withdrawn(&update.vpn_withdraw);
+        }
+        if self.evpn {
+            bytes += announced(&update.evpn_announce) + withdrawn(&update.evpn_withdraw);
+        }
+        bytes
+    }
+
     /// Rows of `update` in private families.
     pub(crate) fn rows(self, update: &OutboundRouteUpdate) -> usize {
         let mut rows = update.flowspec_announce.len()

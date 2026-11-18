@@ -678,13 +678,13 @@ pub struct RibManager {
     /// coalesced family-scoped recovery intent for those limits (ADR-0113).
     outbound_limit_control: outbound_prefix_limits::OutboundLimitControl,
     outbound_peers: HashMap<PeerId, mpsc::Sender<OutboundRouteUpdate>>,
-    /// Outbound row credit and live whole-table operation of every peer
+    /// Outbound byte credit and live whole-table operation of every peer
     /// that has registered for outbound updates, kept across `PeerDown`,
     /// collision supersede and re-registration: envelopes of an earlier
     /// session still count against the same peer (`crate::outbound_credit`).
     outbound_credit: HashMap<PeerId, outbound_credit::PeerCredit>,
-    /// Fixed per-peer row credit for tests and bench builds.
-    outbound_row_credit_override: Option<usize>,
+    /// Fixed per-peer byte credit for tests and bench builds.
+    outbound_credit_override: Option<usize>,
     /// Notified whenever a whole-table operation's last envelope drops, so
     /// the resync tick runs work deferred behind it at the backlog cadence.
     outbound_latch_released: Arc<tokio::sync::Notify>,
@@ -2821,14 +2821,14 @@ impl RibManager {
     }
 }
 
-/// A fixed per-peer outbound row credit for the whole test suite
-/// (`RUSTBGPD_TEST_OUTBOUND_ROW_CREDIT`), so every RIB test, the oracles
+/// A fixed per-peer outbound byte credit for the whole test suite
+/// (`RUSTBGPD_TEST_OUTBOUND_CREDIT_BYTES`), so every RIB test, the oracles
 /// included, can run with refusals that the default credit never reaches.
 #[cfg(test)]
-fn test_outbound_row_credit() -> Option<usize> {
-    std::env::var("RUSTBGPD_TEST_OUTBOUND_ROW_CREDIT")
+fn test_outbound_credit_bytes() -> Option<usize> {
+    std::env::var("RUSTBGPD_TEST_OUTBOUND_CREDIT_BYTES")
         .ok()
-        .and_then(|rows| rows.parse().ok())
+        .and_then(|bytes| bytes.parse().ok())
 }
 
 impl RibManager {
@@ -2927,12 +2927,12 @@ impl RibManager {
             outbound_peers: HashMap::new(),
             outbound_credit: HashMap::new(),
             // A test-only override; production sizes the credit itself.
-            outbound_row_credit_override: {
+            outbound_credit_override: {
                 #[cfg(test)]
-                let rows = test_outbound_row_credit();
+                let bytes = test_outbound_credit_bytes();
                 #[cfg(not(test))]
-                let rows = None;
-                rows
+                let bytes = None;
+                bytes
             },
             outbound_closing: false,
             outbound_latch_released: Arc::default(),
@@ -5507,6 +5507,7 @@ impl RibManager {
                     end_of_rib: sort(self.eor_pending(peer).into_iter().collect()),
                     live_operation: self.outbound_operation_live(peer),
                     credit_rows: self.outbound_credit_rows(peer),
+                    credit_bytes: self.outbound_credit_bytes(peer),
                     owed_pending: self
                         .owing(peer)
                         .map_or_else(Vec::new, outbound_owing::PeerOwing::rendered),

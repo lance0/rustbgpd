@@ -496,22 +496,30 @@ async fn outbound_credit_gauges_sum_over_peers_and_refusals_start_at_zero() {
     }
 
     let rows = |m: &RibManager| gauge_metric_value(&m.metrics, "bgp_rib_outbound_credit_rows", &[]);
+    let bytes =
+        |m: &RibManager| gauge_metric_value(&m.metrics, "bgp_rib_outbound_credit_bytes", &[]);
+    let gauge = |value: usize| f64::from(u32::try_from(value).unwrap());
     let operations =
         |m: &RibManager| gauge_metric_value(&m.metrics, "bgp_rib_outbound_operations_live", &[]);
-    let charge_a = crate::OutboundCharge::new(&manager.outbound_credit_handle(a), 3);
-    let charge_b = crate::OutboundCharge::new(&manager.outbound_credit_handle(b), 4);
+    let charge_a =
+        crate::OutboundCharge::new(&manager.outbound_credit_handle(a), 3, unicast_rows(3));
+    let charge_b =
+        crate::OutboundCharge::new(&manager.outbound_credit_handle(b), 4, unicast_rows(4));
     let (sender, _receiver) = mpsc::channel(4);
     manager.outbound_peers.insert(a, sender);
     let operation = manager.begin_outbound_operation(a, 1).unwrap();
     manager.sample_outbound_dirty_gauges();
     assert_eq!(rows(&manager), 7.0);
+    assert_eq!(bytes(&manager), gauge(unicast_rows(7)));
     assert_eq!(operations(&manager), 1.0);
 
     drop((charge_a, operation));
     manager.sample_outbound_dirty_gauges();
     assert_eq!(rows(&manager), 4.0);
+    assert_eq!(bytes(&manager), gauge(unicast_rows(4)));
     assert_eq!(operations(&manager), 0.0);
     drop(charge_b);
     manager.sample_outbound_dirty_gauges();
     assert_eq!(rows(&manager), 0.0);
+    assert_eq!(bytes(&manager), 0.0);
 }

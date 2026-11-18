@@ -310,11 +310,12 @@ fn assert_delivered(
     }
 }
 
-/// Spend `peer`'s row credit; the charge holds it until dropped.
+/// Spend `peer`'s byte credit; the charge holds it until dropped.
 fn spend(manager: &mut RibManager, peer: PeerId) -> crate::OutboundCharge {
     crate::OutboundCharge::new(
         &manager.outbound_credit_handle(peer),
-        manager.outbound_row_credit(),
+        1,
+        manager.outbound_credit_limit(),
     )
 }
 

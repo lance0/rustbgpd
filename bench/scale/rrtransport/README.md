@@ -275,15 +275,17 @@ witness. `witness.receivers` must equal `shape.receivers`. On a row-credit
 tree the per-peer credit comes from the result's `row_credit` record: the
 RIB's crate-private constants (`DAEMON_ROW_CREDIT`, `MIN_ROW_CREDIT`,
 `MAX_ROW_CREDIT`, `CHUNK_ROWS`), which the harness mirrors and a harness
-test compares with `crates/rib/src/outbound_credit.rs`.
+test compares with `crates/rib/src/outbound_credit.rs`. A byte-credit tree
+records the same row baseline for cell 7 and checks the shared pass size.
 
 Owe-whole flips (`bgp_rib_outbound_owing_flips_total`) are recorded but are
 not a witness. An RFC 4724 selection release owes its family whole to every
-private receiver by design, one flip per receiver at any table size, and
-delivers it as an uncharged whole-table operation: a 4-receiver, 4,096-route
-restart burst shows 4 flips with no credit in use. That is why the restart
-burst is no longer cell 2; it is cell 7 below. A result whose
-`shape.trigger` is not `ordinary_announce_burst` is INVALID as cell 2.
+private receiver by design, one flip per receiver at any table size. On
+trees with the unicast cursor its steps consume ordinary credit. An EVPN
+release still uses an uncharged whole-family operation. A flip alone says
+nothing about exhaustion in either family. Cell 7 checks the restart burst.
+A result whose `shape.trigger` is not `ordinary_announce_burst` is INVALID
+as cell 2.
 
 The credit-rows, credit-bytes, dirty-peer and live-operation gauges are
 sampled by the RIB once per run-loop iteration, so a RIB unit that spans a

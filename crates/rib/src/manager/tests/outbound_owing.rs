@@ -24,7 +24,7 @@ fn manager(credit: usize) -> RibManager {
         Some(Ipv4Addr::new(10, 0, 0, 100)),
         BgpMetrics::new(),
     )
-    .with_outbound_row_credit(credit);
+    .with_outbound_credit_bytes(unicast_rows(credit));
     manager.test_force_ungrouped = true;
     manager
 }
@@ -389,7 +389,7 @@ fn empty_whole_family_drain_clears_the_flag() {
     // Spend the credit, then change and revert one key while it is spent.
     let filler: Arc<crate::outbound_credit::OutboundCredit> =
         manager.outbound_credit_handle(stalled);
-    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8);
+    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8, unicast_rows(8));
     received(&mut manager, vec![route(0, 1)], vec![], vec![], vec![]);
     received(&mut manager, vec![route(0, 0)], vec![], vec![], vec![]);
     send_all(&mut source);
@@ -421,7 +421,8 @@ fn pass_stages_within_the_remaining_credit() {
     let mut rx = up(&mut manager, peer, ipv4_sendable());
     send_all(&mut rx);
     let filler = manager.outbound_credit_handle(peer);
-    let charge = crate::outbound_credit::OutboundCharge::new(&filler, credit / 2);
+    let charge =
+        crate::outbound_credit::OutboundCharge::new(&filler, credit / 2, unicast_rows(credit / 2));
     let announced = (0..500).map(|key| route(key, 0)).collect();
     received(&mut manager, announced, vec![], vec![], vec![]);
     send_all(&mut source);
@@ -451,7 +452,7 @@ fn persistent_drain_refusal_escalates_to_a_resync() {
     let mut rx = up(&mut manager, peer, ipv4_sendable());
     send_all(&mut rx);
     let filler = manager.outbound_credit_handle(peer);
-    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8);
+    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8, unicast_rows(8));
     received(&mut manager, vec![route(0, 0)], vec![], vec![], vec![]);
     send_all(&mut source);
     assert_eq!(owed(&manager, peer, V4), 1);
@@ -479,7 +480,7 @@ fn a_new_session_owes_nothing_from_the_last() {
     let mut rx = up(&mut manager, peer, ipv4_sendable());
     send_all(&mut rx);
     let filler = manager.outbound_credit_handle(peer);
-    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8);
+    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8, unicast_rows(8));
     received(&mut manager, vec![route(0, 0)], vec![], vec![], vec![]);
     send_all(&mut source);
     assert_eq!(owed(&manager, peer, V4), 1);
@@ -526,7 +527,7 @@ fn mixed_peer_owes_private_evpn_and_keeps_its_group() {
         "private EVPN"
     );
     let filler = manager.outbound_credit_handle(stalled);
-    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8);
+    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8, unicast_rows(8));
     received(
         &mut manager,
         vec![route(0, 0)],
@@ -586,7 +587,8 @@ fn assert_mixed_regroup_withdraws_old_route(owe_evpn: bool, refuse_capture: bool
     assert_eq!(manager.adj_ribs_out[&peer].len(), 0);
 
     let credit = manager.outbound_credit_handle(peer);
-    let charge = owe_evpn.then(|| crate::outbound_credit::OutboundCharge::new(&credit, 8));
+    let charge =
+        owe_evpn.then(|| crate::outbound_credit::OutboundCharge::new(&credit, 8, unicast_rows(8)));
     received(&mut manager, vec![], vec![], vec![evpn_route(1, 0)], vec![]);
     send_all(&mut source);
     wire.apply(&send_all(&mut rx));
@@ -685,7 +687,7 @@ fn owing_fallback_then_private_regroup_withdraws_the_denied_route() {
     assert!(wire.unicast.contains_key(&old));
 
     let credit = manager.outbound_credit_handle(peer);
-    let charge = crate::outbound_credit::OutboundCharge::new(&credit, 8);
+    let charge = crate::outbound_credit::OutboundCharge::new(&credit, 8, unicast_rows(8));
     received(&mut manager, vec![], vec![], vec![evpn_route(1, 0)], vec![]);
     send_all(&mut source);
     wire.apply(&send_all(&mut rx));
@@ -831,9 +833,9 @@ fn begin_close_flushes_owed_withdrawals() {
     send_all(&mut source);
     let mut wire = Wire::default();
     wire.apply(&send_all(&mut rx));
-    manager.outbound_row_credit_override = Some(1);
+    manager.outbound_credit_override = Some(unicast_rows(1));
     let filler = manager.outbound_credit_handle(peer);
-    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 1);
+    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 1, unicast_rows(1));
     received(
         &mut manager,
         vec![],
@@ -869,9 +871,9 @@ fn close_marker_held_by_withdrawal() -> (
     received(&mut manager, vec![route(1, 0)], vec![], vec![], vec![]);
     send_all(&mut source);
     send_all(&mut rx);
-    manager.outbound_row_credit_override = Some(1);
+    manager.outbound_credit_override = Some(unicast_rows(1));
     let credit = manager.outbound_credit_handle(peer);
-    let charge = crate::outbound_credit::OutboundCharge::new(&credit, 1);
+    let charge = crate::outbound_credit::OutboundCharge::new(&credit, 1, unicast_rows(1));
     received(
         &mut manager,
         vec![],
@@ -984,7 +986,7 @@ fn pending_marker_waits_behind_owed_keys() {
     let dump = held(&mut rx);
     assert!(manager.outbound_operation_live(peer));
     let filler = manager.outbound_credit_handle(peer);
-    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8);
+    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8, unicast_rows(8));
     received(&mut manager, vec![route(0, 0)], vec![], vec![], vec![]);
     send_all(&mut source);
     assert_eq!(owed(&manager, peer, V4), 1);
@@ -1040,7 +1042,7 @@ fn refresh_answer_absorbs_owed_withdrawal_first() {
     wire.apply(&send_all(&mut rx));
     assert_eq!(wire.unicast.len(), 2);
     let filler = manager.outbound_credit_handle(peer);
-    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8);
+    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8, unicast_rows(8));
     received(
         &mut manager,
         vec![],
@@ -1114,7 +1116,8 @@ fn vpn_flowspec_refresh_absorbs_only_its_own_owed_withdrawals() {
                 .sum::<usize>(),
             1 + usize::from(global)
         );
-        let held_credit = crate::OutboundCharge::new(&manager.outbound_credit_handle(peer), 8);
+        let held_credit =
+            crate::OutboundCharge::new(&manager.outbound_credit_handle(peer), 8, unicast_rows(8));
         for key in &keys {
             let (reply, mut result) = oneshot::channel();
             manager.handle_update(RibUpdate::WithdrawFlowSpec {
@@ -1236,7 +1239,8 @@ async fn lease_expiry_owes_ipv6_vpn_flowspec_beside_global_flowspec() {
         .collect();
     assert_eq!(announced, keys, "both rules reach the peer");
 
-    let held = crate::OutboundCharge::new(&manager.outbound_credit_handle(peer), 8);
+    let held =
+        crate::OutboundCharge::new(&manager.outbound_credit_handle(peer), 8, unicast_rows(8));
     tokio::time::advance(Duration::from_secs(30)).await;
     let (expired, _) = manager.injection_leases().take_expired();
     assert_eq!(expired.len(), 1);
@@ -1277,7 +1281,7 @@ fn refused_replay_leaves_owed_keys_and_accepted_replay_absorbs_them() {
     let mut rx = up(&mut manager, peer, ipv4_sendable());
     let dump = held(&mut rx);
     let filler = manager.outbound_credit_handle(peer);
-    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8);
+    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8, unicast_rows(8));
     received(
         &mut manager,
         vec![route(0, 0), route(1, 0)],
@@ -1330,7 +1334,7 @@ fn operator_replay_sends_the_owed_marker_as_an_ordinary_envelope() {
     let mut rx = up(&mut manager, peer, ipv4_sendable());
     send_all(&mut rx);
     let filler = manager.outbound_credit_handle(peer);
-    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8);
+    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8, unicast_rows(8));
     received(&mut manager, vec![route(0, 0)], vec![], vec![], vec![]);
     send_all(&mut source);
     assert_eq!(owed(&manager, peer, V4), 1);
@@ -1399,7 +1403,7 @@ fn cancelling_the_last_owed_key_sends_the_marker_it_held() {
     let dump = held(&mut rx);
     assert!(manager.outbound_operation_live(peer));
     let filler = manager.outbound_credit_handle(peer);
-    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8);
+    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8, unicast_rows(8));
     received(&mut manager, vec![route(0, 0)], vec![], vec![], vec![]);
     send_all(&mut source);
     assert_eq!(owed(&manager, peer, V4), 1);
@@ -1451,7 +1455,7 @@ fn refresh_absorbing_on_the_last_slot_offers_the_marker_it_freed() {
     send_all(&mut source);
     send_all(&mut rx);
     let filler = manager.outbound_credit_handle(peer);
-    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8);
+    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8, unicast_rows(8));
     received(
         &mut manager,
         vec![],
@@ -1605,7 +1609,7 @@ async fn actor_barrier(tx: &mpsc::Sender<RibUpdate>) {
 async fn owed_keys_follow_returned_credit_within_one_backlog_tick() {
     let (tx, rx) = mpsc::channel(64);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
-        .with_outbound_row_credit(4);
+        .with_outbound_credit_bytes(unicast_rows(4));
     manager.test_force_ungrouped = true;
     let handle = tokio::spawn(manager.run());
     let (source_tx, mut source_rx) = mpsc::channel(64);
@@ -1664,7 +1668,7 @@ fn owed_keys_of_a_deferred_family_wait_for_the_release() {
     use super::selection_deferral_dirty_rtbh::{connect, manager_with_dormant_waiter};
     const DEFERRAL_SOURCE: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 81);
     const WAITER: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 83);
-    let mut manager = manager_with_dormant_waiter().with_outbound_row_credit(8);
+    let mut manager = manager_with_dormant_waiter().with_outbound_credit_bytes(unicast_rows(8));
     manager.test_force_ungrouped = true;
     let mut source = connect(&mut manager, DEFERRAL_SOURCE, 4096, false, false);
     let peer = peer_v4(Ipv4Addr::new(192, 0, 2, 90));
@@ -1677,7 +1681,7 @@ fn owed_keys_of_a_deferred_family_wait_for_the_release() {
     );
     send_all(&mut rx);
     let filler = manager.outbound_credit_handle(peer);
-    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8);
+    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8, unicast_rows(8));
     let announced = (0..4u8)
         .map(|index| {
             make_route_with_lp(
@@ -1764,7 +1768,7 @@ fn oversized_send_all_keys_drain_one_per_credit_window() {
         sources.push(up(&mut manager, peer_v4(address), ipv4_sendable()));
     }
     let filler = manager.outbound_credit_handle(peer);
-    let charge = crate::outbound_credit::OutboundCharge::new(&filler, credit);
+    let charge = crate::outbound_credit::OutboundCharge::new(&filler, credit, unicast_rows(credit));
     for index in 0..SOURCES {
         let address = Ipv4Addr::new(10, 0, 17, index + 1);
         let announced = (0..PREFIXES)
@@ -1833,7 +1837,7 @@ fn owed_key_drain_never_starves_the_dirty_ring() {
     send_all(&mut owing_rx);
     send_all(&mut dirty_rx);
     let filler = manager.outbound_credit_handle(owing);
-    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8);
+    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8, unicast_rows(8));
     received(&mut manager, vec![route(0, 0)], vec![], vec![], vec![]);
     send_all(&mut source);
     send_all(&mut dirty_rx);
@@ -1858,7 +1862,7 @@ fn a_drain_refused_by_a_full_channel_keeps_its_keys() {
     let mut rx = up_session(&mut manager, peer, 0, ipv4_sendable(), 4);
     send_all(&mut rx);
     let filler = manager.outbound_credit_handle(peer);
-    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8);
+    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8, unicast_rows(8));
     received(&mut manager, vec![route(0, 0)], vec![], vec![], vec![]);
     send_all(&mut source);
     assert_eq!(owed(&manager, peer, V4), 1);
@@ -1953,7 +1957,7 @@ fn full_channel_debt_skips_the_executor_handoff_tick() {
     received(&mut manager, vec![], vec![], vec![evpn_route(1, 0)], vec![]);
     send_all(&mut source);
     assert_eq!(owed(&manager, peer, EVPN), 1);
-    assert!(manager.outbound_credit_rows(peer) < manager.outbound_row_credit());
+    assert!(manager.outbound_credit_bytes(peer) < manager.outbound_credit_limit());
 
     for _ in 0..5 {
         assert_eq!(handoffs(&mut manager), 0, "no drain can progress");
@@ -1996,8 +2000,8 @@ fn a_partial_credit_window_preserves_the_oldest_owed_keys() {
         manager.handle_update(registration);
         send_all(&mut rx);
         let credit = manager.outbound_credit_handle(peer);
-        let retained = crate::OutboundCharge::new(&credit, HELD);
-        let spent = crate::OutboundCharge::new(&credit, CREDIT - HELD);
+        let retained = crate::OutboundCharge::new(&credit, HELD, unicast_rows(HELD));
+        let spent = crate::OutboundCharge::new(&credit, CREDIT - HELD, unicast_rows(CREDIT - HELD));
         for index in 0..8 {
             for (address, _) in &sources {
                 let mut path = route(index, 0);
@@ -2050,7 +2054,8 @@ fn an_owed_tick_keeps_draining_while_credit_and_time_remain() {
     let peer = peer_v4(Ipv4Addr::new(10, 0, 19, 3));
     let mut rx = up(&mut manager, peer, ipv4_sendable());
     send_all(&mut rx);
-    let spent = crate::OutboundCharge::new(&manager.outbound_credit_handle(peer), 16);
+    let spent =
+        crate::OutboundCharge::new(&manager.outbound_credit_handle(peer), 16, unicast_rows(16));
     received(
         &mut manager,
         (0..12).map(|key| route(key, 0)).collect(),
@@ -2124,7 +2129,8 @@ fn unavailable_unicast_families_create_no_owed_keys() {
         }
         manager.handle_update(registration);
         send_all(&mut rx);
-        let spent = crate::OutboundCharge::new(&manager.outbound_credit_handle(peer), 4);
+        let spent =
+            crate::OutboundCharge::new(&manager.outbound_credit_handle(peer), 4, unicast_rows(4));
         received(&mut manager, vec![route(0, 0)], vec![], vec![], vec![]);
         send_all(&mut source);
         assert!(manager.owing(peer).is_none(), "orf={orf}");
@@ -2173,7 +2179,7 @@ fn a_resync_settles_what_the_peer_owed() {
     let mut rx = up(&mut manager, peer, ipv4_sendable());
     send_all(&mut rx);
     let filler = manager.outbound_credit_handle(peer);
-    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8);
+    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8, unicast_rows(8));
     received(
         &mut manager,
         vec![route(0, 0), route(1, 0)],
@@ -2268,7 +2274,8 @@ fn review_p1_owed_exempt_withdrawal_drains_inside_a_selection_hold() {
                 manager.handle_update(target);
                 send_all(&mut rx);
                 let filler = manager.outbound_credit_handle(peer);
-                let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8);
+                let charge =
+                    crate::outbound_credit::OutboundCharge::new(&filler, 8, unicast_rows(8));
                 let mut ordinary = route(40, 0);
                 if afi == Afi::Ipv6 {
                     ordinary.prefix =
@@ -2315,7 +2322,8 @@ fn review_p1_owed_exempt_withdrawal_drains_inside_a_selection_hold() {
                     "the exempt RTBH is advertised inside the hold"
                 );
                 assert!(!wire.unicast.contains_key(&(ordinary_key, 0)));
-                let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8);
+                let charge =
+                    crate::outbound_credit::OutboundCharge::new(&filler, 8, unicast_rows(8));
                 withdraw_local(&mut manager, rtbh);
                 assert!(
                     send_all(&mut rx).is_empty(),
@@ -2421,7 +2429,7 @@ fn review_p2_old_owed_withdrawal_is_not_starved_by_hot_keys() {
     assert!(wire.unicast.contains_key(&(old.prefix, 0)));
     // Spend the credit, then owe the old route's withdrawal first.
     let filler = manager.outbound_credit_handle(peer);
-    let charge = crate::outbound_credit::OutboundCharge::new(&filler, credit);
+    let charge = crate::outbound_credit::OutboundCharge::new(&filler, credit, unicast_rows(credit));
     received(&mut manager, vec![], vec![(old.prefix, 0)], vec![], vec![]);
     let hot = |variant: u32| {
         (0..hot_keys)
@@ -2459,6 +2467,8 @@ fn review_p2_vpn_add_path_pass_budgets_with_the_family_cap() {
     const PATHS: u32 = 8;
     let credit = 64;
     let mut manager = manager(credit).with_owing_theta_floor(1 << 30);
+    // Credit for `credit` VPN rows.
+    manager.outbound_credit_override = Some(credit * OwedFamily::VPNV4.row_bytes());
     let vpn = (Afi::Ipv4, Safi::MplsVpn);
     let source_address = Ipv4Addr::new(10, 0, 22, 9);
     let (source_tx, mut source_rx) = mpsc::channel(4096);
@@ -2529,7 +2539,7 @@ fn review_p2_vpn_add_path_pass_budgets_with_the_family_cap() {
 async fn review_p2_owed_keys_shorten_an_armed_one_second_timer() {
     let (tx, rx) = mpsc::channel(64);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
-        .with_outbound_row_credit(4);
+        .with_outbound_credit_bytes(unicast_rows(4));
     manager.test_force_ungrouped = true;
     let handle = tokio::spawn(manager.run());
     let (source_tx, mut source_rx) = mpsc::channel(64);
@@ -2612,7 +2622,7 @@ fn deferral_manager(families: Vec<(Afi, Safi)>, credit: usize) -> RibManager {
             families,
         }],
     })
-    .with_outbound_row_credit(credit);
+    .with_outbound_credit_bytes(unicast_rows(credit));
     manager.test_force_ungrouped = true;
     manager
 }
@@ -2664,7 +2674,7 @@ fn owed_evpn_keys_wait_for_the_selection_release() {
     );
     send_all(&mut rx);
     let filler = manager.outbound_credit_handle(peer);
-    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8);
+    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8, unicast_rows(8));
     let routes: Vec<_> = (0..3).map(|tag| evpn_route(tag, 0)).collect();
     manager.handle_update(RibUpdate::RoutesReceived {
         session_id: 1,
@@ -2777,7 +2787,7 @@ fn owed_flowspec_revocation_drains_inside_a_selection_hold() {
             "the local rule is advertised inside the hold"
         );
         let filler = manager.outbound_credit_handle(peer);
-        let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8);
+        let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8, unicast_rows(8));
         let (reply, mut result) = oneshot::channel();
         manager.handle_update(RibUpdate::WithdrawFlowSpec {
             key: key.clone(),
@@ -2814,7 +2824,7 @@ fn owed_flowspec_revocation_drains_inside_a_selection_hold() {
         // step that settles it, and a drained or rearmed held sibling is
         // preserved.
         for rearm in [false, true] {
-            let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8);
+            let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8, unicast_rows(8));
             if rearm {
                 let (reply, mut result) = oneshot::channel();
                 manager.handle_update(RibUpdate::InjectFlowSpec {
@@ -2939,7 +2949,7 @@ fn only_eligible_whole_debt_waits_on_a_live_latch() {
         let mut rx = up(&mut manager, peer, vec![V4, EVPN]);
         send_all(&mut rx);
         let credit = manager.outbound_credit_handle(peer);
-        let charge = crate::outbound_credit::OutboundCharge::new(&credit, 8);
+        let charge = crate::outbound_credit::OutboundCharge::new(&credit, 8, unicast_rows(8));
         received(&mut manager, vec![], vec![], vec![evpn_route(0, 0)], vec![]);
         send_all(&mut source);
         assert!(send_all(&mut rx).is_empty());
@@ -2988,7 +2998,7 @@ fn a_failed_absorption_keeps_the_end_of_rib() {
     let mut rx = up(&mut manager, peer, families.to_vec());
     send_all(&mut rx);
     let filler = manager.outbound_credit_handle(peer);
-    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8);
+    let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8, unicast_rows(8));
     received(&mut manager, vec![route(0, 0)], vec![], vec![], vec![]);
     send_all(&mut source);
     assert_eq!(owed(&manager, peer, V4), 1);
@@ -3061,9 +3071,9 @@ fn byte_cap_is_a_quarter_of_the_family_in_bytes() {
         );
         send_all(&mut source);
         send_all(&mut rx);
-        manager.outbound_row_credit_override = Some(8);
+        manager.outbound_credit_override = Some(unicast_rows(8));
         let filler = manager.outbound_credit_handle(peer);
-        let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8);
+        let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8, unicast_rows(8));
         received(
             &mut manager,
             (0..changed).map(|key| route(key, 1)).collect(),
@@ -3169,7 +3179,7 @@ async fn whole_family_debt_behind_a_latch_drains_when_it_releases() {
         Some(Ipv4Addr::new(10, 0, 0, 100)),
         BgpMetrics::new(),
     )
-    .with_outbound_row_credit(4)
+    .with_outbound_credit_bytes(unicast_rows(4))
     .with_owing_theta_floor(0);
     manager.test_force_ungrouped = true;
     let handle = tokio::spawn(manager.run());
@@ -3253,7 +3263,7 @@ async fn owed_keys_drain_across_poll_slices_through_the_actor() {
     const KEYS: u32 = 12;
     let (tx, rx) = mpsc::channel(64);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
-        .with_outbound_row_credit(4)
+        .with_outbound_credit_bytes(unicast_rows(4))
         .with_owing_theta_floor(1 << 30);
     manager.test_force_ungrouped = true;
     manager.flush_poll_budget = Duration::ZERO;
@@ -3599,6 +3609,9 @@ fn typed_owed_drains_use_partial_credit_and_converge() {
     ] {
         for gone in [0, 6, 8] {
             let mut manager = manager(20).with_owing_theta_floor(1 << 30);
+            // Credit sized in rows of the family under test.
+            let row = OwedFamily::of(family).unwrap().row_bytes();
+            manager.outbound_credit_override = Some(20 * row);
             manager.flush_poll_budget = Duration::ZERO;
             let families = if family == EVPN {
                 vec![V4, EVPN]
@@ -3640,8 +3653,8 @@ fn typed_owed_drains_use_partial_credit_and_converge() {
             apply_typed_wire(&mut wire, &send_all(&mut rx));
             assert_eq!(wire.len(), usize::from(gone));
             let credit = manager.outbound_credit_handle(peer);
-            let retained = crate::outbound_credit::OutboundCharge::new(&credit, 4);
-            let spent = crate::outbound_credit::OutboundCharge::new(&credit, 16);
+            let retained = crate::outbound_credit::OutboundCharge::new(&credit, 4, 4 * row);
+            let spent = crate::outbound_credit::OutboundCharge::new(&credit, 16, 16 * row);
             for key in 1..=12 {
                 if key <= gone {
                     typed_received(&mut manager, family, &[], &[(key, 0)], 0);
@@ -3735,7 +3748,7 @@ fn whole_typed_debt_isolates_held_and_ready_afis() {
             assert_eq!(wire.len(), 2);
             let initial = wire.clone();
             let credit = manager.outbound_credit_handle(peer);
-            let spent = crate::outbound_credit::OutboundCharge::new(&credit, 64);
+            let spent = crate::outbound_credit::OutboundCharge::new(&credit, 64, unicast_rows(64));
             for family in &families {
                 typed_received(&mut manager, *family, &[(2, 0), (3, 0)], &[(1, 0)], 10);
                 assert!(manager.owes_whole(peer, OwedFamily::of(*family).unwrap()));
@@ -3787,7 +3800,7 @@ fn whole_typed_debt_isolates_held_and_ready_afis() {
 
             // With both AFIs runnable, one whole pass must still exclude its sibling.
             let before = wire.clone();
-            let spent = crate::outbound_credit::OutboundCharge::new(&credit, 64);
+            let spent = crate::outbound_credit::OutboundCharge::new(&credit, 64, unicast_rows(64));
             for family in &families {
                 typed_received(
                     &mut manager,
@@ -3860,7 +3873,8 @@ fn begin_close_flushes_typed_withdrawals_and_moves_only() {
             apply_typed_wire(&mut wire, &send_all(&mut rx));
             assert_eq!(wire.len(), 3);
             let credit = manager.outbound_credit_handle(peer);
-            let held_credit = crate::outbound_credit::OutboundCharge::new(&credit, 64);
+            let held_credit =
+                crate::outbound_credit::OutboundCharge::new(&credit, 64, unicast_rows(64));
             typed_received(
                 &mut manager,
                 family,
@@ -4010,7 +4024,8 @@ fn partial_keyed_pass_only_owes_negotiated_families() {
         let peer = peer_v4(Ipv4Addr::new(10, 0, 31, 1));
         let mut rx = up(&mut manager, peer, vec![available_family]);
         send_all(&mut rx);
-        let held_credit = crate::OutboundCharge::new(&manager.outbound_credit_handle(peer), 1);
+        let held_credit =
+            crate::OutboundCharge::new(&manager.outbound_credit_handle(peer), 1, unicast_rows(1));
         let KeyedPass::Stage { keys: pass, budget } = manager.owing_keyed_pass(
             peer,
             &keys,
@@ -4113,7 +4128,7 @@ fn owed_bgpls_families_drain_independently_of_a_held_sibling() {
                 negotiated.len()
             );
             let credit = manager.outbound_credit_handle(peer);
-            let held_credit = crate::OutboundCharge::new(&credit, 64);
+            let held_credit = crate::OutboundCharge::new(&credit, 64, unicast_rows(64));
             receive(&mut manager, 200);
             assert!(send_all(&mut rx).is_empty());
             assert!(manager.owes(peer, ready));
@@ -4196,7 +4211,7 @@ fn owed_bgpls_families_drain_independently_of_a_held_sibling() {
                     .all(|route| route.local_pref_attr() == Some(300))
             );
             if dual {
-                let held_credit = crate::OutboundCharge::new(&credit, 64);
+                let held_credit = crate::OutboundCharge::new(&credit, 64, unicast_rows(64));
                 receive(&mut manager, 400);
                 assert!(
                     families
