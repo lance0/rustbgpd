@@ -51,6 +51,9 @@ thread_local! {
     pub(crate) static FAMILY_COUNT_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+#[cfg(test)]
+type EvpnGrowthProbe = (Vec<(usize, usize)>, usize, Vec<*const EvpnRibRoute>);
+
 /// EVPN route slots at which [`AdjRibOut::insert_evpn`] reserves the rest of
 /// the slab's first segment.
 const EVPN_FIRST_SEGMENT_AT: usize = 1 << 13;
@@ -1106,6 +1109,25 @@ impl AdjRibOut {
         self.evpn_bodies.len()
     }
 
+    /// What one EVPN insert can move: each index table's capacity and
+    /// length, the bytes of an index entry, and the address of the first
+    /// route of each slab segment.
+    #[cfg(test)]
+    fn evpn_growth_probe(&self) -> EvpnGrowthProbe {
+        let tables = self.evpn_index.shards().iter();
+        (
+            tables
+                .map(|table| (table.capacity(), table.len()))
+                .collect(),
+            std::mem::size_of::<(EvpnRouteKey, u32)>(),
+            (0..self.evpn_bodies.slot_count())
+                .step_by(SEGMENT)
+                .filter_map(|handle| self.evpn_bodies.get(u32::try_from(handle).ok()?))
+                .map(std::ptr::from_ref)
+                .collect(),
+        )
+    }
+
     // --- BGP-LS methods (ADR-0077 outbound reflection substrate) ---
 
     /// Reserve the BGP-LS advertised-route map for a known outbound batch.
@@ -1658,8 +1680,143 @@ mod tests {
     const PAST_LARGE_DOUBLING: usize =
         2 * crate::fast_hash::LARGE_SHARD_SPLIT_AT + crate::fast_hash::LARGE_SHARD_SPLIT_AT / 8;
 
-    /// The labeled route map and its prefix index both grow like the EVPN
-    /// map.
+    /// Bytes of stored entries each insert moved while one receiver's EVPN
+    /// table fills to `count` rows, as `(rows before the insert, bytes)` for
+    /// every insert that moved any, and whether a route moved once the
+    /// slab's first segment was full. A regrown index table rehashes its
+    /// entries, a split rehashes all of them, and a reallocated slab segment
+    /// copies its routes.
+    fn evpn_growth_moves(count: u32) -> (Vec<(usize, usize)>, bool) {
+        let mut rib = AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+        let (mut tables, entry, mut bodies) = rib.evpn_growth_probe();
+        let (mut moves, mut late_body_move) = (Vec::new(), false);
+        for i in 0..count {
+            rib.insert_evpn(evpn_mac_ip(i));
+            let rows = i as usize;
+            let (now_tables, _, now_bodies) = rib.evpn_growth_probe();
+            let index_rows = if now_tables.len() == tables.len() {
+                let regrown = tables
+                    .iter()
+                    .zip(&now_tables)
+                    .filter(|(old, new)| old.0 != new.0);
+                regrown.map(|(old, _)| old.1).sum()
+            } else {
+                rows
+            };
+            let moved_segments = bodies.iter().zip(&now_bodies).enumerate();
+            let body_rows: usize = moved_segments
+                .filter(|(_, (old, new))| old != new)
+                .map(|(segment, _)| (rows - segment * SEGMENT).min(SEGMENT))
+                .sum();
+            late_body_move |= body_rows != 0 && rows >= SEGMENT;
+            let bytes = index_rows * entry + body_rows * size_of::<EvpnRibRoute>();
+            if bytes != 0 {
+                moves.push((rows, bytes));
+            }
+            (tables, bodies) = (now_tables, now_bodies);
+        }
+        (moves, late_body_move)
+    }
+
+    /// All private receivers of a family hold about the same rows, so they
+    /// grow inside the same inbound message: what one insert moves is paid
+    /// once per receiver in one RIB turn. One receiver's EVPN table filling
+    /// past 28,672, 57,344 and 114,688 rows never moves more than 2 MiB of
+    /// stored entries in one insert, and no route moves once the slab's
+    /// first segment is full. Red proof: routes stored inline in the hash
+    /// table move 5.96 MB at 28,672 rows, 11.9 MB at 57,344 and 23.9 MB at
+    /// 114,688.
+    #[test]
+    fn evpn_growth_moves_at_most_two_mebibytes_per_insert() {
+        let (moves, late_body_move) = evpn_growth_moves(250_000);
+        for (rows, bytes) in moves.iter().filter(|(_, bytes)| *bytes >= 256 << 10) {
+            println!("EVPN_GROWTH rows={rows} moved_bytes={bytes}");
+        }
+        let worst = moves.iter().max_by_key(|(_, bytes)| *bytes).unwrap();
+        assert!(
+            worst.1 <= 2 << 20,
+            "the insert after {} rows moved {} bytes of stored EVPN entries",
+            worst.0,
+            worst.1
+        );
+        assert!(!late_body_move, "a route moved after slot {SEGMENT}");
+    }
+
+    /// A small EVPN table keeps a small slab; the first segment is reserved
+    /// whole only once the table reaches `EVPN_FIRST_SEGMENT_AT` rows.
+    #[test]
+    fn evpn_slab_reserves_its_first_segment_once() {
+        let mut rib = AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+        let at = u32::try_from(EVPN_FIRST_SEGMENT_AT).unwrap();
+        (0..at).for_each(|i| rib.insert_evpn(evpn_mac_ip(i)));
+        assert_eq!(rib.evpn_bodies.capacity(), EVPN_FIRST_SEGMENT_AT);
+        rib.insert_evpn(evpn_mac_ip(at));
+        assert_eq!(rib.evpn_bodies.capacity(), SEGMENT);
+    }
+
+    /// The EVPN index and slab stay one table through inserts, replacements,
+    /// removals and every way of emptying it: each key reads back its own
+    /// latest route, a walk yields exactly the stored keys, and freed slots
+    /// are reused.
+    #[test]
+    fn evpn_index_and_slab_agree_through_churn() {
+        const KEYS: u32 = 40_000;
+        let mut rib = AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+        let mut model = std::collections::HashMap::new();
+        let mut state = 0x9e37_79b9_u32;
+        let check = |rib: &AdjRibOut, model: &std::collections::HashMap<u32, Ipv4Addr>| {
+            assert_eq!(rib.evpn_len(), model.len());
+            assert_eq!(rib.evpn_index.len(), model.len());
+            assert_eq!(
+                rib.iter_evpn().size_hint(),
+                (model.len(), Some(model.len()))
+            );
+            let walked: std::collections::HashSet<_> =
+                rib.iter_evpn().map(EvpnRibRoute::key).collect();
+            assert_eq!(walked.len(), model.len());
+            for (i, version) in model {
+                let key = evpn_mac_ip(*i).key();
+                assert!(walked.contains(&key));
+                assert_eq!(rib.get_evpn(&key).unwrap().peer_router_id, *version);
+            }
+        };
+        for step in 0..300_000_u32 {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let i = (state >> 8) % KEYS;
+            let key = evpn_mac_ip(i).key();
+            if state >> 30 == 0 {
+                assert_eq!(rib.remove_evpn(&key), model.remove(&i).is_some());
+                assert!(rib.get_evpn(&key).is_none());
+            } else {
+                let mut route = evpn_mac_ip(i);
+                route.peer_router_id = Ipv4Addr::from(step);
+                rib.insert_evpn(route);
+                model.insert(i, Ipv4Addr::from(step));
+                assert_eq!(
+                    rib.get_evpn(&key).unwrap().peer_router_id,
+                    Ipv4Addr::from(step)
+                );
+            }
+            assert!(rib.evpn_bodies.slot_count() <= KEYS as usize);
+            if step % 50_000 == 49_999 {
+                check(&rib, &model);
+                match step / 50_000 {
+                    1 => rib.clear(),
+                    2 => rib.retire_with(&mut || {}),
+                    3 => rib.release_evpn_with(&mut || {}),
+                    _ => continue,
+                }
+                model.clear();
+                check(&rib, &model);
+                assert!(rib.is_empty_all_families());
+            }
+        }
+    }
+
+    /// The labeled route map and its prefix index are plain tables up to the
+    /// large split point and then grow one shard at a time: no insert rehashes
+    /// more than `LARGE_SHARD_SPLIT_AT` entries. Red proof: a plain map fails
+    /// at its doubling past 229,376 entries.
     #[test]
     fn labeled_maps_grow_by_at_most_one_large_split_per_insert() {
         for (name, capacity) in [
@@ -1710,6 +1867,29 @@ mod tests {
             );
             println!("RESIZE routes={count} evpn_worst_ms={evpn:.1} labeled_worst_ms={labeled:.1}");
         }
+        // The slowest EVPN insert within 4,096 rows of each row count at
+        // which the index regrows (its 16 shards cross close together), and
+        // the slowest of the whole fill with its row.
+        let mut rib = AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+        let mut slowest = [std::time::Duration::ZERO; 3];
+        let mut worst = (std::time::Duration::ZERO, 0);
+        for (i, route) in (0..120_000_usize).zip((0..).map(evpn_mac_ip)) {
+            let started = Instant::now();
+            rib.insert_evpn(route);
+            let elapsed = started.elapsed();
+            worst = worst.max((elapsed, i));
+            for (slot, at) in slowest.iter_mut().zip([28_672_usize, 57_344, 114_688]) {
+                if at.abs_diff(i) < 4096 {
+                    *slot = (*slot).max(elapsed);
+                }
+            }
+        }
+        println!(
+            "RESIZE evpn_threshold_us={:?} worst_us={} at_row={}",
+            slowest.map(|d| d.as_micros()),
+            worst.0.as_micros(),
+            worst.1
+        );
     }
 
     fn prefix_a() -> Prefix {
