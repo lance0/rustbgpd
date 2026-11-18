@@ -734,6 +734,83 @@ async fn late_family_marker_retry_and_selection_release_respect_the_hold() {
     assert_eq!(released, vec![V4]);
 }
 
+/// A refresh the selection gate deferred is answered at the gate's release
+/// without an End-of-RIB of its own, since the release owes the marker. When
+/// the grace window still holds that marker, the answer waits for it and
+/// keeps that rule: the peer receives one End-of-RIB in all.
+#[tokio::test(start_paused = true)]
+async fn selection_released_refresh_behind_the_grace_hold_sends_one_end_of_rib() {
+    let metrics = BgpMetrics::new();
+    let mut manager = manager_with(&metrics);
+    let (mut messages, mut rx) = session_messages(UPSTREAM, 1, HELPER, vec![V4], 64);
+    if let RibUpdate::SetPeerGracefulRestartContext {
+        peer_gr_families, ..
+    } = &mut messages[0]
+    {
+        *peer_gr_families = vec![V4];
+    }
+    for message in messages {
+        manager.handle_update(message);
+    }
+    inject(&mut manager, KEPT);
+    assert!(manager.selection_convergence_held(V4));
+    manager.handle_update(RibUpdate::RouteRefreshRequest {
+        peer: UPSTREAM,
+        session_id: 1,
+        afi: V4.0,
+        safi: V4.1,
+        queued: Arc::default(),
+    });
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: UPSTREAM,
+        session_id: 1,
+        afi: V4.0,
+        safi: V4.1,
+    });
+    assert!(!manager.selection_convergence_held(V4));
+    assert!(!manager.dirty_peers.contains(&UPSTREAM));
+    assert!(manager.pending_refresh[&UPSTREAM].contains(&V4));
+    assert!(
+        manager
+            .pending_refresh_suppress_eor
+            .contains(&(UPSTREAM, V4))
+    );
+    let mut wire = Vec::new();
+    let mut drain = |rx: &mut mpsc::Receiver<OutboundRouteUpdate>| {
+        while let Ok(update) = rx.try_recv() {
+            wire.push((
+                update.announce.len(),
+                update.end_of_rib.clone(),
+                update.refresh_markers.clone(),
+            ));
+        }
+    };
+    drain(&mut rx);
+    release(&mut manager).await;
+    for _ in 0..4 {
+        manager.resync_dirty_peers_bounded();
+    }
+    drain(&mut rx);
+    assert_eq!(
+        wire.iter()
+            .flat_map(|(_, eor, _)| eor)
+            .copied()
+            .collect::<Vec<_>>(),
+        [V4],
+        "{wire:?}"
+    );
+    let answer = wire.last().unwrap();
+    assert_eq!(answer.0, 1, "{wire:?}");
+    assert_eq!(
+        answer.2,
+        [
+            (V4.0, V4.1, rustbgpd_wire::RouteRefreshSubtype::BoRR),
+            (V4.0, V4.1, rustbgpd_wire::RouteRefreshSubtype::EoRR),
+        ]
+    );
+    assert!(!manager.pending_refresh.contains_key(&UPSTREAM));
+}
+
 fn manager_with(metrics: &BgpMetrics) -> RibManager {
     manager(Some(&[UPSTREAM]), metrics)
 }
