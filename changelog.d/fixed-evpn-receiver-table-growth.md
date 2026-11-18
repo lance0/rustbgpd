@@ -8,8 +8,10 @@
   inside one inbound UPDATE, and every peer's updates waited behind it.
   The routes now live in a slab that does not move them, and the table
   holds 68-byte entries that point into it and grows one sixteenth at a
-  time: no single insert moves more than 2 MiB. The evidence is a work
-  count in a unit test, not a timing.
+  time: up to about 900,000 routes per receiver no single insert moves
+  more than 2 MiB. Past that a growth step moves one sixteenth of the
+  table's entries, 3.9 MB at 911,000 routes. The evidence is a work count
+  in a unit test, not a timing.
   **Operator-visible:** memory per advertised EVPN route per receiver is
   lower for large tables, about 40 MB against 55 MB at 150,000 routes by
   the tables' sizes, not a daemon measurement. A receiver with more than
