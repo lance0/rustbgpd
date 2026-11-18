@@ -678,12 +678,18 @@ fn m76_pins_gobgp410_identity_before_preserving_the_orr_contract() {
 }
 
 #[test]
-fn m77_pins_gobgp410_identity_before_preserving_the_gr_llgr_contract() {
+fn m77_pins_gobgp_identity_before_preserving_the_gr_llgr_contract() {
     let topology = topology("m77-gr-llgr-rr-gobgp.clab.yml");
     assert_eq!(topology["name"], "m77-gr-llgr-rr-gobgp");
     let nodes = topology["topology"]["nodes"].as_mapping().unwrap();
     assert_eq!(nodes["rustbgpd"]["image"], "rustbgpd:dev");
-    for peer in ["gobgp-pe", "gobgp-client", "gobgp-ls"] {
+    for peer in [
+        "gobgp-pe",
+        "gobgp-client",
+        "gobgp-ls",
+        "gobgp-ibgp",
+        "gobgp-ebgp",
+    ] {
         assert_eq!(
             nodes[peer]["image"], "gobgp:v4.11.0-m77",
             "M77 {peer} image drifted"

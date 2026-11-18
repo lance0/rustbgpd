@@ -367,7 +367,7 @@ impl RibManager {
                 || "no source-route NO_EXPORT restriction applies".to_string(),
             );
 
-            // RFC 9494 §4.4: LLGR-stale toward a non-LLGR eBGP peer is
+            // RFC 9494 §4.3: LLGR-stale toward a non-LLGR eBGP peer is
             // suppressed. See `llgr_stale_export_suppressed`.
             //
             // GR-stale (`is_stale`) EVPN routes are deliberately NOT gated

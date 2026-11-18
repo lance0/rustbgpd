@@ -1756,7 +1756,7 @@ mod shared_unicast_probe_cache_tests {
     }
 }
 
-/// RFC 9494 §4.4 export restriction: an LLGR-stale route "SHOULD NOT be
+/// RFC 9494 §4.3 export restriction: an LLGR-stale route "SHOULD NOT be
 /// advertised to any neighbor from which the Long-Lived Graceful Restart
 /// Capability has not been received". For an eBGP target that means
 /// suppression (withdraw-if-present, the standard ineligibility shape at

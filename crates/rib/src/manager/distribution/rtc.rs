@@ -107,7 +107,7 @@ impl RibManager {
                 continue;
             }
 
-            // RFC 9494 §4.4: LLGR-stale toward a non-LLGR eBGP peer is
+            // RFC 9494 §4.3: LLGR-stale toward a non-LLGR eBGP peer is
             // suppressed. See `llgr_stale_export_suppressed`.
             if super::llgr_stale_export_suppressed(
                 best.is_llgr_stale,

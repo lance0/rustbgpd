@@ -1,0 +1,18 @@
+[global.config]
+as = 65002
+router-id = "10.0.125.2"
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "10.0.125.1"
+peer-as = 65001
+[neighbors.transport.config]
+passive-mode = true
+[neighbors.graceful-restart.config]
+enabled = true
+restart-time = 60
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "l2vpn-evpn"
+[neighbors.afi-safis.mp-graceful-restart.config]
+enabled = true

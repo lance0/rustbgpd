@@ -729,7 +729,7 @@ resolved.
   receipt), and the pre-existing unicast/FlowSpec/EVPN paths implement
   the same RFC-strict consecutive-restart deletion, End-of-RIB sweep
   of non-readvertised stale routes (RFC 4724 §4.1 / RFC 9494 §4.2), and
-  the RFC 9494 §4.4 export restriction (LLGR-stale routes are withheld
+  the RFC 9494 §4.3 export restriction (LLGR-stale routes are withheld
   from eBGP peers that didn't advertise the LLGR capability; non-LLGR
   iBGP peers receive them per the §4.6 intra-AS exception with NO_EXPORT
   and LOCAL_PREF 0, LLGR_STALE community intact). Other families such

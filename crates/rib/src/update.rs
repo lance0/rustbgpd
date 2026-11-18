@@ -3025,7 +3025,7 @@ pub enum RibUpdate {
         /// Families for which the peer advertised the Long-Lived Graceful
         /// Restart capability (RFC 9494). LLGR-stale routes must not be
         /// advertised to an eBGP peer whose family is absent from this
-        /// list (RFC 9494 §4.4 export restriction); iBGP peers take the
+        /// list (RFC 9494 §4.3 export restriction); iBGP peers take the
         /// §4.6 `NO_EXPORT` + `LOCAL_PREF`-0 form instead, applied in
         /// transport.
         negotiated_llgr_families: Vec<(Afi, Safi)>,

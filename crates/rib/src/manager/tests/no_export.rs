@@ -621,7 +621,7 @@ async fn explain_best_path_candidate_walk_matches_live_no_export_staging() {
     handle.await.unwrap();
 }
 
-/// Peer-scoped `ExplainBestPath` applies the RFC 9494 §4.4 LLGR export gate
+/// Peer-scoped `ExplainBestPath` applies the RFC 9494 §4.3 LLGR export gate
 /// live Add-Path staging applies: an `LLGR_STALE` sibling holds no
 /// advertised path ID toward an eBGP peer that did not advertise LLGR for
 /// the family, exactly like that peer's Adj-RIB-Out, and keeps its rank
@@ -716,7 +716,7 @@ async fn received_llgr_stale_no_export_form_suppressed_despite_llgr_eligibility(
         orr_vantage: None,
         per_client_best: false,
         interpret_rfc1997: true,
-        // LLGR advertised for the family: the RFC 9494 §4.4 gate passes.
+        // LLGR advertised for the family: the RFC 9494 §4.3 gate passes.
         negotiated_llgr_families: vec![(Afi::Ipv4, Safi::Unicast)],
         add_path_send_families: vec![],
         add_path_send_max: 0,

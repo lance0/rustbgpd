@@ -11,13 +11,19 @@ import time
 from pathlib import Path
 
 from m105_capture_oracle import messages, reassemble, need
-from m122_evpn_gr_oracle import SOURCE, RR, RR_CLIENT, CLIENT, admit_open, analyze_wire, check_rr, check_client, client_withdrawals, expected_nlri, nlri_key, capture_row
+from m122_evpn_gr_oracle import (
+    SOURCE, RR, RR_CLIENT, CLIENT, RR_IBGP, IBGP, RR_EBGP, EBGP,
+    admit_open, analyze_wire, capture_row, check_rr, check_client, client_withdrawals, expected_nlri, nlri_key,
+)
 from m122_fsm_trace import parse_logs
 
 LAB = "m122-evpn-gr-rr-gobgp"
 REFLECTOR = f"clab-{LAB}-rustbgpd"
 PE = f"clab-{LAB}-gobgp-source"
 SINK = f"clab-{LAB}-gobgp-client"
+IBGP_SINK = f"clab-{LAB}-gobgp-ibgp"
+EBGP_SINK = f"clab-{LAB}-gobgp-ebgp"
+PEER_LOGS = {PE: "source.log", SINK: "client.log", IBGP_SINK: "ibgp.log", EBGP_SINK: "ebgp.log"}
 CAPTURE = f"clab-{LAB}-capture"
 OUT = Path(os.environ.get("M122_OUT", "/tmp/m122-evpn-gr-rr")).resolve()
 TOOLS = os.environ.get("M122_TOOLS_IMAGE", "rustbgpd:m122-tools")
@@ -98,8 +104,8 @@ def rr_rows():
     return json.loads(docker(REFLECTOR, "rbgp", "-s", "http://127.0.0.1:50051", "evpn", "-j"))
 
 
-def sink_rows():
-    return json.loads(gobgp(SINK, "global", "rib", "-a", "evpn", "-j"))
+def sink_rows(container=SINK):
+    return json.loads(gobgp(container, "global", "rib", "-a", "evpn", "-j"))
 
 
 def metric(name):
@@ -109,8 +115,8 @@ def metric(name):
     return int(matches[0])
 
 
-def flaps():
-    text = gobgp(SINK, "neighbor", RR_CLIENT)
+def flaps(container=SINK, neighbor=RR_CLIENT):
+    text = gobgp(container, "neighbor", neighbor)
     need("BGP state = SESSION_STATE_ESTABLISHED" in text, "client session is not Established")
     values = re.findall(r"Flops = (\d+)", text)
     need(len(values) == 1, "client flap counter missing")
@@ -120,13 +126,19 @@ def flaps():
 def snapshot(phase, sets, llgr=False):
     rr = wait(f"{phase}: exact RR identities", rr_rows, lambda rows: check_rr(rows, sets, llgr))
     sink = wait(f"{phase}: exact client identities", sink_rows, lambda rows: check_client(rows, sets, llgr))
-    need(flaps() == 0, "client session flapped")
+    ibgp = wait(f"{phase}: non-LLGR iBGP identities and attributes", lambda: sink_rows(IBGP_SINK),
+                lambda rows: check_client(rows, sets, llgr, partial=True))
+    ebgp = wait(f"{phase}: non-LLGR eBGP identities", lambda: sink_rows(EBGP_SINK),
+                lambda rows: check_client(rows, [] if llgr else sets))
+    for container, address in ((SINK, RR_CLIENT), (IBGP_SINK, RR_IBGP), (EBGP_SINK, RR_EBGP)):
+        need(flaps(container, address) == 0, f"{container}: receiver session flapped")
     # The labelled gauge is created by the first GR transition, not PeerUp.
     expected_stale = {"gr-ten": 10, "gr-five": 5, "llgr-five": 5, "eor-five": 0, "expired": 0}
     stale = None if phase == "initial" else wait(
         f"{phase}: exact stored stale gauge", lambda: metric("bgp_gr_stale_routes"),
         lambda value: need(value == expected_stale[phase], "phase stale gauge differs"))
-    save(f"{phase}.json", {"rr": rr, "client": sink, "source_stale": stale, "client_flaps": 0})
+    save(f"{phase}.json", {"rr": rr, "client": sink, "non_llgr_ibgp": ibgp, "non_llgr_ebgp": ebgp,
+                           "source_stale": stale, "client_flaps": 0})
 
 
 def payloads():
@@ -169,13 +181,12 @@ def collect_evidence():
         extracted = retain(["docker", "run", "--rm", "--network", "none", "-v", f"{OUT}:/out:ro",
                             TOOLS, "tshark", *CAPTURE_FIELDS], "capture.tsv")
     retain(["docker", "logs", CAPTURE], "capture.log")
-    for container, source, destination in ((REFLECTOR, "rustbgpd.log", "rr.log"),
-                                           (PE, "gobgpd.log", "source.log"),
-                                           (SINK, "gobgpd.log", "client.log")):
-        retain(["docker", "cp", f"{container}:/tmp/{source}", str(OUT / destination)])
+    retain(["docker", "cp", f"{REFLECTOR}:/tmp/rustbgpd.log", str(OUT / "rr.log")])
+    for container, destination in PEER_LOGS.items():
+        retain(["docker", "cp", f"{container}:/tmp/gobgpd.log", str(OUT / destination)])
     retain(["docker", "rm", "-f", CAPTURE])
     try:
-        traces = parse_logs({name: (OUT / name).read_text() for name in ("rr.log", "source.log", "client.log")})
+        traces = parse_logs({name: (OUT / name).read_text() for name in ("rr.log", *PEER_LOGS.values())})
         save("fsm-traces.json", traces)
     except (OSError, ValueError, KeyError, TypeError) as error:
         print(f"WARNING: M122 FSM evidence incomplete: {error}", file=sys.stderr)
@@ -192,8 +203,10 @@ def live_admission(lines):
     for (_, src, dst), segments in parts.items():
         for typ, body in messages(reassemble(segments)):
             if typ == 1:
-                witnesses.append({"source": src, "destination": dst, **admit_open(body)})
-    need({(w["source"], w["destination"]) for w in witnesses} == {(SOURCE, RR), (RR, SOURCE), (CLIENT, RR_CLIENT), (RR_CLIENT, CLIENT)}, "initial OPEN exchange incomplete")
+                witnesses.append({"source": src, "destination": dst, **admit_open(body, src)})
+    links = ((SOURCE, RR), (CLIENT, RR_CLIENT), (IBGP, RR_IBGP), (EBGP, RR_EBGP))
+    expected = set(links) | {(dst, src) for src, dst in links}
+    need({(w["source"], w["destination"]) for w in witnesses} == expected, "initial OPEN exchange incomplete")
     return witnesses
 
 
@@ -203,7 +216,7 @@ def provenance():
     patch_path = "tests/interop/patches/m122-gobgp-fsm-trace.patch"
     patch_sha256 = hashlib.sha256(Path(patch_path).read_bytes()).hexdigest()
     version = "4.11.0-m122-fsm-trace"
-    for container in (PE, SINK):
+    for container in PEER_LOGS:
         need(gobgp(container, "--version").strip() == f"gobgp version {version}", "GoBGP CLI version differs")
         need(docker(container, "gobgpd", "--version").strip() == f"gobgpd version {version}", "GoBGP daemon version differs")
         need(docker(container, "cat", "/usr/local/share/gobgp-m122/source-commit").strip() == source_commit, "GoBGP source identity differs")
@@ -213,7 +226,7 @@ def provenance():
         need(hashes == manifest and len(hashes) == 2, "GoBGP instrumented binary identity differs")
         image = command("docker", "inspect", "--format", "{{.Image}}", container).strip()
         need(command("docker", "image", "inspect", "--format", "{{.Architecture}}", image).strip() == "amd64", "GoBGP image architecture differs")
-        peers.append({"image": image, "gobgp_sha256": hashes[0].split()[0], "gobgpd_sha256": hashes[1].split()[0]})
+        peers.append({"container": container, "image": image, "gobgp_sha256": hashes[0].split()[0], "gobgpd_sha256": hashes[1].split()[0]})
     source_id = command("bash", "scripts/source-id.sh").strip()
     need(docker(REFLECTOR, "cat", "/usr/local/share/rustbgpd/source-id").strip() == source_id, "RR image source ID differs")
     inputs = ["tests/interop/scripts/m122_evpn_gr_oracle.py", "tests/interop/scripts/run_m122_evpn_gr.py",
@@ -221,7 +234,8 @@ def provenance():
               "tests/interop/Dockerfile.gobgp-m122-trace", patch_path, "tests/interop/scripts/test-m122-evpn-gr-rr-gobgp.sh",
               "tests/interop/m122-evpn-gr-rr-gobgp.clab.yml", "tests/interop/Dockerfile.m122-tools",
               "tests/interop/configs/rustbgpd-m122-evpn-gr-rr.toml", "tests/interop/configs/gobgp-m122-source.toml",
-              "tests/interop/configs/gobgp-m122-client.toml"]
+              "tests/interop/configs/gobgp-m122-client.toml", "tests/interop/configs/gobgp-m122-ibgp.toml",
+              "tests/interop/configs/gobgp-m122-ebgp.toml"]
     hashes = {name: hashlib.sha256(Path(name).read_bytes()).hexdigest() for name in inputs}
     save("provenance.json", {"rustbgpd_source_id": source_id, "rustbgpd_commit": command("git", "rev-parse", "HEAD").strip(),
                             "harness_dirty": bool(command("git", "status", "--porcelain").strip()), "harness_sha256": hashes,
@@ -231,7 +245,7 @@ def provenance():
 
 def run():
     OUT.mkdir(parents=True, exist_ok=True)
-    for name in ("verdict.json", "wire-witnesses.json", "fsm-traces.json", "capture-state.json", "rr.log", "source.log", "client.log"):
+    for name in ("verdict.json", "wire-witnesses.json", "fsm-traces.json", "capture-state.json", "rr.log", *PEER_LOGS.values()):
         (OUT / name).unlink(missing_ok=True)
     provenance()
     command("docker", "run", "-d", "--name", CAPTURE, "--label", "rustbgpd.lab=m122", "--network", f"container:{REFLECTOR}",
@@ -239,13 +253,15 @@ def run():
     try:
         wait("capture armed", lambda: subprocess.run(["docker", "logs", CAPTURE], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=True).stdout,
              lambda value: need("listening on any" in value, "capture not armed"))
+        for container in (IBGP_SINK, EBGP_SINK):
+            start_peer(container)
         docker(REFLECTOR, "sh", "-c", "nohup rustbgpd /etc/rustbgpd/config.toml >/tmp/rustbgpd.log 2>&1 &")
         ready(REFLECTOR, ["rbgp", "-s", "http://127.0.0.1:50051", "health", "--liveness"])
         start_peer(PE)
         start_peer(SINK)
         wait("source Established", lambda: gobgp(PE, "neighbor", RR), lambda v: need("SESSION_STATE_ESTABLISHED" in v, "source pending"))
         wait("client Established", lambda: gobgp(SINK, "neighbor", RR_CLIENT), lambda v: need("SESSION_STATE_ESTABLISHED" in v, "client pending"))
-        lines = wait("actual MP25/70 GR64 and positive LLGR71 OPEN admission", payloads, live_admission)
+        lines = wait("actual EVPN MP/GR OPENs and per-peer LLGR capability", payloads, live_admission)
         save("admission.json", live_admission(lines))
         inject(1)
         inject(2)
@@ -263,9 +279,16 @@ def run():
         kill_source()
         wait("five stored EVPN paths marked stale", lambda: metric("bgp_gr_stale_routes"), lambda v: need(v == 5, "stale gauge differs"))
         snapshot("gr-five", [1])
-        need(client_withdrawals(payloads()) == {nlri_key(n) for n in expected_nlri([2])}, "second GR window changed client withdrawals")
+        rows = payloads()
+        for pair in ((RR_CLIENT, CLIENT), (RR_EBGP, EBGP)):
+            need(client_withdrawals(rows, pair) == {nlri_key(n) for n in expected_nlri([2])},
+                 f"{pair}: second GR window changed receiver withdrawals")
         wait("RR LLGR promotion", rr_rows, lambda rows: check_rr(rows, [1], True), timeout=90)
         snapshot("llgr-five", [1], True)
+        ebgp_withdrawals = client_withdrawals(payloads(), (RR_EBGP, EBGP))
+        need(ebgp_withdrawals == {nlri_key(n) for n in expected_nlri([1, 2])},
+             "non-LLGR eBGP receiver lacks exact wire withdrawals at promotion")
+        check_rr(rr_rows(), [1], llgr=True)
         wait("LLGR expiry at RR", rr_rows, lambda rows: check_rr(rows, []), timeout=60)
         snapshot("expired", [])
         wait("expiry clears stored stale gauge", lambda: metric("bgp_gr_stale_routes"), lambda v: need(v == 0, "stale remains"))
@@ -282,11 +305,12 @@ def run():
 
 def finalize_evidence(capture_complete):
     need(capture_complete, "final capture lacks clean exit and fresh extraction")
-    traces = parse_logs({name: (OUT / name).read_text() for name in ("rr.log", "source.log", "client.log")})
+    traces = parse_logs({name: (OUT / name).read_text() for name in ("rr.log", *PEER_LOGS.values())})
     save("fsm-traces.json", traces)
     witnesses = analyze_wire((OUT / "capture.tsv").read_text().splitlines(), traces)
     save("wire-witnesses.json", witnesses)
     save("verdict.json", {"result": "pass", "initial_routes": 10, "refreshed_routes": 5, "eor_swept_routes": 5,
+                          "non_llgr_ibgp_depreferenced": 5, "non_llgr_ebgp_withdrawn_at_promotion": 5,
                           "llgr_routes": 5, "expired_routes": 5, "route_types": [1, 2, 3, 4, 5], "client_flaps": 0})
 
 
