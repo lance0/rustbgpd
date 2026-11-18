@@ -33,6 +33,44 @@
 //!   caught up, any other is absorbed with its family, one per step.
 //! - A key no source still offers and the peer does not hold is cancelled
 //!   (the keep-set below mirrors the resync enumeration).
+//!
+//! # A receiver's EVPN debt as one state machine
+//!
+//! | State | Record | Dirty | Evicted |
+//! | --- | --- | --- | --- |
+//! | `N` not owing | none | no | no |
+//! | `K` keyed | set | no | no |
+//! | `C` cursor | whole, live position | no | no |
+//! | `W` waiting (group member) | whole, dead position | no | yes |
+//! | `D` evicted, dirty | kept (member) or dropped | yes | yes |
+//! | `R` ordinary resync | any | yes | no |
+//!
+//! `evicted` is [`RibManager::owed_row_evicted`]. A position is read only
+//! through [`RibManager::live_cursor`], which has none for `W` and `D`:
+//! the drain, the list trim and its cap, the settle check, an absorption
+//! (refused as for capacity) and the shutdown flush all see no cursor.
+//!
+//! | Event | `K`/`C` | `W` | `D` |
+//! | --- | --- | --- | --- |
+//! | EVPN pass, parked slice | mark or log | nothing staged; an unlogged key joins the set | out of scope, left dirty |
+//! | drain step | sends | none for EVPN | none |
+//! | cap pass | `C` behind: `W` (member) or `D` | skipped | skipped |
+//! | tick, unit admissible | – | `D` (one capture, lowest first), then its unit | unit: `N`, End-of-RIB behind it |
+//! | tick, channel full or operation live | – | stays `W`, no capture | refused before the build, stays `D` |
+//! | tick, channel gone | dropped | dropped | dropped |
+//! | tick inside an EVPN selection hold | waits | stays `W` | stays `D`, nothing built |
+//! | hold release | inventory logged | unchanged; next tick promotes | unchanged; next tick builds |
+//! | peer refresh | absorbs the debt | deferred to the unit | deferred to the unit |
+//! | operator refresh, failed send | `R` | `D` (that turn's one capture) | `D` |
+//! | regroup | `R` | `R` (mark and record dropped) | `R` |
+//! | session end or registration | `N` | `N` | `N` |
+//! | shutdown flush | set and remainder | set only | set only |
+//!
+//! A unit that builds an evicted receiver is the only exit from `W`/`D`
+//! besides a session end or a regroup, and it runs only when EVPN is
+//! enumerated ([`RibManager::evicted_unit_held`]), so the dead position is
+//! never read again and the withdrawals its dropped entries named are sent
+//! by that unit's diff against what the receiver holds.
 
 use std::collections::{BTreeMap, HashSet};
 use std::hash::Hash;
@@ -1072,6 +1110,17 @@ impl RibManager {
         }
     }
 
+    /// `peer`'s position in cursor family `index`'s shared list, or `None`
+    /// when `owing` holds no cursor there or the owed-row cap evicted the
+    /// receiver ([`Self::owed_row_evicted`]): the entries after an evicted
+    /// position were dropped, so nothing reads the list from it. Every
+    /// reader of a position asks here first (a drain step through
+    /// [`Self::owed_family_drainable`]).
+    fn live_cursor(&self, peer: PeerId, owing: &PeerOwing, index: usize) -> Option<u64> {
+        (owing.is_whole(OwedFamily::CURSORS[index]) && !self.owed_row_evicted.contains(&peer))
+            .then(|| owing.cursor[index])
+    }
+
     /// Whether `peer` owes anything of `family` (keys or the whole family).
     pub(super) fn owes(&self, peer: PeerId, family: (Afi, Safi)) -> bool {
         OwedFamily::of(family)
@@ -1563,7 +1612,10 @@ impl RibManager {
             return None;
         }
         // The cap evicted this cursor: the tick's resync sends the family.
-        if family == OwedFamily::EVPN && self.owed_row_evicted.contains(&peer) {
+        if let Some(index) = family.cursor_index()
+            && owing.is_whole(family)
+            && self.live_cursor(peer, owing, index).is_none()
+        {
             return None;
         }
         self.owed_drain_scope(peer, owing, family)
@@ -1956,13 +2008,9 @@ impl RibManager {
             let Some(owing) = self.owing(peer) else {
                 continue;
             };
-            // An evicted group member's EVPN cursor waits for nothing.
-            let evicted = self.owed_row_evicted.contains(&peer);
+            // An evicted receiver's cursor waits for nothing.
             for (index, floor) in floors.iter_mut().enumerate() {
-                if owing.is_whole(OwedFamily::CURSORS[index])
-                    && !(evicted && index == OwedFamily::EVPN_CURSOR)
-                {
-                    let cursor = owing.cursor[index];
+                if let Some(cursor) = self.live_cursor(peer, owing, index) {
                     *floor = Some(floor.map_or(cursor, |floor| floor.min(cursor)));
                 }
             }
@@ -2094,10 +2142,10 @@ impl RibManager {
             .iter()
             .copied()
             .filter(|&peer| {
-                !self.owed_row_evicted.contains(&peer)
-                    && self
-                        .owing(peer)
-                        .is_some_and(|owing| owing.is_whole(family) && owing.cursor[index] < over)
+                self.owing(peer).is_some_and(|owing| {
+                    self.live_cursor(peer, owing, index)
+                        .is_some_and(|cursor| cursor < over)
+                })
             })
             .collect();
         for peer in behind {
@@ -2128,33 +2176,56 @@ impl RibManager {
         }
     }
 
-    /// Whether a group member the cap evicted still waits to be made dirty.
+    /// Whether evicted `peer`'s resync must wait for an EVPN selection
+    /// hold: inside one a resync enumerates no EVPN key, so its unit would
+    /// clear the dirty flag and the eviction with the family not rebuilt.
+    /// The receiver keeps its state, dirty or waiting, until the release.
+    pub(super) fn evicted_unit_held(&self, peer: PeerId) -> bool {
+        const EVPN: (Afi, Safi) = (Afi::L2Vpn, Safi::Evpn);
+        self.owed_row_evicted.contains(&peer)
+            && self.selection_deferred(EVPN)
+            && self
+                .peer_sendable_families
+                .get(&peer)
+                .is_some_and(|families| families.contains(&EVPN))
+    }
+
+    /// Whether a group member the cap evicted still waits to be made dirty
+    /// and no selection hold keeps it waiting.
     pub(super) fn owed_eviction_pending(&self) -> bool {
         self.owed_row_evicted
             .iter()
-            .any(|peer| !self.dirty_peers.contains(peer))
+            .any(|&peer| !self.dirty_peers.contains(&peer) && !self.evicted_unit_held(peer))
     }
 
-    /// The resync tick makes one evicted group member dirty, and only when
-    /// no evicted receiver already waits for its unit: one capture of a
-    /// group's table per tick, ahead of that receiver's whole-table unit.
+    /// The resync tick makes at most one waiting evicted group member
+    /// dirty: one capture of a group's table per tick, ahead of that
+    /// receiver's whole-table unit. It takes the lowest receiver whose unit
+    /// could be admitted now (no selection hold, room in its channel, no
+    /// live whole-table operation) and passes over the rest at no cost, so
+    /// no receiver waits behind another, dirty or not, that cannot build.
+    /// One scan of the evicted receivers.
     pub(super) fn promote_evicted_receiver(&mut self) {
-        if self.owed_row_evicted.iter().any(|&peer| {
-            self.dirty_peers.contains(&peer) && !self.selection_partial_caught_up(peer)
-        }) {
-            return;
-        }
-        let next = self
+        let waiting: Vec<PeerId> = self
             .owed_row_evicted
             .iter()
             .copied()
             .filter(|peer| !self.dirty_peers.contains(peer))
-            .min();
-        if let Some(peer) = next
-            && !self.mark_outbound_dirty(peer)
-        {
-            // Its channel is gone.
-            self.drop_peer_owing(peer);
+            .collect();
+        let mut next = None::<PeerId>;
+        for peer in waiting {
+            if self.outbound_channel_gone(peer) {
+                // Its session is gone: nothing is owed to it.
+                self.drop_peer_owing(peer);
+            } else if !self.evicted_unit_held(peer)
+                && !self.outbound_channel_full(peer)
+                && !self.outbound_operation_live(peer)
+            {
+                next = Some(next.map_or(peer, |lowest| lowest.min(peer)));
+            }
+        }
+        if let Some(peer) = next {
+            self.mark_outbound_dirty(peer);
         }
     }
 
@@ -2168,9 +2239,10 @@ impl RibManager {
         if let Some(mut owing) = self.take_owing(peer) {
             let cursor = family.cursor_index();
             let caught_up = cursor.is_some_and(|index| {
-                owing.is_whole(family)
-                    && owing.keyed_len(family) == 0
-                    && owing.cursor[index] >= self.owed_rows_head(index)
+                owing.keyed_len(family) == 0
+                    && self
+                        .live_cursor(peer, &owing, index)
+                        .is_some_and(|at| at >= self.owed_rows_head(index))
             });
             if let Some(index) = cursor.filter(|_| caught_up) {
                 owing.end_cursor(index);
@@ -2253,10 +2325,12 @@ impl RibManager {
             // as they were. A cursor's remainder joins the keys.
             let mut keys = owing.copy_keys(family, DrainScope::All, usize::MAX);
             if let Some(index) = family.cursor_index().filter(|_| owing.is_whole(family)) {
-                keys.extend(
-                    self.owed_rows_after(index, owing.cursor[index], usize::MAX)
-                        .0,
-                );
+                // An evicted cursor has no remainder to absorb: the family
+                // stays owed for the tick's resync, as after a refusal.
+                let Some(cursor) = self.live_cursor(peer, owing, index) else {
+                    return Err(super::outbound_credit::CREDIT_REFUSAL);
+                };
+                keys.extend(self.owed_rows_after(index, cursor, usize::MAX).0);
             }
             OwingDrain::keyed(peer, family, usize::MAX, keys)
         };
@@ -2313,13 +2387,12 @@ impl RibManager {
                 }
                 // A cursor's remainder is flushed with the set and stays
                 // behind the cursor, which does not move.
-                let cursor_keys = match family.cursor_index() {
-                    Some(index) if owing.is_whole(family) => {
-                        self.owed_rows_after(index, owing.cursor[index], usize::MAX)
-                            .0
-                    }
-                    _ => Vec::new(),
-                };
+                let cursor_keys = family
+                    .cursor_index()
+                    .and_then(|index| Some((index, self.live_cursor(peer, owing, index)?)))
+                    .map_or_else(Vec::new, |(index, cursor)| {
+                        self.owed_rows_after(index, cursor, usize::MAX).0
+                    });
                 let mut popped = Vec::new();
                 let mut drain = if owing.is_whole(family) && !family.has_cursor() {
                     if self.outbound_operation_live(peer) {

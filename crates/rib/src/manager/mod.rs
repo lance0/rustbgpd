@@ -4236,7 +4236,7 @@ impl RibManager {
     fn resync_tick_pending_unowed(&self) -> bool {
         self.dirty_peers.iter().any(|&peer| {
             self.replacement_checkpoint(false);
-            !self.selection_partial_caught_up(peer)
+            self.dirty_unit_due(peer)
         }) || !self.pending_inbound_refresh.is_empty()
             || self.helper_stale_exempt.iter().any(|(&peer, carried)| {
                 self.replacement_checkpoint(false);
@@ -4255,6 +4255,14 @@ impl RibManager {
             || self.outbound_limit_recovery_runnable()
             || self.deferred_refresh_pending()
             || self.owed_eviction_pending()
+    }
+
+    /// Whether dirty `peer`'s resync is a unit the tick may run now: not
+    /// one a selection gate holds after it caught up for the other
+    /// families, nor an evicted receiver's inside an EVPN selection hold
+    /// ([`Self::evicted_unit_held`]). The hold's release makes it due.
+    fn dirty_unit_due(&self, peer: PeerId) -> bool {
+        !self.selection_partial_caught_up(peer) && !self.evicted_unit_held(peer)
     }
 
     /// The outcome label of a resync tick that re-arms: `still_dirty` while
@@ -4370,9 +4378,7 @@ impl RibManager {
                 });
                 after
                     .chain(wrapped)
-                    .filter(|peer| {
-                        !attempted.contains(*peer) && !self.selection_partial_caught_up(**peer)
-                    })
+                    .filter(|peer| !attempted.contains(*peer) && self.dirty_unit_due(**peer))
                     .take(1)
                     .copied()
                     .collect()
@@ -4433,7 +4439,7 @@ impl RibManager {
             let unattempted_remain = self
                 .dirty_peers
                 .iter()
-                .any(|peer| !attempted.contains(peer) && !self.selection_partial_caught_up(*peer));
+                .any(|peer| !attempted.contains(peer) && self.dirty_unit_due(*peer));
             if !unattempted_remain {
                 return recovered;
             }

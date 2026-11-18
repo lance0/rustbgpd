@@ -714,10 +714,14 @@ bounded list maintenance. What differs is where the keys come from:
   turn. The evicting pass does not mark them: each keeps its debt, with a
   position no step reads and that holds no list entry, so
   EVPN passes still skip it and its End-of-RIB still waits, while its
-  group's families keep flowing to it. The resync tick marks one such
-  receiver per tick, and only when no evicted receiver already waits for
-  its unit: a tick does at most one capture, then that receiver's
-  whole-table unit, which covers the debt. What reaches such a receiver
+  group's families keep flowing to it. The resync tick marks at most one
+  such receiver per tick, the lowest whose unit could be admitted now (room
+  in its channel, no whole-table operation still live), so a tick does at
+  most one capture and one evicted receiver's whole-table unit, which
+  covers the debt, and a receiver that cannot build holds no other. Inside
+  an EVPN selection hold a resync enumerates no EVPN key, so no evicted
+  receiver is marked or built there: each keeps its state and its eviction
+  until the release, and its unit follows. What reaches such a receiver
   first is handled for that receiver alone: a session end or a regroup
   ends the debt (a regroup marks its own member dirty, as for any member
   that owes), an operator refresh marks it dirty and leaves the table to
