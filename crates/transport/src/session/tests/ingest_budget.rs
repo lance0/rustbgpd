@@ -305,16 +305,100 @@ async fn peer_sends(server: &mut TcpStream, session: &mut PeerSession, bytes: &[
     assert_eq!(read_half.peek(&mut peek).await.unwrap(), 1);
 }
 
-/// A peer whose KEEPALIVEs sit unread behind the gate is not expired by our
-/// hold timer: the wait follows the bounded policy of a full RIB channel.
-/// The first expiry is deferred for the wait, the second for the peer's
-/// unread bytes, and only a third with still nothing processed closes the
-/// session, as a local overload (Cease/Out of Resources), not as Hold Timer
-/// Expired.
-/// Red proof: without the gate in the hold expiry, the first expiry sends
-/// Hold Timer Expired.
+fn keepalive_pdu() -> Vec<u8> {
+    rustbgpd_wire::encode_message(&Message::Keepalive)
+        .unwrap()
+        .to_vec()
+}
+
+/// Sent NOTIFICATIONs with `code`, as the metric counts them.
+fn notifications_sent(session: &PeerSession, code: &str) -> f64 {
+    counter(
+        &session.metrics,
+        "bgp_notifications_sent_total",
+        &[("peer", &session.peer_label), ("code", code)],
+    )
+}
+
+/// Fill the RIB channel with another source's messages; returns how many.
+fn fill_rib_channel(session: &PeerSession) -> usize {
+    let mut fillers = 0;
+    while session
+        .rib_tx
+        .try_send(placeholder_routes_received())
+        .is_ok()
+    {
+        fillers += 1;
+    }
+    fillers
+}
+
+/// A wait caused only by the gate does not use up hold deferrals: the RIB
+/// channel has room, so each hold expiry admits exactly one of the peer's
+/// pending frames past the gate and the hold timer restarts from it. Three
+/// hold times behind the gate leave the session Established.
+/// Red proof: with the full-channel policy applied to the gate, the third
+/// expiry closes the session with Cease/Out of Resources and no frame is
+/// processed; with the whole buffer processed on an expiry, the first
+/// expiry delivers the UPDATE.
 #[tokio::test]
-async fn hold_expiry_behind_the_gate_follows_the_parked_policy() {
+async fn hold_expiry_behind_the_gate_admits_one_pending_frame_per_expiry() {
+    let Metered {
+        mut session,
+        mut rib_rx,
+        mut server,
+        budget,
+        commands: _commands,
+    } = metered_session().await;
+    buffer_and_process(&mut session, &[burst_pdu(10), burst_pdu(20)]).await;
+    assert!(session.ingest_gate_closed);
+    let _held = [rib_rx.try_recv().unwrap(), rib_rx.try_recv().unwrap()];
+
+    // The peer's next three frames are readable, none of them read.
+    let mut frames = keepalive_pdu();
+    frames.extend(block_pdu(30, 1, 24));
+    frames.extend(keepalive_pdu());
+    let total = frames.len();
+    peer_sends(&mut server, &mut session, &frames).await;
+    while {
+        let mut peek = vec![0_u8; total];
+        session
+            .read_half
+            .as_mut()
+            .unwrap()
+            .peek(&mut peek)
+            .await
+            .unwrap()
+            < total
+    } {}
+
+    let keepalive = keepalive_pdu().len();
+    for (expiry, left) in [(1, total - keepalive), (2, keepalive), (3, 0)] {
+        assert!(hold_expiry(&mut session).await, "expiry {expiry}");
+        assert_eq!(session.read_buf.buf.len(), left, "one frame per expiry");
+        assert!(session.timers.hold.is_some(), "the hold timer runs again");
+        assert_eq!(session.fsm.state(), SessionState::Established);
+        assert!(session.ingest_gate_closed, "the gate stays closed");
+        // Only the second frame is an UPDATE.
+        let update = rib_rx.try_recv().ok();
+        assert_eq!(update.is_some(), expiry == 2, "expiry {expiry}");
+        if let Some(update) = update {
+            assert_eq!(burst_block(&update), Some((30, 1)));
+            assert_eq!(budget.unfinished(), 2 * BLOCK + 1, "the overdraft");
+        }
+    }
+    assert_eq!(notifications_sent(&session, "4"), 0.0);
+    assert_eq!(notifications_sent(&session, "6"), 0.0);
+    assert_eq!(session.parked_hold_renewals, 0, "no deferral was spent");
+}
+
+/// Behind the gate a peer with no complete frame pending has been silent
+/// for the hold time: the session sends Hold Timer Expired, not a local
+/// overload Cease. Half a frame is not liveness.
+/// Red proof: with the full-channel policy applied to the gate, the expiry
+/// is deferred.
+#[tokio::test]
+async fn hold_expiry_behind_the_gate_with_a_silent_peer_is_hold_timer_expired() {
     let Metered {
         mut session,
         rib_rx: _rib_rx,
@@ -322,72 +406,147 @@ async fn hold_expiry_behind_the_gate_follows_the_parked_policy() {
         commands: _commands,
         ..
     } = metered_session().await;
+    buffer_and_process(&mut session, &[burst_pdu(10), burst_pdu(20)]).await;
+    assert!(session.ingest_gate_closed);
+    assert!(session.rib_backlog.is_empty(), "the RIB channel has room");
+    peer_sends(&mut server, &mut session, &keepalive_pdu()[..10]).await;
     let (metrics, peer) = (session.metrics.clone(), session.peer_label.clone());
-    let notifications = |code: &str| {
+    assert!(!hold_expiry(&mut session).await, "the peer was silent");
+    let sent = |code: &str| {
         counter(
             &metrics,
             "bgp_notifications_sent_total",
             &[("peer", &peer), ("code", code)],
         )
     };
-    buffer_and_process(&mut session, &[burst_pdu(10), burst_pdu(20)]).await;
-    assert!(session.ingest_gate_closed);
-    assert!(session.rib_backlog.is_empty(), "the RIB channel has room");
+    assert_eq!(sent("4"), 1.0, "Hold Timer Expired");
+    assert_eq!(sent("6"), 0.0);
+}
 
-    let keepalive = rustbgpd_wire::encode_message(&Message::Keepalive)
-        .unwrap()
-        .to_vec();
-    peer_sends(&mut server, &mut session, &keepalive).await;
+/// The gate and a full RIB channel together: a message is held for the
+/// channel, so the wait follows the full-channel policy unchanged. The
+/// first expiry is deferred for the wait, the second for the peer's unread
+/// bytes, and a third with still nothing processed closes the session as a
+/// local overload (Cease/Out of Resources), not as Hold Timer Expired. No
+/// frame is admitted past the gate meanwhile.
+/// Red proof: with the gate's one-frame admission applied while a message
+/// is held, the first expiry processes the KEEPALIVE and nothing is closed.
+#[tokio::test]
+async fn hold_expiry_behind_the_gate_and_a_full_channel_follows_the_parked_policy() {
+    let Metered {
+        mut session,
+        rib_rx: _rib_rx,
+        mut server,
+        commands: _commands,
+        ..
+    } = metered_session().await;
+    fill_rib_channel(&session);
+    buffer_and_process(&mut session, &[block_pdu(40, INGEST_BUDGET_ROUTES, 24)]).await;
+    assert!(session.ingest_gate_closed);
+    assert_eq!(session.rib_backlog.len(), 1, "held for the full channel");
+
+    peer_sends(&mut server, &mut session, &keepalive_pdu()).await;
     assert!(hold_expiry(&mut session).await, "the wait itself earns one");
     assert!(
         hold_expiry(&mut session).await,
         "unread peer bytes earn one"
     );
-    assert_eq!(notifications("4"), 0.0, "never Hold Timer Expired");
-    assert_eq!(notifications("6"), 0.0);
+    assert_eq!(
+        session.read_buf.buf.len(),
+        keepalive_pdu().len(),
+        "the KEEPALIVE was probed, not processed"
+    );
+    assert_eq!(notifications_sent(&session, "4"), 0.0);
+    assert_eq!(notifications_sent(&session, "6"), 0.0);
     assert_eq!(
         counter(
-            &metrics,
+            &session.metrics,
             "bgp_hold_timer_rearmed_pending_input_total",
-            &[("peer", &peer)],
+            &[("peer", &session.peer_label)],
         ),
         2.0
     );
+    let (metrics, peer) = (session.metrics.clone(), session.peer_label.clone());
     assert!(
         !hold_expiry(&mut session).await,
         "three hold times with nothing processed close the session"
     );
-    assert_eq!(notifications("6"), 1.0, "Cease/Out of Resources");
-    assert_eq!(notifications("4"), 0.0);
+    let sent = |code: &str| {
+        counter(
+            &metrics,
+            "bgp_notifications_sent_total",
+            &[("peer", &peer), ("code", code)],
+        )
+    };
+    assert_eq!(sent("6"), 1.0, "Cease/Out of Resources");
+    assert_eq!(sent("4"), 0.0, "never Hold Timer Expired");
 }
 
-/// Once the RIB returns the budget, the unread KEEPALIVE is processed and
-/// the deferral budget is whole again.
-/// Red proof: without the reset on a processed PDU the count stays at one.
+/// The gate and a full RIB channel together, clearing in either order:
+/// buffered input waits for both, and the deferral budget is whole again
+/// once a peer PDU is processed.
+/// Red proof: without the reset on a processed PDU the count stays at one;
+/// a gate that ignores the held message, or a held message that ignores
+/// the gate, processes the KEEPALIVE one step early.
 #[tokio::test]
-async fn processed_input_after_the_gate_reopens_restores_the_hold_budget() {
-    let Metered {
-        mut session,
-        mut rib_rx,
-        commands: _commands,
-        server: _server,
-        ..
-    } = metered_session().await;
-    let keepalive = rustbgpd_wire::encode_message(&Message::Keepalive)
-        .unwrap()
-        .to_vec();
-    buffer_and_process(&mut session, &[burst_pdu(10), burst_pdu(20), keepalive]).await;
-    assert!(hold_expiry(&mut session).await);
-    assert_eq!(session.parked_hold_renewals, 1);
-    assert!(session.timers.hold.is_some(), "the hold timer is re-armed");
-    while rib_rx.try_recv().is_ok() {}
-    session.reopen_ingest_gate().await;
-    assert!(
-        session.read_buf.buf.is_empty(),
-        "the KEEPALIVE is processed"
-    );
-    assert_eq!(session.parked_hold_renewals, 0);
-    assert_eq!(session.fsm.state(), SessionState::Established);
+async fn input_behind_the_gate_and_a_full_channel_waits_for_both() {
+    for channel_first in [true, false] {
+        let Metered {
+            mut session,
+            mut rib_rx,
+            commands: _commands,
+            server: _server,
+            ..
+        } = metered_session().await;
+        let fillers = fill_rib_channel(&session);
+        let pdus = [block_pdu(40, INGEST_BUDGET_ROUTES, 24), keepalive_pdu()];
+        buffer_and_process(&mut session, &pdus).await;
+        assert!(session.ingest_gate_closed && !session.rib_backlog.is_empty());
+        assert!(hold_expiry(&mut session).await);
+        assert_eq!(session.parked_hold_renewals, 1);
+        let waiting = |session: &PeerSession| session.read_buf.buf.len() == pdus[1].len();
+
+        // The channel frees one slot; the session delivers the held message.
+        let mut filler = Some(rib_rx.try_recv().unwrap());
+        if channel_first {
+            session.advance_rib_backlog(Err(())).await;
+            assert!(session.rib_backlog.is_empty());
+            session.reopen_ingest_gate().await;
+            assert!(waiting(&session), "the gate is still closed");
+            for _ in 1..fillers {
+                filler = rib_rx.try_recv().ok();
+            }
+            assert!(burst_block(&filler.take().unwrap()).is_none());
+            drop(rib_rx.try_recv().unwrap());
+            session.reopen_ingest_gate().await;
+        } else {
+            // A hand-held permit stands in for the message, so the budget
+            // can return while the message is still held for the channel.
+            let permit = session.ingest_budget.as_ref().unwrap().charge(0);
+            let (held, then) = session.rib_backlog.pop_front().unwrap();
+            let RibUpdate::SessionRoutes {
+                routes,
+                permit: charged,
+            } = held
+            else {
+                panic!("a session's routes carry a permit");
+            };
+            drop(charged);
+            session
+                .rib_backlog
+                .push_front((RibUpdate::SessionRoutes { permit, routes }, then));
+            session.reopen_ingest_gate().await;
+            assert!(!session.ingest_gate_closed);
+            assert!(waiting(&session), "a message is still held");
+            session.advance_rib_backlog(Err(())).await;
+        }
+        assert!(
+            session.read_buf.buf.is_empty(),
+            "the KEEPALIVE is processed"
+        );
+        assert_eq!(session.parked_hold_renewals, 0);
+        assert_eq!(session.fsm.state(), SessionState::Established);
+    }
 }
 
 /// The routes of an ended connection keep their permits on the old budget:

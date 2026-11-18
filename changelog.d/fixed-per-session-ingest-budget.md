@@ -12,7 +12,8 @@
   **Operator-visible:** a route a restarting peer re-advertises just before a
   stale-route or refresh deadline, behind a larger burst the RIB has not
   finished, can be swept at the deadline and announced again when it is read;
-  see [graceful restart timers](../docs/reference/configuration.md). A session
-  whose input waits behind its own unfinished routes for about three hold
-  times is closed with Cease/Out of Resources, as one waiting on a full RIB
-  channel already was.
+  see [graceful restart timers](../docs/reference/configuration.md). While a
+  session's input waits behind its own unfinished routes, each hold-timer
+  expiry processes one pending message from the peer, and a peer with none
+  pending gets Hold Timer Expired; the session is not closed for the wait
+  itself.

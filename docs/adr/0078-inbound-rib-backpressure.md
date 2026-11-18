@@ -254,15 +254,22 @@ A session end starts a fresh budget, so routes of an ended connection never
 pace the next one. Selection deferral does not hold a permit: the routes are
 ingested and the batch finished.
 
-A hold expiry behind a spent budget follows the same bounded policy as one
-behind a full channel (2026-11-03): the peer's KEEPALIVEs sit unread because
-of us, so the first expiry is deferred for the wait, the second for unread
-peer bytes, and a third with still nothing processed closes the session with
-Cease/Out of Resources. The same operational risk applies and reaches further
-than before: a session with a short hold time is closed if the RIB does not
-finish half of that session's budget for three hold times, which can now
-happen with the channel far from full when many sources burst at once toward
-many private receivers.
+A hold expiry behind a spent budget alone does not use the bounded policy of
+a full channel (2026-11-03). The channel has room, so liveness is judged from
+the peer's input: the expiry admits one complete frame, already buffered or
+readable from the socket, past the gate, and the hold timer restarts from it
+as from any received message. The overdraft is at most one PDU per hold time
+per session. With no complete frame to admit the peer has been silent, and
+the session sends Hold Timer Expired. A session is therefore never closed
+for the RIB's pace alone, however many sources burst at once. When messages
+are also held for a full channel, the full-channel policy applies unchanged.
+
+While the gate stays closed the session does not read its socket, so a
+NOTIFICATION or a close from the peer is acted on when the gate reopens, or
+when a hold expiry reaches it: at once if nothing complete is pending ahead
+of it, otherwise after one hold time per pending frame. With hold time 0
+there is no expiry and it is acted on when the gate reopens. KEEPALIVEs to
+the peer come from the writer task and do not depend on the gate.
 
 Consequences:
 

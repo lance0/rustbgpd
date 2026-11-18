@@ -848,17 +848,27 @@ impl PeerSession {
     }
 
     /// Drain complete messages from the read buffer and feed to FSM.
+    pub(super) async fn process_read_buffer(&mut self) {
+        self.process_buffered_input(false).await;
+    }
+
+    /// [`Self::process_read_buffer`]; `past_gate` admits one PDU past a
+    /// closed ingest gate, for a hold expiry behind it.
     #[expect(
         clippy::too_many_lines,
         reason = "message ingestion keeps decode, BMP accounting, FSM dispatch, and buffer ordering explicit"
     )]
-    pub(super) async fn process_read_buffer(&mut self) {
+    pub(super) async fn process_buffered_input(&mut self, mut past_gate: bool) {
         loop {
             // The OPEN just processed may have parked a collision candidate;
             // input behind it waits for the verdict. Input behind a message
-            // held for the RIB waits until the run loop delivers it, and
-            // input behind a spent ingest budget until the RIB returns it.
-            if self.collision_verdict_pending() || self.rib_input_parked() {
+            // held for the RIB waits until the run loop delivers it.
+            if self.collision_verdict_pending() || !self.rib_backlog.is_empty() {
+                return;
+            }
+            // Input behind a spent ingest budget waits until the run loop
+            // sees the RIB return it.
+            if self.ingest_gate_closed && !std::mem::take(&mut past_gate) {
                 return;
             }
             // Reconcile a due refresh window before *each* buffered PDU, not

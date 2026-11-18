@@ -342,7 +342,7 @@ pub(crate) struct PeerSession {
     /// whose tests read the plain messages.
     ingest_budget: Option<Arc<rustbgpd_rib::ingest_budget::IngestBudget>>,
     /// The budget was spent and the run loop has not yet seen it fall to its
-    /// resume mark; see [`Self::rib_input_parked`].
+    /// resume mark; see [`Self::reopen_ingest_gate`].
     ingest_gate_closed: bool,
     /// Hold renewals spent while peer input waits for the RIB, since the
     /// last peer PDU processed.

@@ -588,12 +588,18 @@ impl PeerSession {
     /// equivalent rule likewise counts parsed packets. Only a peer with
     /// no complete frame outstanding expires.
     ///
-    /// While RIB-bound messages are held, or the ingest budget is spent,
-    /// input is deliberately left unprocessed, so liveness cannot be proven
-    /// from it; see [`Self::renew_parked_hold`] for the bounded policy used
-    /// then.
+    /// While RIB-bound messages are held for a full channel, input is
+    /// deliberately left unprocessed, so liveness cannot be proven from it;
+    /// see [`Self::renew_parked_hold`] for the bounded policy used then.
+    ///
+    /// A spent ingest budget alone also leaves input unprocessed, but the
+    /// channel has room, so liveness is judged from the input itself: the
+    /// expiry admits one complete pending frame past the gate and the FSM
+    /// re-arms from it as from any received message. The overdraft is one
+    /// PDU per hold time. With no complete frame pending the peer has been
+    /// silent and the hold timer expires.
     pub(super) async fn handle_hold_timer_expiry(&mut self) {
-        if self.rib_input_parked() {
+        if !self.rib_backlog.is_empty() {
             if self.renew_parked_hold() {
                 self.metrics
                     .record_hold_timer_rearmed_pending_input(&self.peer_label);
@@ -620,7 +626,7 @@ impl PeerSession {
             return;
         }
         if self.take_pending_input() {
-            self.process_read_buffer().await;
+            self.process_buffered_input(true).await;
             // Processing may have torn the session down (the pending
             // frame was a NOTIFICATION, or failed decode): the FSM has
             // already stopped the hold timer and closed the connection

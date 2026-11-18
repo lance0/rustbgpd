@@ -1499,26 +1499,19 @@ impl PeerSession {
         }
     }
 
-    /// Whether peer input is left unread and unprocessed: RIB-bound messages
-    /// are held for a full channel (ADR-0078), or the ingest budget is spent.
+    /// The one place the ingest gate reopens, run at the top of every run
+    /// loop turn: once the RIB has returned the budget to its resume mark
+    /// (or the session end replaced the budget), process the input buffered
+    /// behind the gate, in stream order. [`Self::deliver_routes_to_rib`]
+    /// closes the gate; every other reader sees the stored gate, so none can
+    /// observe the budget's return and leave complete frames buffered until
+    /// the peer's next byte. Input also held behind a full channel is
+    /// processed once that backlog is delivered.
     ///
     /// The budget never holds anything already read: only reading and
     /// processing further peer PDUs stop, so a message of any size is
     /// admitted while the gate is open, and End-of-RIB, refresh markers and
     /// session ends are sent in stream order without waiting for budget.
-    /// This only reads the gate; [`Self::deliver_routes_to_rib`] closes it
-    /// and [`Self::reopen_ingest_gate`] reopens it.
-    pub(super) fn rib_input_parked(&self) -> bool {
-        !self.rib_backlog.is_empty() || self.ingest_gate_closed
-    }
-
-    /// The one place the ingest gate reopens, run at the top of every run
-    /// loop turn: once the RIB has returned the budget to its resume mark
-    /// (or the session end replaced the budget), process the input buffered
-    /// behind the gate, in stream order. Every other reader sees the stored
-    /// gate, so none can observe the budget's return and leave complete
-    /// frames buffered until the peer's next byte. Input also held behind a
-    /// full channel is processed once that backlog is delivered.
     pub(super) async fn reopen_ingest_gate(&mut self) {
         if !self.ingest_gate_closed
             || self
