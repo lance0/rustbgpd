@@ -18,10 +18,11 @@ in the file. The fuzz crates are separate workspaces with no tracked
 lockfile, so without the seed every build takes the newest release of every
 dependency, and one that needs a newer std than the pin breaks the campaign
 the same way a floating compiler does. The seed script owns the source,
-destination and coverage; this check owns that it runs, and runs first. It
-compares line order within a file, so it does not prove the seed and the
-build share a workflow step or recipe, and it does not order the seed
-against other resolving commands such as `cargo fetch`.
+destination and coverage; this check owns that a line invokes it as a
+command before the first build. It compares line order within a file, so it
+does not prove the seed and the build share a workflow step or recipe, that
+the invocation is unconditional (an `if` or a `false &&` guard still passes),
+or that the seed precedes other resolving commands such as `cargo fetch`.
 """
 
 from __future__ import annotations
@@ -94,6 +95,16 @@ VIOLATION_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
 )
 
 SEED_SCRIPT = "fuzz/seed-fuzz-lockfiles.sh"
+# The seed script must be the command word: at the start of a line (bare, as
+# a workflow `run:` value, or after a Dockerfile `RUN`) or after `&&`, `||`,
+# `;` or `(`, optionally through `bash`/`sh` and a `$var/` root prefix. A step
+# name, an `echo`, or any other argument position does not run it.
+SEED_INVOCATION = re.compile(
+    r"""(?:^\s*(?:-\s+)?(?:run:\s*|RUN\s+)?|(?:&&|\|\||;|\()\s*)"""
+    r"""(?:(?:ba)?sh\s+)?"?(?:\$\{?\w+\}?/)?"""
+    + re.escape(SEED_SCRIPT)
+    + r""""?(?=\s|$|[;&|)])"""
+)
 # Any toolchain selector may sit between `cargo` and `fuzz`, including one
 # with spaces such as `"+$(cat fuzz/rust-nightly.txt)"`.
 FUZZ_BUILD = re.compile(r"\bcargo\b.*\bfuzz\s+(?:build|run)\b")
@@ -224,7 +235,7 @@ def audit_build_path(relative: str, text: str) -> list[str]:
     )
     if first_build is None:
         return []
-    if any(SEED_SCRIPT in line for line in code[:first_build]):
+    if any(SEED_INVOCATION.search(line) for line in code[:first_build]):
         return []
     return [
         f"{relative}:{first_build + 1} builds fuzz targets without first running "
