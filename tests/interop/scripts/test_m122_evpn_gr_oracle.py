@@ -773,7 +773,7 @@ class OracleTests(unittest.TestCase):
             for gauge in (0, 5):
                 with self.subTest(phase=phase, gauge=gauge), \
                         patch.object(runner, "rr_rows", return_value=rr), \
-                        patch.object(runner, "sink_rows", side_effect=lambda container=runner.SINK: sinks[container]), \
+                        patch.object(runner, "sink_rows", side_effect=lambda container=runner.SINK, rows=sinks: rows[container]), \
                         patch.object(runner, "flaps", return_value=0), \
                         patch.object(runner, "metric", return_value=gauge), \
                         patch.object(runner, "save") as saved, \
