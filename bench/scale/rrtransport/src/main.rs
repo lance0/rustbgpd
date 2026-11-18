@@ -656,7 +656,12 @@ fn credit_main(mode: &str, args: &[String]) -> Result<()> {
         ))?,
         ("credit-probe", [output, rest @ ..]) => {
             let options = credit::Options::parse(rest)?;
-            credit_probe::run(Path::new(output), options.reduced, options.correctness_only)?
+            credit_probe::run(
+                &harness,
+                Path::new(output),
+                options.reduced,
+                options.correctness_only,
+            )?
         }
         _ => bail!("bad {mode} arguments; run without arguments for usage"),
     };

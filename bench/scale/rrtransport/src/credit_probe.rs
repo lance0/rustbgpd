@@ -149,7 +149,7 @@ fn peer_context_export_chain() -> PolicyChain {
     }])
 }
 
-fn manager() -> (RibManager, mpsc::Sender<RibUpdate>, mpsc::Sender<RibUpdate>) {
+fn manager(metrics: BgpMetrics) -> (RibManager, mpsc::Sender<RibUpdate>, mpsc::Sender<RibUpdate>) {
     let (tx, rx) = mpsc::channel::<RibUpdate>(64);
     let (qtx, qrx) = mpsc::channel::<RibUpdate>(16);
     let manager = RibManager::new(
@@ -157,7 +157,7 @@ fn manager() -> (RibManager, mpsc::Sender<RibUpdate>, mpsc::Sender<RibUpdate>) {
         qrx,
         None,
         Some(Ipv4Addr::new(10, 255, 255, 255)),
-        BgpMetrics::new(),
+        metrics,
     );
     (manager, tx, qtx)
 }
@@ -199,8 +199,8 @@ impl Episodes {
 
 /// Receivers stop draining for `stall` while 1,024-key passes keep
 /// arriving, then drain everything; three cycles.
-fn lag_stall(evpn: bool, peers: usize, stall: Duration) -> Value {
-    let (mut manager, tx, _qtx) = manager();
+fn lag_stall(metrics: BgpMetrics, evpn: bool, peers: usize, stall: Duration) -> Value {
+    let (mut manager, tx, _qtx) = manager(metrics);
     manager.bench_register_restarted_source(PeerId::from_addr(IpAddr::V4(SOURCE)));
     let mut receivers = if evpn {
         manager.bench_register_unicast_route_server_peers(
@@ -266,9 +266,9 @@ fn lag_stall(evpn: bool, peers: usize, stall: Duration) -> Value {
 /// `peers` private peers join while a second source dumps 100k routes over a
 /// 100k-route table; the second half of the dump queues behind their
 /// initial tables without draining.
-fn restart_during_dump(peers: usize) -> Value {
+fn restart_during_dump(metrics: BgpMetrics, peers: usize) -> Value {
     const DUMP: usize = 100_000;
-    let (mut manager, tx, _qtx) = manager();
+    let (mut manager, tx, _qtx) = manager(metrics);
     manager.bench_register_restarted_source(PeerId::from_addr(IpAddr::V4(SOURCE)));
     manager.bench_register_restarted_source(PeerId::from_addr(IpAddr::V4(SECOND)));
     for start in (0..DUMP).step_by(PASS) {
@@ -396,7 +396,18 @@ fn join_undrained(
 }
 
 /// Run every probe cell and write `probes.json`.
-pub fn run(output: &Path, reduced: bool, correctness_only: bool) -> Result<bool> {
+pub fn run(
+    harness: &tokio::runtime::Runtime,
+    output: &Path,
+    reduced: bool,
+    correctness_only: bool,
+) -> Result<bool> {
+    let metrics = BgpMetrics::new();
+    // The in-process probes run synchronously outside any Tokio runtime.
+    let sampling = {
+        let _entered = harness.enter();
+        crate::credit::MemorySampling::start(metrics.clone())
+    };
     let fleets: &[usize] = if reduced { &[16] } else { &[150, 1_000] };
     let stalls: &[Duration] = if reduced {
         &[Duration::from_millis(200)]
@@ -407,21 +418,23 @@ pub fn run(output: &Path, reduced: bool, correctness_only: bool) -> Result<bool>
     for evpn in [false, true] {
         for &peers in fleets {
             for &stall in stalls {
-                let cell = lag_stall(evpn, peers, stall);
+                let cell = lag_stall(metrics.clone(), evpn, peers, stall);
                 println!("probe {cell}");
                 cells.push(cell);
             }
         }
     }
-    let cell = restart_during_dump(if reduced { 16 } else { 150 });
+    let cell = restart_during_dump(metrics.clone(), if reduced { 16 } else { 150 });
     println!("probe {cell}");
     cells.push(cell);
+    let memory = harness.block_on(sampling.finish())?;
     let clean = cells.iter().all(|cell| cell["dirty_episodes"] == 0);
     let result = json!({
         "schema": "rrtransport-credit/1",
         "cell": "probes",
         "mode": if reduced || correctness_only { "correctness" } else { "measured" },
         "probes": cells,
+        "memory": memory,
     });
     std::fs::create_dir_all(output)?;
     std::fs::write(

@@ -115,6 +115,13 @@ never from the daemon's Adj-RIB-Out.
 | 4 | `credit-probe` | in-process healthy-lag cells (unicast and EVPN, 150 and 1,000 peers, 0.5 s and 2 s stalls) and the 150-peer restart-during-dump probe, whose receivers join through the production `PeerUp` path and keep their 150,000-row initial tables queued while the 50,000-row tail arrives | dirty episodes and queued rows per receiver |
 | 6 | `credit-fill unicast\|evpn\|vpn\|flowspec` | 150 paused private receivers (unicast and VPN through the same peer-context policy); one source sends 150,000 fresh routes of the family; FlowSpec rules carry a prefix, 16 ports and 8 length ranges | bytes per queued row (report-only) |
 
+Each cell reports the independent sampled peaks of jemalloc allocated, active,
+and resident bytes. `memory.at_peak_sampled_rss` records all three from the
+first sample at the highest observed process RSS (`peak_sampled_rss_kib`).
+Linux records `VmHWM` separately and can see a higher peak between samples.
+Both analyzer commands print these as report-only readings. An unavailable
+reading, including a field absent from an older receipt, prints as `n/a`.
+
 Cell 5 (Criterion) is not part of this harness.
 
 **Cell 2.** The burst routes carry distinct attributes (one UPDATE a route,

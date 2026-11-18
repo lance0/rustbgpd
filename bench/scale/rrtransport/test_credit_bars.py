@@ -347,6 +347,38 @@ class Bars(unittest.TestCase):
         self.assertEqual(len(results), CELL_COUNT)
         self.assertTrue(all(v == "PASS" for v, _ in results.values()), results)
 
+    def test_jemalloc_is_report_only_in_both_commands_and_keeps_legacy_readings(self):
+        fields = ["jemalloc_" + name + "_bytes" for name in ("allocated", "active", "resident")]
+        memory = dict(zip(("peak_" + field for field in fields), [60, 80, 95]))
+        memory.update(peak_sampled_rss_kib=12, at_peak_sampled_rss=dict(zip(fields, [40, 70, 85])))
+
+        def mutate(parent, candidate):
+            parent["restart-evpn.json"]["memory"] = {"peak_jemalloc_allocated_bytes": 62}
+            for run in candidate.values():
+                run.setdefault("memory", {}).update(memory)
+
+        results = self.run_bars(mutate)
+        tag, detail = results.pop("parent 1 restart-evpn jemalloc")
+        self.assertEqual(tag, "REPORT")
+        self.assertIn("62/n/a/n/a", detail)
+        self.assertIn("(n/a KiB) n/a/n/a/n/a", detail)
+        for cell in ALL_CELLS:
+            tag, detail = results.pop(f"candidate 1 {cell} jemalloc")
+            self.assertEqual(tag, "REPORT")
+            self.assertIn("independent peaks 60/80/95", detail)
+            self.assertIn("at sampled RSS peak (12 KiB) 40/70/85", detail)
+        self.assertTrue(all(verdict == "PASS" for verdict, _ in results.values()))
+
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root, "probes.json")
+            path.write_text(json.dumps({**probes(), "memory": memory}))
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                # This command has no single-arm verdict for probes.
+                self.assertEqual(credit_bars.main(["credit_bars.py", "check", root]), 2)
+            self.assertIn("REPORT", output.getvalue())
+            self.assertIn("at sampled RSS peak (12 KiB) 40/70/85", output.getvalue())
+
     def test_eviction_timing_keeps_its_source_and_cannot_fail_a_bar(self):
         field = "eviction_recovery_longest_ms"
 

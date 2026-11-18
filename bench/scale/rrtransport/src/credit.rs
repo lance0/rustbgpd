@@ -944,14 +944,21 @@ fn cgroup_value(name: &str) -> Option<String> {
         .map(|value| value.trim().to_string())
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct Jemalloc {
+    allocated: Option<u64>,
+    active: Option<u64>,
+    resident: Option<u64>,
+}
+
 /// One instrument sample.
 #[derive(Clone, Copy, Debug, Default)]
 struct Sample {
     at_ms: f64,
-    allocated: f64,
+    jemalloc: Jemalloc,
     credit_rows: f64,
     credit_bytes: Option<f64>,
-    rss_kib: f64,
+    rss_kib: Option<u64>,
 }
 
 /// Peaks and samples of the instruments every arm has, plus the optional
@@ -963,8 +970,8 @@ struct Instruments {
     peak_credit_bytes: Option<f64>,
     peak_operations_live: f64,
     peak_dirty_peers: f64,
-    peak_allocated: f64,
-    peak_rss_kib: f64,
+    peak_jemalloc: Jemalloc,
+    at_peak_rss: Option<Sample>,
     first_refusal_ms: Option<f64>,
     /// Whole-table operations live at the sample that first saw a refusal.
     operations_live_at_first_refusal: Option<f64>,
@@ -973,6 +980,18 @@ struct Instruments {
     /// stage over the sampler's reads, and how many reads it took.
     slice_max_us: BTreeMap<String, f64>,
     slice_reads: usize,
+}
+
+impl Instruments {
+    fn observe_memory(&mut self, sample: Sample) {
+        let peak = &mut self.peak_jemalloc;
+        peak.allocated = peak.allocated.max(sample.jemalloc.allocated);
+        peak.active = peak.active.max(sample.jemalloc.active);
+        peak.resident = peak.resident.max(sample.jemalloc.resident);
+        if sample.rss_kib > self.at_peak_rss.and_then(|previous| previous.rss_kib) {
+            self.at_peak_rss = Some(sample);
+        }
+    }
 }
 
 /// Publish the RIB's since-render slice maxima, take one snapshot, and fold
@@ -1223,10 +1242,14 @@ fn sampler(
             let gauge = |name| snapshot.total(name).unwrap_or(0.0);
             let sample = Sample {
                 at_ms,
-                allocated: gauge("jemalloc_allocated_bytes"),
+                jemalloc: Jemalloc {
+                    allocated: snapshot.total("jemalloc_allocated_bytes").map(|n| n as u64),
+                    active: snapshot.total("jemalloc_active_bytes").map(|n| n as u64),
+                    resident: snapshot.total("jemalloc_resident_bytes").map(|n| n as u64),
+                },
                 credit_rows: gauge("bgp_rib_outbound_credit_rows"),
                 credit_bytes: snapshot.total("bgp_rib_outbound_credit_bytes"),
-                rss_kib: rss_kib().map_or(0.0, |(rss, _)| rss as f64),
+                rss_kib: rss_kib().ok().map(|(rss, _)| rss),
             };
             instruments.peak_credit_rows = instruments.peak_credit_rows.max(sample.credit_rows);
             instruments.peak_credit_bytes =
@@ -1240,8 +1263,7 @@ fn sampler(
             instruments.peak_dirty_peers = instruments
                 .peak_dirty_peers
                 .max(gauge("bgp_rib_outbound_dirty_peers"));
-            instruments.peak_allocated = instruments.peak_allocated.max(sample.allocated);
-            instruments.peak_rss_kib = instruments.peak_rss_kib.max(sample.rss_kib);
+            instruments.observe_memory(sample);
             if instruments.all_refused_ms.is_none() && !watched.is_empty() {
                 let refusals = snapshot.credit_refusals();
                 for (index, label) in labels.iter().enumerate() {
@@ -1270,6 +1292,8 @@ fn sampler(
 
 fn memory_json(instruments: &Instruments) -> Value {
     let (rss, hwm) = rss_kib().unwrap_or((0, 0));
+    let peak = instruments.peak_jemalloc;
+    let at = instruments.at_peak_rss.unwrap_or_default();
     json!({
         "cgroup": cgroup().map(|path| path.display().to_string()),
         "cgroup_memory_peak_bytes": cgroup_value("memory.peak").and_then(|value| value.parse::<u64>().ok()),
@@ -1280,13 +1304,46 @@ fn memory_json(instruments: &Instruments) -> Value {
         }),
         "vmrss_kib": rss,
         "vmhwm_kib": hwm,
-        "peak_sampled_rss_kib": instruments.peak_rss_kib,
-        "peak_jemalloc_allocated_bytes": instruments.peak_allocated,
+        "peak_sampled_rss_kib": at.rss_kib,
+        "peak_jemalloc_allocated_bytes": peak.allocated,
+        "peak_jemalloc_active_bytes": peak.active,
+        "peak_jemalloc_resident_bytes": peak.resident,
+        "at_peak_sampled_rss": {
+            "jemalloc_allocated_bytes": at.jemalloc.allocated,
+            "jemalloc_active_bytes": at.jemalloc.active,
+            "jemalloc_resident_bytes": at.jemalloc.resident,
+        },
         "peak_credit_rows": instruments.peak_credit_rows,
         "peak_credit_bytes": instruments.peak_credit_bytes,
         "peak_operations_live": instruments.peak_operations_live,
         "peak_dirty_peers": instruments.peak_dirty_peers,
     })
+}
+
+/// Common sampler for cells that only need its memory report.
+pub(super) struct MemorySampling {
+    stop: StopOnDrop,
+    task: tokio::task::JoinHandle<Instruments>,
+}
+
+impl MemorySampling {
+    pub(super) fn start(metrics: BgpMetrics) -> Self {
+        let stop = StopOnDrop(Arc::new(AtomicBool::new(false)));
+        let task = sampler(
+            metrics,
+            Instant::now(),
+            Vec::new(),
+            false,
+            SAMPLE,
+            Arc::clone(&stop.0),
+        );
+        Self { stop, task }
+    }
+
+    pub(super) async fn finish(self) -> Result<Value> {
+        drop(self.stop);
+        Ok(memory_json(&self.task.await?))
+    }
 }
 
 /// The summed credit gauge in its tree's unit: bytes where the byte gauge
@@ -2456,7 +2513,7 @@ pub async fn fill(family: Family, output: &Path, options: &Options) -> Result<bo
     let points: Vec<_> = before
         .iter()
         .filter(|s| s.credit_rows >= 0.1 * peak && s.credit_rows <= 0.9 * peak)
-        .map(|s| (s.credit_rows, s.allocated))
+        .filter_map(|s| Some((s.credit_rows, s.jemalloc.allocated? as f64)))
         .collect();
     let fit = slope(&points);
     let result = json!({
@@ -2512,6 +2569,43 @@ mod tests {
 
     fn parse(args: &[&str]) -> Options {
         Options::parse(&args.iter().map(ToString::to_string).collect::<Vec<_>>()).unwrap()
+    }
+
+    #[test]
+    fn allocator_peaks_and_first_peak_rss_sample_are_independent() {
+        let mut instruments = super::Instruments::default();
+        for (rss_kib, allocated, active, resident) in [
+            (Some(16), 600, 750, 900),
+            (Some(20), 400, 725, 850),
+            (Some(20), 425, 800, 880),
+            (None, 450, 775, 950),
+        ] {
+            instruments.observe_memory(super::Sample {
+                rss_kib,
+                jemalloc: super::Jemalloc {
+                    allocated: Some(allocated),
+                    active: Some(active),
+                    resident: Some(resident),
+                },
+                ..Default::default()
+            });
+        }
+        let memory = super::memory_json(&instruments);
+        assert_eq!(memory["peak_sampled_rss_kib"], 20);
+        assert_eq!(memory["peak_jemalloc_allocated_bytes"], 600);
+        assert_eq!(memory["peak_jemalloc_active_bytes"], 800);
+        assert_eq!(memory["peak_jemalloc_resident_bytes"], 950);
+        assert_eq!(
+            memory["at_peak_sampled_rss"],
+            json!({
+                "jemalloc_allocated_bytes": 400,
+                "jemalloc_active_bytes": 725,
+                "jemalloc_resident_bytes": 850,
+            })
+        );
+        let empty = super::memory_json(&super::Instruments::default());
+        assert!(empty["peak_sampled_rss_kib"].is_null());
+        assert!(empty["at_peak_sampled_rss"]["jemalloc_allocated_bytes"].is_null());
     }
 
     #[test]

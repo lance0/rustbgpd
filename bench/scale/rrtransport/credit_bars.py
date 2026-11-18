@@ -1498,18 +1498,63 @@ def verdicts(
             results.extend(optional_release_reports(directory, arm, rep))
             results.extend(source_burst_reports(directory, arm, rep))
             for cell in sorted(arm.attempted[rep]):
-                if not cell.startswith(("restart-", "exhaust-")):
-                    continue
                 try:
                     run = arm.run(rep, cell)
                 except (Invalid, AttributeError, TypeError, ValueError):
                     continue  # The campaign cells above report unusable results.
-                if run and (note := eviction_reading(run, f"{arm.name} {rep} {cell}")):
-                    results.append(note)
+                if run:
+                    source = f"{arm.name} {rep} {cell}"
+                    if note := allocator_reading(run, source):
+                        results.append(note)
+                    if cell.startswith(("restart-", "exhaust-")) and (note := eviction_reading(run, source)):
+                        results.append(note)
     for cell in SOURCE_BURST:
         if note := source_burst_compare(parent, candidate, cell):
             results.append(note)
     return results
+
+
+def allocator_reading(run: dict, source: str) -> tuple[str, str, str] | None:
+    memory = run.get("memory")
+    if not isinstance(memory, dict) or "peak_jemalloc_allocated_bytes" not in memory:
+        return None
+
+    def reading(value):
+        if type(value) is int and value >= 0:
+            return str(value)
+        if isinstance(value, float) and math.isfinite(value) and value >= 0:
+            return f"{value:.0f}"
+        return "n/a"
+
+    fields = ["jemalloc_" + name + "_bytes" for name in ("allocated", "active", "resident")]
+    peaks = "/".join(reading(memory.get("peak_" + field)) for field in fields)
+    at = memory.get("at_peak_sampled_rss")
+    at = at if isinstance(at, dict) else {}
+    paired = "/".join(reading(at.get(field)) for field in fields)
+    rss = reading(memory.get("peak_sampled_rss_kib"))
+    return f"{source} jemalloc", "REPORT", (
+        f"allocated/active/resident bytes: independent peaks {peaks}, "
+        f"at sampled RSS peak ({rss} KiB) {paired}"
+    )
+
+
+def check_allocator_readings(directory: Path):
+    cells = [
+        "paused", "probes", *OPTIONAL_RELEASES, *SOURCE_BURST,
+        *(f"fill-{family}" for family in FILL_FAMILIES),
+        *(f"{kind}-{family}" for kind in ("exhaust", "restart", "restart-churn") for family in FAMILIES),
+    ]
+    files = {result_file(cell): identity(cell) for cell in cells}
+    for path in sorted(directory.rglob("*.json")):
+        if path.name not in files:
+            continue
+        try:
+            run = read(path)
+        except Invalid:
+            continue
+        if (run.get("cell"), run.get("family")) == files[path.name]:
+            if note := allocator_reading(run, str(path)):
+                yield note
 
 
 def eviction_reading(run: dict, source: str) -> tuple[str, str, str] | None:
@@ -1959,8 +2004,8 @@ def source_burst_compare(parent: Arm, candidate: Arm, cell: str) -> tuple[str, s
     return name, "REPORT", "; ".join(parts)
 
 
-def report(results: list[tuple[str, str, str]]) -> int:
-    for name, verdict, reason in results:
+def report(results: list[tuple[str, str, str]], readings=()) -> int:
+    for name, verdict, reason in [*results, *readings]:
         print(f"{verdict:<7} {name}: {reason}")
     found = {verdict for _, verdict, _ in results}
     return 1 if "FAIL" in found else 2 if "INVALID" in found or not results else 0
@@ -1978,7 +2023,8 @@ def main(argv: list[str]) -> int:
     if len(args) == 3 and args[0] == "analyze" and known:
         return report(verdicts(Path(args[1]), Path(args[2]), tuple(require)))
     if len(args) == 2 and args[0] == "check" and not require:
-        return report(check(Path(args[1])))
+        directory = Path(args[1])
+        return report(check(directory), check_allocator_readings(directory))
     print(__doc__, file=sys.stderr)
     return 2
 
