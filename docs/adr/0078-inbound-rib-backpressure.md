@@ -219,3 +219,59 @@ limits: 4096 frames, at most 16 MiB of standard messages or just under
 256 MiB with RFC 8654. That is a bound on frames and their bytes, not a cap
 on the total outbound heap: the RIB→session envelope queue and an envelope
 being encoded still hold workload-sized route payloads.
+
+### 2026-11-18 — A per-session ingest budget bounds one source's share of the queue
+
+The decision above bounds the shared channel, not any one source. A session
+that reads as fast as its peer writes can put a whole burst into the channel
+ahead of every other session's updates: 150,000 routes sent at once toward
+150 private receivers made an unrelated peer's update wait for the entire
+burst, about 15 s in the transport harness, although the channel never
+filled. This is the starvation
+evidence the rejected per-peer queue alternative asked for, and the answer is
+the bounded per-source input the Context names as the standard shape, kept at
+the source instead of in a queue.
+
+Each session charges every route-bearing message of every family to its own
+ingest budget, one route per announced or withdrawn entry. When 1,024 of its
+routes are unfinished in the RIB the session reads nothing more from its
+socket and processes no further buffered PDU; it resumes at 512. Nothing
+already read is held for budget, so a message larger than the whole budget
+is admitted whenever the gate is open, and End-of-RIB, route-refresh markers
+and session ends are sent in stream order without waiting. The shared
+channel, its bound and rules 1 to 5 are unchanged; the RIB's actor loop,
+timer cutoffs and message order are unchanged.
+
+The charge is a permit carried by the message. The RIB returns it by
+dropping the message: after the distribution pass that covers its routes,
+including a pass shared with later messages and a fan-out continued over
+several turns; at once for a family applied within its own turn; and on every
+discard, namely a peer-down purge, a message from a replaced or unregistered
+session, shutdown and a closed channel. There are no release calls to miss.
+A session end starts a fresh budget, so routes of an ended connection never
+pace the next one. Selection deferral does not hold a permit: the routes are
+ingested and the batch finished.
+
+A hold expiry behind a spent budget follows the same bounded policy as one
+behind a full channel (2026-11-03): the peer's KEEPALIVEs sit unread because
+of us, so the first expiry is deferred for the wait, the second for unread
+peer bytes, and a third with still nothing processed closes the session with
+Cease/Out of Resources. The same operational risk applies and reaches further
+than before: a session with a short hold time is closed if the RIB does not
+finish half of that session's budget for three hold times, which can now
+happen with the channel far from full when many sources burst at once toward
+many private receivers.
+
+Consequences:
+
+- An unrelated peer's update waits behind about one distribution pass per
+  bursting source, not behind a burst. The wait still grows with the number
+  of sources bursting at the same time.
+- Timer cutoffs cover received input only, and the budget shrinks what is
+  received ahead of the RIB from up to the whole channel to about one
+  window per source. Input a peer sent before a graceful-restart,
+  long-lived or refresh deadline that is still unread in its socket is not
+  applied before the sweep.
+- Route input that does not come from a session (injection, local
+  origination, MRT replay) carries no permit and is bounded only by the
+  shared channel.

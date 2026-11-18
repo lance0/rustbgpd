@@ -3,8 +3,8 @@
 //! The RIB serves one shared input queue in arrival order, so a session that
 //! reads its socket as fast as the peer writes can queue a whole burst ahead
 //! of every other session's updates. A session therefore charges each
-//! route-bearing message to its own [`IngestBudget`] and stops reading its
-//! socket while the budget is spent. The charge is an [`IngestPermit`] that
+//! route-bearing message to its own `IngestBudget` and stops reading its
+//! socket while the budget is spent. The charge is an `IngestPermit` that
 //! travels with the message and returns the routes when it is dropped, so
 //! every path that discards a message (a drained batch, a peer-down purge, a
 //! superseded session, a closed channel) returns budget without a release

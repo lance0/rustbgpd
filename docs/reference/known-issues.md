@@ -74,13 +74,26 @@ resolved.
     unit-level tests, not timings. Each owed family other than IPv4 and
     IPv6 unicast still goes out as one operation, like the whole-family
     sends below.
-  - Ordinary UPDATE bursts, still on main and not yet attributed: 150,000
-    routes sent at once as ordinary UPDATEs toward 150 private receivers
-    delayed an unrelated peer's updates by 27–34 s. Paced at one
-    1,024-route UPDATE per 500 ms, the gap was about 0.4 s for unicast and
-    4.6 s for EVPN. These are single untimed harness runs on a shared host,
-    and the cause, one long unit of work or many short units served in
-    arrival order, is not yet established.
+  - Ordinary UPDATE bursts, v0.83.0 and earlier: 150,000 routes sent at
+    once as ordinary UPDATEs toward 150 private receivers delayed an
+    unrelated peer's updates by 27–34 s in single untimed harness runs on a
+    shared host. The burst was many short units served in arrival order:
+    the session queued all of it ahead of the other peer's update. On main
+    after v0.83.0 a session stops reading its socket while 1,024 routes it
+    already sent are unfinished in the RIB
+    ([ADR-0078](../adr/0078-inbound-rib-backpressure.md)), so the other
+    peer's update waits behind about one distribution pass per bursting
+    source. The evidence is a count in unit-level tests (at most two burst
+    messages queued ahead of another source) and untimed reduced-shape
+    harness runs, not a timed measurement at 150 receivers. The wait still
+    grows with the number of sources bursting at once, and route input
+    that does not come from a session is not bounded this way.
+  - Paced EVPN bursts, still on main: at one 1,024-route UPDATE per 500 ms
+    toward 150 private receivers an unrelated peer's update waited up to
+    4.6 s (about 0.4 s for unicast), in a single untimed harness run. The
+    session bound above does not change it: the wait is inside one inbound
+    message, where every receiver's EVPN table grows at the same row
+    counts.
   - Whole-family sends of IPv4 and IPv6 unicast, v0.83.0 and earlier: a
     receiver that was owed a released family, or whose owed keys exceeded
     the keyed threshold (a quarter of its table), was sent the whole family
