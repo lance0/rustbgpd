@@ -71,10 +71,9 @@ const _: () = {
 ///
 /// The slab's first segment grows by copying its routes, so it is a power
 /// of two of at most `EVPN_FIRST_SEGMENT_AT` slots, or the whole segment.
-/// The step between the two copies at most `EVPN_FIRST_SEGMENT_AT` slots
-/// (1.18 MB), the last doubling under 2 MiB, and happens once, in the call
-/// that first needs a slot past them. Freed slots are reused first and
-/// need no room; capacity that is never written is not resident.
+/// The first request past that threshold grows the segment once, with at
+/// most `EVPN_FIRST_SEGMENT_AT` initialized slots (1.18 MB). Vacant slots
+/// count toward the room available for new routes.
 fn reserve_evpn_slots(
     bodies: &mut RouteSlab<EvpnRibRoute>,
     additional: usize,
@@ -1703,12 +1702,9 @@ mod tests {
     const PAST_LARGE_DOUBLING: usize =
         2 * crate::fast_hash::LARGE_SHARD_SPLIT_AT + crate::fast_hash::LARGE_SHARD_SPLIT_AT / 8;
 
-    /// Bytes of stored entries the growth between two probes of a table
-    /// that held `rows` rows moved. An index table or slab segment whose
-    /// capacity changed moved what the old allocation held, counted as its
-    /// whole capacity: no address is compared, so a reallocation the
-    /// allocator extends in place counts like one that copies. An index
-    /// split moves every row.
+    /// Work-count proxy for growth between two probes. Charge the whole
+    /// old capacity of a resized index table or slab segment, including
+    /// unused slots and in-place growth. Charge an index split by live rows.
     fn evpn_moved_bytes(before: &EvpnGrowthProbe, after: &EvpnGrowthProbe, rows: usize) -> usize {
         let regrown = |old: &[usize], new: &[usize]| -> usize {
             let changed = old.iter().zip(new).filter(|(old, new)| old != new);
@@ -1889,7 +1885,7 @@ mod tests {
             }
         }
 
-        /// Run `call` and return the slab and index bytes it moved.
+        /// Return the slab and index growth charges from `evpn_moved_bytes`.
         fn moved(&mut self, call: impl FnOnce(&mut AdjRibOut)) -> (usize, usize) {
             let rows = self.rib.evpn_len();
             let before = self.rib.evpn_growth_probe();
@@ -1972,11 +1968,9 @@ mod tests {
     /// The production shape: every message reserves for its 1,024 rows and
     /// then commits them, from empty to past two slab segments. The slab's
     /// first segment is made whole once, inside the reserve of the message
-    /// that crosses `EVPN_FIRST_SEGMENT_AT` rows, and that message moves
-    /// 1.18 MB of routes.
-    /// Red proof: with the promotion only in `insert_evpn`, that message's
-    /// reserve doubles the segment (1.18 MB) and its first insert then
-    /// moves 2,359,296 bytes outside the reserve.
+    /// that crosses `EVPN_FIRST_SEGMENT_AT` rows.
+    /// Red proof: the old reserve grew the segment to 16,384 slots and
+    /// its first insert immediately resized it again (2,359,296 B charge).
     #[test]
     fn evpn_batched_commits_promote_the_slab_inside_the_reserve() {
         const BATCH: usize = 1024;
@@ -2005,8 +1999,8 @@ mod tests {
 
     /// One reserve larger than `EVPN_FIRST_SEGMENT_AT` on an empty table
     /// allocates the first segment whole, so filling it moves no route.
-    /// Red proof: a segment sized to the 20,000-row batch is expanded by
-    /// the insert after 8,192 rows, which moves 2,880,000 bytes.
+    /// Red proof: expanding a 20,000-slot allocation in the insert after
+    /// 8,192 rows incurs a 2,880,000 B charge.
     #[test]
     fn evpn_large_first_reserve_leaves_no_route_to_move() {
         let mut run = EvpnCommits::new();
@@ -2019,8 +2013,7 @@ mod tests {
     /// Reserves of mixed sizes, some filled, some partly filled and some
     /// not at all, with inserts no reserve covers in between.
     /// Red proof: a reserve that lets the slab double an 8,191-slot
-    /// segment leaves 16,382 slots (2,359,008 bytes) to move at the
-    /// promotion.
+    /// segment incurs a 16,382-slot charge (2,359,008 B) at promotion.
     #[test]
     fn evpn_interleaved_reserves_keep_every_call_bounded() {
         let mut run = EvpnCommits::new();
@@ -2056,9 +2049,9 @@ mod tests {
     /// Freed slots are reused before the slab grows: a reserve they cover
     /// moves nothing and does not promote, the inserts that reuse them
     /// move no route, and the reserve that first needs slot 8,193 promotes.
-    /// Red proof: counting slots instead of rows moves 1,179,648 bytes at
-    /// the covered reserve; with the promotion only in `insert_evpn`, an
-    /// insert that reuses a freed slot moves 1,179,648 bytes.
+    /// Red proof: counting slots instead of rows grows the segment at the
+    /// covered reserve. The old insert-only promotion grew it at the first
+    /// insert that reused a vacancy. Each incurs a 1,179,648 B charge.
     #[test]
     fn evpn_reserve_counts_freed_slots_before_promoting() {
         const BATCH: usize = 1024;
