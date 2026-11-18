@@ -22,19 +22,23 @@ pub(crate) const SHARDS: usize = 16;
 ///
 /// jemalloc returns a freed allocation of 8 MiB or more at once and keeps a
 /// smaller one for up to its 10 s decay. Splitting early, as [`ShardedMap`]
-/// does, makes every replaced shard table small; across one map per
-/// receiver those retained tables raised the daemon high-water mark by about 0.95 GiB at
-/// 150 receivers of 75k EVPN routes each. Below this size the map is one
-/// table, exactly a plain map.
+/// does, makes every replaced shard table small; with routes stored inline
+/// in one map per receiver, those retained tables raised the daemon
+/// high-water mark by about 0.95 GiB at 150 receivers of 75k EVPN routes
+/// each. Below this size the map is one table, exactly a plain map.
 pub(crate) const LARGE_SHARD_SPLIT_AT: usize = 114_688;
 /// Tables in a split [`LargeShardedMap`]: each shard rehashes at most about
-/// 1/8 of the entries, about 25 ms per 114,688 EVPN routes.
+/// 1/8 of the entries. The split itself moves every entry, routes included:
+/// about 25 ms for 114,688 inline 208-byte entries, and every receiver of
+/// the family pays it in the same inbound message. EVPN Adj-RIB-Out
+/// therefore keeps its routes in a slab behind a [`ShardedMap`] of handles;
+/// this map still holds the labeled-unicast routes inline.
 pub(crate) const LARGE_SHARDS: usize = 8;
 /// A [`LargeShardedMap`] splits into shards sized for twice its entries,
 /// exactly the room the plain map's doubling would allocate.
 pub(crate) const LARGE_SHARD_PRESIZE: usize = 2;
 
-/// A [`ShardedMap`] for one receiver's large per-family table: one table
+/// A [`ShardedMap`] for one receiver's labeled-unicast tables: one table
 /// until a doubling would rehash [`LARGE_SHARD_SPLIT_AT`] entries at once.
 pub(crate) type LargeShardedMap<K, V> =
     ShardedMap<K, V, LARGE_SHARD_SPLIT_AT, LARGE_SHARDS, LARGE_SHARD_PRESIZE>;

@@ -19,7 +19,7 @@ use crate::route::{
     LabeledRibRoute, LabeledRibRouteKey, Route, RtcRibRoute, RtcRibRouteKey, VpnRibRoute,
     VpnRibRouteKey,
 };
-use crate::slab::RouteSlab;
+use crate::slab::{RouteSlab, SEGMENT};
 use crate::update::{RouteQueryKey, route_query_key};
 
 /// Original local intent behind an exported unicast key. Export policy and
@@ -49,6 +49,34 @@ thread_local! {
     /// Calls to [`AdjRibOut::family_counts`], so tests can pin that a query
     /// path reads maintained counters instead of walking every family table.
     pub(crate) static FAMILY_COUNT_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// EVPN route slots at which [`AdjRibOut::insert_evpn`] reserves the rest of
+/// the slab's first segment.
+const EVPN_FIRST_SEGMENT_AT: usize = 1 << 13;
+
+// One stored EVPN route and one index entry. A change to either changes the
+// memory per advertised route and the bytes an index rehash moves.
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+const _: () = {
+    assert!(std::mem::size_of::<Option<EvpnRibRoute>>() == 144);
+    assert!(std::mem::size_of::<(EvpnRouteKey, u32)>() == 68);
+};
+
+/// Store the route of a key that is new to the EVPN index.
+fn new_evpn_slot(bodies: &mut RouteSlab<EvpnRibRoute>, route: &mut Option<EvpnRibRoute>) -> u32 {
+    if bodies.slot_count() == EVPN_FIRST_SEGMENT_AT {
+        // The slab's first segment doubles by copying its routes. Give it
+        // the whole segment at the last doubling that copies less than
+        // 2 MiB; capacity that is never written is not resident.
+        bodies.reserve_with(SEGMENT - bodies.len(), &mut || {});
+    }
+    bodies.insert(route.take().expect("a new key stores its route once"))
+}
+
+/// The route an EVPN index entry names.
+fn evpn_body(bodies: &RouteSlab<EvpnRibRoute>, handle: u32) -> &EvpnRibRoute {
+    bodies.get(handle).expect("EVPN index names a live slot")
 }
 
 /// Per-peer Adj-RIB-Out: routes advertised to a specific peer.
@@ -84,8 +112,13 @@ pub struct AdjRibOut {
     prefix_path_ids: FamilyPrefixMap<SmallVec<[(u32, u32); 1]>>,
     /// `FlowSpec` routes advertised to this peer (always single-best, `path_id=0`).
     flowspec_routes: HashMap<FlowSpecKey, FlowSpecRoute>,
-    /// EVPN routes advertised to this peer, keyed by RFC 7432 route identity.
-    evpn_routes: LargeShardedMap<EvpnRouteKey, EvpnRibRoute>,
+    /// RFC 7432 route identity → slot in `evpn_bodies`. The two change
+    /// together in the EVPN methods below and a handle never leaves this
+    /// struct, so the index cannot name a freed or reused slot.
+    evpn_index: ShardedMap<EvpnRouteKey, u32>,
+    /// EVPN routes advertised to this peer, behind the handles in
+    /// `evpn_index`: a growing index moves its 68-byte entries and no route.
+    evpn_bodies: RouteSlab<EvpnRibRoute>,
     /// BGP-LS routes advertised to this peer, keyed by opaque RFC 9552 identity.
     bgpls_routes: HashMap<BgpLsRouteKey, BgpLsRibRoute>,
     /// VPNv4/VPNv6 routes advertised to this peer, keyed by RD + prefix identity.
@@ -319,7 +352,8 @@ impl AdjRibOut {
             self_next_hop_count: 0,
             prefix_path_ids: FamilyPrefixMap::default(),
             flowspec_routes: HashMap::default(),
-            evpn_routes: LargeShardedMap::default(),
+            evpn_index: ShardedMap::default(),
+            evpn_bodies: RouteSlab::default(),
             bgpls_routes: HashMap::default(),
             vpn_routes: ShardedMap::default(),
             vpn_key_path_ids: ShardedMap::default(),
@@ -791,7 +825,8 @@ impl AdjRibOut {
 
     /// Release actual private EVPN state after complete group admission.
     pub(crate) fn release_evpn_with(&mut self, checkpoint: &mut impl FnMut()) {
-        release_sharded_map(&mut self.evpn_routes, checkpoint);
+        self.evpn_bodies.release_with(checkpoint);
+        release_sharded_map(&mut self.evpn_index, checkpoint);
     }
 
     /// Reserve both VPN advertised-route indexes for a known outbound batch.
@@ -828,7 +863,8 @@ impl AdjRibOut {
         self.self_next_hop_count = 0;
         self.prefix_path_ids.clear();
         self.flowspec_routes.clear();
-        self.evpn_routes.clear();
+        self.evpn_index.clear();
+        self.evpn_bodies.clear();
         self.bgpls_routes.clear();
         self.vpn_keys_changed(None);
         self.vpn_routes.clear();
@@ -848,7 +884,8 @@ impl AdjRibOut {
         self.self_next_hop_count = 0;
         self.prefix_path_ids.retire_with(checkpoint);
         retire_hash_map(&mut self.flowspec_routes, checkpoint);
-        retire_sharded_map(&mut self.evpn_routes, checkpoint);
+        self.evpn_bodies.retire_with(checkpoint);
+        retire_sharded_map(&mut self.evpn_index, checkpoint);
         retire_hash_map(&mut self.bgpls_routes, checkpoint);
         self.vpn_keys_released();
         retire_sharded_map(&mut self.vpn_routes, checkpoint);
@@ -944,7 +981,7 @@ impl AdjRibOut {
     pub fn is_empty_all_families(&self) -> bool {
         self.is_empty()
             && self.flowspec_routes.is_empty()
-            && self.evpn_routes.is_empty()
+            && self.evpn_bodies.is_empty()
             && self.bgpls_routes.is_empty()
             && self.vpn_len() == 0
             && self.labeled_len() == 0
@@ -1015,36 +1052,58 @@ impl AdjRibOut {
 
     // --- EVPN methods (RFC 7432) ---
 
-    /// Reserve the EVPN advertised-route map for a known outbound batch.
+    /// Reserve the EVPN index and route slots for a known outbound batch.
     pub(crate) fn reserve_evpn_with(&mut self, additional: usize, checkpoint: &mut impl FnMut()) {
-        self.evpn_routes.reserve_count_with(additional, checkpoint);
+        self.evpn_index.reserve_count_with(additional, checkpoint);
+        self.evpn_bodies.reserve_with(additional, checkpoint);
     }
 
     /// Insert or replace an advertised EVPN route.
     pub fn insert_evpn(&mut self, route: EvpnRibRoute) {
-        self.evpn_routes.insert(route.key(), route);
+        let bodies = &mut self.evpn_bodies;
+        let key = route.key();
+        let mut route = Some(route);
+        let new_slot = || new_evpn_slot(bodies, &mut route);
+        let handle = *self.evpn_index.get_or_insert_with(key, new_slot);
+        if let Some(route) = route {
+            bodies.set(handle, route);
+        }
     }
 
     /// Remove an EVPN route by key. Returns `true` if it existed.
     pub fn remove_evpn(&mut self, key: &EvpnRouteKey) -> bool {
-        self.evpn_routes.remove(key).is_some()
+        let Some(handle) = self.evpn_index.remove(key) else {
+            return false;
+        };
+        let live = self.evpn_bodies.discard(handle);
+        debug_assert!(live, "EVPN index names a live slot");
+        true
     }
 
     /// Look up an EVPN route by key.
     #[must_use]
     pub fn get_evpn(&self, key: &EvpnRouteKey) -> Option<&EvpnRibRoute> {
-        self.evpn_routes.get(key)
+        let route = self.evpn_bodies.get(*self.evpn_index.get(key)?);
+        debug_assert!(
+            route.is_some_and(|route| route.key() == *key),
+            "EVPN index names the live slot of its own route"
+        );
+        route
     }
 
-    /// Iterate over all advertised EVPN routes.
+    /// Iterate over all advertised EVPN routes, in the index's unspecified
+    /// hash order: a walk visits live rows only, never slab vacancies.
     pub fn iter_evpn(&self) -> impl Iterator<Item = &EvpnRibRoute> {
-        self.evpn_routes.values()
+        let bodies = &self.evpn_bodies;
+        self.evpn_index
+            .values()
+            .map(|&handle| evpn_body(bodies, handle))
     }
 
     /// Return the number of advertised EVPN routes.
     #[must_use]
     pub fn evpn_len(&self) -> usize {
-        self.evpn_routes.len()
+        self.evpn_bodies.len()
     }
 
     // --- BGP-LS methods (ADR-0077 outbound reflection substrate) ---
@@ -1296,8 +1355,8 @@ impl AdjRibOut {
         for key in self.bgpls_routes.keys() {
             bump(key.family.to_afi_safi());
         }
-        if !self.evpn_routes.is_empty() {
-            counts.push(((Afi::L2Vpn, Safi::Evpn), self.evpn_routes.len() as u64));
+        if !self.evpn_bodies.is_empty() {
+            counts.push(((Afi::L2Vpn, Safi::Evpn), self.evpn_bodies.len() as u64));
         }
         if !self.rtc_routes.is_empty() {
             counts.push(((Afi::Ipv4, Safi::RtConstrain), self.rtc_routes.len() as u64));
@@ -1598,22 +1657,6 @@ mod tests {
     /// rehash that many entries at once.
     const PAST_LARGE_DOUBLING: usize =
         2 * crate::fast_hash::LARGE_SHARD_SPLIT_AT + crate::fast_hash::LARGE_SHARD_SPLIT_AT / 8;
-
-    /// One receiver's EVPN map is a plain table up to the large split point
-    /// and then grows one shard at a time: no insert rehashes more than
-    /// `LARGE_SHARD_SPLIT_AT` entries. Red proof: a plain map fails at its
-    /// doubling past 229,376 entries.
-    #[test]
-    fn evpn_map_grows_by_at_most_one_large_split_per_insert() {
-        crate::fast_hash::assert_growth_bounded_by(
-            "Adj-RIB-Out EVPN routes",
-            &mut AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST))),
-            |rib, i| rib.insert_evpn(evpn_mac_ip(i)),
-            |rib| rib.evpn_routes.capacity(),
-            PAST_LARGE_DOUBLING,
-            crate::fast_hash::LARGE_SHARD_SPLIT_AT,
-        );
-    }
 
     /// The labeled route map and its prefix index both grow like the EVPN
     /// map.
