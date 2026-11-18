@@ -142,7 +142,14 @@ def held(charged=CLEAN_CHARGED, advertised=CLEAN_HELD, queued=HELD_QUEUED):
     }
 
 
-# The same bound at a byte-credit tree's credit, report-only there.
+# A byte-credit tree's constants, as a harness that records them would,
+# and the release bound at its credit: 150 x (credit + one pass of
+# `row_size_of` + 146 bytes a row).
+BYTE_CREDIT_RECORD = {
+    "DAEMON_CREDIT_BYTES": 2 * GIB,
+    "MIN_CREDIT_BYTES": 2 << 20,
+    "MAX_CREDIT_BYTES": 256 << 20,
+}
 RELEASE_BYTE_BOUND = {
     "unicast": 150 * (BYTE_CREDIT + 1_024 * 250),
     "evpn": 150 * (BYTE_CREDIT + 1_024 * 290),
@@ -185,7 +192,10 @@ def release(family, churn=False):
             "slice_max_us": {"actor_poll": 120_000.0, "other": 9_000.0},
             "turn_longest_ms": {"end_of_rib": histogram(100.0, 200.0)},
             "work_longest_ms": {"distribute_flush": histogram(25.0, 50.0, 400)},
-            "owed_drain_step_longest_ms": {"whole": histogram(25.0, 50.0, 900)},
+            # As on main: unicast drains by cursor, EVPN whole.
+            "owed_drain_step_longest_ms": {
+                "cursor" if family == "unicast" else "whole": histogram(25.0, 50.0, 900)
+            },
             "inbox_round_trip": {
                 "probes": 2_500,
                 "longest_ms": 40.0,
@@ -201,6 +211,7 @@ def release(family, churn=False):
             "reads": 30_000,
             "peak_operations_live": 0,
             "peak_credit_rows": 150 * ROW_CREDIT,
+            "peak_credit_bytes": None,
         },
         "unaffected": unaffected(),
     }
@@ -795,7 +806,10 @@ class Bars(unittest.TestCase):
             self.assertIn("owed rows not charged", results[cell][1])
             cell = f"cell 7 {kind} evpn"
             self.assertEqual(results[cell][0], "PASS", results[cell])
-            self.assertIn("charge witness report-only: evpn", results[cell][1])
+            self.assertIn(
+                "charge witness report-only: the run recorded only whole owed-drain steps for evpn",
+                results[cell][1],
+            )
             self.assertIn("would fail", results[cell][1])
 
     def test_drain_after_resume_is_reported_not_gated(self):
@@ -1491,8 +1505,22 @@ class Bars(unittest.TestCase):
         def change(run):
             run["actor"]["owed_drain_step_longest_ms"] = None
 
-        results = self.release_defect("restart-evpn.json", change)
-        self.assert_only(results, "cell 7 release owed-drain step", "INVALID", "no instrument")
+        # Bar 6 agrees: without the histogram it cannot tell how the
+        # candidate drains the family, so the release line cannot pass.
+        for file, line in (
+            ("restart-evpn.json", "cell 7 selection release evpn"),
+            ("restart-churn-unicast.json", "cell 7 release under churn unicast"),
+        ):
+            with self.subTest(file=file):
+                results = self.release_defect(file, change)
+                self.assertEqual(results[line][0], "INVALID", results[line])
+                self.assertIn(
+                    "no instrument: actor.owed_drain_step_longest_ms is null", results[line][1]
+                )
+                del results[line]
+                self.assert_only(
+                    results, "cell 7 release owed-drain step", "INVALID", "no instrument"
+                )
 
     def test_seeded_owed_drain_step_over_50_ms(self):
         cases = (
@@ -1504,11 +1532,19 @@ class Bars(unittest.TestCase):
         for entry, verdict, reason in cases:
 
             def change(run, entry=entry):
-                steps = {"whole": histogram(25.0, 50.0), "keyed": entry} if entry else {}
+                steps = {"cursor": histogram(25.0, 50.0), "keyed": entry} if entry else {}
                 run["actor"]["owed_drain_step_longest_ms"] = steps
 
             with self.subTest(entry=entry):
                 results = self.release_defect("restart-churn-unicast.json", change)
+                if entry:
+                    self.assert_only(results, "cell 7 release owed-drain step", verdict, reason)
+                    continue
+                # No step at all: bar 6 cannot tell how the family drained.
+                line = "cell 7 release under churn unicast"
+                self.assertEqual(results[line][0], "INVALID", results[line])
+                self.assertIn("no cursor or whole owed-drain step recorded", results[line][1])
+                del results[line]
                 self.assert_only(results, "cell 7 release owed-drain step", verdict, reason)
 
     def test_seeded_long_actor_turn(self):
@@ -1561,27 +1597,223 @@ class Bars(unittest.TestCase):
             results["cell 7 selection release evpn"][1],
         )
 
-    def test_byte_credit_release_bound_is_report_only(self):
-        # The byte bound reads the 250 ms sampler: within it or over it, it
-        # never decides bar 6; a huge 1 ms rows peak still fails.
+    def test_evpn_on_the_cursor_gates_the_charge_witness(self):
+        # A candidate that moved EVPN onto the cursor records cursor steps
+        # for it, with or without a family label on the histogram: its
+        # uncharged owed rows FAIL like unicast's, and its clean read passes.
+        step = histogram(10.0, 25.0)
+        for steps in ({"cursor": step}, {"cursor/l2vpn_evpn": step}):
+            for file, line in (
+                ("restart-evpn.json", "cell 7 selection release evpn"),
+                ("restart-churn-evpn.json", "cell 7 release under churn evpn"),
+            ):
+                for record, verdict in (
+                    (held(), "PASS"),
+                    (held(CLEAN_HELD - HELD_SLACK - 1), "FAIL"),
+                    (held(QUARTER_CHARGED, QUARTER_HELD, QUARTER_QUEUED), "FAIL"),
+                ):
+
+                    def change(run, steps=steps, record=record):
+                        run["actor"]["owed_drain_step_longest_ms"] = steps
+                        run["witness"]["held"] = record
+                        run["drain_gauges"]["peak_credit_rows"] = record["charged_after"]
+
+                    with self.subTest(steps=steps, file=file, charged=record["charged_after"]):
+                        results = self.release_defect(file, change)
+                        if verdict == "PASS":
+                            self.assertTrue(all(v == "PASS" for v, _ in results.values()), results)
+                            self.assertIn(
+                                "charge witness (the run recorded cursor owed-drain steps for "
+                                "evpn)",
+                                results[line][1],
+                            )
+                        else:
+                            self.assert_only(results, line, "FAIL", "owed rows not charged")
+
+        # On the cursor, EVPN keeps no whole-table operation live either.
+        def live(run):
+            run["actor"]["owed_drain_step_longest_ms"] = {"cursor": step}
+            run["drain_gauges"]["peak_operations_live"] = 1
+
+        results = self.release_defect("restart-evpn.json", live)
+        self.assert_only(
+            results, "cell 7 selection release evpn", "FAIL", "1 live whole-table operations"
+        )
+
+    def test_labeled_steps_of_another_family_do_not_decide(self):
+        # A labeled histogram: unicast's cursor steps say nothing about an
+        # EVPN cell whose own steps are whole.
+        def change(run):
+            run["actor"]["owed_drain_step_longest_ms"] = {
+                "cursor/ipv4_unicast": histogram(10.0, 25.0),
+                "whole/l2vpn_evpn": histogram(25.0, 50.0),
+            }
+            run["witness"]["held"] = held(0)
+
+        results = self.release_defect("restart-evpn.json", change)
+        self.assertTrue(all(v == "PASS" for v, _ in results.values()), results)
+        self.assertIn(
+            "charge witness report-only: the run recorded only whole owed-drain steps for evpn",
+            results["cell 7 selection release evpn"][1],
+        )
+
+    def test_partial_move_to_the_cursor_is_invalid(self):
+        # Cursor and whole steps for the cell's family: the witness can
+        # neither gate nor skip it. A FAIL elsewhere in bar 6 still stands.
+        cursor, whole = histogram(10.0, 25.0), histogram(25.0, 50.0)
+        for file, line, steps in (
+            ("restart-evpn.json", "cell 7 selection release evpn", {"cursor": cursor, "whole": whole}),
+            (
+                "restart-churn-evpn.json",
+                "cell 7 release under churn evpn",
+                {"cursor/l2vpn_evpn": cursor, "whole/l2vpn_evpn": whole},
+            ),
+            (
+                "restart-unicast.json",
+                "cell 7 selection release unicast",
+                {"cursor": cursor, "whole": whole},
+            ),
+        ):
+
+            def mixed(run, steps=steps):
+                run["actor"]["owed_drain_step_longest_ms"] = steps
+
+            def over(run, steps=steps):
+                mixed(run, steps)
+                run["drain_gauges"]["peak_credit_rows"] = RELEASE_ROW_BOUND + 1
+
+            with self.subTest(file=file):
+                results = self.release_defect(file, mixed)
+                self.assert_only(results, line, "INVALID", "partial move")
+                results = self.release_defect(file, over)
+                self.assert_only(results, line, "FAIL", f"> {RELEASE_ROW_BOUND}")
+                self.assertIn("partial move", results[line][1])
+
+    @staticmethod
+    def byte_tree(run, peak=None, record=True):
+        """`run` on a byte-credit tree: both byte peaks and, with `record`,
+        the RIB's byte-credit constants."""
+        bound = RELEASE_BYTE_BOUND[run["family"]]
+        run["witness"]["peak_credit_bytes"] = float(bound)
+        run["drain_gauges"]["peak_credit_bytes"] = bound if peak is None else peak
+        if record:
+            run["byte_credit"] = dict(BYTE_CREDIT_RECORD)
+
+    def test_byte_credit_tree_takes_the_row_witness(self):
+        # The witness works in rows, whose gauge keeps its meaning on a
+        # byte-credit tree: an uncharged cursor row fails and a clean read
+        # passes.
+        for file, line in (
+            ("restart-unicast.json", "cell 7 selection release unicast"),
+            ("restart-churn-unicast.json", "cell 7 release under churn unicast"),
+        ):
+            for record, verdict in (
+                (held(), "PASS"),
+                (held(CLEAN_HELD - HELD_SLACK - 1), "FAIL"),
+                (held(0), "FAIL"),
+            ):
+
+                def change(run, record=record):
+                    self.byte_tree(run)
+                    run["witness"]["held"] = record
+                    run["drain_gauges"]["peak_credit_rows"] = record["charged_after"]
+
+                with self.subTest(file=file, charged=record["charged_after"]):
+                    results = self.release_defect(file, change)
+                    if verdict == "PASS":
+                        self.assertTrue(all(v == "PASS" for v, _ in results.values()), results)
+                        self.assertIn("charge witness (the run recorded cursor", results[line][1])
+                        bound = RELEASE_BYTE_BOUND["unicast"]
+                        self.assertIn(
+                            f"credit bytes peak {bound} read every 1 ms (bound {bound})",
+                            results[line][1],
+                        )
+                    else:
+                        self.assert_only(results, line, "FAIL", "owed rows not charged")
+
+        # Every candidate release cell on a byte tree; the parent arm, a
+        # row-credit tree, has no byte gauge and cell 7 never reads it.
+        def all_byte(_parent, candidate):
+            for cell in RELEASE_CELLS:
+                self.byte_tree(candidate[f"{cell}.json"])
+
+        results = self.run_bars(all_byte)
+        self.assertTrue(all(v == "PASS" for v, _ in results.values()), results)
+
+    def test_byte_bound_gates_only_with_its_record_and_uniform_rows(self):
         line = "cell 7 release under churn evpn"
         bound = RELEASE_BYTE_BOUND["evpn"]
         for peak in (bound, bound + 1):
-
-            def change(run, peak=peak):
-                run["witness"]["peak_credit_bytes"] = float(peak)
-
             with self.subTest(peak=peak):
+                results = self.release_defect(
+                    "restart-churn-evpn.json", lambda run, peak=peak: self.byte_tree(run, peak)
+                )
+                if peak == bound:
+                    self.assertTrue(all(v == "PASS" for v, _ in results.values()), results)
+                else:
+                    self.assert_only(
+                        results,
+                        line,
+                        "FAIL",
+                        f"credit bytes peak {peak} > {bound} = 150 x ({BYTE_CREDIT} + 1024 x 290)",
+                    )
+
+        # Over the bound, but without the run's byte-credit record, rows of
+        # one size or the 1 ms reading: report-only, never undecided.
+        def no_record(run):
+            self.byte_tree(run, bound + 1, record=False)
+
+        def two_rows(run):
+            self.byte_tree(run, bound + 1)
+            run["wire"]["max_rows_per_update"] = 2
+
+        def partial_record(run):
+            self.byte_tree(run, bound + 1)
+            del run["byte_credit"]["MIN_CREDIT_BYTES"]
+
+        def sampler_only(run):
+            self.byte_tree(run)
+            del run["drain_gauges"]["peak_credit_bytes"]
+
+        for change, reason in (
+            (no_record, "byte bound report-only: no byte_credit record in the run"),
+            (two_rows, "report-only: row size not uniform"),
+            (partial_record, "byte bound report-only: not judged"),
+            (sampler_only, "no 1 ms byte reading"),
+        ):
+            with self.subTest(reason=reason):
                 results = self.release_defect("restart-churn-evpn.json", change)
-                self.assert_only(results, line, "INVALID", "bar 6 cannot pass")
-                self.assertIn(f"report-only: credit bytes peak {peak} vs {bound}", results[line][1])
+                self.assertTrue(all(v == "PASS" for v, _ in results.values()), results)
+                self.assertIn(reason, results[line][1])
 
         def huge_rows(run):
-            run["witness"]["peak_credit_bytes"] = float(bound)
+            self.byte_tree(run)
             run["drain_gauges"]["peak_credit_rows"] = 10**12
 
         results = self.release_defect("restart-churn-evpn.json", huge_rows)
         self.assert_only(results, line, "FAIL", f"credit rows peak {10**12} > {RELEASE_ROW_BOUND}")
+
+    def test_check_without_a_step_histogram_keeps_the_legacy_families(self):
+        # `check` on a tree that predates the histogram: unicast's witness
+        # still reports a verdict, EVPN's stays report-only.
+        for family, expected in (
+            ("unicast", "bar 6 would FAIL: run 0: owed rows not charged"),
+            (
+                "evpn",
+                "charge witness report-only: no step histogram (a tree that predates it), "
+                "where evpn drains whole: would fail",
+            ),
+        ):
+            run = release(family)
+            run["mode"] = "correctness"
+            run["actor"]["owed_drain_step_longest_ms"] = None
+            run["witness"]["held"] = held(0)
+            with tempfile.TemporaryDirectory() as root:
+                Path(root, f"restart-{family}.json").write_text(json.dumps(run))
+                ((_, verdict, reason),) = credit_bars.check(Path(root))
+            with self.subTest(family=family):
+                self.assertEqual(verdict, "PASS", reason)
+                self.assertIn(expected, reason)
 
     def test_release_credit_bound_on_a_row_credit_tree(self):
         # Without the byte gauge the bound is in rows, from the getter peak.
@@ -1689,7 +1921,11 @@ class Bars(unittest.TestCase):
             results = self.release_defect("restart-evpn.json", change)
             verdict, reason = results["cell 7 selection release evpn"]
             self.assertEqual(verdict, "PASS", reason)
-            self.assertIn("charge witness report-only: evpn is not drained by cursor", reason)
+            self.assertIn(
+                "charge witness report-only: the run recorded only whole owed-drain steps for "
+                "evpn, whose whole-table operations charge no rows by design",
+                reason,
+            )
 
     def test_held_read_must_be_tight_and_inside_the_pause(self):
         line = "cell 7 selection release unicast"

@@ -19,4 +19,5 @@ tikv-jemallocator.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+prometheus.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
