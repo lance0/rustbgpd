@@ -33,11 +33,13 @@ are cell 7's, which ``analyze`` judges on the candidate alone.
 
 Both commands also judge any ``source-burst.json`` and
 ``source-burst-control.json`` (the unpaced source burst through real
-sessions and its control without healthy updates): FAIL on a failed
-correctness check, INVALID when the instrument could not have seen a healthy
-update queued behind the burst, else PASS with its readings, which are
-report-only. ``analyze`` adds a REPORT line with the candidate's readings
-over the parent's when both arms ran the cell.
+sessions and its control without healthy updates), and their
+``source-burst-small`` counterparts (the same burst in UPDATEs of fewer than
+1,024 routes): FAIL on a failed correctness check, INVALID when the
+instrument could not have seen a healthy update queued behind the burst,
+else PASS with its readings, which are report-only. ``analyze`` adds a
+REPORT line with the candidate's readings over the parent's when both arms
+ran the cell, and refuses to compare runs that used different UPDATE sizes.
 """
 
 from __future__ import annotations
@@ -59,11 +61,18 @@ OPTIONAL_RELEASE_CHECKS = {
     "all_markers_after_trigger",
     "sessions_established",
 }
-# The unpaced source burst through real sessions and its control. Their
-# latency, count, completion, rate and memory readings are report-only.
-SOURCE_BURST = ("source-burst", "source-burst-control")
+# The unpaced source burst through real sessions and its control, with
+# 1,024 routes per UPDATE or (the `-small` cells) fewer. Their latency,
+# count, completion, rate and memory readings are report-only.
+SOURCE_BURST = (
+    "source-burst",
+    "source-burst-control",
+    "source-burst-small",
+    "source-burst-small-control",
+)
 SOURCE_BURST_CHECKS = ("final_state_exact", "per_source_order", "sessions_established")
-SOURCE_BURST_SHAPE = {"receivers": 150, "routes": 150_000, "rows_per_update": 1_024}
+SOURCE_BURST_SHAPE = {"receivers": 150, "routes": 150_000}
+SOURCE_BURST_ROUTES_PER_UPDATE = 1_024
 SOURCE_BURST_COLUMNS = [
     "sequence",
     "sent_ms",
@@ -1727,6 +1736,31 @@ def source_burst_readings(run: dict, what: str) -> dict:
             f"{what}: the burst was paced ({interval:g} ms between UPDATEs, {slept:.0f} ms "
             "slept), so it is not the unpaced burst"
         )
+    cell = need(run, "cell", what)
+    per_update = need(run, "shape.rows_per_update", what)
+    small = cell.startswith("source-burst-small")
+    if small:
+        named = (
+            isinstance(per_update, int)
+            and not isinstance(per_update, bool)
+            and 1 <= per_update < SOURCE_BURST_ROUTES_PER_UPDATE
+        )
+    else:
+        named = per_update == SOURCE_BURST_ROUTES_PER_UPDATE
+    if not named:
+        raise Invalid(f"{what}: shape.rows_per_update {per_update!r} is not {cell}'s shape")
+    # Each burst message and each marker behind one takes a slot in the
+    # RIB's half of the tap; past its capacity the later admission stamps
+    # wait for room and read late. Older results marked every message.
+    messages = number(run, "shape.burst_messages", what)
+    markers = run["shape"].get("burst_markers", messages)
+    capacity = (run["shape"].get("tap_capacity") or [None, None])[1]
+    if capacity is not None and messages + markers > capacity:
+        raise Invalid(
+            f"{what}: the burst's {messages:.0f} messages and {markers:.0f} markers need more "
+            f"than the {capacity} slots of the tap's RIB-side channel, so its admission stamps "
+            "would read late"
+        )
     sent = number(run, "burst.first_sent_ms", what)
     done = number(run, "burst.rib_done_ms", what)
     # Bucket edges bracketing the longest distribution pass in the run.
@@ -1739,8 +1773,11 @@ def source_burst_readings(run: dict, what: str) -> dict:
         "vmhwm_kib": number(run, "memory.vmhwm_kib", what),
         "flush_above_ms": flush.get("above_ms"),
         "flush_at_most_ms": flush.get("at_most_ms"),
+        "passes": flush.get("observations"),
+        "burst_messages": messages,
+        "burst_markers": markers,
     }
-    if need(run, "cell", what) != "source-burst-control":
+    if not cell.endswith("-control"):
         start = number(run, "burst.first_admitted_ms", what)
         readings.update(healthy_readings(run, what, start, done))
     if need(run, "mode", what) == "measured":
@@ -1799,15 +1836,23 @@ def source_burst(run: dict, what: str) -> tuple[str, str]:
     if mode not in ("correctness", "measured"):
         raise Invalid(f"{what}: unknown mode {mode!r}")
     r = source_burst_readings(run, what)
-    parts = [f"tables exact, order kept, sessions Established; report-only, {mode} run"]
+    parts = [
+        f"tables exact, order kept, sessions Established; report-only, {mode} run, "
+        f"{need(run, 'shape.rows_per_update', what)} routes per UPDATE"
+    ]
     if "updates" in r:
         lead = r["lead_dispatch_max_ms"]
         before = "no update" if lead is None else f"at most {lead:.1f} ms"
+        grouped = (
+            f" (counted by marker, {r['burst_markers']:.0f} for {r['burst_messages']:.0f} messages)"
+            if r["burst_markers"] < r["burst_messages"]
+            else ""
+        )
         parts.append(
             f"healthy admission to dispatch max {r['dispatch_max_ms']:.1f} ms (median "
             f"{r['dispatch_median_ms']:.1f} ms over the {r['during']} of {r['updates']} updates "
             f"admitted during the burst; {before} before it), at most "
-            f"{r['burst_ahead_max']} burst messages queued ahead, send to receive max "
+            f"{r['burst_ahead_max']} burst messages queued ahead{grouped}, send to receive max "
             f"{r['delivery_max_ms']:.1f} ms, dispatch to receive (its own pass) max "
             f"{r['own_pass_max_ms']:.1f} ms, {r['stamped_late']:.0f} admission stamps late"
         )
@@ -1822,6 +1867,14 @@ def source_burst(run: dict, what: str) -> tuple[str, str]:
         most = r["flush_at_most_ms"]
         bound = "past the top bucket" if most is None else f"at most {most:g} ms"
         parts.append(f"longest distribution pass above {r['flush_above_ms']:g} ms, {bound}")
+    if r["passes"] is not None:
+        # Without healthy updates, every pass in the run is the burst's.
+        share = (
+            f", {r['burst_messages'] / r['passes']:.1f} burst messages a pass"
+            if need(run, "cell", what).endswith("-control")
+            else ""
+        )
+        parts.append(f"{r['passes']} distribution passes in the run{share}")
     parts.append(f"peak RSS {r['vmhwm_kib'] / 1024:.0f} MiB")
     return "PASS", "; ".join(parts)
 
@@ -1864,8 +1917,10 @@ def mean_readings(readings: list[dict]) -> dict:
 
 def source_burst_compare(parent: Arm, candidate: Arm, cell: str) -> tuple[str, str, str] | None:
     """Report-only: the candidate's readings beside the parent's, each the
-    mean of its passing repetitions; None unless both arms have one."""
-    means = []
+    mean of its passing repetitions; None unless both arms have one. Runs
+    with different routes per UPDATE are different shapes: neither averaged
+    nor compared."""
+    means, sizes = [], set()
     for arm in (parent, candidate):
         readings = []
         for rep in sorted(arm.repetitions):
@@ -1875,11 +1930,20 @@ def source_burst_compare(parent: Arm, candidate: Arm, cell: str) -> tuple[str, s
                 run = arm.run(rep, cell)
                 if run and source_burst(run, cell)[0] == "PASS":
                     readings.append(source_burst_readings(run, cell))
+                    sizes.add(run["shape"]["rows_per_update"])
             except (Invalid, AttributeError, KeyError, TypeError, ValueError):
                 continue  # The repetition's own line says why.
         if not readings:
             return None
         means.append(mean_readings(readings))
+    name = f"{cell} candidate over parent"
+    if len(sizes) > 1:
+        return (
+            name,
+            "INVALID",
+            f"runs used {', '.join(map(str, sorted(sizes)))} routes per UPDATE: different "
+            "shapes, not compared",
+        )
     old, new = means
     parts = [
         f"burst completion x{new['completion_ms'] / old['completion_ms']:.2f}",
@@ -1892,7 +1956,7 @@ def source_burst_compare(parent: Arm, candidate: Arm, cell: str) -> tuple[str, s
             f"{old['dispatch_max_ms']:.1f} ms, burst messages queued ahead "
             f"{new['burst_ahead_max']:.0f} against {old['burst_ahead_max']:.0f}"
         )
-    return f"{cell} candidate over parent", "REPORT", "; ".join(parts)
+    return name, "REPORT", "; ".join(parts)
 
 
 def report(results: list[tuple[str, str, str]]) -> int:

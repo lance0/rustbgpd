@@ -602,6 +602,7 @@ and its admission into the RIB:
 
 `--reduced` runs 8 receivers, 16,000 routes and a 5 ms healthy cadence.
 `--rows N` sets the burst size and marks the run a correctness run.
+`--routes-per-update N` sets the UPDATE size (see Small UPDATEs below).
 `--control` (runner cell `source-burst-control`) sends no healthy update and
 records the burst's uncontended ingest rate.
 
@@ -709,6 +710,43 @@ debug build, `--reduced`, on one host (all runs PASS):
 | 32,000 | 10 | 1,934 ms (1,833–2,346 ms) | 1,994 ms |
 
 The ratio is 2.14 for the reading and 2.08 for the burst.
+
+**Small UPDATEs.** A production peer often sends tens to a few hundred
+routes per UPDATE, not 1,024. `--routes-per-update N` (1 to 1,024; default
+1,024) sends the same burst in UPDATEs of N routes, the last of each stage
+carrying the remainder, so the burst takes ceil(routes / N) messages per
+stage. Such a run is its own shape: its result is named
+`source-burst-small` (or `source-burst-small-control`) and records N as
+`shape.rows_per_update`. The runner cells `source-burst-small` and
+`source-burst-small-control` run it at N = 100, only when named. The shape
+measures how the session's admission and the RIB's distribution window
+interact when one window holds several of the source's messages: a window
+closes at 256 messages, 1,024 affected prefixes or 5 ms, so at N = 100
+about ten burst messages share one. The burst source negotiates Extended
+Message only when a message is past 4,096 bytes, so at N = 100 it does not.
+
+At small N the instrument changes in three ways:
+
+- A marker behind every burst message would end every window after one
+  message. The tap instead puts a marker behind the message that brings a
+  window begun after the previous marker to 1,024 routes or 256 messages,
+  where the RIB closes it anyway, and behind the last (`shape.burst_markers`).
+  A window that a healthy update or the 5 ms bound started mid-group still
+  ends at the next marker, short of its bound.
+- `burst_ahead` counts a message as ahead until its group's marker is
+  answered, so it can read up to a group's messages high; the verdict line
+  says so when markers are fewer than messages.
+- Every burst message and every marker takes a slot in the RIB's half of
+  the tap. A result whose burst messages and markers together exceed that
+  half's 2,048 slots is INVALID, since admission stamps after it fills would
+  read late. The full shape at N = 100 needs about 1,660 slots.
+
+The verdict line prints the number of distribution passes in the run; for
+a control, which has no healthy updates, every pass is the burst's, so the
+line also prints burst messages per pass. A measured run must have N =
+1,024 for the default cells and below 1,024 for the small ones. `analyze`
+compares a cell only between runs with the same N: runs with different N
+are different shapes and the comparison line is INVALID.
 
 ### Running
 
