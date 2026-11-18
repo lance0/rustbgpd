@@ -951,6 +951,25 @@ struct Jemalloc {
     resident: Option<u64>,
 }
 
+impl Jemalloc {
+    /// The allocator gauges of one snapshot. The collector keeps a gauge at
+    /// 0 until an epoch advance first succeeds, and a live jemalloc process
+    /// never reads 0, so 0 is no reading.
+    fn read(snapshot: &Snapshot) -> Self {
+        let gauge = |name| {
+            snapshot
+                .total(name)
+                .filter(|&bytes| bytes > 0.0)
+                .map(|bytes| bytes as u64)
+        };
+        Self {
+            allocated: gauge("jemalloc_allocated_bytes"),
+            active: gauge("jemalloc_active_bytes"),
+            resident: gauge("jemalloc_resident_bytes"),
+        }
+    }
+}
+
 /// One instrument sample.
 #[derive(Clone, Copy, Debug, Default)]
 struct Sample {
@@ -1242,11 +1261,7 @@ fn sampler(
             let gauge = |name| snapshot.total(name).unwrap_or(0.0);
             let sample = Sample {
                 at_ms,
-                jemalloc: Jemalloc {
-                    allocated: snapshot.total("jemalloc_allocated_bytes").map(|n| n as u64),
-                    active: snapshot.total("jemalloc_active_bytes").map(|n| n as u64),
-                    resident: snapshot.total("jemalloc_resident_bytes").map(|n| n as u64),
-                },
+                jemalloc: Jemalloc::read(&snapshot),
                 credit_rows: gauge("bgp_rib_outbound_credit_rows"),
                 credit_bytes: snapshot.total("bgp_rib_outbound_credit_bytes"),
                 rss_kib: rss_kib().ok().map(|(rss, _)| rss),
@@ -2606,6 +2621,38 @@ mod tests {
         let empty = super::memory_json(&super::Instruments::default());
         assert!(empty["peak_sampled_rss_kib"].is_null());
         assert!(empty["at_peak_sampled_rss"]["jemalloc_allocated_bytes"].is_null());
+    }
+
+    #[test]
+    fn each_allocator_reading_comes_from_its_own_gauge_and_zero_is_no_reading() {
+        let snapshot = |values: [f64; 4]| {
+            let names = [
+                "jemalloc_allocated_bytes",
+                "jemalloc_active_bytes",
+                "jemalloc_resident_bytes",
+                "jemalloc_mapped_bytes",
+            ];
+            super::Snapshot(
+                names
+                    .iter()
+                    .zip(values)
+                    .map(|(name, value)| (name.to_string(), vec![(BTreeMap::new(), value)]))
+                    .collect(),
+            )
+        };
+        let read = super::Jemalloc::read(&snapshot([100.0, 200.0, 300.0, 400.0]));
+        assert_eq!(
+            (read.allocated, read.active, read.resident),
+            (Some(100), Some(200), Some(300))
+        );
+        // The collector's gauges before any epoch advance succeeded.
+        let never = super::Jemalloc::read(&snapshot([0.0; 4]));
+        assert_eq!(
+            (never.allocated, never.active, never.resident),
+            (None, None, None)
+        );
+        let absent = super::Jemalloc::read(&super::Snapshot(Vec::new()));
+        assert_eq!(absent.allocated, None);
     }
 
     #[test]

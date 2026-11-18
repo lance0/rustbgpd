@@ -119,8 +119,21 @@ Each cell reports the independent sampled peaks of jemalloc allocated, active,
 and resident bytes. `memory.at_peak_sampled_rss` records all three from the
 first sample at the highest observed process RSS (`peak_sampled_rss_kib`).
 Linux records `VmHWM` separately and can see a higher peak between samples.
-Both analyzer commands print these as report-only readings. An unavailable
-reading, including a field absent from an older receipt, prints as `n/a`.
+Both analyzer commands print these as report-only readings, with the paired
+RSS and `vmhwm_kib` beside them. An unavailable reading prints as `n/a`. This
+includes a field absent from an older receipt and a gauge that reads 0, which
+the allocator never refreshed. Readings that break jemalloc's order (resident
+at least active, active at least allocated) read INVALID.
+
+- *allocated*: bytes in live allocations.
+- *active*: allocated plus the unused space in the pages those allocations
+  occupy (fragmentation).
+- *resident*: jemalloc's upper bound on its resident pages: metadata, active
+  pages and unused dirty pages. It counts pages the process never touched, so
+  it can exceed the RSS of the same sample.
+
+"Resident minus allocated" therefore over-attributes memory to allocator
+retention unless it is compared with the RSS of the same sample.
 
 Cell 5 (Criterion) is not part of this harness.
 

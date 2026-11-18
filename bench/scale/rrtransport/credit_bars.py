@@ -1520,23 +1520,35 @@ def allocator_reading(run: dict, source: str) -> tuple[str, str, str] | None:
     if not isinstance(memory, dict) or "peak_jemalloc_allocated_bytes" not in memory:
         return None
 
-    def reading(value):
-        if type(value) is int and value >= 0:
-            return str(value)
-        if isinstance(value, float) and math.isfinite(value) and value >= 0:
-            return f"{value:.0f}"
-        return "n/a"
+    def value(raw):
+        # 0 is a gauge the allocator never refreshed: no reading.
+        if type(raw) is int or (isinstance(raw, float) and math.isfinite(raw)):
+            return raw if raw > 0 else None
+        return None
+
+    def reading(raw):
+        return "n/a" if (raw := value(raw)) is None else f"{raw:.0f}"
 
     fields = ["jemalloc_" + name + "_bytes" for name in ("allocated", "active", "resident")]
-    peaks = "/".join(reading(memory.get("peak_" + field)) for field in fields)
     at = memory.get("at_peak_sampled_rss")
     at = at if isinstance(at, dict) else {}
-    paired = "/".join(reading(at.get(field)) for field in fields)
-    rss = reading(memory.get("peak_sampled_rss_kib"))
-    return f"{source} jemalloc", "REPORT", (
+    triples = [
+        [memory.get("peak_" + field) for field in fields],
+        [at.get(field) for field in fields],
+    ]
+    peaks, paired = ("/".join(map(reading, triple)) for triple in triples)
+    rss, hwm = (reading(memory.get(key)) for key in ("peak_sampled_rss_kib", "vmhwm_kib"))
+    detail = (
         f"allocated/active/resident bytes: independent peaks {peaks}, "
-        f"at sampled RSS peak ({rss} KiB) {paired}"
+        f"at sampled RSS peak ({rss} KiB, VmHWM {hwm} KiB) {paired}"
     )
+    # jemalloc's own invariant: resident >= active >= allocated.
+    for triple in triples:
+        known = [value(raw) for raw in triple]
+        if None not in known and not known[0] <= known[1] <= known[2]:
+            reason = f"out of order, not resident >= active >= allocated: {detail}"
+            return f"{source} jemalloc", "INVALID", reason
+    return f"{source} jemalloc", "REPORT", detail
 
 
 def check_allocator_readings(directory: Path):
@@ -2078,9 +2090,11 @@ def source_burst_compare(parent: Arm, candidate: Arm, cell: str) -> tuple[str, s
 
 
 def report(results: list[tuple[str, str, str]], readings=()) -> int:
+    readings = list(readings)
     for name, verdict, reason in [*results, *readings]:
         print(f"{verdict:<7} {name}: {reason}")
-    found = {verdict for _, verdict, _ in results}
+    # A report-only reading counts only when its instrument is unusable.
+    found = {verdict for _, verdict, _ in [*results, *readings] if verdict != "REPORT"}
     return 1 if "FAIL" in found else 2 if "INVALID" in found or not results else 0
 
 
