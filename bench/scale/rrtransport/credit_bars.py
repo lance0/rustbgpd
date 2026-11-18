@@ -1762,16 +1762,30 @@ def source_burst_readings(run: dict, what: str) -> dict:
 
 
 def source_burst(run: dict, what: str) -> tuple[str, str]:
-    """One source-burst result's verdict and its report-only readings."""
-    checks = need(run, "checks", what)
-    if (
-        not isinstance(checks, dict)
-        or set(checks) != set(SOURCE_BURST_CHECKS)
-        or any(not isinstance(value, bool) for value in checks.values())
-    ):
+    """One source-burst result's verdict and its report-only readings. A
+    recorded failure outranks every INVALID, except where the tap judged it."""
+    checks = run.get("checks")
+    well_formed = (
+        isinstance(checks, dict)
+        and set(checks) == set(SOURCE_BURST_CHECKS)
+        and all(isinstance(value, bool) for value in checks.values())
+    )
+    failed = [key for key in SOURCE_BURST_CHECKS if well_formed and not checks[key]]
+    # A flap, reset or session down is a correctness failure even where the
+    # result's own check missed it, and whatever else the result holds: the
+    # sessions' state does not depend on the tap.
+    wire = run.get("wire") if isinstance(run.get("wire"), dict) else {}
+    flaps, resets = wire.get("session_flaps_total") or 0, wire.get("stub_resets") or 0
+    if (flaps or resets or wire.get("not_established")) and "sessions_established" not in failed:
+        failed.append("sessions_established")
+    if "sessions_established" in failed:
+        return "FAIL", f"failed checks: {', '.join(failed)}"
+    if not well_formed:
         raise Invalid(f"{what}: incomplete or malformed checks")
+    need(run, "wire", what)
     # A tap that no longer recognizes what the session admits sees no burst
-    # and leaves the run to time out: that is the instrument, not a FAIL.
+    # and leaves the run to time out: its table and order checks then judge
+    # the instrument, not the daemon.
     admitted = number(run, "burst.messages_admitted", what)
     planned = number(run, "shape.burst_messages", what)
     if admitted != planned:
@@ -1779,13 +1793,6 @@ def source_burst(run: dict, what: str) -> tuple[str, str]:
             f"{what}: the tap recognized {admitted:.0f} of the {planned:.0f} burst messages "
             "the source sent"
         )
-    failed = [key for key in SOURCE_BURST_CHECKS if not checks[key]]
-    # A flap, reset or session down is a correctness failure even where the
-    # result's own check missed it.
-    wire = need(run, "wire", what)
-    flaps, resets = wire.get("session_flaps_total") or 0, wire.get("stub_resets") or 0
-    if (flaps or resets or wire.get("not_established")) and "sessions_established" not in failed:
-        failed.append("sessions_established")
     if failed:
         return "FAIL", f"failed checks: {', '.join(failed)}"
     mode = need(run, "mode", what)

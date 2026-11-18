@@ -147,6 +147,9 @@ struct TapLog {
     finished: Vec<Instant>,
     markers_lost: usize,
     peak_depth: usize,
+    /// Forwards that found the RIB's channel full and waited for room.
+    #[cfg(test)]
+    forwards_waited: usize,
 }
 
 struct TapConfig {
@@ -225,6 +228,10 @@ fn tap(
         let forward = |update: RibUpdate| match rib.try_send(update) {
             Ok(()) => Some(false),
             Err(mpsc::error::TrySendError::Full(update)) => {
+                #[cfg(test)]
+                {
+                    log.lock().expect("tap log").forwards_waited += 1;
+                }
                 rib.blocking_send(update).ok().map(|()| true)
             }
             Err(mpsc::error::TrySendError::Closed(_)) => None,
@@ -860,83 +867,130 @@ mod tests {
         late: bool,
     }
 
+    /// The tap between a test's burst and a RIB stand-in the test serves by
+    /// hand. Every wait is on the tap's state, never on elapsed time.
+    struct Stand {
+        ingress: Option<mpsc::Sender<RibUpdate>>,
+        rib: mpsc::Receiver<RibUpdate>,
+        log: Arc<Mutex<TapLog>>,
+        threads: [thread::JoinHandle<()>; 2],
+        burst: usize,
+        answered: usize,
+        offered: Option<Instant>,
+    }
+
+    impl Stand {
+        /// The tap with `burst` single-route burst messages in its ingress.
+        fn new(burst: usize, stall: Option<Duration>) -> Self {
+            let (ingress, ingress_rx) = mpsc::channel(TAP_CAPACITY);
+            let (rib, rib_rx) = mpsc::channel(TAP_CAPACITY);
+            let log = Arc::new(Mutex::new(TapLog::default()));
+            let threads = tap(
+                TapConfig {
+                    burst: PeerId::from_ipv4(SOURCE),
+                    healthy: PeerId::from_ipv4(CHURN_SOURCE),
+                    stall,
+                },
+                ingress_rx,
+                rib,
+                Arc::clone(&log),
+            );
+            for start in 0..burst {
+                let update = source_update(Family::Unicast, start..start + 1, BURST_VERSION, 100);
+                ingress.blocking_send(update).expect("tap open");
+            }
+            Self {
+                ingress: Some(ingress),
+                rib: rib_rx,
+                log,
+                threads,
+                burst,
+                answered: 0,
+                offered: None,
+            }
+        }
+
+        fn wait_until(&self, done: impl Fn(&TapLog) -> bool) {
+            while !done(&self.log.lock().expect("tap log")) {
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+
+        /// Serve the next `count` forwarded messages, and return once the
+        /// stamper has logged every marker answered so far.
+        fn serve(&mut self, count: usize) {
+            for _ in 0..count {
+                let update = self.rib.blocking_recv().expect("tap open");
+                if let RibUpdate::QueryLocRibCount { reply } = update {
+                    reply.send(0).expect("marker waiting");
+                    self.answered += 1;
+                }
+            }
+            let answered = self.answered;
+            self.wait_until(|log| log.finished.len() + log.dispatched.len() >= answered);
+        }
+
+        /// Offer the healthy update behind the burst; nothing follows it.
+        fn offer(&mut self) {
+            let ingress = self.ingress.take().expect("offered once");
+            self.offered = Some(Instant::now());
+            ingress
+                .blocking_send(churn_update(STALL_SEQUENCE))
+                .expect("tap open");
+        }
+
+        /// Serve everything left and read the healthy update. Its stamps lie
+        /// between its offer and the end of the tap, whatever the timing.
+        fn finish(mut self) -> Reading {
+            while let Some(update) = self.rib.blocking_recv() {
+                if let RibUpdate::QueryLocRibCount { reply } = update {
+                    let _ = reply.send(0);
+                }
+            }
+            for thread in self.threads {
+                thread.join().expect("tap thread");
+            }
+            let ended = Instant::now();
+            let log = self.log.lock().expect("tap log");
+            assert_eq!(log.markers_lost, 0);
+            assert_eq!(log.burst.len(), self.burst);
+            assert_eq!(log.finished.len(), self.burst);
+            let (admitted, dispatched) = (&log.healthy[0], log.dispatched[0]);
+            assert_eq!(
+                (admitted.sequence, dispatched.0),
+                (STALL_SEQUENCE, STALL_SEQUENCE)
+            );
+            let offered = self.offered.expect("healthy update offered");
+            assert!(offered <= admitted.at && dispatched.1 <= ended);
+            Reading {
+                wait: dispatched.1 - admitted.at,
+                burst_ahead: admitted.burst_ahead(&log.finished),
+                late: admitted.late,
+            }
+        }
+    }
+
     /// One healthy update's reading behind `burst` burst messages, with a
     /// RIB stand-in that serves the first `taken` forwarded messages before
-    /// the healthy update is offered, and the rest `held` after it.
+    /// the healthy update is offered, and the rest `held` after the tap
+    /// stamped its admission.
     fn reading(burst: usize, taken: usize, held: Duration, stall: Option<Duration>) -> Reading {
-        let (ingress, ingress_rx) = mpsc::channel(TAP_CAPACITY);
-        let (rib, mut rib_rx) = mpsc::channel(TAP_CAPACITY);
-        let log = Arc::new(Mutex::new(TapLog::default()));
-        let threads = tap(
-            TapConfig {
-                burst: PeerId::from_ipv4(SOURCE),
-                healthy: PeerId::from_ipv4(CHURN_SOURCE),
-                stall,
-            },
-            ingress_rx,
-            rib,
-            Arc::clone(&log),
-        );
-        for start in 0..burst {
-            let update = source_update(Family::Unicast, start..start + 1, BURST_VERSION, 100);
-            ingress.blocking_send(update).expect("tap open");
-        }
-        let mut answered = 0;
-        for _ in 0..taken {
-            if let Some(RibUpdate::QueryLocRibCount { reply }) = rib_rx.blocking_recv() {
-                reply.send(0).expect("marker waiting");
-                answered += 1;
-            }
-        }
-        // The stamper has logged every answer before the update is offered.
-        while log.lock().expect("tap log").finished.len() < answered {
-            thread::sleep(Duration::from_millis(1));
-        }
-        ingress
-            .blocking_send(churn_update(STALL_SEQUENCE))
-            .expect("tap open");
-        drop(ingress);
+        let mut stand = Stand::new(burst, stall);
+        stand.serve(taken);
+        stand.offer();
+        stand.wait_until(|log| !log.healthy.is_empty());
         thread::sleep(held);
-        while let Some(update) = rib_rx.blocking_recv() {
-            if let RibUpdate::QueryLocRibCount { reply } = update {
-                let _ = reply.send(0);
-            }
-        }
-        for thread in threads {
-            thread.join().expect("tap thread");
-        }
-        let log = log.lock().expect("tap log");
-        assert_eq!(log.markers_lost, 0);
-        assert_eq!(log.burst.len(), burst);
-        assert_eq!(log.finished.len(), burst);
-        let (admitted, dispatched) = (&log.healthy[0], log.dispatched[0]);
-        assert_eq!(
-            (admitted.sequence, dispatched.0),
-            (STALL_SEQUENCE, STALL_SEQUENCE)
-        );
-        Reading {
-            wait: dispatched.1 - admitted.at,
-            burst_ahead: admitted.burst_ahead(&log.finished),
-            late: admitted.late,
-        }
+        stand.finish()
     }
 
     #[test]
     fn reading_follows_how_long_the_rib_left_the_update_queued() {
         let prompt = reading(0, 0, Duration::ZERO, None);
-        assert!(
-            prompt.wait < HELD / 2,
-            "unqueued update read {:?}",
-            prompt.wait
-        );
         assert_eq!(prompt.burst_ahead, 0);
+        assert!(!prompt.late);
         let queued = reading(3, 0, HELD, None);
         let wait = queued.wait;
-        assert!(
-            wait >= HELD - Duration::from_millis(20),
-            "queued update read {wait:?}"
-        );
-        assert!(wait < HELD * 3, "queued update read {wait:?}");
+        assert!(wait >= HELD, "queued update read {wait:?}");
         assert_eq!(
             queued.burst_ahead, 3,
             "every burst message was still queued ahead"
@@ -957,8 +1011,18 @@ mod tests {
     /// room while the healthy update sits in the ingress channel.
     #[test]
     fn an_update_held_in_ingress_by_a_full_channel_is_stamped_late() {
+        // Each burst message forwards with its marker: 1,024 fill the
+        // RIB's channel, and the forwarder waits on the next with the
+        // healthy update behind it in the ingress. A full channel alone
+        // does not say the forwarder has tried it yet.
         let burst = TAP_CAPACITY / 2 + 8;
-        let held = reading(burst, 0, HELD, None);
+        let mut stand = Stand::new(burst, None);
+        stand.offer();
+        stand.wait_until(|log| log.forwards_waited > 0);
+        // The RIB finishes the first burst message, and its marker is
+        // stamped, before the forwarder has room to reach the update.
+        stand.serve(2);
+        let held = stand.finish();
         assert!(held.late);
         // What the RIB finished while the update waited unstamped is missed.
         assert!(held.burst_ahead < burst, "read {}", held.burst_ahead);
@@ -968,7 +1032,6 @@ mod tests {
     fn reading_follows_a_seeded_stall_behind_the_admission_stamp() {
         let stalled = reading(0, 0, Duration::ZERO, Some(HELD)).wait;
         assert!(stalled >= HELD, "stalled update read {stalled:?}");
-        assert!(stalled < HELD * 3, "stalled update read {stalled:?}");
     }
 
     #[test]

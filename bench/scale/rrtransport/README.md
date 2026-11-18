@@ -671,7 +671,11 @@ waits out its deadline), or when a dispatch stamp trails the healthy
 receiver by more than 50 ms (the stamper stalled). A flap, stub reset or
 session not Established recorded under `wire` FAILs the run even where
 `sessions_established` reads true: it is the daemon's behavior, not the
-instrument's.
+instrument's. Such a record, or `sessions_established` false, FAILs before
+any INVALID reason is weighed, so a burst source that went down before its
+last UPDATE fails although the tap missed the messages it never sent. The
+table and order checks, which follow the tap, FAIL only once the tap
+recognized the whole burst.
 
 Otherwise it PASSes and prints the readings: the longest and median
 admission-to-dispatch time, the most burst messages queued ahead, the

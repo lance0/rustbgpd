@@ -141,8 +141,44 @@ class SourceBurst(unittest.TestCase):
     def test_burst_the_tap_did_not_recognize_is_invalid_not_a_failure(self):
         run = burst()
         run["burst"]["messages_admitted"] = 0
-        run["checks"] = dict.fromkeys(credit_bars.SOURCE_BURST_CHECKS, False)
+        run["checks"].update(final_state_exact=False, per_source_order=False)
         self.assert_verdict(run, "INVALID", "the tap recognized 0 of the 150 burst messages")
+
+    def test_a_source_that_went_down_mid_burst_fails_though_the_tap_missed_its_tail(self):
+        """The burst source disconnects before its last UPDATE: the tap sees
+        149 of 150, and the recorded flap is still the verdict."""
+        for record in ("wire", "check"):
+            run = burst()
+            run["burst"]["messages_admitted"] = 149
+            run["checks"].update(final_state_exact=False, per_source_order=False)
+            if record == "wire":
+                run["wire"]["session_flaps_total"] = 1.0
+            else:
+                run["checks"]["sessions_established"] = False
+            self.assert_verdict(
+                run,
+                "FAIL",
+                "failed checks: final_state_exact, per_source_order, sessions_established",
+            )
+
+    def test_a_recorded_session_failure_outranks_every_instrument_question(self):
+        for spoil in (
+            lambda run: run["checks"].pop("per_source_order"),
+            lambda run: run.pop("checks"),
+            lambda run: run["burst"].pop("messages_admitted"),
+            lambda run: run["shape"].update(burst_interval_ms=10.0),
+            lambda run: run["healthy"].update(markers_lost=2),
+        ):
+            run = burst()
+            spoil(run)
+            run["wire"]["stub_resets"] = 1
+            self.assert_verdict(run, "FAIL", "sessions_established")
+        run = burst()
+        del run["wire"]
+        run["checks"]["sessions_established"] = False
+        self.assert_verdict(run, "FAIL", "failed checks: sessions_established")
+        del run["checks"]["per_source_order"]
+        self.assert_verdict(run, "INVALID", "incomplete or malformed checks")
 
     def test_a_flap_reset_or_down_session_fails_whatever_the_check_says(self):
         for field, value in (
