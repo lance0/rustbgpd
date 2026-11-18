@@ -1859,6 +1859,236 @@ mod tests {
         assert_eq!(rib.evpn_bodies.segment_capacities(), reserved);
     }
 
+    /// Bytes of one stored EVPN route slot.
+    const EVPN_SLOT_BYTES: usize = size_of::<Option<EvpnRibRoute>>();
+
+    /// One receiver's EVPN table driven the way a commit drives it: a
+    /// checkpointed reserve for the batch's new rows, then the inserts.
+    /// Each call is held to its growth bound as it runs.
+    struct EvpnCommits {
+        rib: AdjRibOut,
+        /// Number of the next route that is new to the table.
+        next: u32,
+        /// New rows the last reserve still covers.
+        covered: usize,
+        /// Times the slab's first segment became a whole segment.
+        promotions: usize,
+        /// Per reserve and its inserts: rows before it, slab bytes moved
+        /// and index bytes moved.
+        commits: Vec<(usize, usize, usize)>,
+    }
+
+    impl EvpnCommits {
+        fn new() -> Self {
+            Self {
+                rib: AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST))),
+                next: 0,
+                covered: 0,
+                promotions: 0,
+                commits: Vec::new(),
+            }
+        }
+
+        /// Run `call` and return the slab and index bytes it moved.
+        fn moved(&mut self, call: impl FnOnce(&mut AdjRibOut)) -> (usize, usize) {
+            let rows = self.rib.evpn_len();
+            let before = self.rib.evpn_growth_probe();
+            call(&mut self.rib);
+            let after = self.rib.evpn_growth_probe();
+            let slab_only = |probe: &EvpnGrowthProbe| (Vec::new(), 0, probe.2.clone());
+            let slab = evpn_moved_bytes(&slab_only(&before), &slab_only(&after), rows);
+            let index = evpn_moved_bytes(&before, &after, rows) - slab;
+            let whole = |probe: &EvpnGrowthProbe| probe.2.first() == Some(&SEGMENT);
+            self.promotions += usize::from(!whole(&before) && whole(&after));
+            let commit = self.commits.last_mut().expect("a reserve opens the commit");
+            commit.1 += slab;
+            commit.2 += index;
+            (slab, index)
+        }
+
+        /// A reserve is checkpointed, so its bound is on what it moves
+        /// between two checkpoints: the slab's first segment, at most
+        /// `EVPN_FIRST_SEGMENT_AT` slots (1.18 MB), or the index's one
+        /// table when it splits, under 16,384 entries (1.11 MB). Index
+        /// tables regrow one entry per checkpoint, several tables in one
+        /// call, so their sum has no fixed bound and is only recorded.
+        fn reserve(&mut self, additional: usize) -> (usize, usize) {
+            let rows = self.rib.evpn_len();
+            let tables = self.rib.evpn_index.shards().len();
+            self.commits.push((rows, 0, 0));
+            let mut checkpoints = 0_usize;
+            let (slab, index) =
+                self.moved(|rib| rib.reserve_evpn_with(additional, &mut || checkpoints += 1));
+            assert!(
+                slab <= EVPN_FIRST_SEGMENT_AT * EVPN_SLOT_BYTES,
+                "the reserve of {additional} after {rows} rows moved {slab} bytes of routes"
+            );
+            if self.rib.evpn_index.shards().len() != tables {
+                assert!(index <= 2 << 20, "the index split moved {index} bytes");
+            }
+            assert!(slab + index == 0 || checkpoints > 0, "an unpaced move");
+            self.covered = additional;
+            (slab, index)
+        }
+
+        /// Insert `count` routes that are new to the table. No insert
+        /// moves more than 2 MiB, and one the last reserve covers moves no
+        /// route and does not split the index.
+        fn insert_new(&mut self, count: usize) {
+            for _ in 0..count {
+                let rows = self.rib.evpn_len();
+                let tables = self.rib.evpn_index.shards().len();
+                let route = evpn_mac_ip(self.next);
+                self.next += 1;
+                let (slab, index) = self.moved(|rib| rib.insert_evpn(route));
+                assert!(
+                    slab + index <= 2 << 20,
+                    "the insert after {rows} rows moved {slab} bytes of routes and {index} of index"
+                );
+                if self.covered > 0 {
+                    self.covered -= 1;
+                    assert_eq!(slab, 0, "a reserved insert after {rows} rows moved routes");
+                    assert_eq!(self.rib.evpn_index.shards().len(), tables, "split");
+                }
+            }
+            assert_eq!(self.rib.evpn_len(), self.rib.evpn_index.len());
+        }
+
+        fn remove(&mut self, numbers: std::ops::Range<u32>) {
+            for i in numbers {
+                assert!(self.rib.remove_evpn(&evpn_mac_ip(i).key()));
+            }
+        }
+
+        /// The first segment was made whole once if the table passed
+        /// `EVPN_FIRST_SEGMENT_AT` slots, and never otherwise.
+        fn assert_promoted_once(&self) {
+            let passed = self.rib.evpn_bodies.slot_count() > EVPN_FIRST_SEGMENT_AT;
+            assert!(self.promotions <= 1, "{} promotions", self.promotions);
+            assert!(!passed || self.promotions == 1, "never promoted");
+        }
+    }
+
+    /// The production shape: every message reserves for its 1,024 rows and
+    /// then commits them, from empty to past two slab segments. The slab's
+    /// first segment is made whole once, inside the reserve of the message
+    /// that crosses `EVPN_FIRST_SEGMENT_AT` rows, and that message moves
+    /// 1.18 MB of routes.
+    /// Red proof: with the promotion only in `insert_evpn`, that message's
+    /// reserve doubles the segment (1.18 MB) and its first insert then
+    /// moves 2,359,296 bytes outside the reserve.
+    #[test]
+    fn evpn_batched_commits_promote_the_slab_inside_the_reserve() {
+        const BATCH: usize = 1024;
+        let mut run = EvpnCommits::new();
+        while run.rib.evpn_len() < 2 * SEGMENT + 19 * BATCH {
+            run.reserve(BATCH);
+            run.insert_new(BATCH);
+        }
+        run.assert_promoted_once();
+        for (rows, slab, index) in &run.commits {
+            if slab + index >= 1 << 20 {
+                println!("EVPN_COMMIT rows={rows} slab_bytes={slab} index_bytes={index}");
+            }
+        }
+        let crossing = run.commits[EVPN_FIRST_SEGMENT_AT / BATCH];
+        assert_eq!(
+            (crossing.0, crossing.1),
+            (
+                EVPN_FIRST_SEGMENT_AT,
+                EVPN_FIRST_SEGMENT_AT * EVPN_SLOT_BYTES
+            )
+        );
+        let routes_moved: usize = run.commits.iter().map(|commit| commit.1).sum();
+        assert!(routes_moved < 2 * EVPN_FIRST_SEGMENT_AT * EVPN_SLOT_BYTES);
+    }
+
+    /// One reserve larger than `EVPN_FIRST_SEGMENT_AT` on an empty table
+    /// allocates the first segment whole, so filling it moves no route.
+    /// Red proof: a segment sized to the 20,000-row batch is expanded by
+    /// the insert after 8,192 rows, which moves 2,880,000 bytes.
+    #[test]
+    fn evpn_large_first_reserve_leaves_no_route_to_move() {
+        let mut run = EvpnCommits::new();
+        run.reserve(20_000);
+        run.insert_new(20_000);
+        run.assert_promoted_once();
+        assert_eq!(run.commits, [(0, 0, 0)]);
+    }
+
+    /// Reserves of mixed sizes, some filled, some partly filled and some
+    /// not at all, with inserts no reserve covers in between.
+    /// Red proof: a reserve that lets the slab double an 8,191-slot
+    /// segment leaves 16,382 slots (2,359,008 bytes) to move at the
+    /// promotion.
+    #[test]
+    fn evpn_interleaved_reserves_keep_every_call_bounded() {
+        let mut run = EvpnCommits::new();
+        for (reserve, insert) in [
+            (1, 1),
+            (8190, 8190),
+            (1, 1),
+            (300, 0),
+            (0, 0),
+            (5, 300),
+            (5000, 100),
+            (1024, 2000),
+            (70_000, 0),
+            (3, 30_000),
+            (100_000, 100_000),
+            (1024, 1024),
+        ] {
+            run.reserve(reserve);
+            run.insert_new(insert);
+        }
+        run.assert_promoted_once();
+        assert!(run.rib.evpn_len() > 2 * SEGMENT);
+
+        // Small reserves below the threshold, then one that crosses it.
+        let mut run = EvpnCommits::new();
+        for (reserve, insert) in [(700, 700), (5000, 4000), (3000, 3000), (1, 0), (1000, 1000)] {
+            run.reserve(reserve);
+            run.insert_new(insert);
+        }
+        run.assert_promoted_once();
+    }
+
+    /// Freed slots are reused before the slab grows: a reserve they cover
+    /// moves nothing and does not promote, the inserts that reuse them
+    /// move no route, and the reserve that first needs slot 8,193 promotes.
+    /// Red proof: counting slots instead of rows moves 1,179,648 bytes at
+    /// the covered reserve; with the promotion only in `insert_evpn`, an
+    /// insert that reuses a freed slot moves 1,179,648 bytes.
+    #[test]
+    fn evpn_reserve_counts_freed_slots_before_promoting() {
+        const BATCH: usize = 1024;
+        let mut run = EvpnCommits::new();
+        for _ in 0..EVPN_FIRST_SEGMENT_AT / BATCH {
+            run.reserve(BATCH);
+            run.insert_new(BATCH);
+        }
+        run.remove(0..2000);
+        assert_eq!(run.reserve(BATCH), (0, 0));
+        assert_eq!(run.promotions, 0, "freed slots covered the reserve");
+        run.insert_new(BATCH);
+        assert_eq!(run.rib.evpn_bodies.slot_count(), EVPN_FIRST_SEGMENT_AT);
+        // 976 slots are free: this batch needs 48 new ones.
+        let (slab, _) = run.reserve(BATCH);
+        assert_eq!(slab, EVPN_FIRST_SEGMENT_AT * EVPN_SLOT_BYTES);
+        run.insert_new(BATCH);
+        run.assert_promoted_once();
+
+        // Without a reserve, an insert promotes only when no slot is free.
+        let mut run = EvpnCommits::new();
+        run.reserve(0);
+        run.insert_new(EVPN_FIRST_SEGMENT_AT);
+        run.remove(0..10);
+        run.insert_new(10);
+        assert_eq!(run.promotions, 0, "freed slots took the inserts");
+        run.insert_new(1);
+        run.assert_promoted_once();
+    }
+
     /// Every invariant that ties the EVPN index to its slab, against a
     /// model: each key reads back its latest route, no two keys share a
     /// slot, the slab holds no route the index does not name, and the
