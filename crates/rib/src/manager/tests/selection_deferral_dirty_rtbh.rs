@@ -3651,3 +3651,54 @@ fn limited_dirty_member_without_a_proof_counts_its_wire() {
         }
     }
 }
+
+#[test]
+fn held_join_counts_only_eligible_policy_evaluations_and_denials() {
+    let mut manager = manager_with_dormant_waiter();
+    let prefixes = [1, 2, 3, 4].map(|octet| Ipv4Prefix::new(Ipv4Addr::new(10, 20, octet, 0), 24));
+    let policy = deny_prefixes_chain(&[Prefix::V4(prefixes[1]), Prefix::V4(prefixes[3])]);
+    let join = |manager: &mut RibManager, address| {
+        let mut up = registering_peer_up(peer_v4(address), 7);
+        let RibUpdate::PeerUp {
+            outbound_tx,
+            sendable_families,
+            export_policy,
+            ..
+        } = &mut up
+        else {
+            unreachable!()
+        };
+        let (tx, rx) = mpsc::channel(16);
+        *outbound_tx = tx;
+        *sendable_families = vec![FAMILY];
+        *export_policy = Some(policy.clone());
+        manager.handle_update(up);
+        rx
+    };
+    let _existing = join(&mut manager, OBSERVER);
+    for (index, prefix) in prefixes.into_iter().enumerate() {
+        // Last two carry an explicit BLACKHOLE on their original local path.
+        inject_aggregate(&mut manager, prefix, 42, index >= 2);
+    }
+    let gid = manager.grouped_member_of(peer_v4(OBSERVER)).unwrap();
+    let _waiter = connect(&mut manager, WAITER, 64, true, false);
+    assert!(manager.selection_deferred(FAMILY));
+    for (octet, private) in [(91, false), (92, true)] {
+        let address = Ipv4Addr::new(192, 0, 2, octet);
+        let peer = peer_v4(address);
+        manager.test_force_ungrouped = private;
+        let _rx = join(&mut manager, address);
+        assert_eq!(manager.grouped_member_of(peer), (!private).then_some(gid));
+        let stats = manager.export_policy_counters[&peer].snapshot();
+        assert_eq!(
+            (
+                stats.export_policy_routes_permitted,
+                stats.export_policy_routes_denied
+            ),
+            (1, 1),
+        );
+        let denials = &manager.policy_filtered_routes[&peer];
+        assert!(denials.contains_key(&Prefix::V4(prefixes[3])));
+        assert!(!denials.contains_key(&Prefix::V4(prefixes[1])));
+    }
+}
