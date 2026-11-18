@@ -72,6 +72,21 @@ def burst(control=False, measured=True):
     return run
 
 
+def small(per_update, control=False):
+    """The same burst in UPDATEs of `per_update` routes, its own shape."""
+    run = burst(control)
+    run["cell"] = "source-burst-small-control" if control else "source-burst-small"
+    messages = -(-150_000 // per_update)
+    run["shape"].update(
+        rows_per_update=per_update,
+        burst_messages=messages,
+        burst_markers=-(-messages * per_update // 1_024),
+        tap_capacity=[2_048, 2_048],
+    )
+    run["burst"]["messages_admitted"] = messages
+    return run
+
+
 def verdict(run):
     try:
         return credit_bars.source_burst(run, "run")
@@ -292,6 +307,37 @@ class SourceBurst(unittest.TestCase):
             run["mode"] = "timed"
             self.assert_verdict(run, "INVALID", "unknown mode 'timed'")
 
+    def test_a_measured_small_update_run_is_its_own_named_shape(self):
+        for control in (False, True):
+            self.assert_verdict(small(100, control), "PASS", "measured run, 100 routes per UPDATE")
+            # The default cell keeps its fixed 1,024, and the small cell
+            # never carries it.
+            run = burst(control)
+            run["shape"]["rows_per_update"] = 100
+            self.assert_verdict(run, "INVALID", "rows_per_update 100 is not source-burst")
+            self.assert_verdict(small(1_024, control), "INVALID", "rows_per_update 1024 is not")
+            run = small(100, control)
+            run["shape"]["rows_per_update"] = 0
+            self.assert_verdict(run, "INVALID", "rows_per_update 0 is not")
+        self.assert_verdict(small(100), "PASS", "queued ahead (counted by marker, 147 for 1500")
+        self.assertNotIn("counted by marker", verdict(burst())[1])
+
+    def test_a_burst_the_tap_cannot_hold_is_invalid(self):
+        """Every burst message and its marker take a slot in the RIB's half
+        of the tap: past 2,048 the later admission stamps read late."""
+        self.assertEqual(verdict(small(100))[0], "PASS")  # 1,500 + 147 slots
+        run = small(50)  # 3,000 + 147
+        self.assert_verdict(run, "INVALID", "3000 messages and 147 markers need more than the 2048")
+        run["mode"] = "correctness"
+        self.assertEqual(verdict(run)[0], "INVALID")
+
+    def test_passes_and_messages_a_pass_are_reported(self):
+        self.assert_verdict(burst(), "PASS", "300 distribution passes in the run; peak")
+        self.assert_verdict(burst(control=True), "PASS", "0.5 burst messages a pass")
+        run = small(100, control=True)
+        run["actor"]["work_longest_ms"]["distribute_flush"]["observations"] = 150
+        self.assert_verdict(run, "PASS", "150 distribution passes in the run, 10.0 burst")
+
 
 class Means(unittest.TestCase):
     def test_a_reading_null_in_one_repetition_is_left_out(self):
@@ -356,14 +402,25 @@ class Directories(unittest.TestCase):
         )
         self.assertEqual({name: results[name][0] for name in credit_bars.CELLS}, gated)
         for arm in ("parent", "candidate"):
-            for cell in credit_bars.SOURCE_BURST:
+            for cell in ("source-burst", "source-burst-control"):
                 self.assertEqual(results[f"{arm} 1 {cell}"][0], "PASS")
+            self.assertNotIn(f"{arm} 1 source-burst-small", results)
         compared = results["source-burst candidate over parent"]
         self.assertEqual(compared[0], "REPORT")
         self.assertIn("burst completion x1.05", compared[1])
         self.assertIn("max 240.0 ms against 36000.0 ms", compared[1])
         self.assertIn("queued ahead 1 against 146", compared[1])
         self.assertIn("ingest rate x1.00", results["source-burst-control candidate over parent"][1])
+
+    def test_runs_with_different_routes_per_update_are_not_compared(self):
+        same = self.analyze({"source-burst-small": small(100)}, {"source-burst-small": small(100)})
+        self.assertEqual(same["source-burst-small candidate over parent"][0], "REPORT")
+        mixed = self.analyze({"source-burst-small": small(100)}, {"source-burst-small": small(200)})
+        for arm in ("parent", "candidate"):
+            self.assertEqual(mixed[f"{arm} 1 source-burst-small"][0], "PASS")
+        compared = mixed["source-burst-small candidate over parent"]
+        self.assertEqual(compared[0], "INVALID")
+        self.assertIn("100, 200 routes per UPDATE: different shapes, not compared", compared[1])
 
     def test_analyze_rejects_a_result_no_run_listed(self):
         results = self.analyze({"source-burst": burst()}, {}, listed=False)

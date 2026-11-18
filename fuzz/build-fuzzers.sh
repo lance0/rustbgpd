@@ -34,6 +34,8 @@ fi
 # wall-clock improvement is asserted without a retained benchmark harness.
 build_target_dir=${CARGO_FUZZ_TARGET_DIR:-"$repo_root/target/cargo-fuzz"}
 
+"$repo_root/fuzz/seed-fuzz-lockfiles.sh"
+
 for dir in crates/bfd crates/cli crates/evpn crates/mrt crates/policy crates/rpki crates/wire; do
   pushd "$repo_root/$dir"
   cargo fuzz build -O --debug-assertions --target-dir "$build_target_dir"

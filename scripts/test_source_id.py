@@ -130,9 +130,15 @@ class FailClosed(TempTree):
 class Pruned(TempTree):
     def test_dockerignored_directories_do_not_change_the_digest(self) -> None:
         before = self.run_script().stdout
-        for ignored in ("crates/__pycache__/oracle.cpython-312.pyc", "src/target/debug/x"):
+        for ignored in (
+            "crates/__pycache__/oracle.cpython-312.pyc",
+            "src/target/debug/x",
+            "crates/wire/fuzz/Cargo.lock",
+            "crates/wire/fuzz/corpus/decode_update/abc",
+            "crates/wire/fuzz/artifacts/decode_update/crash-abc",
+        ):
             path = self.tree / ignored
-            path.parent.mkdir(parents=True)
+            path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("ignored")
         self.assertEqual(self.run_script().stdout, before)
 

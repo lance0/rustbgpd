@@ -305,6 +305,7 @@ fuzz crate target *args:
     fi
     RUSTUP_TOOLCHAIN="$(cat fuzz/rust-nightly.txt)"
     export RUSTUP_TOOLCHAIN
+    fuzz/seed-fuzz-lockfiles.sh
     cd "${crate}"
     exec cargo fuzz run "${target}" "$@"
 
