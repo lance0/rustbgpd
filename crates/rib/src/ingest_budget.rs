@@ -135,6 +135,21 @@ mod tests {
         assert!(!budget.gate_closed(true));
     }
 
+    /// Boundary: a return that lands exactly on the resume mark wakes the
+    /// session and reopens the gate.
+    #[tokio::test]
+    async fn a_return_to_exactly_the_resume_mark_wakes_and_reopens() {
+        let budget = IngestBudget::new();
+        let kept = budget.charge(INGEST_RESUME_ROUTES);
+        drop(budget.charge(INGEST_BUDGET_ROUTES - INGEST_RESUME_ROUTES));
+        assert_eq!(budget.unfinished(), INGEST_RESUME_ROUTES);
+        tokio::time::timeout(std::time::Duration::ZERO, budget.resumed())
+            .await
+            .expect("a return to the resume mark wakes the session");
+        assert!(!budget.gate_closed(true));
+        drop(kept);
+    }
+
     #[tokio::test]
     async fn a_return_above_the_resume_mark_does_not_wake() {
         let budget = IngestBudget::new();

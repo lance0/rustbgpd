@@ -120,7 +120,7 @@ async fn spent_budget_holds_buffered_input_and_resumes_in_stream_order() {
     let third = block_pdu(30, 1, 24);
     buffer_and_process(&mut session, &[burst_pdu(10), burst_pdu(20), third.clone()]).await;
     assert_eq!(budget.unfinished(), 2 * BLOCK);
-    assert!(session.ingest_gated());
+    assert!(session.ingest_gate_closed);
     assert_eq!(&session.read_buf.buf[..], &third[..], "the third waits");
     let first = rib_rx.try_recv().unwrap();
     let second = rib_rx.try_recv().unwrap();
@@ -129,16 +129,16 @@ async fn spent_budget_holds_buffered_input_and_resumes_in_stream_order() {
     assert!(rib_rx.try_recv().is_err());
 
     drop(first);
-    session.resume_gated_input().await;
+    session.reopen_ingest_gate().await;
     assert!(
         rib_rx.try_recv().is_err(),
         "{BLOCK} unfinished routes are above the resume mark"
     );
     drop(second);
-    session.resume_gated_input().await;
+    session.reopen_ingest_gate().await;
     assert_eq!(burst_block(&rib_rx.try_recv().unwrap()), Some((30, 1)));
     assert!(session.read_buf.buf.is_empty());
-    assert!(!session.ingest_gated());
+    assert!(!session.ingest_gate_closed);
 }
 
 /// The starvation regression, as a count: an unpaced burst source has at
@@ -181,7 +181,7 @@ async fn unpaced_burst_leaves_at_most_two_messages_ahead_of_another_source() {
         }
         // The RIB finishes the message; the session reads on if it may.
         drop(update);
-        session.resume_gated_input().await;
+        session.reopen_ingest_gate().await;
         deepest = deepest.max(rib_rx.len());
     }
     assert_eq!(other_after, Some(2), "dispatched after two burst messages");
@@ -219,7 +219,7 @@ async fn message_larger_than_the_budget_is_admitted_and_reopens_the_gate() {
     assert_eq!(budget.unfinished(), oversized);
     assert!(rib_rx.try_recv().is_err(), "the next UPDATE waits");
     drop(big);
-    session.resume_gated_input().await;
+    session.reopen_ingest_gate().await;
     assert_eq!(burst_block(&rib_rx.try_recv().unwrap()), Some((30, 1)));
 }
 
@@ -327,7 +327,7 @@ async fn hold_expiry_behind_the_gate_follows_the_parked_policy() {
         )
     };
     buffer_and_process(&mut session, &[burst_pdu(10), burst_pdu(20)]).await;
-    assert!(session.ingest_gated());
+    assert!(session.ingest_gate_closed);
     assert!(session.rib_backlog.is_empty(), "the RIB channel has room");
 
     let keepalive = rustbgpd_wire::encode_message(&Message::Keepalive)
@@ -377,7 +377,7 @@ async fn processed_input_after_the_gate_reopens_restores_the_hold_budget() {
     assert_eq!(session.parked_hold_renewals, 1);
     assert!(session.timers.hold.is_some(), "the hold timer is re-armed");
     while rib_rx.try_recv().is_ok() {}
-    session.resume_gated_input().await;
+    session.reopen_ingest_gate().await;
     assert!(
         session.read_buf.buf.is_empty(),
         "the KEEPALIVE is processed"
@@ -400,10 +400,12 @@ async fn session_end_starts_a_fresh_budget() {
         server: _server,
     } = metered_session().await;
     buffer_and_process(&mut session, &[burst_pdu(10), burst_pdu(20)]).await;
-    assert!(session.ingest_gated());
+    assert!(session.ingest_gate_closed);
     session.drive_fsm(Event::ManualStop { reason: None }).await;
     assert_eq!(budget.unfinished(), 2 * BLOCK, "the RIB still holds both");
-    assert!(!session.ingest_gated());
+    // The run loop's next turn sees the fresh budget.
+    session.reopen_ingest_gate().await;
+    assert!(!session.ingest_gate_closed);
     let mut last = None;
     while let Ok(update) = rib_rx.try_recv() {
         last = Some(update);
@@ -488,6 +490,83 @@ async fn run_loop_leaves_the_socket_unread_behind_the_gate_and_wakes_on_budget()
     let third = tokio::select! {
         result = run => panic!("run() ended behind the gate: {result:?}"),
         third = steps => third.expect("returned budget wakes the run loop"),
+    };
+    assert_eq!(burst_block(&third), Some((30, 1)));
+}
+
+/// The gate closes inside `process_read_buffer` with the stream's tail still
+/// buffered, and the RIB returns the budget before the run loop next looks
+/// at the gate. The peer sends nothing more; the buffered tail must still be
+/// processed.
+/// Red proof: a run loop that reopens the gate without processing the
+/// buffer leaves the tail until the peer's next byte.
+#[tokio::test]
+async fn budget_returned_before_the_run_loop_looks_still_processes_the_buffered_tail() {
+    let Metered {
+        mut session,
+        mut rib_rx,
+        budget,
+        commands: _commands,
+        server: _server,
+    } = metered_session().await;
+    buffer_and_process(
+        &mut session,
+        &[burst_pdu(10), burst_pdu(20), block_pdu(30, 1, 24)],
+    )
+    .await;
+    assert!(session.ingest_gate_closed, "the gate closed mid-buffer");
+    assert!(
+        session.read_buf.has_complete_frame(),
+        "the tail is buffered"
+    );
+    // The RIB (another thread in production) finishes both messages now.
+    drop(rib_rx.try_recv().unwrap());
+    drop(rib_rx.try_recv().unwrap());
+    assert_eq!(budget.unfinished(), 0);
+    let run = session.run();
+    let tail = tokio::time::timeout(Duration::from_secs(3), rib_rx.recv());
+    let tail = tokio::select! {
+        result = run => panic!("run() ended: {result:?}"),
+        tail = tail => tail,
+    };
+    let tail = tail.expect("the buffered tail is processed once the budget returned");
+    assert_eq!(burst_block(&tail.unwrap()), Some((30, 1)));
+}
+
+/// Boundary: the RIB's return lands exactly on the resume mark, with the
+/// run loop already waiting behind the gate. The loop is woken, reopens the
+/// gate and reads on.
+/// Red proof: a wake-up only below the mark, or a gate that reopens only
+/// below it, leaves the third UPDATE in the socket.
+#[tokio::test]
+async fn budget_returned_to_exactly_the_resume_mark_wakes_the_run_loop() {
+    const _: () = assert!(2 * INGEST_RESUME_ROUTES >= INGEST_BUDGET_ROUTES);
+    let Metered {
+        mut session,
+        mut rib_rx,
+        mut server,
+        commands,
+        budget,
+    } = metered_session().await;
+    let run = session.run();
+    let steps = tokio::time::timeout(Duration::from_secs(10), async {
+        for block in [10, 20] {
+            let pdu = block_pdu(block, INGEST_RESUME_ROUTES, 24);
+            server.write_all(&pdu).await.unwrap();
+        }
+        until_unfinished(&budget, 2 * INGEST_RESUME_ROUTES).await;
+        let first = rib_rx.recv().await.unwrap();
+        let _second = rib_rx.recv().await.unwrap();
+        server.write_all(&block_pdu(30, 1, 24)).await.unwrap();
+        // The loop is waiting with its read arm closed.
+        run_loop_turn(&commands).await;
+        drop(first);
+        assert_eq!(budget.unfinished(), INGEST_RESUME_ROUTES);
+        rib_rx.recv().await.unwrap()
+    });
+    let third = tokio::select! {
+        result = run => panic!("run() ended behind the gate: {result:?}"),
+        third = steps => third.expect("a return to the resume mark wakes the run loop"),
     };
     assert_eq!(burst_block(&third), Some((30, 1)));
 }

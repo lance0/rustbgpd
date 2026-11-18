@@ -341,8 +341,8 @@ pub(crate) struct PeerSession {
     /// never pace a later one. `None` only under the unit-test constructors,
     /// whose tests read the plain messages.
     ingest_budget: Option<Arc<rustbgpd_rib::ingest_budget::IngestBudget>>,
-    /// The budget was spent and has not yet fallen to its resume mark; see
-    /// [`Self::ingest_gated`].
+    /// The budget was spent and the run loop has not yet seen it fall to its
+    /// resume mark; see [`Self::rib_input_parked`].
     ingest_gate_closed: bool,
     /// Hold renewals spent while peer input waits for the RIB, since the
     /// last peer PDU processed.
@@ -3283,8 +3283,9 @@ impl PeerSession {
             // stays unread so the kernel receive window paces the peer. So
             // does a spent ingest budget, until the RIB finishes enough of
             // the routes this session already sent.
+            self.reopen_ingest_gate().await;
             let rib_parked = !self.rib_backlog.is_empty();
-            let ingest_gated = self.ingest_gated();
+            let ingest_gated = self.ingest_gate_closed;
             let input_parked = rib_parked || ingest_gated;
             let read_active = self.read_half.is_some()
                 && self.fsm.state() != SessionState::Idle
@@ -3362,10 +3363,9 @@ impl PeerSession {
                     self.advance_rib_backlog(reserved).await;
                 }
 
-                // The RIB returned ingest budget: resume the input behind it.
-                () = inbound::ingest_budget_resumed(ingest_budget.as_deref()), if ingest_gated => {
-                    self.resume_gated_input().await;
-                }
+                // The RIB returned ingest budget: the next turn reopens the
+                // gate and resumes the input behind it.
+                () = inbound::ingest_budget_resumed(ingest_budget.as_deref()), if ingest_gated => {}
 
                 () = async {
                     match pending_outbound.as_ref() {
