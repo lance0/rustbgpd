@@ -141,10 +141,24 @@ pub fn observe(
             }
             observed.outside += parsed.announced.len() + parsed.withdrawn.len();
         }
-        WireFamily::Vpn4 => return Ok(observe_mpls(&parsed, Afi::Ipv4, Safi::MplsVpn)),
-        WireFamily::Vpn6 => return Ok(observe_mpls(&parsed, Afi::Ipv6, Safi::MplsVpn)),
-        WireFamily::Labeled4 => return Ok(observe_mpls(&parsed, Afi::Ipv4, Safi::LabeledUnicast)),
-        WireFamily::Labeled6 => return Ok(observe_mpls(&parsed, Afi::Ipv6, Safi::LabeledUnicast)),
+        WireFamily::Vpn4 => return Ok(observe_mpls(update, &parsed, Afi::Ipv4, Safi::MplsVpn)),
+        WireFamily::Vpn6 => return Ok(observe_mpls(update, &parsed, Afi::Ipv6, Safi::MplsVpn)),
+        WireFamily::Labeled4 => {
+            return Ok(observe_mpls(
+                update,
+                &parsed,
+                Afi::Ipv4,
+                Safi::LabeledUnicast,
+            ))
+        }
+        WireFamily::Labeled6 => {
+            return Ok(observe_mpls(
+                update,
+                &parsed,
+                Afi::Ipv6,
+                Safi::LabeledUnicast,
+            ))
+        }
     }
     Ok(observed)
 }
@@ -172,7 +186,7 @@ fn vpn_index(nlri: &VpnNlri) -> Option<usize> {
 
 /// Each MPLS release receiver negotiates exactly one family. A foreign route
 /// or marker is a wire error even when the expected table also arrives.
-fn observe_mpls(parsed: &ParsedUpdate, afi: Afi, safi: Safi) -> Observed {
+fn observe_mpls(update: &UpdateMessage, parsed: &ParsedUpdate, afi: Afi, safi: Safi) -> Observed {
     let mut observed = Observed {
         outside: parsed.announced.len() + parsed.withdrawn.len(),
         ..Observed::default()
@@ -217,7 +231,18 @@ fn observe_mpls(parsed: &ParsedUpdate, afi: Afi, safi: Safi) -> Observed {
                 saw_mp = true;
                 let empty = mp.vpn_withdrawn.is_empty() && mp.labeled_withdrawn.is_empty();
                 if empty {
-                    observed.end_of_rib = parsed.attributes.len() == 1 && observed.outside == 0;
+                    // Unknown optional non-transitive attributes disappear during parsing.
+                    // Check the single raw attribute, allowing both length encodings.
+                    use rustbgpd_wire::constants::{
+                        attr_flags::EXTENDED_LENGTH, attr_type::MP_UNREACH_NLRI,
+                    };
+                    observed.end_of_rib = update.withdrawn_routes.is_empty()
+                        && update.nlri.is_empty()
+                        && match update.path_attributes.as_ref() {
+                            [flags, MP_UNREACH_NLRI, 3, _, _, _] => flags & EXTENDED_LENGTH == 0,
+                            [flags, MP_UNREACH_NLRI, 0, 3, _, _, _] => flags & EXTENDED_LENGTH != 0,
+                            _ => false,
+                        };
                     observed.outside += usize::from(!observed.end_of_rib);
                 }
                 // Withdrawals identify the RD/prefix or prefix. The compatibility
@@ -774,6 +799,34 @@ mod tests {
             }
             let marker = mp_update(15, afi, safi, &[], None);
             assert_eq!(observe(&marker, family).unwrap(), eor());
+        }
+    }
+
+    #[test]
+    fn mpls_eor_must_be_the_only_raw_attribute() {
+        for (family, afi, safi) in [
+            (WireFamily::Vpn4, 1, 128),
+            (WireFamily::Vpn6, 2, 128),
+            (WireFamily::Labeled4, 1, 4),
+            (WireFamily::Labeled6, 2, 4),
+        ] {
+            let mut update = mp_update(15, afi, safi, &[], None);
+            assert_eq!(observe(&update, family).unwrap(), eor());
+            update.path_attributes = vec![0x90, 15, 0, 3, 0, afi, safi].into();
+            assert_eq!(observe(&update, family).unwrap(), eor());
+
+            // Parsing discards this unknown optional non-transitive attribute.
+            let extra = [0x80, 99, 2, 1, 2];
+            let marker = update.path_attributes.clone();
+            for attrs in [
+                [marker.as_ref(), &extra].concat(),
+                [&extra[..], marker.as_ref()].concat(),
+            ] {
+                update.path_attributes = attrs.into();
+                let observed = observe(&update, family).unwrap();
+                assert!(!observed.end_of_rib);
+                assert_ne!(observed.outside, 0);
+            }
         }
     }
 
