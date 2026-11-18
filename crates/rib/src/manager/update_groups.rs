@@ -3272,7 +3272,7 @@ impl RibManager {
         self.dirty_peers.remove(&peer);
         // An evicted receiver's kept debt has a dead position: it goes
         // with the eviction mark.
-        if self.owed_row_evicted.contains(&peer) {
+        if self.owed_row_evicted.contains(&peer) || self.held_evpn_rebuilds.contains(&peer) {
             self.drop_peer_owing(peer);
         }
         self.release_group_admitted_keys(peer);

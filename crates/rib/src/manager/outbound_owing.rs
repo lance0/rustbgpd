@@ -49,10 +49,7 @@
 //!
 //! `evicted` is [`RibManager::owed_row_evicted`]: the receiver's EVPN table
 //! is owed to a whole-table unit of the resync tick. The owed-row cap puts
-//! a group member that fell behind in `W`, and so does a dirty resync that
-//! ran inside an EVPN selection hold for a receiver holding EVPN rows (or
-//! a private recovery proof): it enumerated no EVPN key, and the release
-//! logs the Loc-RIB, not a row only the receiver holds. A position is read only
+//! a group member that fell behind in `W`. A position is read only
 //! through [`RibManager::live_cursor`], which has none for `W` and `D`:
 //! the drain, the list trim and its cap, the settle check, an absorption
 //! (refused as for capacity) and the shutdown flush all see no cursor.
@@ -66,7 +63,7 @@
 //! | tick, channel full or operation live | – | stays `W`, no capture | refused before the build, stays `D` |
 //! | tick, channel gone | dropped | dropped | dropped, record and mark together |
 //! | tick inside an EVPN selection hold | waits | stays `W` | stays `D`, nothing built |
-//! | dirty resync inside the hold (`R`) | `W` if it holds EVPN rows, else as before | – | – |
+//! | dirty resync inside the hold (`R`) | records a held EVPN rebuild if it holds EVPN rows or a private recovery proof | – | – |
 //! | hold release | inventory logged | owes whole, position dead; next tick promotes | unchanged; next tick builds |
 //! | peer refresh | absorbs the debt | deferred to the unit | deferred to the unit |
 //! | operator refresh, failed send | `R` | `D` (that turn's one capture) | `D` |
@@ -79,11 +76,18 @@
 //!
 //! A unit that builds an evicted receiver is the only exit from `W`/`D`
 //! besides a session end, and it runs only when EVPN is enumerated
-//! ([`RibManager::evicted_unit_held`]), so the dead position is never read
+//! ([`RibManager::resync_unit_held`]), so the dead position is never read
 //! again and the withdrawals its dropped entries named are sent by that
 //! unit's diff against what the receiver holds. A regroup's `R` is resynced
 //! in its own transaction: outside a hold that resync is the exit, inside
-//! one it leaves `W` again.
+//! one it records a held EVPN rebuild instead.
+//!
+//! A held rebuild ([`RibManager::held_evpn_rebuilds`]) owes a diff against
+//! the receiver's admitted EVPN rows. Other families retain their ordinary
+//! resync and refresh behavior. Its EVPN cursor is dead. When selection
+//! stages EVPN, the tick can run its rebuild on the same terms as an evicted
+//! receiver. If a waiter re-arms the hold before admission, only EVPN waits
+//! again. A session change drops the rebuild and a regroup takes it into its resync.
 //!
 //! Inside the hold the tick is not armed for `W` or `D` on their own
 //! account. A ROUTE-REFRESH pending from such a receiver keeps it armed
@@ -1104,8 +1108,9 @@ impl RibManager {
         if self.owed_row_evicted.remove(&peer) {
             self.wake_evicted_late_join(peer);
         }
+        let held = self.held_evpn_rebuilds.remove(&peer);
         let Some(owing) = self.take_owing(peer) else {
-            return false;
+            return held;
         };
         if OwedFamily::CURSORS
             .iter()
@@ -1157,14 +1162,17 @@ impl RibManager {
     /// reader of a position asks here first (a drain step through
     /// [`Self::owed_family_drainable`]).
     fn live_cursor(&self, peer: PeerId, owing: &PeerOwing, index: usize) -> Option<u64> {
-        (owing.is_whole(OwedFamily::CURSORS[index]) && !self.owed_row_evicted.contains(&peer))
-            .then(|| owing.cursor[index])
+        (owing.is_whole(OwedFamily::CURSORS[index])
+            && !self.owed_row_evicted.contains(&peer)
+            && !(index == OwedFamily::EVPN_CURSOR && self.held_evpn_rebuilds.contains(&peer)))
+        .then(|| owing.cursor[index])
     }
 
     /// Whether `peer` owes anything of `family` (keys or the whole family).
     pub(super) fn owes(&self, peer: PeerId, family: (Afi, Safi)) -> bool {
-        OwedFamily::of(family)
-            .is_some_and(|family| self.owing(peer).is_some_and(|owing| owing.owes(family)))
+        (family == (Afi::L2Vpn, Safi::Evpn) && self.held_evpn_rebuilds.contains(&peer))
+            || OwedFamily::of(family)
+                .is_some_and(|family| self.owing(peer).is_some_and(|owing| owing.owes(family)))
     }
 
     /// Whether `family` toward `peer` is held in the peer's own Adj-RIB-Out
@@ -2301,25 +2309,41 @@ impl RibManager {
         }
     }
 
-    /// A resync cannot close an eviction while selection hides EVPN keys
-    /// or a unicast release still has inventory to publish.
-    pub(super) fn evicted_unit_held(&self, peer: PeerId) -> bool {
+    /// A resync needs a complete view of any unicast family it will send.
+    /// Only a receiver that lost its row cursor must also wait for EVPN.
+    pub(super) fn resync_unit_held(&self, peer: PeerId) -> bool {
         const EVPN: (Afi, Safi) = (Afi::L2Vpn, Safi::Evpn);
-        self.owed_row_evicted.contains(&peer)
-            && (self.release_resync_waits(peer)
-                || (self.selection_deferred(EVPN)
-                    && self
-                        .peer_sendable_families
-                        .get(&peer)
-                        .is_some_and(|families| families.contains(&EVPN))))
+        self.release_resync_waits(peer)
+            || (self.owed_row_evicted.contains(&peer)
+                && self.selection_deferred(EVPN)
+                && self
+                    .peer_sendable_families
+                    .get(&peer)
+                    .is_some_and(|families| families.contains(&EVPN)))
+    }
+
+    /// The tick owns an in-hold resync's EVPN rebuild only while selection
+    /// is open. A new waiter can defer selection again after collision staging.
+    pub(super) fn held_evpn_rebuild_due(&self, peer: PeerId) -> bool {
+        self.held_evpn_rebuilds.contains(&peer)
+            && !self.selection_deferred((Afi::L2Vpn, Safi::Evpn))
+    }
+
+    fn rebuild_candidates(&self) -> impl Iterator<Item = &PeerId> {
+        let open = !self.held_evpn_rebuilds.is_empty()
+            && !self.selection_deferred((Afi::L2Vpn, Safi::Evpn));
+        self.owed_row_evicted.iter().chain(
+            open.then_some(&self.held_evpn_rebuilds)
+                .into_iter()
+                .flatten(),
+        )
     }
 
     /// Whether a group member the cap evicted still waits to be made dirty
     /// and no selection hold keeps it waiting.
     pub(super) fn owed_eviction_pending(&self) -> bool {
-        self.owed_row_evicted
-            .iter()
-            .any(|&peer| !self.dirty_peers.contains(&peer) && !self.evicted_unit_held(peer))
+        self.rebuild_candidates()
+            .any(|&peer| !self.dirty_peers.contains(&peer) && !self.resync_unit_held(peer))
     }
 
     /// The resync tick makes at most one waiting evicted group member
@@ -2331,8 +2355,7 @@ impl RibManager {
     /// One scan of the evicted receivers.
     pub(super) fn promote_evicted_receiver(&mut self) {
         let waiting: Vec<PeerId> = self
-            .owed_row_evicted
-            .iter()
+            .rebuild_candidates()
             .copied()
             .filter(|peer| !self.dirty_peers.contains(peer))
             .collect();
@@ -2341,7 +2364,7 @@ impl RibManager {
             if self.outbound_channel_gone(peer) {
                 // Its session is gone: nothing is owed to it.
                 self.drop_peer_owing(peer);
-            } else if !self.evicted_unit_held(peer)
+            } else if !self.resync_unit_held(peer)
                 && !self.outbound_channel_full(peer)
                 && !self.outbound_operation_live(peer)
             {
@@ -2443,6 +2466,9 @@ impl RibManager {
         // A dirty or forced peer's resync covers what it owes.
         if self.dirty_peers.contains(&peer) || self.force_outbound_peers.contains(&peer) {
             return Ok(());
+        }
+        if family == OwedFamily::EVPN && self.held_evpn_rebuilds.contains(&peer) {
+            return Err(super::outbound_credit::CREDIT_REFUSAL);
         }
         let Some(owing) = self.owing(peer) else {
             return Ok(());

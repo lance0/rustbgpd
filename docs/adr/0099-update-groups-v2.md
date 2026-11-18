@@ -2024,3 +2024,12 @@ command; the multi-mover case is the three-member one above.
 These are component results with EVPN ownership enabled in tests. The
 regroup-time and recovery-memory qualifications have not been run on this
 change, and production EVPN ownership remains disabled.
+
+## Amendment (2026-11-18) — resync during EVPN selection deferral
+
+A dirty resync that completes during EVPN selection deferral records any
+remaining EVPN rebuild separately. The receiver can receive subsequent
+resyncs, operator soft refreshes and peer refresh answers for its unheld
+families. When selection stages EVPN, the resync tick takes over the rebuild.
+It diffs against the receiver's admitted rows before its EVPN End-of-RIB.
+This supersedes the in-hold refresh limitation in the EVPN row-cursor amendment.

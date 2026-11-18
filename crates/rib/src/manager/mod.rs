@@ -716,15 +716,18 @@ pub struct RibManager {
     /// Receivers the owed-row cap evicted ([`Self::cap_owed_rows`]): dirty,
     /// except a group member, which the resync tick makes dirty one a tick
     /// and which keeps its debt (and a cursor no drain reads) until its
-    /// resync covers it. Also a receiver holding EVPN rows whose dirty
-    /// resync ran inside an EVPN selection hold and so enumerated none of
-    /// them: clean, it waits here for the release. Only the resync tick builds their
+    /// resync covers it. Only the resync tick builds their
     /// resync, one receiver per unit: an ordinary pass leaves them dirty,
     /// as it does a receiver whose channel has no room, so a pass never
     /// builds a table for each receiver the cap cut loose. Cleared when the
     /// tick's resync leaves the receiver clean and wherever its owed state
     /// is dropped (a flap, a registration, a regroup).
     owed_row_evicted: HashSet<PeerId>,
+    /// Receivers whose dirty resync skipped their admitted EVPN rows during
+    /// selection deferral. Their EVPN cursor cannot cover those rows. The
+    /// resync tick owns the diff while EVPN selection is open, including
+    /// collision staging. Other families can resync whenever it is held.
+    held_evpn_rebuilds: HashSet<PeerId>,
     /// Fixed floor of every owed set's byte cap, for tests and bench builds.
     owing_theta_floor: Option<usize>,
     /// Owed keys and whole families recorded since the last read, so the
@@ -2977,6 +2980,7 @@ impl RibManager {
             owed_rows: Default::default(),
             owed_evpn_rows: outbound_owing::OwedRows::default(),
             owed_row_evicted: HashSet::new(),
+            held_evpn_rebuilds: HashSet::new(),
             owing_theta_floor: None,
             #[cfg(test)]
             owing_log: HashMap::new(),
@@ -4423,11 +4427,9 @@ impl RibManager {
     /// Whether dirty `peer`'s resync is a unit the tick may run now: not
     /// one a selection gate holds after it caught up for the other
     /// families, nor an evicted receiver's inside an EVPN selection hold
-    /// ([`Self::evicted_unit_held`]). The hold's release makes it due.
+    /// ([`Self::resync_unit_held`]). The hold's release makes it due.
     fn dirty_unit_due(&self, peer: PeerId) -> bool {
-        !self.selection_partial_caught_up(peer)
-            && !self.evicted_unit_held(peer)
-            && !self.release_resync_waits(peer)
+        !self.selection_partial_caught_up(peer) && !self.resync_unit_held(peer)
     }
 
     /// The outcome label of a resync tick that re-arms: `still_dirty` while
@@ -4576,13 +4578,21 @@ impl RibManager {
             // This unit is where a receiver the owed-row cap evicted is
             // built; it stays marked while it stays dirty.
             let evicted = self.owed_row_evicted.remove(&last);
+            let rebuild_evpn = self.held_evpn_rebuild_due(last);
+            if rebuild_evpn {
+                self.held_evpn_rebuilds.remove(&last);
+            }
+            let recovery = evicted || rebuild_evpn;
             self.take_late_joins_for_resync(last);
-            let built = self.distribute_changes_without_stale_flush(evicted.then_some(last));
+            let built = self.distribute_changes_without_stale_flush(recovery.then_some(last));
             let still_dirty = self.dirty_peers.contains(&last);
             if evicted && still_dirty {
                 self.owed_row_evicted.insert(last);
             }
-            let ran = evicted && (!still_dirty || self.selection_partial_caught_up(last));
+            if rebuild_evpn && still_dirty {
+                self.held_evpn_rebuilds.insert(last);
+            }
+            let ran = recovery && (!still_dirty || self.selection_partial_caught_up(last));
             self.dirty_peers.extend(withheld);
             self.dirty_since.extend(withheld_since);
             self.force_outbound_peers.extend(withheld_force);
@@ -4600,7 +4610,7 @@ impl RibManager {
             if ran {
                 return true;
             }
-            if evicted && built {
+            if recovery && built {
                 return recovered;
             }
             let unattempted_remain = self
