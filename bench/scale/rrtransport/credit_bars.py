@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Apply the outbound-credit campaign bars to parent and candidate results.
 
-    credit_bars.py analyze PARENT_DIR CANDIDATE_DIR
+    credit_bars.py analyze [--require-cursor FAMILY]... PARENT_DIR CANDIDATE_DIR
     credit_bars.py check RESULT_DIR
 
 Each arm directory holds one or more repetitions: every directory under it
@@ -14,6 +14,10 @@ cell, a ``paused-exit.json`` marker saying so. An attempted cell that left
 neither, or only a failure marker, makes its cell INVALID. Both arms must
 attempt each cell in the same repetitions, each arm must use one harness
 binary, and the two arms must use different ones.
+
+``--require-cursor FAMILY`` (repeatable; ``unicast`` or ``evpn``) adds a
+family the candidate must drain by cursor to the default (unicast): a cell
+7 release run that recorded no cursor owed-drain step for it FAILs.
 
 Each gated cell gets one ``PASS``, ``FAIL`` or ``INVALID`` line; the analyzer
 never stops at the first failing cell. Exit status: 1 when any cell FAILs,
@@ -76,10 +80,57 @@ ACTOR_TURN_MAX_MS = 250.0
 # size, so a release's UPDATEs must each carry one row, all of one size
 # within this fraction of the smallest.
 ROW_BYTES_TOLERANCE = 0.01
-# Families the candidate drains by row cursor in charged ordinary envelopes.
-# An owed family outside them goes out as whole-table operations, which
-# charge no rows by design, so the charge witness is report-only there.
-CURSOR_FAMILIES = ("unicast",)
+# How a release cell's family drains, from the run's owed-drain step
+# histogram: `cursor` steps are charged ordinary envelopes, so the charge
+# witness gates them; `whole` steps are whole-table operations, which charge
+# no rows by design, so the witness is report-only there. A tree whose step
+# histogram carries a `family` label names each step's family; one without
+# it drains only the cell's own family in that cell. The scopes and family
+# labels are the product's closed vocabularies (`OWED_DRAIN_STEP_SCOPES` and
+# the canonical family labels in `crates/telemetry/src/metrics.rs`); a key
+# outside them is INVALID. A label maps to the release cell family it
+# drains, or to itself for a family no release cell measures.
+STEP_SCOPES = ("cursor", "keyed", "whole")
+STEP_FAMILIES = {
+    "ipv4_unicast": "unicast",
+    "ipv6_unicast": "unicast",
+    "l2vpn_evpn": "evpn",
+    **{
+        label: label
+        for label in (
+            "ipv4_flowspec",
+            "ipv6_flowspec",
+            "linkstate",
+            "linkstate_vpn",
+            "l3vpn_ipv4_unicast",
+            "l3vpn_ipv6_unicast",
+            "ipv4_labeled_unicast",
+            "ipv6_labeled_unicast",
+            "rtc",
+            "l3vpn_ipv4_flowspec",
+            "l3vpn_ipv6_flowspec",
+        )
+    },
+}
+# Families the candidate must drain by cursor: a judged release cell of one
+# whose run recorded no cursor step for it FAILs. `analyze --require-cursor
+# FAMILY` adds one for a campaign that moves that family onto the cursor.
+REQUIRED_CURSOR_FAMILIES = ("unicast",)
+# A run without the step histogram (a tree that predates it): the families
+# such a tree drains by cursor.
+LEGACY_CURSOR_FAMILIES = ("unicast",)
+# A byte-credit tree's per-peer byte credit, as (daemon-wide, floor,
+# ceiling), when the run records it under `byte_credit`.
+BYTE_CREDIT_KEYS = ("DAEMON_CREDIT_BYTES", "MIN_CREDIT_BYTES", "MAX_CREDIT_BYTES")
+# Bar 6's byte bound gates only on a byte watch that read the gauge at
+# least once per this many ms of its window on average. Each read is a
+# registry gather, so the watch cannot hold the getters' 1 ms; this keeps
+# it 25 times denser than the 250 ms sampler.
+BYTE_READ_EVERY_MAX_MS = 10.0
+# `drain_gauges.credit_bytes_watch` values under which the byte watch saw
+# the whole drain or the tree has no byte gauge. Any other value (the gauge
+# appeared only after the watch started, or the watch failed) is INVALID.
+BYTE_WATCH_COMPLETE = ("watched", "not exported")
 RELEASE_TRIGGER = "rfc4724_selection_release"
 RELEASE_SHAPE = {
     "receivers": 150,
@@ -1012,17 +1063,157 @@ def held_witness(run: dict, what: str, pass_rows: int) -> tuple[str | None, str]
     return None, f"{arithmetic}; margin {slack - gap:.0f}"
 
 
-def credit_bar(run: dict, what: str, family: str) -> Bar:
+def drains_by_cursor(
+    run: dict, what: str, family: str, judged: bool, required: tuple = ()
+) -> tuple[bool, str, str | None]:
+    """Whether the run drained `family`'s owed work by row cursor, from its
+    owed-drain step histogram, why, and a FAIL reason when `judged` and
+    `family` is in `required` but the run recorded no cursor step for it.
+    A step key is its `scope`, or `scope/family` on a tree whose histogram
+    carries a `family` label; an unlabeled step in a release cell is the
+    cell's family's. INVALID for a scope or family label outside the
+    product's vocabularies, when the run recorded both `cursor` and `whole`
+    steps for the family (a partial move), no step for it, or steps but
+    neither scope (unless required: then FAIL). A run without the histogram is a tree that predates it:
+    INVALID when `judged` (the candidate's measured runs), else the legacy
+    families drain by cursor."""
+    steps = (run.get("actor") or {}).get("owed_drain_step_longest_ms")
+    if steps is None:
+        if judged:
+            raise Invalid(
+                f"{what}: no instrument: actor.owed_drain_step_longest_ms is null, so how "
+                f"{family} drains, and whether the charge witness applies, is unknown"
+            )
+        cursor = family in LEGACY_CURSOR_FAMILIES
+        return cursor, (
+            f"no step histogram (a tree that predates it), where {family} "
+            + ("drains by cursor" if cursor else "drains whole")
+        ), None
+    if not isinstance(steps, dict):
+        raise Invalid(f"{what}: actor.owed_drain_step_longest_ms is not an object")
+    scopes = set()
+    for key in steps:
+        scope, _, label = key.partition("/")
+        if scope not in STEP_SCOPES:
+            raise Invalid(f"{what}: owed-drain step key {key!r} has unknown scope {scope!r}")
+        if label and label not in STEP_FAMILIES:
+            raise Invalid(
+                f"{what}: owed-drain step key {key!r} has unknown family label {label!r}"
+            )
+        if not label or STEP_FAMILIES[label] == family:
+            scopes.add(scope)
+    if {"cursor", "whole"} <= scopes:
+        raise Invalid(
+            f"{what}: partial move: the run recorded both cursor and whole owed-drain steps for "
+            f"{family}, so the charge witness can neither gate nor skip it"
+        )
+    if "cursor" in scopes:
+        return True, f"the run recorded cursor owed-drain steps for {family}", None
+    seen = ", ".join(sorted(scopes))
+    if not scopes:
+        raise Invalid(f"{what}: no owed-drain step recorded for {family}: how it drains is unknown")
+    if judged and family in required:
+        return False, f"the run recorded no cursor owed-drain step for {family}", (
+            f"{what}: {family} must drain by cursor, but the run recorded no cursor owed-drain "
+            f"step for it (scopes seen: {seen})"
+        )
+    if "whole" in scopes:
+        return False, (
+            f"the run recorded only whole owed-drain steps for {family}, whose whole-table "
+            "operations charge no rows by design"
+        ), None
+    raise Invalid(
+        f"{what}: no cursor or whole owed-drain step recorded for {family} (scopes seen: "
+        f"{seen}): how it drains is unknown"
+    )
+
+
+def byte_bound(run: dict, what: str, receivers: float) -> Bar:
+    """Bar 6's byte bound on a tree with `bgp_rib_outbound_credit_bytes`
+    (empty on a row-credit tree): the byte watch's peak at most receivers x
+    (per-peer byte credit + one pass of `row_size_of` + 146 bytes a row),
+    from the run's `byte_credit` record. An observed peak over the bound
+    FAILs however sparse the watch; otherwise INVALID when the byte credit
+    is in use but the bound cannot gate: no watch over the whole drain, no
+    `byte_credit` record, rows not of one size, or reads sparser than one
+    per `BYTE_READ_EVERY_MAX_MS` on average."""
+    witness = run.get("witness") if isinstance(run.get("witness"), dict) else {}
+    gauges = run.get("drain_gauges") or {}
+    peak, sampled = gauges.get("peak_credit_bytes"), witness.get("peak_credit_bytes")
+    state = gauges.get("credit_bytes_watch")
+    if state is not None and state not in BYTE_WATCH_COMPLETE:
+        raise Invalid(
+            f"{what}: byte watch {state!r}: the credit-bytes gauge was not read over the drain"
+        )
+    if state == "watched" and peak is None:
+        # The watch started, so the tree exports the gauge, but it kept no
+        # reading: not a row-credit tree.
+        raise Invalid(
+            f"{what}: byte watch started but kept no credit-bytes reading "
+            f"(drain_gauges.peak_credit_bytes null): the byte bound cannot gate"
+        )
+    if peak is None and sampled is None:
+        return None, None, ""
+    if peak is None:
+        raise Invalid(
+            f"{what}: byte credit in use (sampler peak {sampled}) but no 1 ms byte watch "
+            "reading (drain_gauges.peak_credit_bytes): the byte bound cannot gate"
+        )
+    if state != "watched":
+        raise Invalid(
+            f"{what}: credit-bytes peak recorded but drain_gauges.credit_bytes_watch is "
+            f"{state!r}, not 'watched': the byte watch's coverage is unconfirmed"
+        )
+    peak = number(run, "drain_gauges.peak_credit_bytes", what)
+    reads = number(run, "drain_gauges.credit_bytes_reads", what)
+    window = number(run, "drain_gauges.to_ms", what) - number(run, "drain_gauges.from_ms", what)
+    every = window / reads if reads > 0 else math.inf
+    reading = f"; credit bytes peak {peak:.0f} over {reads:.0f} reads, one every {every:.1f} ms"
+    if run.get("byte_credit") is None:
+        raise Invalid(
+            f"{what}: byte credit in use but no byte bound recorded (no byte_credit record in "
+            f"the run){reading}"
+        )
+    row = number(run, "row_size_of", what) + ANNOUNCED_ROW_OVERHEAD
+    credit = tuple(int(number(run, f"byte_credit.{key}", what)) for key in BYTE_CREDIT_KEYS)
+    limit = per_peer(run, credit, what)
+    low = number(run, "wire.min_row_bytes", what)
+    high = number(run, "wire.max_row_bytes", what)
+    per_update = number(run, "wire.max_rows_per_update", what)
+    bound = receivers * (limit + PASS_ROWS * row)
+    arithmetic = f"{bound:.0f} = {receivers:.0f} x ({limit} + {PASS_ROWS} x {row:.0f})"
+    if low < 1 or per_update > 1 or high > low * (1 + ROW_BYTES_TOLERANCE):
+        raise Invalid(
+            f"{what}: byte bound {arithmetic} cannot gate: row size not uniform ({low:.0f} to "
+            f"{high:.0f} B a row, up to {per_update:.0f} announced rows in one UPDATE){reading}"
+        )
+    reading += f" (bound {bound:.0f})"
+    if peak > bound:
+        return f"{what}: credit bytes peak {peak:.0f} > {arithmetic}", None, reading
+    if every > BYTE_READ_EVERY_MAX_MS:
+        return None, (
+            f"{what}: byte watch too sparse: {reads:.0f} reads over the {window:.0f} ms "
+            f"watch, one every {every:.1f} ms, fewer than one every "
+            f"{BYTE_READ_EVERY_MAX_MS:g} ms"
+        ), reading
+    return None, None, reading
+
+
+def credit_bar(
+    run: dict, what: str, family: str, judged: bool = False, required: tuple = ()
+) -> Bar:
     """Bar 6 for one run. The 1 ms gauge watch must have run (reads over at
-    least half its window). In rows: the peak at most receivers x (per-peer
-    credit + one pass), and, for a family drained by cursor, every row held
-    toward the paused receivers charged (`held_witness`), or owed rows went
-    uncharged; elsewhere the witness is report-only. Backpressure may stop a
-    charged drain short of the credit, so whether the peak reached receivers
-    x (credit - one pass) is reported only. A byte-credit tree's byte bound
-    reads the 250 ms sampler and is report-only: the rows bound can still
-    FAIL it, nothing PASSes it. Unicast keeps no whole-table operation
-    live."""
+    least half its window), and `witness` must be an object. In rows, on
+    every tree: the peak at most receivers x (per-peer credit + one pass),
+    and, for a family the run drained by cursor (`drains_by_cursor`), every
+    row held toward the paused receivers charged (`held_witness`), or owed
+    rows went uncharged, and no whole-table operation live; for a family it
+    drained whole both are report-only, unless `judged` and the family is
+    in `required`: then FAIL. Backpressure may stop a charged drain short
+    of the credit, so whether the peak reached receivers x (credit - one
+    pass) is reported only. A byte-credit tree adds its byte bound
+    (`byte_bound`). Each check is judged on its own, so a FAIL stands
+    beside another's missing input."""
     receivers = number(run, "shape.receivers", what)
     start = number(run, "drain_gauges.from_ms", what)
     end = number(run, "drain_gauges.to_ms", what)
@@ -1036,43 +1227,41 @@ def credit_bar(run: dict, what: str, family: str) -> Bar:
     rows = number(run, "drain_gauges.peak_credit_rows", what)
     limit, pass_rows = row_credit(run, what)
     bound, credit_floor = receivers * (limit + pass_rows), receivers * (limit - pass_rows)
-    failures = []
+    failures, undecided = [], []
     if rows > bound:
         failures.append(
             f"{what}: credit rows peak {rows:.0f} > {bound:.0f} = {receivers:.0f} x "
             f"({limit} + {pass_rows})"
         )
+    try:
+        witness_of(run, what)
+    except Invalid as error:
+        undecided.append(str(error))
+    try:
+        cursor, drains, failure = drains_by_cursor(run, what, family, judged, required)
+        failures += [failure] if failure else []
+    except Invalid as error:
+        # How the family drains is unknown: the witness and the live
+        # operations are reported, and the bar cannot pass.
+        cursor, drains = None, f"not judged ({error})"
+        undecided.append(str(error))
     operations = number(run, "drain_gauges.peak_operations_live", what)
-    if family == "unicast" and operations != 0:
+    if cursor and operations != 0:
         failures.append(
             f"{what}: {operations:.0f} live whole-table operations during the drain, not 0"
         )
     reading = (
         f"credit rows peak {rows:.0f} (bound {bound:.0f}) over {reads:.0f} reads; live "
         f"whole-table operations peak {operations:.0f}"
-        + ("" if family == "unicast" else " (report-only: the gauge is unlabeled)")
+        + ("" if cursor else " (report-only: not drained by cursor, and the gauge is unlabeled)")
     )
-    unit, byte_limit, row = credit_unit(run, what)
-    undecided = None
-    if unit == "bytes":
-        peak = number(run, "witness.peak_credit_bytes", what)
-        byte_bound = receivers * (byte_limit + PASS_ROWS * row)
-        reading += (
-            f"; report-only: credit bytes peak {peak:.0f} vs {byte_bound:.0f} = "
-            f"{receivers:.0f} x ({byte_limit} + {PASS_ROWS} x {row:.0f}), read every 250 ms"
-        )
-        undecided = (
-            f"{what}: byte credit: the bar 6 byte bound is report-only (250 ms sampler) and "
-            f"the row witness does not apply, so bar 6 cannot pass ({reading})"
-        )
-    elif family not in CURSOR_FAMILIES:
+    if not cursor:
         try:
             failure, arithmetic = held_witness(run, what, pass_rows)
         except Invalid as error:
             failure, arithmetic = None, f"not judged ({error})"
         reading += (
-            f"; charge witness report-only: {family} is not drained by cursor and its "
-            "whole-table operations charge no rows by design: "
+            f"; charge witness report-only: {drains}: "
             + (f"would fail ({failure})" if failure else arithmetic)
         )
     else:
@@ -1080,19 +1269,30 @@ def credit_bar(run: dict, what: str, family: str) -> Bar:
         try:
             failure, arithmetic = held_witness(run, what, pass_rows)
         except Invalid as error:
-            failure, undecided, arithmetic = None, str(error), "not judged"
+            failure, arithmetic = None, "not judged"
+            undecided.append(str(error))
         failures += [failure] if failure else []
         reached = "reached" if rows >= credit_floor else "not reached"
         reading += (
-            f"; charge witness: {arithmetic}; report-only: credit {reached}, "
+            f"; charge witness ({drains}): {arithmetic}; report-only: credit {reached}, "
             f"{credit_floor:.0f} = {receivers:.0f} x ({limit} - {pass_rows})"
         )
-    return ("; ".join(failures) or None), undecided, reading
+    try:
+        failure, open_question, bytes_reading = byte_bound(run, what, receivers)
+        failures += [failure] if failure else []
+        undecided += [open_question] if open_question else []
+        reading += bytes_reading
+    except Invalid as error:
+        undecided.append(str(error))
+    return ("; ".join(failures) or None), ("; ".join(undecided) or None), reading
 
 
-def release_run(run: dict, what: str, kind: str, family: str) -> tuple[list, list, list]:
+def release_run(
+    run: dict, what: str, kind: str, family: str, required: tuple = REQUIRED_CURSOR_FAMILIES
+) -> tuple[list, list, list]:
     """Every cell-7 bar on one run, each on its own, so one bar's missing
-    instrument never hides another's FAIL: (failures, undecided, readings)."""
+    instrument never hides another's FAIL: (failures, undecided, readings).
+    `required`: the families that must drain by cursor."""
 
     def wire() -> Bar:
         for check in RESTART_WIRE_CHECKS:
@@ -1105,7 +1305,12 @@ def release_run(run: dict, what: str, kind: str, family: str) -> tuple[list, lis
         failure = f"{what}: healthy delivery gap {value:.0f} ms > {MAX_GAP_MS:.0f} ms"
         return (failure if value > MAX_GAP_MS else None), None, note
 
-    bars = [wire, lambda: turn_bar(run, what), gap, lambda: credit_bar(run, what, family)]
+    bars = [
+        wire,
+        lambda: turn_bar(run, what),
+        gap,
+        lambda: credit_bar(run, what, family, True, required),
+    ]
     if kind == "restart-churn":
         bars.insert(1, lambda: (None, None, churn_in_drain(run, what, gate=True)))
     failures, undecided, readings = [], [], []
@@ -1140,14 +1345,16 @@ def release_runs(candidate: Arm, cell: str) -> tuple[list[tuple[str, dict]], lis
     return usable, undecided
 
 
-def cell7(candidate: Arm, kind: str, family: str) -> tuple[str, str]:
+def cell7(
+    candidate: Arm, kind: str, family: str, required: tuple = REQUIRED_CURSOR_FAMILIES
+) -> tuple[str, str]:
     """Bars 2, 3, 4 and 6 on the candidate's release runs of one kind. A
     FAIL in any bar of any run outranks every undecided one."""
     cell = f"{kind}-{family}"
     runs, undecided = release_runs(candidate, cell)
     failures, notes = [], []
     for what, run in runs:
-        run_failures, run_undecided, readings = release_run(run, what, kind, family)
+        run_failures, run_undecided, readings = release_run(run, what, kind, family, required)
         failures += run_failures
         undecided += run_undecided
         notes.append("; ".join(readings))
@@ -1208,7 +1415,12 @@ CELLS = (
 )
 
 
-def verdicts(parent_dir: Path, candidate_dir: Path) -> list[tuple[str, str, str]]:
+def verdicts(
+    parent_dir: Path, candidate_dir: Path, require_cursor: tuple = ()
+) -> list[tuple[str, str, str]]:
+    """Every gated cell's verdict. `require_cursor`: families the candidate
+    must drain by cursor beyond `REQUIRED_CURSOR_FAMILIES`."""
+    required = REQUIRED_CURSOR_FAMILIES + tuple(require_cursor)
     try:
         parent = Arm.load("parent", parent_dir)
         candidate = Arm.load("candidate", candidate_dir)
@@ -1228,7 +1440,10 @@ def verdicts(parent_dir: Path, candidate_dir: Path) -> list[tuple[str, str, str]
     for kind, label in RELEASE_KINDS:
         for family in FAMILIES:
             cells.append(
-                (f"cell 7 {label} {family}", lambda k=kind, f=family: cell7(candidate, k, f))
+                (
+                    f"cell 7 {label} {family}",
+                    lambda k=kind, f=family: cell7(candidate, k, f, required),
+                )
             )
     results = []
     for name, evaluate in cells:
@@ -1365,7 +1580,9 @@ def check(directory: Path) -> list[tuple[str, str, str]]:
                     reason, witness = single_arm_exhaust(runs, "arm")
                     passed = f"{witness}; wire exact, ordered, no resets"
                 else:
-                    # No witness: a selection release spends no ordinary credit.
+                    # No exhaustion witness: a selection release need not
+                    # exhaust ordinary credit. Bar 6's charge witness is only
+                    # reported here; `analyze` judges it on measured runs.
                     reason = wire_failure(runs, "arm", RESTART_WIRE_CHECKS)
                     notes = [
                         release_readings(run, f"run {index}", family)
@@ -1404,10 +1621,18 @@ def report(results: list[tuple[str, str, str]]) -> int:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) == 4 and argv[1] == "analyze":
-        return report(verdicts(Path(argv[2]), Path(argv[3])))
-    if len(argv) == 3 and argv[1] == "check":
-        return report(check(Path(argv[2])))
+    args, require = [], []
+    rest = iter(argv[1:])
+    for arg in rest:
+        if arg == "--require-cursor":
+            require.append(next(rest, None))
+        else:
+            args.append(arg)
+    known = all(family in FAMILIES for family in require)
+    if len(args) == 3 and args[0] == "analyze" and known:
+        return report(verdicts(Path(args[1]), Path(args[2]), tuple(require)))
+    if len(args) == 2 and args[0] == "check" and not require:
+        return report(check(Path(args[1])))
     print(__doc__, file=sys.stderr)
     return 2
 
