@@ -432,7 +432,10 @@ fn stalled_private_evpn(rounds: u32, fresh: bool) -> StallOutcome {
         outcome.charged.push(manager.outbound_credit_rows(*peer));
         let queued = held(rx);
         outcome.retained.push(rows(&queued));
-        outcome.owing &= manager.owing(*peer).is_some() && !manager.dirty_peers.contains(peer);
+        // A receiver that reads nothing while fresh keys rotate past its
+        // cursor is cut loose by the owed-row cap and waits for the tick.
+        outcome.owing &= (manager.owing(*peer).is_some() && !manager.dirty_peers.contains(peer))
+            || manager.owed_row_evicted.contains(peer);
         all.extend(queued);
     }
     outcome.bytes = pinned_bytes(&all);

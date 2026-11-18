@@ -745,7 +745,17 @@ impl RibManager {
         &mut self,
         affected: &HashSet<rustbgpd_wire::EvpnRouteKey>,
     ) {
-        self.recompute_and_distribute_evpn_inner(affected, false);
+        self.recompute_and_distribute_evpn_inner(affected, false, false);
+    }
+
+    /// [`Self::recompute_and_distribute_evpn`] for a selection release's
+    /// whole inventory: receivers that owe EVPN whole read every key of it
+    /// through their cursors, an unchanged winner included.
+    pub(in crate::manager) fn recompute_and_distribute_released_evpn(
+        &mut self,
+        inventory: &HashSet<rustbgpd_wire::EvpnRouteKey>,
+    ) {
+        self.recompute_and_distribute_evpn_inner(inventory, false, true);
     }
 
     /// [`Self::recompute_and_distribute_evpn`] for one inbound route chunk:
@@ -756,7 +766,7 @@ impl RibManager {
         &mut self,
         affected: &HashSet<rustbgpd_wire::EvpnRouteKey>,
     ) {
-        self.recompute_and_distribute_evpn_inner(affected, true);
+        self.recompute_and_distribute_evpn_inner(affected, true, false);
     }
 
     #[expect(
@@ -767,6 +777,7 @@ impl RibManager {
         &mut self,
         affected: &HashSet<rustbgpd_wire::EvpnRouteKey>,
         paced: bool,
+        release: bool,
     ) {
         use crate::route::EvpnRibRoute;
 
@@ -896,7 +907,17 @@ impl RibManager {
             "EVPN dataplane relevant-row cardinality drifted from the Loc-RIB"
         );
 
+        // Receivers that owe EVPN whole stage and mark nothing in the
+        // fanout below: the mutation logs its keys for their cursors once,
+        // here, never per receiver or paced slice. A cursor that starts
+        // while the fanout is parked takes the keys into its own set
+        // (`owe_parked_evpn_fanout`). A release logs its whole inventory
+        // before the unchanged winners are left out: a receiver that joined
+        // during the hold has none of them.
+        self.log_owed_evpn_rows(if release { affected } else { &changed_keys });
+
         if changed_keys.is_empty() {
+            self.cap_owed_evpn_rows();
             return;
         }
 
@@ -955,6 +976,33 @@ impl RibManager {
         parked
     }
 
+    /// `peer`'s EVPN cursor has just started, at the head of the shared
+    /// list. A fanout parked across turns logged its keys before that head
+    /// (or logged nothing, with no cursor to read them), and its later
+    /// slices skip a receiver that owes EVPN whole: the keys it has not yet
+    /// brought to `peer` join `peer`'s own set, which drains ahead of the
+    /// cursor. At most the keys of one inbound chunk, once per cursor
+    /// start, after one scan of the receivers the fanout still has to
+    /// reach; nothing while no fanout is parked.
+    pub(in crate::manager) fn owe_parked_evpn_fanout(&mut self, peer: PeerId) {
+        // Taken while it is marked: a slice in progress holds the fanout
+        // itself, and its own gate marks the receiver it is serving.
+        let Some(fanout) = self.pending_evpn_fanout.take() else {
+            return;
+        };
+        if fanout.peers.contains(&peer) {
+            self.mark_owed_unlogged(
+                peer,
+                fanout
+                    .keys
+                    .iter()
+                    .copied()
+                    .map(super::super::outbound_owing::OwedKey::Evpn),
+            );
+        }
+        self.pending_evpn_fanout = Some(fanout);
+    }
+
     /// Send `fanout.keys` to its remaining private receivers. With a budget,
     /// stop at the first receiver boundary after it elapses and return
     /// `true`; staging reads the current Loc-RIB, so a later step still
@@ -984,7 +1032,7 @@ impl RibManager {
             if self.outbound_peers.contains_key(&peer)
                 && self.evpn_grouped_member_of(peer).is_none()
             {
-                self.distribute_evpn_keys_to_peer(peer, &fanout.keys, &mut checkpoint);
+                self.distribute_evpn_keys(peer, &fanout.keys, true, &mut checkpoint);
             }
             if !fanout.peers.is_empty() && budget.is_some_and(|budget| started.elapsed() >= budget)
             {
@@ -992,17 +1040,34 @@ impl RibManager {
             }
         }
         super::super::retire_hash_set(&mut fanout.keys, &mut checkpoint);
+        // After the receiver loop, as for unicast: an evicted receiver's
+        // resync is a unit of the dirty ring, never part of this pass.
+        self.cap_owed_evpn_rows();
         false
     }
 
     /// Stage `keys` toward one outbound peer and send/commit the delta,
     /// marking the peer dirty when its channel is full. A no-op for a peer
     /// that did not negotiate EVPN. Shared by best-path distribution and
-    /// the RT-Constrain membership-change restage.
+    /// the RT-Constrain membership-change restage. This targeted form
+    /// changed no winner, so no pass logged `keys` for the receivers that
+    /// owe EVPN whole: under a cursor they join `peer`'s own owed set.
     pub(in crate::manager) fn distribute_evpn_keys_to_peer(
         &mut self,
         peer: PeerId,
         keys: &HashSet<rustbgpd_wire::EvpnRouteKey>,
+        checkpoint: &mut impl FnMut(),
+    ) {
+        self.distribute_evpn_keys(peer, keys, false, checkpoint);
+    }
+
+    /// [`Self::distribute_evpn_keys_to_peer`]; `logged`: the caller's pass
+    /// logged `keys` for the cursors ([`RibManager::log_owed_evpn_rows`]).
+    fn distribute_evpn_keys(
+        &mut self,
+        peer: PeerId,
+        keys: &HashSet<rustbgpd_wire::EvpnRouteKey>,
+        logged: bool,
         checkpoint: &mut impl FnMut(),
     ) {
         if self.outbound_channel_gone(peer) {
@@ -1030,7 +1095,7 @@ impl RibManager {
         // stages as many as its remaining credit holds (at most two rows a
         // key) and owes the rest. Outside its scope, a peer without credit
         // stages nothing (its resync covers these keys).
-        let Some((keys, bounded)) = self.owing_evpn_pass(peer, keys) else {
+        let Some((keys, bounded)) = self.owing_evpn_pass(peer, keys, logged) else {
             return;
         };
         let keys = keys.as_ref();

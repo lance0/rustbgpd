@@ -302,8 +302,9 @@ struct AdjRibOutCommitStats {
     /// Per-peer passes that built a full resync (dirty or force).
     #[cfg(test)]
     resync_builds: usize,
-    /// Owed-drain work: unicast keys a drain, absorption or close flush
-    /// read, the drain steps that read any, and the most one step read.
+    /// Owed-drain work: unicast and EVPN keys a drain, absorption or close
+    /// flush read, the drain steps that read any, and the most one step
+    /// read.
     #[cfg(test)]
     owed_drain_rows_read: usize,
     #[cfg(test)]
@@ -313,6 +314,13 @@ struct AdjRibOutCommitStats {
     /// Owing peers visited by the owed-row trim and cap scans.
     #[cfg(test)]
     owed_peer_scans: usize,
+    /// Captures of a member's admitted keys from its group's table (two
+    /// walks of the table each).
+    #[cfg(test)]
+    group_table_captures: usize,
+    /// EVPN passes that logged their keys for the cursors.
+    #[cfg(test)]
+    owed_evpn_logs: usize,
     /// Distinct keys collected into per-peer VPN resync enumerations.
     #[cfg(test)]
     vpn_resync_key_inserts: usize,
@@ -702,9 +710,15 @@ pub struct RibManager {
     owing_cursor: Option<PeerId>,
     /// Per unicast AFI: the keys passes carried while a receiver owed the
     /// family whole, read by those receivers' cursors (`outbound_owing`).
-    owed_rows: [outbound_owing::OwedRows; 2],
-    /// Dirty receivers the owed-row cap evicted
-    /// ([`Self::cap_owed_rows`]). Only the resync tick builds their
+    owed_rows: [outbound_owing::OwedRows<Prefix>; 2],
+    /// The same list for EVPN, keyed by route key.
+    owed_evpn_rows: outbound_owing::OwedRows<rustbgpd_wire::EvpnRouteKey>,
+    /// Receivers the owed-row cap evicted ([`Self::cap_owed_rows`]): dirty,
+    /// except a group member, which the resync tick makes dirty one a tick
+    /// and which keeps its debt (and a cursor no drain reads) until its
+    /// resync covers it. Also a receiver holding EVPN rows whose dirty
+    /// resync ran inside an EVPN selection hold and so enumerated none of
+    /// them: clean, it waits here for the release. Only the resync tick builds their
     /// resync, one receiver per unit: an ordinary pass leaves them dirty,
     /// as it does a receiver whose channel has no room, so a pass never
     /// builds a table for each receiver the cap cut loose. Cleared when the
@@ -2948,6 +2962,7 @@ impl RibManager {
             owing_peers: BTreeSet::new(),
             owing_cursor: None,
             owed_rows: Default::default(),
+            owed_evpn_rows: outbound_owing::OwedRows::default(),
             owed_row_evicted: HashSet::new(),
             owing_theta_floor: None,
             #[cfg(test)]
@@ -4231,7 +4246,7 @@ impl RibManager {
     fn resync_tick_pending_unowed(&self) -> bool {
         self.dirty_peers.iter().any(|&peer| {
             self.replacement_checkpoint(false);
-            !self.selection_partial_caught_up(peer)
+            self.dirty_unit_due(peer)
         }) || !self.pending_inbound_refresh.is_empty()
             || self.helper_stale_exempt.iter().any(|(&peer, carried)| {
                 self.replacement_checkpoint(false);
@@ -4249,6 +4264,15 @@ impl RibManager {
             })
             || self.outbound_limit_recovery_runnable()
             || self.deferred_refresh_pending()
+            || self.owed_eviction_pending()
+    }
+
+    /// Whether dirty `peer`'s resync is a unit the tick may run now: not
+    /// one a selection gate holds after it caught up for the other
+    /// families, nor an evicted receiver's inside an EVPN selection hold
+    /// ([`Self::evicted_unit_held`]). The hold's release makes it due.
+    fn dirty_unit_due(&self, peer: PeerId) -> bool {
+        !self.selection_partial_caught_up(peer) && !self.evicted_unit_held(peer)
     }
 
     /// The outcome label of a resync tick that re-arms: `still_dirty` while
@@ -4328,6 +4352,7 @@ impl RibManager {
         let recovered = self.drain_owing_bounded(poll_start) || recovered;
         let recovered = self.owing_runnable() || self.owed_rows_trimming() || recovered;
         let recovered = self.retry_deferred_refreshes(poll_start) || recovered;
+        self.promote_evicted_receiver();
         // Peers whose outbound channel is gone can never resync: drop them
         // before selecting the slice, so a backlog of dead sessions (e.g.
         // after shutdown tore the TCP sessions down) quiesces in one cheap
@@ -4363,9 +4388,7 @@ impl RibManager {
                 });
                 after
                     .chain(wrapped)
-                    .filter(|peer| {
-                        !attempted.contains(*peer) && !self.selection_partial_caught_up(**peer)
-                    })
+                    .filter(|peer| !attempted.contains(*peer) && self.dirty_unit_due(**peer))
                     .take(1)
                     .copied()
                     .collect()
@@ -4426,7 +4449,7 @@ impl RibManager {
             let unattempted_remain = self
                 .dirty_peers
                 .iter()
-                .any(|peer| !attempted.contains(peer) && !self.selection_partial_caught_up(*peer));
+                .any(|peer| !attempted.contains(peer) && self.dirty_unit_due(*peer));
             if !unattempted_remain {
                 return recovered;
             }
@@ -7058,6 +7081,8 @@ impl RibManager {
                         );
                     }
                 }
+                // No winner changed, so no pass logged these keys: under
+                // a cursor they join this receiver's own owed set.
                 self.distribute_evpn_keys_to_peer(peer, &keys, &mut checkpoint);
                 retire_hash_set(&mut keys, &mut checkpoint);
             }
