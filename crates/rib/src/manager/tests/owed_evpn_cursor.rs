@@ -332,6 +332,19 @@ impl Receiver {
         self.wire.write(&mut self.rx);
     }
 
+    fn unicast_rows_on_operator_refresh(&mut self, manager: &mut RibManager) -> usize {
+        self.write();
+        let before = self.wire.unicast;
+        let (reply, mut result) = oneshot::channel();
+        manager.handle_update(RibUpdate::RefreshPeerOutbound {
+            peer: self.peer,
+            reply,
+        });
+        result.try_recv().unwrap().unwrap();
+        self.write();
+        self.wire.unicast - before
+    }
+
     /// A receiver whose session came up with an empty table: it has
     /// written its initial markers, which are not counted.
     fn up(

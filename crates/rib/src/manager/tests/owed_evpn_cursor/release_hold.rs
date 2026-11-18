@@ -286,13 +286,8 @@ fn a_held_evpn_rebuild_serves_ipv4_resync_and_both_refreshes() {
     let prefixes = unicast_table(2 * UNICAST);
     assert_eq!(receivers[0].wire.unicast_table, prefixes, "second resync");
 
-    let before = receivers[0].wire.unicast;
-    let (reply, mut result) = oneshot::channel();
-    manager.handle_update(RibUpdate::RefreshPeerOutbound { peer, reply });
-    result.try_recv().unwrap().unwrap();
-    receivers[0].write();
     assert_eq!(
-        receivers[0].wire.unicast - before,
+        receivers[0].unicast_rows_on_operator_refresh(&mut manager),
         prefixes.len(),
         "operator refresh"
     );

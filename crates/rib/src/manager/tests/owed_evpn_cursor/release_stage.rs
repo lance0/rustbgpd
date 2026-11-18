@@ -156,17 +156,8 @@ fn stage_case(state: ReceiverState, release: Release, rows: u32, evict: bool) {
         assert!(manager.selection_deferred(EVPN));
         if state == ReceiverState::Dirty {
             let subject = &mut receivers[0];
-            subject.write();
-            let before = subject.wire.unicast;
-            let (reply, mut result) = oneshot::channel();
-            manager.handle_update(RibUpdate::RefreshPeerOutbound {
-                peer: subject.peer,
-                reply,
-            });
-            result.try_recv().unwrap().unwrap();
-            subject.write();
             assert_eq!(
-                subject.wire.unicast - before,
+                subject.unicast_rows_on_operator_refresh(&mut manager),
                 UNICAST as usize,
                 "refresh during rearm"
             );
