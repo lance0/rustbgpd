@@ -395,6 +395,17 @@ fn grouped_differences(left: &GroupKey, right: &GroupKey) -> Vec<UpdateGroupComp
     differences
 }
 
+/// The last ordinary ownership sweep proved this memberless optional group
+/// alone needs the intern slot. Every group or policy membership change runs
+/// that sweep before yielding the actor. Eviction can release this one slot
+/// even when the waiting registration subsequently disappears.
+#[derive(Debug)]
+struct OptionalChainOwner {
+    gid: usize,
+    chain: usize,
+    other_chains: usize,
+}
+
 /// The registry: interned chain contents, group keys, and per-peer
 /// membership. Owned by the [`RibManager`] task like all other RIB
 /// state — no locking.
@@ -408,6 +419,7 @@ pub(super) struct UpdateGroupRegistry {
     // ponytail: historical slots and scans still grow with retired contents;
     // compact with generation-tagged IDs only if measured metadata cost warrants it.
     chains: Vec<Option<PolicyChain>>,
+    optional_chain_owner: Option<OptionalChainOwner>,
     /// Group id = index. Slots remain as historical identity metadata.
     /// A key can recur while its chain remains live; after chain retirement,
     /// reinstalling that content creates a new chain and group ID.
@@ -4592,11 +4604,26 @@ impl RibManager {
         self.replacement_checkpoint(true);
         let mut chains: HashSet<usize> = HashSet::with_capacity(groups.len());
         self.replacement_checkpoint(true);
+        let optional = self
+            .pending_destination_prestage
+            .as_ref()
+            .map(|prestage| prestage.destination)
+            .or(self.prepared_destination)
+            .filter(|gid| {
+                self.group_ribs
+                    .get(gid)
+                    .is_some_and(|group| group.members.is_empty())
+            })
+            .and_then(|gid| Some((gid, self.update_groups.group_key(gid)?.chain?)));
+        if let Some((gid, _)) = optional {
+            groups.remove(&gid);
+        }
         chains.extend(groups.drain().filter_map(|id| {
             checkpoint();
             self.update_groups.group_key(id).and_then(|key| key.chain)
         }));
         self.replacement_checkpoint(true);
+        let exclusive = optional.filter(|(_, chain)| chains.insert(*chain));
         drop(groups);
         self.replacement_checkpoint(true);
         for (id, chain) in self.update_groups.chains.iter_mut().enumerate() {
@@ -4608,23 +4635,42 @@ impl RibManager {
         }
         // Heavy payloads reflect current ownership; small key slots remain
         // historical metadata, including rejected or discarded preparation.
-        self.metrics.set_update_group_interned_chains(
-            i64::try_from(
-                self.update_groups
-                    .chains
-                    .iter()
-                    .inspect(|_| checkpoint())
-                    .filter(|chain| chain.is_some())
-                    .count(),
-            )
-            .unwrap_or(i64::MAX),
-        );
+        let retained = self
+            .update_groups
+            .chains
+            .iter()
+            .inspect(|_| checkpoint())
+            .filter(|chain| chain.is_some())
+            .count();
+        self.update_groups.optional_chain_owner =
+            exclusive.map(|(gid, chain)| OptionalChainOwner {
+                gid,
+                chain,
+                other_chains: retained.saturating_sub(1),
+            });
+        self.metrics
+            .set_update_group_interned_chains(i64::try_from(retained).unwrap_or(i64::MAX));
         self.metrics.set_update_group_keys(
             i64::try_from(self.update_groups.groups.len()).unwrap_or(i64::MAX),
         );
         self.replacement_checkpoint(true);
         super::retire_hash_set(&mut chains, &mut checkpoint);
         self.replacement_checkpoint(true);
+    }
+
+    pub(in crate::manager) fn take_optional_registry_chain(
+        &mut self,
+        gid: usize,
+    ) -> Option<PolicyChain> {
+        let owner = self
+            .update_groups
+            .optional_chain_owner
+            .take_if(|owner| owner.gid == gid)?;
+        let chain = self.update_groups.chains[owner.chain].take()?;
+        self.metrics.set_update_group_interned_chains(
+            i64::try_from(owner.other_chains).unwrap_or(i64::MAX),
+        );
+        Some(chain)
     }
 
     /// Re-derive the ADR-0126 exception-lane gauge: total runner-up

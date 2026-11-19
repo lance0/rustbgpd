@@ -31,6 +31,7 @@ pub(super) struct OptionalDestinationRetirement {
     gid: usize,
     group: OptionalGroupRetirement,
     inventory: OptionalInventoryRetirement,
+    interned_policy: Option<rustbgpd_policy::PolicyChain>,
     withdrawn: BTreeSet<(Prefix, u32)>,
 }
 
@@ -199,7 +200,18 @@ impl RibManager {
         if retirement.withdrawn.is_empty()
             && retirement.inventory.retire_page(&mut budget)
             && retirement.group.retire_page(&mut budget)
+            && budget > 0
         {
+            if retirement.interned_policy.is_some() {
+                budget -= 1;
+                drop(retirement.interned_policy.take());
+            }
+            if budget == 0 {
+                return REGISTRATION_PAGE_SIZE;
+            }
+            // Release the group's configuration handle after the last route
+            // and the exclusive planning handle have both been released.
+            budget -= 1;
             self.optional_destination_retirement = None;
             self.clear_first_group_commit_frontier();
         }
@@ -250,6 +262,7 @@ impl RibManager {
         self.optional_destination_retirement = Some(Box::new(OptionalDestinationRetirement {
             gid,
             group: OptionalGroupRetirement::new(table),
+            interned_policy: self.take_optional_registry_chain(gid),
             inventory,
             withdrawn,
         }));

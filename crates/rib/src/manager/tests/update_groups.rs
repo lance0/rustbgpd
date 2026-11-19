@@ -15749,6 +15749,61 @@ fn sorted_inventory_rows(
     rows
 }
 
+#[test]
+fn optional_eviction_releases_only_its_sole_intern_with_no_waiter_left() {
+    for shared in [false, true] {
+        let (mut manager, peers, _receivers) = direct_clean_transition_manager(2, 8, None);
+        let policy = rpol_community_chain(0xfde8_4270);
+        let weak = Arc::downgrade(policy.policies[0].rpol.as_ref().unwrap());
+        let (_, prepared) = complete_prestage(&mut manager, peers[0], &policy);
+
+        // The prepared group is an iBGP RR client. Another active group
+        // can acquire the same interned policy after preparation has finished.
+        let ebgp = peer_v4(Ipv4Addr::new(10, 42, 1, 7));
+        let (out, _shared_rx) = mpsc::channel(16);
+        if shared {
+            let mut up = super::lifecycle::test_peer_up(ebgp, 7, out);
+            let RibUpdate::PeerUp { export_policy, .. } = &mut up else {
+                unreachable!()
+            };
+            *export_policy = Some(policy.clone());
+            manager.handle_update(up);
+            assert_ne!(manager.grouped_member_of(ebgp).unwrap(), prepared);
+        }
+        drop(policy);
+        let metric = "bgp_update_group_interned_chains";
+        let before = gauge_metric_value(&manager.metrics, metric, &[]);
+
+        let cold = peer_v4(Ipv4Addr::new(10, 42, 1, 8));
+        let (out, _cold_rx) = mpsc::channel(16);
+        manager.first_group_build_min_routes = 1;
+        manager.handle_update(super::lifecycle::test_peer_up(cold, 8, out));
+        assert!(manager.optional_destination_retirement_active());
+        assert_metric(
+            gauge_metric_value(&manager.metrics, metric, &[]),
+            if shared { before } else { before - 1.0 },
+            "retained registry chains at detachment",
+        );
+        manager.handle_update(RibUpdate::PeerDown {
+            peer: cold,
+            session_id: 8,
+        });
+        while manager.optional_destination_retirement_active() {
+            assert!(
+                manager.advance_optional_destination_retirement()
+                    <= crate::loc_rib::REGISTRATION_PAGE_SIZE
+            );
+        }
+        assert_eq!(weak.upgrade().is_some(), shared);
+        if shared {
+            assert_eq!(
+                manager.compute_update_group_membership(ebgp),
+                manager.update_groups.members[&ebgp]
+            );
+        }
+    }
+}
+
 /// Churn landing between the unfenced prestaged inventory walk and the
 /// fence (an announce, a withdrawal and an attribute replacement, both
 /// mid-walk and after the walk finished) must leave the fenced re-check
