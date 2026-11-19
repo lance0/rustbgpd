@@ -340,7 +340,7 @@ async fn gr_expiry_during_sealed_writer_precedes_late_refresh() {
                 .as_mut()
                 .poll(&mut Context::from_waker(Waker::noop()))
                 .is_pending()
-        )
+        );
     };
     tokio::time::advance(deadline - tokio::time::Instant::now()).await;
     // The owner gets one real turn at the deadline with only the EoR queued.
