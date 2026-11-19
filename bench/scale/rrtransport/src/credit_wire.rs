@@ -5,12 +5,13 @@
 //! the daemon cannot also corrupt the reference it is compared with.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rustbgpd_wire::{
-    Afi, EvpnRoute, Message, PathAttribute, Prefix, RouteDistinguisher, Safi, UpdateMessage,
+    Afi, EvpnRoute, Ipv4Prefix, Ipv6Prefix, Message, MplsLabelEntry, ParsedUpdate, PathAttribute,
+    Prefix, RouteDistinguisher, Safi, UpdateMessage, VpnNlri, VpnPrefix,
 };
 
 /// First burst prefix, `10.0.0.0/24`; route `i` is the `i`-th /24 after it,
@@ -24,6 +25,10 @@ pub const BURST_RANGE: (Ipv4Addr, u8) = (Ipv4Addr::new(8, 0, 0, 0), 5);
 pub enum WireFamily {
     Unicast,
     Evpn,
+    Vpn4,
+    Vpn6,
+    Labeled4,
+    Labeled6,
 }
 
 /// Burst route index of an IPv4 /24 inside the burst range.
@@ -71,7 +76,7 @@ pub struct Observed {
     /// `(index, MED)` per announced burst-family route.
     pub announced: Vec<(usize, Option<u32>)>,
     pub withdrawn: Vec<usize>,
-    /// NLRI of the family that is outside the burst key space.
+    /// Unexpected routes, or foreign family, label or next-hop data in an MPLS cell.
     pub outside: usize,
     pub end_of_rib: bool,
 }
@@ -136,8 +141,144 @@ pub fn observe(
             }
             observed.outside += parsed.announced.len() + parsed.withdrawn.len();
         }
+        WireFamily::Vpn4 => return Ok(observe_mpls(update, &parsed, Afi::Ipv4, Safi::MplsVpn)),
+        WireFamily::Vpn6 => return Ok(observe_mpls(update, &parsed, Afi::Ipv6, Safi::MplsVpn)),
+        WireFamily::Labeled4 => {
+            return Ok(observe_mpls(
+                update,
+                &parsed,
+                Afi::Ipv4,
+                Safi::LabeledUnicast,
+            ))
+        }
+        WireFamily::Labeled6 => {
+            return Ok(observe_mpls(
+                update,
+                &parsed,
+                Afi::Ipv6,
+                Safi::LabeledUnicast,
+            ))
+        }
     }
     Ok(observed)
+}
+
+fn mpls_prefix_index(prefix: Prefix) -> Option<usize> {
+    match prefix {
+        Prefix::V4(_) => unicast_index(prefix),
+        Prefix::V6(prefix) => match prefix.addr.segments() {
+            [0x2001, 0xdb8, index, 0, 0, 0, 0, 0] if prefix.len == 48 => Some(usize::from(index)),
+            _ => None,
+        },
+    }
+}
+
+fn vpn_index(nlri: &VpnNlri) -> Option<usize> {
+    let RouteDistinguisher([0, 0, 0xfc, 0, 0, 0, 0, rd @ 1..=2]) = nlri.route_distinguisher else {
+        return None;
+    };
+    let prefix = match nlri.prefix {
+        VpnPrefix::V4 { addr, len } => Prefix::V4(Ipv4Prefix::new(addr, len)),
+        VpnPrefix::V6 { addr, len } => Prefix::V6(Ipv6Prefix::new(addr, len)),
+    };
+    Some(2 * mpls_prefix_index(prefix)? + usize::from(rd - 1))
+}
+
+/// Each MPLS release receiver negotiates exactly one family. A foreign route
+/// or marker is a wire error even when the expected table also arrives.
+fn observe_mpls(update: &UpdateMessage, parsed: &ParsedUpdate, afi: Afi, safi: Safi) -> Observed {
+    let mut observed = Observed {
+        outside: parsed.announced.len() + parsed.withdrawn.len(),
+        ..Observed::default()
+    };
+    let version = med(&parsed.attributes);
+    let expected_next_hop = if afi == Afi::Ipv4 {
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))
+    } else {
+        IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1))
+    };
+    let mut saw_mp = false;
+    for attribute in &parsed.attributes {
+        match attribute {
+            PathAttribute::MpReachNlri(mp) if (mp.afi, mp.safi) == (afi, safi) => {
+                saw_mp = true;
+                if mp.next_hop != expected_next_hop
+                    || mp.link_local_next_hop.is_some()
+                    || (mp.vpn_announced.is_empty() && mp.labeled_announced.is_empty())
+                {
+                    observed.outside += 1;
+                }
+                let mut announce = |index: Option<usize>, labels: &[MplsLabelEntry]| {
+                    if let Some(index) = index {
+                        let label = 16 + u32::try_from(index % 1_000).expect("label fits");
+                        if matches!(labels, [entry] if entry.label == label
+                            && entry.traffic_class == 0 && entry.bottom_of_stack)
+                        {
+                            observed.announced.push((index, version));
+                            return;
+                        }
+                    }
+                    observed.outside += 1;
+                };
+                for entry in &mp.vpn_announced {
+                    announce(vpn_index(&entry.nlri), &entry.nlri.labels);
+                }
+                for entry in &mp.labeled_announced {
+                    announce(mpls_prefix_index(entry.nlri.prefix), &entry.nlri.labels);
+                }
+            }
+            PathAttribute::MpUnreachNlri(mp) if (mp.afi, mp.safi) == (afi, safi) => {
+                saw_mp = true;
+                let empty = mp.vpn_withdrawn.is_empty() && mp.labeled_withdrawn.is_empty();
+                if empty {
+                    // Unknown optional non-transitive attributes disappear during parsing.
+                    // Check the single raw attribute, allowing both length encodings.
+                    use rustbgpd_wire::constants::{
+                        attr_flags::EXTENDED_LENGTH, attr_type::MP_UNREACH_NLRI,
+                    };
+                    observed.end_of_rib = update.withdrawn_routes.is_empty()
+                        && update.nlri.is_empty()
+                        && match update.path_attributes.as_ref() {
+                            [flags, MP_UNREACH_NLRI, 3, _, _, _] => flags & EXTENDED_LENGTH == 0,
+                            [flags, MP_UNREACH_NLRI, 0, 3, _, _, _] => flags & EXTENDED_LENGTH != 0,
+                            _ => false,
+                        };
+                    observed.outside += usize::from(!observed.end_of_rib);
+                }
+                // Withdrawals identify the RD/prefix or prefix. The compatibility
+                // label on the wire is not the previous announcement's label.
+                for index in mp
+                    .vpn_withdrawn
+                    .iter()
+                    .map(|entry| vpn_index(&entry.nlri))
+                    .chain(
+                        mp.labeled_withdrawn
+                            .iter()
+                            .map(|entry| mpls_prefix_index(entry.nlri.prefix)),
+                    )
+                {
+                    if let Some(index) = index {
+                        observed.withdrawn.push(index);
+                    } else {
+                        observed.outside += 1;
+                    }
+                }
+            }
+            PathAttribute::MpReachNlri(_) | PathAttribute::MpUnreachNlri(_) => {
+                saw_mp = true;
+                observed.outside += 1;
+            }
+            _ => {}
+        }
+    }
+    let valid = rustbgpd_wire::validate::validate_update_attributes(
+        &parsed.attributes,
+        !observed.announced.is_empty(),
+        !parsed.announced.is_empty(),
+        false,
+    );
+    observed.outside += usize::from(!saw_mp || valid.is_err());
+    observed
 }
 
 /// The table every burst receiver must end with, shared by all of them.
@@ -584,6 +725,169 @@ mod tests {
             state.apply_observed(step, now);
         }
         state
+    }
+
+    // Build the raw MP attribute independently of the production UPDATE encoder.
+    fn mp_update(kind: u8, afi: u8, safi: u8, payload: &[u8], med: Option<u8>) -> UpdateMessage {
+        let mut attrs = vec![
+            0x80,
+            kind,
+            u8::try_from(3 + payload.len()).unwrap(),
+            0,
+            afi,
+            safi,
+        ];
+        attrs.extend_from_slice(payload);
+        if kind == 14 {
+            attrs.extend_from_slice(&[0x40, 1, 1, 0, 0x40, 2, 0]); // ORIGIN and empty AS_PATH
+        }
+        if let Some(med) = med {
+            attrs.extend_from_slice(&[0x80, 4, 4, 0, 0, 0, med]);
+        }
+        UpdateMessage {
+            withdrawn_routes: Default::default(),
+            path_attributes: attrs.into(),
+            nlri: Default::default(),
+        }
+    }
+
+    #[test]
+    fn mpls_release_reads_both_afis_the_advertised_label_and_vpn_rd() {
+        for (family, afi, safi) in [
+            (WireFamily::Labeled4, 1, 4),
+            (WireFamily::Labeled6, 2, 4),
+            (WireFamily::Vpn4, 1, 128),
+            (WireFamily::Vpn6, 2, 128),
+        ] {
+            // VPN's second row has the same prefix as the first, with RD 64512:2.
+            let vpn = safi == 128;
+            let mut next_hop = if vpn { vec![0; 8] } else { Vec::new() };
+            let mut prefix = Vec::new();
+            if afi == 1 {
+                next_hop.extend_from_slice(&[192, 0, 2, 1]);
+                prefix.extend_from_slice(&[10, 0, u8::from(!vpn)]);
+            } else {
+                next_hop
+                    .extend_from_slice(&Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1).octets());
+                prefix.extend_from_slice(&[0x20, 1, 0x0d, 0xb8, 0, u8::from(!vpn)]);
+            }
+            let mut reach = vec![u8::try_from(next_hop.len()).unwrap()];
+            reach.extend_from_slice(&next_hop);
+            reach.push(0); // reserved byte
+            let bits = u8::try_from(prefix.len() * 8).unwrap() + 24 + if vpn { 64 } else { 0 };
+            let mut nlri = vec![bits, 0, 1, 0x11]; // label 17, TC 0, BoS set
+            if vpn {
+                nlri.extend_from_slice(&[0, 0, 0xfc, 0, 0, 0, 0, 2]);
+            }
+            nlri.extend_from_slice(&prefix);
+            let announce =
+                |nlri: &[u8]| mp_update(14, afi, safi, &[reach.as_slice(), nlri].concat(), Some(7));
+            assert_eq!(observe(&announce(&nlri), family).unwrap(), routes([1], 7));
+            nlri[1..4].copy_from_slice(&[0x80, 0, 0]); // compatibility withdrawal
+            assert_eq!(
+                observe(&mp_update(15, afi, safi, &nlri, None), family).unwrap(),
+                withdrawn([1])
+            );
+            if vpn {
+                nlri[11] = 3; // unknown RD on the withdrawal
+                assert_eq!(
+                    observe(&mp_update(15, afi, safi, &nlri, None), family)
+                        .unwrap()
+                        .outside,
+                    1
+                );
+            }
+            let marker = mp_update(15, afi, safi, &[], None);
+            assert_eq!(observe(&marker, family).unwrap(), eor());
+        }
+    }
+
+    #[test]
+    fn mpls_eor_must_be_the_only_raw_attribute() {
+        for (family, afi, safi) in [
+            (WireFamily::Vpn4, 1, 128),
+            (WireFamily::Vpn6, 2, 128),
+            (WireFamily::Labeled4, 1, 4),
+            (WireFamily::Labeled6, 2, 4),
+        ] {
+            let mut update = mp_update(15, afi, safi, &[], None);
+            assert_eq!(observe(&update, family).unwrap(), eor());
+            update.path_attributes = vec![0x90, 15, 0, 3, 0, afi, safi].into();
+            assert_eq!(observe(&update, family).unwrap(), eor());
+
+            // Parsing discards this unknown optional non-transitive attribute.
+            let extra = [0x80, 99, 2, 1, 2];
+            let marker = update.path_attributes.clone();
+            for attrs in [
+                [marker.as_ref(), &extra].concat(),
+                [&extra[..], marker.as_ref()].concat(),
+            ] {
+                update.path_attributes = attrs.into();
+                let observed = observe(&update, family).unwrap();
+                assert!(!observed.end_of_rib);
+                assert_ne!(observed.outside, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn labeled_release_rejects_wrong_route_attributes_and_foreign_markers() {
+        let family = WireFamily::Labeled4;
+        // MP_REACH next hop, reserved byte, label 16 and 10.0.0.0/24.
+        let clean = [4, 192, 0, 2, 1, 0, 48, 0, 1, 1, 10, 0, 0];
+        let announcement =
+            |payload: &[u8], med| Message::Update(mp_update(14, 1, 4, payload, Some(med)));
+        let marker = Message::Update(mp_update(15, 1, 4, &[], None));
+        let row = announcement(&clean, 7);
+        let state = |messages: &[&Message]| {
+            let mut state = WireState::new(family, 1, 7);
+            for message in messages {
+                state.apply(message, Instant::now());
+            }
+            state
+        };
+        let clean_release = state(&[&row, &marker]);
+        assert!(clean_release.exact());
+        assert_eq!(clean_release.eors, 1);
+        assert!(!clean_release.eor_premature);
+        let early = state(&[&marker, &row]);
+        assert!(early.eor_premature);
+        assert_eq!(early.routes_after_eor, 1);
+        assert_eq!(state(&[&row, &marker, &marker]).eors, 2);
+        assert!(!state(&[&announcement(&clean, 8), &marker]).exact());
+        for (offset, replacement) in [(4, 2), (9, 17), (9, 3), (9, 0), (6, 47), (10, 203)] {
+            let mut changed = clean;
+            changed[offset] = replacement;
+            assert!(
+                !state(&[&row, &announcement(&changed, 7), &marker]).exact(),
+                "{changed:?}"
+            );
+        }
+        // The expected MP row and MED still decode alongside an invalid NEXT_HOP.
+        let mut invalid = mp_update(14, 1, 4, &clean, Some(7));
+        invalid.path_attributes = [
+            invalid.path_attributes.as_ref(),
+            &[0x40, 3, 4, 127, 0, 0, 1],
+        ]
+        .concat()
+        .into();
+        assert!(!state(&[&Message::Update(invalid), &marker]).exact());
+        let mut two_labels = clean.to_vec();
+        two_labels[6] += 24;
+        two_labels.splice(7..7, [0, 2, 0]);
+        assert!(!state(&[&row, &announcement(&two_labels, 7), &marker]).exact());
+        for extra in [
+            mp_update(14, 1, 1, &[4, 192, 0, 2, 1, 0, 24, 10, 0, 0], Some(7)),
+            mp_update(15, 1, 128, &[], None),  // another SAFI
+            mp_update(15, 2, 4, &[], None),    // another AFI
+            mp_update(15, 1, 4, &[], Some(7)), // extra attribute on the marker
+            mp_update(15, 1, 4, &[48, 0x80, 0, 0, 203, 0, 113], None),
+        ] {
+            assert!(!state(&[&row, &Message::Update(extra), &marker]).exact());
+        }
+        let mut with_body = mp_update(15, 1, 4, &[], None);
+        with_body.nlri = vec![24, 10, 0, 0].into();
+        assert!(!state(&[&row, &Message::Update(with_body), &marker]).exact());
     }
 
     #[test]

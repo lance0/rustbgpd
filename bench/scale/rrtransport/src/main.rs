@@ -587,7 +587,7 @@ fn main() -> Result<()> {
         _ => bail!(
             "usage: rrtransport smoke | rrtransport rr1000 <output-dir> | rrtransport rrtiny <output-dir>\n\
              \x20      rrtransport credit-exhaust|credit-restart|credit-restart-churn <unicast|evpn> <output-dir> [--reduced] [--correctness-only] [--pause-ms N]\n\
-             \x20      rrtransport credit-release-mixed|credit-release-timer <output-dir> [--reduced] [--correctness-only]\n\
+             \x20      rrtransport credit-release-<mixed|timer|vpn4|vpn6|labeled4|labeled6> <output-dir> [--reduced] [--correctness-only]\n\
              \x20      rrtransport credit-paused <output-dir> [--reduced] [--correctness-only] [--seconds N]\n\
              \x20      rrtransport credit-fill <unicast|evpn|vpn|flowspec> <output-dir> [--reduced] [--correctness-only]\n\
              \x20      rrtransport credit-source-burst <output-dir> [--reduced] [--two-sources] [--control] [--stall-ms N] [--burst-interval-ms N] [--rows N] [--routes-per-update N]\n\
@@ -625,14 +625,9 @@ fn credit_main(mode: &str, args: &[String]) -> Result<()> {
                 &options(rest)?,
             ))?
         }
-        ("credit-release-mixed" | "credit-release-timer", [output, rest @ ..]) => {
-            let cell = if mode == "credit-release-mixed" {
-                credit::release::Cell::Mixed
-            } else {
-                credit::release::Cell::Timer
-            };
+        (mode, [output, rest @ ..]) if mode.starts_with("credit-release-") => {
             harness.block_on(credit::release::run(
-                cell,
+                mode.strip_prefix("credit-").expect("credit command"),
                 Path::new(output),
                 &options(rest)?,
             ))?

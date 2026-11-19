@@ -18,7 +18,7 @@
 # limit is recorded as an OOM. Each invocation appends the binary hash and
 # its cell list to `provenance.jsonl`, which tells the analyzer what this
 # directory attempted. Use one directory per repetition and one binary per
-# directory. The report-only release-mixed and release-timer cells, and the
+# directory. The report-only release cells and the
 # source-burst and source-burst-control cells (an unpaced source burst
 # through real sessions, and its control without healthy updates) and their
 # source-burst-small counterparts (100 routes per UPDATE), run only when
@@ -61,7 +61,8 @@ ulimit -n 65536 2>/dev/null || ulimit -n "$(ulimit -Hn)"
 sha=$(sha256sum "$binary" | cut -d' ' -f1)
 result_of() {
     case $1 in
-    release-mixed | release-timer | source-burst | source-burst-control) echo "$1.json" ;;
+    release-mixed | release-timer | release-vpn[46] | release-labeled[46]) echo "$1.json" ;;
+    source-burst | source-burst-control) echo "$1.json" ;;
     source-burst-two | source-burst-small | source-burst-small-control) echo "$1.json" ;;
     probes) echo probes.json ;;
     paused) echo paused-evpn.json ;;
@@ -89,7 +90,7 @@ echo "rrtransport $sha measured=$measured cells=${cells[*]}"
 status=0
 for cell in "${cells[@]}"; do
     case $cell in
-    release-mixed | release-timer) args=("credit-$cell" "$output") limit=64G ;;
+    release-*) args=("credit-$cell" "$output") limit=64G ;;
     source-burst) args=(credit-source-burst "$output") limit=64G ;;
     source-burst-two) args=(credit-source-burst "$output" --two-sources) limit=64G ;;
     source-burst-control) args=(credit-source-burst "$output" --control) limit=64G ;;
