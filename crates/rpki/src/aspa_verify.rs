@@ -640,6 +640,122 @@ mod tests {
         assert_eq!(verify_upstream(&path, &table), AspaValidation::Valid);
     }
 
+    fn assert_role_case(
+        table: &AspaTable,
+        local_role: Option<BgpRole>,
+        as_path: &[u32],
+        expected: AspaValidation,
+    ) {
+        assert_eq!(
+            verify(&make_path(as_path), table, context(local_role, as_path[0])),
+            expected,
+            "role={local_role:?} path={as_path:?}"
+        );
+    }
+
+    /// Direction and AS0 edge cases, with verdicts cross-checked against an
+    /// independent implementation of the draft's procedures. The ASNs are
+    /// documentation numbers; paths are neighbor first, origin last.
+    #[test]
+    fn direction_and_as0_edge_vectors() {
+        let upstream = Some(BgpRole::Provider);
+        let downstream = Some(BgpRole::Customer);
+
+        // One path, one set of records, two verdicts. 64498 is a customer of
+        // 64497 (AS0-only: no providers) and of 64500. Sent to its provider
+        // it is a leak of a provider route; sent to its customer it is an
+        // up-ramp followed by a down-ramp.
+        let two_providers = make_table(vec![
+            (64496, vec![64497]),
+            (64497, vec![0]),
+            (64498, vec![64497, 64500]),
+        ]);
+        let path = [64498, 64497, 64496];
+        assert_role_case(&two_providers, upstream, &path, AspaValidation::Invalid);
+        assert_role_case(&two_providers, downstream, &path, AspaValidation::Valid);
+
+        // Two AS0-only ASes peering at the apex: the ramps meet => Valid.
+        let apex_peers = make_table(vec![
+            (64496, vec![64497]),
+            (64497, vec![0]),
+            (64498, vec![0]),
+        ]);
+        assert_role_case(&apex_peers, downstream, &path, AspaValidation::Valid);
+
+        // An AS0-only origin beyond its neighbor: 64497 names 64498 only, so
+        // neither ramp leaves its first AS => Invalid.
+        let as0_origin = make_table(vec![
+            (64496, vec![0]),
+            (64497, vec![64498]),
+            (64498, vec![0]),
+        ]);
+        assert_role_case(&as0_origin, downstream, &path, AspaValidation::Invalid);
+
+        // 64497 passes a route of its provider 64496 to its other provider
+        // 64498, and a customer of 64498 receives it => Invalid.
+        let leak = make_table(vec![
+            (64496, vec![0]),
+            (64497, vec![64496, 64498]),
+            (64498, vec![0]),
+        ]);
+        assert_role_case(&leak, downstream, &path, AspaValidation::Invalid);
+
+        // Prepending on both ramps compresses away before the bounds.
+        let chain = make_table(vec![
+            (64496, vec![64497]),
+            (64497, vec![64498]),
+            (64498, vec![0]),
+            (64499, vec![64498]),
+        ]);
+        assert_role_case(
+            &chain,
+            downstream,
+            &[64499, 64499, 64498, 64497, 64497, 64496],
+            AspaValidation::Valid,
+        );
+
+        // A two-AS path from a provider is Valid whatever the origin's
+        // record says; the same path from a customer is Invalid.
+        let other_provider = make_table(vec![(64496, vec![64499])]);
+        assert_role_case(
+            &other_provider,
+            downstream,
+            &[64497, 64496],
+            AspaValidation::Valid,
+        );
+        assert_role_case(
+            &other_provider,
+            upstream,
+            &[64497, 64496],
+            AspaValidation::Invalid,
+        );
+
+        // Records at both ends only: the max ramps cover the path, the min
+        // ramps do not => Unknown.
+        let ends_only = make_table(vec![(64496, vec![64497]), (64499, vec![64500])]);
+        assert_role_case(
+            &ends_only,
+            downstream,
+            &[64499, 64498, 64497, 64496],
+            AspaValidation::Unknown,
+        );
+    }
+
+    #[test]
+    fn as_set_is_invalid_downstream() {
+        let table = make_table(vec![(64496, vec![64497])]);
+        let path = AsPath {
+            segments: vec![
+                AsPathSegment::AsSequence(vec![64497]),
+                AsPathSegment::AsSet(vec![64496, 64495]),
+            ],
+        };
+        assert_eq!(
+            verify(&path, &table, context(Some(BgpRole::Customer), 64497)),
+            AspaValidation::Invalid
+        );
+    }
+
     fn nist_brio_common_demo_table() -> AspaTable {
         // NIST-BRIO b7.1.2, commit 23ee402f (2025-08-08):
         // brio-examples/demo-aspa-upstream/{exp13,exp46,exp79}.brio_rc.script
