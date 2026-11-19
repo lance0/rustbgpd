@@ -28,6 +28,7 @@ impl RibManager {
     pub(super) fn first_group_replay_due(&self) -> bool {
         (!self.first_group_deferred_intents.is_empty() || self.first_group_general_head.is_some())
             && self.first_group_pending_writer().is_none()
+            && !self.optional_destination_retirement_active()
     }
 
     /// The actor serves these before accepting new primary work, honoring its
@@ -45,9 +46,11 @@ impl RibManager {
     /// This check is also made at each primary read-ahead that can consume a
     /// message directly. A hold leaves the complete original envelope at head.
     pub(super) fn first_group_intake(&self, message: &RibUpdate) -> Intake {
-        let Some(writer) = self.first_group_pending_writer() else {
+        let writer = self.first_group_pending_writer().map(operation);
+        let retiring_optional = self.optional_destination_retirement_active();
+        if writer.is_none() && !retiring_optional {
             return Intake::Apply;
-        };
+        }
         // A held general head was admitted after the retained intents. A
         // replayed intent can own another preparation before that head runs.
         // Keep newer admissions behind it across both preparations.
@@ -56,7 +59,16 @@ impl RibManager {
         }
         let next = operation(message);
         let kind = next.actor_turn_kind();
-        if kind == RibActorTurnKind::OutboundPolicy {
+        // A late writer may rebuild the evicted table. Keep its original
+        // request and reply until the last allocation releases the slot.
+        if kind == RibActorTurnKind::OutboundPolicy
+            || (retiring_optional
+                && matches!(
+                    next,
+                    RibUpdate::PeerSlowState { slow: false, .. }
+                        | RibUpdate::PeerFamilySendable { .. }
+                ))
+        {
             return if self.first_group_deferred_intents.len()
                 < self.rx.max_capacity().min(MAX_DEFERRED_INTENTS)
             {
@@ -65,7 +77,6 @@ impl RibManager {
                 Intake::Hold
             };
         }
-        let writer = operation(writer);
         let peer = match next {
             RibUpdate::PeerDeleted { peer, .. }
             | RibUpdate::ReleasePeer { peer }
@@ -78,8 +89,12 @@ impl RibManager {
         // Even a route receipt/EoR from this session follows its older
         // family activation or slow-state change. Other routes can enter the
         // normal old-policy distribution pass before commit.
-        if let Some(source) = writer.session_peer()
-            && Some(source) == peer
+        if let Some(peer) = peer
+            && (writer.and_then(RibUpdate::session_peer) == Some(peer)
+                || self
+                    .first_group_deferred_intents
+                    .iter()
+                    .any(|intent| intent.session_peer() == Some(peer)))
         {
             return Intake::Hold;
         }
@@ -96,7 +111,8 @@ impl RibManager {
             return Intake::Hold;
         }
         if let Some(peer) = peer
-            && (self.first_group_writer_affects_peer(writer, peer, next)
+            && (writer
+                .is_some_and(|writer| self.first_group_writer_affects_peer(writer, peer, next))
                 || self.first_group_deferred_intents.iter().any(|intent| {
                     self.first_group_writer_affects_peer(operation(intent), peer, next)
                 })

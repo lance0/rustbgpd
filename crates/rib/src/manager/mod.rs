@@ -8072,13 +8072,18 @@ impl RibManager {
                 continue;
             }
 
-            // A commit frontier precedes later timer cutoffs. Finish its
-            // already-admitted work before running the next expiry.
+            // A noncommuting FIFO head or a captured commit frontier precedes
+            // later timer cutoffs. Finish admitted chunks before releasing it.
             if self.first_group_commit_remaining == Some(0)
-                && self.first_group_pending_writer().is_some()
+                && (self.first_group_pending_writer().is_some()
+                    || self.optional_destination_retirement_active())
             {
                 if !self.traced_route_chunk() {
-                    self.advance_first_group_build();
+                    if self.optional_destination_retirement_active() {
+                        self.advance_optional_destination_retirement();
+                    } else {
+                        self.advance_first_group_build();
+                    }
                 }
                 self.drain_readiness_queries(None);
                 self.drain_general_queries_if_unfenced();

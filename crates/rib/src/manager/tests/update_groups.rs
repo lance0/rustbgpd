@@ -20041,7 +20041,6 @@ fn observe_policy_during_retirement(
 async fn check_policy_during_overflow(policy: OverlapPolicy) {
     use crate::loc_rib::REGISTRATION_PAGE_SIZE;
     use OverlapEvent::{EndOfRibWithdrawal, Marker};
-    use std::future::Future;
     use std::task::{Context, Waker};
 
     let PolicyOverlap {
