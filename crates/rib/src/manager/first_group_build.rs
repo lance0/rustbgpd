@@ -20,6 +20,9 @@ pub(super) struct FirstGroupBuild {
     pub(super) peer: PeerId,
     phase: FirstGroupPhase,
     writer: Option<Box<RibUpdate>>,
+    // The FIFO head needs a different cold table. The founder retains this
+    // one until publication or the last physical retirement page.
+    other_destination_waits: bool,
     // Optional prepare belongs to the exact source cohort and session that asked.
     prepare_source: Option<(usize, Waiter)>,
     table: GroupRibOut,
@@ -73,6 +76,7 @@ impl RibManager {
             peer,
             phase: FirstGroupPhase::Scanning(Some(Waiter { session_id, sender })),
             writer: None,
+            other_destination_waits: false,
             prepare_source: None,
             table: self.first_group_table(peer, gid),
         }));
@@ -84,14 +88,28 @@ impl RibManager {
         })
     }
 
+    #[cfg(test)]
     pub(super) fn first_group_targets(&self, gid: usize) -> bool {
         self.first_group_build
             .as_ref()
             .is_some_and(|job| job.gid == gid)
     }
 
+    pub(super) fn policy_build_slot_occupied(&self, destination: usize) -> bool {
+        self.first_group_build.is_some()
+            || self.optional_destination_retirement_active()
+            || self
+                .paced_policy_destination
+                .is_some_and(|gid| gid != destination)
+    }
+
     pub(super) fn first_group_pending_writer(&self) -> Option<&RibUpdate> {
-        self.first_group_build.as_ref()?.writer.as_deref()
+        let job = self.first_group_build.as_ref()?;
+        if job.other_destination_waits {
+            self.first_group_deferred_intents.front()
+        } else {
+            job.writer.as_deref()
+        }
     }
 
     fn writer_needs_group(&mut self, update: &RibUpdate, gid: usize) -> bool {
@@ -117,6 +135,27 @@ impl RibManager {
             .as_ref()
             .map(|job| job.gid)
             .is_some_and(|gid| self.writer_needs_group(update, gid))
+    }
+
+    pub(super) fn reserve_other_policy_destination(&mut self, update: &RibUpdate) -> bool {
+        let Some(held) = self
+            .first_group_build
+            .as_ref()
+            .map(|job| job.gid)
+            .or(self.paced_policy_destination)
+        else {
+            return false;
+        };
+        if !self.policy_needs_other_build_slot(update, held) {
+            return false;
+        }
+        if let Some(job) = self.first_group_build.as_mut() {
+            debug_assert!(job.writer.is_none() && !job.other_destination_waits);
+            job.other_destination_waits = true;
+        } else if !self.retire_prepared_first_group(held) {
+            return false;
+        }
+        true
     }
 
     pub(super) fn reserve_first_group_writer(&mut self, update: RibUpdate) {
@@ -398,6 +437,9 @@ impl RibManager {
                 self.retire_prepared_first_group(gid);
             }
         } else {
+            if job.other_destination_waits {
+                self.clear_first_group_commit_frontier();
+            }
             self.pending_initial_registrations
                 .retain(|queued| *queued != peer);
             self.complete_deferred_registration(peer);
@@ -418,6 +460,9 @@ impl RibManager {
             return;
         }
         let Some(writer) = job.writer.as_deref() else {
+            if job.other_destination_waits {
+                self.clear_first_group_commit_frontier();
+            }
             return;
         };
         if !self.prepare_source_is_current(&job)

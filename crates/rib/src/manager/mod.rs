@@ -5019,6 +5019,10 @@ impl RibManager {
             self.release_primary_reads.push_back(update);
             return;
         }
+        if self.reserve_other_policy_destination(&update) {
+            self.first_group_deferred_intents.push_front(update);
+            return;
+        }
         if self.first_group_build.is_some() && self.first_group_writer_claim(&update) {
             self.reserve_first_group_writer(update);
             return;

@@ -2540,7 +2540,9 @@ impl RibManager {
                     // A conflicting writer normally reserved the table before taking
                     // the fence. If classification changed, leave the old policy live
                     // and let the authoritative command acquire the destination.
-                    if manager.first_group_targets(destination) {
+                    if manager.policy_build_slot_occupied(destination)
+                        && manager.group_ribs.get(&destination).is_none_or(|group| group.members.is_empty())
+                    {
                         pending.phase = Some(CleanPolicyTransitionPhase::StageDestination {
                             source, destination, prefixes, cursor, memo,
                         });
@@ -7020,6 +7022,13 @@ impl RibManager {
             .group_ribs
             .get(&destination)
             .is_some_and(|group| !group.members.is_empty());
+        // An earlier cohort in this same command can move the last incumbent
+        // out of a destination that was warm at admission. Leave its movers
+        // to the ordinary deferred residual walk if another table owns the
+        // build slot. No policy or membership for these movers has committed.
+        if !destination_owned && self.policy_build_slot_occupied(destination) {
+            return false;
+        }
         // Dataset handles keep their identity when content is restored.
         // Until dependent re-evaluation runs, either staged view can still
         // describe the other generation. An occupied group cannot be rebuilt

@@ -18,7 +18,120 @@ enum MembershipChange {
     RemoveConditionalAttachment,
 }
 
+enum SlotTarget {
+    Held,
+    Occupied,
+    Cold,
+}
+
 impl RibManager {
+    /// A clean transition and the shared authoritative cohort kernel can leave
+    /// a new table memberless across polls or a deferred residual walk. Check
+    /// their chain-only destinations before the command acquires its fence or
+    /// installs any candidate policy. Paced per-peer writes join immediately.
+    pub(in crate::manager) fn policy_needs_other_build_slot(
+        &mut self,
+        update: &RibUpdate,
+        held: usize,
+    ) -> bool {
+        let (replacements, clean) = match update.unmetered() {
+            RibUpdate::ReplacePeerExportPolicies { replacements, .. }
+                if replacements.len() >= 2 =>
+            {
+                (replacements, true)
+            }
+            RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+                replacements,
+                reply,
+            } if !reply.is_closed() => (replacements, false),
+            RibUpdate::RestorePeerExportPoliciesAuthoritatively { replacements, .. } => {
+                (replacements, false)
+            }
+            _ => return false,
+        };
+        self.with_replacement_readiness(|manager| {
+            // A uniform cohort repeats one source and chain. An occupied
+            // destination stays occupied throughout this read-only projection.
+            let mut last_occupied = None;
+            let mut targets_held = false;
+            let mut targets_other = false;
+            for replacement in replacements {
+                manager.replacement_checkpoint(false);
+                let peer = replacement.peer;
+                if !manager.outbound_peers.contains_key(&peer) {
+                    continue;
+                }
+                let source_policy = (manager.grouped_member_of(peer), &replacement.export_policy);
+                if last_occupied == Some(source_policy) {
+                    continue;
+                }
+                match manager.shared_slot_target(replacement, clean, held) {
+                    Some(SlotTarget::Cold) => return true,
+                    Some(SlotTarget::Held) => targets_held = true,
+                    Some(SlotTarget::Occupied) => {
+                        targets_other = true;
+                        last_occupied = Some(source_policy);
+                    }
+                    None => {}
+                }
+                // Clean requires every registered member to agree with its
+                // first pair. Any disagreement hands the entire request back.
+                if clean {
+                    break;
+                }
+            }
+            // The first mismatched authoritative cohort can retire a prepared
+            // table that a later cohort in the same command intends to adopt.
+            targets_held && targets_other && manager.prepared_destination == Some(held)
+        })
+    }
+
+    /// Resolve only live table owners. Planning an abandoned write must not
+    /// intern its policy or allocate a historical group ID.
+    fn shared_slot_target(
+        &self,
+        replacement: &crate::update::PeerExportPolicyReplacement,
+        clean: bool,
+        held: usize,
+    ) -> Option<SlotTarget> {
+        let peer = replacement.peer;
+        let source = self.grouped_member_of(peer)?;
+        let source_group = self.group_ribs.get(&source)?;
+        let source_key = self.update_groups.group_key(source)?;
+        let policy = replacement.export_policy.as_ref();
+        let ready = if clean {
+            self.clean_policy_transition_peer_ready(peer)
+        } else {
+            self.shared_policy_transition_member_ready(peer)
+        };
+        if !ready || source_group.export_chain.as_ref() == policy || !source_key.is_unicast_only() {
+            return None;
+        }
+        let input = self.installed_group_classifier_input(peer, policy);
+        let mut key = self.no_policy_group_key(peer, input, false)?;
+        key.chain = source_key.chain;
+        if &key != source_key {
+            return None;
+        }
+        key.chain = None;
+        if policy.is_none() && self.update_groups.group_key(held) == Some(&key) {
+            return Some(SlotTarget::Held);
+        }
+        for (&gid, group) in &self.group_ribs {
+            self.replacement_checkpoint(false);
+            if !group.members.is_empty()
+                && group.export_chain.as_ref() == policy
+                && self.update_groups.group_key(gid).is_some_and(|existing| {
+                    key.chain = existing.chain;
+                    &key == existing
+                })
+            {
+                return Some(SlotTarget::Occupied);
+            }
+        }
+        Some(SlotTarget::Cold)
+    }
+
     pub(in crate::manager) fn mutation_targets_first_group(
         &self,
         update: &RibUpdate,
