@@ -518,6 +518,8 @@ class RecoveryReceiptTests(unittest.TestCase):
         for lib_source in (
             current.read_text(encoding="utf-8"),
             "#![deny(unsafe_code)]\npub use peer_id::PeerId;",
+            '#[doc(hidden)]\n#[allow(unused_imports, reason = "undocumented")]\n'
+            "pub use peer_id::PeerId;",
             "pub mod route; // per-peer storage\n"
             "use std::net::IpAddr; /* outer /* inner */ peer types */\n"
             "pub use peer_id::{PeerEndpoint, PeerId, PeerScope};",
@@ -544,6 +546,9 @@ class RecoveryReceiptTests(unittest.TestCase):
             'const EXAMPLE: &str = r#";\npub use peer_id::PeerId;\n"#;',
             'const EXAMPLE: &[u8] = br#" ";\npub use peer_id::PeerId;\n"#;',
             "#![cfg(test)]\nmod route;\npub use peer_id::PeerId;",
+            "#[cfg(test)]\n#[doc(hidden)]\npub use peer_id::PeerId;",
+            "#[allow(unused)]\n#[cfg_attr(all(), cfg(test))]\npub use peer_id::PeerId;",
+            "#[rewrite_export]\n#[allow(unused)]\npub use peer_id::PeerId;",
             "mod nested {\npub use peer_id::PeerId;\n}",
             "use peer_id::{PeerEndpoint, PeerId, PeerScope};",
             "pub use peer_id::PeerId as LegacyId;",

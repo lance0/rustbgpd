@@ -287,6 +287,7 @@ RUST_TOKEN = re.compile(
     re.DOTALL,
 )
 BLOCK_COMMENT_DELIMITER = re.compile(r"/\*|\*/")
+DOC_OR_LINT_ATTRIBUTE = re.compile(r"#\s*\[\s*(?:doc|allow|warn|deny|forbid|expect)\s*(?=[(=\]])")
 # Outbound envelopes that carry a group's shared withdrawals beside their own.
 SHARED_WITHDRAW_FIELD = "    pub shared_withdraw: "
 HARNESS_SHARED_WITHDRAW_ROWS = (
@@ -314,7 +315,7 @@ def exports_peer_id(lib: str) -> bool:
         return False
     index = depth = 0
     item_start = True
-    inner_attribute = False
+    attribute = None
     previous = ""
     while token := RUST_TOKEN.search(lib, index):
         value = token[0]
@@ -333,9 +334,11 @@ def exports_peer_id(lib: str) -> bool:
             continue
         if item_start and value == "pub" and lib.startswith(PEER_ID_EXPORTS, token.start()):
             return True
-        if depth == 0 and previous == "#" and value == "!":
-            inner_attribute = True
-        if inner_attribute and depth == 1 and value in ("cfg", "cfg_attr"):
+        if item_start and value == "#" and DOC_OR_LINT_ATTRIBUTE.match(lib, token.start()):
+            attribute = "outer"
+        elif depth == 0 and previous == "#" and value == "!":
+            attribute = "inner"
+        if attribute == "inner" and depth == 1 and value in ("cfg", "cfg_attr"):
             break
         if value in ("{", "[", "("):
             depth += 1
@@ -343,9 +346,9 @@ def exports_peer_id(lib: str) -> bool:
             depth -= 1
             require(depth >= 0, "unmatched delimiter in RIB crate root")
         item_start = depth == 0 and value in (";", "}")
-        if inner_attribute and depth == 0 and value == "]":
+        if attribute and depth == 0 and value == "]":
             item_start = True
-            inner_attribute = False
+            attribute = None
         previous = value
     raise InvalidReceipt("unexpected PeerId export in the control")
 
