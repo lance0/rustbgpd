@@ -3,6 +3,7 @@
 //! single-best export share one table.
 
 use crate::PeerId;
+use std::collections::BTreeMap;
 
 use rustbgpd_policy::NextHopAction;
 use rustbgpd_wire::{Afi, EvpnRouteKey, Prefix, Safi};
@@ -42,6 +43,86 @@ impl LocalExportSource {
                 .contains(&rustbgpd_wire::COMMUNITY_BLACKHOLE),
         })
     }
+}
+
+type LocalSourceKey = (Prefix, u32);
+
+/// A paced group keeps its ordered index after publication. Growing one fixed
+/// fanout tree path avoids relocating a populated hash shard in a staging poll.
+enum LocalSources {
+    Hashed(ShardedMap<LocalSourceKey, LocalExportSource>),
+    Ordered(BTreeMap<LocalSourceKey, LocalExportSource>),
+}
+
+impl Default for LocalSources {
+    fn default() -> Self {
+        Self::Hashed(ShardedMap::default())
+    }
+}
+
+impl LocalSources {
+    fn insert(&mut self, key: LocalSourceKey, source: LocalExportSource) {
+        match self {
+            Self::Hashed(table) => table.insert(key, source),
+            Self::Ordered(table) => table.insert(key, source),
+        };
+    }
+
+    fn remove(&mut self, key: &LocalSourceKey) {
+        match self {
+            Self::Hashed(table) => table.remove(key),
+            Self::Ordered(table) => table.remove(key),
+        };
+    }
+
+    fn clear(&mut self) {
+        match self {
+            Self::Hashed(table) => table.clear(),
+            Self::Ordered(table) => table.clear(),
+        }
+    }
+
+    fn retire_with(&mut self, checkpoint: &mut impl RetirementCheckpoint) {
+        match self {
+            Self::Hashed(table) => retire_sharded_map(table, checkpoint),
+            Self::Ordered(table) => {
+                for _ in std::mem::take(table) {
+                    checkpoint.checkpoint(RetirementProgress::Progress);
+                }
+                checkpoint.checkpoint(RetirementProgress::Boundary);
+            }
+        }
+    }
+}
+
+enum LocalSourceIter<H, O> {
+    Hashed(H),
+    Ordered(O),
+}
+
+impl<H: ExactSizeIterator, O: ExactSizeIterator<Item = H::Item>> Iterator
+    for LocalSourceIter<H, O>
+{
+    type Item = H::Item;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Hashed(iter) => iter.next(),
+            Self::Ordered(iter) => iter.next(),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            Self::Hashed(iter) => iter.size_hint(),
+            Self::Ordered(iter) => iter.size_hint(),
+        }
+    }
+}
+
+impl<H: ExactSizeIterator, O: ExactSizeIterator<Item = H::Item>> ExactSizeIterator
+    for LocalSourceIter<H, O>
+{
 }
 
 #[cfg(test)]
@@ -119,7 +200,7 @@ pub struct AdjRibOut {
     /// was the largest heap component in docs/perf/rebaseline-2026-07.md.
     routes: RouteSlab<Route>,
     /// Only local rows need pre-policy identity; received route bodies grow no field.
-    local_export_sources: ShardedMap<(Prefix, u32), LocalExportSource>,
+    local_export_sources: LocalSources,
     /// Explicit `Specific` unicast actions admitted alongside route bodies.
     /// None uses the immutable session profile's default and needs no entry;
     /// `Self_` lives in `self_next_hop`. A hashed entry is 44 B plus one
@@ -373,7 +454,7 @@ impl AdjRibOut {
         Self {
             peer,
             routes: RouteSlab::with_capacity(capacity),
-            local_export_sources: ShardedMap::default(),
+            local_export_sources: LocalSources::default(),
             next_hop_overrides: ShardedMap::default(),
             self_next_hop: Vec::new(),
             self_next_hop_count: 0,
@@ -523,7 +604,10 @@ impl AdjRibOut {
     pub(crate) fn local_export_sources(
         &self,
     ) -> impl ExactSizeIterator<Item = (&(Prefix, u32), &LocalExportSource)> {
-        self.local_export_sources.iter()
+        match &self.local_export_sources {
+            LocalSources::Hashed(table) => LocalSourceIter::Hashed(table.iter()),
+            LocalSources::Ordered(table) => LocalSourceIter::Ordered(table.iter()),
+        }
     }
 
     pub(crate) fn local_export_source(
@@ -531,7 +615,12 @@ impl AdjRibOut {
         prefix: &Prefix,
         path_id: u32,
     ) -> Option<LocalExportSource> {
-        self.local_export_sources.get(&(*prefix, path_id)).copied()
+        let key = (*prefix, path_id);
+        match &self.local_export_sources {
+            LocalSources::Hashed(table) => table.get(&key),
+            LocalSources::Ordered(table) => table.get(&key),
+        }
+        .copied()
     }
 
     /// The outbound path ID of a frozen admission: the local injection with
@@ -568,12 +657,18 @@ impl AdjRibOut {
     /// Called only when a private first-group page is about to commit local
     /// injection provenance. Network-only groups keep the inline empty map.
     pub(crate) fn prepare_first_group_local_sources(&mut self) {
-        self.local_export_sources.split_before_first_insert();
+        if let LocalSources::Hashed(table) = &self.local_export_sources {
+            assert!(
+                table.is_empty(),
+                "select the index before the first local row"
+            );
+            self.local_export_sources = LocalSources::Ordered(BTreeMap::new());
+        }
     }
 
     #[cfg(test)]
-    pub(crate) fn local_source_shards(&self) -> usize {
-        self.local_export_sources.shards().len()
+    pub(crate) fn uses_ordered_local_sources(&self) -> bool {
+        matches!(self.local_export_sources, LocalSources::Ordered(_))
     }
 
     pub(crate) fn set_local_export_source(
@@ -837,7 +932,7 @@ impl AdjRibOut {
         self.second_family.unicast = 0;
         self.routes = RouteSlab::default();
         self.next_hop_overrides = ShardedMap::default();
-        self.local_export_sources = ShardedMap::default();
+        self.local_export_sources = LocalSources::default();
         self.self_next_hop = Vec::new();
         self.self_next_hop_count = 0;
         self.prefix_path_ids = FamilyPrefixMap::default();
@@ -954,7 +1049,7 @@ impl AdjRibOut {
         self.second_family = SecondFamilyCounts::default();
         self.routes.retire_with(checkpoint);
         retire_sharded_map(&mut self.next_hop_overrides, checkpoint);
-        retire_sharded_map(&mut self.local_export_sources, checkpoint);
+        self.local_export_sources.retire_with(checkpoint);
         self.self_next_hop.clear();
         self.self_next_hop_count = 0;
         self.prefix_path_ids.retire_with(checkpoint);
@@ -1471,6 +1566,54 @@ mod tests {
     use crate::attr_set::AttrSet;
     use crate::route::BgpLsFamily;
     use crate::test_support::make_route_with_path_id as make_route;
+
+    #[test]
+    fn local_provenance_keeps_ranked_keys_and_exact_remaining_length() {
+        for paced in [false, true] {
+            let mut table = AdjRibOut::new(PeerId::LOCAL);
+            if paced {
+                table.prepare_first_group_local_sources();
+            }
+            let prefix = prefix_a();
+            for rank in 0..128 {
+                table.set_local_export_source(
+                    (prefix, rank),
+                    Some(LocalExportSource {
+                        path_id: 300 + rank,
+                        deferral_exempt: rank % 2 == 0,
+                    }),
+                );
+            }
+            assert_eq!(table.uses_ordered_local_sources(), paced);
+            let remaining = table.local_export_sources();
+            assert_eq!(remaining.len(), 128);
+            for (key, source) in remaining {
+                assert_eq!(source.path_id, 300 + key.1);
+                assert_eq!(table.local_export_source(&key.0, key.1), Some(*source));
+            }
+            {
+                let mut remaining = table.local_export_sources();
+                assert!(remaining.next().is_some());
+                assert_eq!(remaining.len(), 127);
+            }
+            let replacement = LocalExportSource {
+                path_id: 42,
+                deferral_exempt: false,
+            };
+            table.set_local_export_source((prefix, 9), Some(replacement));
+            assert_eq!(table.local_export_source(&prefix, 9), Some(replacement));
+            table.set_local_export_source((prefix, 10), None);
+            assert_eq!(table.local_export_source(&prefix, 10), None);
+            assert_eq!(table.local_export_sources().len(), 127);
+            table.retire_with(&mut || {});
+            assert_eq!(table.local_export_sources().len(), 0);
+            assert_eq!(table.uses_ordered_local_sources(), paced);
+            table.set_local_export_source((prefix, 0), Some(replacement));
+            table.clear_unicast();
+            assert_eq!(table.local_export_sources().len(), 0);
+            assert_eq!(table.uses_ordered_local_sources(), paced);
+        }
+    }
 
     /// The per-family gauges read these counts instead of walking a table:
     /// dropping an insert, withdraw, or clear adjustment makes this red.

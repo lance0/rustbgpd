@@ -64,7 +64,7 @@ mod tests {
     }
 
     #[test]
-    fn private_staging_allocates_local_shards_only_on_first_local_row() {
+    fn private_staging_selects_ordered_provenance_only_on_first_local_row() {
         use crate::attr_set::AttrSet;
         use crate::manager::RibManager;
         use crate::route::RouteOrigin;
@@ -105,8 +105,7 @@ mod tests {
                 group.table.local_export_source(&prefix, 0),
                 LocalExportSource::from_route(&route)
             );
-            let shards = if i == 1 { 1 } else { crate::fast_hash::SHARDS };
-            assert_eq!(group.table.local_source_shards(), shards);
+            assert_eq!(group.table.uses_ordered_local_sources(), i > 1);
             assert!(
                 group.rs_tagged.is_empty() && group.rs_named.is_empty() && group.rs_all.is_empty()
             );

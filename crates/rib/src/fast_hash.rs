@@ -300,15 +300,6 @@ impl<K: Eq + std::hash::Hash, V, const SPLIT: usize, const N: usize, const PRESI
         *self = Self::Split(shards);
     }
 
-    /// Start with independent empty shards before the first insert so a
-    /// paged producer never has to repartition a populated single table.
-    pub(crate) fn split_before_first_insert(&mut self) {
-        if let Self::One(one) = self {
-            assert!(one.is_empty(), "prepare shards before inserting any keys");
-            self.split();
-        }
-    }
-
     #[inline]
     pub(crate) fn get<Q>(&self, key: &Q) -> Option<&V>
     where
