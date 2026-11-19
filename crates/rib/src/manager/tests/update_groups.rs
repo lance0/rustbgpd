@@ -20109,3 +20109,79 @@ async fn check_policy_during_overflow(policy: OverlapPolicy) {
     check_overlap_founder(&mut first, &base, victim, sentinel, marker);
     check_overlap_founder(&mut second, &base, victim, sentinel, marker);
 }
+
+#[tokio::test]
+async fn closing_a_parked_policy_reply_cancels_forward_but_still_restores() {
+    for restore in [false, true] {
+        let (mut manager, members, mut receivers) = direct_clean_transition_manager(2, 0, None);
+        manager.outbound_row_credit_override = None;
+        distribute_direct_routes(&mut manager, OVERLAP_SOURCE, (0..1100).map(overlap_prefix));
+        for receiver in &mut receivers {
+            while receiver.try_recv().map(delivered).is_ok() {}
+        }
+        let old_group = manager.grouped_member_of(members[0]).unwrap();
+        manager.first_group_build_min_routes = 1;
+        let mut founder = join_overlap_founder(&mut manager, 1);
+        manager.advance_first_group_build();
+        assert!((0..1100).any(|i| manager.first_group_contains(Prefix::V4(overlap_prefix(i)))));
+
+        let replacements = members
+            .iter()
+            .map(|&peer| crate::update::PeerExportPolicyReplacement {
+                peer,
+                export_policy: None,
+            })
+            .collect();
+        if restore {
+            let (reply, mut response) = oneshot::channel();
+            manager.handle_update(RibUpdate::RestorePacedExportPolicies {
+                replacements,
+                cost: None,
+                reply,
+            });
+            assert_eq!(
+                response.try_recv().unwrap_err(),
+                oneshot::error::TryRecvError::Empty
+            );
+            drop(response);
+        } else {
+            let (reply, mut response) = oneshot::channel();
+            manager.handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+                replacements,
+                reply,
+            });
+            assert_eq!(
+                response.try_recv().unwrap_err(),
+                oneshot::error::TryRecvError::Empty
+            );
+            drop(response);
+        }
+        assert!(manager.first_group_pending_writer().is_some());
+        assert_eq!(manager.grouped_member_of(members[0]), Some(old_group));
+        let (tx, rx) = mpsc::channel(8);
+        manager.rx = rx;
+        let actor = tokio::spawn(manager.run_actor());
+        loop {
+            let update = fixture_update(founder.recv()).await;
+            if !update.end_of_rib.is_empty() {
+                assert_eq!(update.end_of_rib, ipv4_sendable());
+                break;
+            }
+        }
+        drop(tx);
+        let manager = actor.await.unwrap();
+        let destination = manager
+            .grouped_member_of(peer_v4(Ipv4Addr::new(10, 43, 0, 1)))
+            .unwrap();
+        assert_ne!(old_group, destination);
+        // A cost-less paced request applies exactly its first member. The
+        // abandoned forward batch would have committed both as a cohort.
+        assert_eq!(
+            manager.grouped_member_of(members[0]),
+            Some(if restore { destination } else { old_group })
+        );
+        assert_eq!(manager.export_policy_for(members[0]).is_none(), restore);
+        assert_eq!(manager.grouped_member_of(members[1]), Some(old_group));
+        assert!(manager.export_policy_for(members[1]).is_some());
+    }
+}
