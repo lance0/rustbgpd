@@ -342,7 +342,7 @@ async fn run_loop<F>(
 ) where
     F: UnicastFib,
 {
-    let mut owned = load_owned_state(&config);
+    let mut owned = load_owned_state(&config, &metrics);
     let mut unresolved = UnresolvedHolds::default();
     let mut interval = tokio::time::interval(RECONCILE_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -2001,8 +2001,7 @@ impl From<&FibTableConfig> for PersistedFibTableSignature {
 }
 
 impl PersistedFibRoute {
-    fn into_route(self) -> Option<FibRoute> {
-        let prefix = prefix_from_addr_len(self.prefix_addr, self.prefix_len)?;
+    fn target(&self, prefix: Prefix) -> Option<FibRouteTarget> {
         // v2/v3 carry `next_hops` (the full set) plus `next_hop` (the best); a v1
         // file carried only the single scalar `next_hop` (which is the best).
         // v3 also carries `weights` positionally aligned with `next_hops`; v4
@@ -2063,6 +2062,12 @@ impl PersistedFibRoute {
                 })
             })
             .unwrap_or(next_hops[0]);
+        Some(FibRouteTarget::from_set_with_best_hop(best, next_hops))
+    }
+
+    fn into_route(self) -> Option<FibRoute> {
+        let prefix = prefix_from_addr_len(self.prefix_addr, self.prefix_len)?;
+        let target = self.target(prefix)?;
         let key = FibRouteKey {
             table_id: self.table_id,
             metric: self.metric,
@@ -2071,7 +2076,7 @@ impl PersistedFibRoute {
         Some(FibRoute {
             table_name: self.table_name,
             key,
-            target: FibRouteTarget::from_set_with_best_hop(best, next_hops),
+            target,
             peer: self.peer,
             peer_scope: self
                 .peer_interface
@@ -2195,17 +2200,13 @@ fn quarantine_on_shape_mismatch(
     clippy::too_many_lines,
     reason = "one load path validates the envelope, table signatures, and both route lists"
 )]
-fn load_owned_state(config: &FibRuntimeConfig) -> FibOwnedState {
+fn load_owned_state(config: &FibRuntimeConfig, metrics: &BgpMetrics) -> FibOwnedState {
     let Some(path) = &config.owned_state_path else {
         return FibOwnedState::default();
     };
-    let bytes = match read_owned_state_file(
-        path,
-        config
-            .owned_state_directory
-            .as_deref()
-            .map(|directory| &directory.file),
-    ) {
+    let directory = config.owned_state_directory.as_ref().map(|dir| &dir.file);
+    let read_receipt = || read_owned_state_file(path, directory);
+    let bytes = match read_receipt() {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return FibOwnedState::default(),
         Err(e) => {
@@ -2213,7 +2214,7 @@ fn load_owned_state(config: &FibRuntimeConfig) -> FibOwnedState {
             return FibOwnedState::default();
         }
     };
-    let persisted = match serde_json::from_slice::<PersistedFibOwnedState>(&bytes) {
+    let mut persisted = match serde_json::from_slice::<PersistedFibOwnedState>(&bytes) {
         Ok(persisted) => persisted,
         Err(e) => {
             warn!(path = %path.display(), error = %e, "failed to parse general FIB owned-state file");
@@ -2237,6 +2238,9 @@ fn load_owned_state(config: &FibRuntimeConfig) -> FibOwnedState {
     }
     if quarantine_on_shape_mismatch(config, path, &persisted) {
         return FibOwnedState::default();
+    }
+    if persisted.version < OWNED_STATE_VERSION {
+        rewrite_legacy_owned_state(path, directory, &mut persisted, metrics, read_receipt);
     }
     // ADR-0079: per-table, set-wise signature comparison. A persisted
     // table's routes survive iff an IDENTICAL signature still exists in
@@ -2347,6 +2351,70 @@ fn load_owned_state(config: &FibRuntimeConfig) -> FibOwnedState {
         );
     }
     owned
+}
+
+/// Upgrade the recorded generations and both route lists before filtering for
+/// this boot's configuration. A restart may still use the other generation.
+fn rewrite_legacy_owned_state(
+    path: &Path,
+    directory: Option<&std::fs::File>,
+    persisted: &mut PersistedFibOwnedState,
+    metrics: &BgpMetrics,
+    read_back: impl FnOnce() -> io::Result<Vec<u8>>,
+) {
+    let old_version = persisted.version;
+    for route in persisted.routes.iter_mut().chain(&mut persisted.in_flight) {
+        if let Some(target) = prefix_from_addr_len(route.prefix_addr, route.prefix_len)
+            .and_then(|prefix| route.target(prefix))
+        {
+            let best = target.primary_next_hop();
+            route.next_hop = Some(best.addr);
+            route.next_hop_ifindex = best.scope.map(|scope| scope.ifindex);
+        }
+        if route.next_hops.is_empty() {
+            route.next_hops.extend(route.next_hop);
+        }
+        route.weights.resize(route.next_hops.len(), 1);
+        route.next_hop_ifindexes.resize(route.next_hops.len(), 0);
+    }
+    persisted.version = OWNED_STATE_VERSION;
+    let bytes = match serde_json::to_vec_pretty(persisted) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            metrics.record_fib_owned_state_persist_failure();
+            warn!(path = %path.display(), old_version, %error,
+                "failed to serialize general FIB owned-state rewrite");
+            return;
+        }
+    };
+    let published = publish_owned_state_bytes(path, directory, &bytes);
+    if let Err(error) = &published {
+        metrics.record_fib_owned_state_persist_failure();
+        match error {
+            AtomicPublishError::NotPublished(error) => {
+                warn!(path = %path.display(), old_version, %error,
+                    "general FIB owned-state rewrite failed before publication");
+                return;
+            }
+            AtomicPublishError::PublicationAmbiguous(error) => {
+                warn!(path = %path.display(), old_version, %error,
+                    "general FIB owned-state rewrite is visible but directory sync failed");
+            }
+        }
+    }
+    let error = match read_back() {
+        Ok(actual) if actual == bytes => return,
+        Ok(_) => io::Error::new(
+            io::ErrorKind::InvalidData,
+            "published receipt differs from the expected v5 bytes",
+        ),
+        Err(error) => error,
+    };
+    if published.is_ok() {
+        metrics.record_fib_owned_state_persist_failure();
+    }
+    warn!(path = %path.display(), old_version, %error,
+        "failed to verify general FIB owned-state rewrite on disk");
 }
 
 fn persist_owned_state(
@@ -2526,13 +2594,18 @@ fn write_owned_state_at(
         std::fs::create_dir_all(parent)
             .map_err(|e| not_published(format!("create state dir: {e}")))?;
     }
-    // Temp file, file fsync, rename, directory fsync; a failed attempt
-    // removes its temp file and leaves the previous file intact. The rename
-    // replaces a planted symlink instead of writing through it.
+    publish_owned_state_bytes(path, directory, &bytes)
+}
+
+fn publish_owned_state_bytes(
+    path: &Path,
+    directory: Option<&std::fs::File>,
+    bytes: &[u8],
+) -> Result<(), AtomicPublishError> {
     if let Some(directory) = directory {
-        crate::confirm_journal::write_state_at(directory, path, &bytes, true)
+        crate::confirm_journal::write_state_at(directory, path, bytes, true)
     } else {
-        crate::confirm_journal::write_state_atomic(path, &bytes)
+        crate::confirm_journal::write_state_atomic(path, bytes)
     }
 }
 
@@ -5145,8 +5218,7 @@ metric = 200
         let expected = fib_route(v4(24), ip("192.0.2.1"));
         assert_eq!(owned.routes.len(), 1);
         assert_eq!(owned.routes.get(&expected.key), Some(&expected));
-        // Accepted in place, not quarantined.
-        assert!(path.exists());
+        assert_rewritten_and_restartable(&config, &owned);
         assert!(!stale_owned_state_path(&path).exists());
     }
 
@@ -5208,6 +5280,39 @@ metric = 200
         );
     }
 
+    fn load_owned_state(config: &FibRuntimeConfig) -> FibOwnedState {
+        super::load_owned_state(config, &BgpMetrics::new())
+    }
+
+    fn assert_rewritten_and_restartable(config: &FibRuntimeConfig, owned: &FibOwnedState) {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let path = config.owned_state_path.as_ref().unwrap();
+        let bytes = std::fs::read(path).unwrap();
+        let stored: PersistedFibOwnedState = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(stored.version, OWNED_STATE_VERSION);
+        for route in stored.routes.iter().chain(&stored.in_flight) {
+            assert_eq!(owned_state_shape_mismatch(stored.version, route), None);
+        }
+        let file = std::fs::File::open(path).unwrap();
+        let restarted = load_owned_state(config);
+        assert_eq!(restarted, *owned);
+        for route in stored.routes {
+            let scalar = (route.next_hop, route.next_hop_ifindex);
+            let key = route.into_route().unwrap().key;
+            let best = owned.routes[&key].target.primary_next_hop();
+            assert_eq!(
+                scalar,
+                (Some(best.addr), best.scope.map(|scope| scope.ifindex))
+            );
+            assert_eq!(restarted.routes[&key].target.primary_next_hop(), best);
+        }
+        assert_eq!(
+            std::fs::metadata(path).unwrap().ino(),
+            file.metadata().unwrap().ino()
+        );
+    }
+
     /// Owned-state envelope JSON around a single route, with the "edge" table
     /// signature matching [`config`]. Optional signature keys are omitted:
     /// they deserialize identically whether absent (v1 files) or `null`
@@ -5239,6 +5344,7 @@ metric = 200
         config.owned_state_path = Some(path.clone());
         write_private_fixture(&path, fixture).unwrap();
         let owned = load_owned_state(&config);
+        assert_rewritten_and_restartable(&config, &owned);
         (dir, path, owned)
     }
 
@@ -5270,6 +5376,10 @@ metric = 200
             [ip("192.0.2.1"), ip("192.0.2.2")].map(FibNextHop::equal),
         );
         assert_eq!(owned.routes.get(&expected.key), Some(&expected));
+        assert_eq!(
+            owned.routes[&expected.key].target.primary(),
+            ip("192.0.2.2")
+        );
         assert!(path.exists());
         assert!(!stale_owned_state_path(&path).exists());
 
@@ -5364,6 +5474,133 @@ metric = 200
         expected.target = FibRouteTarget::from_next_hops([FibNextHop::scoped(ip("fe80::2"), 7)]);
         assert_eq!(owned.routes.get(&expected.key), Some(&expected));
         assert!(!stale_owned_state_path(&path).exists());
+    }
+
+    #[test]
+    fn owned_state_rewrite_failure_keeps_old_bytes_and_loaded_ownership() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fib-owned.json");
+        let mut config = config();
+        config.owned_state_path = Some(path.clone());
+        let mut route = persisted_v5_route();
+        route.weights.clear();
+        route.next_hop_ifindexes.clear();
+        let fixture = owned_state_fixture(2, &serde_json::to_string(&route).unwrap());
+        write_private_fixture(&path, &fixture).unwrap();
+
+        let metrics = metrics();
+        crate::confirm_journal::FAIL_STAGE_PAYLOAD_SYNC.set(true);
+        let owned = super::load_owned_state(&config, &metrics);
+        crate::confirm_journal::FAIL_STAGE_PAYLOAD_SYNC.set(false);
+        assert_eq!(owned.routes.len(), 1);
+        assert!(persist_failures(&metrics) > 0.0);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), fixture);
+        assert_eq!(load_owned_state(&config), owned);
+        assert_rewritten_and_restartable(&config, &owned);
+    }
+
+    #[test]
+    fn owned_state_rewrite_reports_a_changed_or_missing_receipt_at_readback() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fib-owned.json");
+        let mut route = persisted_v5_route();
+        route.next_hop_ifindexes.clear();
+        let fixture = owned_state_fixture(3, &serde_json::to_string(&route).unwrap());
+        for missing in [false, true] {
+            write_private_fixture(&path, &fixture).unwrap();
+            let mut legacy = serde_json::from_str(&fixture).unwrap();
+            let metrics = metrics();
+            let mut read_back = false;
+            rewrite_legacy_owned_state(&path, None, &mut legacy, &metrics, || {
+                let mut published: PersistedFibOwnedState =
+                    serde_json::from_slice(&read_owned_state_file(&path, None)?).unwrap();
+                assert_eq!(published.version, 5);
+                read_back = true;
+                if missing {
+                    std::fs::remove_file(&path)?;
+                } else {
+                    published.routes[0].path_id += 1;
+                    write_private_fixture(&path, serde_json::to_vec_pretty(&published).unwrap())?;
+                }
+                read_owned_state_file(&path, None)
+            });
+            assert!(read_back);
+            assert!(persist_failures(&metrics) >= 1.0);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn owned_state_rewrite_directory_sync_failure_keeps_visible_v5_and_ownership() {
+        use nix::fcntl::{OFlag, open};
+        use nix::sys::stat::Mode;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().join("state");
+        let path = state_dir.join("fib-owned.json");
+        let mut config = config();
+        let mut pinned = crate::PinnedRuntimeStateDirectory::prepare(&state_dir).unwrap();
+        // O_PATH permits openat and renameat, but fsync on the directory fails.
+        pinned.file = open(
+            &state_dir,
+            OFlag::O_PATH | OFlag::O_DIRECTORY,
+            Mode::empty(),
+        )
+        .unwrap()
+        .into();
+        config.owned_state_directory = Some(Arc::new(pinned));
+        config.owned_state_path = Some(path.clone());
+        let mut route = persisted_v5_route();
+        route.next_hop_ifindexes.clear();
+        let fixture = owned_state_fixture(3, &serde_json::to_string(&route).unwrap());
+        write_private_fixture(&path, fixture).unwrap();
+
+        let metrics = metrics();
+        let owned = super::load_owned_state(&config, &metrics);
+        assert!(persist_failures(&metrics) >= 1.0);
+        assert_eq!(owned.routes.len(), 1);
+        assert_rewritten_and_restartable(&config, &owned);
+    }
+
+    #[test]
+    fn owned_state_rewrite_preserves_both_generations_in_the_pinned_directory() {
+        let state = crate::test_support::RuntimeStateRedirect::new();
+        let path = state.path.join("fib-owned.json");
+        let mut config = config();
+        config.owned_state_directory = Some(Arc::new(
+            crate::PinnedRuntimeStateDirectory::prepare(&state.path).unwrap(),
+        ));
+        config.owned_state_path = Some(path.clone());
+        let mut other = config.clone();
+        other.tables[0].max_routes = Some(100);
+        let mut route = persisted_v5_route();
+        route.next_hop = Some(ip("fe80::2"));
+        route.next_hops = vec![ip("fe80::2"); 2];
+        route.next_hop_ifindexes = vec![13, 7];
+        let legacy = PersistedFibOwnedState {
+            version: 4,
+            tables: table_signatures(&config.tables),
+            transition_tables: table_signatures(&other.tables),
+            routes: vec![route],
+            in_flight: vec![persisted_v5_route()],
+        };
+        write_private_fixture(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        state.redirect();
+
+        let metrics = metrics();
+        let owned = super::load_owned_state(&config, &metrics);
+        assert!(persist_failures(&metrics) < 1.0);
+        assert_eq!(owned.routes.len(), 1);
+        assert_eq!(owned.in_flight.len(), 1);
+        let stored: PersistedFibOwnedState =
+            serde_json::from_slice(&std::fs::read(state.original.join("fib-owned.json")).unwrap())
+                .unwrap();
+        assert_eq!(stored.version, 5);
+        assert_eq!(stored.routes[0].next_hop_ifindex, Some(13));
+        assert_eq!(stored.transition_tables, legacy.transition_tables);
+        assert_eq!(stored.tables, legacy.tables);
+        assert_eq!(load_owned_state(&other), owned);
+        assert!(state.replacement.read_dir().unwrap().next().is_none());
     }
 
     /// A syntactically valid current-generation route for shape-mismatch

@@ -1679,6 +1679,14 @@ running daemon, not the file on disk.
    for every expected session to return to `Established`; `systemd` active
    alone does not prove routing convergence.
 
+   If the general FIB installer has a v1–v4 `fib-owned.json`, start a release
+   with the verified v5 rewrite using the existing FIB configuration and
+   runtime state directory before upgrading to one that requires v5.
+   The v5 writer shipped in v0.29.0, but later releases could leave older
+   receipts untouched when routes stayed the same. After startup, check that
+   `fib-owned.json` in the configured `runtime_state_dir` has `"version": 5`.
+   Resolve any write or verification error in the daemon log before continuing.
+
 ### Rollback
 
 A rollback is another compatibility migration, not merely a package command.
