@@ -3,6 +3,10 @@
 use super::{PeerId, RibManager, RibUpdate};
 use rustbgpd_telemetry::metrics::RibActorTurnKind;
 
+// Each intent can carry a whole policy batch. Keep this window small even
+// when the route-ingest mailbox has thousands of slots.
+const MAX_DEFERRED_INTENTS: usize = 8;
+
 pub(super) enum Intake {
     Apply,
     Retain,
@@ -53,7 +57,9 @@ impl RibManager {
         let next = operation(message);
         let kind = next.actor_turn_kind();
         if kind == RibActorTurnKind::OutboundPolicy {
-            return if self.first_group_deferred_intents.len() < self.rx.max_capacity() {
+            return if self.first_group_deferred_intents.len()
+                < self.rx.max_capacity().min(MAX_DEFERRED_INTENTS)
+            {
                 Intake::Retain
             } else {
                 Intake::Hold
