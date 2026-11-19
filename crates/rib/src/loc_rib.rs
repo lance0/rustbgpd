@@ -3,6 +3,7 @@
 //! Stores the single best route per prefix, selected via `best_path_cmp`.
 
 use std::cmp::Ordering;
+use std::collections::VecDeque;
 use std::time::SystemTime;
 
 use rustbgpd_wire::{Afi, AsPath, EvpnRouteKey, Origin, PathAttribute, Prefix};
@@ -49,7 +50,7 @@ struct RegistrationScan {
     bucket: usize,
     discovery_finished: bool,
     repair_due: bool,
-    repairs: Vec<Prefix>,
+    repairs: VecDeque<Prefix>,
     queued: FastSet<Prefix>,
     overflow: bool,
 }
@@ -62,7 +63,7 @@ impl RegistrationScan {
         if self.repairs.len() == REGISTRATION_REPAIR_LIMIT {
             self.overflow = !self.queued.contains(&key);
         } else if self.queued.insert(key) {
-            self.repairs.push(key);
+            self.repairs.push_back(key);
         }
     }
 
@@ -344,7 +345,8 @@ impl LocRib {
             scan.repair_due = false;
             let count = scan.repairs.len().min(REGISTRATION_PAGE_SIZE);
             page.keys.reserve_exact(count);
-            for key in scan.repairs.drain(scan.repairs.len() - count..) {
+            // Changes to just-serviced keys rejoin behind older outstanding repairs.
+            for key in scan.repairs.drain(..count) {
                 scan.queued.remove(&key);
                 page.keys.push(key);
             }
@@ -2057,6 +2059,8 @@ impl Default for LocRib {
 
 #[cfg(test)]
 mod tests {
+    mod registration_repairs;
+
     use crate::PeerId;
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::Arc;
