@@ -610,8 +610,13 @@ impl RibManager {
         }
         for delta in &out.deltas {
             checkpoint();
-            if speculative && delta.local_source.is_some() {
-                group.table.prepare_first_group_local_sources();
+            if speculative {
+                if delta.new.is_some() && delta.old_source.is_none() {
+                    group.table.prepare_first_group_insert();
+                }
+                if delta.local_source.is_some() {
+                    group.table.prepare_first_group_local_sources();
+                }
             }
             group.apply_delta(delta);
         }

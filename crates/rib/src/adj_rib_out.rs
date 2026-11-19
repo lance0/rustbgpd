@@ -12,7 +12,7 @@ use rustbgpd_wire::{Afi, EvpnRouteKey, Prefix, Safi};
 use smallvec::SmallVec;
 
 use crate::fast_hash::{FastMap as HashMap, FastState, LargeShardedMap, ShardedMap};
-use crate::loc_rib::{FamilyLens, SecondFamilyCounts, split, track};
+use crate::loc_rib::{FamilyLens, REGISTRATION_PAGE_SIZE, SecondFamilyCounts, split, track};
 use crate::prefix_map::FamilyPrefixMap;
 use crate::route::{
     BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecKey, FlowSpecRoute,
@@ -551,6 +551,18 @@ impl AdjRibOut {
                         source.path_id == source_path_id && !source.deferral_exempt
                     })
             })
+    }
+
+    /// A new private unicast row can grow the first segment geometrically
+    /// until one page is full. Reserve the rest before a later growth could
+    /// relocate more than one page of initialized route bodies.
+    pub(crate) fn prepare_first_group_insert(&mut self) {
+        if self.routes.slot_count() == REGISTRATION_PAGE_SIZE
+            && self.routes.len() == REGISTRATION_PAGE_SIZE
+        {
+            self.routes
+                .reserve_with(SEGMENT - REGISTRATION_PAGE_SIZE, &mut || {});
+        }
     }
 
     /// Called only when a private first-group page is about to commit local
