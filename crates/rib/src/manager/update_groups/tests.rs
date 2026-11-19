@@ -7539,8 +7539,14 @@ fn adopted_optional_group_keeps_otc_diagnostics_current_for_updates_and_withdraw
     group.local_role = Some(BgpRole::Customer);
     group.prepare_optional_retirement();
     m.group_ribs.insert(PCB_GID, group);
-    seed(&mut m, with_otc_attr(cand(p1, OTHER1, 200)));
-    seed(&mut m, cand(p2, OTHER2, 200));
+    let inbound = |prefix, peer, pref, path_id| {
+        let mut route = cand(prefix, peer, pref);
+        route.path_id = path_id;
+        route
+    };
+    seed(&mut m, with_otc_attr(inbound(p1, OTHER1, 200, 41)));
+    seed(&mut m, with_otc_attr(inbound(p1, OTHER2, 100, 42)));
+    seed(&mut m, inbound(p2, OTHER2, 200, 77));
     let scope = HashSet::from([p1, p2]);
     let _ = m.recompute_best(&scope);
     let _ = stage_pcb(&mut m, &[p1, p2]);
@@ -7549,15 +7555,28 @@ fn adopted_optional_group_keeps_otc_diagnostics_current_for_updates_and_withdraw
         .insert(MEMBER, GroupMembership::Grouped(PCB_GID));
     m.install_group_member(PCB_GID, MEMBER);
 
-    let check = |m: &RibManager, blocked: Option<Prefix>, advertised| {
+    let check = |m: &RibManager, blocked: Option<(Prefix, PeerId, u32)>, advertised| {
         let group = &m.group_ribs[&PCB_GID];
         let denied: Vec<_> = group
             .otc_blocked_for_member(MEMBER, None)
             .iter()
-            .map(|r| r.prefix)
+            .map(|r| (r.prefix, r.peer, r.path_id))
             .collect();
-        assert_eq!(denied, blocked.into_iter().collect::<Vec<_>>());
-        assert_eq!(group.residue_prefixes().collect::<Vec<_>>(), denied);
+        if let Some((prefix, peer, received_path)) = blocked {
+            let best = m.loc_rib.get(&prefix).unwrap();
+            assert_eq!((best.peer, best.path_id), (peer, received_path));
+        }
+        assert_eq!(
+            denied,
+            blocked
+                .map(|(p, peer, _)| (p, peer, 0))
+                .into_iter()
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            group.residue_prefixes().collect::<Vec<_>>(),
+            blocked.map(|(p, _, _)| p).into_iter().collect::<Vec<_>>()
+        );
         assert_eq!(
             m.grouped_advertised_routes_iter(MEMBER)
                 .unwrap()
@@ -7567,13 +7586,17 @@ fn adopted_optional_group_keeps_otc_diagnostics_current_for_updates_and_withdraw
         );
         assert_eq!(m.grouped_advertised_count(MEMBER), Some(1));
     };
-    check(&m, Some(p1), p2);
-    seed(&mut m, cand(p1, OTHER1, 300));
-    seed(&mut m, with_otc_attr(cand(p2, OTHER2, 300)));
+    check(&m, Some((p1, OTHER1, 41)), p2);
+    assert!(m.ribs.get_mut(&OTHER1).unwrap().withdraw(&p1, 41));
+    let _ = m.recompute_best(&HashSet::from([p1]));
+    let _ = stage_pcb(&mut m, &[p1]);
+    check(&m, Some((p1, OTHER2, 42)), p2);
+    seed(&mut m, inbound(p1, OTHER2, 300, 42));
+    seed(&mut m, with_otc_attr(inbound(p2, OTHER2, 300, 77)));
     let _ = m.recompute_best(&scope);
     let _ = stage_pcb(&mut m, &[p1, p2]);
-    check(&m, Some(p2), p1);
-    unseed(&mut m, OTHER2, p2);
+    check(&m, Some((p2, OTHER2, 77)), p1);
+    assert!(m.ribs.get_mut(&OTHER2).unwrap().withdraw(&p2, 77));
     let _ = m.recompute_best(&HashSet::from([p2]));
     let _ = stage_pcb(&mut m, &[p2]);
     check(&m, None, p1);
