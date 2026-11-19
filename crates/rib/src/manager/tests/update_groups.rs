@@ -16613,6 +16613,59 @@ fn prestaged_inventory_recheck_catches_tag_only_transition() {
     ));
 }
 
+#[test]
+fn optional_eviction_detaches_both_change_logs_and_retires_the_completed_probe() {
+    let (mut manager, peers, _receivers) = direct_clean_transition_manager(2, 3, None);
+    let policy = community_chain(0xFDE8_2102);
+    let (source, destination) = complete_prestage(&mut manager, peers[0], &policy);
+    let inventory = manager.prestaged_inventory.as_ref().unwrap();
+    assert_eq!(inventory.announce.len(), 3);
+    let last = Arc::downgrade(&inventory.announce.last().unwrap().attributes);
+    let last_refs = last.strong_count();
+    assert_eq!(inventory.probe.as_ref().unwrap().encoded_lengths.len(), 3);
+
+    let key = (Prefix::V4(fixture_prefix(200)), 0);
+    for gid in [source, destination] {
+        manager
+            .group_ribs
+            .get_mut(&gid)
+            .unwrap()
+            .inventory_log
+            .as_mut()
+            .unwrap()
+            .insert(key, ());
+    }
+    let mut retirement = manager.take_optional_inventory_retirement();
+    assert!(manager.prestaged_inventory.is_none());
+    assert!(manager.group_ribs[&source].inventory_log.is_none());
+    assert!(manager.group_ribs[&destination].inventory_log.is_none());
+    assert!(!retirement.retire_page(&mut 0));
+    assert_eq!(
+        last.strong_count(),
+        last_refs,
+        "detach does not release rows"
+    );
+    let mut allowance = 1;
+    assert!(!retirement.retire_page(&mut allowance));
+    assert_eq!(allowance, 0);
+    assert_eq!(last.strong_count(), last_refs - 1);
+
+    // Two remaining row bodies, their vector allocation, the next-hop and
+    // encoded-length allocations, the encoder snapshot, and the two logs.
+    let mut allowance = 7;
+    assert!(!retirement.retire_page(&mut allowance));
+    assert_eq!(allowance, 0);
+    let mut allowance = 2;
+    assert!(retirement.retire_page(&mut allowance));
+    assert_eq!(allowance, 1);
+    assert!(retirement.retire_page(&mut 0));
+    assert!(
+        manager
+            .take_optional_inventory_retirement()
+            .retire_page(&mut 0)
+    );
+}
+
 /// An authoritative batch with duplicate targets takes the serial
 /// duplicate fallback; it never consumes the completed prestaged inventory,
 /// so it must still retire it and stop both groups' key logs.

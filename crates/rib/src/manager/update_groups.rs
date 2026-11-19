@@ -58,7 +58,7 @@ pub(in crate::manager) use release_fallback::{ReleaseFallback, RsFallback};
 mod policy_transition;
 pub(in crate::manager) mod recovery_provenance;
 pub(in crate::manager) use policy_transition::{
-    PrestagedInventoryOutcome, PrestagedTransitionInventory,
+    OptionalInventoryRetirement, PrestagedInventoryOutcome, PrestagedTransitionInventory,
 };
 mod staging;
 mod views;

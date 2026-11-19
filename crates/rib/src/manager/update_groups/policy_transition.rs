@@ -103,6 +103,104 @@ pub(in crate::manager) struct PrestagedTransitionInventory {
     tagged: ShardedMap<(Prefix, u32), ()>,
 }
 
+/// Detached scratch from an evicted optional policy destination. The two
+/// published groups stop recording writes at detach, before either can be
+/// removed or recreated. The slot owner supplies one shared poll budget.
+pub(in crate::manager) struct OptionalInventoryRetirement {
+    inventory: Option<PrestagedTransitionInventory>,
+    logs: [Option<ShardedMap<(Prefix, u32), ()>>; 2],
+}
+
+impl OptionalInventoryRetirement {
+    pub(in crate::manager) fn retire_page(&mut self, budget: &mut usize) -> bool {
+        let Some(inventory) = &mut self.inventory else {
+            return true;
+        };
+        let PrestagedTransitionInventory {
+            source: _,
+            destination: _,
+            rs_asns,
+            cursor: _,
+            complete: _,
+            announce,
+            next_hop_override,
+            probe,
+            failed,
+            tagged,
+        } = inventory;
+        if !retire_inventory_vec(announce, budget)
+            || !retire_inventory_vec(next_hop_override, budget)
+            || !retire_inventory_vec(rs_asns, budget)
+        {
+            return false;
+        }
+        if let Some(proof) = probe {
+            if !retire_inventory_vec(&mut proof.encoded_lengths, budget) || *budget == 0 {
+                return false;
+            }
+            // Release the immutable encoder snapshot after its lengths.
+            *budget -= 1;
+            *probe = None;
+        }
+        if !retire_plain_shards(failed, budget) || !retire_plain_shards(tagged, budget) {
+            return false;
+        }
+        for log in self.logs.iter_mut().flatten() {
+            if !retire_plain_shards(log, budget) {
+                return false;
+            }
+        }
+        self.inventory = None;
+        true
+    }
+}
+
+/// Charge each owned row destructor and the backing allocation separately.
+/// Plain buffers (next hops, RS ASNs, encoded lengths) need just the release.
+fn retire_inventory_vec<T>(items: &mut Vec<T>, budget: &mut usize) -> bool {
+    if std::mem::needs_drop::<T>() {
+        let count = items.len().min(*budget);
+        items.truncate(items.len() - count);
+        *budget -= count;
+        if !items.is_empty() {
+            return false;
+        }
+    }
+    if std::mem::size_of::<T>() > 0 && items.capacity() > 0 {
+        if *budget == 0 {
+            return false;
+        }
+        *budget -= 1;
+        *items = Vec::new();
+    }
+    true
+}
+
+/// Both the change logs and the failed/tagged proofs contain only Copy
+/// entries. Hashbrown drops such a table by freeing its allocation, without
+/// iterating or clearing buckets. Only the fixed shard headers are inspected
+/// here, even when a mostly empty shard retains a large allocation.
+fn retire_plain_shards<K: Copy, V: Copy>(map: &mut ShardedMap<K, V>, budget: &mut usize) -> bool {
+    for shard in map.shards_mut() {
+        if shard.allocation_size() == 0 {
+            continue;
+        }
+        if *budget == 0 {
+            return false;
+        }
+        *budget -= 1;
+        *shard = crate::fast_hash::Shard::new();
+    }
+    if matches!(map, ShardedMap::Split(_)) {
+        if *budget == 0 {
+            return false;
+        }
+        *budget -= 1;
+        *map = ShardedMap::default();
+    }
+    true
+}
+
 /// What the fenced re-check made of a prestaged inventory.
 pub(in crate::manager) enum PrestagedInventoryOutcome {
     /// Equal to a fenced full walk of the current tables.
@@ -416,14 +514,11 @@ impl RibManager {
         destination: usize,
         rs_asns: &[u32],
     ) -> PrestagedInventoryOutcome {
-        let Some(mut prestaged) = self.prestaged_inventory.take() else {
+        let OptionalInventoryRetirement { inventory, logs } =
+            self.take_optional_inventory_retirement();
+        let Some(mut prestaged) = inventory else {
             return PrestagedInventoryOutcome::Unusable;
         };
-        let logs = [prestaged.source, prestaged.destination].map(|gid| {
-            self.group_ribs
-                .get_mut(&gid)
-                .and_then(|group| group.inventory_log.take())
-        });
         let usable = (prestaged.source, prestaged.destination) == (source, destination)
             && prestaged.complete
             && logs.iter().all(Option::is_some)
@@ -652,22 +747,35 @@ impl RibManager {
         PrestagedInventoryOutcome::Ready(Box::new(inventory), prestaged.probe.take())
     }
 
+    /// Transfer a completed or partial optional inventory to its retiring
+    /// slot. A missing group has already released its own log.
+    pub(in crate::manager) fn take_optional_inventory_retirement(
+        &mut self,
+    ) -> OptionalInventoryRetirement {
+        let inventory = self.prestaged_inventory.take();
+        let logs = match &inventory {
+            Some(state) => [state.source, state.destination].map(|gid| {
+                self.group_ribs
+                    .get_mut(&gid)
+                    .and_then(|group| group.inventory_log.take())
+            }),
+            None => [None, None],
+        };
+        OptionalInventoryRetirement { inventory, logs }
+    }
+
     /// Drop any prestaged inventory and stop its groups' key logs. Every
     /// path that retires or hands off a prepared destination calls this.
     pub(in crate::manager) fn retire_prestaged_transition_inventory(&mut self) {
-        let Some(mut prestaged) = self.prestaged_inventory.take() else {
+        let OptionalInventoryRetirement { inventory, logs } =
+            self.take_optional_inventory_retirement();
+        let Some(mut prestaged) = inventory else {
             return;
         };
-        for gid in [prestaged.source, prestaged.destination] {
-            if let Some(mut log) = self
-                .group_ribs
-                .get_mut(&gid)
-                .and_then(|group| group.inventory_log.take())
-            {
-                crate::adj_rib_out::release_sharded_map(&mut log, &mut || {
-                    self.replacement_checkpoint(false);
-                });
-            }
+        for mut log in logs.into_iter().flatten() {
+            crate::adj_rib_out::release_sharded_map(&mut log, &mut || {
+                self.replacement_checkpoint(false);
+            });
         }
         if let Some(mut probe) = prestaged.probe.take() {
             probe.retire_with(&mut || self.replacement_checkpoint(false));
@@ -1334,6 +1442,62 @@ mod growth_tests {
     use crate::test_support::make_route_with_lp;
     use rustbgpd_wire::{Afi, Ipv4Prefix, PathAttribute, Safi};
     use std::net::Ipv4Addr;
+
+    #[test]
+    fn optional_inventory_releases_sparse_proof_allocations_one_at_a_time() {
+        use crate::fast_hash::{SHARD_SPLIT_AT, SHARDS};
+
+        let mut proof = ShardedMap::with_capacity(SHARD_SPLIT_AT);
+        let key = (Prefix::V4(Ipv4Prefix::new(Ipv4Addr::LOCALHOST, 32)), 0);
+        proof.insert(key, "source flip");
+        assert!(proof.remove(&key).is_some());
+        assert!(proof.is_empty());
+        for released in 1..=SHARDS {
+            let mut allowance = 1;
+            assert!(!retire_plain_shards(&mut proof, &mut allowance));
+            assert_eq!(allowance, 0);
+            assert_eq!(
+                proof
+                    .shards()
+                    .iter()
+                    .filter(|s| s.allocation_size() > 0)
+                    .count(),
+                SHARDS - released,
+                "empty buckets do not require a scan; each remaining shard owns storage"
+            );
+        }
+        let mut allowance = 2;
+        assert!(retire_plain_shards(&mut proof, &mut allowance));
+        assert_eq!(allowance, 1, "release the split header allocation");
+        assert!(matches!(proof, ShardedMap::One(_)));
+    }
+
+    #[test]
+    fn optional_inventory_charges_every_owned_route_and_the_final_buffer() {
+        let route = make_route_with_lp(
+            Ipv4Prefix::new(Ipv4Addr::LOCALHOST, 32),
+            Ipv4Addr::LOCALHOST,
+            100,
+        );
+        let attrs = std::sync::Arc::downgrade(&route.attributes);
+        let mut rows = vec![route; 2049];
+        let initial_refs = attrs.strong_count();
+        for released in [1024, 2048] {
+            let mut allowance = 1024;
+            assert!(!retire_inventory_vec(&mut rows, &mut allowance));
+            assert_eq!(allowance, 0);
+            assert_eq!(rows.len(), 2049 - released);
+            assert_eq!(attrs.strong_count(), initial_refs - released);
+        }
+        let mut allowance = 1;
+        assert!(!retire_inventory_vec(&mut rows, &mut allowance));
+        assert_eq!(allowance, 0);
+        assert!(rows.is_empty() && rows.capacity() >= 2049);
+        let mut allowance = 2;
+        assert!(retire_inventory_vec(&mut rows, &mut allowance));
+        assert_eq!(allowance, 1);
+        assert_eq!(rows.capacity(), 0);
+    }
 
     #[test]
     fn dirty_union_reserves_overlap_once_before_filling() {
