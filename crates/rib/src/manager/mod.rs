@@ -938,6 +938,7 @@ pub struct RibManager {
     first_group_build: Option<Box<first_group_build::FirstGroupBuild>>,
     /// Complete private-origin table handed to policy, until its first member binds.
     paced_policy_destination: Option<usize>,
+    optional_destination_retirement: Option<Box<first_group_build::OptionalDestinationRetirement>>,
     #[cfg(test)]
     first_group_build_min_routes: usize,
     /// When the next `bgp_rib_outbound_registration_pending_*` sample runs.
@@ -3066,6 +3067,7 @@ impl RibManager {
             pending_initial_registrations: VecDeque::new(),
             first_group_build: None,
             paced_policy_destination: None,
+            optional_destination_retirement: None,
             #[cfg(test)]
             first_group_build_min_routes: INITIAL_DUMP_DEFER_MIN_ROUTES,
             registration_wait_sample_at: None,
@@ -4700,14 +4702,15 @@ impl RibManager {
                 self.advance_first_group_build();
                 return;
             }
+            if self.registration_waits_for_optional_destination(peer) {
+                self.pending_initial_registrations.push_back(peer);
+                return;
+            }
             if let Some((gid, session_id, sender)) = self.first_group_candidate(peer) {
                 // Rotate the queue so another group's warm registration can
                 // proceed while this cold table is being staged.
                 self.pending_initial_registrations.push_back(peer);
-                if self.prestaging_destination(gid) {
-                    return;
-                }
-                if self.first_group_slot_available() {
+                if self.claim_registration_slot(gid) {
                     self.start_first_group(peer, gid, session_id, sender);
                 }
                 if self.first_group_build.is_some() {
@@ -7903,6 +7906,7 @@ impl RibManager {
         let mut release_primary_due = true;
         let mut registration_primary_due = true;
         let mut registration_search = 0;
+        let mut optional_registration_due = false;
 
         // A deferred attribute sweep must also run when UPDATE traffic stops.
         let attr_gc_sleep = tokio::time::sleep(ATTR_INTERN_GC_INTERVAL);
@@ -8419,7 +8423,9 @@ impl RibManager {
             // back under the transition fence. Readiness and a bounded
             // query budget are served every iteration, mirroring the
             // paced-flush seams.
-            if self.pending_destination_prestage.is_some() {
+            if self.pending_destination_prestage.is_some()
+                || self.optional_destination_retirement_active()
+            {
                 let primary_since =
                     *prestage_primary_since.get_or_insert_with(std::time::Instant::now);
                 let slice_owed = primary_since.elapsed() >= self.flush_poll_budget
@@ -8429,7 +8435,20 @@ impl RibManager {
                 }
                 prestage_primary_since = None;
                 self.drain_readiness_queries(None);
-                self.advance_destination_prestage();
+                if optional_registration_due
+                    && !self.pending_initial_registrations.is_empty()
+                    && self.pending_route_batches.is_empty()
+                {
+                    self.advance_pending_initial_registration();
+                    optional_registration_due = false;
+                } else {
+                    if self.optional_destination_retirement_active() {
+                        self.advance_optional_destination_retirement();
+                    } else {
+                        self.advance_destination_prestage();
+                    }
+                    optional_registration_due = true;
+                }
                 self.drain_queries(QUERY_BUDGET_PER_CHUNK);
                 tokio::task::yield_now().await;
                 continue;

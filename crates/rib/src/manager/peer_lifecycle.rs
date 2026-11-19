@@ -2768,6 +2768,7 @@ impl RibManager {
         if (actor_busy && dump_expensive)
             || candidate.is_some()
             || self.registration_waits_for_first_group(peer)
+            || self.registration_waits_for_optional_destination(peer)
         {
             if !self.pending_initial_registrations.contains(&peer) {
                 debug!(
@@ -2778,8 +2779,7 @@ impl RibManager {
                 self.pending_initial_registrations.push_back(peer);
             }
             if let Some((gid, session, sender)) = candidate
-                && self.first_group_slot_available()
-                && !self.prestaging_destination(gid)
+                && self.claim_registration_slot(gid)
             {
                 self.start_first_group(peer, gid, session, sender);
             }
@@ -3178,6 +3178,7 @@ impl RibManager {
             // `MAX_JOIN_COHORT - 1` members join it.
             let joins = examined < MAX_JOIN_COHORT_EXAMINED
                 && members.len() < MAX_JOIN_COHORT - 1
+                && !self.registration_waits_for_optional_destination(peer)
                 && self
                     .live_sessions
                     .get(&peer)

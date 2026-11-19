@@ -1,8 +1,11 @@
 //! Build a cold registration's unicast table privately, one actor turn at a time.
 
+use std::collections::BTreeSet;
+
+use rustbgpd_wire::Prefix;
 use tokio::sync::mpsc;
 
-use super::update_groups::GroupRibOut;
+use super::update_groups::{GroupRibOut, OptionalGroupRetirement, OptionalInventoryRetirement};
 use super::{OutboundRouteUpdate, PeerId, RibManager};
 use crate::loc_rib::{REGISTRATION_PAGE_SIZE, RegistrationScanStatus};
 use crate::update::RibUpdate;
@@ -20,6 +23,15 @@ pub(super) struct FirstGroupBuild {
     // Optional prepare belongs to the exact source cohort and session that asked.
     prepare_source: Option<(usize, Waiter)>,
     table: GroupRibOut,
+}
+
+/// Detached as one owner. Until its last page finishes, this still occupies
+/// the same build slot as the memberless prepared table it replaced.
+pub(super) struct OptionalDestinationRetirement {
+    gid: usize,
+    group: OptionalGroupRetirement,
+    inventory: OptionalInventoryRetirement,
+    withdrawn: BTreeSet<(Prefix, u32)>,
 }
 
 enum FirstGroupPhase {
@@ -53,7 +65,7 @@ impl RibManager {
         session_id: u64,
         sender: mpsc::Sender<OutboundRouteUpdate>,
     ) {
-        debug_assert!(self.first_group_build.is_none());
+        debug_assert!(self.first_group_slot_available());
         self.loc_rib.start_registration_scan();
         self.first_group_build = Some(Box::new(FirstGroupBuild {
             gid,
@@ -136,7 +148,92 @@ impl RibManager {
     }
 
     pub(super) fn first_group_slot_available(&self) -> bool {
-        self.first_group_build.is_none() && self.paced_policy_destination.is_none()
+        self.first_group_build.is_none()
+            && self.paced_policy_destination.is_none()
+            && self.pending_destination_prestage.is_none()
+            && !self.optional_destination_retirement_active()
+            && self.completed_memberless_optional().is_none()
+    }
+
+    fn completed_memberless_optional(&self) -> Option<usize> {
+        self.prepared_destination.filter(|gid| {
+            self.group_ribs
+                .get(gid)
+                .is_some_and(|group| group.members.is_empty())
+        })
+    }
+
+    /// An acknowledged Prepare is an optimization with no caller lifetime
+    /// attached. A concrete cold waiter can reclaim its slot. A later policy
+    /// transaction will use its ordinary authoritative preparation.
+    pub(super) fn claim_registration_slot(&mut self, gid: usize) -> bool {
+        if self.first_group_slot_available() {
+            return true;
+        }
+        if let Some(prepared) = self.completed_memberless_optional()
+            && prepared != gid
+            && self.pending_destination_prestage.is_none()
+            && self.first_group_build.is_none()
+            && !self.optional_destination_retirement_active()
+        {
+            let inventory = self.take_optional_inventory_retirement();
+            let table = self
+                .group_ribs
+                .remove(&prepared)
+                .expect("checked memberless preparation");
+            let withdrawn = self
+                .hold_exempt_withdrawn
+                .remove(&super::HoldWithdrawOwner::Group(prepared))
+                .unwrap_or_default();
+            self.prepared_destination = None;
+            if self.paced_policy_destination == Some(prepared) {
+                self.paced_policy_destination = None;
+            }
+            self.optional_destination_retirement = Some(Box::new(OptionalDestinationRetirement {
+                gid: prepared,
+                group: OptionalGroupRetirement::new(table),
+                inventory,
+                withdrawn,
+            }));
+        }
+        false
+    }
+
+    pub(super) fn optional_destination_retirement_active(&self) -> bool {
+        self.optional_destination_retirement.is_some()
+    }
+
+    /// Charge all retained structures to the same physical page. Completing
+    /// this page only releases the slot; another turn starts the next build.
+    pub(super) fn advance_optional_destination_retirement(&mut self) -> usize {
+        let retirement = self
+            .optional_destination_retirement
+            .as_mut()
+            .expect("optional retirement");
+        let mut budget = REGISTRATION_PAGE_SIZE;
+        while budget > 0 && retirement.withdrawn.pop_last().is_some() {
+            budget -= 1;
+        }
+        if retirement.withdrawn.is_empty()
+            && retirement.inventory.retire_page(&mut budget)
+            && retirement.group.retire_page(&mut budget)
+        {
+            self.optional_destination_retirement = None;
+            self.clear_first_group_commit_frontier();
+        }
+        REGISTRATION_PAGE_SIZE - budget
+    }
+
+    pub(super) fn registration_waits_for_optional_destination(&self, peer: PeerId) -> bool {
+        self.optional_destination_retirement
+            .as_ref()
+            .is_some_and(|retiring| {
+                self.pending_registration_matches_group(
+                    peer,
+                    retiring.gid,
+                    retiring.group.export_policy(),
+                )
+            })
     }
 
     pub(super) fn retire_prepared_first_group(&mut self, gid: usize) -> bool {
@@ -205,7 +302,7 @@ impl RibManager {
             let Some((gid, session, sender)) = self.first_group_candidate(peer) else {
                 return;
             };
-            if self.prestaging_destination(gid) || !self.first_group_slot_available() {
+            if !self.claim_registration_slot(gid) {
                 return;
             }
             self.start_first_group(peer, gid, session, sender);

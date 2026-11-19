@@ -7645,7 +7645,8 @@ impl RibManager {
             let handed_off = manager.paced_policy_destination == Some(destination);
             if !handed_off
                 && (manager.first_group_build.is_some()
-                    || manager.paced_policy_destination.is_some())
+                    || manager.paced_policy_destination.is_some()
+                    || manager.optional_destination_retirement_active())
                 && manager
                     .group_ribs
                     .get(&destination)
@@ -7688,6 +7689,11 @@ impl RibManager {
                     }
                     super::update_groups::PolicyTransitionGroupStart::Created(prefixes) => prefixes,
                 };
+            manager
+                .group_ribs
+                .get_mut(&destination)
+                .expect("created optional destination")
+                .prepare_optional_retirement();
             manager.pending_destination_prestage = Some(DestinationPrestage {
                 destination,
                 source,

@@ -659,6 +659,45 @@ impl RibManager {
         ))
     }
 
+    /// A returning session can match a legacy preparation with any groupable
+    /// export chain. Its retained record supplies the inputs not yet installed.
+    pub(in crate::manager) fn pending_registration_matches_group(
+        &self,
+        peer: PeerId,
+        gid: usize,
+        prepared_policy: Option<&PolicyChain>,
+    ) -> bool {
+        let Some(record) = self
+            .live_sessions
+            .get(&peer)
+            .and_then(|sessions| sessions.last())
+        else {
+            return false;
+        };
+        let Some(expected) = self.update_groups.group_key(gid) else {
+            return false;
+        };
+        if record.registration_wait_since.is_none()
+            || record.export_policy.as_ref() != prepared_policy
+        {
+            return false;
+        }
+        let input = self.update_group_classifier_input(
+            peer,
+            prepared_policy,
+            !record.negotiated_orf_recv.is_empty() || self.peer_orf_filters.contains_key(&peer),
+            false,
+            Some(record),
+        );
+        self.no_policy_group_key(peer, input, false)
+            .is_some_and(|mut key| {
+                // The prepared chain was compared above, including its content if
+                // the historical intern entry has since been reclaimed.
+                key.chain = expected.chain;
+                &key == expected
+            })
+    }
+
     pub(in crate::manager) fn registration_matches_first_group(
         &self,
         peer: PeerId,

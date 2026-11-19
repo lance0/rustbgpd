@@ -1749,6 +1749,7 @@ mod local_route_export;
 mod multipath_fib;
 mod no_export;
 mod non_unicast_pushdown;
+mod optional_build_slot;
 mod orf;
 mod orf_helper_initial_eor;
 mod orr;
