@@ -555,8 +555,10 @@ The cell-7 bars read the candidate's measured fixed-shape runs only:
   credit + 1,024 × (`row_size_of` + 146)), 150 × (14,035,840 + 1,024 × 250)
   for unicast at 2 GiB, from the run's record of its tree's byte credit
   (`byte_credit`: `DAEMON_CREDIT_BYTES`, `MIN_CREDIT_BYTES`,
-  `MAX_CREDIT_BYTES`). A peak the watch read over it FAILs. Otherwise the
-  bound must be able to gate, or bar 6 is INVALID: a `byte_credit` record
+  `MAX_CREDIT_BYTES`). A peak the watch read over it FAILs even if its read
+  count is missing. A run that records byte limits but has no byte gauge is
+  INVALID. Otherwise the bound must be able to gate, or bar 6 is INVALID:
+  a `byte_credit` record
   (this harness records none, because the byte tree keeps those constants
   crate-private and exports no limit, so a byte-credit candidate is INVALID
   here), rows of one size (the witness's uniform-row check), a byte watch

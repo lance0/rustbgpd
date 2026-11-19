@@ -1195,7 +1195,7 @@ def byte_bound(run: dict, what: str, receivers: float) -> Bar:
             f"{what}: byte watch started but kept no credit-bytes reading "
             f"(drain_gauges.peak_credit_bytes null): the byte bound cannot gate"
         )
-    if peak is None and sampled is None:
+    if peak is None and sampled is None and run.get("byte_credit") is None:
         return None, None, ""
     if peak is None:
         raise Invalid(
@@ -1208,10 +1208,21 @@ def byte_bound(run: dict, what: str, receivers: float) -> Bar:
             f"{state!r}, not 'watched': the byte watch's coverage is unconfirmed"
         )
     peak = number(run, "drain_gauges.peak_credit_bytes", what)
-    reads = number(run, "drain_gauges.credit_bytes_reads", what)
-    window = number(run, "drain_gauges.to_ms", what) - number(run, "drain_gauges.from_ms", what)
-    every = window / reads if reads > 0 else math.inf
-    reading = f"; credit bytes peak {peak:.0f} over {reads:.0f} reads, one every {every:.1f} ms"
+    reading = f"; credit bytes peak {peak:.0f}"
+    coverage_error = None
+    try:
+        reads = number(run, "drain_gauges.credit_bytes_reads", what)
+        window = number(run, "drain_gauges.to_ms", what) - number(run, "drain_gauges.from_ms", what)
+        every = window / reads if reads > 0 else math.inf
+        reading += f" over {reads:.0f} reads, one every {every:.1f} ms"
+        if every > BYTE_READ_EVERY_MAX_MS:
+            coverage_error = (
+                f"{what}: byte watch too sparse: {reads:.0f} reads over the {window:.0f} ms "
+                f"watch, one every {every:.1f} ms, fewer than one every "
+                f"{BYTE_READ_EVERY_MAX_MS:g} ms"
+            )
+    except Invalid as error:
+        coverage_error = str(error)
     if run.get("byte_credit") is None:
         raise Invalid(
             f"{what}: byte credit in use but no byte bound recorded (no byte_credit record in "
@@ -1233,13 +1244,7 @@ def byte_bound(run: dict, what: str, receivers: float) -> Bar:
     reading += f" (bound {bound:.0f})"
     if peak > bound:
         return f"{what}: credit bytes peak {peak:.0f} > {arithmetic}", None, reading
-    if every > BYTE_READ_EVERY_MAX_MS:
-        return None, (
-            f"{what}: byte watch too sparse: {reads:.0f} reads over the {window:.0f} ms "
-            f"watch, one every {every:.1f} ms, fewer than one every "
-            f"{BYTE_READ_EVERY_MAX_MS:g} ms"
-        ), reading
-    return None, None, reading
+    return None, coverage_error, reading
 
 
 def credit_bar(

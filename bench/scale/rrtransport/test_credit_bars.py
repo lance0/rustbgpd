@@ -2038,6 +2038,10 @@ class Bars(unittest.TestCase):
             run["drain_gauges"]["peak_credit_bytes"] = None
             run["drain_gauges"]["credit_bytes_reads"] = 0
 
+        def record_without_gauge(run):
+            run["byte_credit"] = dict(BYTE_CREDIT_RECORD)
+            run["drain_gauges"]["credit_bytes_watch"] = "not exported"
+
         def peak_unwatched(run):
             self.byte_tree(run)
             run["drain_gauges"]["credit_bytes_watch"] = "not exported"
@@ -2059,6 +2063,7 @@ class Bars(unittest.TestCase):
             (partial_record, "byte_credit.MIN_CREDIT_BYTES"),
             (sampler_only, "no 1 ms byte watch reading"),
             (watched_no_peak, "byte watch started but kept no credit-bytes reading"),
+            (record_without_gauge, "no 1 ms byte watch reading"),
             (peak_unwatched, "credit_bytes_watch is 'not exported', not 'watched'"),
             (peak_no_status, "credit_bytes_watch is None, not 'watched'"),
             (appeared_late, "byte watch 'exported after start'"),
@@ -2087,11 +2092,15 @@ class Bars(unittest.TestCase):
             (3_299, bound, "INVALID", "byte watch too sparse: 3299 reads over the 33000 ms"),
             (3, 1, "INVALID", "byte watch too sparse: 3 reads"),
             (0, bound, "INVALID", "one every inf ms"),
+            (None, bound, "INVALID", "drain_gauges.credit_bytes_reads"),
+            (None, bound + 1, "FAIL", f"credit bytes peak {bound + 1} > {bound}"),
             (3, bound + 1, "FAIL", f"credit bytes peak {bound + 1} > {bound}"),
         ):
 
             def change(run, reads=reads, peak=peak):
                 self.byte_tree(run, peak, reads=reads)
+                if reads is None:
+                    del run["drain_gauges"]["credit_bytes_reads"]
 
             with self.subTest(reads=reads, peak=peak):
                 results = self.release_defect("restart-unicast.json", change)
