@@ -825,22 +825,7 @@ impl RibManager {
         if self.slow_isolated_peers.contains(&peer) {
             return GroupMembership::SlowPeer;
         }
-        // ORF-receive negotiated ⇒ ungrouped from the start (the RFC
-        // 5291 §6 gate never meets grouping). Read from the live
-        // session record — `peer_orf_pending` drains as gates lift, so
-        // it can't answer "was ORF negotiated" later in the session.
-        let orf_negotiated = self
-            .live_sessions
-            .get(&peer)
-            .and_then(|sessions| sessions.last())
-            .is_some_and(|record| !record.negotiated_orf_recv.is_empty());
-        let input = self.update_group_classifier_input(
-            peer,
-            chain,
-            orf_negotiated || self.peer_orf_filters.contains_key(&peer),
-            false,
-            None,
-        );
+        let input = self.installed_group_classifier_input(peer, chain);
         let fingerprint = match classify_update_group(input) {
             UpdateGroupClassification::PolicyPeerContext => {
                 return GroupMembership::PolicyPeerContext;
@@ -867,6 +852,29 @@ impl RibManager {
             chain_idx,
             owns_evpn,
         )))
+    }
+
+    pub(super) fn installed_group_classifier_input(
+        &self,
+        peer: PeerId,
+        chain: Option<&PolicyChain>,
+    ) -> super::UpdateGroupClassifierInput {
+        // ORF-receive negotiated ⇒ ungrouped from the start (the RFC
+        // 5291 §6 gate never meets grouping). Read from the live
+        // session record — `peer_orf_pending` drains as gates lift, so
+        // it can't answer "was ORF negotiated" later in the session.
+        let orf_negotiated = self
+            .live_sessions
+            .get(&peer)
+            .and_then(|sessions| sessions.last())
+            .is_some_and(|record| !record.negotiated_orf_recv.is_empty());
+        self.update_group_classifier_input(
+            peer,
+            chain,
+            orf_negotiated || self.peer_orf_filters.contains_key(&peer),
+            false,
+            None,
+        )
     }
 
     /// Preflight the prospective group id for a clean unicast-only policy

@@ -337,7 +337,7 @@ pub(super) struct ConditionalAdvertisementTracker {
 #[derive(Clone, Debug)]
 pub struct ConditionalAdvertisementCapture {
     definitions: BTreeMap<Arc<str>, DefinitionState>,
-    attachments: BTreeMap<PeerEndpoint, Vec<Arc<str>>>,
+    pub(super) attachments: BTreeMap<PeerEndpoint, Vec<Arc<str>>>,
     installed: bool,
     selection_arms: HashMap<(Afi, Safi), u64>,
 }

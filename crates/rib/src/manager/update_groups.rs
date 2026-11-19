@@ -51,6 +51,7 @@ use rustbgpd_wire::ExtendedCommunity;
 pub(in crate::manager) mod admitted_recovery;
 mod first_group_retirement;
 mod membership;
+mod mutation_target;
 mod payload;
 pub(in crate::manager) mod release_fallback;
 pub(in crate::manager) use release_fallback::{ReleaseFallback, RsFallback};

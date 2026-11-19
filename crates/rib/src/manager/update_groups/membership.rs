@@ -607,17 +607,8 @@ impl RibManager {
         peer: PeerId,
         record: &super::super::LiveSessionRecord,
     ) -> Option<super::GroupKey> {
-        use crate::update::{UpdateGroupClassification, classify_update_group};
-
-        #[cfg(test)]
-        if self.test_force_ungrouped {
-            return None;
-        }
         record.registration_wait_since?;
-        if self.outbound_peers.contains_key(&peer)
-            || self.slow_isolated_peers.contains(&peer)
-            || record.export_policy.is_some()
-        {
+        if self.outbound_peers.contains_key(&peer) || record.export_policy.is_some() {
             return None;
         }
         let input = self.update_group_classifier_input(
@@ -627,16 +618,38 @@ impl RibManager {
             false,
             Some(record),
         );
-        let UpdateGroupClassification::Groupable(fingerprint) = classify_update_group(input) else {
+        self.no_policy_group_key(peer, input, false)
+    }
+
+    /// Match the actual staging profile, including the bench-only EVPN owner
+    /// dimension, for a proposed no-policy membership.
+    pub(super) fn no_policy_group_key(
+        &self,
+        peer: PeerId,
+        input: super::UpdateGroupClassifierInput,
+        slow_recovery: bool,
+    ) -> Option<super::GroupKey> {
+        #[cfg(test)]
+        if self.test_force_ungrouped {
             return None;
-        };
+        }
+        if !slow_recovery && self.slow_isolated_peers.contains(&peer) {
+            return None;
+        }
         #[cfg(feature = "bench-internals")]
         let owns_evpn = self.bench_evpn_group_ownership
-            && !record.per_client_best
-            && record
+            && !input.per_client_best
+            && input
                 .sendable_families
-                .contains(&(super::Afi::L2Vpn, super::Safi::Evpn))
-            && !fingerprint.rtc_negotiated;
+                .contains(&(super::Afi::L2Vpn as u16, super::Safi::Evpn as u8))
+            && !input
+                .sendable_families
+                .contains(&(super::Afi::Ipv4 as u16, super::Safi::RtConstrain as u8));
+        let super::UpdateGroupClassification::Groupable(fingerprint) =
+            super::classify_update_group(input)
+        else {
+            return None;
+        };
         #[cfg(not(feature = "bench-internals"))]
         let owns_evpn = false;
         Some(super::GroupKey::from_fingerprint(
