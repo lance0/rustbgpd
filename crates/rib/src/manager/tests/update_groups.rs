@@ -6321,12 +6321,14 @@ fn start_clean_transition(
     response
 }
 
-fn assert_fenced_destination_waits_for_registration(
-    manager: &mut RibManager,
+async fn assert_fenced_destination_waits_for_registration(
+    mut manager: RibManager,
     members: &[PeerId],
     dst: usize,
 ) {
-    let (reply, _response) = oneshot::channel();
+    let (tx, rx) = mpsc::channel(8);
+    manager.rx = rx;
+    let (reply, response) = oneshot::channel();
     manager.handle_update(RibUpdate::ReplacePeerExportPolicies {
         replacements: members
             .iter()
@@ -6337,15 +6339,24 @@ fn assert_fenced_destination_waits_for_registration(
             .collect(),
         reply,
     });
-    for _ in 0..16 {
-        assert!(!(manager.first_group_targets(dst) && manager.group_ribs.contains_key(&dst)));
-        if manager.group_ribs.contains_key(&dst) {
-            break;
-        }
-        assert_eq!(step_parked_transition(manager).1, "continue");
-    }
+    assert!(
+        manager.pending_clean_policy_transition.is_none(),
+        "the policy fence starts after destination preparation"
+    );
+    assert!(!manager.group_ribs.contains_key(&dst));
+    let actor = tokio::spawn(manager.run_actor());
+    assert_eq!(
+        response.await.unwrap(),
+        Ok(crate::update::ExportPolicyCohortOutcome::Committed)
+    );
+    drop(tx);
+    let manager = actor.await.unwrap();
     assert!(!manager.first_group_targets(dst));
-    assert!(manager.group_ribs.contains_key(&dst));
+    assert!(
+        members
+            .iter()
+            .all(|&peer| manager.grouped_member_of(peer) == Some(dst))
+    );
 }
 
 /// Registration and both policy paths may need the same previously absent
@@ -6377,13 +6388,16 @@ async fn cold_registration_and_policy_use_one_destination_in_both_orders() {
         let (_, dst) = manager
             .clean_policy_transition_destination(members[0], None)
             .unwrap();
-        let mut preparation = None;
-        if matches!(order, Arrival::PrepareFirst) {
+        let prepare = |manager: &mut RibManager| {
             let (reply, response) = oneshot::channel();
-            manager.begin_destination_prestage(members[0], None, reply);
-            preparation = Some(response);
-            assert!(manager.group_ribs.contains_key(&dst));
-        }
+            manager.handle_update(RibUpdate::PrepareExportPolicyDestination {
+                peer: members[0],
+                export_policy: None,
+                reply,
+            });
+            response
+        };
+        let mut preparation = matches!(order, Arrival::PrepareFirst).then(|| prepare(&mut manager));
         let peer = peer_v4(Ipv4Addr::new(10, 42, 0, 99));
         let (outbound, mut receiver) = mpsc::channel(64);
         let mut up = super::lifecycle::test_peer_up(peer, 17, outbound);
@@ -6398,9 +6412,7 @@ async fn cold_registration_and_policy_use_one_destination_in_both_orders() {
         *is_ebgp = false;
         *route_reflector_client = true;
         manager.handle_update(up);
-        if matches!(order, Arrival::PrepareFirst) {
-            assert!(!manager.first_group_targets(dst));
-        } else {
+        if !matches!(order, Arrival::PrepareFirst) {
             assert!(manager.first_group_targets(dst));
             manager.advance_first_group_build();
             assert!(
@@ -6411,39 +6423,27 @@ async fn cold_registration_and_policy_use_one_destination_in_both_orders() {
         }
 
         if matches!(order, Arrival::FencedWithoutPrepare) {
-            assert_fenced_destination_waits_for_registration(&mut manager, &members, dst);
+            assert_fenced_destination_waits_for_registration(manager, &members, dst).await;
             continue;
         }
 
         if preparation.is_none() {
-            let (reply, response) = oneshot::channel();
-            manager.begin_destination_prestage(members[0], None, reply);
-            preparation = Some(response);
+            preparation = Some(prepare(&mut manager));
             assert!(
                 !manager.group_ribs.contains_key(&dst),
-                "no second provisional table"
-            );
-            manager.advance_destination_prestage();
-            assert!(
-                !manager.group_ribs.contains_key(&dst),
-                "retire and allocate on separate turns"
+                "the registration's private table is still unpublished"
             );
         }
-        while manager.pending_destination_prestage.is_some() {
-            assert!(!(manager.first_group_targets(dst) && manager.group_ribs.contains_key(&dst)));
-            manager.advance_destination_prestage();
-        }
-        assert_eq!(preparation.unwrap().await.unwrap(), Ok(()));
-        assert_eq!(manager.group_ribs[&dst].table.len(), prefixes.len());
         assert!(!manager.outbound_peers.contains_key(&peer));
-        while !manager.pending_initial_registrations.is_empty() {
-            manager.advance_pending_initial_registration();
-        }
-        assert_eq!(manager.grouped_member_of(peer), Some(dst));
+        let (tx, rx) = mpsc::channel(8);
+        manager.rx = rx;
+        let actor = tokio::spawn(manager.run_actor());
+        assert_eq!(preparation.unwrap().await.unwrap(), Ok(()));
+        let prefixes_len = prefixes.len();
         let mut remaining: std::collections::HashSet<_> =
             prefixes.into_iter().map(Prefix::V4).collect();
         loop {
-            let update = delivered(receiver.try_recv().expect("full initial table and EoR"));
+            let update = fixture_update(receiver.recv()).await;
             for route in update.announce.iter() {
                 assert!(remaining.remove(&route.prefix));
             }
@@ -6453,6 +6453,10 @@ async fn cold_registration_and_policy_use_one_destination_in_both_orders() {
                 break;
             }
         }
+        drop(tx);
+        let manager = actor.await.unwrap();
+        assert_eq!(manager.grouped_member_of(peer), Some(dst));
+        assert_eq!(manager.group_ribs[&dst].table.len(), prefixes_len);
     }
 }
 
@@ -19720,4 +19724,388 @@ fn peer_down_answers_readiness_while_retiring_the_last_members_group() {
         });
     });
     assert_group_retirement_answered("peer down", routes, &answered);
+}
+
+const OVERLAP_SOURCE: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 42);
+const OVERLAP_RESTARTER: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 43);
+const OVERLAP_TAG: u32 = 0xFDE8_2101;
+type OverlapInventory = BTreeMap<Prefix, (PeerId, u32)>;
+
+fn overlap_prefix(index: u32) -> Ipv4Prefix {
+    Ipv4Prefix::new(Ipv4Addr::from(0x0a01_0000 + index), 32)
+}
+
+// The EoR between two ordinary UPDATEs later in the test will remove this
+// source's stale sentinel, giving their FIFO order a visible wire consequence.
+fn seed_overlap_restart(manager: &mut RibManager, sentinel: Ipv4Prefix) {
+    let peer = peer_v4(OVERLAP_RESTARTER);
+    distribute_direct_route(manager, OVERLAP_RESTARTER, sentinel);
+    manager.handle_update(RibUpdate::PeerGracefulRestart {
+        peer,
+        session_id: 0,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: ipv4_sendable(),
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    });
+    manager.handle_update(registering_peer_up(peer, 0));
+    assert!(manager.loc_rib.get(&Prefix::V4(sentinel)).unwrap().is_stale);
+}
+
+fn join_overlap_founder(manager: &mut RibManager, n: u8) -> mpsc::Receiver<OutboundRouteUpdate> {
+    let (tx, rx) = mpsc::channel(16);
+    let mut up = super::lifecycle::test_peer_up(peer_v4(Ipv4Addr::new(10, 43, 0, n)), 17, tx);
+    if let RibUpdate::PeerUp {
+        is_ebgp,
+        route_reflector_client,
+        ..
+    } = &mut up
+    {
+        *is_ebgp = false;
+        *route_reflector_client = true;
+    }
+    manager.handle_update(up);
+    rx
+}
+
+fn overflow_with_staged_withdrawal(
+    manager: &mut RibManager,
+    expected: &mut OverlapInventory,
+) -> Prefix {
+    use crate::loc_rib::{REGISTRATION_PAGE_SIZE, RegistrationScanStatus};
+    // Leave enough live slots to prove a few real actor polls cannot have
+    // completed retirement by the time a queued UPDATE reaches its receiver.
+    let populated = |manager: &RibManager| {
+        expected
+            .keys()
+            .filter(|&&p| manager.first_group_contains(p))
+            .count()
+    };
+    for _ in 0..32 {
+        manager.advance_first_group_build();
+        if populated(manager) > 9 * REGISTRATION_PAGE_SIZE {
+            break;
+        }
+    }
+    assert!(populated(manager) > 9 * REGISTRATION_PAGE_SIZE);
+    let victim = *expected
+        .keys()
+        .find(|&&p| manager.first_group_contains(p))
+        .unwrap();
+    let mut replacements = Vec::new();
+    for (&prefix, winner) in expected
+        .iter_mut()
+        .filter(|(p, _)| **p != victim)
+        .take(4096)
+    {
+        let Prefix::V4(v4) = prefix else {
+            unreachable!()
+        };
+        replacements.push(make_route_with_lp(v4, OVERLAP_SOURCE, 150));
+        winner.1 = 150;
+    }
+    assert_eq!(replacements.len(), 4096);
+    churn_fixture_source(manager, replacements, Vec::new());
+    assert_eq!(
+        manager.loc_rib.registration_scan_status(),
+        RegistrationScanStatus::Scanning
+    );
+    churn_fixture_source(manager, Vec::new(), vec![victim]);
+    assert_eq!(
+        manager.loc_rib.registration_scan_status(),
+        RegistrationScanStatus::Overflow
+    );
+    assert!(manager.loc_rib.get(&victim).is_none());
+    expected.remove(&victim);
+    manager.advance_first_group_build();
+    victim
+}
+
+enum OverlapPolicy {
+    Single,
+    AuthoritativeBatch,
+}
+
+impl OverlapPolicy {
+    fn submit(
+        &self,
+        tx: &mpsc::Sender<RibUpdate>,
+        members: &[PeerId],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        match self {
+            Self::Single => {
+                let (reply, response) = oneshot::channel();
+                tx.try_send(RibUpdate::ReplacePeerExportPolicy {
+                    peer: members[0],
+                    export_policy: None,
+                    reply,
+                })
+                .unwrap();
+                Box::pin(async move {
+                    assert_eq!(response.await.unwrap(), Ok(()));
+                })
+            }
+            Self::AuthoritativeBatch => {
+                let (reply, response) = oneshot::channel();
+                tx.try_send(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+                    replacements: members[..2]
+                        .iter()
+                        .map(|&peer| crate::update::PeerExportPolicyReplacement {
+                            peer,
+                            export_policy: None,
+                        })
+                        .collect(),
+                    reply,
+                })
+                .unwrap();
+                Box::pin(async move {
+                    assert_eq!(response.await.unwrap(), Ok(Vec::new()));
+                })
+            }
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum OverlapEvent {
+    Marker(u32, bool),
+    EndOfRibWithdrawal,
+}
+
+fn overlap_events(
+    updates: &[OutboundRouteUpdate],
+    marker: Prefix,
+    sentinel: Prefix,
+) -> Vec<OverlapEvent> {
+    let mut events = Vec::new();
+    for update in updates {
+        for &(prefix, _) in update.unicast_withdrawals() {
+            if prefix == sentinel {
+                events.push(OverlapEvent::EndOfRibWithdrawal);
+            }
+        }
+        for row in update.announce.iter().filter(|row| {
+            row.prefix == marker && update.announce_source_exclusion != Some(row.peer)
+        }) {
+            events.push(OverlapEvent::Marker(
+                row.local_pref(),
+                row.communities().contains(&OVERLAP_TAG),
+            ));
+        }
+    }
+    events
+}
+
+fn check_overlap_founder(
+    receiver: &mut mpsc::Receiver<OutboundRouteUpdate>,
+    base: &OverlapInventory,
+    victim: Prefix,
+    sentinel: Prefix,
+    marker: Prefix,
+) {
+    let mut inventory = OverlapInventory::new();
+    let mut ends = 0;
+    while let Ok(update) = receiver.try_recv().map(delivered) {
+        for &(prefix, _) in update.unicast_withdrawals() {
+            inventory.remove(&prefix);
+        }
+        for row in update
+            .announce
+            .iter()
+            .filter(|row| update.announce_source_exclusion != Some(row.peer))
+        {
+            assert_ne!(
+                row.prefix, victim,
+                "overflow withdrawal resurrected in replay"
+            );
+            assert!(!row.communities().contains(&OVERLAP_TAG));
+            let prior = inventory.insert(row.prefix, (row.peer, row.local_pref()));
+            if ends == 0 {
+                assert!(prior.is_none(), "duplicate initial row {}", row.prefix);
+            }
+        }
+        if !update.end_of_rib.is_empty() {
+            assert_eq!(update.end_of_rib, ipv4_sendable());
+            ends += 1;
+            assert!(
+                base.iter().all(|(p, r)| inventory.get(p) == Some(r)),
+                "all current base winners before initial EoR"
+            );
+            assert!(
+                inventory.contains_key(&marker),
+                "pre-commit marker missing at EoR"
+            );
+        }
+    }
+    assert_eq!(ends, 1);
+    assert_eq!(
+        inventory.remove(&marker),
+        Some((peer_v4(OVERLAP_RESTARTER), 180))
+    );
+    assert!(!inventory.contains_key(&sentinel));
+    assert_eq!(&inventory, base);
+}
+
+#[tokio::test]
+async fn single_policy_waits_for_overflow_retirement_while_updates_reach_receivers() {
+    check_policy_during_overflow(OverlapPolicy::Single).await;
+}
+
+#[tokio::test]
+async fn authoritative_policy_batch_waits_for_overflow_retirement_while_updates_reach_receivers() {
+    check_policy_during_overflow(OverlapPolicy::AuthoritativeBatch).await;
+}
+
+struct PolicyOverlap {
+    manager: RibManager,
+    members: Vec<PeerId>,
+    receivers: Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+    founders: [mpsc::Receiver<OutboundRouteUpdate>; 2],
+    base: OverlapInventory,
+    victim: Prefix,
+    sentinel: Ipv4Prefix,
+}
+
+fn policy_overlap() -> PolicyOverlap {
+    let (mut manager, members, mut receivers) = direct_clean_transition_manager(3, 0, None);
+    manager.outbound_row_credit_override = None;
+    let mut base: OverlapInventory = (0..12_288)
+        .map(|i| {
+            (
+                Prefix::V4(overlap_prefix(i)),
+                (peer_v4(OVERLAP_SOURCE), 100),
+            )
+        })
+        .collect();
+    distribute_direct_routes(
+        &mut manager,
+        OVERLAP_SOURCE,
+        (0..12_288).map(overlap_prefix),
+    );
+    let sentinel = overlap_prefix(20_000);
+    seed_overlap_restart(&mut manager, sentinel);
+    for receiver in &mut receivers {
+        while receiver.try_recv().map(delivered).is_ok() {}
+    }
+    manager.first_group_build_min_routes = 1;
+    let first = join_overlap_founder(&mut manager, 1);
+    let victim = overflow_with_staged_withdrawal(&mut manager, &mut base);
+    let second = join_overlap_founder(&mut manager, 2);
+    for receiver in &mut receivers {
+        while receiver.try_recv().map(delivered).is_ok() {}
+    }
+    PolicyOverlap {
+        manager,
+        members,
+        receivers,
+        founders: [first, second],
+        base,
+        victim,
+        sentinel,
+    }
+}
+
+async fn check_policy_during_overflow(policy: OverlapPolicy) {
+    use crate::loc_rib::REGISTRATION_PAGE_SIZE;
+    use OverlapEvent::{EndOfRibWithdrawal, Marker};
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    let PolicyOverlap {
+        mut manager,
+        members,
+        mut receivers,
+        founders: [mut first, mut second],
+        base,
+        victim,
+        sentinel,
+    } = policy_overlap();
+    let marker = overlap_prefix(20_001);
+    let remaining = manager.first_group_retiring_slots().unwrap();
+    assert!(remaining > 7 * REGISTRATION_PAGE_SIZE);
+    manager.publish_export_roster();
+    let roster = manager.export_roster();
+    let (tx, rx) = mpsc::channel(16);
+    manager.rx = rx;
+    let mut response = policy.submit(&tx, &members);
+    let source = peer_v4(OVERLAP_RESTARTER);
+    let update = |pref| {
+        super::lifecycle::test_routes_received(
+            source,
+            vec![make_route_with_lp(marker, OVERLAP_RESTARTER, pref)],
+        )
+    };
+    tx.try_send(update(170)).unwrap();
+    let mut actor = Box::pin(manager.run_actor());
+    let mut wire = [Vec::new(), Vec::new(), Vec::new()];
+    // Poll the actual run loop to each executor yield. Even one maximum
+    // retirement page on EVERY poll leaves some of the old allocation live.
+    for _ in 0..(remaining - 1) / REGISTRATION_PAGE_SIZE {
+        assert!(
+            actor
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        for (receiver, log) in receivers.iter_mut().zip(&mut wire) {
+            log.extend(std::iter::from_fn(|| {
+                receiver.try_recv().ok().map(delivered)
+            }));
+        }
+        if !wire[2].is_empty() {
+            break;
+        }
+    }
+    for index in [0, 2] {
+        assert_eq!(
+            overlap_events(&wire[index], Prefix::V4(marker), Prefix::V4(sentinel)),
+            [Marker(170, true)]
+        );
+    }
+    assert!(
+        response
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    assert!(roster.load().for_peer(members[0]).is_some());
+    assert!(first.is_empty() && second.is_empty());
+    tx.try_send(RibUpdate::EndOfRib {
+        peer: source,
+        session_id: 0,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    })
+    .unwrap();
+    tx.try_send(update(180)).unwrap();
+    let actor = tokio::spawn(actor);
+    response.await;
+    drop(tx);
+    let manager = actor.await.unwrap();
+    for (receiver, log) in receivers.iter_mut().zip(&mut wire) {
+        log.extend(std::iter::from_fn(|| {
+            receiver.try_recv().ok().map(delivered)
+        }));
+    }
+    let marker = Prefix::V4(marker);
+    let sentinel = Prefix::V4(sentinel);
+    assert_eq!(
+        overlap_events(&wire[2], marker, sentinel),
+        [Marker(170, true), EndOfRibWithdrawal, Marker(180, true)]
+    );
+    let changes = overlap_events(&wire[0], marker, sentinel);
+    assert_eq!(changes.first(), Some(&Marker(170, true)));
+    assert_eq!(changes.last(), Some(&Marker(180, false)));
+    assert_eq!(
+        changes.iter().filter(|e| **e == EndOfRibWithdrawal).count(),
+        1
+    );
+    assert!(manager.loc_rib.get(&victim).is_none());
+    assert!(manager.loc_rib.get(&sentinel).is_none());
+    assert_eq!(manager.loc_rib.get(&marker).unwrap().local_pref(), 180);
+    assert!(roster.load().for_peer(members[0]).is_none());
+    check_overlap_founder(&mut first, &base, victim, sentinel, marker);
+    check_overlap_founder(&mut second, &base, victim, sentinel, marker);
 }
