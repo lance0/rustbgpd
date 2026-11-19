@@ -867,6 +867,57 @@ impl RibManager {
             && source_key.same_staging_profile_except_chain(destination_key)
     }
 
+    /// Can a freshly built destination's shared inventory commit without a
+    /// route-dependent refusal? An occupied or already prepared destination
+    /// can use the exact inventory check without creating a speculative table.
+    pub(in crate::manager) fn cold_batched_inventory_can_commit(
+        &self,
+        source: usize,
+        destination: usize,
+        members: &[PeerId],
+    ) -> bool {
+        use rustbgpd_policy::RouteFamily;
+
+        let (Some(group), Some(key), Some(&exemplar)) = (
+            self.group_ribs.get(&source),
+            self.update_groups.group_key(destination),
+            members.first(),
+        ) else {
+            return false;
+        };
+        // Newly permitted routes can carry OTC or RS tags absent from the
+        // source table. RS checks use movers' ASNs against both original and
+        // post-policy attributes, including the per-client-best fallback.
+        if super::super::distribution::otc_role_blocks(group.local_role)
+            || !group.otc_blocked.is_empty()
+            || members
+                .iter()
+                .any(|peer| self.peer_rs_control.contains_key(peer))
+            || group.table.has_next_hop_overrides()
+        {
+            return false;
+        }
+        // An action-only difference also vetoes a winner's source-specific
+        // lane. The lane was staged under the group's own immutable chain,
+        // independently of the replacement temporarily installed on the peer.
+        let source_lane_policy = (!group.runner_up.is_empty())
+            .then_some(group.export_chain.as_ref())
+            .flatten();
+        [self.export_policy_for(exemplar), source_lane_policy]
+            .into_iter()
+            .flatten()
+            .all(|chain| {
+                (!key.sendable_ipv4_unicast
+                    || chain
+                        .set_next_hop_reaching(RouteFamily::Ipv4Unicast)
+                        .is_none())
+                    && (!key.sendable_ipv6_unicast
+                        || chain
+                            .set_next_hop_reaching(RouteFamily::Ipv6Unicast)
+                            .is_none())
+            })
+    }
+
     /// Whether a member may take a shared policy transition (the clean
     /// transition or the batched authoritative cohort). Both re-export
     /// IPv4/IPv6 unicast only, so every family the member can send must be

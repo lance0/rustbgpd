@@ -1194,13 +1194,6 @@ pub struct RibManager {
     /// committing cohort that resolves a different destination discards
     /// the unadopted group instead of leaking it.
     prepared_destination: Option<usize>,
-    /// Memberless destinations the forward authoritative batch built or
-    /// adopted for a shared cohort it then refused, handing the cohort to the
-    /// paced walk, each with the movers the walk still owes. The walk's first
-    /// mover adopts each one. A paced command that applies or skips the last
-    /// owed mover, the rollback restore and the next forward batch each
-    /// retire one no member joined, so no walk outcome leaks a group.
-    refused_cohort_destinations: Vec<(usize, Vec<PeerId>)>,
     /// The clean-transition inventory walked unfenced after the prestage
     /// that staged `prepared_destination`; consumed (re-checked against
     /// the churned keys only) by the fenced `BuildInventory`.
@@ -3205,7 +3198,6 @@ impl RibManager {
             post_commit_query_trace: None,
             pending_destination_prestage: None,
             prepared_destination: None,
-            refused_cohort_destinations: Vec::new(),
             prestaged_inventory: None,
             pending_exact_export_withdrawals: HashSet::new(),
             pending_distribute_changed: HashSet::new(),

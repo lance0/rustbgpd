@@ -6223,9 +6223,6 @@ impl RibManager {
                     }
                 })
                 .collect::<Vec<_>>();
-            // The batch first retires a destination the failed forward walk
-            // left memberless. One this rollback's own refused cohort leaves
-            // is adopted or retired by its paced restore commands.
             let mut deferred: HashSet<PeerId> = manager
                 .apply_export_policy_replacements(execution, ResidualMode::DeferChanged)?
                 .deferred
@@ -6299,46 +6296,6 @@ impl RibManager {
     ) -> Result<Vec<PeerId>, RibCommandError> {
         self.apply_export_policy_replacements(replacements, ResidualMode::DeferChanged)
             .map(|outcome| outcome.deferred)
-    }
-
-    /// Discard every recorded refused-cohort destination that no member
-    /// joined, unless a destination prestage now owns that group. Callers
-    /// run inside a replacement readiness scope, so retiring a large table
-    /// keeps answering readiness and summary queries.
-    fn discard_refused_cohort_destinations(&mut self) {
-        for (gid, _) in std::mem::take(&mut self.refused_cohort_destinations) {
-            self.discard_refused_cohort_destination(gid);
-        }
-    }
-
-    fn discard_refused_cohort_destination(&mut self, gid: usize) {
-        let prestaged = self.prepared_destination == Some(gid)
-            || self
-                .pending_destination_prestage
-                .as_ref()
-                .is_some_and(|prestage| prestage.destination == gid);
-        if !prestaged {
-            let _ = self.discard_uncommitted_policy_transition_group(gid);
-        }
-    }
-
-    /// After a paced command: a refused destination whose movers have all
-    /// been applied or skipped has seen its whole walk. Retire it now if no
-    /// member joined (every mover left the RIB, or moved elsewhere), rather
-    /// than staging route updates into it until the next batch or restore.
-    fn settle_refused_cohort_destinations(&mut self, applied: &[PeerId], skipped: &[PeerId]) {
-        let mut settled = Vec::new();
-        self.refused_cohort_destinations
-            .retain_mut(|(gid, movers)| {
-                movers.retain(|peer| !applied.contains(peer) && !skipped.contains(peer));
-                if movers.is_empty() {
-                    settled.push(*gid);
-                }
-                !movers.is_empty()
-            });
-        for gid in settled {
-            self.discard_refused_cohort_destination(gid);
-        }
     }
 
     /// One command of the paced walk: the batch body for the members that fit
@@ -6574,12 +6531,6 @@ impl RibManager {
             prestage.retire_with(&mut || checkpoint());
             self.replacement_checkpoint(true);
         }
-        // A new forward batch starts a new walk: an earlier walk's refused
-        // destination that no member joined is retired here, in this scope.
-        if matches!(mode, ResidualMode::DeferChanged) {
-            self.discard_refused_cohort_destinations();
-        }
-
         let phase = std::time::Instant::now();
         let mut present: Vec<PeerExportPolicyReplacement> = Vec::with_capacity(replacements.len());
         let mut n_skipped_unregistered = 0_usize;
@@ -6767,16 +6718,6 @@ impl RibManager {
                 n_shared_members += members.len();
                 n_destination_groups += 1;
             } else {
-                // A refusal after the destination build leaves the group for
-                // the movers; deferred, they join it only in a later command.
-                let memberless = self
-                    .group_ribs
-                    .get(&destination)
-                    .is_some_and(|group| group.members.is_empty());
-                if memberless && matches!(mode, ResidualMode::DeferChanged) {
-                    self.refused_cohort_destinations
-                        .push((destination, members.clone()));
-                }
                 residual.extend(members);
             }
         }
@@ -6909,9 +6850,6 @@ impl RibManager {
                 Some(applied_peers.iter().map(|&peer| (peer, None)).collect());
         }
         self.distribute_changes_with_evpn_feeds(evpn_feeds, false);
-        if matches!(mode, ResidualMode::Paced { .. }) {
-            self.settle_refused_cohort_destinations(&applied_peers, &skipped);
-        }
         let member_costs = self.paced_member_costs.take();
         receipt.distribution_us = u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX);
         let pass_max = member_costs.and_then(|costs| costs.into_values().flatten().max());
@@ -7051,12 +6989,20 @@ impl RibManager {
                 .saturating_add(u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX));
             return false;
         }
-        // Consume the completed-prestage record exactly like the clean
-        // transition's Classify phase: a match hands the staged table to
-        // this transition, a mismatch discards the never-adopted group.
-        if let Some(prepared) = self.prepared_destination.take()
-            && prepared != destination
+        // A fresh speculative table has no owner if its inventory refuses
+        // the move and the caller abandons the subsequent paced walk.
+        let destination_existed = self.group_ribs.contains_key(&destination);
+        if !destination_existed
+            && !self.cold_batched_inventory_can_commit(source, destination, members)
         {
+            receipt.cohort_precheck_us = receipt
+                .cohort_precheck_us
+                .saturating_add(u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX));
+            return false;
+        }
+        // Keep a matching completed Prepare owned until the inventory
+        // commits. Cold contention can still evict it after a refusal.
+        if let Some(prepared) = self.prepared_destination.take_if(|gid| *gid != destination) {
             let _ = self.discard_uncommitted_policy_transition_group(prepared);
         }
         let Some(&exemplar) = members.first() else {
@@ -7073,7 +7019,6 @@ impl RibManager {
         // name only movers; incumbent counters and withdrawal residue stay
         // with the existing group and its ordinary retry path.
         let phase = std::time::Instant::now();
-        let destination_existed = self.group_ribs.contains_key(&destination);
         if !destination_owned {
             self.ensure_group_table(destination, exemplar);
             receipt.destination_ensures += 1;
@@ -7139,6 +7084,7 @@ impl RibManager {
 
         // Everything below commits: no fallible step touches shared
         // state before this point.
+        self.prepared_destination.take_if(|gid| *gid == destination);
         let mut source_tombstones: Vec<(Prefix, u32)> = self
             .group_ribs
             .get(&source)

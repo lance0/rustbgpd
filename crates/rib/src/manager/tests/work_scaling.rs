@@ -1490,58 +1490,14 @@ enum WalkEnd {
     EveryMoverLeft,
 }
 
-/// Count the `retirement` checkpoints the replacement readiness owner
-/// observes, and whether a readiness query queued at the first one is
-/// answered by a later one. Returns (visits, answered during retirement).
-fn observe_retirement_readiness(
-    manager: &mut RibManager,
-) -> (
-    Arc<std::sync::atomic::AtomicUsize>,
-    Arc<std::sync::atomic::AtomicBool>,
-) {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    let (readiness_tx, readiness_rx) = mpsc::channel(8);
-    manager.readiness_rx = Some(readiness_rx);
-    let visits = Arc::new(AtomicUsize::new(0));
-    let answered = Arc::new(AtomicBool::new(false));
-    let pending = std::sync::Mutex::new(None);
-    manager.replacement_readiness_test_hook = Some(Arc::new({
-        let (visits, answered) = (Arc::clone(&visits), Arc::clone(&answered));
-        move |observed| {
-            if observed != "retirement" {
-                return;
-            }
-            let mut pending = pending.lock().unwrap();
-            if visits.fetch_add(1, Ordering::Relaxed) == 0 {
-                *pending = Some(super::update_groups::queue_replacement_readiness(
-                    &readiness_tx,
-                ));
-            } else if pending
-                .as_mut()
-                .is_some_and(|response: &mut oneshot::Receiver<_>| response.try_recv().is_ok())
-            {
-                answered.store(true, Ordering::Relaxed);
-            }
-        }
-    }));
-    (visits, answered)
-}
-
-/// A shared cohort the forward batch refuses after building its destination
-/// (an action-only next-hop change refuses the shared inventory) hands its
-/// members to the paced walk, which adopts the destination through its first
-/// mover. However the walk ends, no memberless destination outlives it:
-/// a restore retires it, and so does the paced command that skips the last
-/// mover when every mover left the RIB. That retirement, [`RESIDUAL_ROWS`]
-/// staged rows, runs under the replacement readiness owner and answers a
-/// readiness query part-way through.
+/// A next-hop-action-only change cannot share a delta. A caller may leave
+/// the returned movers idle while another group starts and imports continue.
 #[test]
 #[expect(
     clippy::too_many_lines,
     reason = "one fixture follows each way the walk can end through the destination's retirement"
 )]
-fn refused_cohort_destination_never_outlives_the_walk_memberless() {
-    use std::sync::atomic::Ordering;
+fn refused_cold_cohort_leaves_the_slot_available_before_paced_apply() {
     const OLD: u32 = 0xFC00_0001;
     const SIZE: usize = 4;
     let arm = ResidualArm::MixedDestinations;
@@ -1567,7 +1523,7 @@ fn refused_cohort_destination_never_outlives_the_walk_memberless() {
     ] {
         let (_tx, mut manager) = manager();
         manager.paced_elapsed_for_test = Some(Duration::ZERO);
-        let _receivers: Vec<_> = (0..SIZE)
+        let mut receivers: Vec<_> = (0..SIZE)
             .map(|index| {
                 let (outbound_tx, receiver) = mpsc::channel(4096);
                 let mut up = test_peer_up(member(index), 1, outbound_tx);
@@ -1587,6 +1543,7 @@ fn refused_cohort_destination_never_outlives_the_walk_memberless() {
             })
             .collect();
         arm.seed(&mut manager);
+        assert_eq!(drain(&mut receivers), (SIZE * RESIDUAL_ROWS, 0));
         let source = manager.grouped_member_of(all[0]).unwrap();
         assert_eq!(memberless_groups(&manager), 0, "setup");
         let (reply, mut response) = oneshot::channel();
@@ -1598,18 +1555,62 @@ fn refused_cohort_destination_never_outlives_the_walk_memberless() {
         assert_eq!(pending, all, "the refused cohort is handed back whole");
         let receipt = manager.authoritative_transition_receipts.last().unwrap();
         assert_eq!(
-            (receipt.destination_builds, receipt.shared_members),
-            (1, 0),
-            "the cohort built its destination and was refused"
+            (
+                receipt.destination_ensures,
+                receipt.destination_builds,
+                receipt.shared_members
+            ),
+            (0, 0, 0)
         );
-        assert_eq!(memberless_groups(&manager), 1, "the built destination");
-        let (destination, staged) = manager
-            .group_ribs
-            .iter()
-            .find(|(_, group)| group.members.is_empty())
-            .map(|(gid, group)| (*gid, group.table.len()))
-            .unwrap();
-        assert!(staged >= RESIDUAL_ROWS, "{end:?}: staged {staged} rows");
+        assert_eq!(memberless_groups(&manager), 0);
+        assert!(
+            all.iter()
+                .all(|peer| manager.export_policy_for(*peer) == Some(&old))
+        );
+        // Leave the returned movers idle. An unrelated group can start, and
+        // its eventual complete replay must include an UPDATE installed now.
+        manager.first_group_build_min_routes = 1;
+        let (mut joining, _encoder) = join(&mut manager, SIZE, false, None);
+        assert!(manager.first_group_build.is_some());
+        let marker = Prefix::V4(prefix(9, 0));
+        manager.handle_update(routes_from(external(), 0, 9, 1));
+        drain_route_chunks(&mut manager);
+        assert!(manager.first_group_build.is_some());
+        assert!(manager.loc_rib.get(&marker).is_some());
+        for rx in &mut receivers {
+            let update = rx.try_recv().unwrap();
+            assert!(
+                update
+                    .announce
+                    .iter()
+                    .any(|row| row.prefix == marker && row.communities().contains(&OLD))
+            );
+        }
+        for _ in 0..64 {
+            if manager.pending_initial_registrations.is_empty()
+                && manager.first_group_build.is_none()
+            {
+                break;
+            }
+            manager.advance_pending_initial_registration();
+        }
+        let mut expected: BTreeSet<_> = (0..RESIDUAL_ROWS)
+            .map(|n| Prefix::V4(prefix(1, n)))
+            .collect();
+        expected.insert(marker);
+        let mut eor = 0;
+        while let Ok(update) = joining.try_recv() {
+            for row in update.announce.iter() {
+                assert_eq!(eor, 0);
+                assert!(expected.remove(&row.prefix));
+            }
+            for family in &update.end_of_rib {
+                assert_eq!(*family, (Afi::Ipv4, Safi::Unicast));
+                eor += 1;
+            }
+        }
+        assert!(expected.is_empty());
+        assert_eq!(eor, 1);
         if matches!(end, WalkEnd::EveryMoverLeft) {
             for &peer in &all {
                 manager.handle_update(RibUpdate::PeerDown {
@@ -1619,7 +1620,6 @@ fn refused_cohort_destination_never_outlives_the_walk_memberless() {
             }
             drain_route_chunks(&mut manager);
         }
-        let (visits, answered) = observe_retirement_readiness(&mut manager);
         match end {
             WalkEnd::Restored => {
                 let (reply, mut response) = oneshot::channel();
@@ -1650,36 +1650,75 @@ fn refused_cohort_destination_never_outlives_the_walk_memberless() {
                 }
             }
         }
-        manager.replacement_readiness_test_hook = None;
         if matches!(end, WalkEnd::Completed) {
+            let destination = manager.grouped_member_of(all[0]).unwrap();
+            assert_ne!(destination, source);
             assert!(
                 all.iter()
-                    .all(|peer| manager.grouped_member_of(*peer) == Some(destination)),
-                "every mover joined the destination"
+                    .all(|peer| manager.grouped_member_of(*peer) == Some(destination))
             );
-        } else {
-            assert!(
-                !manager.group_ribs.contains_key(&destination),
-                "{end:?}: the unadopted destination survived the walk's last command"
-            );
-            assert!(
-                visits.load(Ordering::Relaxed) >= 2 && answered.load(Ordering::Relaxed),
-                "{end:?}: retiring {staged} staged rows answered no readiness query \
-                 ({} retirement checkpoints observed under a readiness owner)",
-                visits.load(Ordering::Relaxed)
+            let group = &manager.group_ribs[&destination];
+            assert_eq!(group.table.len(), RESIDUAL_ROWS + 1);
+            assert_eq!(
+                group.table.next_hop_override(&marker, 0),
+                Some(&rustbgpd_policy::NextHopAction::Self_)
             );
         }
         assert_eq!(memberless_groups(&manager), 0, "{end:?}");
-        // Later churn finds no orphan to stage into.
-        manager.handle_update(routes_from(external(), 0, 9, 4));
-        drain_route_chunks(&mut manager);
-        assert_eq!(memberless_groups(&manager), 0, "{end:?}: after churn");
-        assert_eq!(
-            manager.group_ribs.contains_key(&destination),
-            matches!(end, WalkEnd::Completed),
-            "{end:?}: after churn"
+    }
+}
+
+/// A completed optional Prepare already owns a real table. A refused batch
+/// must leave it discoverable by a later cold registration's bounded eviction.
+#[test]
+fn refused_batch_keeps_matching_prepare_owned_until_cold_contention() {
+    let (_tx, mut manager) = manager();
+    let old = super::update_groups::community_chain(0xFC00_0001);
+    let mut next = old.clone();
+    next.policies[0].policy.entries[0]
+        .modifications
+        .set_next_hop = Some(rustbgpd_policy::NextHopAction::Self_);
+    let _receivers = members(&mut manager, 4, false, Some(&old));
+    manager.handle_update(routes_from(external(), 0, 1, RESIDUAL_ROWS));
+    drain_route_chunks(&mut manager);
+    let (reply, mut response) = oneshot::channel();
+    manager.begin_destination_prestage(member(0), Some(&next), reply);
+    while manager.pending_destination_prestage.is_some() {
+        manager.advance_destination_prestage();
+    }
+    response.try_recv().unwrap().unwrap();
+    let destination = manager.prepared_destination.unwrap();
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+        replacements: (0..4)
+            .map(|i| crate::PeerExportPolicyReplacement {
+                peer: member(i),
+                export_policy: Some(next.clone()),
+            })
+            .collect(),
+        reply,
+    });
+    assert_eq!(
+        response.try_recv().unwrap().unwrap(),
+        (0..4).map(member).collect::<Vec<_>>()
+    );
+    assert_eq!(manager.prepared_destination, Some(destination));
+    assert!(manager.group_ribs[&destination].members.is_empty());
+    manager.first_group_build_min_routes = 1;
+    let (_joining, _encoder) = join(&mut manager, 5, false, None);
+    assert!(manager.optional_destination_retirement_active());
+    assert!(manager.first_group_build.is_none());
+    assert!(!manager.group_ribs.contains_key(&destination));
+    for _ in 0..64 {
+        if !manager.optional_destination_retirement_active() {
+            break;
+        }
+        assert!(
+            manager.advance_optional_destination_retirement()
+                <= crate::loc_rib::REGISTRATION_PAGE_SIZE
         );
     }
+    assert!(!manager.optional_destination_retirement_active());
 }
 
 #[test]
