@@ -576,6 +576,9 @@ impl RibManager {
             if self.primary_lookahead.is_none() {
                 self.primary_lookahead = self.rx.try_recv().ok();
             }
+            if !self.first_group_allows_lookahead() {
+                break;
+            }
             let Some(RibUpdate::RouteRefreshRequest {
                 peer,
                 session_id,

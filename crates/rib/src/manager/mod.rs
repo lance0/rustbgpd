@@ -22,6 +22,7 @@ mod eor_hold;
 mod evpn_recovery;
 mod export_chains;
 mod first_group_build;
+mod first_group_order;
 mod flowspec_validation;
 mod graceful_restart;
 mod helpers;
@@ -1264,6 +1265,11 @@ pub struct RibManager {
     /// Primary messages still ahead of a prepared first group's commit.
     /// An exhausted frontier keeps later admissions queued until publication.
     first_group_commit_remaining: Option<usize>,
+    /// Inert policy requests behind the current preparation, in admission
+    /// order. Bounded by the primary channel capacity.
+    first_group_deferred_intents: VecDeque<RibUpdate>,
+    /// One noncommuting head from the general lane (also typed RibUpdate).
+    first_group_general_head: Option<Box<RibUpdate>>,
     /// Process-local mutation versions bound into opaque route-page tokens.
     /// A successful continuation must match the requested scope's current
     /// version; no server-side snapshots are retained.
@@ -3192,6 +3198,8 @@ impl RibManager {
             distribution_window_limits: distribution::DistributionWindowLimits::default(),
             expiry_cutoffs: ExpiryCutoffs::default(),
             first_group_commit_remaining: None,
+            first_group_deferred_intents: VecDeque::new(),
+            first_group_general_head: None,
             primary_lookahead: None,
             orr_rebuild_owed_updates: 0,
             route_page_table_version: Some(initial_route_page_version()),
@@ -4164,10 +4172,12 @@ impl RibManager {
             }
             self.handle_update(query);
             true
-        } else if self
-            .release_general_reads
-            .front()
-            .is_some_and(|q| !self.release_fences_read(q))
+        } else if self.first_group_general_head.is_none()
+            && !self.first_group_replay_due()
+            && self
+                .release_general_reads
+                .front()
+                .is_some_and(|q| !self.release_fences_read(q))
         {
             let query = self
                 .release_general_reads
@@ -4190,7 +4200,10 @@ impl RibManager {
         }
         self.drain_summary_queries();
         for _ in 0..limit {
-            if self.release_general_reads.len() >= self.query_rx.max_capacity() {
+            if self.release_general_reads.len() >= self.query_rx.max_capacity()
+                || self.first_group_general_head.is_some()
+                || self.first_group_replay_due()
+            {
                 break;
             }
             let Ok(query) = self.query_rx.try_recv() else {
@@ -4205,6 +4218,18 @@ impl RibManager {
     /// through here so the post-commit query trace is consumed by the
     /// first general query dispatched, whichever path delivers it.
     fn serve_general_query(&mut self, query: RibUpdate) {
+        match self.first_group_intake(&query) {
+            first_group_order::Intake::Apply => {}
+            first_group_order::Intake::Retain => {
+                self.first_group_deferred_intents.push_back(query);
+                return;
+            }
+            first_group_order::Intake::Hold => {
+                self.first_group_general_head = Some(Box::new(query));
+                self.seal_first_group_commit_frontier();
+                return;
+            }
+        }
         if self.release_fences_read(&query) {
             self.release_general_reads.push_back(query);
             return;
@@ -4787,7 +4812,7 @@ impl RibManager {
     /// Probe one FIFO head at saturation. Mutations and compatible reads can
     /// still proceed while only the legacy read buffer is full.
     fn can_receive_release_primary(&mut self) -> bool {
-        if self.first_group_commit_remaining == Some(0) {
+        if self.first_group_commit_remaining == Some(0) || self.first_group_replay_due() {
             return false;
         }
         if self.release_primary_has_room() {
@@ -4796,17 +4821,33 @@ impl RibManager {
         if self.primary_lookahead.is_none() {
             self.primary_lookahead = self.rx.try_recv().ok();
         }
-        self.primary_lookahead
-            .as_ref()
-            .is_none_or(|update| !self.release_fences_read(update))
+        self.first_group_allows_lookahead()
+            && self
+                .primary_lookahead
+                .as_ref()
+                .is_none_or(|update| !self.release_fences_read(update))
     }
 
     fn admit_primary(&mut self, update: RibUpdate) -> Option<RibUpdate> {
         if self.first_group_commit_remaining == Some(0)
+            || self.first_group_replay_due()
             || (!self.release_primary_has_room() && self.release_fences_read(&update))
         {
             self.primary_lookahead = Some(update);
             return None;
+        }
+        match self.first_group_intake(&update) {
+            first_group_order::Intake::Apply => {}
+            first_group_order::Intake::Retain => {
+                self.charge_primary_admission();
+                self.first_group_deferred_intents.push_back(update);
+                return None;
+            }
+            first_group_order::Intake::Hold => {
+                self.primary_lookahead = Some(update);
+                self.seal_first_group_commit_frontier();
+                return None;
+            }
         }
         self.charge_primary_admission();
         Some(update)
@@ -4814,7 +4855,10 @@ impl RibManager {
 
     /// The next queued primary update, the held lookahead first.
     fn try_recv_primary(&mut self) -> Option<RibUpdate> {
-        if self.release_delivery_pending() || self.first_group_commit_remaining == Some(0) {
+        if self.release_delivery_pending()
+            || self.first_group_commit_remaining == Some(0)
+            || self.first_group_replay_due()
+        {
             return None;
         }
         let update = self
@@ -4837,7 +4881,9 @@ impl RibManager {
 
     /// A coalescer must leave the next message for expiry or commit.
     fn primary_read_ahead_cutoff_reached(&self) -> bool {
-        self.expiry_cutoffs.any_exhausted() || self.first_group_commit_remaining == Some(0)
+        self.expiry_cutoffs.any_exhausted()
+            || self.first_group_commit_remaining == Some(0)
+            || self.first_group_replay_due()
     }
 
     /// Place commit after exactly the currently queued primary messages,
@@ -4920,12 +4966,14 @@ impl RibManager {
         // other primary message. Yielding between chunks preserves that FIFO
         // while giving operator reads and the executor their ordinary seam.
         if !self.traced_route_chunk() {
-            let Some(update) = self.try_recv_primary() else {
+            let parked = self.first_group_deferred_intents.len();
+            if let Some(update) = self.try_recv_primary() {
+                self.traced(PostCommitWork::PrimaryUpdate, |manager| {
+                    manager.handle_update(update);
+                });
+            } else if parked == self.first_group_deferred_intents.len() {
                 return false;
-            };
-            self.traced(PostCommitWork::PrimaryUpdate, |manager| {
-                manager.handle_update(update);
-            });
+            }
         }
         let transition_elapsed = self
             .pending_clean_policy_transition
@@ -7570,10 +7618,12 @@ impl RibManager {
             if self.primary_lookahead.is_none() {
                 self.primary_lookahead = self.rx.try_recv().ok();
             }
-            if matches!(
-                self.primary_lookahead.as_ref().map(RibUpdate::unmetered),
-                Some(RibUpdate::BgpLsRoutesReceived { .. })
-            ) {
+            if self.first_group_allows_lookahead()
+                && matches!(
+                    self.primary_lookahead.as_ref().map(RibUpdate::unmetered),
+                    Some(RibUpdate::BgpLsRoutesReceived { .. })
+                )
+            {
                 self.orr_rebuild_owed_updates += 1;
                 return;
             }
@@ -8122,8 +8172,10 @@ impl RibManager {
             };
 
             let accept_summary = !self.unicast_release_partial();
-            let accept_general =
-                query_rx_open && self.release_general_reads.len() < self.query_rx.max_capacity();
+            let accept_general = query_rx_open
+                && self.release_general_reads.len() < self.query_rx.max_capacity()
+                && self.first_group_general_head.is_none()
+                && !self.first_group_replay_due();
             let needs_timers = has_attr_gc_timer
                 || has_registration_wait_timer
                 || resync_armed

@@ -8460,10 +8460,11 @@ impl RibManager {
         if self.primary_lookahead.is_none() {
             self.primary_lookahead = self.rx.try_recv().ok();
         }
-        if !self
-            .primary_lookahead
-            .as_ref()
-            .is_some_and(DistributionWindow::admits)
+        if !self.first_group_allows_lookahead()
+            || !self
+                .primary_lookahead
+                .as_ref()
+                .is_some_and(DistributionWindow::admits)
         {
             return false;
         }

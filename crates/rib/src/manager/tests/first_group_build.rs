@@ -108,6 +108,107 @@ fn finish(manager: &mut RibManager) {
     panic!("registration did not settle");
 }
 
+#[tokio::test]
+async fn pending_session_writer_orders_its_eor_but_later_config_allows_other_ingest() {
+    let (mut manager, primary, _) = fixture(0);
+    let incumbent = receiver(1);
+    let _incumbent_rx = join(&mut manager, incumbent, 1, &DUAL);
+    let (out, mut witness) = mpsc::channel(32);
+    manager.handle_update(test_peer_up(receiver(3), 1, out));
+    let slow = |slow| RibUpdate::PeerSlowState {
+        peer: incumbent,
+        session_id: 1,
+        slow,
+    };
+    manager.handle_update(slow(true));
+    let seed = prefixes(1)[0];
+    manager.handle_update(test_routes_received(
+        peer_v4(SOURCE),
+        vec![route(seed, SOURCE, 100)],
+    ));
+    drain_route_chunks(&mut manager);
+    let _founder_rx = join(&mut manager, receiver(2), 1, &DUAL);
+    manager.handle_update(slow(false));
+    assert!(manager.first_group_pending_writer().is_some());
+
+    let later_policy = |peer| {
+        let (reply, response) = oneshot::channel();
+        (
+            RibUpdate::ReplacePeerExportPolicy {
+                peer,
+                export_policy: None,
+                reply,
+            },
+            response,
+        )
+    };
+    let (first, mut reply1) = later_policy(receiver(3));
+    let (second, mut reply2) = later_policy(receiver(3));
+    primary.try_send(first).unwrap();
+    assert!(manager.drain_ready_updates().await);
+    // General-lane callers share the same intent ordering as primary callers.
+    manager.serve_general_query(second);
+    let marker = prefixes(2)[0];
+    primary
+        .try_send(test_routes_received(
+            peer_v4(OTHER),
+            vec![route(marker, OTHER, 100)],
+        ))
+        .unwrap();
+    primary
+        .try_send(RibUpdate::EndOfRib {
+            peer: incumbent,
+            session_id: 1,
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+        })
+        .unwrap();
+    assert!(manager.drain_ready_updates().await);
+    assert!(manager.drain_ready_updates().await);
+    assert!(manager.loc_rib.get(&marker).is_some());
+    assert!(
+        std::iter::from_fn(|| witness.try_recv().ok())
+            .any(|out| out.announce.iter().any(|r| r.prefix == marker))
+    );
+    // The normal receiver also honors the barrier if the optional distribution
+    // coalescer exhausted its elapsed-time budget before peeking at this EoR.
+    assert!(!manager.drain_ready_updates().await);
+    // It remains ahead of any following primary input until the older
+    // slow-state change commits.
+    assert!(manager.first_group_commit_frontier_reached());
+    assert!(
+        matches!(manager.primary_lookahead, Some(RibUpdate::EndOfRib { peer, .. }) if peer == incumbent)
+    );
+    assert!(manager.take_first_group_deferred_intent().is_none());
+    assert!(matches!(
+        reply1.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    assert!(matches!(
+        reply2.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    for _ in 0..64 {
+        if manager.first_group_pending_writer().is_none() {
+            break;
+        }
+        manager.advance_first_group_build();
+    }
+    let first = manager.take_first_group_deferred_intent().unwrap();
+    manager.handle_update(first);
+    assert!(reply1.try_recv().is_ok());
+    assert!(matches!(
+        reply2.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    let second = manager.take_first_group_deferred_intent().unwrap();
+    manager.handle_update(second);
+    assert!(reply2.try_recv().is_ok());
+    assert!(
+        matches!(manager.try_recv_primary(), Some(RibUpdate::EndOfRib { peer, .. }) if peer == incumbent)
+    );
+}
+
 async fn assert_initial(
     rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
     expected: &Inventory,
