@@ -991,25 +991,27 @@ mod tests {
 
     /// A dump future dropped after its blocking step finished, but before it
     /// took the result, releases that result on the blocking pool too.
-    #[tokio::test]
-    async fn an_untaken_step_result_is_dropped_on_the_blocking_pool() {
+    #[test]
+    fn an_untaken_step_result_is_dropped_on_the_blocking_pool() {
         struct Probe(std::sync::mpsc::Sender<std::thread::ThreadId>);
         impl Drop for Probe {
             fn drop(&mut self) {
                 let _ = self.0.send(std::thread::current().id());
             }
         }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
         let (dropped_tx, dropped_rx) = std::sync::mpsc::channel();
-        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (started_tx, started_rx) = oneshot::channel();
         let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
-        let (returning_tx, returning_rx) = std::sync::mpsc::channel();
-        let handle = tokio::spawn(async move {
+        let handle = runtime.spawn(async move {
             let cancelled = AtomicBool::new(false);
             MrtManager::encode_step(
                 move || {
                     started_tx.send(()).unwrap();
                     go_rx.recv().unwrap();
-                    returning_tx.send(()).unwrap();
                     Ok(Probe(dropped_tx))
                 },
                 None,
@@ -1018,23 +1020,16 @@ mod tests {
             .await
             .map(drop)
         });
-        // The closure blocks on `go`, so the task cannot finish while the
-        // test yields. Once it has started, the test never yields again:
-        // the one-thread runtime cannot poll the task until `abort()`, so
-        // the finished result stays untaken.
-        while started_rx.try_recv().is_err() {
-            tokio::task::yield_now().await;
-        }
+        runtime.block_on(started_rx).unwrap();
+        // Outside block_on the async owner cannot run. The sole blocking
+        // worker can signal only after it stored the first task's result.
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        runtime.spawn_blocking(move || finished_tx.send(()).unwrap());
         go_tx.send(()).unwrap();
-        returning_rx.recv().unwrap();
-        // Give the pool time to store the result in the JoinHandle; a result
-        // not yet stored would be dropped on the pool and hide a regression.
-        std::thread::sleep(Duration::from_millis(100));
+        finished_rx.recv().unwrap();
         handle.abort();
-        assert!(matches!(handle.await, Err(error) if error.is_cancelled()));
-        let dropped_on = tokio::task::spawn_blocking(move || dropped_rx.recv().unwrap())
-            .await
-            .unwrap();
+        assert!(matches!(runtime.block_on(handle), Err(error) if error.is_cancelled()));
+        let dropped_on = dropped_rx.recv().unwrap();
         assert_ne!(dropped_on, std::thread::current().id());
     }
 
