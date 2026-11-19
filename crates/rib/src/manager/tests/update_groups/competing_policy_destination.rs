@@ -96,16 +96,19 @@ async fn distinct_cold_destination(command: Command, acknowledge: bool) {
     }
     let old = manager.grouped_member_of(members[0]).unwrap();
     let policy = community_chain(0xfde8_2415);
-    let (_, target) = manager
-        .clean_policy_transition_destination(members[0], Some(&policy))
-        .unwrap();
+    let has_target = |manager: &RibManager| {
+        manager
+            .group_ribs
+            .values()
+            .any(|group| group.export_chain.as_ref() == Some(&policy))
+    };
     let response = command.submit(&mut manager, &members, &policy);
     assert!(
         manager.pending_clean_policy_transition.is_none(),
         "a competing clean fence would block ordinary UPDATEs"
     );
     assert!(
-        !manager.group_ribs.contains_key(&target),
+        !has_target(&manager),
         "a second provisional table was created"
     );
     assert_eq!(manager.grouped_member_of(members[0]), Some(old));
@@ -127,7 +130,7 @@ async fn distinct_cold_destination(command: Command, acknowledge: bool) {
         );
     }
     while manager.first_group_build.is_some() || manager.optional_destination_retirement_active() {
-        assert!(!manager.group_ribs.contains_key(&target));
+        assert!(!has_target(&manager));
         assert!(manager.take_first_group_deferred_intent().is_none());
         if acknowledge {
             assert!(
@@ -152,6 +155,8 @@ async fn distinct_cold_destination(command: Command, acknowledge: bool) {
         step_parked_transition(&mut manager);
     }
     response.await;
+    let target = manager.grouped_member_of(members[0]).unwrap();
+    assert_ne!(old, target);
     for member in members {
         assert_eq!(manager.grouped_member_of(member), Some(target));
         assert_eq!(manager.export_policy_for(member), Some(&policy));
@@ -172,4 +177,81 @@ async fn distinct_authoritative_destination_waits_for_founder_and_paced_prepare(
         distinct_cold_destination(Command::Batch, acknowledged).await;
         distinct_cold_destination(Command::Restore, acknowledged).await;
     }
+}
+
+#[tokio::test]
+async fn occupied_policy_destination_can_commit_while_an_unrelated_founder_scans() {
+    let (mut manager, members, _receivers) = direct_clean_transition_manager(3, 1, None);
+    let policy = community_chain(0xfde8_2416);
+    let (reply, mut applied) = oneshot::channel();
+    manager.handle_update(RibUpdate::ReplacePeerExportPolicy {
+        peer: members[2],
+        export_policy: Some(policy.clone()),
+        reply,
+    });
+    assert_eq!(applied.try_recv().unwrap(), Ok(()));
+    let warm = manager.grouped_member_of(members[2]).unwrap();
+    manager.first_group_build_min_routes = 1;
+    let _founder = join_overlap_founder(&mut manager, 1);
+    assert!(manager.first_group_build.is_some());
+    Command::Batch
+        .submit(&mut manager, &members[..2], &policy)
+        .await;
+    assert!(manager.first_group_build.is_some());
+    assert!(manager.first_group_pending_writer().is_none());
+    assert!(
+        members
+            .iter()
+            .all(|peer| manager.grouped_member_of(*peer) == Some(warm))
+    );
+}
+
+#[tokio::test]
+async fn policy_removal_waits_for_a_different_plain_registration_profile() {
+    let (mut manager, members, _receivers) = direct_clean_transition_manager(2, 1, None);
+    manager.first_group_build_min_routes = 1;
+    let (out, _founder) = mpsc::channel(16);
+    let peer = peer_v4(Ipv4Addr::new(10, 43, 0, 55));
+    let mut up = super::super::lifecycle::test_peer_up(peer, 18, out);
+    if let RibUpdate::PeerUp {
+        sendable_families,
+        is_ebgp,
+        route_reflector_client,
+        ..
+    } = &mut up
+    {
+        *is_ebgp = false;
+        *route_reflector_client = true;
+        sendable_families.push((Afi::Ipv6, Safi::Unicast));
+    }
+    manager.handle_update(up);
+    assert!(manager.first_group_build.is_some());
+    let (reply, mut result) = oneshot::channel();
+    manager.handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+        replacements: members
+            .iter()
+            .map(|&peer| crate::update::PeerExportPolicyReplacement {
+                peer,
+                export_policy: None,
+            })
+            .collect(),
+        reply,
+    });
+    assert_eq!(
+        result.try_recv().unwrap_err(),
+        oneshot::error::TryRecvError::Empty
+    );
+    while manager.first_group_build.is_some() {
+        manager.advance_first_group_build();
+    }
+    let intent = manager
+        .take_first_group_deferred_intent()
+        .expect("single-stack cohort waits for the dual-stack founder");
+    manager.handle_update(intent);
+    assert_eq!(result.try_recv().unwrap(), Ok(Vec::new()));
+    assert_ne!(
+        manager.grouped_member_of(peer),
+        manager.grouped_member_of(members[0])
+    );
+    assert!(manager.export_policy_for(members[0]).is_none());
 }
