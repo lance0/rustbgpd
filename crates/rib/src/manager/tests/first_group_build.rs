@@ -558,3 +558,148 @@ async fn rs_control_registration_waits_for_its_existing_plain_group_build() {
         Some(manager.grouped_member_of(founder).unwrap())
     );
 }
+
+// Fill the repair log without touching the staged IPv4 row we withdraw next.
+// Its stale copy then survives in the discarded table with no repair-log entry.
+fn overflow_with_staged_withdrawal(
+    manager: &mut RibManager,
+    expected: &mut Inventory,
+    lost: Prefix,
+) {
+    use crate::loc_rib::RegistrationScanStatus;
+
+    let winners: Vec<_> = expected
+        .iter_mut()
+        .filter(|(prefix, _)| matches!(prefix, Prefix::V6(_)))
+        .map(|(&prefix, winner)| {
+            *winner = (peer_v4(OTHER), 200);
+            route(prefix, OTHER, 200)
+        })
+        .collect();
+    assert_eq!(winners.len(), 4096);
+    manager.handle_update(test_routes_received(peer_v4(OTHER), winners));
+    drain_route_chunks(manager);
+    assert_eq!(
+        manager.loc_rib.registration_scan_status(),
+        RegistrationScanStatus::Scanning
+    );
+
+    let mut removal = test_routes_received(peer_v4(SOURCE), Vec::new());
+    let RibUpdate::RoutesReceived { withdrawn, .. } = &mut removal else {
+        unreachable!()
+    };
+    withdrawn.push((lost, 0));
+    manager.handle_update(removal);
+    drain_route_chunks(manager);
+    expected.remove(&lost).unwrap();
+    assert!(manager.loc_rib.get(&lost).is_none());
+    assert!(manager.first_group_contains(lost));
+    assert_eq!(
+        manager.loc_rib.registration_scan_status(),
+        RegistrationScanStatus::Overflow
+    );
+}
+
+#[tokio::test]
+async fn overflow_withdrawal_stays_withdrawn_across_retirement_and_sender_replacement() {
+    use crate::loc_rib::REGISTRATION_PAGE_SIZE;
+
+    let (mut manager, _tx, mut expected) = fixture(4096);
+    let mut established = join(&mut manager, receiver(3), 6, &DUAL[..1]);
+    finish(&mut manager);
+    let ipv4 = expected
+        .iter()
+        .filter(|(p, _)| matches!(p, Prefix::V4(_)))
+        .map(|(&p, &winner)| (p, winner))
+        .collect();
+    assert_initial(&mut established, &ipv4, &DUAL[..1]).await;
+    let published = manager.group_ribs.len();
+    let founder = receiver(1);
+    let next = receiver(2);
+    let old = join(&mut manager, founder, 7, &DUAL);
+    let [[lost, changed, _], _] = staged_keys(&mut manager, &expected);
+    // No slots are vacant before this build sees its first change.
+    let mut remaining = expected
+        .keys()
+        .filter(|&&p| manager.first_group_contains(p))
+        .count();
+    for _ in 0..32 {
+        if remaining > 3 * REGISTRATION_PAGE_SIZE {
+            break;
+        }
+        manager.advance_pending_initial_registration();
+        remaining = expected
+            .keys()
+            .filter(|&&p| manager.first_group_contains(p))
+            .count();
+    }
+    assert!(remaining > 3 * REGISTRATION_PAGE_SIZE);
+    overflow_with_staged_withdrawal(&mut manager, &mut expected, lost);
+    let withdrawal = established
+        .try_recv()
+        .expect("established receiver's withdrawal");
+    assert_eq!(
+        withdrawal
+            .unicast_withdrawals()
+            .copied()
+            .collect::<Vec<_>>(),
+        [(lost, 0)]
+    );
+    assert!(established.is_empty());
+    for _ in 0..2 {
+        manager.advance_pending_initial_registration();
+        let after = manager
+            .first_group_retiring_slots()
+            .expect("partly retired group");
+        assert!((1..=REGISTRATION_PAGE_SIZE).contains(&(remaining - after)));
+        remaining = after;
+    }
+
+    manager.handle_update(test_routes_received(
+        peer_v4(OTHER),
+        vec![route(changed, OTHER, 220)],
+    ));
+    drain_route_chunks(&mut manager);
+    expected.insert(changed, (peer_v4(OTHER), 220));
+    assert_eq!(manager.loc_rib.get(&changed).unwrap().peer, peer_v4(OTHER));
+    let update = established
+        .try_recv()
+        .expect("established receiver's new winner");
+    assert_eq!(
+        update
+            .announce
+            .iter()
+            .map(|r| (r.prefix, r.peer, r.local_pref()))
+            .collect::<Vec<_>>(),
+        [(changed, peer_v4(OTHER), 220)]
+    );
+    assert!(update.end_of_rib.is_empty() && established.is_empty());
+    assert_eq!(manager.first_group_retiring_slots(), Some(remaining));
+
+    let mut replacement = join(&mut manager, founder, 7, &DUAL);
+    let mut second = join(&mut manager, next, 8, &DUAL);
+    while remaining != 0 {
+        assert_eq!(manager.first_group_retiring_slots(), Some(remaining));
+        assert_eq!(manager.group_ribs.len(), published);
+        for waiter in [founder, next] {
+            assert!(manager.grouped_member_of(waiter).is_none());
+            assert!(!manager.outbound_peers.contains_key(&waiter));
+        }
+        assert!(old.is_empty() && replacement.is_empty() && second.is_empty());
+        manager.advance_pending_initial_registration();
+        let after = manager.first_group_retiring_slots().unwrap_or(0);
+        assert!((1..=REGISTRATION_PAGE_SIZE).contains(&(remaining - after)));
+        remaining = after;
+    }
+    assert!(manager.first_group_build.is_none());
+    assert_eq!(manager.group_ribs.len(), published);
+    finish(&mut manager);
+    assert_initial(&mut replacement, &expected, &DUAL).await;
+    assert_initial(&mut second, &expected, &DUAL).await;
+    assert!(old.is_empty() && replacement.is_empty() && second.is_empty());
+    assert_eq!(
+        manager.grouped_member_of(next),
+        Some(manager.grouped_member_of(founder).unwrap())
+    );
+    assert_eq!(manager.group_ribs.len(), published + 1);
+}
