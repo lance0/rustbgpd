@@ -3056,7 +3056,7 @@ rustbgpd \- API\-first BGP daemon with gRPC control plane
 [\fIOPTIONS\fR] [\fICONFIG_PATH\fR]
 .br
 .B rustbgpd --migrate-config
-\fIACTION\fR --offline [--dry-run] [--validator \fIPATH\fR] \fICONFIG_PATH\fR
+\fIACTION\fR --offline [--dry-run] \fICONFIG_PATH\fR
 .SH DESCRIPTION
 .B rustbgpd
 is a BGP daemon managed through its gRPC API. It loads a TOML
@@ -3081,10 +3081,9 @@ Path to the TOML config file. Defaults to
 .TP
 \fB\-\-migrate\-config\fR \fIACTION\fR
 Run an offline, in-place Linux config migration. Actions are
-\fBpin-legacy\fR, \fBprepare-secure\fR, and \fBdowngrade-v0.64\fR.
+\fBpin-legacy\fR and \fBprepare-secure\fR.
 Requires \fB--offline\fR and an explicit config path. \fB--dry-run\fR
-performs the complete proof without replacement. Downgrade alone requires
-\fB--validator\fR with an explicit path to exactly rustbgpd v0.64.0.
+performs the complete proof without replacement.
 The operator must stop or quiesce the daemon first; \fB--offline\fR is an
 assertion, not daemon discovery.
 .TP
@@ -3255,12 +3254,11 @@ fn main() -> ExitCode {
              Arguments:\n  \
                CONFIG_PATH  Path to TOML config file [default: /etc/rustbgpd/config.toml]\n\n\
              Options:\n  \
-               --migrate-config ACTION  Offline in-place migration: pin-legacy,\n                        \
-                                        prepare-secure, or downgrade-v0.64; requires\n                        \
+               --migrate-config ACTION  Offline in-place migration: pin-legacy or\n                        \
+                                        prepare-secure; requires\n                        \
                                         --offline and an explicit CONFIG_PATH\n  \
                --offline             Confirm migration runs without a daemon\n  \
                --dry-run             Prove migration without replacing CONFIG_PATH\n  \
-               --validator PATH      Exact v0.64.0 binary (downgrade-v0.64 only)\n  \
                --check               Validate config and exit without starting the daemon\n  \
                --strict              With --check, exit 1 if anything was warned about (for CI\n                        \
                                      and deployment gates). Rejected without --check\n  \
@@ -3313,12 +3311,10 @@ fn main() -> ExitCode {
         };
     }
 
-    if args.iter().any(|arg| {
-        matches!(
-            arg.as_str(),
-            "--migrate-config" | "--offline" | "--dry-run" | "--validator"
-        )
-    }) {
+    if args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--migrate-config" | "--offline" | "--dry-run"))
+    {
         return config_migration::run(&args);
     }
 

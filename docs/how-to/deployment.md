@@ -1377,7 +1377,7 @@ These cover the config lifecycle, from bootstrap to reload:
 | `rustbgpd --check <file>` | Parse + validate; print `config OK`, `config VALID, <n> WARNINGS — NOT a clean check` (warnings framed on stderr; still exit 0), or a rustc-style diagnostic (exit 1). Does not start the daemon. The running daemon logs the same config advisories as WARN lines: all of them at startup, and after a SIGHUP reload or API config change is adopted, each advisory that the previous config did not raise. |
 | `rustbgpd --check --strict <file>` | The same check, but any warning exits 1 instead of 0 — for CI and deployment gates that must not accept a valid-but-risky config. A clean check still exits 0. `--strict` without `--check` is an error (exit 2). |
 | `rbgp policy check [--fail-on-empty] [--deny-lints[=LINT,...]] [-j] <file.rpol>` | Compile a `.rpol` file and run its `test` blocks offline, without a daemon — a CI or editor gate for policy files. Exit 0 = clean, 1 = compile error, 2 = failing test (or no tests under `--fail-on-empty`), 3 = coverage below a requested threshold, 4 = a lint denied by `--deny-lints`. `-j` prints one `rbgp-policy-check/1.0` document with located findings. See [policy check as a CI and editor gate](../../crates/cli/README.md#policy-check-as-a-ci-and-editor-gate). |
-| `rustbgpd --migrate-config <pin-legacy\|prepare-secure\|downgrade-v0.64> --offline [--dry-run] <file>` | Rewrite the RFC 8212 posture representation in place, offline (Linux only). `pin-legacy` writes epoch 1 + explicit `false`; `prepare-secure` writes epoch 2 + explicit `true`; `downgrade-v0.64` preserves the effective boolean, removes the epoch, and requires `--validator` naming an exact v0.64.0 binary. `--dry-run` performs the same validation proof and discards the stage. `--offline` is an operator assertion, not a daemon probe — stop or quiesce the daemon first. |
+| `rustbgpd --migrate-config <pin-legacy\|prepare-secure> --offline [--dry-run] <file>` | Rewrite the RFC 8212 posture representation in place, offline (Linux only). `pin-legacy` writes epoch 1 + explicit `false`. `prepare-secure` writes epoch 2 + explicit `true`. `--dry-run` performs the same validation proof and discards the stage. `--offline` is an operator assertion, not a daemon probe — stop or quiesce the daemon first. |
 | `rustbgpd --diff <candidate> [<current>]` | Compare a candidate file against the current on-disk config (`<current>` defaults to `/etc/rustbgpd/config.toml`); print per-section change list with expected reload class and the `SIGHUP reload route`. Exit 0 = no actionable changes, 1 = actionable changes, 2 = load error. This is a static file-vs-file compare: once the candidate is installed over `<current>`, it reports no changes. To compare against the running daemon's view, use `rbgp config diff`. |
 | `rbgp config diff <candidate>` | Compare a candidate file against the running daemon's config snapshot, with the same reload-class annotations. Run it on the installed file after a reload to see what did not take effect, such as restart-required edits. Exit 0 = no changes, 2 = changes present, 1 = error. The 1 and 2 codes are the reverse of `rustbgpd --diff`. |
 | `systemctl reload rustbgpd` (or `kill -HUP $(pidof rustbgpd)`) | Apply the diff. Live fields hot-apply; restart-required fields are pinned and logged at `ERROR` (the live values are kept). |
@@ -1573,7 +1573,7 @@ running daemon, not the file on disk.
    Fix every error before proceeding. There is no general schema-migration
    tool; make release-note field renames by hand, then repeat the candidate
    check. The one exception is the RFC 8212 posture representation, which
-   `rustbgpd --migrate-config pin-legacy|prepare-secure|downgrade-v0.64
+   `rustbgpd --migrate-config pin-legacy|prepare-secure
    --offline [--dry-run] CONFIG_PATH` rewrites in place (see
    [`CONFIGURATION.md`](../reference/configuration.md) → `config_epoch`); stop or quiesce
    the daemon first — `--offline` is an operator assertion, not a daemon probe.
@@ -1718,7 +1718,24 @@ Builds that recognize newer-format history rows (see
 [ADR-0124](../adr/0124-bounded-config-history-retention.md)) list them as
 unreadable and skip recording, with a warning, until they are moved aside.
 
-Then stop cleanly, move history aside if required above, and install the selected older package:
+For a rollback to v0.64.0 that needs an epoch-aware config converted, v0.83.0
+was the last release with the Linux `downgrade-v0.64` action. Extract both
+release binaries. After settling pending transactions and stopping the daemon,
+run the v0.83.0 binary on a copy of the config alongside the original so
+relative paths resolve from the same directory:
+
+```sh
+/path/to/v0.83.0/rustbgpd --migrate-config downgrade-v0.64 --offline \
+  --validator /path/to/v0.64.0/rustbgpd /etc/rustbgpd/rollback.toml
+```
+
+This converts only the RFC 8212 posture and preserves its effective boolean.
+If either release rejects the config, use a saved v0.64.0 config and reconcile
+later changes. Run the v0.64.0 binary's `--check --strict` on the rollback
+file before installing it.
+
+For the package rollback, stop the daemon, move history aside if required
+above, and install the selected older package:
 
 ```sh
 previous_pkg=/path/to/rustbgpd_W.X.Y_amd64.deb # or the .rpm

@@ -36,8 +36,7 @@ _gate:
 # rustdoc commands; `test-feature-gated` the feature-gated Cargo commands;
 # `gate-ci-steps` every other named script step of the core and scale/receipt
 # jobs, read from the workflow; and `gate-msrv` the msrv job. What stays
-# outside it: the exact v0.64 migration test (it needs the validator binary CI
-# prepares), the privileged kernel job (`just netns` runs it in Docker), and
+# outside it: the privileged kernel job (`just netns` runs it in Docker) and
 # every other workflow, including the interop and kernel labs. The recipes run
 # one after another because `test-feature-gated` includes the Criterion smoke;
 # never start another gate beside it.

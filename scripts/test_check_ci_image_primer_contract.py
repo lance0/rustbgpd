@@ -374,7 +374,6 @@ class PrimerContractTests(unittest.TestCase):
             (".github/actions/stage-bird3-artifact/action.yml", "", BIRD3_ARCHIVE),
             (".github/actions/stage-bird3-artifact/action.yml", "2.19.2", "bird-2.19.2.tar.gz"),
             (".github/actions/stage-gobgp-artifact/action.yml", "3.37.0", "gobgp_3.37.0_linux_amd64.tar.gz"),
-            (".github/workflows/ci.yml", None, "rustbgpd-v0.64.0-linux-amd64.tar.gz"),
             (".github/workflows/kernel-dataplane.yml", None, BIRD3_ARCHIVE),
         )
         pins = dict(line.split() for line in (ROOT / MANIFEST).read_text().splitlines() if line and not line.startswith("#"))

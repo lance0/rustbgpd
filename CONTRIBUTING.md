@@ -170,14 +170,9 @@ The recipes intentionally expose their direct commands:
 Hosted checks remain authoritative. A draft pull request runs core CI
 (`ci.yml`) but skips the Interop and Kernel Dataplane labs, which run on the
 same head once the pull request is marked ready for review. `just gate-ci`
-covers the `ci.yml` checks that need no privileges; these stay CI-only:
-
-- the exact v0.64 migration test, which runs only when
-  `RUSTBGPD_V064_VALIDATOR` points to the verified v0.64 binary that CI
-  prepares;
-- the privileged kernel job in `ci.yml`, plus every other workflow under
-  `.github/workflows/`, such as the interop, kernel-dataplane, container, and
-  release lanes.
+covers the unprivileged checks in `ci.yml`. The privileged kernel job and
+the other workflows under `.github/workflows/`, including interop,
+kernel-dataplane, container, and release, run in CI.
 
 Privileged network-namespace tests require Linux, `EVPN_LINUX_NETNS=1`, and
 `CAP_NET_ADMIN` plus `CAP_SYS_ADMIN`; use
