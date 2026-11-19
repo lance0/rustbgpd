@@ -6046,7 +6046,7 @@ impl RibManager {
             }
             if let Some(mut prestage) = manager.pending_destination_prestage.take() {
                 manager.retire_prestaged_transition_inventory();
-                manager.release_prestage_to_policy_writer(prestage.destination);
+                let _ = manager.discard_uncommitted_policy_transition_group(prestage.destination);
                 #[cfg(feature = "bench-internals")]
                 prestage.memo.record_replacement_capacities(manager);
                 prestage.retire_with(&mut || checkpoint());
@@ -6566,8 +6566,7 @@ impl RibManager {
         // A still-running destination preparation cannot be trusted
         // mid-walk (same guard as the cohort transition command).
         if let Some(mut prestage) = self.pending_destination_prestage.take() {
-            self.retire_prestaged_transition_inventory();
-            self.release_prestage_to_policy_writer(prestage.destination);
+            let _ = self.discard_uncommitted_policy_transition_group(prestage.destination);
             #[cfg(feature = "bench-internals")]
             prestage.memo.record_replacement_capacities(self);
             prestage.retire_with(&mut || checkpoint());
@@ -7647,10 +7646,10 @@ impl RibManager {
             if !handed_off
                 && (manager.first_group_build.is_some()
                     || manager.paced_policy_destination.is_some())
-                && !manager
+                && manager
                     .group_ribs
                     .get(&destination)
-                    .is_some_and(|group| !group.members.is_empty())
+                    .is_none_or(|group| group.members.is_empty())
             {
                 manager.reclaim_unused_update_group_policies();
                 return Some((
@@ -7667,23 +7666,25 @@ impl RibManager {
                 let _ = manager.discard_uncommitted_policy_transition_group(stale);
             }
             manager.retire_prestaged_transition_inventory();
-            // A leftover unowned group under this id may be partially staged
-            // from an aborted attempt; recreate it deterministically. An OWNED
-            // group is maintained by definition — nothing to stage.
-            let prefixes = if handed_off {
-                // The private builder reconciled this table before publishing it.
-                // Continue with the optional bounded inventory/probe walk only.
-                Vec::new()
-            } else {
-                let _ = manager.discard_uncommitted_policy_transition_group(destination);
+            if handed_off {
+                // The private builder already reconciled this complete destination.
+                // Match an occupied destination's fast path, retaining the memberless
+                // table for the cohort or an explicit discard.
+                manager.prepared_destination = Some(destination);
+                manager.reclaim_unused_update_group_policies();
+                return Some((reply, Ok(())));
+            }
+            // A leftover memberless table from an aborted legacy walk may be partial.
+            // An occupied group is already maintained and stays available to its members.
+            let _ = manager.discard_uncommitted_policy_transition_group(destination);
+            let prefixes =
                 match manager.begin_policy_transition_group(destination, peer, export_policy) {
                     super::update_groups::PolicyTransitionGroupStart::Maintained => {
                         manager.reclaim_unused_update_group_policies();
                         return Some((reply, Ok(())));
                     }
                     super::update_groups::PolicyTransitionGroupStart::Created(prefixes) => prefixes,
-                }
-            };
+                };
             manager.pending_destination_prestage = Some(DestinationPrestage {
                 destination,
                 source,
@@ -7700,14 +7701,6 @@ impl RibManager {
         });
         if let Some((reply, result)) = completed {
             let _ = reply.send(result);
-        }
-    }
-
-    fn release_prestage_to_policy_writer(&mut self, gid: usize) {
-        if self.paced_policy_destination == Some(gid) {
-            self.prepared_destination = Some(gid);
-        } else {
-            let _ = self.discard_uncommitted_policy_transition_group(gid);
         }
     }
 
@@ -7733,11 +7726,7 @@ impl RibManager {
         };
         let reply = self.with_replacement_readiness(|manager| {
             manager.retire_prestaged_transition_inventory();
-            // A binding member can adopt this complete table immediately. Only a
-            // legacy mid-walk table needs to be removed and rebuilt on adoption.
-            if manager.paced_policy_destination != Some(gid) {
-                let _ = manager.discard_uncommitted_policy_transition_group(gid);
-            }
+            let _ = manager.discard_uncommitted_policy_transition_group(gid);
             manager.replacement_checkpoint(true);
             #[cfg(feature = "bench-internals")]
             prestage.memo.record_replacement_capacities(manager);
