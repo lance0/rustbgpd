@@ -144,6 +144,10 @@ fn uncertain_single_best_cold_cohort_commits_its_exact_shared_inventory() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one actor and its receivers witness the refusal, retirement and mandatory restore in order"
+)]
 fn abandoned_late_cold_refusal_preserves_old_updates_and_mandatory_restore() {
     let (tx, mut manager) = manager();
     let old = tagged(OLD);

@@ -1667,7 +1667,7 @@ fn refused_cold_cohort_retires_before_the_next_registration() {
                         assert_eq!(outcome.applied, 0, "every mover is skipped");
                         assert_eq!(outcome.skipped, pending);
                     } else {
-                        assert!(outcome.skipped.is_empty());
+                        assert_eq!(outcome.skipped, Vec::<PeerId>::new());
                         assert!(outcome.applied > 0);
                         assert_eq!(outcome.pending, pending[outcome.applied..]);
                     }

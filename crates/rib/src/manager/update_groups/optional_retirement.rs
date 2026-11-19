@@ -145,6 +145,10 @@ pub(in crate::manager) struct RejectedBatchedInventory {
     pending_source: Option<PeerId>,
 }
 
+#[expect(
+    clippy::ref_option,
+    reason = "the whole Option is the borrowed hash key, including the unlabelled row"
+)]
 impl RejectedBatchedInventory {
     pub(super) fn new(
         announce: Vec<Route>,
@@ -183,7 +187,7 @@ impl RejectedBatchedInventory {
         if let Some(permits) = &mut self.permit_by_source
             && let Some(labels) = permits.get_mut(&source)
         {
-            if !release_permit(labels, label, budget) || *budget == 0 {
+            if !Self::release_permit(labels, label, budget) || *budget == 0 {
                 return false;
             }
             // Release the source's empty label-map allocation.
@@ -209,7 +213,7 @@ impl RejectedBatchedInventory {
 
     fn finish(&mut self, label: &Option<PolicyLabel>, budget: &mut usize) -> bool {
         if let Some(totals) = &mut self.permit_totals
-            && !release_permit(totals, label, budget)
+            && !Self::release_permit(totals, label, budget)
         {
             return false;
         }
@@ -219,24 +223,24 @@ impl RejectedBatchedInventory {
             && release_empty_map(&mut self.permit_by_source, budget)
             && release_empty_map(&mut self.supplements, budget)
     }
-}
 
-// Both maps receiving permit labels are fresh and group-uniform. Remove the
-// only label by key, even if the allocation has mostly empty buckets.
-fn release_permit(
-    rows: &mut FastMap<Option<PolicyLabel>, u64>,
-    label: &Option<PolicyLabel>,
-    budget: &mut usize,
-) -> bool {
-    if !rows.is_empty() {
-        if *budget == 0 {
-            return false;
+    // Both maps receiving permit labels are fresh and group-uniform. Remove the
+    // only label by key, even if the allocation has mostly empty buckets.
+    fn release_permit(
+        rows: &mut FastMap<Option<PolicyLabel>, u64>,
+        label: &Option<PolicyLabel>,
+        budget: &mut usize,
+    ) -> bool {
+        if !rows.is_empty() {
+            if *budget == 0 {
+                return false;
+            }
+            *budget -= 1;
+            rows.remove(label).expect("one group permit label");
+            debug_assert!(rows.is_empty());
         }
-        *budget -= 1;
-        rows.remove(label).expect("one group permit label");
-        debug_assert!(rows.is_empty());
+        true
     }
-    true
 }
 
 fn release_empty_map<T>(map: &mut Option<T>, budget: &mut usize) -> bool {

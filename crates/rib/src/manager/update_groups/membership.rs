@@ -794,6 +794,10 @@ impl RibManager {
     /// join-time build pass (one shared staging walk, deltas discarded:
     /// correct only while the group is memberless). `peer` is the
     /// exemplar whose group-uniform staging inputs seed the profile.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the ordered family staging and its readiness checkpoints share one group build"
+    )]
     pub(in crate::manager) fn ensure_group_table(&mut self, gid: usize, peer: PeerId) {
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || crate::manager::replacement_readiness_checkpoint(&readiness, false);
