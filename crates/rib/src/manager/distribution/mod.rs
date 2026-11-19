@@ -6136,6 +6136,10 @@ impl RibManager {
             .collect();
         let mut cost = None;
         while !pending.is_empty() {
+            // The production intake holds the paced command until disposal.
+            while self.optional_destination_retirement_active() {
+                self.advance_optional_destination_retirement();
+            }
             let outcome = self.apply_paced_export_policies(
                 pending
                     .iter()
@@ -6722,6 +6726,14 @@ impl RibManager {
             }
         }
 
+        #[cfg(test)]
+        if matches!(mode, ResidualMode::All) {
+            // This whole-list reference runs its residual without the actor's
+            // intake separating the authoritative and subsequent paced stages.
+            while self.optional_destination_retirement_active() {
+                self.advance_optional_destination_retirement();
+            }
+        }
         let n_residual_members = residual.len();
         // A paced command stops at a caller-order boundary: what it applies
         // is a prefix of its list, and the rest comes back in order.
@@ -6920,9 +6932,8 @@ impl RibManager {
     /// transition: reuse or build the destination table, derive the shared
     /// old→new delta plus ADR-0126 per-member exceptions once, move the
     /// memberships, and enqueue the encode-once shared payload per
-    /// member. Returns `false` (nothing externally visible mutated
-    /// beyond an unowned staged destination the per-member fallback then
-    /// adopts) when the cohort does not qualify.
+    /// member. A refused cohort keeps its old policy and membership. A fresh
+    /// speculative table and its partial inventory retire under one slot.
     #[expect(
         clippy::too_many_lines,
         reason = "the cohort commit keeps its gates, membership moves, and \
@@ -6989,12 +7000,13 @@ impl RibManager {
                 .saturating_add(u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX));
             return false;
         }
-        // A fresh speculative table has no owner if its inventory refuses
-        // the move and the caller abandons the subsequent paced walk.
+        // A single-best unicast cohort can use an idle slot to resolve a
+        // route-dependent decision. A refusal must retain physical ownership
+        // independently of whether the caller ever submits its paced walk.
         let destination_existed = self.group_ribs.contains_key(&destination);
-        if !destination_existed
-            && !self.cold_batched_inventory_can_commit(source, destination, members)
-        {
+        let speculative = !destination_existed
+            && !self.cold_batched_inventory_can_commit(source, destination, members);
+        if speculative && !self.can_own_uncertain_policy_destination(source) {
             receipt.cohort_precheck_us = receipt
                 .cohort_precheck_us
                 .saturating_add(u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX));
@@ -7020,6 +7032,9 @@ impl RibManager {
         // with the existing group and its ordinary retry path.
         let phase = std::time::Instant::now();
         if !destination_owned {
+            if speculative {
+                self.paced_policy_destination = Some(destination);
+            }
             self.ensure_group_table(destination, exemplar);
             receipt.destination_ensures += 1;
         }
@@ -7033,15 +7048,19 @@ impl RibManager {
             .saturating_add(u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX));
         let phase = std::time::Instant::now();
         let mut inventory = {
-            let (Some(source_group), Some(destination_group)) = (
-                self.group_ribs.get(&source),
-                self.group_ribs.get(&destination),
-            ) else {
+            let Some(source_group) = self.group_ribs.get(&source) else {
+                if speculative {
+                    self.retire_refused_authoritative_destination(destination, None);
+                }
                 receipt.inventory_build_us = receipt
                     .inventory_build_us
                     .saturating_add(u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX));
                 return false;
             };
+            let destination_group = self
+                .group_ribs
+                .get(&destination)
+                .expect("ensured destination");
             // RFC 9234 OTC enforcement rides inside the inventory build:
             // a blocked route in the emitted delta, or blocked-winner
             // residue on either side, degrades the cohort to the
@@ -7056,10 +7075,11 @@ impl RibManager {
                 .collect();
             rs_asns.sort_unstable();
             rs_asns.dedup();
-            let Some(inventory) = Self::batched_transition_inventory(
+            match Self::batched_transition_inventory(
                 source_group,
                 destination_group,
                 &rs_asns,
+                speculative,
                 &mut |force| {
                     if force {
                         self.replacement_checkpoint(true);
@@ -7067,13 +7087,18 @@ impl RibManager {
                         self.replacement_checkpoint_at("shared_inventory", false);
                     }
                 },
-            ) else {
-                receipt.inventory_build_us = receipt
-                    .inventory_build_us
-                    .saturating_add(u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX));
-                return false;
-            };
-            inventory
+            ) {
+                Ok(inventory) => inventory,
+                Err(scratch) => {
+                    if speculative {
+                        self.retire_refused_authoritative_destination(destination, scratch);
+                    }
+                    receipt.inventory_build_us = receipt.inventory_build_us.saturating_add(
+                        u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX),
+                    );
+                    return false;
+                }
+            }
         };
         receipt.inventory_build_us = receipt
             .inventory_build_us

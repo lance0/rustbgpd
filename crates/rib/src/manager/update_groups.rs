@@ -4626,6 +4626,19 @@ impl RibManager {
         }));
         self.replacement_checkpoint(true);
         let exclusive = optional.filter(|(_, chain)| chains.insert(*chain));
+        // Authority can detach a refused table while this command still has
+        // preclassified destinations. Only now can an unused registry payload
+        // move to that table's physical retirement owner.
+        if let Some(retiring) = &mut self.optional_destination_retirement
+            && retiring.interned_policy.is_none()
+            && let Some(id) = self
+                .update_groups
+                .group_key(retiring.gid)
+                .and_then(|key| key.chain)
+            && !chains.contains(&id)
+        {
+            retiring.interned_policy = self.update_groups.chains[id].take();
+        }
         drop(groups);
         self.replacement_checkpoint(true);
         for (id, chain) in self.update_groups.chains.iter_mut().enumerate() {

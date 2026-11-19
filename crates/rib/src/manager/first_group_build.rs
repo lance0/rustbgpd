@@ -33,10 +33,10 @@ pub(super) struct FirstGroupBuild {
 /// Detached as one owner. Until its last page finishes, this still occupies
 /// the same build slot as the memberless prepared table it replaced.
 pub(super) struct OptionalDestinationRetirement {
-    gid: usize,
+    pub(super) gid: usize,
     group: OptionalGroupRetirement,
     inventory: OptionalInventoryRetirement,
-    interned_policy: Option<rustbgpd_policy::PolicyChain>,
+    pub(super) interned_policy: Option<rustbgpd_policy::PolicyChain>,
     withdrawn: BTreeSet<(Prefix, u32)>,
 }
 

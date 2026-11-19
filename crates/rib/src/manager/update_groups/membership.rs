@@ -832,6 +832,9 @@ impl RibManager {
             );
             self.replacement_checkpoint(true);
             group.owns_evpn = self.planned_group_owns_evpn(gid);
+            if self.paced_policy_destination == Some(gid) {
+                group.prepare_optional_retirement();
+            }
             group.evpn_table_stamp = self.next_evpn_table_stamp().unwrap_or(0);
             self.group_ribs.insert(gid, group);
             self.replacement_checkpoint(true);

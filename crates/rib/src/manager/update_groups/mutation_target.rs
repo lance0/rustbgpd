@@ -25,6 +25,17 @@ enum SlotTarget {
 }
 
 impl RibManager {
+    /// A fresh authoritative table with a route-dependent inventory may
+    /// occupy a free slot if its actual table and sidecars support paged
+    /// retirement. Existing source OTC residue already decides the refusal.
+    pub(in crate::manager) fn can_own_uncertain_policy_destination(&self, source: usize) -> bool {
+        self.first_group_slot_available()
+            && self
+                .group_ribs
+                .get(&source)
+                .is_some_and(|group| !group.per_client_best && group.otc_blocked.is_empty())
+    }
+
     /// A clean transition and the shared authoritative cohort kernel can leave
     /// a new table memberless across polls or a deferred residual walk. Check
     /// their chain-only destinations before the command acquires its fence or
@@ -129,8 +140,8 @@ impl RibManager {
                 return Some(SlotTarget::Occupied);
             }
         }
-        // The authoritative kernel hands an unprovable cold inventory back
-        // to its paced caller without allocating. That result needs no slot.
+        // An uncertain cold inventory can speculate only on an idle slot.
+        // It cannot evict this holder or postpone the founder's publication.
         // Check each mover conservatively: another eligible source cohort in
         // the same command may still need to build its destination.
         if !clean && !self.cold_shared_inventory_eligible(source_group, &key, policy, &[peer]) {
