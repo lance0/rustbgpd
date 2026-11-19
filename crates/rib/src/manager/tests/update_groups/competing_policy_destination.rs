@@ -66,6 +66,24 @@ impl Command {
     }
 }
 
+fn acknowledge_founders_destination(manager: &mut RibManager, peer: PeerId) {
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::PrepareExportPolicyDestination {
+        peer,
+        export_policy: None,
+        reply,
+    });
+    while manager.first_group_build.is_some() {
+        manager.advance_first_group_build();
+    }
+    assert_eq!(response.try_recv().unwrap(), Ok(()));
+    assert!(manager.paced_policy_destination.is_some());
+    assert_eq!(
+        manager.paced_policy_destination,
+        manager.prepared_destination
+    );
+}
+
 async fn distinct_cold_destination(command: Command, acknowledge: bool) {
     let (mut manager, members, mut receivers) = direct_clean_transition_manager(2, 0, None);
     manager.outbound_row_credit_override = None;
@@ -78,21 +96,7 @@ async fn distinct_cold_destination(command: Command, acknowledge: bool) {
     manager.advance_first_group_build();
     assert!(manager.first_group_build.is_some());
     if acknowledge {
-        let (reply, mut response) = oneshot::channel();
-        manager.handle_update(RibUpdate::PrepareExportPolicyDestination {
-            peer: members[0],
-            export_policy: None,
-            reply,
-        });
-        while manager.first_group_build.is_some() {
-            manager.advance_first_group_build();
-        }
-        assert_eq!(response.try_recv().unwrap(), Ok(()));
-        assert!(manager.paced_policy_destination.is_some());
-        assert_eq!(
-            manager.paced_policy_destination,
-            manager.prepared_destination
-        );
+        acknowledge_founders_destination(&mut manager, members[0]);
     }
     let old = manager.grouped_member_of(members[0]).unwrap();
     let policy = community_chain(0xfde8_2415);
@@ -176,6 +180,102 @@ async fn distinct_authoritative_destination_waits_for_founder_and_paced_prepare(
     for acknowledged in [false, true] {
         distinct_cold_destination(Command::Batch, acknowledged).await;
         distinct_cold_destination(Command::Restore, acknowledged).await;
+    }
+}
+
+#[test]
+fn refused_cold_batch_replies_without_displacing_founder_or_prepared_destination() {
+    for acknowledged in [false, true] {
+        let (mut manager, members, mut receivers) = direct_clean_transition_manager(2, 0, None);
+        distribute_direct_route(&mut manager, OVERLAP_SOURCE, overlap_prefix(0));
+        for rx in &mut receivers {
+            assert_eq!(delivered(rx.try_recv().unwrap()).announce.len(), 1);
+        }
+        let mut target = community_chain(OVERLAP_TAG);
+        target.policies[0].policy.entries[0]
+            .modifications
+            .set_next_hop = Some(rustbgpd_policy::NextHopAction::Self_);
+        manager.first_group_build_min_routes = 1;
+        let mut founder = join_overlap_founder(&mut manager, 1);
+        assert!(manager.first_group_build.is_some());
+        if acknowledged {
+            acknowledge_founders_destination(&mut manager, members[0]);
+        }
+        let held = manager.paced_policy_destination;
+        let replacements = || batch_replacements(&members, &target);
+        let (reply, mut forward) = oneshot::channel();
+        manager.handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements: replacements(),
+            reply,
+        });
+        assert_eq!(forward.try_recv().unwrap(), Ok(members.clone()));
+        let (reply, mut restore) = oneshot::channel();
+        manager.handle_update(RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+            replacements: replacements(),
+            reply,
+        });
+        let receipts = restore.try_recv().unwrap().unwrap();
+        assert_eq!(
+            receipts,
+            members
+                .iter()
+                .rev()
+                .map(|&peer| crate::update::PeerExportPolicyRestoreReceipt::Deferred { peer })
+                .collect::<Vec<_>>()
+        );
+        assert!(manager.first_group_pending_writer().is_none());
+        assert!(manager.first_group_deferred_intents.is_empty());
+        assert!(!manager.optional_destination_retirement_active());
+        assert_eq!(manager.paced_policy_destination, held);
+        assert_eq!(manager.prepared_destination, held);
+        assert_eq!(manager.first_group_build.is_some(), !acknowledged);
+        assert!(
+            manager
+                .group_ribs
+                .values()
+                .all(|group| group.export_chain.as_ref() != Some(&target))
+        );
+        assert_eq!(manager.authoritative_transition_receipts.len(), 2);
+        for receipt in &manager.authoritative_transition_receipts {
+            assert_eq!(
+                (receipt.destination_builds, receipt.destination_ensures),
+                (0, 0)
+            );
+        }
+        let marker = overlap_prefix(1);
+        distribute_direct_route(&mut manager, OVERLAP_SOURCE, marker);
+        for rx in &mut receivers {
+            let update = delivered(rx.try_recv().unwrap());
+            assert!(
+                update
+                    .announce
+                    .iter()
+                    .any(|row| row.prefix == Prefix::V4(marker)
+                        && row.communities().contains(&OVERLAP_TAG))
+            );
+        }
+        for _ in 0..64 {
+            if manager.first_group_build.is_none()
+                && manager.pending_initial_registrations.is_empty()
+            {
+                break;
+            }
+            manager.advance_pending_initial_registration();
+        }
+        let mut expected = HashSet::from([Prefix::V4(overlap_prefix(0)), Prefix::V4(marker)]);
+        let mut eors = 0;
+        while let Ok(update) = founder.try_recv().map(delivered) {
+            for row in update.announce.iter() {
+                assert_eq!(eors, 0);
+                assert!(expected.remove(&row.prefix));
+            }
+            if !update.end_of_rib.is_empty() {
+                assert_eq!(update.end_of_rib, ipv4_sendable());
+                eors += 1;
+            }
+        }
+        assert!(expected.is_empty());
+        assert_eq!(eors, 1);
     }
 }
 

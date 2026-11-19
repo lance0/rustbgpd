@@ -876,8 +876,6 @@ impl RibManager {
         destination: usize,
         members: &[PeerId],
     ) -> bool {
-        use rustbgpd_policy::RouteFamily;
-
         let (Some(group), Some(key), Some(&exemplar)) = (
             self.group_ribs.get(&source),
             self.update_groups.group_key(destination),
@@ -885,6 +883,20 @@ impl RibManager {
         ) else {
             return false;
         };
+        self.cold_shared_inventory_eligible(group, key, self.export_policy_for(exemplar), members)
+    }
+
+    /// The incoming policy is explicit so admission can check it before
+    /// installation or interning, using the same proof as the batch handler.
+    pub(super) fn cold_shared_inventory_eligible(
+        &self,
+        group: &GroupRibOut,
+        key: &GroupKey,
+        target_policy: Option<&PolicyChain>,
+        members: &[PeerId],
+    ) -> bool {
+        use rustbgpd_policy::RouteFamily;
+
         // Newly permitted routes can carry OTC or RS tags absent from the
         // source table. RS checks use movers' ASNs against both original and
         // post-policy attributes, including the per-client-best fallback.
@@ -892,6 +904,7 @@ impl RibManager {
             || !group.otc_blocked.is_empty()
             || members
                 .iter()
+                .inspect(|_| self.replacement_checkpoint(false))
                 .any(|peer| self.peer_rs_control.contains_key(peer))
             || group.table.has_next_hop_overrides()
         {
@@ -903,7 +916,7 @@ impl RibManager {
         let source_lane_policy = (!group.runner_up.is_empty())
             .then_some(group.export_chain.as_ref())
             .flatten();
-        [self.export_policy_for(exemplar), source_lane_policy]
+        [target_policy, source_lane_policy]
             .into_iter()
             .flatten()
             .all(|chain| {

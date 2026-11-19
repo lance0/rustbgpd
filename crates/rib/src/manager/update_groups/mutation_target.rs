@@ -129,6 +129,13 @@ impl RibManager {
                 return Some(SlotTarget::Occupied);
             }
         }
+        // The authoritative kernel hands an unprovable cold inventory back
+        // to its paced caller without allocating. That result needs no slot.
+        // Check each mover conservatively: another eligible source cohort in
+        // the same command may still need to build its destination.
+        if !clean && !self.cold_shared_inventory_eligible(source_group, &key, policy, &[peer]) {
+            return None;
+        }
         Some(SlotTarget::Cold)
     }
 
