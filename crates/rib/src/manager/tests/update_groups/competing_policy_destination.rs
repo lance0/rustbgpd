@@ -255,3 +255,92 @@ async fn policy_removal_waits_for_a_different_plain_registration_profile() {
     );
     assert!(manager.export_policy_for(members[0]).is_none());
 }
+
+#[tokio::test]
+async fn queued_distinct_policy_allows_old_policy_update_during_paced_prepare_retirement() {
+    const ROWS: u32 = 10_240;
+    let (mut manager, members, mut receivers) = direct_clean_transition_manager(3, 0, None);
+    manager.outbound_row_credit_override = None;
+    for start in (0..ROWS).step_by(512) {
+        distribute_direct_routes(
+            &mut manager,
+            OVERLAP_SOURCE,
+            (start..start + 512).map(overlap_prefix),
+        );
+        for receiver in &mut receivers {
+            while receiver.try_recv().map(delivered).is_ok() {}
+        }
+    }
+    manager.first_group_build_min_routes = 1;
+    let _founder = join_overlap_founder(&mut manager, 1);
+    let (reply, mut prepared) = oneshot::channel();
+    manager.handle_update(RibUpdate::PrepareExportPolicyDestination {
+        peer: members[0],
+        export_policy: None,
+        reply,
+    });
+    while manager.first_group_build.is_some() {
+        manager.advance_first_group_build();
+    }
+    assert_eq!(prepared.try_recv().unwrap(), Ok(()));
+    let held = manager.paced_policy_destination.unwrap();
+    assert_eq!(manager.group_ribs[&held].table.len(), ROWS as usize);
+    let old = manager.grouped_member_of(members[0]).unwrap();
+    manager.flush_poll_budget = std::time::Duration::MAX;
+    let (primary, rx) = mpsc::channel(8);
+    manager.rx = rx;
+    let (queries, rx) = mpsc::channel(4);
+    manager.query_rx = rx;
+    let policy = community_chain(0xfde8_2421);
+    let (reply, mut applied) = oneshot::channel();
+    primary
+        .try_send(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements: members[..2]
+                .iter()
+                .map(|&peer| crate::update::PeerExportPolicyReplacement {
+                    peer,
+                    export_policy: Some(policy.clone()),
+                })
+                .collect(),
+            reply,
+        })
+        .unwrap();
+    let prefix = overlap_prefix(ROWS);
+    primary
+        .try_send(super::super::lifecycle::test_routes_received(
+            peer_v4(OVERLAP_SOURCE),
+            vec![make_route_with_lp(prefix, OVERLAP_SOURCE, 170)],
+        ))
+        .unwrap();
+    let mut actor = Box::pin(manager.run_actor());
+    let wire = observe_policy_during_retirement(
+        actor.as_mut(),
+        ROWS as usize,
+        &mut receivers,
+        query_update_group(&queries, members[0]),
+        old,
+    );
+    assert!(matches!(
+        applied.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    for witness in &wire {
+        assert!(witness.iter().any(|update| {
+            update.announce.iter().any(|row| {
+                row.prefix == Prefix::V4(prefix)
+                    && row.local_pref() == 170
+                    && row.communities().contains(&OVERLAP_TAG)
+            })
+        }));
+    }
+    let actor = tokio::spawn(actor);
+    assert_eq!(applied.await.unwrap(), Ok(Vec::new()));
+    drop(primary);
+    drop(queries);
+    let manager = actor.await.unwrap();
+    for peer in &members[..2] {
+        assert_eq!(manager.export_policy_for(*peer), Some(&policy));
+        assert_ne!(manager.grouped_member_of(*peer), Some(old));
+    }
+    assert_eq!(manager.grouped_member_of(members[2]), Some(old));
+}
