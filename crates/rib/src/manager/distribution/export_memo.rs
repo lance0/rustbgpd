@@ -31,6 +31,7 @@ use crate::PeerId;
 use crate::attr_set::AttrSet;
 use crate::fast_hash::ShardedMap;
 use crate::route::Route;
+use rustbgpd_wire::Prefix;
 
 /// Memoized export-tail results for one distribution pass.
 #[derive(Default)]
@@ -49,6 +50,74 @@ struct MemoEntry {
     /// set. Expected tiny: one slot per distinct `RouteModifications`
     /// produced by the export chains in this pass.
     modified: Vec<(RouteModifications, Arc<AttrSet>, Option<NextHopAction>)>,
+}
+
+/// Detached walk buffers of a cancelled destination preparation. Ordinary
+/// export memos never carry a retirement cursor or maintain an auxiliary index.
+pub(in crate::manager) struct CancelledPrestage {
+    prefixes: Vec<Prefix>,
+    memo: ExportMemo,
+    shard: usize,
+    bucket: usize,
+    entry: Option<MemoEntry>,
+}
+
+impl CancelledPrestage {
+    pub(super) fn new(prefixes: Vec<Prefix>, memo: ExportMemo) -> Self {
+        Self {
+            prefixes,
+            memo,
+            shard: 0,
+            bucket: 0,
+            entry: None,
+        }
+    }
+
+    pub(in crate::manager) fn retire_page(&mut self, budget: &mut usize) -> bool {
+        if self.prefixes.capacity() > 0 {
+            if *budget == 0 {
+                return false;
+            }
+            // Prefix is Copy. Only its backing allocation needs release.
+            *budget -= 1;
+            self.prefixes = Vec::new();
+        }
+        while *budget > 0 {
+            if let Some(entry) = &mut self.entry {
+                let count = entry.modified.len().min(*budget);
+                entry.modified.truncate(entry.modified.len() - count);
+                *budget -= count;
+                if *budget == 0 {
+                    return false;
+                }
+                *budget -= 1;
+                self.entry = None;
+                continue;
+            }
+            let Some(shard) = self.memo.entries.shards_mut().get_mut(self.shard) else {
+                // Release the fixed-size shard directory with the walk owner.
+                *budget -= 1;
+                return true;
+            };
+            if shard.is_empty() {
+                if shard.allocation_size() != 0 {
+                    *budget -= 1;
+                    *shard = crate::fast_hash::Shard::new();
+                }
+                self.shard += 1;
+                self.bucket = 0;
+                continue;
+            }
+            // Removing the current bucket leaves all other buckets in place.
+            // Charge the inspection even when the table is sparse.
+            *budget -= 1;
+            if let Ok(entry) = shard.get_bucket_entry(self.bucket) {
+                self.entry = Some(entry.remove().0.1);
+            }
+            self.bucket += 1;
+        }
+        false
+    }
 }
 
 impl ExportMemo {
@@ -232,6 +301,43 @@ mod tests {
             },
             |memo| memo.entries.capacity(),
         );
+    }
+
+    #[test]
+    fn cancelled_prestage_charges_sparse_memo_buckets_and_nested_outcomes() {
+        let source = AttrSet::new(attrs(100));
+        let mut shard = crate::fast_hash::Shard::with_capacity(512);
+        let outcomes = vec![(RouteModifications::default(), Arc::clone(&source), None); 200];
+        shard.insert_unique(
+            256,
+            (
+                256,
+                MemoEntry {
+                    _source: Arc::clone(&source),
+                    aspath: None,
+                    modified: outcomes,
+                },
+            ),
+            |entry| entry.0 as u64,
+        );
+        assert!(shard.get_bucket_entry(256).is_ok());
+        let mut staging = CancelledPrestage::new(
+            Vec::new(),
+            ExportMemo {
+                entries: ShardedMap::One(shard),
+            },
+        );
+        let mut budget = 256;
+        assert!(!staging.retire_page(&mut budget));
+        assert_eq!(budget, 0);
+        assert_eq!(staging.memo.len(), 1, "holes must consume the first page");
+        let mut budget = 101;
+        assert!(!staging.retire_page(&mut budget));
+        assert_eq!(budget, 0);
+        assert_eq!(staging.entry.as_ref().unwrap().modified.len(), 100);
+        let mut budget = 104;
+        assert!(staging.retire_page(&mut budget));
+        assert_eq!(Arc::strong_count(&source), 1);
     }
 
     fn attrs(local_pref: u32) -> Vec<PathAttribute> {

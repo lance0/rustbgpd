@@ -4234,6 +4234,7 @@ impl RibManager {
     /// through here so the post-commit query trace is consumed by the
     /// first general query dispatched, whichever path delivers it.
     fn serve_general_query(&mut self, query: RibUpdate) {
+        self.retire_abandoned_destination_prestage();
         match self.first_group_intake(&query) {
             first_group_order::Intake::Apply => {}
             first_group_order::Intake::Retain => {
@@ -4686,6 +4687,7 @@ impl RibManager {
     /// registration — the synchronous path never skipped it either; its
     /// sends fail harmlessly and the session's `PeerDown` cleans up.
     fn advance_pending_initial_registration(&mut self) {
+        self.retire_abandoned_destination_prestage();
         while let Some(peer) = self.pending_initial_registrations.pop_front() {
             let waiting = self
                 .live_sessions
@@ -4846,6 +4848,7 @@ impl RibManager {
     }
 
     fn admit_primary(&mut self, update: RibUpdate) -> Option<RibUpdate> {
+        self.retire_abandoned_destination_prestage();
         if self.first_group_commit_remaining == Some(0)
             || self.first_group_replay_due()
             || (!self.release_primary_has_room() && self.release_fences_read(&update))

@@ -15687,8 +15687,12 @@ fn prepared_policy_contents_release_after_discard_or_rejection() {
             "preparation still owns its policy"
         );
         manager.discard_prepared_export_destination();
-        assert!(weak.upgrade().is_none());
         assert!(!manager.group_ribs.contains_key(&destination));
+        assert!(manager.optional_destination_retirement_active());
+        while manager.optional_destination_retirement_active() {
+            manager.advance_optional_destination_retirement();
+        }
+        assert!(weak.upgrade().is_none());
     }
 
     // The late unicast-only preflight rejects after interning the candidate.
@@ -20435,5 +20439,6 @@ async fn discarding_a_paced_preparation_retires_its_hold_withdrawals() {
     assert!(manager.first_group_slot_available());
 }
 
+mod cancelled_prestage;
 mod competing_policy_destination;
 mod optional_eviction_writer;

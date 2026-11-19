@@ -108,12 +108,19 @@ pub(in crate::manager) struct PrestagedTransitionInventory {
 /// removed or recreated. The slot owner supplies one shared poll budget.
 #[derive(Default)]
 pub(in crate::manager) struct OptionalInventoryRetirement {
+    pub(in crate::manager) staging: Option<Box<crate::manager::distribution::CancelledPrestage>>,
     inventory: Option<PrestagedTransitionInventory>,
     logs: [Option<ShardedMap<(Prefix, u32), ()>>; 2],
 }
 
 impl OptionalInventoryRetirement {
     pub(in crate::manager) fn retire_page(&mut self, budget: &mut usize) -> bool {
+        if let Some(staging) = &mut self.staging {
+            if !staging.retire_page(budget) {
+                return false;
+            }
+            self.staging = None;
+        }
         let Some(inventory) = &mut self.inventory else {
             return true;
         };
@@ -515,8 +522,9 @@ impl RibManager {
         destination: usize,
         rs_asns: &[u32],
     ) -> PrestagedInventoryOutcome {
-        let OptionalInventoryRetirement { inventory, logs } =
-            self.take_optional_inventory_retirement();
+        let OptionalInventoryRetirement {
+            inventory, logs, ..
+        } = self.take_optional_inventory_retirement();
         let Some(mut prestaged) = inventory else {
             return PrestagedInventoryOutcome::Unusable;
         };
@@ -777,14 +785,19 @@ impl RibManager {
             }),
             None => [None, None],
         };
-        OptionalInventoryRetirement { inventory, logs }
+        OptionalInventoryRetirement {
+            inventory,
+            logs,
+            staging: None,
+        }
     }
 
     /// Drop any prestaged inventory and stop its groups' key logs. Every
     /// path that retires or hands off a prepared destination calls this.
     pub(in crate::manager) fn retire_prestaged_transition_inventory(&mut self) {
-        let OptionalInventoryRetirement { inventory, logs } =
-            self.take_optional_inventory_retirement();
+        let OptionalInventoryRetirement {
+            inventory, logs, ..
+        } = self.take_optional_inventory_retirement();
         let Some(mut prestaged) = inventory else {
             return;
         };

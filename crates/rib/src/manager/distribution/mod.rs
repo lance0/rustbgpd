@@ -65,7 +65,7 @@ mod rtc;
 mod unicast;
 mod vpn;
 
-pub(in crate::manager) use export_memo::{ExportAdmission, ExportMemo};
+pub(in crate::manager) use export_memo::{CancelledPrestage, ExportAdmission, ExportMemo};
 pub(in crate::manager) use unicast::{
     AddPathKeys, blackholing, exact_exportable, lease_rejection, multipath_candidate_suppressed,
 };
@@ -7734,12 +7734,9 @@ impl RibManager {
         );
     }
 
-    /// One budgeted, unfenced staging slice of a pending destination
-    /// preparation. Runs from the actor loop only after queued mutation
-    /// traffic has been drained, so ordinary churn keeps flowing between
-    /// slices — and that same churn keeps already-staged prefixes current
-    /// through the ordinary all-groups staging pass.
-    pub(super) fn advance_destination_prestage(&mut self) {
+    /// Detect caller timeout before either a prestage slice or another
+    /// message can take the partial table. Only the actor changes ownership.
+    pub(super) fn retire_abandoned_destination_prestage(&mut self) -> bool {
         if self
             .pending_destination_prestage
             .as_ref()
@@ -7751,6 +7748,18 @@ impl RibManager {
             })
         {
             self.discard_prepared_export_destination();
+            return true;
+        }
+        false
+    }
+
+    /// One budgeted, unfenced staging slice of a pending destination
+    /// preparation. Runs from the actor loop only after queued mutation
+    /// traffic has been drained, so ordinary churn keeps flowing between
+    /// slices — and that same churn keeps already-staged prefixes current
+    /// through the ordinary all-groups staging pass.
+    pub(super) fn advance_destination_prestage(&mut self) {
+        if self.retire_abandoned_destination_prestage() {
             return;
         }
         let reply = self.with_replacement_readiness(|manager| {
@@ -7809,8 +7818,10 @@ impl RibManager {
                 }
             }
         });
-        if let Some(reply) = reply {
-            let _ = reply.send(Ok(()));
+        if let Some(reply) = reply
+            && reply.send(Ok(())).is_err()
+        {
+            self.discard_prepared_export_destination();
         }
     }
 
@@ -7936,22 +7947,27 @@ impl RibManager {
             let reply = manager
                 .pending_destination_prestage
                 .take()
-                .and_then(|mut prestage| {
-                    let _ =
-                        manager.discard_uncommitted_policy_transition_group(prestage.destination);
-                    manager.replacement_checkpoint(true);
-                    #[cfg(feature = "bench-internals")]
-                    prestage.memo.record_replacement_capacities(manager);
-                    prestage.retire_with(&mut || manager.replacement_checkpoint(false));
-                    manager.replacement_checkpoint(true);
-                    prestage.reply.take()
+                .and_then(|mut walk| {
+                    // An incoming member takes the membership-cancellation path
+                    // before it can bind to a partial destination.
+                    let staging = (!walk.staged)
+                        .then(|| Box::new(CancelledPrestage::new(walk.prefixes, walk.memo)));
+                    manager.retire_cancelled_optional_destination(walk.destination, staging);
+                    walk.reply.take()
                 });
-            if let Some(prepared) = manager.prepared_destination.take() {
-                let _ = manager.discard_uncommitted_policy_transition_group(prepared);
+            if let Some(gid) = manager.prepared_destination.take()
+                && manager
+                    .group_ribs
+                    .get(&gid)
+                    .is_some_and(|group| group.members.is_empty())
+            {
+                manager.retire_cancelled_optional_destination(gid, None);
             }
             if let Some(gid) = manager.paced_policy_destination {
                 manager.retire_prepared_first_group(gid);
             }
+            // A clean cohort may already own the table and have consumed
+            // its prepared gid. Discard still closes any remaining proof.
             manager.retire_prestaged_transition_inventory();
             manager.reclaim_unused_update_group_policies();
             reply

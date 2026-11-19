@@ -2761,6 +2761,7 @@ impl RibManager {
         // small table whose dump costs microseconds, completes inline
         // exactly as before — registration-timing semantics only change
         // where deferring buys real latency back.
+        self.retire_abandoned_destination_prestage();
         let actor_busy =
             self.primary_backlog() > 0 || !self.pending_initial_registrations.is_empty();
         let dump_expensive = self.loc_rib.len() >= self.initial_dump_defer_min_routes;

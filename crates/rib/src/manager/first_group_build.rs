@@ -324,6 +324,19 @@ impl RibManager {
         }));
     }
 
+    pub(super) fn retire_cancelled_optional_destination(
+        &mut self,
+        gid: usize,
+        staging: Option<Box<super::distribution::CancelledPrestage>>,
+    ) {
+        self.retire_memberless_destination(gid, None);
+        self.optional_destination_retirement
+            .as_mut()
+            .expect("detached destination")
+            .inventory
+            .staging = staging;
+    }
+
     pub(super) fn retire_refused_authoritative_destination(
         &mut self,
         gid: usize,
