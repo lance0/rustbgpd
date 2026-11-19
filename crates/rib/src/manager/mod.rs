@@ -8064,6 +8064,14 @@ impl RibManager {
                 continue;
             }
 
+            if let Some(intent) = self.take_first_group_deferred_intent() {
+                self.handle_update(intent);
+                self.drain_readiness_queries(None);
+                self.drain_general_queries_if_unfenced();
+                tokio::task::yield_now().await;
+                continue;
+            }
+
             // A commit frontier precedes later timer cutoffs. Finish its
             // already-admitted work before running the next expiry.
             if self.first_group_commit_remaining == Some(0)
