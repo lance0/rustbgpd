@@ -903,6 +903,9 @@ impl RibManager {
                 super::super::replacement_readiness_checkpoint(&readiness, true);
             }
             group.members.insert(peer);
+            if self.paced_policy_destination == Some(gid) {
+                self.paced_policy_destination = None;
+            }
             group.recompute_vpn_member_counts(peer, filter.as_ref(), &mut || {
                 super::super::replacement_readiness_checkpoint(&readiness, false);
             });

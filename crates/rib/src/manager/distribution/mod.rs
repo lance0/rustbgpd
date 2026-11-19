@@ -1028,9 +1028,6 @@ pub(super) struct DestinationPrestage {
     pub(super) destination: usize,
     /// The current group of the preparing peer: the transition's source.
     source: usize,
-    /// A same-destination, policy-free registration must release its private
-    /// table before preparation allocates or snapshots a second one.
-    waiting_for_first_group: bool,
     /// The staging walk is done and the prestaged inventory walk
     /// ([`RibManager::extend_prestaged_transition_inventory`]) runs.
     staged: bool,
@@ -2540,11 +2537,14 @@ impl RibManager {
                 mut memo,
             } => {
                 if prefixes.is_none() {
-                    if !manager.retire_first_group_for_policy(destination) {
+                    // A conflicting writer normally reserved the table before taking
+                    // the fence. If classification changed, leave the old policy live
+                    // and let the authoritative command acquire the destination.
+                    if manager.first_group_targets(destination) {
                         pending.phase = Some(CleanPolicyTransitionPhase::StageDestination {
                             source, destination, prefixes, cursor, memo,
                         });
-                        return CleanPolicyTransitionAdvance::Continue(pending);
+                        return CleanPolicyTransitionAdvance::Fallback(pending);
                     }
                     match manager.begin_policy_transition_group(
                         destination,
@@ -5983,7 +5983,9 @@ impl RibManager {
         export_policy: Option<PolicyChain>,
         reply: tokio::sync::oneshot::Sender<Result<(), RibCommandError>>,
     ) {
-        let _ = reply.send(self.replace_peer_export_policy_synchronously(peer, export_policy));
+        let result = self.replace_peer_export_policy_synchronously(peer, export_policy);
+        self.publish_export_roster();
+        let _ = reply.send(result);
     }
 
     /// Apply a batch of replacements. The optimization is all-or-nothing:
@@ -6044,7 +6046,7 @@ impl RibManager {
             }
             if let Some(mut prestage) = manager.pending_destination_prestage.take() {
                 manager.retire_prestaged_transition_inventory();
-                let _ = manager.discard_uncommitted_policy_transition_group(prestage.destination);
+                manager.release_prestage_to_policy_writer(prestage.destination);
                 #[cfg(feature = "bench-internals")]
                 prestage.memo.record_replacement_capacities(manager);
                 prestage.retire_with(&mut || checkpoint());
@@ -6059,6 +6061,7 @@ impl RibManager {
             if discard_prepared {
                 self.discard_prepared_export_destination();
             }
+            self.publish_export_roster();
             let _ = reply.send(result);
         }
     }
@@ -6090,7 +6093,9 @@ impl RibManager {
             });
             return;
         }
-        let _ = reply.send(self.apply_export_policy_replacements_deferring_residual(replacements));
+        let result = self.apply_export_policy_replacements_deferring_residual(replacements);
+        self.publish_export_roster();
+        let _ = reply.send(result);
     }
 
     pub(super) fn handle_restore_peer_export_policies_authoritatively(
@@ -6105,6 +6110,7 @@ impl RibManager {
         // must still repair the RIB. Never use `reply.is_closed()` as a reason to
         // skip compensation.
         let result = self.restore_export_policy_replacements_deferring_residual(replacements);
+        self.publish_export_roster();
         let _ = reply.send(result);
     }
 
@@ -6384,7 +6390,9 @@ impl RibManager {
             );
             return;
         }
-        let _ = reply.send(self.apply_paced_export_policies(replacements, cost));
+        let result = self.apply_paced_export_policies(replacements, cost);
+        self.publish_export_roster();
+        let _ = reply.send(result);
     }
 
     fn apply_export_policy_replacements(
@@ -6558,7 +6566,8 @@ impl RibManager {
         // A still-running destination preparation cannot be trusted
         // mid-walk (same guard as the cohort transition command).
         if let Some(mut prestage) = self.pending_destination_prestage.take() {
-            let _ = self.discard_uncommitted_policy_transition_group(prestage.destination);
+            self.retire_prestaged_transition_inventory();
+            self.release_prestage_to_policy_writer(prestage.destination);
             #[cfg(feature = "bench-internals")]
             prestage.memo.record_replacement_capacities(self);
             prestage.retire_with(&mut || checkpoint());
@@ -7587,27 +7596,32 @@ impl RibManager {
         result
     }
 
-    /// Begin the unfenced staging of a prospective clean-transition
-    /// destination group ([`crate::update::RibUpdate::PrepareExportPolicyDestination`]).
-    /// The reply is held until [`Self::advance_destination_prestage`]
-    /// finishes the walk; an immediate `Err` means the preparation was
-    /// skipped and the transition will stage under its fence, as before.
+    #[cfg(test)]
     pub(super) fn begin_destination_prestage(
         &mut self,
         peer: PeerId,
-        export_policy: Option<&rustbgpd_policy::PolicyChain>,
+        export_policy: Option<&PolicyChain>,
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     ) {
-        self.begin_destination_prestage_for(peer, export_policy, reply, None);
+        self.handle_update(crate::update::RibUpdate::PrepareExportPolicyDestination {
+            peer,
+            export_policy: export_policy.map(PolicyChain::share),
+            reply,
+        });
     }
 
-    fn begin_destination_prestage_for(
+    /// Stage a prospective clean-transition destination after admission has
+    /// resolved any conflicting first-member build. Keep its reply until
+    /// the complete destination and optional inventory are ready.
+    pub(super) fn prepare_export_policy_destination(
         &mut self,
         peer: PeerId,
-        export_policy: Option<&rustbgpd_policy::PolicyChain>,
+        export_policy: Option<&PolicyChain>,
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
-        expected: Option<(usize, usize)>,
     ) {
+        if reply.is_closed() {
+            return;
+        }
         if self.pending_clean_policy_transition.is_some()
             || self.pending_destination_prestage.is_some()
         {
@@ -7617,9 +7631,8 @@ impl RibManager {
             return;
         }
         let completed = self.with_replacement_readiness(|manager| {
-            let Some((source, destination)) = manager
-                .clean_policy_transition_destination(peer, export_policy)
-                .filter(|pair| expected.is_none_or(|wanted| *pair == wanted))
+            let Some((source, destination)) =
+                manager.clean_policy_transition_destination(peer, export_policy)
             else {
                 manager.reclaim_unused_update_group_policies();
                 return Some((
@@ -7633,22 +7646,22 @@ impl RibManager {
             // A stale completed preparation that was never consumed (its
             // cohort never arrived) is discarded before a new one begins;
             // the record must only ever name the latest staged group.
-            if let Some(stale) = manager.prepared_destination.take() {
+            let handed_off = manager.paced_policy_destination == Some(destination);
+            if let Some(stale) = manager.prepared_destination.take()
+                && !(handed_off && stale == destination)
+            {
                 let _ = manager.discard_uncommitted_policy_transition_group(stale);
             }
             manager.retire_prestaged_transition_inventory();
             // A leftover unowned group under this id may be partially staged
             // from an aborted attempt; recreate it deterministically. An OWNED
             // group is maintained by definition — nothing to stage.
-            let _ = manager.discard_uncommitted_policy_transition_group(destination);
-            let waiting_for_first_group = manager.first_group_targets(destination);
-            let prefixes = if waiting_for_first_group {
-                debug_assert!(
-                    export_policy.is_none(),
-                    "only a policy-free registration stages privately"
-                );
+            let prefixes = if handed_off {
+                // The private builder reconciled this table before publishing it.
+                // Continue with the optional bounded inventory/probe walk only.
                 Vec::new()
             } else {
+                let _ = manager.discard_uncommitted_policy_transition_group(destination);
                 match manager.begin_policy_transition_group(destination, peer, export_policy) {
                     super::update_groups::PolicyTransitionGroupStart::Maintained => {
                         manager.reclaim_unused_update_group_policies();
@@ -7660,7 +7673,6 @@ impl RibManager {
             manager.pending_destination_prestage = Some(DestinationPrestage {
                 destination,
                 source,
-                waiting_for_first_group,
                 staged: false,
                 inventory_complete: false,
                 peer,
@@ -7674,6 +7686,14 @@ impl RibManager {
         });
         if let Some((reply, result)) = completed {
             let _ = reply.send(result);
+        }
+    }
+
+    fn release_prestage_to_policy_writer(&mut self, gid: usize) {
+        if self.paced_policy_destination == Some(gid) {
+            self.prepared_destination = Some(gid);
+        } else {
+            let _ = self.discard_uncommitted_policy_transition_group(gid);
         }
     }
 
@@ -7699,7 +7719,11 @@ impl RibManager {
         };
         let reply = self.with_replacement_readiness(|manager| {
             manager.retire_prestaged_transition_inventory();
-            let _ = manager.discard_uncommitted_policy_transition_group(gid);
+            // A binding member can adopt this complete table immediately. Only a
+            // legacy mid-walk table needs to be removed and rebuilt on adoption.
+            if manager.paced_policy_destination != Some(gid) {
+                let _ = manager.discard_uncommitted_policy_transition_group(gid);
+            }
             manager.replacement_checkpoint(true);
             #[cfg(feature = "bench-internals")]
             prestage.memo.record_replacement_capacities(manager);
@@ -7725,31 +7749,17 @@ impl RibManager {
     /// slices — and that same churn keeps already-staged prefixes current
     /// through the ordinary all-groups staging pass.
     pub(super) fn advance_destination_prestage(&mut self) {
-        if let Some(destination) = self
+        if self
             .pending_destination_prestage
             .as_ref()
-            .filter(|prestage| prestage.waiting_for_first_group)
-            .map(|prestage| prestage.destination)
+            .is_some_and(|prestage| {
+                prestage
+                    .reply
+                    .as_ref()
+                    .is_some_and(tokio::sync::oneshot::Sender::is_closed)
+            })
         {
-            if !self.retire_first_group_for_policy(destination) {
-                return;
-            }
-            let mut waiting = self
-                .pending_destination_prestage
-                .take()
-                .expect("preparation just checked");
-            let reply = waiting
-                .reply
-                .take()
-                .expect("unsettled preparation has a reply");
-            // Only a no-policy destination can collide. The source session may
-            // have moved during retirement; never stage a different group.
-            self.begin_destination_prestage_for(
-                waiting.peer,
-                None,
-                reply,
-                Some((waiting.source, destination)),
-            );
+            self.discard_prepared_export_destination();
             return;
         }
         let reply = self.with_replacement_readiness(|manager| {
@@ -7947,6 +7957,9 @@ impl RibManager {
                 });
             if let Some(prepared) = manager.prepared_destination.take() {
                 let _ = manager.discard_uncommitted_policy_transition_group(prepared);
+            }
+            if let Some(gid) = manager.paced_policy_destination {
+                manager.retire_prepared_first_group(gid);
             }
             manager.retire_prestaged_transition_inventory();
             manager.reclaim_unused_update_group_policies();

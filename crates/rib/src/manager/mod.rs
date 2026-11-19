@@ -5906,7 +5906,7 @@ impl RibManager {
                 peer,
                 export_policy,
                 reply,
-            } => self.begin_destination_prestage(peer, export_policy.as_ref(), reply),
+            } => self.prepare_export_policy_destination(peer, export_policy.as_ref(), reply),
             RibUpdate::DiscardPreparedExportPolicyDestination { .. } => {
                 self.discard_prepared_export_destination();
             }
@@ -7907,9 +7907,9 @@ impl RibManager {
                 }
                 self.rebuild_orr_and_resync();
             }
-            // The export roster's one publication point (ADR-0136): after
-            // each completed unit, never while a grouped transition is
-            // parked between `CommitMembers` batches.
+            // Publish changes from units without a policy reply. Policy commands
+            // publish before their acknowledgement, and a clean transition
+            // publishes only after its terminal membership batch.
             self.publish_export_roster();
 
             // Sample ingest-channel depth once per iteration — a gauge
@@ -8005,6 +8005,7 @@ impl RibManager {
                     }
                 } });
                 if let Some((reply, result)) = terminal_reply {
+                    self.publish_export_roster();
                     let _ = reply.send(result);
                 }
                 self.drain_readiness_queries(policy_transition_elapsed);
