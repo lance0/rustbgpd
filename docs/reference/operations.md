@@ -1127,8 +1127,10 @@ the section or shared control. For example, `[[dynamic_neighbors]].tcp_ao`
 covers edits to a protected range as well as its keys. Repeated entries in
 RPKI cache and BMP collector lists share one field name, such as
 `[rpki].cache_servers[].refresh_interval`. Use `rbgp config diff` to see
-which list entries changed. A reload of the same edited file reports the drift
-again. Reverting the file and reloading clears the corresponding entries.
+which list entries changed. If the EVPN coordinator rejects a change to an
+existing IP-VRF's VNI, VRF device, L3VXLAN device or table ID, the receipt
+names the changed identity fields. A reload of the same edited file reports
+the drift again. Reverting the file and reloading clears the corresponding entries.
 An attempt that fails before it can compare the configuration has an empty
 list. Use the outcome and failing bucket to distinguish an early failure
 from a completed reload with no pending fields. The record's

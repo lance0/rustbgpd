@@ -592,6 +592,40 @@ impl<'a> SighupMutationProgress<'a> {
         }
     }
 
+    fn pending_ip_vrf_identity_changes(&self, committed: &Config, desired: &Config) {
+        if self.trace.is_none() || committed.evpn_ip_vrfs == desired.evpn_ip_vrfs {
+            return;
+        }
+        let old_by_name: BTreeMap<_, _> = committed
+            .evpn_ip_vrfs
+            .iter()
+            .map(|vrf| (vrf.name.as_str(), vrf))
+            .collect();
+        for new in &desired.evpn_ip_vrfs {
+            let Some(old) = old_by_name.get(new.name.as_str()) else {
+                continue;
+            };
+            // These kernel-object identity changes are permanently excluded by
+            // validate_single_ip_vrf_redefine. Other rejections can be retried.
+            for (changed, field) in [
+                (old.vni != new.vni, "[[evpn_ip_vrfs]].vni"),
+                (
+                    old.vrf_device != new.vrf_device,
+                    "[[evpn_ip_vrfs]].vrf_device",
+                ),
+                (
+                    old.l3vxlan_device != new.l3vxlan_device,
+                    "[[evpn_ip_vrfs]].l3vxlan_device",
+                ),
+                (old.table_id != new.table_id, "[[evpn_ip_vrfs]].table_id"),
+            ] {
+                if changed {
+                    self.pending_restart(field);
+                }
+            }
+        }
+    }
+
     fn record_applied(&mut self, bucket: &'static str, target: impl Into<String>) {
         self.mark_accepted_effect();
         if let Some(trace) = &self.trace {
@@ -3227,6 +3261,7 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
                      Split unsupported mixed edits or restart rustbgpd for \
                      restart-required EVPN identity changes."
                 );
+                progress.pending_ip_vrf_identity_changes(&attempt.baseline, &new_config);
                 copy_evpn_runtime_fields(&mut new_config, &attempt.baseline);
                 let failure = ReloadStepFailure {
                     bucket: "evpn_runtime.apply",
@@ -6708,6 +6743,85 @@ local_vtep_ip = "10.0.0.1"
             );
             drop(guard);
             std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_ip_vrf_reload_reports_only_changed_kernel_identity_fields() {
+        let source = format!(
+            r#"{EVPN_VNI_100_TOML}
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+"#
+        );
+        let initial = load_config_from_toml("reload-ip-vrf-identity", &source);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for (before, after, expected) in [
+            (
+                "table_id = 5000",
+                "table_id = 5001",
+                Some("[[evpn_ip_vrfs]].table_id"),
+            ),
+            ("vni = 5000", "vni = 5001", Some("[[evpn_ip_vrfs]].vni")),
+            ("vrf-blue", "vrf-green", Some("[[evpn_ip_vrfs]].vrf_device")),
+            (
+                "vni5000",
+                "vni5001",
+                Some("[[evpn_ip_vrfs]].l3vxlan_device"),
+            ),
+            ("02:00:00:00:00:01", "02:00:00:00:00:02", None),
+        ] {
+            // The real coordinator refuses each identity edit before converge.
+            // The router MAC edit reaches converge and fails with acknowledged rollback.
+            let converge = if expected.is_some() {
+                Ok(())
+            } else {
+                Err(
+                    crate::evpn_runtime_converger::DaemonEvpnRuntimeConvergeError::Failed(
+                        rustbgpd_evpn::EvpnRuntimeConvergeError::new("rollback acknowledged"),
+                    ),
+                )
+            };
+            let (apply, _coordinator) = evpn_reload_apply(&initial, converge);
+            std::fs::write(&path, source.replace(before, after)).unwrap();
+            let (peer_mgr_tx, peer_mgr_rx) = mpsc::channel(1);
+            drop(peer_mgr_rx);
+            let trace: SighupReloadTraceHandle = Arc::default();
+            let outcome = reload_config_recorded(
+                path.to_str().unwrap(),
+                &initial,
+                initial.global.telemetry.grpc_tcp.as_ref(),
+                initial.global.telemetry.grpc_uds.as_ref(),
+                &peer_mgr_tx,
+                None,
+                Some(&apply),
+                Some(Arc::clone(&trace)),
+            )
+            .await;
+            let SighupReloadOutcome::CleanNoEffect(error) = outcome else {
+                panic!("{before}: expected the coordinator to reject the reload");
+            };
+            let record = crate::last_sighup_record(
+                std::time::SystemTime::now(),
+                &Ok(Err(error)),
+                &trace.lock().unwrap(),
+            );
+            assert_eq!(record.outcome, "rejected_no_effect");
+            assert_eq!(record.failure_bucket, "evpn_runtime.apply");
+            assert_eq!(
+                record.pending_restart_required_fields.as_slice(),
+                expected.as_slice(),
+                "{before}"
+            );
         }
     }
 
