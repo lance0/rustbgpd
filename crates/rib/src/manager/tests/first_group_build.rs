@@ -209,6 +209,97 @@ async fn pending_session_writer_orders_its_eor_but_later_config_allows_other_ing
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn held_writer_head_preserves_gr_expiry_cutoff_for_queued_refresh() {
+    let (mut manager, primary, _) = fixture(0);
+    let incumbent = receiver(1);
+    let _incumbent_rx = join(&mut manager, incumbent, 1, &DUAL);
+    let slow = |slow| RibUpdate::PeerSlowState {
+        peer: incumbent,
+        session_id: 1,
+        slow,
+    };
+    manager.handle_update(slow(true));
+    let source = peer_v4(SOURCE);
+    let kept = prefixes(1)[0];
+    let expired = prefixes(2)[0];
+    manager.handle_update(test_routes_received(
+        source,
+        vec![route(kept, SOURCE, 100), route(expired, SOURCE, 100)],
+    ));
+    drain_route_chunks(&mut manager);
+    manager.handle_update(RibUpdate::PeerGracefulRestart {
+        peer: source,
+        session_id: 0,
+        restart_time: 10,
+        stale_routes_time: 30,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    });
+    manager.handle_update(registering_peer_up(source, 1));
+    assert!(manager.loc_rib.get(&kept).unwrap().is_stale);
+    assert!(manager.loc_rib.get(&expired).unwrap().is_stale);
+
+    let _founder_rx = join(&mut manager, receiver(2), 1, &DUAL);
+    manager.handle_update(slow(false));
+    assert!(manager.first_group_pending_writer().is_some());
+    primary
+        .try_send(RibUpdate::EndOfRib {
+            peer: incumbent,
+            session_id: 1,
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+        })
+        .unwrap();
+    let mut refresh = test_routes_received(source, vec![route(kept, SOURCE, 190)]);
+    if let RibUpdate::RoutesReceived { session_id, .. } = &mut refresh {
+        *session_id = 1;
+    }
+    primary.try_send(refresh).unwrap();
+
+    let timer = ExpiryTimer::GrStale;
+    let due = manager.gr_stale_deadlines[&source];
+    tokio::time::advance(due - tokio::time::Instant::now()).await;
+    let now = tokio::time::Instant::now();
+    manager
+        .expiry_cutoffs
+        .observe(timer, Some(due), now, manager.primary_backlog());
+    assert_eq!(manager.expiry_cutoffs.remaining(timer), 2);
+    assert!(manager.can_receive_release_primary());
+    assert!(manager.drain_before_expiry(timer).await);
+    assert!(manager.first_group_commit_frontier_reached());
+    assert_eq!(manager.expiry_cutoffs.remaining(timer), 2);
+
+    for _ in 0..64 {
+        if manager.first_group_pending_writer().is_none() {
+            break;
+        }
+        manager.advance_first_group_build();
+    }
+    assert!(manager.first_group_pending_writer().is_none());
+    let (reply, mut after_deadline) = oneshot::channel();
+    primary
+        .try_send(RibUpdate::QueryLocRibCount { reply })
+        .unwrap();
+    for _ in 0..8 {
+        if !manager.drain_before_expiry(timer).await {
+            break;
+        }
+    }
+    assert!(manager.expiry_cutoffs.captured_at(timer).is_none());
+    assert!(matches!(
+        after_deadline.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    manager.sweep_gr_stale(source);
+    let survivor = manager.loc_rib.get(&kept).unwrap();
+    assert!(!survivor.is_stale);
+    assert_eq!(survivor.local_pref(), 190);
+    assert!(manager.loc_rib.get(&expired).is_none());
+}
+
 async fn assert_initial(
     rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
     expected: &Inventory,

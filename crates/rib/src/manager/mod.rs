@@ -4955,6 +4955,12 @@ impl RibManager {
         {
             return true;
         }
+        // Peeking a noncommuting head can seal the writer's frontier
+        // without admitting the head. Keep its pre-deadline FIFO budget
+        // while the next owner turn finishes the writer.
+        if remaining > 0 && self.first_group_commit_remaining == Some(0) {
+            return true;
+        }
         self.expiry_cutoffs.clear(timer);
         false
     }
