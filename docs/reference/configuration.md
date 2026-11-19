@@ -3119,9 +3119,11 @@ that client.
 
 For an ORF-negotiated family, rustbgpd gates the initial table dump until the
 peer sends its first ROUTE-REFRESH for that family, then floods the filtered
-view. ORF entries use prefix-list semantics: sequence order, first match wins,
-implicit deny on a non-empty list, and permit-all when the list is empty or
-removed. `DEFER` installs the filter state but waits for a later immediate or
+view. A filter received while the session is waiting for its outbound sender
+applies to that first advertisement. ORF entries follow prefix-list semantics.
+The first matching entry in sequence order wins. A non-empty list denies a
+prefix with no match. An empty or removed list permits all prefixes.
+`DEFER` installs the filter state but waits for a later immediate or
 plain ROUTE-REFRESH to sweep advertisements and withdrawals.
 
 Each peer and AFI/SAFI can retain at most **4,096 Address-Prefix ORF entries**,

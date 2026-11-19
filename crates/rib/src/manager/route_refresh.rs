@@ -512,8 +512,41 @@ impl RibManager {
         }
     }
 
+    /// Resume the negotiated families' pending responses once this session has a sender.
+    pub(super) fn resume_registration_orf_refresh(&mut self, peer: PeerId, orf_refresh: [bool; 2]) {
+        for (afi, requested) in [Afi::Ipv4, Afi::Ipv6].into_iter().zip(orf_refresh) {
+            if requested {
+                let family = (afi, Safi::Unicast);
+                if self.selection_peer_convergence_held(peer, family) {
+                    self.selection_deferred_refresh
+                        .entry(peer)
+                        .or_default()
+                        .insert(family);
+                } else {
+                    self.lift_orf_gate(peer, family);
+                    self.defer_refresh_answer(peer, family, false);
+                }
+            }
+        }
+    }
+
     pub(super) fn handle_route_refresh_request(&mut self, peer: PeerId, afi: Afi, safi: Safi) {
         info!(%peer, ?afi, ?safi, "handling route refresh request");
+        let family = (afi, safi);
+        if !self.outbound_peers.contains_key(&peer)
+            && matches!(family, (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast))
+            && let Some(record) = self
+                .live_sessions
+                .get_mut(&peer)
+                .and_then(|sessions| sessions.last_mut())
+            && record.negotiated_orf_recv.contains(&family)
+        {
+            record.registration_orf_refresh[usize::from(afi == Afi::Ipv6)] = true;
+            if !self.selection_peer_convergence_held(peer, family) {
+                self.lift_orf_gate(peer, family);
+            }
+            return;
+        }
         // The leader's dispatch has already released its queued flag and
         // checked its session. One readiness owner covers admission, the
         // shared inventory and every per-member commit; mutations stay queued.
