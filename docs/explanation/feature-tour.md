@@ -50,7 +50,7 @@ Per-RFC conformance notes: [RFC implementation notes](../reference/rfc-notes.md)
 ## Origin and path validation
 
 An RTR client (RFC 8210) feeds RPKI origin validation (RFC 6811) and ASPA
-AS_PATH verification (draft-ietf-sidrops-aspa-verification-28, role-aware).
+AS_PATH verification (draft-ietf-sidrops-aspa-verification-31, role-aware).
 Validation states rank paths in best-path selection and are policy match
 inputs; rejecting an Invalid route is an explicit policy decision.
 Configuration: [`[rpki]`](../reference/configuration.md#rpki); ASPA
