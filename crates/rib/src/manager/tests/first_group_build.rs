@@ -510,3 +510,51 @@ async fn repair_overflow_retires_the_partial_table_then_replays_current_winners_
         Some(manager.grouped_member_of(founder).unwrap())
     );
 }
+
+#[tokio::test]
+async fn rs_control_registration_waits_for_its_existing_plain_group_build() {
+    let (mut manager, _tx, mut expected) = fixture(2400);
+    expected.retain(|prefix, _| matches!(prefix, Prefix::V4(_)));
+    let register = |manager: &mut RibManager, peer, session| {
+        let (sender, receiver) = mpsc::channel(64);
+        manager.handle_update(test_peer_up(peer, session, sender));
+        receiver
+    };
+    let founder = receiver(1);
+    let joiner = receiver(2);
+    let mut first = register(&mut manager, founder, 41);
+    manager.advance_first_group_build();
+    assert!(
+        expected
+            .keys()
+            .any(|prefix| manager.first_group_contains(*prefix))
+    );
+    // A build already owns the destination. Falling below either start threshold
+    // cannot let a second, RS-control registration create its own copy inline.
+    manager.first_group_build_min_routes = usize::MAX;
+    manager.initial_dump_defer_min_routes = usize::MAX;
+    manager.handle_update(RibUpdate::SetPeerRsControl {
+        peer: joiner,
+        session_id: 42,
+        rs_control_asn: Some(64512),
+    });
+    let mut second = register(&mut manager, joiner, 42);
+    assert!(manager.pending_initial_registrations.contains(&joiner));
+    // Rotate past the founder so the ordinary deferred path examines the
+    // RS-control peer while its uncapped initial replay would still need a build.
+    manager.advance_pending_initial_registration();
+    manager.advance_pending_initial_registration();
+    for peer in [founder, joiner] {
+        assert!(!manager.outbound_peers.contains_key(&peer));
+    }
+    assert!(second.is_empty());
+
+    finish(&mut manager);
+    assert_initial(&mut first, &expected, &[(Afi::Ipv4, Safi::Unicast)]).await;
+    assert_initial(&mut second, &expected, &[(Afi::Ipv4, Safi::Unicast)]).await;
+    assert_eq!(manager.peer_rs_control.get(&joiner), Some(&64512));
+    assert_eq!(
+        manager.grouped_member_of(joiner),
+        Some(manager.grouped_member_of(founder).unwrap())
+    );
+}

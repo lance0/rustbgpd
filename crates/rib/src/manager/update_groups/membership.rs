@@ -599,39 +599,24 @@ impl RibManager {
         self.install_group_member(gid, peer);
     }
 
-    /// Classify the live registration without installing its sender or group membership.
-    pub(in crate::manager) fn prospective_first_group(
-        &mut self,
+    /// The group installation will select for this waiting, policy-free session.
+    /// Some per-member features, including RS control, affect replay but do not
+    /// distinguish the shared unicast table.
+    fn pending_registration_key(
+        &self,
         peer: PeerId,
-        expected_gid: Option<usize>,
-    ) -> Option<(
-        usize,
-        u64,
-        tokio::sync::mpsc::Sender<crate::update::OutboundRouteUpdate>,
-    )> {
+        record: &super::super::LiveSessionRecord,
+    ) -> Option<super::GroupKey> {
         use crate::update::{UpdateGroupClassification, classify_update_group};
-        use rustbgpd_wire::{Afi, Safi};
 
         #[cfg(test)]
         if self.test_force_ungrouped {
             return None;
         }
-        let record = self.live_sessions.get(&peer)?.last()?;
         record.registration_wait_since?;
         if self.outbound_peers.contains_key(&peer)
             || self.slow_isolated_peers.contains(&peer)
             || record.export_policy.is_some()
-            || record.local_role.is_some()
-            || record.rs_control_asn.is_some()
-            || record.per_client_best
-            || record.sendable_families.is_empty()
-            || record.sendable_families.iter().any(|&family| {
-                !matches!(family, (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast))
-                    || self.selection_deferral.as_ref().is_some_and(|state| state.may_hold_family(family))
-            })
-            // With a local RR, export to a non-client depends on each source's
-            // current client status, which can change without a Loc-RIB write.
-            || (self.cluster_id.is_some() && !record.is_ebgp && !record.route_reflector_client)
         {
             return None;
         }
@@ -645,9 +630,68 @@ impl RibManager {
         let UpdateGroupClassification::Groupable(fingerprint) = classify_update_group(input) else {
             return None;
         };
+        #[cfg(feature = "bench-internals")]
+        let owns_evpn = self.bench_evpn_group_ownership
+            && !record.per_client_best
+            && record
+                .sendable_families
+                .contains(&(super::Afi::L2Vpn, super::Safi::Evpn))
+            && !fingerprint.rtc_negotiated;
+        #[cfg(not(feature = "bench-internals"))]
+        let owns_evpn = false;
+        Some(super::GroupKey::from_fingerprint(
+            fingerprint,
+            None,
+            owns_evpn,
+        ))
+    }
+
+    pub(in crate::manager) fn registration_matches_first_group(
+        &self,
+        peer: PeerId,
+        gid: usize,
+    ) -> bool {
+        let Some(key) = self
+            .live_sessions
+            .get(&peer)
+            .and_then(|sessions| sessions.last())
+            .and_then(|record| self.pending_registration_key(peer, record))
+        else {
+            return false;
+        };
+        self.update_groups.group_key(gid) == Some(&key)
+    }
+
+    /// Only plain registrations may start a private build.
+    pub(in crate::manager) fn prospective_first_group(
+        &mut self,
+        peer: PeerId,
+        expected_gid: Option<usize>,
+    ) -> Option<(
+        usize,
+        u64,
+        tokio::sync::mpsc::Sender<crate::update::OutboundRouteUpdate>,
+    )> {
+        use rustbgpd_wire::{Afi, Safi};
+
+        let record = self.live_sessions.get(&peer)?.last()?;
+        if record.local_role.is_some()
+            || record.rs_control_asn.is_some()
+            || record.per_client_best
+            || record.sendable_families.is_empty()
+            || record.sendable_families.iter().any(|&family| {
+                !matches!(family, (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast))
+                    || self.selection_deferral.as_ref().is_some_and(|state| state.may_hold_family(family))
+            })
+            // With a local RR, export to a non-client depends on each source's
+            // current client status, which can change without a Loc-RIB write.
+            || (self.cluster_id.is_some() && !record.is_ebgp && !record.route_reflector_client)
+        {
+            return None;
+        }
+        let key = self.pending_registration_key(peer, record)?;
         let session_id = record.session_id;
         let sender = record.outbound_tx.clone();
-        let key = super::GroupKey::from_fingerprint(fingerprint, None, false);
         let gid = match expected_gid {
             Some(id) if self.update_groups.group_key(id) == Some(&key) => id,
             Some(_) => return None,

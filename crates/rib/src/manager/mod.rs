@@ -4649,11 +4649,7 @@ impl RibManager {
             }
             // A replacement session or a changed export policy must retire its
             // superseded table before this peer can fall back to a full build.
-            if self
-                .first_group_build
-                .as_ref()
-                .is_some_and(|job| job.peer == peer)
-            {
+            if self.registration_waits_for_first_group(peer) {
                 self.pending_initial_registrations.push_back(peer);
                 self.advance_first_group_build();
                 return;
@@ -8301,7 +8297,9 @@ impl RibManager {
                 }
                 self.drain_readiness_queries(None);
                 registration_primary_due = true;
-                if !self.pending_route_batches.is_empty() || self.primary_backlog() > 0 {
+                if !self.pending_route_batches.is_empty()
+                    || (accept_primary && self.primary_backlog() > 0)
+                {
                     self.advance_busy_first_group(&mut registration_search);
                 } else {
                     self.advance_pending_initial_registration();

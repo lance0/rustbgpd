@@ -2735,7 +2735,10 @@ impl RibManager {
             self.primary_backlog() > 0 || !self.pending_initial_registrations.is_empty();
         let dump_expensive = self.loc_rib.len() >= self.initial_dump_defer_min_routes;
         let candidate = self.first_group_candidate(peer);
-        if (actor_busy && dump_expensive) || candidate.is_some() {
+        if (actor_busy && dump_expensive)
+            || candidate.is_some()
+            || self.registration_waits_for_first_group(peer)
+        {
             if !self.pending_initial_registrations.contains(&peer) {
                 debug!(
                     %peer,

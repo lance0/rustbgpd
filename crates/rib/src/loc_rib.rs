@@ -48,6 +48,7 @@ struct RegistrationScan {
     shard: usize,
     bucket: usize,
     discovery_finished: bool,
+    repair_due: bool,
     repairs: Vec<Prefix>,
     queued: FastSet<Prefix>,
     overflow: bool,
@@ -337,7 +338,10 @@ impl LocRib {
         if scan.overflow {
             return page;
         }
-        if scan.discovery_finished {
+        // Alternate when both have work. Deferring all repairs until the last
+        // bucket lets even a trickle of distinct changes overflow a long scan.
+        if scan.discovery_finished || (scan.repair_due && !scan.repairs.is_empty()) {
+            scan.repair_due = false;
             let count = scan.repairs.len().min(REGISTRATION_PAGE_SIZE);
             page.keys.reserve_exact(count);
             for key in scan.repairs.drain(scan.repairs.len() - count..) {
@@ -367,6 +371,7 @@ impl LocRib {
             }
         }
         scan.discovery_finished = scan.shard == shards.len();
+        scan.repair_due = true;
         page
     }
 
@@ -2211,6 +2216,45 @@ mod tests {
             loc.len(),
             "rescan every relocated winner"
         );
+    }
+
+    #[test]
+    fn registration_finishes_discovery_and_repairs_under_continuing_changes() {
+        // Spare capacity keeps the bucket layout fixed throughout the scan.
+        let mut loc = LocRib::with_capacity(12_000);
+        let buckets = loc.routes.shards()[0].num_buckets();
+        let pages = buckets.div_ceil(REGISTRATION_PAGE_SIZE);
+        let mut seen = FastSet::default();
+        let mut changes = 0_u32;
+        let mut visited = 0;
+        let mut repairs_during_discovery = 0;
+        loc.start_registration_scan();
+        for _ in 0..=2 * pages {
+            if loc.registration_scan_status() != RegistrationScanStatus::Scanning {
+                break;
+            }
+            // Two turns' arrivals fit in a repair page, but all arrivals
+            // across the discovery walk do not fit in the repair backlog.
+            for _ in 0..320 {
+                let route = registration_route(changes);
+                assert!(loc.recompute(route.prefix, [&route].into_iter()));
+                changes += 1;
+            }
+            let page = loc.take_registration_page();
+            assert!(page.bucket_visits + page.repairs <= REGISTRATION_PAGE_SIZE);
+            visited += page.bucket_visits;
+            if visited < buckets {
+                repairs_during_discovery += page.repairs;
+            }
+            seen.extend(page.keys);
+        }
+        assert_eq!(
+            loc.registration_scan_status(),
+            RegistrationScanStatus::Ready
+        );
+        assert_eq!(visited, buckets);
+        assert!(repairs_during_discovery > REGISTRATION_REPAIR_LIMIT);
+        assert_eq!(seen, loc.prefixes().collect());
     }
 
     #[test]

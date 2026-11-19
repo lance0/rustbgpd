@@ -1368,6 +1368,66 @@ fn route_refresh_request_releases_its_queued_flag_on_dequeue() {
     }
 }
 
+#[test]
+fn route_refresh_during_initial_registration_survives_retry_and_follows_initial_eor() {
+    use super::lifecycle::{test_peer_up, test_routes_received};
+    use rustbgpd_wire::RouteRefreshSubtype::{BoRR, EoRR};
+
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.first_group_build_min_routes = 1;
+    let source = Ipv4Addr::new(192, 0, 2, 1);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    register_test_peer(&mut manager, peer_v4(source), 0);
+    manager.handle_update(test_routes_received(
+        peer_v4(source),
+        vec![make_route(prefix, source)],
+    ));
+    drain_route_chunks(&mut manager);
+
+    let peer = peer_v4(Ipv4Addr::new(192, 0, 2, 2));
+    let (sender, mut output) = mpsc::channel(8);
+    manager.handle_update(test_peer_up(peer, 7, sender));
+    assert!(manager.first_group_build.is_some());
+    assert!(!manager.outbound_peers.contains_key(&peer));
+    let family = (Afi::Ipv4, Safi::Unicast);
+    manager.handle_update(RibUpdate::RouteRefreshRequest {
+        peer,
+        session_id: 7,
+        afi: family.0,
+        safi: family.1,
+        queued: Arc::default(),
+    });
+    // Another peer can wake the resync timer during the build. Its sweep
+    // must leave this accepted request parked until registration publishes.
+    manager.resync_dirty_peers_bounded();
+    assert!(manager.pending_refresh[&peer].contains(&family));
+    assert!(!manager.deferred_refresh_pending());
+    assert!(output.is_empty());
+
+    manager.advance_pending_initial_registration();
+    let initial = delivered(output.try_recv().expect("initial table"));
+    assert_eq!(initial.refresh_markers, []);
+    assert_eq!(initial.announce.len(), 1);
+    assert_eq!(initial.announce[0].prefix, Prefix::V4(prefix));
+    let eor = delivered(output.try_recv().expect("initial EoR"));
+    assert_eq!(eor.end_of_rib, [family]);
+    assert_eq!(eor.refresh_markers, []);
+
+    assert!(manager.deferred_refresh_pending());
+    manager.resync_dirty_peers_bounded();
+    let replay = delivered(output.try_recv().expect("requested refresh"));
+    assert_eq!(
+        replay.refresh_markers,
+        [(family.0, family.1, BoRR), (family.0, family.1, EoRR)]
+    );
+    assert_eq!(replay.announce.len(), 1);
+    assert_eq!(replay.announce[0].prefix, Prefix::V4(prefix));
+    assert_eq!(replay.end_of_rib, [family]);
+    assert!(!manager.pending_refresh.contains_key(&peer));
+    assert!(output.is_empty());
+}
+
 /// One family's route, its announcement and withdrawal from `source`, and
 /// the receiver's view of an envelope (`Debug` keys, announced and withdrawn).
 struct OwedFamily {

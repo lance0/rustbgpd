@@ -54,6 +54,12 @@ impl RibManager {
         }));
     }
 
+    pub(super) fn registration_waits_for_first_group(&self, peer: PeerId) -> bool {
+        self.first_group_build.as_ref().is_some_and(|job| {
+            job.peer == peer || self.registration_matches_first_group(peer, job.gid)
+        })
+    }
+
     pub(super) fn first_group_targets(&self, gid: usize) -> bool {
         self.first_group_build
             .as_ref()

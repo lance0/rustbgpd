@@ -657,6 +657,53 @@ async fn full_legacy_read_buffer_preserves_startup_timer_admission_cutoff() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn parked_primary_read_allows_pending_registration_to_complete() {
+    let (tx, rx) = mpsc::channel(1);
+    let mut manager = timer_manager(rx, dummy_query_rx());
+    manager.release_readiness_count = Some(0);
+    manager.set_owed_release_open((Afi::Ipv4, Safi::Unicast), true);
+    let (reply, _first_read) = oneshot::channel();
+    tx.try_send(RibUpdate::QueryBmpLocRibStats { reply })
+        .unwrap();
+    assert!(manager.drain_ready_updates().await);
+    let (reply, mut blocked_read) = oneshot::channel();
+    tx.try_send(RibUpdate::QueryBmpLocRibStats { reply })
+        .unwrap();
+    assert!(!manager.can_receive_release_primary());
+
+    manager.initial_dump_defer_min_routes = 0;
+    let peer = peer_v4(Ipv4Addr::new(192, 0, 2, 10));
+    let (out, mut receiver) = mpsc::channel(8);
+    let mut registration = super::lifecycle::test_peer_up(peer, 1, out);
+    let RibUpdate::PeerUp {
+        sendable_families, ..
+    } = &mut registration
+    else {
+        unreachable!()
+    };
+    // Observe a family whose EoR is not held by the parked unicast release.
+    *sendable_families = vec![(Afi::Ipv4, Safi::MplsVpn)];
+    manager.handle_update(registration);
+    assert!(manager.pending_initial_registrations.contains(&peer));
+    assert!(!manager.can_receive_release_primary());
+    let mut actor = Box::pin(manager.run());
+    assert!(
+        actor
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    assert!(
+        receiver.try_recv().is_ok(),
+        "registration runs while the primary head is fenced"
+    );
+    assert!(matches!(
+        blocked_read.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+}
+
+#[tokio::test(start_paused = true)]
 async fn recurring_bmp_samples_do_not_fill_primary_during_a_parked_stage() {
     let (tx, rx) = mpsc::channel(2);
     let mut manager = timer_manager(rx, dummy_query_rx());
