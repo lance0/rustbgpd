@@ -8093,7 +8093,9 @@ impl RibManager {
                 && (self.first_group_pending_writer().is_some()
                     || self.optional_destination_retirement_active());
             let first_group_turn = deferred_intent.is_some() || sealed_owner;
-            if !first_group_turn {
+            let maintenance_progress = if first_group_turn {
+                false
+            } else {
                 let released_read = self.serve_released_read();
                 // One bounded validation slice per ordinary actor turn, including
                 // under sustained primary traffic. Clean transitions above retain
@@ -8101,7 +8103,8 @@ impl RibManager {
                 let validated_flowspec = self.process_flowspec_validation_chunk();
                 let retired_dampening =
                     self.dampening_history.retire(ROUTES_RECEIVED_CHUNK_SIZE) > 0;
-                if validated_flowspec || retired_dampening || released_read {
+                let progressed = validated_flowspec || retired_dampening || released_read;
+                if progressed {
                     self.drain_readiness_queries(None);
                     self.drain_queries(QUERY_BUDGET_PER_CHUNK);
                     tokio::task::yield_now().await;
@@ -8127,7 +8130,8 @@ impl RibManager {
                         resync_sleep.as_mut().reset(soon);
                     }
                 }
-            }
+                progressed
+            };
 
             // Arm the GR timer to the nearest stale deadline.
             let has_gr_timers = if let Some(deadline) = self.next_gr_deadline() {
@@ -8485,7 +8489,7 @@ impl RibManager {
                 self.drain_readiness_queries(None);
                 self.drain_queries(QUERY_BUDGET_PER_CHUNK);
                 tokio::task::yield_now().await;
-            } else if validated_flowspec || retired_dampening || released_read {
+            } else if maintenance_progress {
                 // Do not sleep while validation remains queued, but admit a
                 // primary update between slices instead of monopolizing turns.
                 if let Some(update) = self.try_recv_primary() {
