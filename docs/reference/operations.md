@@ -1409,7 +1409,7 @@ and any offline authority checks before installing. See
 [the check reference](#pre-upgrade-checks).
 
 Moving a config between RFC 8212 epochs is a separate, offline step:
-`rustbgpd --migrate-config pin-legacy|prepare-secure|downgrade-v0.64 --offline
+`rustbgpd --migrate-config pin-legacy|prepare-secure --offline
 [--dry-run] CONFIG_PATH` rewrites the posture representation in place. Stop or
 quiesce the daemon first — `--offline` is an operator assertion, not a daemon
 probe — and see [`CONFIGURATION.md`](configuration.md) → `config_epoch` for

@@ -1,9 +1,11 @@
 //! Real-binary proofs for the Linux-only offline config migrator.
 
 use std::fs;
+use std::io::Write as _;
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -62,37 +64,37 @@ fn config_file() -> (tempfile::TempDir, PathBuf) {
     (dir, path)
 }
 
-fn validator(dir: &Path, body: &str) -> PathBuf {
-    let path = dir.join("validator");
-    fs::write(&path, body).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
-    path
-}
-
-/// Polls `condition` every 50ms until it holds or `deadline_secs` elapses.
-/// Scheduler-dependent state (process reap, concurrent stage creation) must
-/// never be asserted instantaneously: under load the state lags the event.
-fn poll_until(deadline_secs: u64, condition: impl Fn() -> bool) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(deadline_secs);
+/// Wait for the debug migrator to reach its pre-publication fence.
+fn hold_staged(path: &Path) -> (Child, UnixStream) {
+    let hold = path.with_extension("sock");
+    let listener = UnixListener::bind(&hold).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rustbgpd"))
+        .args(["--migrate-config", "pin-legacy", "--offline"])
+        .arg(path)
+        .env("RUSTBGPD_TEST_MIGRATION_STAGE_HOLD", &hold)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        if condition() {
-            return true;
+        match listener.accept() {
+            Ok((release, _)) => return (child, release),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(
+                    child.try_wait().unwrap().is_none(),
+                    "migration exited before staging"
+                );
+                assert!(
+                    Instant::now() < deadline,
+                    "migration did not reach the fence"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("migration handshake failed: {error}"),
         }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        thread::sleep(Duration::from_millis(50));
     }
-}
-
-/// Validator whose check phase holds its stage open until `release` appears,
-/// letting tests order events deterministically instead of racing a fixed
-/// sleep. Capped at ~30s so an aborted test cannot leak a spinning script.
-fn holding_validator_script(release: &Path) -> String {
-    format!(
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'rustbgpd 0.64.0\\n'; else i=0; while [ ! -e '{}' ] && [ \"$i\" -lt 600 ]; do sleep 0.05; i=$((i+1)); done; fi\n",
-        release.display()
-    )
 }
 
 #[test]
@@ -228,13 +230,9 @@ fn explicit_offline_path_and_cli_conflicts_fail_closed() {
         .unwrap();
     assert!(relative.status.success(), "{:?}", text(&relative));
 
-    for args in [
-        vec!["--offline"],
-        vec!["--dry-run"],
-        vec!["--validator", path.to_str().unwrap()],
-    ] {
+    for args in [["--offline"], ["--dry-run"]] {
         let output = Command::new(env!("CARGO_BIN_EXE_rustbgpd"))
-            .args(&args)
+            .args(args)
             .output()
             .unwrap();
         assert_eq!(
@@ -251,64 +249,38 @@ fn explicit_offline_path_and_cli_conflicts_fail_closed() {
 }
 
 #[test]
-fn validator_option_cannot_be_consumed_as_path() {
-    let (dir, path) = config_file();
-    let before = fs::read(&path).unwrap();
-    let inode = fs::metadata(&path).unwrap().ino();
-    let validator = dir.path().join("--dry-run");
-    fs::write(
-        &validator,
-        "#!/bin/sh\n[ \"$1\" != --version ] || printf 'rustbgpd 0.64.0\\n'\n",
-    )
-    .unwrap();
-    fs::set_permissions(&validator, fs::Permissions::from_mode(0o700)).unwrap();
-
-    let output = Command::new(env!("CARGO_BIN_EXE_rustbgpd"))
-        .current_dir(dir.path())
-        .args([
-            "--migrate-config",
+fn retired_downgrade_is_rejected_before_touching_config() {
+    let (_dir, path) = config_file();
+    let before = fs::metadata(&path).unwrap();
+    let output = run(
+        &[&path],
+        &[
             "downgrade-v0.64",
             "--offline",
             "--validator",
-            "--dry-run",
-        ])
-        .arg(&path)
-        .output()
-        .unwrap();
-
-    let (stdout, stderr) = text(&output);
-    assert_eq!(output.status.code(), Some(2), "{stdout}\n{stderr}");
-    assert!(stdout.is_empty(), "{stdout}");
-    assert!(stderr.contains("--validator"), "{stderr}");
-    assert!(stderr.contains("requires a path"), "{stderr}");
-    assert_eq!(fs::read(&path).unwrap(), before);
-    assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
+            "old-validator",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(text(&output).0, "");
+    assert_eq!(
+        text(&output).1,
+        "error: config migration refused: unknown migration action\n"
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), CONFIG);
+    assert_eq!(fs::metadata(&path).unwrap().ino(), before.ino());
     assert!(!PathBuf::from(format!("{}.tmp", path.display())).exists());
 }
 
 #[test]
-fn large_source_relative_validator_and_stdout_failure_are_bounded() {
-    let (dir, path) = config_file();
+fn large_source_and_stdout_failure_are_handled() {
+    let (_dir, path) = config_file();
     let mut source = fs::read_to_string(&path).unwrap();
     source.push_str(&format!("# {}\n", "x".repeat(17 * 1024 * 1024)));
-    fs::write(&path, source).unwrap();
-    let _validator = validator(
-        dir.path(),
-        "#!/bin/sh\n[ \"$1\" != --version ] || printf 'rustbgpd 0.64.0\\n'\n",
-    );
-    let relative = Command::new(env!("CARGO_BIN_EXE_rustbgpd"))
-        .current_dir(dir.path())
-        .args([
-            "--migrate-config",
-            "downgrade-v0.64",
-            "--offline",
-            "--validator",
-            "validator",
-            "config.toml",
-        ])
-        .output()
-        .unwrap();
-    assert!(relative.status.success(), "{:?}", text(&relative));
+    fs::write(&path, &source).unwrap();
+    let dry = run(&[&path], &["pin-legacy", "--offline", "--dry-run"]);
+    assert!(dry.status.success(), "{:?}", text(&dry));
+    assert_eq!(fs::read_to_string(&path).unwrap(), source);
     let full = fs::OpenOptions::new()
         .write(true)
         .open("/dev/full")
@@ -400,109 +372,6 @@ fn locked_captured_bytes_are_the_only_source_semantics_authority() {
 }
 
 #[test]
-fn downgrade_materializes_effective_bool_removes_epoch_and_runs_exact_validator() {
-    for (source, effective) in [
-        (CONFIG.to_string(), false),
-        (
-            format!(
-                "config_epoch = 2\n{}",
-                CONFIG.replace("[global]", "[global]\nebgp_requires_policy = true")
-            ),
-            true,
-        ),
-        // ADR-0119 activated cell: epoch-2 omission is effective `true`, so
-        // downgrade output must materialize the explicit boolean the epoch-less
-        // v0.64 loader needs to preserve enforcement.
-        (format!("config_epoch = 2\n{CONFIG}"), true),
-    ] {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        fs::write(&path, source).unwrap();
-        let log = dir.path().join("validator.log");
-        let script = validator(
-            dir.path(),
-            &format!(
-                "#!/bin/sh\nset -eu\nif [ \"$1\" = --version ]; then printf 'rustbgpd 0.64.0\\n'; exit 0; fi\n[ \"$1\" = --check ]\ngrep -q 'ebgp_requires_policy = {effective}' \"$2\"\n! grep -q config_epoch \"$2\"\nprintf '%s\\n' \"$1\" >> '{}'\n",
-                log.display()
-            ),
-        );
-        let output = run(
-            &[&validator_path(&script), &path],
-            &["downgrade-v0.64", "--offline", "--validator"],
-        );
-        assert!(output.status.success(), "{:?}", text(&output));
-        let migrated = fs::read_to_string(&path).unwrap();
-        assert!(!migrated.contains("config_epoch"), "{migrated}");
-        assert!(
-            migrated.contains(&format!("ebgp_requires_policy = {effective}")),
-            "{migrated}"
-        );
-        assert_eq!(fs::read_to_string(log).unwrap(), "--check\n");
-    }
-}
-
-#[test]
-fn ci_exact_v064_binary_accepts_real_downgrade_bytes() {
-    let Some(validator) = std::env::var_os("RUSTBGPD_V064_VALIDATOR").map(PathBuf::from) else {
-        return;
-    };
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("config.toml");
-    fs::write(
-        &path,
-        format!(
-            "config_epoch = 2\n{}",
-            CONFIG.replace("[global]", "[global]\nebgp_requires_policy = true")
-        ),
-    )
-    .unwrap();
-    let rejected = Command::new(&validator)
-        .args(["--check", path.to_str().unwrap()])
-        .output()
-        .unwrap();
-    assert!(
-        !rejected.status.success(),
-        "v0.64 unexpectedly accepted config_epoch input"
-    );
-    let output = run(
-        &[&validator, &path],
-        &["downgrade-v0.64", "--offline", "--validator"],
-    );
-    assert!(output.status.success(), "{:?}", text(&output));
-    assert_eq!(
-        text(&output).0,
-        "migration action=downgrade-v0.64 result=changed written=true\n"
-    );
-}
-
-fn validator_path(path: &Path) -> PathBuf {
-    path.to_path_buf()
-}
-
-#[test]
-fn downgrade_refuses_absent_wrong_or_rejecting_validator_without_change() {
-    let (_dir, path) = config_file();
-    let before = fs::read(&path).unwrap();
-    let absent = run(&[&path], &["downgrade-v0.64", "--offline"]);
-    assert_eq!(absent.status.code(), Some(2));
-    for script in [
-        "#!/bin/sh\nprintf 'rustbgpd 0.63.0\\n'\n",
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'rustbgpd 0.64.0\\n'; else exit 1; fi\n",
-    ] {
-        let dir = tempfile::tempdir().unwrap();
-        let validator = validator(dir.path(), script);
-        let output = run(
-            &[&validator, &path],
-            &["downgrade-v0.64", "--offline", "--validator"],
-        );
-        assert_eq!(output.status.code(), Some(1), "{:?}", text(&output));
-        assert!(text(&output).1.contains("config migration refused"));
-        assert_eq!(fs::read(&path).unwrap(), before);
-        assert!(!PathBuf::from(format!("{}.tmp", path.display())).exists());
-    }
-}
-
-#[test]
 fn symlink_is_preserved_and_resolved_target_is_replaced() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("real.toml");
@@ -525,8 +394,8 @@ fn symlink_is_preserved_and_resolved_target_is_replaced() {
 }
 
 #[test]
-fn source_or_symlink_change_during_validation_refuses_and_cleans_stage() {
-    for swap_link in [false, true] {
+fn source_symlink_or_stage_change_before_publication_refuses_and_cleans_stage() {
+    for changed in ["source", "symlink", "stage"] {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("real.toml");
         let alternate = dir.path().join("alternate.toml");
@@ -534,37 +403,44 @@ fn source_or_symlink_change_during_validation_refuses_and_cleans_stage() {
         fs::write(&target, CONFIG).unwrap();
         fs::write(&alternate, CONFIG.replace("65001", "65003")).unwrap();
         symlink(&target, &link).unwrap();
-        let release = dir.path().join("release");
-        let validator = validator(dir.path(), &holding_validator_script(&release));
-        let child_link = link.clone();
-        let child_target = target.clone();
-        let child_alternate = alternate.clone();
-        let changer = thread::spawn(move || {
-            let stage = PathBuf::from(format!("{}.tmp", child_target.display()));
-            assert!(poll_until(10, || stage.exists()), "stage never appeared");
-            if swap_link {
-                fs::remove_file(&child_link).unwrap();
-                symlink(&child_alternate, &child_link).unwrap();
-            } else {
-                fs::write(&child_target, CONFIG.replace("65001", "65004")).unwrap();
+        let (child, mut release) = hold_staged(&link);
+        let stage = PathBuf::from(format!("{}.tmp", target.display()));
+        let external = CONFIG.replace("65001", "65004");
+        match changed {
+            "source" => fs::write(&target, &external).unwrap(),
+            "symlink" => {
+                fs::remove_file(&link).unwrap();
+                symlink(&alternate, &link).unwrap();
             }
-            // The validator holds until this appears, so the mutation above is
-            // strictly ordered before validation completes — no sleep race.
-            fs::write(&release, b"go").unwrap();
-        });
-        let output = run(
-            &[&validator, &link],
-            &["downgrade-v0.64", "--offline", "--validator"],
+            "stage" => fs::write(&stage, b"modified stage").unwrap(),
+            _ => unreachable!(),
+        }
+        release.write_all(b"x").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "{changed}: {:?}",
+            text(&output)
         );
-        changer.join().unwrap();
-        assert_eq!(output.status.code(), Some(1), "{:?}", text(&output));
         assert!(text(&output).1.contains("config migration refused"));
-        assert!(!PathBuf::from(format!("{}.tmp", target.display())).exists());
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            if changed == "source" {
+                &external
+            } else {
+                CONFIG
+            }
+        );
+        if changed == "symlink" {
+            assert_eq!(fs::read_link(&link).unwrap(), alternate);
+        }
+        assert!(!stage.exists());
     }
 }
 
 #[test]
-fn malformed_source_and_sanitized_validator_output_are_never_published() {
+fn malformed_source_is_rejected_without_disclosing_its_contents() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");
     fs::write(&path, "secret = 'DO_NOT_PRINT'\nnot valid = [").unwrap();
@@ -573,18 +449,10 @@ fn malformed_source_and_sanitized_validator_output_are_never_published() {
     assert_eq!(output.status.code(), Some(1));
     assert!(!stdout.contains("DO_NOT_PRINT") && !stderr.contains("DO_NOT_PRINT"));
 
-    fs::write(&path, CONFIG).unwrap();
-    let validator = validator(
-        dir.path(),
-        "#!/bin/sh\nprintf 'rustbgpd 0.64.0\\nLEAK'\nprintf 'DO_NOT_PRINT' >&2\n",
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "secret = 'DO_NOT_PRINT'\nnot valid = ["
     );
-    let output = run(
-        &[&validator, &path],
-        &["downgrade-v0.64", "--offline", "--validator"],
-    );
-    let (stdout, stderr) = text(&output);
-    assert_eq!(output.status.code(), Some(1));
-    assert!(!stdout.contains("LEAK") && !stderr.contains("DO_NOT_PRINT"));
 }
 
 #[test]
@@ -620,24 +488,7 @@ fn different_target_migrations_in_one_directory_do_not_contend() {
     let second = dir.path().join("second.toml");
     fs::write(&first, CONFIG).unwrap();
     fs::write(&second, CONFIG.replace("65001", "65003")).unwrap();
-    let release = dir.path().join("release");
-    let validator = validator(dir.path(), &holding_validator_script(&release));
-    let mut first_child = Command::new(env!("CARGO_BIN_EXE_rustbgpd"))
-        .args([
-            "--migrate-config",
-            "downgrade-v0.64",
-            "--offline",
-            "--validator",
-        ])
-        .arg(&validator)
-        .arg(&first)
-        .spawn()
-        .unwrap();
-    let first_stage = PathBuf::from(format!("{}.tmp", first.display()));
-    assert!(
-        poll_until(10, || first_stage.exists()),
-        "first migration stage never appeared"
-    );
+    let (mut first_child, mut release) = hold_staged(&first);
     let concurrent = run(&[&second], &["pin-legacy", "--offline"]);
     assert!(concurrent.status.success(), "{:?}", text(&concurrent));
     assert!(
@@ -646,16 +497,11 @@ fn different_target_migrations_in_one_directory_do_not_contend() {
             .starts_with("config_epoch = 1"),
         "second migration did not publish"
     );
-    // Direct non-contention proof, no wall clock: the second migration ran to
-    // a published completion while the first still held its stage — the first
-    // cannot finish before `release` exists. A second migration that waited on
-    // the first would only return after the first exited (its holding
-    // validator caps at ~30s), which this catches as Some(_) here.
     assert!(
         first_child.try_wait().unwrap().is_none(),
         "first migration finished before the concurrent one: the migrations contended"
     );
-    fs::write(&release, b"go").unwrap();
+    release.write_all(b"x").unwrap();
     assert!(first_child.wait().unwrap().success());
     assert!(
         fs::read_to_string(&first)
@@ -785,184 +631,4 @@ fn post_rename_directory_sync_failure_is_reported_ambiguous() {
             .unwrap()
             .contains("config_epoch = 1")
     );
-}
-
-#[test]
-fn validator_identity_swaps_refuse_before_publication() {
-    for phase in ["version", "check"] {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        fs::write(&path, CONFIG).unwrap();
-        let validator_a = dir.path().join("validator-a");
-        let validator_b = dir.path().join("validator-b");
-        let validator = dir.path().join("validator");
-        fs::write(&validator_b, "#!/bin/sh\nprintf 'rustbgpd 0.64.0\\n'\n").unwrap();
-        fs::set_permissions(&validator_b, fs::Permissions::from_mode(0o700)).unwrap();
-        fs::write(
-            &validator_a,
-            format!(
-                "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'rustbgpd 0.64.0\\n'; {}; else {}; fi\n",
-                if phase == "version" {
-                    format!(
-                        "/bin/ln -sfn -- '{}' '{}'",
-                        validator_b.display(),
-                        validator.display()
-                    )
-                } else {
-                    ":".to_string()
-                },
-                if phase == "check" {
-                    format!(
-                        "/bin/ln -sfn -- '{}' '{}'",
-                        validator_b.display(),
-                        validator.display()
-                    )
-                } else {
-                    ":".to_string()
-                }
-            ),
-        )
-        .unwrap();
-        fs::set_permissions(&validator_a, fs::Permissions::from_mode(0o700)).unwrap();
-        symlink(&validator_a, &validator).unwrap();
-        assert_eq!(fs::read_link(&validator).unwrap(), validator_a);
-        let before = fs::read(&path).unwrap();
-        let output = run(
-            &[&validator, &path],
-            &["downgrade-v0.64", "--offline", "--validator"],
-        );
-        assert_eq!(
-            output.status.code(),
-            Some(1),
-            "{phase}: {:?}",
-            text(&output)
-        );
-        assert_eq!(fs::read(&path).unwrap(), before);
-        assert_eq!(
-            fs::read_link(&validator).unwrap(),
-            validator_b,
-            "{phase}: {:?}",
-            text(&output)
-        );
-        assert!(
-            text(&output)
-                .1
-                .contains("validator changed during migration"),
-            "{:?}",
-            text(&output)
-        );
-    }
-}
-
-#[test]
-fn downgrade_dry_run_invokes_validator_and_malicious_stage_mutation_refuses() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("config.toml");
-    fs::write(&path, CONFIG).unwrap();
-    let before = fs::read(&path).unwrap();
-    let log = dir.path().join("log");
-    let proof_validator = validator(
-        dir.path(),
-        &format!(
-            "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'rustbgpd 0.64.0\\n'; else printf checked > '{}'; fi\n",
-            log.display()
-        ),
-    );
-    let dry = run(
-        &[&proof_validator, &path],
-        &["downgrade-v0.64", "--offline", "--dry-run", "--validator"],
-    );
-    assert!(dry.status.success(), "{:?}", text(&dry));
-    assert_eq!(fs::read_to_string(&log).unwrap(), "checked");
-    assert_eq!(fs::read(&path).unwrap(), before);
-
-    let malicious_validator = validator(
-        dir.path(),
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'rustbgpd 0.64.0\\n'; else printf '# malicious\\n' > \"$2\"; fi\n",
-    );
-    let malicious = run(
-        &[&malicious_validator, &path],
-        &["downgrade-v0.64", "--offline", "--validator"],
-    );
-    assert_eq!(malicious.status.code(), Some(1), "{:?}", text(&malicious));
-    assert_eq!(fs::read(&path).unwrap(), before);
-    assert!(!PathBuf::from(format!("{}.tmp", path.display())).exists());
-}
-
-#[test]
-fn both_validator_deadlines_kill_reap_sanitize_and_clean_stage() {
-    for phase in ["version", "check"] {
-        // The migrator arms the shrunk 100ms deadline when it spawns the
-        // validator, so the script's first action, recording the descendant's
-        // pid, races the kill itself: under load the kill can land before the
-        // record exists. Such an attempt left no descendant to reason about
-        // and proves nothing either way, so it is retried (bounded) rather
-        // than read as a survivor; a pass always needs a recorded pid.
-        let mut recorded = false;
-        for _ in 0..5 {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("config.toml");
-            fs::write(&path, CONFIG).unwrap();
-            let descendant_pid = dir.path().join("descendant.pid");
-            // The descendant sleeps 60s: far past every bound below, so
-            // "reaped within the poll deadline" can only mean the migrator
-            // killed it, and "returned within the hang stop" can only mean
-            // the migrator did not wait it out.
-            let script = if phase == "version" {
-                format!(
-                    "#!/bin/sh\nsleep 60 & echo $! > '{}'\nprintf DO_NOT_PRINT >&2\n",
-                    descendant_pid.display()
-                )
-            } else {
-                format!(
-                    "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'rustbgpd 0.64.0\\n'; else (sleep 60; printf malicious > \"$2\") & echo $! > '{}'; printf DO_NOT_PRINT >&2; fi\n",
-                    descendant_pid.display()
-                )
-            };
-            let validator = validator(dir.path(), &script);
-            let started = Instant::now();
-            let output = run_env(
-                &[&validator, &path],
-                &["downgrade-v0.64", "--offline", "--validator"],
-                &[("RUSTBGPD_TEST_MIGRATION_TIMEOUT_PHASE", phase)],
-            );
-            assert_eq!(
-                output.status.code(),
-                Some(1),
-                "{phase}: {:?}",
-                text(&output)
-            );
-            // Hang stop: waiting out the descendant instead of killing at the
-            // deadline would take 60s. Generous so scheduler load cannot trip it.
-            assert!(started.elapsed() < Duration::from_secs(30), "{phase}");
-            assert!(!text(&output).1.contains("DO_NOT_PRINT"));
-            assert!(!PathBuf::from(format!("{}.tmp", path.display())).exists());
-            let retry = run(&[&path], &["pin-legacy", "--offline"]);
-            assert!(
-                retry.status.success(),
-                "lock leaked after {phase}: {:?}",
-                text(&retry)
-            );
-            let pid = fs::read_to_string(&descendant_pid).unwrap_or_default();
-            let pid = pid.trim();
-            if pid.is_empty() {
-                continue;
-            }
-            let proc_entry = format!("/proc/{pid}");
-            // The kill precedes the migrator's exit, but the reap can lag it
-            // under load — poll instead of asserting instant /proc
-            // non-existence. The 60s descendant sleep keeps this a kill proof,
-            // not an exit race.
-            assert!(
-                poll_until(10, || !Path::new(&proc_entry).exists()),
-                "{phase}: descendant {pid} survived the deadline kill"
-            );
-            recorded = true;
-            break;
-        }
-        assert!(
-            recorded,
-            "{phase}: the validator never recorded its descendant before the deadline kill"
-        );
-    }
 }

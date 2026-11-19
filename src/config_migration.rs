@@ -5,18 +5,11 @@
 use std::fs::{self, File};
 use std::io::{self, Read as _};
 use std::os::unix::fs::{FileExt as _, MetadataExt as _, OpenOptionsExt as _};
-use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Stdio};
-use std::sync::mpsc;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::process::ExitCode;
 
 use sha2::{Digest as _, Sha256};
 use toml_edit::{DocumentMut, Item, TableLike, Value};
-
-use nix::sys::signal::{Signal, killpg};
-use nix::unistd::Pid;
 
 use crate::config::{Config, ConfigEpoch};
 
@@ -24,7 +17,6 @@ use crate::config::{Config, ConfigEpoch};
 enum Action {
     PinLegacy,
     PrepareSecure,
-    DowngradeV064,
 }
 
 impl Action {
@@ -32,7 +24,6 @@ impl Action {
         match self {
             Self::PinLegacy => "pin-legacy",
             Self::PrepareSecure => "prepare-secure",
-            Self::DowngradeV064 => "downgrade-v0.64",
         }
     }
 }
@@ -40,7 +31,6 @@ impl Action {
 struct Request {
     action: Action,
     config_path: PathBuf,
-    validator: Option<PathBuf>,
     dry_run: bool,
 }
 
@@ -59,12 +49,6 @@ impl From<String> for MigrationFailure {
     fn from(message: String) -> Self {
         Self::Operational(message)
     }
-}
-
-struct Validator {
-    spelled: PathBuf,
-    resolved: PathBuf,
-    fingerprint: Fingerprint,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -121,61 +105,34 @@ fn parse(args: &[String]) -> Result<Request, String> {
     let action = match args.get(2).map(String::as_str) {
         Some("pin-legacy") => Action::PinLegacy,
         Some("prepare-secure") => Action::PrepareSecure,
-        Some("downgrade-v0.64") => Action::DowngradeV064,
         Some(_) => return Err("unknown migration action".to_string()),
         None => return Err("missing migration action".to_string()),
     };
     let mut offline = false;
     let mut dry_run = false;
-    let mut validator = None;
     let mut config_path = None;
-    let mut index = 3;
-    while index < args.len() {
-        match args[index].as_str() {
+    for arg in &args[3..] {
+        match arg.as_str() {
             "--offline" if !offline => offline = true,
             "--dry-run" if !dry_run => dry_run = true,
-            "--validator" if validator.is_none() => {
-                index += 1;
-                let path = args
-                    .get(index)
-                    .filter(|path| !path.starts_with('-'))
-                    .ok_or_else(|| "--validator requires a path argument".to_string())?;
-                validator = Some(PathBuf::from(path));
-            }
             option if option.starts_with('-') => {
                 return Err("unknown or duplicate migration option".to_string());
             }
             path if config_path.is_none() => config_path = Some(PathBuf::from(path)),
             _ => return Err("multiple config paths are not allowed".to_string()),
         }
-        index += 1;
     }
     if !offline {
         return Err("--offline is required".to_string());
     }
     let config_path = config_path.ok_or_else(|| "CONFIG_PATH is required".to_string())?;
-    match (action, &validator) {
-        (Action::DowngradeV064, Some(_)) => {}
-        (Action::DowngradeV064, None) => {
-            return Err("downgrade-v0.64 requires --validator PATH".to_string());
-        }
-        (_, Some(_)) => {
-            return Err("--validator is only valid with downgrade-v0.64".to_string());
-        }
-        (_, None) => {}
-    }
     Ok(Request {
         action,
         config_path,
-        validator,
         dry_run,
     })
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "the atomic proof sequence stays visibly ordered around its sole rename"
-)]
 fn migrate(request: &Request) -> Result<Outcome, MigrationFailure> {
     let link_before = fingerprint_path(&request.config_path, false)?;
     let resolved = fs::canonicalize(&request.config_path)
@@ -200,16 +157,15 @@ fn migrate(request: &Request) -> Result<Outcome, MigrationFailure> {
         .map_err(|_| "cannot read CONFIG_PATH".to_string())?;
     let text = std::str::from_utf8(&bytes)
         .map_err(|_| "CONFIG_PATH is not valid UTF-8 TOML".to_string())?;
-    let current = load_captured_config(text, &resolved, "migration source")
+    load_captured_config(text, &resolved, "migration source")
         .map_err(|diagnostic| format!("migration source validation failed:\n{diagnostic}"))?;
     let mut document = text
         .parse::<DocumentMut>()
         .map_err(|_| "CONFIG_PATH is not valid TOML".to_string())?;
-    apply(request.action, &current, &mut document)?;
+    apply(request.action, &mut document)?;
     let candidate = document.to_string();
 
-    let unchanged = candidate.as_bytes() == bytes;
-    if unchanged && request.action != Action::DowngradeV064 {
+    if candidate.as_bytes() == bytes {
         verify_source(
             &request.config_path,
             &resolved,
@@ -219,16 +175,11 @@ fn migrate(request: &Request) -> Result<Outcome, MigrationFailure> {
         )?;
         return Ok(Outcome::Unchanged);
     }
-    let validator = request
-        .validator
-        .as_deref()
-        .map(resolve_validator)
-        .transpose()?;
-
     let mut stage = crate::confirm_journal::stage_atomic(&resolved, candidate.as_bytes())
         .map_err(|_| "cannot stage migrated config".to_string())?;
-    let staged_config = validate_stage(&candidate, &resolved, validator.as_ref(), stage.path())?;
-    verify_transform(request.action, &current, &staged_config)?;
+    let staged_config = load_captured_config(&candidate, &resolved, "migration candidate")
+        .map_err(|_| "staged config failed current validation".to_string())?;
+    verify_transform(request.action, &staged_config)?;
     stage
         .preserve_metadata(
             source_before.uid,
@@ -242,6 +193,8 @@ fn migrate(request: &Request) -> Result<Outcome, MigrationFailure> {
     if stage_bytes != candidate.as_bytes() {
         return Err("staged config changed during validation".to_string().into());
     }
+    #[cfg(debug_assertions)]
+    hold_stage_for_test()?;
     if request.dry_run {
         verify_fence(
             &request.config_path,
@@ -253,24 +206,7 @@ fn migrate(request: &Request) -> Result<Outcome, MigrationFailure> {
             &staged_before,
         )?;
         stage.discard();
-        return Ok(if unchanged {
-            Outcome::Unchanged
-        } else {
-            Outcome::WouldChange
-        });
-    }
-    if unchanged {
-        verify_fence(
-            &request.config_path,
-            &resolved,
-            &source,
-            &link_before,
-            &source_before,
-            stage.path(),
-            &staged_before,
-        )?;
-        stage.discard();
-        return Ok(Outcome::Unchanged);
+        return Ok(Outcome::WouldChange);
     }
     let stage_path = stage.path().to_path_buf();
     stage
@@ -299,7 +235,21 @@ fn migrate(request: &Request) -> Result<Outcome, MigrationFailure> {
     Ok(Outcome::Changed)
 }
 
-fn apply(action: Action, current: &Config, document: &mut DocumentMut) -> Result<(), String> {
+#[cfg(debug_assertions)]
+fn hold_stage_for_test() -> Result<(), String> {
+    if let Some(path) = std::env::var_os("RUSTBGPD_TEST_MIGRATION_STAGE_HOLD") {
+        use std::os::unix::net::UnixStream;
+        use std::time::Duration;
+
+        let mut hold = UnixStream::connect(path).map_err(|error| error.to_string())?;
+        hold.set_read_timeout(Some(Duration::from_secs(30)))
+            .and_then(|()| hold.read_exact(&mut [0]))
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn apply(action: Action, document: &mut DocumentMut) -> Result<(), String> {
     match action {
         Action::PinLegacy => {
             let global = global_table(document)?;
@@ -310,12 +260,6 @@ fn apply(action: Action, current: &Config, document: &mut DocumentMut) -> Result
             let global = global_table(document)?;
             set_value(global, "ebgp_requires_policy", true);
             set_value(document.as_table_mut(), "config_epoch", 2_i64);
-        }
-        Action::DowngradeV064 => {
-            let effective = current.rfc8212_posture().policy_effective;
-            let global = global_table(document)?;
-            set_value(global, "ebgp_requires_policy", effective);
-            document.remove("config_epoch");
         }
     }
     Ok(())
@@ -338,40 +282,6 @@ fn set_value(table: &mut dyn TableLike, key: &str, replacement: impl Into<Value>
     }
 }
 
-fn validate_stage(
-    candidate: &str,
-    target: &Path,
-    validator: Option<&Validator>,
-    stage: &Path,
-) -> Result<Config, String> {
-    let config = load_captured_config(candidate, target, "migration candidate")
-        .map_err(|_| "staged config failed current validation".to_string())?;
-    if let Some(validator) = validator {
-        verify_validator(validator)?;
-        let version = run_validator(
-            &validator.resolved,
-            &["--version"],
-            None,
-            validator_timeout("version", Duration::from_secs(5)),
-        )?;
-        if !version.0 || version.1 != b"rustbgpd 0.64.0\n" {
-            return Err("validator is not exactly rustbgpd 0.64.0".to_string());
-        }
-        verify_validator(validator)?;
-        let checked = run_validator(
-            &validator.resolved,
-            &["--check"],
-            Some(stage),
-            validator_timeout("check", Duration::from_mins(5)),
-        )?;
-        if !checked.0 {
-            return Err("v0.64 validator rejected the downgraded config".to_string());
-        }
-        verify_validator(validator)?;
-    }
-    Ok(config)
-}
-
 fn load_captured_config(content: &str, target: &Path, label: &str) -> Result<Config, String> {
     let original = std::env::current_dir().map_err(|_| "cannot capture working directory")?;
     let parent = target
@@ -383,11 +293,7 @@ fn load_captured_config(content: &str, target: &Path, label: &str) -> Result<Con
     loaded
 }
 
-fn verify_transform(
-    action: Action,
-    current: &Config,
-    staged: &Config,
-) -> Result<(), MigrationFailure> {
+fn verify_transform(action: Action, staged: &Config) -> Result<(), MigrationFailure> {
     #[cfg(debug_assertions)]
     if std::env::var_os("RUSTBGPD_TEST_MIGRATION_INVARIANT_FAILURE").is_some() {
         return Err(MigrationFailure::Internal(
@@ -402,10 +308,6 @@ fn verify_transform(
         Action::PrepareSecure => {
             posture.config_epoch_raw == Some(ConfigEpoch::V2) && posture.policy_raw == Some(true)
         }
-        Action::DowngradeV064 => {
-            posture.config_epoch_raw.is_none()
-                && posture.policy_raw == Some(current.rfc8212_posture().policy_effective)
-        }
     };
     if !valid {
         return Err(MigrationFailure::Internal(
@@ -413,146 +315,6 @@ fn verify_transform(
         ));
     }
     Ok(())
-}
-
-fn validator_timeout(phase: &str, normal: Duration) -> Duration {
-    #[cfg(not(debug_assertions))]
-    let _ = phase;
-    #[cfg(debug_assertions)]
-    if std::env::var("RUSTBGPD_TEST_MIGRATION_TIMEOUT_PHASE").as_deref() == Ok(phase) {
-        return Duration::from_millis(100);
-    }
-    normal
-}
-
-fn resolve_validator(path: &Path) -> Result<Validator, String> {
-    let resolved =
-        fs::canonicalize(path).map_err(|_| "cannot resolve validator PATH".to_string())?;
-    let fingerprint = fingerprint_path(&resolved, true)?;
-    if fingerprint.mode & libc::S_IFMT != libc::S_IFREG || fingerprint.mode & 0o111 == 0 {
-        return Err("validator PATH is not a regular executable".to_string());
-    }
-    Ok(Validator {
-        spelled: path.to_path_buf(),
-        resolved,
-        fingerprint,
-    })
-}
-
-fn verify_validator(validator: &Validator) -> Result<(), String> {
-    if fs::canonicalize(&validator.spelled).ok().as_ref() != Some(&validator.resolved)
-        || fingerprint_path(&validator.resolved, true)? != validator.fingerprint
-    {
-        return Err("validator changed during migration".to_string());
-    }
-    Ok(())
-}
-
-fn run_validator(
-    validator: &Path,
-    args: &[&str],
-    config: Option<&Path>,
-    timeout: Duration,
-) -> Result<(bool, Vec<u8>), String> {
-    let mut command = Command::new(validator);
-    command
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0);
-    if let Some(config) = config {
-        command.arg(config);
-    }
-    let mut child = command
-        .spawn()
-        .map_err(|_| "cannot execute the v0.64 validator".to_string())?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "cannot capture validator output".to_string())?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "cannot capture validator output".to_string())?;
-    let (drained_tx, drained_rx) = mpsc::sync_channel(2);
-    let stdout_drained = drained_tx.clone();
-    let stdout_thread = thread::spawn(move || {
-        let mut retained = Vec::new();
-        let mut reader = io::BufReader::new(stdout);
-        let mut buffer = [0; 4096];
-        loop {
-            let count = reader.read(&mut buffer).unwrap_or(0);
-            if count == 0 {
-                break;
-            }
-            let keep = (128_usize.saturating_sub(retained.len())).min(count);
-            retained.extend_from_slice(&buffer[..keep]);
-        }
-        let _ = stdout_drained.send(());
-        retained
-    });
-    let stderr_thread = thread::spawn(move || {
-        let result = io::copy(&mut io::BufReader::new(stderr), &mut io::sink());
-        let _ = drained_tx.send(());
-        result
-    });
-    let deadline = Instant::now() + timeout;
-    let mut timed_out = false;
-    let mut status = None;
-    let mut drained = 0;
-    loop {
-        if status.is_none() {
-            status = child
-                .try_wait()
-                .map_err(|_| "v0.64 validator did not complete".to_string())?;
-        }
-        while drained_rx.try_recv().is_ok() {
-            drained += 1;
-        }
-        if status.is_some() && drained == 2 {
-            break;
-        }
-        if Instant::now() >= deadline {
-            let pid = i32::try_from(child.id())
-                .map_err(|_| "v0.64 validator did not complete".to_string())?;
-            if killpg(Pid::from_raw(pid), Signal::SIGKILL).is_err() {
-                let _ = child.kill();
-            }
-            timed_out = true;
-            if status.is_none() {
-                status = Some(
-                    child
-                        .wait()
-                        .map_err(|_| "v0.64 validator did not complete".to_string())?,
-                );
-            }
-            while drained < 2 {
-                drained_rx
-                    .recv_timeout(Duration::from_secs(1))
-                    .map_err(|_| "validator output drain did not complete".to_string())?;
-                drained += 1;
-            }
-            break;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    let stdout = stdout_thread
-        .join()
-        .map_err(|_| "cannot collect validator output".to_string())?;
-    stderr_thread
-        .join()
-        .map_err(|_| "cannot collect validator output".to_string())?
-        .map_err(|_| "cannot collect validator output".to_string())?;
-    if timed_out {
-        return Err("v0.64 validator exceeded its execution deadline".to_string());
-    }
-    Ok((
-        status
-            .ok_or_else(|| "v0.64 validator did not complete".to_string())?
-            .success(),
-        stdout,
-    ))
 }
 
 fn fingerprint_path(path: &Path, follow: bool) -> Result<Fingerprint, String> {
