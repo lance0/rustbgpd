@@ -194,10 +194,14 @@ fn external_cancellation_of_pending_prepare_releases_the_slot() {
     assert!(manager.pending_destination_prestage.is_some() && manager.first_group_build.is_none());
     drop(response);
     manager.advance_destination_prestage();
-    assert!(
-        manager.pending_destination_prestage.is_none()
-            && !manager.optional_destination_retirement_active()
-    );
+    assert!(manager.pending_destination_prestage.is_none());
+    assert!(manager.optional_destination_retirement_active());
+    manager.advance_pending_initial_registration();
+    assert!(manager.first_group_build.is_none());
+    // Cancellation preceded the first staging slice. Only empty table and walk buffers remain.
+    let spent = manager.advance_optional_destination_retirement();
+    assert!((1..=crate::loc_rib::REGISTRATION_PAGE_SIZE).contains(&spent));
+    assert!(manager.first_group_slot_available());
     finish_registrations(&mut manager);
     assert!(manager.outbound_peers.contains_key(&neighbor(2)));
 }

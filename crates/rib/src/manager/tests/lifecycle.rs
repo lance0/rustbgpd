@@ -2943,22 +2943,15 @@ async fn all_deferred_cohort_releases_prepared_destination() {
         "the memberless prepared group is removed"
     );
 
-    while manager.drain_ready_updates().await {}
-    while !manager.pending_initial_registrations.is_empty() {
-        manager.advance_pending_initial_registration();
+    let actor = tokio::spawn(manager.run_actor());
+    for receiver in &mut receivers {
+        drain_eor(receiver).await;
     }
-    for (&peer, receiver) in members.iter().zip(&mut receivers) {
+    drop(tx);
+    let manager = actor.await.unwrap();
+    for peer in members {
         assert!(manager.outbound_peers.contains_key(&peer));
         assert_eq!(manager.export_chains[&peer], Some(new.clone()));
-        let mut saw_eor = false;
-        while let Ok(update) = receiver.try_recv() {
-            assert!(
-                update.announce.is_empty(),
-                "{peer}: dump uses the new chain"
-            );
-            saw_eor |= !update.end_of_rib.is_empty();
-        }
-        assert!(saw_eor, "{peer}: initial dump completed");
     }
 }
 
