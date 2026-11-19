@@ -120,7 +120,8 @@ impl RibManager {
         paged_members: bool,
         pcb: Option<crate::manager::distribution::PreparedPcb>,
     ) -> GroupStageOutput {
-        let mut out = self.stage_group_prefixes_inner(gid, prefixes, memo, paged_members, pcb);
+        let mut out =
+            self.stage_group_prefixes_inner(gid, prefixes, memo, paged_members, pcb, false);
         // A memberless prestaged destination needs live table updates,
         // but no wire payload until a member adopts it.
         if self
@@ -147,7 +148,26 @@ impl RibManager {
         prefixes: &HashSet<Prefix, S>,
         memo: &mut crate::manager::distribution::ExportMemo,
     ) -> GroupStageOutput {
-        self.stage_group_prefixes_inner(gid, prefixes, memo, false, None)
+        self.stage_group_prefixes_inner(gid, prefixes, memo, false, None, false)
+    }
+
+    /// Lend the memberless table to the synchronous single-best stager for one
+    /// page. The actor cannot dispatch a join or query until it is private again.
+    pub(in crate::manager) fn stage_first_group_page(
+        &mut self,
+        gid: usize,
+        table: GroupRibOut,
+        prefixes: &HashSet<Prefix>,
+    ) -> GroupRibOut {
+        let std::collections::hash_map::Entry::Vacant(slot) = self.group_ribs.entry(gid) else {
+            return table;
+        };
+        slot.insert(table);
+        let mut memo = crate::manager::distribution::ExportMemo::default();
+        self.stage_group_prefixes_inner(gid, prefixes, &mut memo, false, None, true);
+        self.group_ribs
+            .remove(&gid)
+            .expect("single exclusive staging pass")
     }
 
     #[expect(
@@ -161,6 +181,7 @@ impl RibManager {
         memo: &mut crate::manager::distribution::ExportMemo,
         paged_members: bool,
         mut pcb: Option<crate::manager::distribution::PreparedPcb>,
+        speculative: bool,
     ) -> GroupStageOutput {
         self.replacement_checkpoint(true);
         let mut out = GroupStageOutput::default();
@@ -551,7 +572,7 @@ impl RibManager {
         // The committed table forgets a withdrawn row's provenance; keep the
         // exempt rows withdrawn outright while our End-of-RIB may be held,
         // for a GR helper's flap.
-        if self.helper_stale_may_hold_any() {
+        if !speculative && self.helper_stale_may_hold_any() {
             let withdrawn = out
                 .deltas
                 .iter()
@@ -589,6 +610,14 @@ impl RibManager {
         }
         for delta in &out.deltas {
             checkpoint();
+            if speculative {
+                if delta.new.is_some() && delta.old_source.is_none() {
+                    group.table.prepare_first_group_insert();
+                }
+                if delta.local_source.is_some() {
+                    group.table.prepare_first_group_local_sources();
+                }
+            }
             group.apply_delta(delta);
         }
         // Lane commits live in this commit block ON PURPOSE: the

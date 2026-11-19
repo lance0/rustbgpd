@@ -21,6 +21,8 @@ mod eor_grace;
 mod eor_hold;
 mod evpn_recovery;
 mod export_chains;
+mod first_group_build;
+mod first_group_order;
 mod flowspec_validation;
 mod graceful_restart;
 mod helpers;
@@ -933,6 +935,18 @@ pub struct RibManager {
     /// registers the peer's CURRENT last live session, so a session
     /// superseded or failed over while queued resolves to its survivor.
     pending_initial_registrations: VecDeque<PeerId>,
+    first_group_build: Option<Box<first_group_build::FirstGroupBuild>>,
+    /// A completed registration table handed to policy, or a fresh authoritative
+    /// destination awaiting its inventory verdict. Its first member adopts it;
+    /// a refused unowned table transfers to bounded retirement.
+    paced_policy_destination: Option<usize>,
+    optional_destination_retirement: Option<Box<first_group_build::OptionalDestinationRetirement>>,
+    #[cfg(test)]
+    first_group_build_min_routes: usize,
+    /// Stage this prefix last in a fresh join-time table, so a real
+    /// route-dependent refusal can exercise an already populated inventory.
+    #[cfg(test)]
+    cold_build_last_prefix: Option<Prefix>,
     /// When the next `bgp_rib_outbound_registration_pending_*` sample runs.
     /// Armed one interval ahead when a registration wait starts, so a burst
     /// of `PeerUp`s shares one scan; re-armed one interval out while the last
@@ -1186,13 +1200,6 @@ pub struct RibManager {
     /// committing cohort that resolves a different destination discards
     /// the unadopted group instead of leaking it.
     prepared_destination: Option<usize>,
-    /// Memberless destinations the forward authoritative batch built or
-    /// adopted for a shared cohort it then refused, handing the cohort to the
-    /// paced walk, each with the movers the walk still owes. The walk's first
-    /// mover adopts each one. A paced command that applies or skips the last
-    /// owed mover, the rollback restore and the next forward batch each
-    /// retire one no member joined, so no walk outcome leaks a group.
-    refused_cohort_destinations: Vec<(usize, Vec<PeerId>)>,
     /// The clean-transition inventory walked unfenced after the prestage
     /// that staged `prepared_destination`; consumed (re-checked against
     /// the churned keys only) by the fenced `BuildInventory`.
@@ -1255,6 +1262,14 @@ pub struct RibManager {
     /// extend past an exhausted cutoff. Sustained ingress therefore cannot
     /// postpone any of these deadlines indefinitely.
     expiry_cutoffs: ExpiryCutoffs,
+    /// Primary messages still ahead of a prepared first group's commit.
+    /// An exhausted frontier keeps later admissions queued until publication.
+    first_group_commit_remaining: Option<usize>,
+    /// Inert policy requests behind the current preparation, in admission
+    /// order. Bounded by the primary channel capacity.
+    first_group_deferred_intents: VecDeque<RibUpdate>,
+    /// One noncommuting head from the general lane.
+    first_group_general_head: Option<Box<RibUpdate>>,
     /// Process-local mutation versions bound into opaque route-page tokens.
     /// A successful continuation must match the requested scope's current
     /// version; no server-side snapshots are retained.
@@ -3049,6 +3064,13 @@ impl RibManager {
             pending_refresh_suppress_eor: HashSet::new(),
             deferred_refresh_cursor: None,
             pending_initial_registrations: VecDeque::new(),
+            first_group_build: None,
+            paced_policy_destination: None,
+            optional_destination_retirement: None,
+            #[cfg(test)]
+            first_group_build_min_routes: INITIAL_DUMP_DEFER_MIN_ROUTES,
+            #[cfg(test)]
+            cold_build_last_prefix: None,
             registration_wait_sample_at: None,
             initial_dump_defer_min_routes: INITIAL_DUMP_DEFER_MIN_ROUTES,
             refresh_in_progress: HashMap::new(),
@@ -3184,7 +3206,6 @@ impl RibManager {
             post_commit_query_trace: None,
             pending_destination_prestage: None,
             prepared_destination: None,
-            refused_cohort_destinations: Vec::new(),
             prestaged_inventory: None,
             pending_exact_export_withdrawals: HashSet::new(),
             pending_distribute_changed: HashSet::new(),
@@ -3192,6 +3213,9 @@ impl RibManager {
             distribution_window: distribution::DistributionWindow::default(),
             distribution_window_limits: distribution::DistributionWindowLimits::default(),
             expiry_cutoffs: ExpiryCutoffs::default(),
+            first_group_commit_remaining: None,
+            first_group_deferred_intents: VecDeque::new(),
+            first_group_general_head: None,
             primary_lookahead: None,
             orr_rebuild_owed_updates: 0,
             route_page_table_version: Some(initial_route_page_version()),
@@ -4164,10 +4188,12 @@ impl RibManager {
             }
             self.handle_update(query);
             true
-        } else if self
-            .release_general_reads
-            .front()
-            .is_some_and(|q| !self.release_fences_read(q))
+        } else if self.first_group_general_head.is_none()
+            && !self.first_group_replay_due()
+            && self
+                .release_general_reads
+                .front()
+                .is_some_and(|q| !self.release_fences_read(q))
         {
             let query = self
                 .release_general_reads
@@ -4190,7 +4216,10 @@ impl RibManager {
         }
         self.drain_summary_queries();
         for _ in 0..limit {
-            if self.release_general_reads.len() >= self.query_rx.max_capacity() {
+            if self.release_general_reads.len() >= self.query_rx.max_capacity()
+                || self.first_group_general_head.is_some()
+                || self.first_group_replay_due()
+            {
                 break;
             }
             let Ok(query) = self.query_rx.try_recv() else {
@@ -4205,6 +4234,19 @@ impl RibManager {
     /// through here so the post-commit query trace is consumed by the
     /// first general query dispatched, whichever path delivers it.
     fn serve_general_query(&mut self, query: RibUpdate) {
+        self.retire_abandoned_destination_prestage();
+        match self.first_group_intake(&query) {
+            first_group_order::Intake::Apply => {}
+            first_group_order::Intake::Retain => {
+                self.first_group_deferred_intents.push_back(query);
+                return;
+            }
+            first_group_order::Intake::Hold => {
+                self.first_group_general_head = Some(Box::new(query));
+                self.seal_first_group_commit_frontier();
+                return;
+            }
+        }
         if self.release_fences_read(&query) {
             self.release_general_reads.push_back(query);
             return;
@@ -4645,24 +4687,44 @@ impl RibManager {
     /// registration — the synchronous path never skipped it either; its
     /// sends fail harmlessly and the session's `PeerDown` cleans up.
     fn advance_pending_initial_registration(&mut self) {
+        self.retire_abandoned_destination_prestage();
         while let Some(peer) = self.pending_initial_registrations.pop_front() {
-            let target = self
+            let waiting = self
                 .live_sessions
                 .get(&peer)
                 .and_then(|sessions| sessions.last())
-                .map(|record| record.session_id);
-            match target {
-                Some(session_id) if self.outbound_session_ids.get(&peer) != Some(&session_id) => {
-                    self.complete_deferred_registration(peer);
-                    return;
-                }
-                _ => {
-                    debug!(
-                        %peer,
-                        "dropping deferred outbound registration — session gone or already registered"
-                    );
-                }
+                .is_some_and(|live| live.registration_wait_since.is_some());
+            if !waiting {
+                continue;
             }
+            // A replacement session or a changed export policy must retire its
+            // superseded table before this peer can fall back to a full build.
+            if self.registration_waits_for_first_group(peer) {
+                self.pending_initial_registrations.push_back(peer);
+                self.advance_first_group_build();
+                return;
+            }
+            if self.registration_waits_for_optional_destination(peer) {
+                self.pending_initial_registrations.push_back(peer);
+                return;
+            }
+            if let Some((gid, session_id, sender)) = self.first_group_candidate(peer) {
+                // Rotate the queue so another group's warm registration can
+                // proceed while this cold table is being staged.
+                self.pending_initial_registrations.push_back(peer);
+                if self.claim_registration_slot(gid) {
+                    self.start_first_group(peer, gid, session_id, sender);
+                }
+                if self.first_group_build.is_some() {
+                    self.advance_first_group_build();
+                }
+                return;
+            }
+            self.complete_deferred_registration(peer);
+            return;
+        }
+        if self.first_group_build.is_some() {
+            self.advance_first_group_build();
         }
     }
 
@@ -4769,43 +4831,105 @@ impl RibManager {
     /// Probe one FIFO head at saturation. Mutations and compatible reads can
     /// still proceed while only the legacy read buffer is full.
     fn can_receive_release_primary(&mut self) -> bool {
+        if self.first_group_commit_remaining == Some(0) || self.first_group_replay_due() {
+            return false;
+        }
         if self.release_primary_has_room() {
             return true;
         }
         if self.primary_lookahead.is_none() {
             self.primary_lookahead = self.rx.try_recv().ok();
         }
-        self.primary_lookahead
-            .as_ref()
-            .is_none_or(|update| !self.release_fences_read(update))
+        self.first_group_allows_lookahead()
+            && self
+                .primary_lookahead
+                .as_ref()
+                .is_none_or(|update| !self.release_fences_read(update))
     }
 
     fn admit_primary(&mut self, update: RibUpdate) -> Option<RibUpdate> {
-        if !self.release_primary_has_room() && self.release_fences_read(&update) {
+        self.retire_abandoned_destination_prestage();
+        if self.first_group_commit_remaining == Some(0)
+            || self.first_group_replay_due()
+            || (!self.release_primary_has_room() && self.release_fences_read(&update))
+        {
             self.primary_lookahead = Some(update);
             return None;
         }
+        match self.first_group_intake(&update) {
+            first_group_order::Intake::Apply => {}
+            first_group_order::Intake::Retain => {
+                self.charge_primary_admission();
+                self.first_group_deferred_intents.push_back(update);
+                return None;
+            }
+            first_group_order::Intake::Hold => {
+                self.primary_lookahead = Some(update);
+                self.seal_first_group_commit_frontier();
+                return None;
+            }
+        }
+        self.charge_primary_admission();
         Some(update)
     }
 
     /// The next queued primary update, the held lookahead first.
     fn try_recv_primary(&mut self) -> Option<RibUpdate> {
-        if self.release_delivery_pending() {
+        if self.release_delivery_pending()
+            || self.first_group_commit_remaining == Some(0)
+            || self.first_group_replay_due()
+        {
             return None;
         }
         let update = self
             .primary_lookahead
             .take()
             .or_else(|| self.rx.try_recv().ok())?;
-        let update = self.admit_primary(update)?;
-        self.expiry_cutoffs.charge();
-        Some(update)
+        self.admit_primary(update)
     }
 
-    /// A due timer's admission cutoff is exhausted: coalescing paths must
-    /// not admit further primary updates ahead of its expiry.
-    fn expiry_cutoff_reached(&self) -> bool {
+    /// Coalescers admit from lookahead directly. Like ordinary receives,
+    /// they charge the message once, independently of its later route chunks.
+    fn charge_primary_admission(&mut self) {
+        self.expiry_cutoffs.charge();
+        if let Some(remaining) = &mut self.first_group_commit_remaining {
+            *remaining = remaining
+                .checked_sub(1)
+                .expect("primary admission past commit frontier");
+        }
+    }
+
+    /// A coalescer must leave the next message for expiry or commit.
+    fn primary_read_ahead_cutoff_reached(&self) -> bool {
         self.expiry_cutoffs.any_exhausted()
+            || self.first_group_commit_remaining == Some(0)
+            || self.first_group_replay_due()
+    }
+
+    /// Place commit after exactly the currently queued primary messages,
+    /// including a previously peeked head. Later sends cannot extend it.
+    pub(super) fn capture_first_group_commit_frontier(&mut self) {
+        if self.first_group_commit_remaining.is_none() {
+            self.first_group_commit_remaining = Some(self.primary_backlog());
+        }
+    }
+
+    /// Place commit immediately before a noncommuting head that the owner
+    /// has peeked but has not admitted. Already admitted route chunks finish.
+    pub(super) fn seal_first_group_commit_frontier(&mut self) {
+        self.first_group_commit_remaining = Some(0);
+    }
+
+    pub(super) fn first_group_commit_frontier_reached(&self) -> bool {
+        self.first_group_commit_remaining == Some(0)
+            && self.pending_route_batches.is_empty()
+            && self.distribution_window.started.is_none()
+            && self.distribution_window.messages == 0
+            && self.pending_exact_export_withdrawals.is_empty()
+    }
+
+    pub(super) fn clear_first_group_commit_frontier(&mut self) {
+        self.first_group_commit_remaining = None;
     }
 
     /// The latest deadline a due `timer` may expire once its cutoff drains:
@@ -4832,6 +4956,12 @@ impl RibManager {
         if (!self.pending_route_batches.is_empty() || remaining > 0)
             && self.drain_ready_updates().await
         {
+            return true;
+        }
+        // Peeking a noncommuting head can seal the writer's frontier
+        // without admitting the head. Keep its pre-deadline FIFO budget
+        // while the next owner turn finishes the writer.
+        if remaining > 0 && self.first_group_commit_remaining == Some(0) {
             return true;
         }
         self.expiry_cutoffs.clear(timer);
@@ -4862,12 +4992,14 @@ impl RibManager {
         // other primary message. Yielding between chunks preserves that FIFO
         // while giving operator reads and the executor their ordinary seam.
         if !self.traced_route_chunk() {
-            let Some(update) = self.try_recv_primary() else {
+            let parked = self.first_group_deferred_intents.len();
+            if let Some(update) = self.try_recv_primary() {
+                self.traced(PostCommitWork::PrimaryUpdate, |manager| {
+                    manager.handle_update(update);
+                });
+            } else if parked == self.first_group_deferred_intents.len() {
                 return false;
-            };
-            self.traced(PostCommitWork::PrimaryUpdate, |manager| {
-                manager.handle_update(update);
-            });
+            }
         }
         let transition_elapsed = self
             .pending_clean_policy_transition
@@ -4888,6 +5020,14 @@ impl RibManager {
     fn handle_update(&mut self, update: RibUpdate) {
         if self.release_fences_read(&update) {
             self.release_primary_reads.push_back(update);
+            return;
+        }
+        if self.reserve_other_policy_destination(&update) {
+            self.first_group_deferred_intents.push_front(update);
+            return;
+        }
+        if self.first_group_build.is_some() && self.first_group_writer_claim(&update) {
+            self.reserve_first_group_writer(update);
             return;
         }
         let turn = actor_turn::ActorTurn::new(&update, &self.ribs);
@@ -5844,7 +5984,7 @@ impl RibManager {
                 peer,
                 export_policy,
                 reply,
-            } => self.begin_destination_prestage(peer, export_policy.as_ref(), reply),
+            } => self.prepare_export_policy_destination(peer, export_policy.as_ref(), reply),
             RibUpdate::DiscardPreparedExportPolicyDestination { .. } => {
                 self.discard_prepared_export_destination();
             }
@@ -7502,15 +7642,18 @@ impl RibManager {
         if self.orr_rebuild_owed_updates == 0 {
             return;
         }
-        if self.orr_rebuild_owed_updates < ORR_REBUILD_COALESCE_MAX && !self.expiry_cutoff_reached()
+        if self.orr_rebuild_owed_updates < ORR_REBUILD_COALESCE_MAX
+            && !self.primary_read_ahead_cutoff_reached()
         {
             if self.primary_lookahead.is_none() {
                 self.primary_lookahead = self.rx.try_recv().ok();
             }
-            if matches!(
-                self.primary_lookahead.as_ref().map(RibUpdate::unmetered),
-                Some(RibUpdate::BgpLsRoutesReceived { .. })
-            ) {
+            if self.first_group_allows_lookahead()
+                && matches!(
+                    self.primary_lookahead.as_ref().map(RibUpdate::unmetered),
+                    Some(RibUpdate::BgpLsRoutesReceived { .. })
+                )
+            {
                 self.orr_rebuild_owed_updates += 1;
                 return;
             }
@@ -7774,6 +7917,9 @@ impl RibManager {
         // Start of the primary work admitted since the last prestage slice.
         let mut prestage_primary_since: Option<std::time::Instant> = None;
         let mut release_primary_due = true;
+        let mut registration_primary_due = true;
+        let mut registration_search = 0;
+        let mut optional_registration_due = false;
 
         // A deferred attribute sweep must also run when UPDATE traffic stops.
         let attr_gc_sleep = tokio::time::sleep(ATTR_INTERN_GC_INTERVAL);
@@ -7842,9 +7988,9 @@ impl RibManager {
                 }
                 self.rebuild_orr_and_resync();
             }
-            // The export roster's one publication point (ADR-0136): after
-            // each completed unit, never while a grouped transition is
-            // parked between `CommitMembers` batches.
+            // Publish changes from units without a policy reply. Policy commands
+            // publish before their acknowledgement, and a clean transition
+            // publishes only after its terminal membership batch.
             self.publish_export_roster();
 
             // Sample ingest-channel depth once per iteration — a gauge
@@ -7940,6 +8086,7 @@ impl RibManager {
                     }
                 } });
                 if let Some((reply, result)) = terminal_reply {
+                    self.publish_export_roster();
                     let _ = reply.send(result);
                 }
                 self.drain_readiness_queries(policy_transition_elapsed);
@@ -7948,38 +8095,50 @@ impl RibManager {
                 continue;
             }
 
-            let released_read = self.serve_released_read();
-            // One bounded validation slice per ordinary actor turn, including
-            // under sustained primary traffic. Clean transitions above retain
-            // their existing ownership fence.
-            let validated_flowspec = self.process_flowspec_validation_chunk();
-            let retired_dampening = self.dampening_history.retire(ROUTES_RECEIVED_CHUNK_SIZE) > 0;
-            if validated_flowspec || retired_dampening || released_read {
-                self.drain_readiness_queries(None);
-                self.drain_queries(QUERY_BUDGET_PER_CHUNK);
-                tokio::task::yield_now().await;
-            }
-
-            // Arm the resync timer when resync work transitions none → some.
-            // Owed keys drain at the backlog cadence, including when other
-            // work already armed the ordinary interval: credit returns
-            // without telling the RIB, so the tick is what notices it.
-            if !resync_armed && self.resync_tick_pending() {
-                let interval = if self.owing_runnable() {
-                    DIRTY_RESYNC_BACKLOG_INTERVAL
-                } else {
-                    DIRTY_RESYNC_INTERVAL
-                };
-                resync_sleep
-                    .as_mut()
-                    .reset(tokio::time::Instant::now() + interval);
-                resync_armed = true;
-            } else if resync_armed && self.owing_runnable() {
-                let soon = tokio::time::Instant::now() + DIRTY_RESYNC_BACKLOG_INTERVAL;
-                if resync_sleep.deadline() > soon {
-                    resync_sleep.as_mut().reset(soon);
+            let deferred_intent = self.take_first_group_deferred_intent();
+            let sealed_owner = self.first_group_commit_remaining == Some(0)
+                && (self.first_group_pending_writer().is_some()
+                    || self.optional_destination_retirement_active());
+            let first_group_turn = deferred_intent.is_some() || sealed_owner;
+            let maintenance_progress = if first_group_turn {
+                false
+            } else {
+                let released_read = self.serve_released_read();
+                // One bounded validation slice per ordinary actor turn, including
+                // under sustained primary traffic. Clean transitions above retain
+                // their existing ownership fence.
+                let validated_flowspec = self.process_flowspec_validation_chunk();
+                let retired_dampening =
+                    self.dampening_history.retire(ROUTES_RECEIVED_CHUNK_SIZE) > 0;
+                let progressed = validated_flowspec || retired_dampening || released_read;
+                if progressed {
+                    self.drain_readiness_queries(None);
+                    self.drain_queries(QUERY_BUDGET_PER_CHUNK);
+                    tokio::task::yield_now().await;
                 }
-            }
+
+                // Arm the resync timer when resync work transitions none → some.
+                // Owed keys drain at the backlog cadence, including when other
+                // work already armed the ordinary interval: credit returns
+                // without telling the RIB, so the tick is what notices it.
+                if !resync_armed && self.resync_tick_pending() {
+                    let interval = if self.owing_runnable() {
+                        DIRTY_RESYNC_BACKLOG_INTERVAL
+                    } else {
+                        DIRTY_RESYNC_INTERVAL
+                    };
+                    resync_sleep
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + interval);
+                    resync_armed = true;
+                } else if resync_armed && self.owing_runnable() {
+                    let soon = tokio::time::Instant::now() + DIRTY_RESYNC_BACKLOG_INTERVAL;
+                    if resync_sleep.deadline() > soon {
+                        resync_sleep.as_mut().reset(soon);
+                    }
+                }
+                progressed
+            };
 
             // Arm the GR timer to the nearest stale deadline.
             let has_gr_timers = if let Some(deadline) = self.next_gr_deadline() {
@@ -8042,8 +8201,10 @@ impl RibManager {
             };
 
             let accept_summary = !self.unicast_release_partial();
-            let accept_general =
-                query_rx_open && self.release_general_reads.len() < self.query_rx.max_capacity();
+            let accept_general = query_rx_open
+                && self.release_general_reads.len() < self.query_rx.max_capacity()
+                && self.first_group_general_head.is_none()
+                && !self.first_group_replay_due();
             let needs_timers = has_attr_gc_timer
                 || has_registration_wait_timer
                 || resync_armed
@@ -8104,6 +8265,24 @@ impl RibManager {
             ] {
                 self.expiry_cutoffs
                     .observe(timer, due.then_some(deadline), now, backlog);
+            }
+            // A writer still owns execution at its sealed frontier. Observe
+            // deadlines on each such turn so later sends cannot enlarge a
+            // cutoff while the writer settles or its admitted intents replay.
+            if first_group_turn {
+                if let Some(intent) = deferred_intent {
+                    self.handle_update(intent);
+                } else if !self.traced_route_chunk() {
+                    if self.optional_destination_retirement_active() {
+                        self.advance_optional_destination_retirement();
+                    } else {
+                        self.advance_first_group_build();
+                    }
+                }
+                self.drain_readiness_queries(None);
+                self.drain_general_queries_if_unfenced();
+                tokio::task::yield_now().await;
+                continue;
             }
             let accept_primary = self.can_receive_release_primary();
             let cutoffs = &self.expiry_cutoffs;
@@ -8260,7 +8439,9 @@ impl RibManager {
             // back under the transition fence. Readiness and a bounded
             // query budget are served every iteration, mirroring the
             // paced-flush seams.
-            if self.pending_destination_prestage.is_some() {
+            if self.pending_destination_prestage.is_some()
+                || self.optional_destination_retirement_active()
+            {
                 let primary_since =
                     *prestage_primary_since.get_or_insert_with(std::time::Instant::now);
                 let slice_owed = primary_since.elapsed() >= self.flush_poll_budget
@@ -8270,25 +8451,42 @@ impl RibManager {
                 }
                 prestage_primary_since = None;
                 self.drain_readiness_queries(None);
-                self.advance_destination_prestage();
+                if optional_registration_due
+                    && !self.pending_initial_registrations.is_empty()
+                    && self.pending_route_batches.is_empty()
+                {
+                    self.advance_pending_initial_registration();
+                    optional_registration_due = false;
+                } else {
+                    if self.optional_destination_retirement_active() {
+                        self.advance_optional_destination_retirement();
+                    } else {
+                        self.advance_destination_prestage();
+                    }
+                    optional_registration_due = true;
+                }
                 self.drain_queries(QUERY_BUDGET_PER_CHUNK);
                 tokio::task::yield_now().await;
                 continue;
             }
             prestage_primary_since = None;
 
-            // Deferred outbound registrations (LAN-475): complete one
-            // initial table dump per iteration, and only after every queued
-            // mutation batch has drained — imports and their fan-out to
-            // established peers always preempt the reconnecting peers'
-            // full-table catch-up, so a mass reconnect cannot head-of-line
-            // block re-announcement delivery to survivors.
-            if !self.pending_initial_registrations.is_empty() {
-                if self.drain_ready_updates().await {
+            // Private construction alternates with queued primary work. Ordinary
+            // registrations retain their existing priority behind queued imports.
+            if self.first_group_build.is_some() || !self.pending_initial_registrations.is_empty() {
+                if registration_primary_due && self.drain_ready_updates().await {
+                    registration_primary_due = false;
                     continue;
                 }
                 self.drain_readiness_queries(None);
-                self.advance_pending_initial_registration();
+                registration_primary_due = true;
+                if !self.pending_route_batches.is_empty()
+                    || (accept_primary && self.primary_backlog() > 0)
+                {
+                    self.advance_busy_first_group(&mut registration_search);
+                } else {
+                    self.advance_pending_initial_registration();
+                }
                 self.drain_queries(QUERY_BUDGET_PER_CHUNK);
                 tokio::task::yield_now().await;
                 continue;
@@ -8298,7 +8496,7 @@ impl RibManager {
                 self.drain_readiness_queries(None);
                 self.drain_queries(QUERY_BUDGET_PER_CHUNK);
                 tokio::task::yield_now().await;
-            } else if validated_flowspec || retired_dampening || released_read {
+            } else if maintenance_progress {
                 // Do not sleep while validation remains queued, but admit a
                 // primary update between slices instead of monopolizing turns.
                 if let Some(update) = self.try_recv_primary() {

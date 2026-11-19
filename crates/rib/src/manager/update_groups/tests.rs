@@ -313,6 +313,22 @@ fn register_growth_peer(
     outbound_rx
 }
 
+#[test]
+fn registration_with_local_role_uses_the_authoritative_group_build() {
+    let mut manager = staging_manager();
+    manager.first_group_build_min_routes = 0;
+    manager.handle_update(crate::RibUpdate::SetPeerExportContext {
+        peer: MEMBER,
+        session_id: 1,
+        local_role: Some(BgpRole::Provider),
+    });
+    // This helper requires the initial EoR immediately after PeerUp.
+    let _receiver = register_growth_peer(&mut manager, MEMBER, 1);
+    let gid = manager.grouped_member_of(MEMBER).expect("group installed");
+    assert_eq!(manager.group_ribs[&gid].local_role, Some(BgpRole::Provider));
+    assert!(manager.pending_initial_registrations.is_empty());
+}
+
 fn replace_growth_policy(manager: &mut RibManager, peer: PeerId, policy: Option<PolicyChain>) {
     assert_eq!(
         manager.replace_peer_export_policy_synchronously(peer, policy),
@@ -7425,4 +7441,199 @@ fn rs_targets_record_thousands_of_asns_as_one_sorted_set() {
     assert!(!targets.names((64_999, 4001)));
     targets.record(&[], &[large(0)]);
     assert!(targets.all && targets.names((64_999, 4001)));
+}
+
+#[test]
+fn optional_group_retirement_charges_sparse_denials_without_advertised_rows() {
+    fn last_bucket<V>(map: &ShardedMap<Prefix, V>) -> (usize, Prefix) {
+        let [shard] = map.shards() else {
+            panic!("unsplit test table")
+        };
+        (0..shard.num_buckets())
+            .rev()
+            .find_map(|index| shard.get_bucket(index).map(|(key, _)| (index, *key)))
+            .unwrap()
+    }
+
+    let mut group = empty_group();
+    group.local_role = Some(BgpRole::Customer);
+    group.prepare_optional_retirement();
+    let policy: HashSet<_> = (0..4096).map(growth_prefix).collect();
+    let otc: HashSet<_> = (4096..8192).map(growth_prefix).collect();
+    let label: PolicyLabel = Arc::from("denying policy");
+    let live_label = Arc::downgrade(&label);
+    let denial = |prefix, path_id| {
+        (
+            PolicyFilteredRouteKey {
+                target_peer: GROUP_FILTERED_PLACEHOLDER,
+                source_peer: OTHER1,
+                prefix,
+                path_id,
+            },
+            Some(Arc::clone(&label)),
+        )
+    };
+    let denied: Vec<_> = policy.iter().map(|&prefix| denial(prefix, 0)).collect();
+    group.record_policy_filtered(&policy, &denied, &mut || {});
+    drop(denied);
+    let blocked: Vec<_> = otc
+        .iter()
+        .map(|&p| with_otc_attr(route(p, OTHER2)))
+        .collect();
+    group.record_otc_blocked(&otc, &blocked, &mut || {});
+    drop(blocked);
+
+    let retained_policy = growth_prefix(1);
+    // Replacing the winner's input path never accumulates per-prefix denials.
+    for path_id in 1..16 {
+        group.record_policy_filtered(
+            &HashSet::from([retained_policy]),
+            &[denial(retained_policy, path_id)],
+            &mut || {},
+        );
+        assert_eq!(
+            group.policy_filtered.get(&retained_policy).unwrap().len(),
+            1
+        );
+    }
+    drop(label);
+    let (last_policy, retained_policy) = last_bucket(&group.policy_filtered);
+    let OtcBlocked::Optional(blocked) = &group.otc_blocked else {
+        panic!("blocking optional group")
+    };
+    let (last_otc, retained_otc) = last_bucket(blocked);
+    let live_attrs = Arc::downgrade(&blocked.get(&retained_otc).unwrap().attributes);
+    let mut removed = policy;
+    removed.remove(&retained_policy);
+    group.record_policy_filtered(&removed, &[], &mut || {});
+    let mut removed = otc;
+    removed.remove(&retained_otc);
+    group.record_otc_blocked(&removed, &[], &mut || {});
+    assert_eq!(group.table.len(), 0);
+    assert!(group.source_counts.is_empty());
+    assert!(last_policy > 3 * 1024 && last_otc > 3 * 1024);
+
+    let mut retired = OptionalGroupRetirement::new(group);
+    let total_buckets = last_policy + 1 + last_otc + 1;
+    let mut charged = 0;
+    while charged < total_buckets {
+        // The other parts of the same cleanup can consume part of a page.
+        let mut budget = 714;
+        let done = retired.retire_page(&mut budget);
+        charged += 714 - budget;
+        assert_eq!(done, charged == total_buckets);
+        assert_eq!(
+            live_label.strong_count(),
+            usize::from(charged <= last_policy)
+        );
+        assert_eq!(live_attrs.strong_count(), usize::from(!done));
+        assert!(done || budget == 0);
+    }
+}
+
+#[test]
+fn adopted_optional_group_keeps_otc_diagnostics_current_for_updates_and_withdrawals() {
+    let mut m = staging_manager();
+    let (p1, p2) = (prefix(1), prefix(2));
+    let mut group = empty_group();
+    group.local_role = Some(BgpRole::Customer);
+    group.prepare_optional_retirement();
+    m.group_ribs.insert(PCB_GID, group);
+    let inbound = |prefix, peer, pref, path_id| {
+        let mut route = cand(prefix, peer, pref);
+        route.path_id = path_id;
+        route
+    };
+    seed(&mut m, with_otc_attr(inbound(p1, OTHER1, 200, 41)));
+    seed(&mut m, with_otc_attr(inbound(p1, OTHER2, 100, 42)));
+    seed(&mut m, inbound(p2, OTHER2, 200, 77));
+    let scope = HashSet::from([p1, p2]);
+    let _ = m.recompute_best(&scope);
+    let _ = stage_pcb(&mut m, &[p1, p2]);
+    m.update_groups
+        .members
+        .insert(MEMBER, GroupMembership::Grouped(PCB_GID));
+    m.install_group_member(PCB_GID, MEMBER);
+
+    let check = |m: &RibManager, blocked: Option<(Prefix, PeerId, u32)>, advertised| {
+        let group = &m.group_ribs[&PCB_GID];
+        let denied: Vec<_> = group
+            .otc_blocked_for_member(MEMBER, None)
+            .iter()
+            .map(|r| (r.prefix, r.peer, r.path_id))
+            .collect();
+        if let Some((prefix, peer, received_path)) = blocked {
+            let best = m.loc_rib.get(&prefix).unwrap();
+            assert_eq!((best.peer, best.path_id), (peer, received_path));
+        }
+        assert_eq!(
+            denied,
+            blocked
+                .map(|(p, peer, _)| (p, peer, 0))
+                .into_iter()
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            group.residue_prefixes().collect::<Vec<_>>(),
+            blocked.map(|(p, _, _)| p).into_iter().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            m.grouped_advertised_routes_iter(MEMBER)
+                .unwrap()
+                .map(|r| r.prefix)
+                .collect::<Vec<_>>(),
+            vec![advertised]
+        );
+        assert_eq!(m.grouped_advertised_count(MEMBER), Some(1));
+    };
+    check(&m, Some((p1, OTHER1, 41)), p2);
+    assert!(m.ribs.get_mut(&OTHER1).unwrap().withdraw(&p1, 41));
+    let _ = m.recompute_best(&HashSet::from([p1]));
+    let _ = stage_pcb(&mut m, &[p1]);
+    check(&m, Some((p1, OTHER2, 42)), p2);
+    seed(&mut m, inbound(p1, OTHER2, 300, 42));
+    seed(&mut m, with_otc_attr(inbound(p2, OTHER2, 300, 77)));
+    let _ = m.recompute_best(&scope);
+    let _ = stage_pcb(&mut m, &[p1, p2]);
+    check(&m, Some((p2, OTHER2, 77)), p1);
+    assert!(m.ribs.get_mut(&OTHER2).unwrap().withdraw(&p2, 77));
+    let _ = m.recompute_best(&HashSet::from([p2]));
+    let _ = stage_pcb(&mut m, &[p2]);
+    check(&m, None, p1);
+}
+
+#[test]
+fn optional_group_retirement_releases_source_attributes_with_each_live_slot() {
+    let mut group = plain_group_with_chain(Some(strip_communities_chain(vec![7])));
+    group.prepare_optional_retirement();
+    let mut sources = Vec::new();
+    for i in 1..=4 {
+        let mut delta = announce_delta(prefix(i), OTHER1, None);
+        let input = AttrSet::new(vec![PathAttribute::Communities(vec![7])]);
+        sources.push(Arc::downgrade(&input));
+        delta.source_attrs = Some(input);
+        delta.policy_label.clone_from(&group.permit_policy_label);
+        delta.new.as_mut().unwrap().1 = Some(NextHopAction::Self_);
+        group.apply_delta(&delta);
+    }
+    group.apply_delta(&withdraw_delta(prefix(4), Some(OTHER1)));
+    assert_eq!(sources[3].strong_count(), 0);
+    let mut retired = OptionalGroupRetirement::new(group);
+    for (i, left) in [3, 2, 1, 0].into_iter().enumerate() {
+        let mut remaining = 1;
+        let done = retired.retire_page(&mut remaining);
+        assert_eq!(remaining, 0);
+        assert_eq!(done, i == 3);
+        assert!(
+            retired.export_policy().is_some(),
+            "a pending join can still check the profile"
+        );
+        assert_eq!(
+            sources
+                .iter()
+                .filter(|weak| weak.strong_count() != 0)
+                .count(),
+            left
+        );
+    }
 }

@@ -222,7 +222,10 @@ resolved.
   limited to 65,536 carried keys per helper peer, and 65,536
   withdrawn-in-hold keys per peer or update group; keys past that limit are
   not recorded, so a deleted RTBH among them stays at the helper until
-  End-of-RIB.
+  its family's End-of-RIB. IPv4 and IPv6 share the per-helper allowance.
+  When a group stages local routes during the paged build for its first
+  receiver, it visits its current exempt IPv4 keys before its IPv6 keys
+  when collecting the carry. IPv4 can fill the remaining allowance.
   Mitigations: keep `gr_eor_grace_time` short; an RTBH controller that
   replaces a blackhole with an ordinary route at the same prefix should
   expect the old RTBH to stay at a flapped helper until that replacement is

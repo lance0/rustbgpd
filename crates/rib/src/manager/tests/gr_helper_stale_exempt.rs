@@ -3271,3 +3271,5 @@ fn oversized_carried_set_retires_chunk_by_chunk() {
     assert_eq!(withdrawn, keys, "every carried key is withdrawn");
     assert_eq!(carried(&manager), 0);
 }
+
+mod carry_cap;

@@ -194,6 +194,27 @@ impl<T> RouteSlab<T> {
         self.slots
     }
 
+    /// Terminal retirement: consume one physical slot (including holes), or one
+    /// empty preallocated segment. Once started, never insert into this slab
+    /// again: only the free-list cardinality is maintained while it shrinks.
+    pub(crate) fn pop_retiring_slot(&mut self) -> Option<T> {
+        let tail = self.segments.last_mut()?;
+        let slot = tail.pop();
+        if tail.is_empty() {
+            self.segments.pop();
+        }
+        let value = slot?;
+        self.slots -= 1;
+        if value.is_none() {
+            self.free.pop().expect("each vacancy has one free handle");
+        }
+        value
+    }
+
+    pub(crate) fn retirement_finished(&self) -> bool {
+        self.segments.is_empty()
+    }
+
     /// Drop every value. Keeps the slot allocations, like `HashMap::clear`.
     pub(crate) fn clear(&mut self) {
         self.segments.iter_mut().for_each(Vec::clear);
@@ -272,6 +293,23 @@ impl<T> RouteSlab<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retiring_preallocated_segments_and_holes_takes_one_step_each() {
+        let mut slab = RouteSlab::with_capacity(3 * SEGMENT);
+        let first = slab.insert(10u32);
+        slab.insert(20);
+        assert_eq!(slab.remove(first), Some(10));
+        for _ in 0..2 {
+            assert_eq!(slab.pop_retiring_slot(), None, "one spare segment");
+            assert_eq!(slab.slot_count(), 2);
+        }
+        assert_eq!(slab.pop_retiring_slot(), Some(20));
+        assert!(!slab.retirement_finished(), "the hole remains");
+        assert_eq!(slab.pop_retiring_slot(), None);
+        assert!(slab.retirement_finished());
+        assert_eq!((slab.slot_count(), slab.len()), (0, 0));
+    }
 
     #[test]
     fn insert_get_remove_round_trip() {

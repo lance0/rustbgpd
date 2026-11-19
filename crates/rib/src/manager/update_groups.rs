@@ -49,14 +49,21 @@ use crate::fast_hash::{AddrMap, FastMap, FastState, ShardedMap};
 use rustbgpd_wire::ExtendedCommunity;
 
 pub(in crate::manager) mod admitted_recovery;
+mod first_group_retirement;
 mod membership;
+mod mutation_target;
+mod optional_retirement;
+use optional_retirement::OtcBlocked;
+pub(in crate::manager) use optional_retirement::{
+    OptionalGroupRetirement, RejectedBatchedInventory,
+};
 mod payload;
 pub(in crate::manager) mod release_fallback;
 pub(in crate::manager) use release_fallback::{ReleaseFallback, RsFallback};
 mod policy_transition;
 pub(in crate::manager) mod recovery_provenance;
 pub(in crate::manager) use policy_transition::{
-    PrestagedInventoryOutcome, PrestagedTransitionInventory,
+    OptionalInventoryRetirement, PrestagedInventoryOutcome, PrestagedTransitionInventory,
 };
 mod staging;
 mod views;
@@ -218,6 +225,28 @@ pub(super) struct GroupKey {
 }
 
 impl GroupKey {
+    fn from_fingerprint(
+        fingerprint: crate::update::UpdateGroupFingerprint,
+        chain: Option<usize>,
+        owns_evpn: bool,
+    ) -> Self {
+        Self {
+            chain,
+            target_is_ebgp: fingerprint.target_is_ebgp,
+            target_is_rr_client: fingerprint.target_is_rr_client,
+            target_local_role: fingerprint.target_local_role,
+            interpret_rfc1997: fingerprint.interpret_rfc1997,
+            sendable_ipv4_unicast: fingerprint.sendable_ipv4_unicast,
+            sendable_ipv6_unicast: fingerprint.sendable_ipv6_unicast,
+            sendable_vpnv4: fingerprint.sendable_vpnv4,
+            sendable_vpnv6: fingerprint.sendable_vpnv6,
+            owns_evpn,
+            rtc_negotiated: fingerprint.rtc_negotiated,
+            per_client_best: fingerprint.per_client_best,
+            llgr_families: fingerprint.llgr_families,
+        }
+    }
+
     /// Whether two groups differ only by the effective export-chain content.
     fn same_staging_profile_except_chain(&self, other: &Self) -> bool {
         let mut left = self.clone();
@@ -368,6 +397,17 @@ fn grouped_differences(left: &GroupKey, right: &GroupKey) -> Vec<UpdateGroupComp
     differences
 }
 
+/// The last ordinary ownership sweep proved this memberless optional group
+/// alone needs the intern slot. Every group or policy membership change runs
+/// that sweep before yielding the actor. Eviction can release this one slot
+/// even when the waiting registration subsequently disappears.
+#[derive(Debug)]
+struct OptionalChainOwner {
+    gid: usize,
+    chain: usize,
+    other_chains: usize,
+}
+
 /// The registry: interned chain contents, group keys, and per-peer
 /// membership. Owned by the [`RibManager`] task like all other RIB
 /// state — no locking.
@@ -381,6 +421,7 @@ pub(super) struct UpdateGroupRegistry {
     // ponytail: historical slots and scans still grow with retired contents;
     // compact with generation-tagged IDs only if measured metadata cost warrants it.
     chains: Vec<Option<PolicyChain>>,
+    optional_chain_owner: Option<OptionalChainOwner>,
     /// Group id = index. Slots remain as historical identity metadata.
     /// A key can recur while its chain remains live; after chain retirement,
     /// reinstalling that content creates a new chain and group ID.
@@ -655,7 +696,7 @@ pub(in crate::manager) struct GroupRibOut {
     /// path's RT gate precedes the policy evaluation).
     vpn_policy_denied: ShardedMap<VpnRouteKey, VpnDenialRecord>,
     /// Persistent RFC 9234 denial residue for join/resync diagnostics.
-    otc_blocked: FastMap<(Prefix, u32), Route>,
+    otc_blocked: OtcBlocked,
     /// Count aggregates beside `otc_blocked`, per unicast family
     /// `[v4, v6]`: total blocked staged winners plus their per-source
     /// split — the winner term of the Decision 4 count synthesis's
@@ -811,7 +852,7 @@ impl GroupRibOut {
         self.policy_filtered
             .keys()
             .copied()
-            .chain(self.otc_blocked.keys().map(|(prefix, _)| *prefix))
+            .chain(self.otc_blocked.values().map(|route| route.prefix))
             .chain(self.runner_up.keys().copied())
             // An rs-control member's resolved slot (and its OTC verdict) can
             // be a fallback entry on a prefix with no lane.
@@ -820,7 +861,7 @@ impl GroupRibOut {
 
     #[cfg(feature = "bench-internals")]
     pub(in crate::manager) fn bench_otc_storage_shape(&self) -> (usize, usize) {
-        (self.otc_blocked.len(), self.otc_blocked.capacity())
+        self.otc_blocked.storage_shape()
     }
 
     fn retire_with(&mut self, checkpoint: &mut impl FnMut()) {
@@ -835,7 +876,7 @@ impl GroupRibOut {
         }
         crate::adj_rib_out::release_sharded_map(&mut self.policy_filtered, checkpoint);
         crate::adj_rib_out::release_sharded_map(&mut self.vpn_policy_denied, checkpoint);
-        release_hash_map(&mut self.otc_blocked, checkpoint);
+        self.otc_blocked.retire_with(checkpoint);
         release_hash_map(&mut self.otc_blocked_sources, checkpoint);
         release_hash_map(&mut self.lane_otc_blocked_counts, checkpoint);
         release_hash_map(&mut self.vpn_member_counts, checkpoint);
@@ -906,7 +947,7 @@ impl GroupRibOut {
             policy_filtered: ShardedMap::default(),
             permit_policy_label,
             vpn_policy_denied: ShardedMap::default(),
-            otc_blocked: FastMap::default(),
+            otc_blocked: OtcBlocked::Ordinary(FastMap::default()),
             otc_blocked_totals: [0; 2],
             otc_blocked_sources: AddrMap::default(),
             lane_otc_blocked_counts: AddrMap::default(),
@@ -968,19 +1009,7 @@ impl GroupRibOut {
         blocked: &[Route],
         checkpoint: &mut impl FnMut(),
     ) {
-        self.otc_blocked.retain(|(prefix, _), _| {
-            checkpoint();
-            !prefixes.contains(prefix)
-        });
-        // Reserve a fresh table before moving entries: in-place growth
-        // rehashes the complete route map without an actor checkpoint.
-        let mut incoming = FastMap::with_capacity_and_hasher(blocked.len(), FastState::default());
-        checkpoint();
-        for route in blocked {
-            checkpoint();
-            incoming.insert((route.prefix, route.path_id), route.clone());
-        }
-        merge_owned_maps(&mut self.otc_blocked, incoming, checkpoint);
+        self.otc_blocked.replace_for(prefixes, blocked, checkpoint);
         // Rebuild the count aggregates from the refreshed map — one
         // mutation seam keeps them exact, at O(blocked residue) per
         // pass (zero in the overwhelmingly common no-OTC case). Only
@@ -4370,8 +4399,23 @@ impl RibManager {
         chain: Option<&PolicyChain>,
         orf_installed: bool,
         with_policy_fingerprint: bool,
+        pending: Option<&super::LiveSessionRecord>,
     ) -> UpdateGroupClassifierInput {
-        let sendable = self.peer_sendable_families.get(&peer);
+        // These four inputs install only when the pending registration commits.
+        let (sendable, llgr, add_path_send, orr_vantage) = match pending {
+            Some(record) => (
+                Some(&record.sendable_families),
+                Some(&record.negotiated_llgr_families),
+                record.add_path_send_max > 0 && !record.add_path_send_families.is_empty(),
+                record.orr_vantage,
+            ),
+            None => (
+                self.peer_sendable_families.get(&peer),
+                self.peer_advertised_llgr_families.get(&peer),
+                self.peer_has_any_add_path_send(peer),
+                self.peer_orr_vantage.get(&peer).copied(),
+            ),
+        };
         let mut sendable_families = sendable
             .into_iter()
             .flatten()
@@ -4379,9 +4423,7 @@ impl RibManager {
             .collect::<Vec<_>>();
         sendable_families.sort_unstable();
         sendable_families.dedup();
-        let mut llgr_families = self
-            .peer_advertised_llgr_families
-            .get(&peer)
+        let mut llgr_families = llgr
             .into_iter()
             .flatten()
             .map(|&(afi, safi)| (afi as u16, safi as u8))
@@ -4410,9 +4452,9 @@ impl RibManager {
             // with its own exact family-local cap. If Add-Path grouping is
             // introduced, the effective `(AFI, SAFI) -> max` map MUST become part
             // of GroupKey before this disqualifier is relaxed.
-            add_path_send: self.peer_has_any_add_path_send(peer),
+            add_path_send,
             per_client_best: self.peer_per_client_best.contains(&peer),
-            orr_vantage: self.peer_orr_vantage.get(&peer).copied(),
+            orr_vantage,
             orf_installed,
             conditional_advertisement: self.peer_has_conditional_advertisements(peer),
         }
@@ -4446,6 +4488,7 @@ impl RibManager {
                     chain,
                     orf_negotiated || self.peer_orf_filters.contains_key(&peer),
                     true,
+                    None,
                 );
                 UpdateGroupPeerSnapshot {
                     peer,
@@ -4563,11 +4606,42 @@ impl RibManager {
         self.replacement_checkpoint(true);
         let mut chains: HashSet<usize> = HashSet::with_capacity(groups.len());
         self.replacement_checkpoint(true);
+        let optional = self
+            .pending_destination_prestage
+            .as_ref()
+            .map(|prestage| prestage.destination)
+            .or(self.prepared_destination)
+            .filter(|gid| {
+                self.group_ribs
+                    .get(gid)
+                    .is_some_and(|group| group.members.is_empty())
+            })
+            .and_then(|gid| Some((gid, self.update_groups.group_key(gid)?.chain?)));
+        if let Some((gid, _)) = optional {
+            groups.remove(&gid);
+        }
         chains.extend(groups.drain().filter_map(|id| {
             checkpoint();
             self.update_groups.group_key(id).and_then(|key| key.chain)
         }));
         self.replacement_checkpoint(true);
+        let exclusive = optional.filter(|(_, chain)| chains.insert(*chain));
+        // Authority can detach a refused table while this command still has
+        // preclassified destinations. Only now can an unused registry payload
+        // move to that table's physical retirement owner.
+        if let Some(retiring) = self
+            .optional_destination_retirement
+            .as_mut()
+            .and_then(|owner| owner.detached.as_mut())
+            && retiring.interned_policy.is_none()
+            && let Some(id) = self
+                .update_groups
+                .group_key(retiring.gid)
+                .and_then(|key| key.chain)
+            && !chains.contains(&id)
+        {
+            retiring.interned_policy = self.update_groups.chains[id].take();
+        }
         drop(groups);
         self.replacement_checkpoint(true);
         for (id, chain) in self.update_groups.chains.iter_mut().enumerate() {
@@ -4579,23 +4653,42 @@ impl RibManager {
         }
         // Heavy payloads reflect current ownership; small key slots remain
         // historical metadata, including rejected or discarded preparation.
-        self.metrics.set_update_group_interned_chains(
-            i64::try_from(
-                self.update_groups
-                    .chains
-                    .iter()
-                    .inspect(|_| checkpoint())
-                    .filter(|chain| chain.is_some())
-                    .count(),
-            )
-            .unwrap_or(i64::MAX),
-        );
+        let retained = self
+            .update_groups
+            .chains
+            .iter()
+            .inspect(|_| checkpoint())
+            .filter(|chain| chain.is_some())
+            .count();
+        self.update_groups.optional_chain_owner =
+            exclusive.map(|(gid, chain)| OptionalChainOwner {
+                gid,
+                chain,
+                other_chains: retained.saturating_sub(1),
+            });
+        self.metrics
+            .set_update_group_interned_chains(i64::try_from(retained).unwrap_or(i64::MAX));
         self.metrics.set_update_group_keys(
             i64::try_from(self.update_groups.groups.len()).unwrap_or(i64::MAX),
         );
         self.replacement_checkpoint(true);
         super::retire_hash_set(&mut chains, &mut checkpoint);
         self.replacement_checkpoint(true);
+    }
+
+    pub(in crate::manager) fn take_optional_registry_chain(
+        &mut self,
+        gid: usize,
+    ) -> Option<PolicyChain> {
+        let owner = self
+            .update_groups
+            .optional_chain_owner
+            .take_if(|owner| owner.gid == gid)?;
+        let chain = self.update_groups.chains[owner.chain].take()?;
+        self.metrics.set_update_group_interned_chains(
+            i64::try_from(owner.other_chains).unwrap_or(i64::MAX),
+        );
+        Some(chain)
     }
 
     /// Re-derive the ADR-0126 exception-lane gauge: total runner-up

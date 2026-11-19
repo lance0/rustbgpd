@@ -603,11 +603,14 @@ impl RibManager {
         let mut tags = None;
         let mut peers = vec![leader];
         for _ in 0..queued {
-            if self.expiry_cutoff_reached() {
+            if self.primary_read_ahead_cutoff_reached() {
                 break;
             }
             if self.primary_lookahead.is_none() {
                 self.primary_lookahead = self.rx.try_recv().ok();
+            }
+            if !self.first_group_allows_lookahead() {
+                break;
             }
             let Some(RibUpdate::RouteRefreshRequest {
                 peer,
@@ -645,7 +648,7 @@ impl RibManager {
                 .primary_lookahead
                 .take()
                 .expect("refresh admitted above");
-            self.expiry_cutoffs.charge();
+            self.charge_primary_admission();
             self.advance_route_pages_for_update(&update);
             let RibUpdate::RouteRefreshRequest {
                 peer,
@@ -2678,6 +2681,17 @@ impl RibManager {
         }
     }
 
+    /// A current session can request a refresh before its outbound sender is
+    /// installed. Replacement and teardown clear that session's refresh debt.
+    fn refresh_waits_for_registration(&self, peer: PeerId) -> bool {
+        self.live_sessions
+            .get(&peer)
+            .and_then(|sessions| sessions.last())
+            .is_some_and(|session| {
+                session.registration_wait_since.is_some() && !session.outbound_tx.is_closed()
+            })
+    }
+
     /// Retry the refresh responses of peers no resync owns once their live
     /// whole-table operation has drained and their channel has room. A
     /// response deferred behind a dirty resync rides that resync instead.
@@ -2697,6 +2711,9 @@ impl RibManager {
         for (index, peer) in peers.iter().copied().enumerate() {
             self.replacement_checkpoint(false);
             if self.outbound_channel_gone(peer) {
+                if self.refresh_waits_for_registration(peer) {
+                    continue;
+                }
                 self.pending_refresh.remove(&peer);
                 self.pending_refresh_suppress_eor
                     .retain(|(owed, _)| *owed != peer);
@@ -2718,9 +2735,9 @@ impl RibManager {
 
     /// Whether a deferred refresh response waits for the resync timer.
     pub(super) fn deferred_refresh_pending(&self) -> bool {
-        self.pending_refresh
-            .keys()
-            .any(|peer| !self.dirty_peers.contains(peer))
+        self.pending_refresh.keys().any(|peer| {
+            !self.dirty_peers.contains(peer) && !self.refresh_waits_for_registration(*peer)
+        })
     }
 
     /// Finish an active inbound enhanced route refresh window for a peer/family.

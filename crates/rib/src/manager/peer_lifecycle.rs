@@ -2761,10 +2761,16 @@ impl RibManager {
         // small table whose dump costs microseconds, completes inline
         // exactly as before — registration-timing semantics only change
         // where deferring buys real latency back.
+        self.retire_abandoned_destination_prestage();
         let actor_busy =
             self.primary_backlog() > 0 || !self.pending_initial_registrations.is_empty();
         let dump_expensive = self.loc_rib.len() >= self.initial_dump_defer_min_routes;
-        if actor_busy && dump_expensive {
+        let candidate = self.first_group_candidate(peer);
+        if (actor_busy && dump_expensive)
+            || candidate.is_some()
+            || self.registration_waits_for_first_group(peer)
+            || self.registration_waits_for_optional_destination(peer)
+        {
             if !self.pending_initial_registrations.contains(&peer) {
                 debug!(
                     %peer,
@@ -2772,6 +2778,11 @@ impl RibManager {
                     "deferring outbound registration behind queued actor work"
                 );
                 self.pending_initial_registrations.push_back(peer);
+            }
+            if let Some((gid, session, sender)) = candidate
+                && self.claim_registration_slot(gid)
+            {
+                self.start_first_group(peer, gid, session, sender);
             }
         } else {
             self.complete_outbound_registration(peer);
@@ -3168,6 +3179,7 @@ impl RibManager {
             // `MAX_JOIN_COHORT - 1` members join it.
             let joins = examined < MAX_JOIN_COHORT_EXAMINED
                 && members.len() < MAX_JOIN_COHORT - 1
+                && !self.registration_waits_for_optional_destination(peer)
                 && self
                     .live_sessions
                     .get(&peer)

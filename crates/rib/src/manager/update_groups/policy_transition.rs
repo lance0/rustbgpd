@@ -103,6 +103,112 @@ pub(in crate::manager) struct PrestagedTransitionInventory {
     tagged: ShardedMap<(Prefix, u32), ()>,
 }
 
+/// Detached scratch from an evicted optional policy destination. The two
+/// published groups stop recording writes at detach, before either can be
+/// removed or recreated. The slot owner supplies one shared poll budget.
+#[derive(Default)]
+pub(in crate::manager) struct OptionalInventoryRetirement {
+    pub(in crate::manager) staging: Option<Box<crate::manager::distribution::CancelledPrestage>>,
+    inventory: Option<PrestagedTransitionInventory>,
+    logs: [Option<ShardedMap<(Prefix, u32), ()>>; 2],
+}
+
+impl OptionalInventoryRetirement {
+    pub(in crate::manager) fn retire_page(&mut self, budget: &mut usize) -> bool {
+        if let Some(staging) = &mut self.staging {
+            if !staging.retire_page(budget) {
+                return false;
+            }
+            self.staging = None;
+        }
+        let Some(inventory) = &mut self.inventory else {
+            return true;
+        };
+        let PrestagedTransitionInventory {
+            source: _,
+            destination: _,
+            rs_asns,
+            cursor: _,
+            complete: _,
+            announce,
+            next_hop_override,
+            probe,
+            failed,
+            tagged,
+        } = inventory;
+        if !retire_inventory_vec(announce, budget)
+            || !retire_inventory_vec(next_hop_override, budget)
+            || !retire_inventory_vec(rs_asns, budget)
+        {
+            return false;
+        }
+        if let Some(proof) = probe {
+            if !retire_inventory_vec(&mut proof.encoded_lengths, budget) || *budget == 0 {
+                return false;
+            }
+            // Release the immutable encoder snapshot after its lengths.
+            *budget -= 1;
+            *probe = None;
+        }
+        if !retire_plain_shards(failed, budget) || !retire_plain_shards(tagged, budget) {
+            return false;
+        }
+        for log in self.logs.iter_mut().flatten() {
+            if !retire_plain_shards(log, budget) {
+                return false;
+            }
+        }
+        self.inventory = None;
+        true
+    }
+}
+
+/// Charge each owned row destructor and the backing allocation separately.
+/// Plain buffers (next hops, RS ASNs, encoded lengths) need just the release.
+pub(super) fn retire_inventory_vec<T>(items: &mut Vec<T>, budget: &mut usize) -> bool {
+    if std::mem::needs_drop::<T>() {
+        let count = items.len().min(*budget);
+        items.truncate(items.len() - count);
+        *budget -= count;
+        if !items.is_empty() {
+            return false;
+        }
+    }
+    if std::mem::size_of::<T>() > 0 && items.capacity() > 0 {
+        if *budget == 0 {
+            return false;
+        }
+        *budget -= 1;
+        *items = Vec::new();
+    }
+    true
+}
+
+/// Both the change logs and the failed/tagged proofs contain only Copy
+/// entries. Hashbrown drops such a table by freeing its allocation, without
+/// iterating or clearing buckets. Only the fixed shard headers are inspected
+/// here, even when a mostly empty shard retains a large allocation.
+fn retire_plain_shards<K: Copy, V: Copy>(map: &mut ShardedMap<K, V>, budget: &mut usize) -> bool {
+    for shard in map.shards_mut() {
+        if shard.allocation_size() == 0 {
+            continue;
+        }
+        if *budget == 0 {
+            return false;
+        }
+        *budget -= 1;
+        *shard = crate::fast_hash::Shard::new();
+    }
+    if matches!(map, ShardedMap::Split(_)) {
+        if *budget == 0 {
+            return false;
+        }
+        *budget -= 1;
+        *map = ShardedMap::default();
+    }
+    true
+}
+
 /// What the fenced re-check made of a prestaged inventory.
 pub(in crate::manager) enum PrestagedInventoryOutcome {
     /// Equal to a fenced full walk of the current tables.
@@ -416,14 +522,12 @@ impl RibManager {
         destination: usize,
         rs_asns: &[u32],
     ) -> PrestagedInventoryOutcome {
-        let Some(mut prestaged) = self.prestaged_inventory.take() else {
+        let OptionalInventoryRetirement {
+            inventory, logs, ..
+        } = self.take_optional_inventory_retirement();
+        let Some(mut prestaged) = inventory else {
             return PrestagedInventoryOutcome::Unusable;
         };
-        let logs = [prestaged.source, prestaged.destination].map(|gid| {
-            self.group_ribs
-                .get_mut(&gid)
-                .and_then(|group| group.inventory_log.take())
-        });
         let usable = (prestaged.source, prestaged.destination) == (source, destination)
             && prestaged.complete
             && logs.iter().all(Option::is_some)
@@ -652,22 +756,55 @@ impl RibManager {
         PrestagedInventoryOutcome::Ready(Box::new(inventory), prestaged.probe.take())
     }
 
+    pub(in crate::manager) fn take_destination_inventory_retirement(
+        &mut self,
+        gid: usize,
+    ) -> Option<OptionalInventoryRetirement> {
+        if self
+            .prestaged_inventory
+            .as_ref()
+            .is_some_and(|state| state.destination == gid)
+        {
+            Some(self.take_optional_inventory_retirement())
+        } else {
+            None
+        }
+    }
+
+    /// Transfer a completed or partial optional inventory to its retiring
+    /// slot. A missing group has already released its own log.
+    pub(in crate::manager) fn take_optional_inventory_retirement(
+        &mut self,
+    ) -> OptionalInventoryRetirement {
+        let inventory = self.prestaged_inventory.take();
+        let logs = match &inventory {
+            Some(state) => [state.source, state.destination].map(|gid| {
+                self.group_ribs
+                    .get_mut(&gid)
+                    .and_then(|group| group.inventory_log.take())
+            }),
+            None => [None, None],
+        };
+        OptionalInventoryRetirement {
+            inventory,
+            logs,
+            staging: None,
+        }
+    }
+
     /// Drop any prestaged inventory and stop its groups' key logs. Every
     /// path that retires or hands off a prepared destination calls this.
     pub(in crate::manager) fn retire_prestaged_transition_inventory(&mut self) {
-        let Some(mut prestaged) = self.prestaged_inventory.take() else {
+        let OptionalInventoryRetirement {
+            inventory, logs, ..
+        } = self.take_optional_inventory_retirement();
+        let Some(mut prestaged) = inventory else {
             return;
         };
-        for gid in [prestaged.source, prestaged.destination] {
-            if let Some(mut log) = self
-                .group_ribs
-                .get_mut(&gid)
-                .and_then(|group| group.inventory_log.take())
-            {
-                crate::adj_rib_out::release_sharded_map(&mut log, &mut || {
-                    self.replacement_checkpoint(false);
-                });
-            }
+        for mut log in logs.into_iter().flatten() {
+            crate::adj_rib_out::release_sharded_map(&mut log, &mut || {
+                self.replacement_checkpoint(false);
+            });
         }
         if let Some(mut probe) = prestaged.probe.take() {
             probe.retire_with(&mut || self.replacement_checkpoint(false));
@@ -741,6 +878,70 @@ impl RibManager {
                 .get(&destination)
                 .is_some_and(GroupRibOut::owns_evpn_routes)
             && source_key.same_staging_profile_except_chain(destination_key)
+    }
+
+    /// Can a freshly built destination's shared inventory commit without a
+    /// route-dependent refusal? An occupied or already prepared destination
+    /// can use the exact inventory check without creating a speculative table.
+    pub(in crate::manager) fn cold_batched_inventory_can_commit(
+        &self,
+        source: usize,
+        destination: usize,
+        members: &[PeerId],
+    ) -> bool {
+        let (Some(group), Some(key), Some(&exemplar)) = (
+            self.group_ribs.get(&source),
+            self.update_groups.group_key(destination),
+            members.first(),
+        ) else {
+            return false;
+        };
+        self.cold_shared_inventory_eligible(group, key, self.export_policy_for(exemplar), members)
+    }
+
+    /// The incoming policy is explicit so admission can check it before
+    /// installation or interning, using the same proof as the batch handler.
+    pub(super) fn cold_shared_inventory_eligible(
+        &self,
+        group: &GroupRibOut,
+        key: &GroupKey,
+        target_policy: Option<&PolicyChain>,
+        members: &[PeerId],
+    ) -> bool {
+        use rustbgpd_policy::RouteFamily;
+
+        // Newly permitted routes can carry OTC or RS tags absent from the
+        // source table. RS checks use movers' ASNs against both original and
+        // post-policy attributes, including the per-client-best fallback.
+        if super::super::distribution::otc_role_blocks(group.local_role)
+            || !group.otc_blocked.is_empty()
+            || members
+                .iter()
+                .inspect(|_| self.replacement_checkpoint(false))
+                .any(|peer| self.peer_rs_control.contains_key(peer))
+            || group.table.has_next_hop_overrides()
+        {
+            return false;
+        }
+        // An action-only difference also vetoes a winner's source-specific
+        // lane. The lane was staged under the group's own immutable chain,
+        // independently of the replacement temporarily installed on the peer.
+        let source_lane_policy = (!group.runner_up.is_empty())
+            .then_some(group.export_chain.as_ref())
+            .flatten();
+        [target_policy, source_lane_policy]
+            .into_iter()
+            .flatten()
+            .all(|chain| {
+                (!key.sendable_ipv4_unicast
+                    || chain
+                        .set_next_hop_reaching(RouteFamily::Ipv4Unicast)
+                        .is_none())
+                    && (!key.sendable_ipv6_unicast
+                        || chain
+                            .set_next_hop_reaching(RouteFamily::Ipv6Unicast)
+                            .is_none())
+            })
     }
 
     /// Whether a member may take a shared policy transition (the clean
@@ -825,21 +1026,7 @@ impl RibManager {
         if self.slow_isolated_peers.contains(&peer) {
             return GroupMembership::SlowPeer;
         }
-        // ORF-receive negotiated ⇒ ungrouped from the start (the RFC
-        // 5291 §6 gate never meets grouping). Read from the live
-        // session record — `peer_orf_pending` drains as gates lift, so
-        // it can't answer "was ORF negotiated" later in the session.
-        let orf_negotiated = self
-            .live_sessions
-            .get(&peer)
-            .and_then(|sessions| sessions.last())
-            .is_some_and(|record| !record.negotiated_orf_recv.is_empty());
-        let input = self.update_group_classifier_input(
-            peer,
-            chain,
-            orf_negotiated || self.peer_orf_filters.contains_key(&peer),
-            false,
-        );
+        let input = self.installed_group_classifier_input(peer, chain);
         let fingerprint = match classify_update_group(input) {
             UpdateGroupClassification::PolicyPeerContext => {
                 return GroupMembership::PolicyPeerContext;
@@ -861,22 +1048,34 @@ impl RibManager {
         let owns_evpn = self.bench_evpn_ownership_candidate(peer);
         #[cfg(not(feature = "bench-internals"))]
         let owns_evpn = false;
-        let key = GroupKey {
-            chain: chain_idx,
-            target_is_ebgp: fingerprint.target_is_ebgp,
-            target_is_rr_client: fingerprint.target_is_rr_client,
-            target_local_role: fingerprint.target_local_role,
-            interpret_rfc1997: fingerprint.interpret_rfc1997,
-            sendable_ipv4_unicast: fingerprint.sendable_ipv4_unicast,
-            sendable_ipv6_unicast: fingerprint.sendable_ipv6_unicast,
-            sendable_vpnv4: fingerprint.sendable_vpnv4,
-            sendable_vpnv6: fingerprint.sendable_vpnv6,
+        GroupMembership::Grouped(self.update_groups.group_for(GroupKey::from_fingerprint(
+            fingerprint,
+            chain_idx,
             owns_evpn,
-            rtc_negotiated: fingerprint.rtc_negotiated,
-            per_client_best: fingerprint.per_client_best,
-            llgr_families: fingerprint.llgr_families,
-        };
-        GroupMembership::Grouped(self.update_groups.group_for(key))
+        )))
+    }
+
+    pub(super) fn installed_group_classifier_input(
+        &self,
+        peer: PeerId,
+        chain: Option<&PolicyChain>,
+    ) -> super::UpdateGroupClassifierInput {
+        // ORF-receive negotiated ⇒ ungrouped from the start (the RFC
+        // 5291 §6 gate never meets grouping). Read from the live
+        // session record — `peer_orf_pending` drains as gates lift, so
+        // it can't answer "was ORF negotiated" later in the session.
+        let orf_negotiated = self
+            .live_sessions
+            .get(&peer)
+            .and_then(|sessions| sessions.last())
+            .is_some_and(|record| !record.negotiated_orf_recv.is_empty());
+        self.update_group_classifier_input(
+            peer,
+            chain,
+            orf_negotiated || self.peer_orf_filters.contains_key(&peer),
+            false,
+            None,
+        )
     }
 
     /// Preflight the prospective group id for a clean unicast-only policy
@@ -1013,6 +1212,9 @@ impl RibManager {
         &mut self,
         gid: usize,
     ) -> bool {
+        if self.retire_prepared_first_group(gid) {
+            return true;
+        }
         let removable = self
             .group_ribs
             .get(&gid)
@@ -1058,12 +1260,13 @@ impl RibManager {
     /// cohort transition ([`crate::update::RibUpdate::ReplacePeerExportPoliciesAuthoritatively`]):
     /// every batch member of `source` moves to the current staged
     /// `destination` (same staging profile except the chain — validated
-    /// by the caller). Returns `None` when the delta carries an RFC 7947
+    /// by the caller). Refuses when the delta carries an RFC 7947
     /// control-form community for one of the cohort's rs-control ASNs on
     /// either side of policy — per-target suppress/prepend/scrub cannot
     /// ride a shared payload, so the caller degrades the cohort to the
     /// ordinary per-member machinery (the clean transition's
-    /// tagged-inventory posture).
+    /// tagged-inventory posture). A speculative single-best refusal hands
+    /// any partial inventory to the newly created table's retirement owner.
     ///
     /// The shared announce carries each destination entry whose wire
     /// form differs from the source entry at the same key
@@ -1086,9 +1289,13 @@ impl RibManager {
         source: &GroupRibOut,
         destination: &GroupRibOut,
         rs_asns: &[u32],
+        speculative: bool,
         checkpoint: &mut impl FnMut(bool),
-    ) -> Option<BatchedTransitionInventory> {
+    ) -> Result<BatchedTransitionInventory, Option<Box<super::RejectedBatchedInventory>>> {
         use crate::manager::distribution::rs_control::rs_control_route_tagged;
+        debug_assert!(
+            !speculative || (destination.members.is_empty() && !destination.per_client_best)
+        );
         // RFC 9234 OTC residue on either side means blocked staged
         // winners (or lane runner-ups) whose per-member diagnostics and
         // withdraw conversions belong to the pre-commit backstop this
@@ -1096,7 +1303,7 @@ impl RibManager {
         // A role-bearing fleet with no OTC-attributed routes (the
         // rendered route-server default) carries no residue and shares.
         if !source.otc_blocked.is_empty() || !destination.otc_blocked.is_empty() {
-            return None;
+            return Err(None);
         }
         let attrs_tagged = |attrs: (&[u32], &[LargeCommunity])| {
             rs_asns
@@ -1251,6 +1458,17 @@ impl RibManager {
             }
         }
         if rejected {
+            if speculative {
+                // Every partial permit and supplement belongs to the source
+                // of a destination slab row. Its exclusive retirement owns
+                // these allocations before any other table write can intervene.
+                return Err(Some(Box::new(super::RejectedBatchedInventory::new(
+                    announce,
+                    next_hop_override,
+                    supplements,
+                    counters,
+                ))));
+            }
             checkpoint(true);
             crate::manager::retire_vec(&mut announce, &mut || checkpoint(false));
             crate::manager::retire_vec(&mut next_hop_override, &mut || checkpoint(false));
@@ -1266,7 +1484,7 @@ impl RibManager {
             counters.retire_with(checkpoint);
             drop(counters);
             checkpoint(true);
-            return None;
+            return Err(None);
         }
         checkpoint(true);
         let mut withdraw: Vec<(Prefix, u32)> = Vec::with_capacity(source.table.len());
@@ -1297,7 +1515,7 @@ impl RibManager {
         checkpoint(true);
         let next_hop_override = next_hop_override.into();
         checkpoint(true);
-        Some(BatchedTransitionInventory {
+        Ok(BatchedTransitionInventory {
             announce,
             next_hop_override,
             withdraw,
@@ -1333,6 +1551,62 @@ mod growth_tests {
     use crate::test_support::make_route_with_lp;
     use rustbgpd_wire::{Afi, Ipv4Prefix, PathAttribute, Safi};
     use std::net::Ipv4Addr;
+
+    #[test]
+    fn optional_inventory_releases_sparse_proof_allocations_one_at_a_time() {
+        use crate::fast_hash::{SHARD_SPLIT_AT, SHARDS};
+
+        let mut proof = ShardedMap::with_capacity(SHARD_SPLIT_AT);
+        let key = (Prefix::V4(Ipv4Prefix::new(Ipv4Addr::LOCALHOST, 32)), 0);
+        proof.insert(key, "source flip");
+        assert!(proof.remove(&key).is_some());
+        assert!(proof.is_empty());
+        for released in 1..=SHARDS {
+            let mut allowance = 1;
+            assert!(!retire_plain_shards(&mut proof, &mut allowance));
+            assert_eq!(allowance, 0);
+            assert_eq!(
+                proof
+                    .shards()
+                    .iter()
+                    .filter(|s| s.allocation_size() > 0)
+                    .count(),
+                SHARDS - released,
+                "empty buckets do not require a scan; each remaining shard owns storage"
+            );
+        }
+        let mut allowance = 2;
+        assert!(retire_plain_shards(&mut proof, &mut allowance));
+        assert_eq!(allowance, 1, "release the split header allocation");
+        assert!(matches!(proof, ShardedMap::One(_)));
+    }
+
+    #[test]
+    fn optional_inventory_charges_every_owned_route_and_the_final_buffer() {
+        let route = make_route_with_lp(
+            Ipv4Prefix::new(Ipv4Addr::LOCALHOST, 32),
+            Ipv4Addr::LOCALHOST,
+            100,
+        );
+        let attrs = std::sync::Arc::downgrade(&route.attributes);
+        let mut rows = vec![route; 2049];
+        let initial_refs = attrs.strong_count();
+        for released in [1024, 2048] {
+            let mut allowance = 1024;
+            assert!(!retire_inventory_vec(&mut rows, &mut allowance));
+            assert_eq!(allowance, 0);
+            assert_eq!(rows.len(), 2049 - released);
+            assert_eq!(attrs.strong_count(), initial_refs - released);
+        }
+        let mut allowance = 1;
+        assert!(!retire_inventory_vec(&mut rows, &mut allowance));
+        assert_eq!(allowance, 0);
+        assert!(rows.is_empty() && rows.capacity() >= 2049);
+        let mut allowance = 2;
+        assert!(retire_inventory_vec(&mut rows, &mut allowance));
+        assert_eq!(allowance, 1);
+        assert_eq!(rows.capacity(), 0);
+    }
 
     #[test]
     fn dirty_union_reserves_overlap_once_before_filling() {

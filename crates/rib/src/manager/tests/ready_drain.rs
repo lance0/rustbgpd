@@ -46,6 +46,82 @@ fn routes(peer: Ipv4Addr, first: usize, count: usize) -> RibUpdate {
     }
 }
 
+#[tokio::test(start_paused = true)]
+async fn first_group_commit_frontier_counts_select_and_coalesced_admissions_once() {
+    let source = Ipv4Addr::new(10, 0, 0, 1);
+    let (tx, rx) = mpsc::channel(4);
+    let mut manager = timer_manager(rx, dummy_query_rx());
+    manager.distribution_window_limits.elapsed = Duration::from_secs(60);
+    let batch = ROUTES_RECEIVED_CHUNK_SIZE + 1;
+    manager.primary_lookahead = Some(routes(source, 0, 1));
+    tx.try_send(routes(source, 1, batch)).unwrap();
+    manager.capture_first_group_commit_frontier();
+    tx.try_send(routes(source, 1 + batch, 1)).unwrap();
+    manager.capture_first_group_commit_frontier();
+
+    // Exercise the select receive/admit pair, including a previously peeked head.
+    let update = RibManager::recv_primary(&mut manager.primary_lookahead, &mut manager.rx)
+        .await
+        .unwrap();
+    let update = manager.admit_primary(update).unwrap();
+    manager.handle_update(update);
+    assert_eq!(manager.first_group_commit_remaining, Some(1));
+    assert!(manager.drain_ready_updates().await);
+    assert_eq!(manager.loc_rib.len(), 1);
+    assert_eq!(
+        manager.first_group_commit_remaining,
+        Some(0),
+        "the window admitted the second message"
+    );
+    assert!(
+        !manager.first_group_commit_frontier_reached(),
+        "its route chunks still own work"
+    );
+    assert!(manager.drain_ready_updates().await);
+    assert!(!manager.first_group_commit_frontier_reached());
+    assert!(manager.drain_ready_updates().await);
+    assert!(manager.first_group_commit_frontier_reached());
+    assert_eq!(manager.loc_rib.len(), 1 + batch);
+    assert_eq!(manager.primary_backlog(), 1);
+    assert!(!manager.can_receive_release_primary());
+    assert!(!manager.drain_ready_updates().await);
+
+    manager.clear_first_group_commit_frontier();
+    assert!(manager.drain_ready_updates().await);
+    assert!(manager.drain_ready_updates().await);
+    assert_eq!(manager.loc_rib.len(), 2 + batch);
+}
+
+#[tokio::test(start_paused = true)]
+async fn first_group_commit_frontier_can_seal_before_a_held_head() {
+    let source = Ipv4Addr::new(10, 0, 0, 1);
+    let (tx, rx) = mpsc::channel(4);
+    let mut manager = timer_manager(rx, dummy_query_rx());
+    manager.handle_update(routes(source, 0, 1));
+    let (reply, mut read) = oneshot::channel();
+    manager.primary_lookahead = Some(RibUpdate::QueryLocRibCount { reply });
+    tx.try_send(routes(source, 1, 1)).unwrap();
+    manager.capture_first_group_commit_frontier();
+    manager.seal_first_group_commit_frontier();
+    manager.capture_first_group_commit_frontier();
+    assert!(!manager.first_group_commit_frontier_reached());
+    assert!(manager.drain_ready_updates().await);
+    assert!(manager.first_group_commit_frontier_reached());
+    assert_eq!(manager.primary_backlog(), 2);
+    assert!(manager.try_recv_primary().is_none());
+    assert!(matches!(
+        read.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    manager.clear_first_group_commit_frontier();
+    assert!(manager.drain_ready_updates().await);
+    assert_eq!(
+        read.try_recv().unwrap(),
+        1,
+        "the held read still precedes the later UPDATE"
+    );
+}
+
 async fn assert_timer_drain_yields_before_backlog_is_empty(pending_chunk: bool) {
     let source = Ipv4Addr::new(10, 0, 0, 1);
     let (tx, rx) = mpsc::channel(8);
@@ -654,6 +730,53 @@ async fn full_legacy_read_buffer_preserves_startup_timer_admission_cutoff() {
     assert_eq!(manager.release_primary_reads.capacity(), 0);
     assert!(manager.drain_ready_updates().await);
     assert_eq!(after_deadline.try_recv().unwrap(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn parked_primary_read_allows_pending_registration_to_complete() {
+    let (tx, rx) = mpsc::channel(1);
+    let mut manager = timer_manager(rx, dummy_query_rx());
+    manager.release_readiness_count = Some(0);
+    manager.set_owed_release_open((Afi::Ipv4, Safi::Unicast), true);
+    let (reply, _first_read) = oneshot::channel();
+    tx.try_send(RibUpdate::QueryBmpLocRibStats { reply })
+        .unwrap();
+    assert!(manager.drain_ready_updates().await);
+    let (reply, mut blocked_read) = oneshot::channel();
+    tx.try_send(RibUpdate::QueryBmpLocRibStats { reply })
+        .unwrap();
+    assert!(!manager.can_receive_release_primary());
+
+    manager.initial_dump_defer_min_routes = 0;
+    let peer = peer_v4(Ipv4Addr::new(192, 0, 2, 10));
+    let (out, mut receiver) = mpsc::channel(8);
+    let mut registration = super::lifecycle::test_peer_up(peer, 1, out);
+    let RibUpdate::PeerUp {
+        sendable_families, ..
+    } = &mut registration
+    else {
+        unreachable!()
+    };
+    // Observe a family whose EoR is not held by the parked unicast release.
+    *sendable_families = vec![(Afi::Ipv4, Safi::MplsVpn)];
+    manager.handle_update(registration);
+    assert!(manager.pending_initial_registrations.contains(&peer));
+    assert!(!manager.can_receive_release_primary());
+    let mut actor = Box::pin(manager.run());
+    assert!(
+        actor
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    assert!(
+        receiver.try_recv().is_ok(),
+        "registration runs while the primary head is fenced"
+    );
+    assert!(matches!(
+        blocked_read.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
 }
 
 #[tokio::test(start_paused = true)]

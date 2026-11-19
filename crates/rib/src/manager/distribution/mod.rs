@@ -65,7 +65,7 @@ mod rtc;
 mod unicast;
 mod vpn;
 
-pub(in crate::manager) use export_memo::{ExportAdmission, ExportMemo};
+pub(in crate::manager) use export_memo::{CancelledPrestage, ExportAdmission, ExportMemo};
 pub(in crate::manager) use unicast::{
     AddPathKeys, blackholing, exact_exportable, lease_rejection, multipath_candidate_suppressed,
 };
@@ -2537,6 +2537,17 @@ impl RibManager {
                 mut memo,
             } => {
                 if prefixes.is_none() {
+                    // A conflicting writer normally reserved the table before taking
+                    // the fence. If classification changed, leave the old policy live
+                    // and let the authoritative command acquire the destination.
+                    if manager.policy_build_slot_occupied(destination)
+                        && manager.group_ribs.get(&destination).is_none_or(|group| group.members.is_empty())
+                    {
+                        pending.phase = Some(CleanPolicyTransitionPhase::StageDestination {
+                            source, destination, prefixes, cursor, memo,
+                        });
+                        return CleanPolicyTransitionAdvance::Fallback(pending);
+                    }
                     match manager.begin_policy_transition_group(
                         destination,
                         pending.replacements[0].peer,
@@ -5974,7 +5985,9 @@ impl RibManager {
         export_policy: Option<PolicyChain>,
         reply: tokio::sync::oneshot::Sender<Result<(), RibCommandError>>,
     ) {
-        let _ = reply.send(self.replace_peer_export_policy_synchronously(peer, export_policy));
+        let result = self.replace_peer_export_policy_synchronously(peer, export_policy);
+        self.publish_export_roster();
+        let _ = reply.send(result);
     }
 
     /// Apply a batch of replacements. The optimization is all-or-nothing:
@@ -6050,6 +6063,7 @@ impl RibManager {
             if discard_prepared {
                 self.discard_prepared_export_destination();
             }
+            self.publish_export_roster();
             let _ = reply.send(result);
         }
     }
@@ -6081,7 +6095,9 @@ impl RibManager {
             });
             return;
         }
-        let _ = reply.send(self.apply_export_policy_replacements_deferring_residual(replacements));
+        let result = self.apply_export_policy_replacements_deferring_residual(replacements);
+        self.publish_export_roster();
+        let _ = reply.send(result);
     }
 
     pub(super) fn handle_restore_peer_export_policies_authoritatively(
@@ -6096,6 +6112,7 @@ impl RibManager {
         // must still repair the RIB. Never use `reply.is_closed()` as a reason to
         // skip compensation.
         let result = self.restore_export_policy_replacements_deferring_residual(replacements);
+        self.publish_export_roster();
         let _ = reply.send(result);
     }
 
@@ -6119,6 +6136,10 @@ impl RibManager {
             .collect();
         let mut cost = None;
         while !pending.is_empty() {
+            // The production intake holds the paced command until disposal.
+            while self.optional_destination_retirement_active() {
+                self.advance_optional_destination_retirement();
+            }
             let outcome = self.apply_paced_export_policies(
                 pending
                     .iter()
@@ -6206,9 +6227,6 @@ impl RibManager {
                     }
                 })
                 .collect::<Vec<_>>();
-            // The batch first retires a destination the failed forward walk
-            // left memberless. One this rollback's own refused cohort leaves
-            // is adopted or retired by its paced restore commands.
             let mut deferred: HashSet<PeerId> = manager
                 .apply_export_policy_replacements(execution, ResidualMode::DeferChanged)?
                 .deferred
@@ -6284,46 +6302,6 @@ impl RibManager {
             .map(|outcome| outcome.deferred)
     }
 
-    /// Discard every recorded refused-cohort destination that no member
-    /// joined, unless a destination prestage now owns that group. Callers
-    /// run inside a replacement readiness scope, so retiring a large table
-    /// keeps answering readiness and summary queries.
-    fn discard_refused_cohort_destinations(&mut self) {
-        for (gid, _) in std::mem::take(&mut self.refused_cohort_destinations) {
-            self.discard_refused_cohort_destination(gid);
-        }
-    }
-
-    fn discard_refused_cohort_destination(&mut self, gid: usize) {
-        let prestaged = self.prepared_destination == Some(gid)
-            || self
-                .pending_destination_prestage
-                .as_ref()
-                .is_some_and(|prestage| prestage.destination == gid);
-        if !prestaged {
-            let _ = self.discard_uncommitted_policy_transition_group(gid);
-        }
-    }
-
-    /// After a paced command: a refused destination whose movers have all
-    /// been applied or skipped has seen its whole walk. Retire it now if no
-    /// member joined (every mover left the RIB, or moved elsewhere), rather
-    /// than staging route updates into it until the next batch or restore.
-    fn settle_refused_cohort_destinations(&mut self, applied: &[PeerId], skipped: &[PeerId]) {
-        let mut settled = Vec::new();
-        self.refused_cohort_destinations
-            .retain_mut(|(gid, movers)| {
-                movers.retain(|peer| !applied.contains(peer) && !skipped.contains(peer));
-                if movers.is_empty() {
-                    settled.push(*gid);
-                }
-                !movers.is_empty()
-            });
-        for gid in settled {
-            self.discard_refused_cohort_destination(gid);
-        }
-    }
-
     /// One command of the paced walk: the batch body for the members that fit
     /// [`PACED_TURN_BUDGET`], in caller order, with one shared distribution
     /// pass. A member's recompute runs warm after the first in the turn, and
@@ -6375,7 +6353,9 @@ impl RibManager {
             );
             return;
         }
-        let _ = reply.send(self.apply_paced_export_policies(replacements, cost));
+        let result = self.apply_paced_export_policies(replacements, cost);
+        self.publish_export_roster();
+        let _ = reply.send(result);
     }
 
     fn apply_export_policy_replacements(
@@ -6555,12 +6535,6 @@ impl RibManager {
             prestage.retire_with(&mut || checkpoint());
             self.replacement_checkpoint(true);
         }
-        // A new forward batch starts a new walk: an earlier walk's refused
-        // destination that no member joined is retired here, in this scope.
-        if matches!(mode, ResidualMode::DeferChanged) {
-            self.discard_refused_cohort_destinations();
-        }
-
         let phase = std::time::Instant::now();
         let mut present: Vec<PeerExportPolicyReplacement> = Vec::with_capacity(replacements.len());
         let mut n_skipped_unregistered = 0_usize;
@@ -6748,20 +6722,18 @@ impl RibManager {
                 n_shared_members += members.len();
                 n_destination_groups += 1;
             } else {
-                // A refusal after the destination build leaves the group for
-                // the movers; deferred, they join it only in a later command.
-                let memberless = self
-                    .group_ribs
-                    .get(&destination)
-                    .is_some_and(|group| group.members.is_empty());
-                if memberless && matches!(mode, ResidualMode::DeferChanged) {
-                    self.refused_cohort_destinations
-                        .push((destination, members.clone()));
-                }
                 residual.extend(members);
             }
         }
 
+        #[cfg(test)]
+        if matches!(mode, ResidualMode::All) {
+            // This whole-list reference runs its residual without the actor's
+            // intake separating the authoritative and subsequent paced stages.
+            while self.optional_destination_retirement_active() {
+                self.advance_optional_destination_retirement();
+            }
+        }
         let n_residual_members = residual.len();
         // A paced command stops at a caller-order boundary: what it applies
         // is a prefix of its list, and the rest comes back in order.
@@ -6890,9 +6862,6 @@ impl RibManager {
                 Some(applied_peers.iter().map(|&peer| (peer, None)).collect());
         }
         self.distribute_changes_with_evpn_feeds(evpn_feeds, false);
-        if matches!(mode, ResidualMode::Paced { .. }) {
-            self.settle_refused_cohort_destinations(&applied_peers, &skipped);
-        }
         let member_costs = self.paced_member_costs.take();
         receipt.distribution_us = u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX);
         let pass_max = member_costs.and_then(|costs| costs.into_values().flatten().max());
@@ -6963,9 +6932,8 @@ impl RibManager {
     /// transition: reuse or build the destination table, derive the shared
     /// old→new delta plus ADR-0126 per-member exceptions once, move the
     /// memberships, and enqueue the encode-once shared payload per
-    /// member. Returns `false` (nothing externally visible mutated
-    /// beyond an unowned staged destination the per-member fallback then
-    /// adopts) when the cohort does not qualify.
+    /// member. A refused cohort keeps its old policy and membership. A fresh
+    /// speculative table and its partial inventory retire under one slot.
     #[expect(
         clippy::too_many_lines,
         reason = "the cohort commit keeps its gates, membership moves, and \
@@ -7003,6 +6971,13 @@ impl RibManager {
             .group_ribs
             .get(&destination)
             .is_some_and(|group| !group.members.is_empty());
+        // An earlier cohort in this same command can move the last incumbent
+        // out of a destination that was warm at admission. Leave its movers
+        // to the ordinary deferred residual walk if another table owns the
+        // build slot. No policy or membership for these movers has committed.
+        if !destination_owned && self.policy_build_slot_occupied(destination) {
+            return false;
+        }
         // Dataset handles keep their identity when content is restored.
         // Until dependent re-evaluation runs, either staged view can still
         // describe the other generation. An occupied group cannot be rebuilt
@@ -7025,12 +7000,21 @@ impl RibManager {
                 .saturating_add(u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX));
             return false;
         }
-        // Consume the completed-prestage record exactly like the clean
-        // transition's Classify phase: a match hands the staged table to
-        // this transition, a mismatch discards the never-adopted group.
-        if let Some(prepared) = self.prepared_destination.take()
-            && prepared != destination
-        {
+        // A single-best unicast cohort can use an idle slot to resolve a
+        // route-dependent decision. A refusal must retain physical ownership
+        // independently of whether the caller ever submits its paced walk.
+        let destination_existed = self.group_ribs.contains_key(&destination);
+        let speculative = !destination_existed
+            && !self.cold_batched_inventory_can_commit(source, destination, members);
+        if speculative && !self.can_own_uncertain_policy_destination(source) {
+            receipt.cohort_precheck_us = receipt
+                .cohort_precheck_us
+                .saturating_add(u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX));
+            return false;
+        }
+        // Keep a matching completed Prepare owned until the inventory
+        // commits. Cold contention can still evict it after a refusal.
+        if let Some(prepared) = self.prepared_destination.take_if(|gid| *gid != destination) {
             let _ = self.discard_uncommitted_policy_transition_group(prepared);
         }
         let Some(&exemplar) = members.first() else {
@@ -7047,8 +7031,10 @@ impl RibManager {
         // name only movers; incumbent counters and withdrawal residue stay
         // with the existing group and its ordinary retry path.
         let phase = std::time::Instant::now();
-        let destination_existed = self.group_ribs.contains_key(&destination);
         if !destination_owned {
+            if speculative {
+                self.paced_policy_destination = Some(destination);
+            }
             self.ensure_group_table(destination, exemplar);
             receipt.destination_ensures += 1;
         }
@@ -7062,15 +7048,19 @@ impl RibManager {
             .saturating_add(u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX));
         let phase = std::time::Instant::now();
         let mut inventory = {
-            let (Some(source_group), Some(destination_group)) = (
-                self.group_ribs.get(&source),
-                self.group_ribs.get(&destination),
-            ) else {
+            let Some(source_group) = self.group_ribs.get(&source) else {
+                if speculative {
+                    self.retire_refused_authoritative_destination(destination, None);
+                }
                 receipt.inventory_build_us = receipt
                     .inventory_build_us
                     .saturating_add(u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX));
                 return false;
             };
+            let destination_group = self
+                .group_ribs
+                .get(&destination)
+                .expect("ensured destination");
             // RFC 9234 OTC enforcement rides inside the inventory build:
             // a blocked route in the emitted delta, or blocked-winner
             // residue on either side, degrades the cohort to the
@@ -7085,10 +7075,11 @@ impl RibManager {
                 .collect();
             rs_asns.sort_unstable();
             rs_asns.dedup();
-            let Some(inventory) = Self::batched_transition_inventory(
+            match Self::batched_transition_inventory(
                 source_group,
                 destination_group,
                 &rs_asns,
+                speculative,
                 &mut |force| {
                     if force {
                         self.replacement_checkpoint(true);
@@ -7096,13 +7087,18 @@ impl RibManager {
                         self.replacement_checkpoint_at("shared_inventory", false);
                     }
                 },
-            ) else {
-                receipt.inventory_build_us = receipt
-                    .inventory_build_us
-                    .saturating_add(u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX));
-                return false;
-            };
-            inventory
+            ) {
+                Ok(inventory) => inventory,
+                Err(scratch) => {
+                    if speculative {
+                        self.retire_refused_authoritative_destination(destination, scratch);
+                    }
+                    receipt.inventory_build_us = receipt.inventory_build_us.saturating_add(
+                        u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX),
+                    );
+                    return false;
+                }
+            }
         };
         receipt.inventory_build_us = receipt
             .inventory_build_us
@@ -7578,17 +7574,32 @@ impl RibManager {
         result
     }
 
-    /// Begin the unfenced staging of a prospective clean-transition
-    /// destination group ([`crate::update::RibUpdate::PrepareExportPolicyDestination`]).
-    /// The reply is held until [`Self::advance_destination_prestage`]
-    /// finishes the walk; an immediate `Err` means the preparation was
-    /// skipped and the transition will stage under its fence, as before.
+    #[cfg(test)]
     pub(super) fn begin_destination_prestage(
         &mut self,
         peer: PeerId,
-        export_policy: Option<&rustbgpd_policy::PolicyChain>,
+        export_policy: Option<&PolicyChain>,
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     ) {
+        self.handle_update(crate::update::RibUpdate::PrepareExportPolicyDestination {
+            peer,
+            export_policy: export_policy.map(PolicyChain::share),
+            reply,
+        });
+    }
+
+    /// Stage a prospective clean-transition destination after admission has
+    /// resolved any conflicting first-member build. Keep its reply until
+    /// the complete destination and optional inventory are ready.
+    pub(super) fn prepare_export_policy_destination(
+        &mut self,
+        peer: PeerId,
+        export_policy: Option<&PolicyChain>,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    ) {
+        if reply.is_closed() {
+            return;
+        }
         if self.pending_clean_policy_transition.is_some()
             || self.pending_destination_prestage.is_some()
         {
@@ -7610,43 +7621,81 @@ impl RibManager {
                     ),
                 ));
             };
+            let handed_off = manager.paced_policy_destination == Some(destination);
+            if !handed_off
+                && (manager.first_group_build.is_some()
+                    || manager.paced_policy_destination.is_some()
+                    || manager.optional_destination_retirement_active())
+                && manager
+                    .group_ribs
+                    .get(&destination)
+                    .is_none_or(|group| group.members.is_empty())
+            {
+                manager.reclaim_unused_update_group_policies();
+                return Some((
+                    reply,
+                    Err("a first-member destination already owns the build slot".into()),
+                ));
+            }
             // A stale completed preparation that was never consumed (its
             // cohort never arrived) is discarded before a new one begins;
             // the record must only ever name the latest staged group.
-            if let Some(stale) = manager.prepared_destination.take() {
+            if let Some(stale) = manager.prepared_destination.take()
+                && !(handed_off && stale == destination)
+            {
                 let _ = manager.discard_uncommitted_policy_transition_group(stale);
             }
             manager.retire_prestaged_transition_inventory();
-            // A leftover unowned group under this id may be partially staged
-            // from an aborted attempt; recreate it deterministically. An OWNED
-            // group is maintained by definition — nothing to stage.
+            if handed_off {
+                // The private builder already reconciled this complete destination.
+                // Match an occupied destination's fast path, retaining the memberless
+                // table for the cohort or an explicit discard.
+                manager.prepared_destination = Some(destination);
+                manager.reclaim_unused_update_group_policies();
+                if reply.send(Ok(())).is_err() {
+                    manager.discard_prepared_export_destination();
+                }
+                return None;
+            }
+            // A leftover memberless table from an aborted legacy walk may be partial.
+            // An occupied group is already maintained and stays available to its members.
             let _ = manager.discard_uncommitted_policy_transition_group(destination);
-            let completed =
+            let prefixes =
                 match manager.begin_policy_transition_group(destination, peer, export_policy) {
                     super::update_groups::PolicyTransitionGroupStart::Maintained => {
-                        Some((reply, Ok(())))
+                        manager.reclaim_unused_update_group_policies();
+                        return Some((reply, Ok(())));
                     }
-                    super::update_groups::PolicyTransitionGroupStart::Created(prefixes) => {
-                        manager.pending_destination_prestage = Some(DestinationPrestage {
-                            destination,
-                            source,
-                            staged: false,
-                            inventory_complete: false,
-                            peer,
-                            prefixes,
-                            cursor: 0,
-                            memo: ExportMemo::default(),
-                            reply: Some(reply),
-                        });
-                        None
-                    }
+                    super::update_groups::PolicyTransitionGroupStart::Created(prefixes) => prefixes,
                 };
+            manager
+                .group_ribs
+                .get_mut(&destination)
+                .expect("created optional destination")
+                .prepare_optional_retirement();
+            manager.pending_destination_prestage = Some(DestinationPrestage {
+                destination,
+                source,
+                staged: false,
+                inventory_complete: false,
+                peer,
+                prefixes,
+                cursor: 0,
+                memo: ExportMemo::default(),
+                reply: Some(reply),
+            });
             manager.reclaim_unused_update_group_policies();
-            completed
+            None
         });
         if let Some((reply, result)) = completed {
             let _ = reply.send(result);
         }
+    }
+
+    pub(super) fn prestaging_destination(&self, gid: usize) -> bool {
+        self.pending_destination_prestage
+            .as_ref()
+            .is_some_and(|job| job.destination == gid)
     }
 
     /// Discard a mid-walk destination prestage that a membership event is
@@ -7685,12 +7734,34 @@ impl RibManager {
         );
     }
 
+    /// Detect caller timeout before either a prestage slice or another
+    /// message can take the partial table. Only the actor changes ownership.
+    pub(super) fn retire_abandoned_destination_prestage(&mut self) -> bool {
+        if self
+            .pending_destination_prestage
+            .as_ref()
+            .is_some_and(|prestage| {
+                prestage
+                    .reply
+                    .as_ref()
+                    .is_some_and(tokio::sync::oneshot::Sender::is_closed)
+            })
+        {
+            self.discard_prepared_export_destination();
+            return true;
+        }
+        false
+    }
+
     /// One budgeted, unfenced staging slice of a pending destination
     /// preparation. Runs from the actor loop only after queued mutation
     /// traffic has been drained, so ordinary churn keeps flowing between
     /// slices — and that same churn keeps already-staged prefixes current
     /// through the ordinary all-groups staging pass.
     pub(super) fn advance_destination_prestage(&mut self) {
+        if self.retire_abandoned_destination_prestage() {
+            return;
+        }
         let reply = self.with_replacement_readiness(|manager| {
             let readiness = manager.replacement_readiness.clone();
             let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
@@ -7747,8 +7818,10 @@ impl RibManager {
                 }
             }
         });
-        if let Some(reply) = reply {
-            let _ = reply.send(Ok(()));
+        if let Some(reply) = reply
+            && reply.send(Ok(())).is_err()
+        {
+            self.discard_prepared_export_destination();
         }
     }
 
@@ -7874,19 +7947,27 @@ impl RibManager {
             let reply = manager
                 .pending_destination_prestage
                 .take()
-                .and_then(|mut prestage| {
-                    let _ =
-                        manager.discard_uncommitted_policy_transition_group(prestage.destination);
-                    manager.replacement_checkpoint(true);
-                    #[cfg(feature = "bench-internals")]
-                    prestage.memo.record_replacement_capacities(manager);
-                    prestage.retire_with(&mut || manager.replacement_checkpoint(false));
-                    manager.replacement_checkpoint(true);
-                    prestage.reply.take()
+                .and_then(|mut walk| {
+                    // An incoming member takes the membership-cancellation path
+                    // before it can bind to a partial destination.
+                    let staging = (!walk.staged)
+                        .then(|| Box::new(CancelledPrestage::new(walk.prefixes, walk.memo)));
+                    manager.retire_cancelled_optional_destination(walk.destination, staging);
+                    walk.reply.take()
                 });
-            if let Some(prepared) = manager.prepared_destination.take() {
-                let _ = manager.discard_uncommitted_policy_transition_group(prepared);
+            if let Some(gid) = manager.prepared_destination.take()
+                && manager
+                    .group_ribs
+                    .get(&gid)
+                    .is_some_and(|group| group.members.is_empty())
+            {
+                manager.retire_cancelled_optional_destination(gid, None);
             }
+            if let Some(gid) = manager.paced_policy_destination {
+                manager.retire_prepared_first_group(gid);
+            }
+            // A clean cohort may already own the table and have consumed
+            // its prepared gid. Discard still closes any remaining proof.
             manager.retire_prestaged_transition_inventory();
             manager.reclaim_unused_update_group_policies();
             reply
@@ -8379,7 +8460,7 @@ impl RibManager {
         // The ingest-stall fault injection must see every message on its
         // own receive; coalescing would bypass the stall.
         if self.test_ingest_stall.is_some()
-            || self.expiry_cutoff_reached()
+            || self.primary_read_ahead_cutoff_reached()
             || !self.pending_route_batches.is_empty()
             || window.messages >= limits.messages
             || window.routes >= limits.routes
@@ -8393,10 +8474,11 @@ impl RibManager {
         if self.primary_lookahead.is_none() {
             self.primary_lookahead = self.rx.try_recv().ok();
         }
-        if !self
-            .primary_lookahead
-            .as_ref()
-            .is_some_and(DistributionWindow::admits)
+        if !self.first_group_allows_lookahead()
+            || !self
+                .primary_lookahead
+                .as_ref()
+                .is_some_and(DistributionWindow::admits)
         {
             return false;
         }
@@ -8404,7 +8486,7 @@ impl RibManager {
             .primary_lookahead
             .take()
             .expect("lookahead admitted above");
-        self.expiry_cutoffs.charge();
+        self.charge_primary_admission();
         self.handle_update(update);
         // A stale-session message is dropped without a batch: the window
         // settles now and the next queued message waits for the next turn.

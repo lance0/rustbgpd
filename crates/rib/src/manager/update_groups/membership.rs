@@ -599,10 +599,205 @@ impl RibManager {
         self.install_group_member(gid, peer);
     }
 
+    /// The group installation will select for this waiting, policy-free session.
+    /// Some per-member features, including RS control, affect replay but do not
+    /// distinguish the shared unicast table.
+    fn pending_registration_key(
+        &self,
+        peer: PeerId,
+        record: &super::super::LiveSessionRecord,
+    ) -> Option<super::GroupKey> {
+        record.registration_wait_since?;
+        if self.outbound_peers.contains_key(&peer) || record.export_policy.is_some() {
+            return None;
+        }
+        let input = self.update_group_classifier_input(
+            peer,
+            None,
+            !record.negotiated_orf_recv.is_empty() || self.peer_orf_filters.contains_key(&peer),
+            false,
+            Some(record),
+        );
+        self.no_policy_group_key(peer, input, false)
+    }
+
+    /// Match the actual staging profile, including the bench-only EVPN owner
+    /// dimension, for a proposed no-policy membership.
+    pub(super) fn no_policy_group_key(
+        &self,
+        peer: PeerId,
+        input: super::UpdateGroupClassifierInput,
+        slow_recovery: bool,
+    ) -> Option<super::GroupKey> {
+        #[cfg(test)]
+        if self.test_force_ungrouped {
+            return None;
+        }
+        if !slow_recovery && self.slow_isolated_peers.contains(&peer) {
+            return None;
+        }
+        #[cfg(feature = "bench-internals")]
+        let owns_evpn = self.bench_evpn_group_ownership
+            && !input.per_client_best
+            && input
+                .sendable_families
+                .contains(&(super::Afi::L2Vpn as u16, super::Safi::Evpn as u8))
+            && !input
+                .sendable_families
+                .contains(&(super::Afi::Ipv4 as u16, super::Safi::RtConstrain as u8));
+        let super::UpdateGroupClassification::Groupable(fingerprint) =
+            super::classify_update_group(input)
+        else {
+            return None;
+        };
+        #[cfg(not(feature = "bench-internals"))]
+        let owns_evpn = false;
+        Some(super::GroupKey::from_fingerprint(
+            fingerprint,
+            None,
+            owns_evpn,
+        ))
+    }
+
+    /// A returning session can match a legacy preparation with any groupable
+    /// export chain. Its retained record supplies the inputs not yet installed.
+    pub(in crate::manager) fn pending_registration_matches_group(
+        &self,
+        peer: PeerId,
+        gid: usize,
+        prepared_policy: Option<&PolicyChain>,
+    ) -> bool {
+        let Some(record) = self
+            .live_sessions
+            .get(&peer)
+            .and_then(|sessions| sessions.last())
+        else {
+            return false;
+        };
+        let Some(expected) = self.update_groups.group_key(gid) else {
+            return false;
+        };
+        if record.registration_wait_since.is_none()
+            || record.export_policy.as_ref() != prepared_policy
+        {
+            return false;
+        }
+        let input = self.update_group_classifier_input(
+            peer,
+            prepared_policy,
+            !record.negotiated_orf_recv.is_empty() || self.peer_orf_filters.contains_key(&peer),
+            false,
+            Some(record),
+        );
+        self.no_policy_group_key(peer, input, false)
+            .is_some_and(|mut key| {
+                // The prepared chain was compared above, including its content if
+                // the historical intern entry has since been reclaimed.
+                key.chain = expected.chain;
+                &key == expected
+            })
+    }
+
+    pub(in crate::manager) fn registration_matches_first_group(
+        &self,
+        peer: PeerId,
+        gid: usize,
+    ) -> bool {
+        let Some(key) = self
+            .live_sessions
+            .get(&peer)
+            .and_then(|sessions| sessions.last())
+            .and_then(|record| self.pending_registration_key(peer, record))
+        else {
+            return false;
+        };
+        self.update_groups.group_key(gid) == Some(&key)
+    }
+
+    /// Only plain registrations may start a private build.
+    pub(in crate::manager) fn prospective_first_group(
+        &mut self,
+        peer: PeerId,
+        expected_gid: Option<usize>,
+    ) -> Option<(
+        usize,
+        u64,
+        tokio::sync::mpsc::Sender<crate::update::OutboundRouteUpdate>,
+    )> {
+        use rustbgpd_wire::{Afi, Safi};
+
+        let record = self.live_sessions.get(&peer)?.last()?;
+        if record.local_role.is_some()
+            || record.rs_control_asn.is_some()
+            || record.per_client_best
+            || record.sendable_families.is_empty()
+            || record.sendable_families.iter().any(|&family| {
+                !matches!(family, (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast))
+                    || self.selection_deferral.as_ref().is_some_and(|state| state.may_hold_family(family))
+            })
+            // With a local RR, export to a non-client depends on each source's
+            // current client status, which can change without a Loc-RIB write.
+            || (self.cluster_id.is_some() && !record.is_ebgp && !record.route_reflector_client)
+        {
+            return None;
+        }
+        let key = self.pending_registration_key(peer, record)?;
+        let session_id = record.session_id;
+        let sender = record.outbound_tx.clone();
+        let gid = match expected_gid {
+            Some(id) if self.update_groups.group_key(id) == Some(&key) => id,
+            Some(_) => return None,
+            None => self.update_groups.group_for(key),
+        };
+        Some((gid, session_id, sender))
+    }
+
+    /// Take the pending session's eligible profile. The segmented table grows
+    /// as rows stage, avoiding a Loc-RIB-sized reservation at admission.
+    pub(in crate::manager) fn first_group_table(&self, peer: PeerId, gid: usize) -> GroupRibOut {
+        let record = self.live_sessions[&peer]
+            .last()
+            .expect("registration just classified");
+        let key = self
+            .update_groups
+            .group_key(gid)
+            .expect("registration just classified");
+        GroupRibOut::new(
+            None,
+            key.target_is_ebgp,
+            key.interpret_rfc1997,
+            key.target_is_rr_client,
+            None,
+            record.sendable_families.clone(),
+            record.negotiated_llgr_families.clone(),
+            false,
+            0,
+        )
+    }
+
+    /// A table installed by an intervening join or policy preparation wins.
+    /// Return the losing table to its owner for bounded retirement.
+    pub(in crate::manager) fn publish_first_group(
+        &mut self,
+        gid: usize,
+        mut table: GroupRibOut,
+    ) -> Option<GroupRibOut> {
+        if self.group_ribs.contains_key(&gid) {
+            return Some(table);
+        }
+        table.evpn_table_stamp = self.next_evpn_table_stamp().unwrap_or(0);
+        self.group_ribs.insert(gid, table);
+        None
+    }
+
     /// Build the group's staged table when it does not exist yet — the
     /// join-time build pass (one shared staging walk, deltas discarded:
     /// correct only while the group is memberless). `peer` is the
     /// exemplar whose group-uniform staging inputs seed the profile.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the ordered family staging and its readiness checkpoints share one group build"
+    )]
     pub(in crate::manager) fn ensure_group_table(&mut self, gid: usize, peer: PeerId) {
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || crate::manager::replacement_readiness_checkpoint(&readiness, false);
@@ -641,6 +836,9 @@ impl RibManager {
             );
             self.replacement_checkpoint(true);
             group.owns_evpn = self.planned_group_owns_evpn(gid);
+            if self.paced_policy_destination == Some(gid) {
+                group.prepare_optional_retirement();
+            }
             group.evpn_table_stamp = self.next_evpn_table_stamp().unwrap_or(0);
             self.group_ribs.insert(gid, group);
             self.replacement_checkpoint(true);
@@ -656,9 +854,19 @@ impl RibManager {
             // Deltas of the build passes are discarded: there are no
             // members yet, and the joining member replays the whole
             // table anyway.
+            #[cfg(test)]
+            let last = self
+                .cold_build_last_prefix
+                .and_then(|prefix| prefixes.take(&prefix));
             let mut staged = self.stage_group_prefixes(gid, &prefixes, &mut memo);
             staged.retire_with(&mut |force| self.replacement_checkpoint(force));
             drop(staged);
+            #[cfg(test)]
+            if let Some(last) = last {
+                let mut final_row =
+                    self.stage_group_prefixes(gid, &HashSet::from([last]), &mut memo);
+                final_row.retire_with(&mut |force| self.replacement_checkpoint(force));
+            }
             self.replacement_checkpoint(true);
             if self
                 .group_ribs
@@ -744,6 +952,14 @@ impl RibManager {
             let (len, slots, capacity) = group.table.bench_unicast_storage_shape();
             self.replacement_storage_shape("group_before_shrink", len, capacity, slots);
         }
+        if self.prepared_destination == Some(gid)
+            && self
+                .group_ribs
+                .get(&gid)
+                .is_some_and(|group| group.members.is_empty())
+        {
+            self.adopt_prepared_destination(gid);
+        }
         if let Some(group) = self.group_ribs.get_mut(&gid) {
             if group.members.is_empty() {
                 super::super::replacement_readiness_checkpoint(&readiness, true);
@@ -751,6 +967,9 @@ impl RibManager {
                 super::super::replacement_readiness_checkpoint(&readiness, true);
             }
             group.members.insert(peer);
+            if self.paced_policy_destination == Some(gid) {
+                self.paced_policy_destination = None;
+            }
             group.recompute_vpn_member_counts(peer, filter.as_ref(), &mut || {
                 super::super::replacement_readiness_checkpoint(&readiness, false);
             });

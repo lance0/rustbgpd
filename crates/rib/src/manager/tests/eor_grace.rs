@@ -37,7 +37,7 @@ fn host(octet: u8) -> Prefix {
     Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, octet), 32))
 }
 
-fn local_route(octet: u8) -> Route {
+pub(super) fn local_route(octet: u8) -> Route {
     let mut route = make_route(
         Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, octet), 32),
         Ipv4Addr::UNSPECIFIED,
@@ -54,7 +54,7 @@ fn local_route(octet: u8) -> Route {
     route
 }
 
-fn grace(peers: &[PeerId]) -> EorGraceConfig {
+pub(super) fn grace(peers: &[PeerId]) -> EorGraceConfig {
     let start = tokio::time::Instant::now();
     EorGraceConfig {
         peers: peers
