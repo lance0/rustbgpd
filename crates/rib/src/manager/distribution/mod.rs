@@ -8427,7 +8427,7 @@ impl RibManager {
         // The ingest-stall fault injection must see every message on its
         // own receive; coalescing would bypass the stall.
         if self.test_ingest_stall.is_some()
-            || self.expiry_cutoff_reached()
+            || self.primary_read_ahead_cutoff_reached()
             || !self.pending_route_batches.is_empty()
             || window.messages >= limits.messages
             || window.routes >= limits.routes
@@ -8452,7 +8452,7 @@ impl RibManager {
             .primary_lookahead
             .take()
             .expect("lookahead admitted above");
-        self.expiry_cutoffs.charge();
+        self.charge_primary_admission();
         self.handle_update(update);
         // A stale-session message is dropped without a batch: the window
         // settles now and the next queued message waits for the next turn.

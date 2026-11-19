@@ -570,7 +570,7 @@ impl RibManager {
         let mut tags = None;
         let mut peers = vec![leader];
         for _ in 0..queued {
-            if self.expiry_cutoff_reached() {
+            if self.primary_read_ahead_cutoff_reached() {
                 break;
             }
             if self.primary_lookahead.is_none() {
@@ -612,7 +612,7 @@ impl RibManager {
                 .primary_lookahead
                 .take()
                 .expect("refresh admitted above");
-            self.expiry_cutoffs.charge();
+            self.charge_primary_admission();
             self.advance_route_pages_for_update(&update);
             let RibUpdate::RouteRefreshRequest {
                 peer,

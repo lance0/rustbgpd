@@ -1259,6 +1259,9 @@ pub struct RibManager {
     /// extend past an exhausted cutoff. Sustained ingress therefore cannot
     /// postpone any of these deadlines indefinitely.
     expiry_cutoffs: ExpiryCutoffs,
+    /// Primary messages still ahead of a prepared first group's commit.
+    /// An exhausted frontier keeps later admissions queued until publication.
+    first_group_commit_remaining: Option<usize>,
     /// Process-local mutation versions bound into opaque route-page tokens.
     /// A successful continuation must match the requested scope's current
     /// version; no server-side snapshots are retained.
@@ -3185,6 +3188,7 @@ impl RibManager {
             distribution_window: distribution::DistributionWindow::default(),
             distribution_window_limits: distribution::DistributionWindowLimits::default(),
             expiry_cutoffs: ExpiryCutoffs::default(),
+            first_group_commit_remaining: None,
             primary_lookahead: None,
             orr_rebuild_owed_updates: 0,
             route_page_table_version: Some(initial_route_page_version()),
@@ -4778,6 +4782,9 @@ impl RibManager {
     /// Probe one FIFO head at saturation. Mutations and compatible reads can
     /// still proceed while only the legacy read buffer is full.
     fn can_receive_release_primary(&mut self) -> bool {
+        if self.first_group_commit_remaining == Some(0) {
+            return false;
+        }
         if self.release_primary_has_room() {
             return true;
         }
@@ -4790,31 +4797,68 @@ impl RibManager {
     }
 
     fn admit_primary(&mut self, update: RibUpdate) -> Option<RibUpdate> {
-        if !self.release_primary_has_room() && self.release_fences_read(&update) {
+        if self.first_group_commit_remaining == Some(0)
+            || (!self.release_primary_has_room() && self.release_fences_read(&update))
+        {
             self.primary_lookahead = Some(update);
             return None;
         }
+        self.charge_primary_admission();
         Some(update)
     }
 
     /// The next queued primary update, the held lookahead first.
     fn try_recv_primary(&mut self) -> Option<RibUpdate> {
-        if self.release_delivery_pending() {
+        if self.release_delivery_pending() || self.first_group_commit_remaining == Some(0) {
             return None;
         }
         let update = self
             .primary_lookahead
             .take()
             .or_else(|| self.rx.try_recv().ok())?;
-        let update = self.admit_primary(update)?;
-        self.expiry_cutoffs.charge();
-        Some(update)
+        self.admit_primary(update)
     }
 
-    /// A due timer's admission cutoff is exhausted: coalescing paths must
-    /// not admit further primary updates ahead of its expiry.
-    fn expiry_cutoff_reached(&self) -> bool {
-        self.expiry_cutoffs.any_exhausted()
+    /// Coalescers admit from lookahead directly. Like ordinary receives,
+    /// they charge the message once, independently of its later route chunks.
+    fn charge_primary_admission(&mut self) {
+        self.expiry_cutoffs.charge();
+        if let Some(remaining) = &mut self.first_group_commit_remaining {
+            *remaining = remaining
+                .checked_sub(1)
+                .expect("primary admission past commit frontier");
+        }
+    }
+
+    /// A coalescer must leave the next message for expiry or commit.
+    fn primary_read_ahead_cutoff_reached(&self) -> bool {
+        self.expiry_cutoffs.any_exhausted() || self.first_group_commit_remaining == Some(0)
+    }
+
+    /// Place commit after exactly the currently queued primary messages,
+    /// including a previously peeked head. Later sends cannot extend it.
+    pub(super) fn capture_first_group_commit_frontier(&mut self) {
+        if self.first_group_commit_remaining.is_none() {
+            self.first_group_commit_remaining = Some(self.primary_backlog());
+        }
+    }
+
+    /// Place commit immediately before a noncommuting head that the owner
+    /// has peeked but has not admitted. Already admitted route chunks finish.
+    pub(super) fn seal_first_group_commit_frontier(&mut self) {
+        self.first_group_commit_remaining = Some(0);
+    }
+
+    pub(super) fn first_group_commit_frontier_reached(&self) -> bool {
+        self.first_group_commit_remaining == Some(0)
+            && self.pending_route_batches.is_empty()
+            && self.distribution_window.started.is_none()
+            && self.distribution_window.messages == 0
+            && self.pending_exact_export_withdrawals.is_empty()
+    }
+
+    pub(super) fn clear_first_group_commit_frontier(&mut self) {
+        self.first_group_commit_remaining = None;
     }
 
     /// The latest deadline a due `timer` may expire once its cutoff drains:
@@ -7511,7 +7555,8 @@ impl RibManager {
         if self.orr_rebuild_owed_updates == 0 {
             return;
         }
-        if self.orr_rebuild_owed_updates < ORR_REBUILD_COALESCE_MAX && !self.expiry_cutoff_reached()
+        if self.orr_rebuild_owed_updates < ORR_REBUILD_COALESCE_MAX
+            && !self.primary_read_ahead_cutoff_reached()
         {
             if self.primary_lookahead.is_none() {
                 self.primary_lookahead = self.rx.try_recv().ok();

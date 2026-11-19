@@ -10597,6 +10597,26 @@ async fn queued_refresh_stops_at_stale_session_and_preserves_page_advancement() 
 }
 
 #[tokio::test]
+async fn first_group_commit_frontier_stops_refresh_cohort_before_postcapture_member() {
+    let (mut manager, peers, mut receivers) = direct_clean_transition_manager(3, 2, None);
+    let (tx, rx) = mpsc::channel(4);
+    manager.rx = rx;
+    queue_refresh(&tx, peers[0], 0, Afi::Ipv4);
+    queue_refresh(&tx, peers[1], 0, Afi::Ipv4);
+    manager.capture_first_group_commit_frontier();
+    let after = queue_refresh(&tx, peers[2], 0, Afi::Ipv4);
+    assert!(manager.drain_ready_updates().await);
+    assert!(manager.first_group_commit_frontier_reached());
+    assert_eq!(manager.primary_backlog(), 1);
+    assert!(after.load(Ordering::Acquire));
+    assert!(receivers[2].try_recv().is_err());
+    manager.clear_first_group_commit_frontier();
+    assert!(manager.drain_ready_updates().await);
+    assert!(!after.load(Ordering::Acquire));
+    assert!(receivers[2].try_recv().is_ok());
+}
+
+#[tokio::test]
 async fn queued_refresh_respects_cohort_cap_and_conditional_cutoff() {
     for (cutoff, admitted) in [(None, 64), (Some(2), 2)] {
         let (mut manager, peers, mut receivers) = direct_clean_transition_manager(66, 2, None);
