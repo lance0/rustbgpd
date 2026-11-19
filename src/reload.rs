@@ -2253,17 +2253,19 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
     // a restart-required edit.
     // Listener settings belong to the sockets captured at startup. Compare
     // against that authority if the reconstructed runtime snapshot differs.
-    let mut live_global = std::borrow::Cow::Borrowed(&current.global);
-    if live_global.telemetry.grpc_tcp.as_ref() != live_grpc_tcp {
-        live_global.to_mut().telemetry.grpc_tcp = live_grpc_tcp.cloned();
+    {
+        let mut live_global = std::borrow::Cow::Borrowed(&current.global);
+        if live_global.telemetry.grpc_tcp.as_ref() != live_grpc_tcp {
+            live_global.to_mut().telemetry.grpc_tcp = live_grpc_tcp.cloned();
+        }
+        if live_global.telemetry.grpc_uds.as_ref() != live_grpc_uds {
+            live_global.to_mut().telemetry.grpc_uds = live_grpc_uds.cloned();
+        }
+        progress.report_restart_changes(
+            "[global]",
+            &config::global_restart_required_changes(&live_global, &new_config.global),
+        );
     }
-    if live_global.telemetry.grpc_uds.as_ref() != live_grpc_uds {
-        live_global.to_mut().telemetry.grpc_uds = live_grpc_uds.cloned();
-    }
-    progress.report_restart_changes(
-        "[global]",
-        &config::global_restart_required_changes(&live_global, &new_config.global),
-    );
     progress.report_restart_changes(
         "[rpki]",
         &config::rpki_restart_required_changes(current.rpki.as_ref(), new_config.rpki.as_ref()),
@@ -9428,7 +9430,10 @@ hold_time = 90
         let published = read_last_sighup_via_rpc(&state).await.unwrap();
         assert_eq!(published, noop_record);
         assert_eq!(published.outcome, "complete");
-        assert!(published.pending_restart_required_fields.is_empty());
+        assert_eq!(
+            published.pending_restart_required_fields,
+            Vec::<String>::new()
+        );
         assert_eq!(published.applied_count, 0);
         assert_eq!(published.unapplied_count, 0);
         std::fs::remove_file(path).unwrap();
