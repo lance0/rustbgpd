@@ -275,7 +275,19 @@ HARNESS_MEMBER_FULL_PASS = "                    .with_member_full_pass()\n"
 MEMBER_FULL_PASS_BUILDER = "pub fn with_member_full_pass("
 
 
-PEER_ID_EXPORT = "pub use peer_id::PeerId;"
+PEER_ID_EXPORTS = (
+    "pub use peer_id::PeerId;",
+    "pub use peer_id::{PeerEndpoint, PeerId};",
+    "pub use peer_id::{PeerEndpoint, PeerId, PeerScope};",
+)
+# Keep literals opaque so their braces and semicolons cannot start a root item.
+RUST_TOKEN = re.compile(
+    r'//[^\n]*|/\*|(?:br|cr|r)(?P<fence>#*)".*?"(?P=fence)|"(?:\\.|[^"\\])*"'
+    r"|'(?:\\(?:u\{[\w]+\}|x[\da-fA-F]{2}|.)|[^'\\\n])'|\w+|\S",
+    re.DOTALL,
+)
+BLOCK_COMMENT_DELIMITER = re.compile(r"/\*|\*/")
+DOC_OR_LINT_ATTRIBUTE = re.compile(r"#\s*\[\s*(?:doc|allow|warn|deny|forbid|expect)\s*(?=[(=\]])")
 # Outbound envelopes that carry a group's shared withdrawals beside their own.
 SHARED_WITHDRAW_FIELD = "    pub shared_withdraw: "
 HARNESS_SHARED_WITHDRAW_ROWS = (
@@ -295,6 +307,50 @@ HARNESS_SUPERSEDES = re.compile(r"^[ \t]*supersedes: None,\n", re.M)
 PEER_ID_IMPORT = re.compile(r"^[ \t]*use rustbgpd_rib::PeerId;\n", re.M)
 PEER_ID_FROM_ADDR = "PeerId::from_addr("
 PEER_ID_ADDR = "peer.addr()"
+
+
+def exports_peer_id(lib: str) -> bool:
+    """Accept an unconditional root export, or a control predating the peer_id module."""
+    if "PeerId" not in lib and "peer_id" not in lib:
+        return False
+    index = depth = 0
+    item_start = True
+    attribute = None
+    previous = ""
+    while token := RUST_TOKEN.search(lib, index):
+        value = token[0]
+        index = token.end()
+        if value.startswith("//"):
+            continue
+        if value == "/*":
+            nesting = 1
+            for delimiter in BLOCK_COMMENT_DELIMITER.finditer(lib, index):
+                nesting += 1 if delimiter[0] == "/*" else -1
+                if nesting == 0:
+                    index = delimiter.end()
+                    break
+            else:
+                raise InvalidReceipt("unterminated block comment in RIB crate root")
+            continue
+        if item_start and value == "pub" and lib.startswith(PEER_ID_EXPORTS, token.start()):
+            return True
+        if item_start and value == "#" and DOC_OR_LINT_ATTRIBUTE.match(lib, token.start()):
+            attribute = "outer"
+        elif depth == 0 and previous == "#" and value == "!":
+            attribute = "inner"
+        if attribute == "inner" and depth == 1 and value in ("cfg", "cfg_attr"):
+            break
+        if value in ("{", "[", "("):
+            depth += 1
+        elif value in ("}", "]", ")"):
+            depth -= 1
+            require(depth >= 0, "unmatched delimiter in RIB crate root")
+        item_start = depth == 0 and value in (";", "}")
+        if attribute and depth == 0 and value == "]":
+            item_start = True
+            attribute = None
+        previous = value
+    raise InvalidReceipt("unexpected PeerId export in the control")
 
 
 def unwrap_peer_ids(text: str) -> str:
@@ -374,8 +430,7 @@ def derive_control_api(tree: Path) -> None:
         text, main = HARNESS_SUPERSEDES.sub("", text), HARNESS_SUPERSEDES.sub("", main)
     changes = [(harness, text), (entrypoint, main)]
     lib = (tree / "crates/rib/src/lib.rs").read_text(encoding="utf-8")
-    if PEER_ID_EXPORT not in lib:
-        require("PeerId" not in lib, "unexpected PeerId export in the control")
+    if not exports_peer_id(lib):
         changes = [(path, unwrap_peer_ids(source)) for path, source in changes]
     # Validate every file before changing any.
     for path, source in changes:
