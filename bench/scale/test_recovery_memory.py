@@ -453,14 +453,11 @@ class RecoveryReceiptTests(unittest.TestCase):
         return self.root
 
     def control_api_tree(
-        self, swaps: bool, hook: bool = True, peer_id: bool = True
+        self, swaps: bool, hook: bool = True, lib_source: str = "pub use peer_id::PeerId;"
     ) -> tuple[Path, Path]:
         lib = self.root / "crates/rib/src/lib.rs"
         lib.parent.mkdir(parents=True, exist_ok=True)
-        lib.write_text(
-            "pub mod peer_id;\n" + receipt.PEER_ID_EXPORT + "\n" if peer_id else "pub mod route;\n",
-            encoding="utf-8",
-        )
+        lib.write_text(lib_source, encoding="utf-8")
         manager = self.root / "crates/rib/src/manager/mod.rs"
         manager.parent.mkdir(parents=True, exist_ok=True)
         builder = "    " + receipt.MEMBER_FULL_PASS_BUILDER + "mut self) -> Self {}\n"
@@ -517,14 +514,41 @@ class RecoveryReceiptTests(unittest.TestCase):
         return entrypoint
 
     def test_control_api_keeps_peer_ids_for_a_control_that_has_them(self) -> None:
-        tree, harness = self.control_api_tree(swaps=True)
-        entrypoint = self.peer_id_harness(harness, self.PEER_ID_MAIN)
-        original = (harness.read_bytes(), entrypoint.read_bytes())
-        receipt.derive_control_api(tree)
-        self.assertEqual((harness.read_bytes(), entrypoint.read_bytes()), original)
+        current = Path(__file__).resolve().parents[2] / "crates/rib/src/lib.rs"
+        for lib_source in (
+            current.read_text(encoding="utf-8"),
+            "pub use peer_id::PeerId;",
+            "pub use peer_id::{PeerEndpoint, PeerId};",
+            "pub use peer_id::{PeerEndpoint, PeerId, PeerScope};",
+        ):
+            with self.subTest(lib=lib_source if "\n" not in lib_source else "current"):
+                tree, harness = self.control_api_tree(swaps=True, lib_source=lib_source)
+                entrypoint = self.peer_id_harness(harness, self.PEER_ID_MAIN)
+                original = (harness.read_bytes(), entrypoint.read_bytes())
+                receipt.derive_control_api(tree)
+                self.assertEqual((harness.read_bytes(), entrypoint.read_bytes()), original)
+
+    def test_control_api_refuses_a_mention_without_a_peer_id_export(self) -> None:
+        for mention in (
+            "// pub use peer_id::PeerId;",
+            "/*\npub use peer_id::{PeerEndpoint, PeerId, PeerScope};\n*/",
+            "#[cfg(test)]\npub use peer_id::{PeerEndpoint, PeerId, PeerScope};",
+            "/* outer /* inner */\npub use peer_id::PeerId;\n*/",
+            'const EXAMPLE: &str = r#";\npub use peer_id::PeerId;\n"#;',
+            "mod nested {\npub use peer_id::PeerId;\n}",
+            "use peer_id::{PeerEndpoint, PeerId, PeerScope};",
+            "pub use peer_id::PeerId as LegacyId;",
+        ):
+            with self.subTest(mention=mention):
+                tree, harness = self.control_api_tree(swaps=False, hook=False, lib_source=mention)
+                entrypoint = self.peer_id_harness(harness, self.PEER_ID_MAIN)
+                original = (harness.read_bytes(), entrypoint.read_bytes())
+                with self.assertRaisesRegex(receipt.InvalidReceipt, "unexpected PeerId export"):
+                    receipt.derive_control_api(tree)
+                self.assertEqual((harness.read_bytes(), entrypoint.read_bytes()), original)
 
     def test_control_api_maps_peer_ids_to_addresses_before_peer_id(self) -> None:
-        tree, harness = self.control_api_tree(swaps=True, peer_id=False)
+        tree, harness = self.control_api_tree(swaps=True, lib_source="pub mod route;")
         original = harness.read_text(encoding="utf-8")
         entrypoint = self.peer_id_harness(harness, self.PEER_ID_MAIN)
         receipt.derive_control_api(tree)
@@ -532,7 +556,7 @@ class RecoveryReceiptTests(unittest.TestCase):
         self.assertEqual(harness.read_text(encoding="utf-8"), original)
 
     def test_current_memory_harness_maps_to_a_historical_control(self) -> None:
-        tree, harness = self.control_api_tree(swaps=False, hook=False, peer_id=False)
+        tree, harness = self.control_api_tree(swaps=False, hook=False, lib_source="pub mod route;")
         source = Path(__file__).resolve().parent / "rrharness/src"
         for name in ("main.rs", "recovery_memory.rs"):
             (harness.parent / name).write_bytes((source / name).read_bytes())
@@ -555,7 +579,7 @@ class RecoveryReceiptTests(unittest.TestCase):
             self.PEER_ID_MAIN + "fn f() { PeerId::from_addr(peer; }\n",
         ):
             with self.subTest(main=main):
-                tree, harness = self.control_api_tree(swaps=True, peer_id=False)
+                tree, harness = self.control_api_tree(swaps=True, lib_source="pub mod route;")
                 entrypoint = self.peer_id_harness(harness, main)
                 original = (harness.read_bytes(), entrypoint.read_bytes())
                 with self.assertRaises(receipt.InvalidReceipt):

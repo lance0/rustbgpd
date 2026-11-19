@@ -275,7 +275,17 @@ HARNESS_MEMBER_FULL_PASS = "                    .with_member_full_pass()\n"
 MEMBER_FULL_PASS_BUILDER = "pub fn with_member_full_pass("
 
 
-PEER_ID_EXPORT = "pub use peer_id::PeerId;"
+PEER_ID_EXPORTS = {
+    "pub use peer_id::PeerId;",
+    "pub use peer_id::{PeerEndpoint, PeerId};",
+    "pub use peer_id::{PeerEndpoint, PeerId, PeerScope};",
+}
+# The RIB crate root declares modules, constants and re-exports before PeerId.
+# Consuming only complete items keeps quoted, nested and gated uses out.
+RIB_ROOT_ITEM = re.compile(
+    r'(?:#!\[(?:deny|warn)\([\w:]+\)\]\s*|#\[cfg\((?:test|feature = "[\w-]+")\)\]\s*)*'
+    r'(?:(?:pub )?mod \w+|pub const [\w: =(),]+|pub use [\w:]+(?:\{[\w,\s]+\})?)'
+)
 # Outbound envelopes that carry a group's shared withdrawals beside their own.
 SHARED_WITHDRAW_FIELD = "    pub shared_withdraw: "
 HARNESS_SHARED_WITHDRAW_ROWS = (
@@ -295,6 +305,19 @@ HARNESS_SUPERSEDES = re.compile(r"^[ \t]*supersedes: None,\n", re.M)
 PEER_ID_IMPORT = re.compile(r"^[ \t]*use rustbgpd_rib::PeerId;\n", re.M)
 PEER_ID_FROM_ADDR = "PeerId::from_addr("
 PEER_ID_ADDR = "peer.addr()"
+
+
+def exports_peer_id(lib: str) -> bool:
+    if "PeerId" not in lib:
+        return False
+    code = re.sub(r"(?m)^[ \t]*//[^\n]*", "", lib)
+    for item in code.split(";")[:-1]:
+        item = item.strip()
+        if item + ";" in PEER_ID_EXPORTS:
+            return True
+        if not RIB_ROOT_ITEM.fullmatch(item):
+            break
+    raise InvalidReceipt("unexpected PeerId export in the control")
 
 
 def unwrap_peer_ids(text: str) -> str:
@@ -374,8 +397,7 @@ def derive_control_api(tree: Path) -> None:
         text, main = HARNESS_SUPERSEDES.sub("", text), HARNESS_SUPERSEDES.sub("", main)
     changes = [(harness, text), (entrypoint, main)]
     lib = (tree / "crates/rib/src/lib.rs").read_text(encoding="utf-8")
-    if PEER_ID_EXPORT not in lib:
-        require("PeerId" not in lib, "unexpected PeerId export in the control")
+    if not exports_peer_id(lib):
         changes = [(path, unwrap_peer_ids(source)) for path, source in changes]
     # Validate every file before changing any.
     for path, source in changes:
