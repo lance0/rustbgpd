@@ -158,7 +158,7 @@ impl OptionalInventoryRetirement {
 
 /// Charge each owned row destructor and the backing allocation separately.
 /// Plain buffers (next hops, RS ASNs, encoded lengths) need just the release.
-fn retire_inventory_vec<T>(items: &mut Vec<T>, budget: &mut usize) -> bool {
+pub(super) fn retire_inventory_vec<T>(items: &mut Vec<T>, budget: &mut usize) -> bool {
     if std::mem::needs_drop::<T>() {
         let count = items.len().min(*budget);
         items.truncate(items.len() - count);
@@ -1247,12 +1247,13 @@ impl RibManager {
     /// cohort transition ([`crate::update::RibUpdate::ReplacePeerExportPoliciesAuthoritatively`]):
     /// every batch member of `source` moves to the current staged
     /// `destination` (same staging profile except the chain — validated
-    /// by the caller). Returns `None` when the delta carries an RFC 7947
+    /// by the caller). Refuses when the delta carries an RFC 7947
     /// control-form community for one of the cohort's rs-control ASNs on
     /// either side of policy — per-target suppress/prepend/scrub cannot
     /// ride a shared payload, so the caller degrades the cohort to the
     /// ordinary per-member machinery (the clean transition's
-    /// tagged-inventory posture).
+    /// tagged-inventory posture). A speculative single-best refusal hands
+    /// any partial inventory to the newly created table's retirement owner.
     ///
     /// The shared announce carries each destination entry whose wire
     /// form differs from the source entry at the same key
@@ -1275,9 +1276,13 @@ impl RibManager {
         source: &GroupRibOut,
         destination: &GroupRibOut,
         rs_asns: &[u32],
+        speculative: bool,
         checkpoint: &mut impl FnMut(bool),
-    ) -> Option<BatchedTransitionInventory> {
+    ) -> Result<BatchedTransitionInventory, Option<Box<super::RejectedBatchedInventory>>> {
         use crate::manager::distribution::rs_control::rs_control_route_tagged;
+        debug_assert!(
+            !speculative || (destination.members.is_empty() && !destination.per_client_best)
+        );
         // RFC 9234 OTC residue on either side means blocked staged
         // winners (or lane runner-ups) whose per-member diagnostics and
         // withdraw conversions belong to the pre-commit backstop this
@@ -1285,7 +1290,7 @@ impl RibManager {
         // A role-bearing fleet with no OTC-attributed routes (the
         // rendered route-server default) carries no residue and shares.
         if !source.otc_blocked.is_empty() || !destination.otc_blocked.is_empty() {
-            return None;
+            return Err(None);
         }
         let attrs_tagged = |attrs: (&[u32], &[LargeCommunity])| {
             rs_asns
@@ -1440,6 +1445,17 @@ impl RibManager {
             }
         }
         if rejected {
+            if speculative {
+                // Every partial permit and supplement belongs to the source
+                // of a destination slab row. Its exclusive retirement owns
+                // these allocations before any other table write can intervene.
+                return Err(Some(Box::new(super::RejectedBatchedInventory::new(
+                    announce,
+                    next_hop_override,
+                    supplements,
+                    counters,
+                ))));
+            }
             checkpoint(true);
             crate::manager::retire_vec(&mut announce, &mut || checkpoint(false));
             crate::manager::retire_vec(&mut next_hop_override, &mut || checkpoint(false));
@@ -1455,7 +1471,7 @@ impl RibManager {
             counters.retire_with(checkpoint);
             drop(counters);
             checkpoint(true);
-            return None;
+            return Err(None);
         }
         checkpoint(true);
         let mut withdraw: Vec<(Prefix, u32)> = Vec::with_capacity(source.table.len());
@@ -1486,7 +1502,7 @@ impl RibManager {
         checkpoint(true);
         let next_hop_override = next_hop_override.into();
         checkpoint(true);
-        Some(BatchedTransitionInventory {
+        Ok(BatchedTransitionInventory {
             announce,
             next_hop_override,
             withdraw,

@@ -5,7 +5,9 @@ use std::collections::BTreeSet;
 use rustbgpd_wire::Prefix;
 use tokio::sync::mpsc;
 
-use super::update_groups::{GroupRibOut, OptionalGroupRetirement, OptionalInventoryRetirement};
+use super::update_groups::{
+    GroupRibOut, OptionalGroupRetirement, OptionalInventoryRetirement, RejectedBatchedInventory,
+};
 use super::{OutboundRouteUpdate, PeerId, RibManager};
 use crate::loc_rib::{REGISTRATION_PAGE_SIZE, RegistrationScanStatus};
 use crate::update::RibUpdate;
@@ -216,7 +218,7 @@ impl RibManager {
             && self.first_group_build.is_none()
             && !self.optional_destination_retirement_active()
         {
-            self.retire_memberless_destination(prepared);
+            self.retire_memberless_destination(prepared, None);
         }
         false
     }
@@ -278,11 +280,32 @@ impl RibManager {
         {
             return false;
         }
-        self.retire_memberless_destination(gid);
+        self.retire_memberless_destination(gid, None);
         true
     }
 
-    fn retire_memberless_destination(&mut self, gid: usize) {
+    #[cfg(test)]
+    pub(super) fn refused_inventory_rows_remaining(&self) -> Option<usize> {
+        self.optional_destination_retirement
+            .as_ref()?
+            .group
+            .refused_inventory_rows_remaining()
+    }
+
+    pub(super) fn retire_refused_authoritative_destination(
+        &mut self,
+        gid: usize,
+        rejected: Option<Box<RejectedBatchedInventory>>,
+    ) {
+        debug_assert_eq!(self.paced_policy_destination, Some(gid));
+        self.retire_memberless_destination(gid, rejected);
+    }
+
+    fn retire_memberless_destination(
+        &mut self,
+        gid: usize,
+        rejected: Option<Box<RejectedBatchedInventory>>,
+    ) {
         debug_assert!(
             self.first_group_build.is_none() && !self.optional_destination_retirement_active()
         );
@@ -300,8 +323,14 @@ impl RibManager {
         self.paced_policy_destination.take_if(|paced| *paced == gid);
         self.optional_destination_retirement = Some(Box::new(OptionalDestinationRetirement {
             gid,
-            group: OptionalGroupRetirement::new(table),
-            interned_policy: self.take_optional_registry_chain(gid),
+            group: OptionalGroupRetirement::with_refusal(table, rejected),
+            // A batch can create another live owner of this chain before
+            // returning. Its final registry reconciliation decides exclusivity.
+            interned_policy: if self.update_groups.reclamation_deferred {
+                None
+            } else {
+                self.take_optional_registry_chain(gid)
+            },
             inventory,
             withdrawn,
         }));

@@ -53,8 +53,10 @@ mod first_group_retirement;
 mod membership;
 mod mutation_target;
 mod optional_retirement;
-pub(in crate::manager) use optional_retirement::OptionalGroupRetirement;
 use optional_retirement::OtcBlocked;
+pub(in crate::manager) use optional_retirement::{
+    OptionalGroupRetirement, RejectedBatchedInventory,
+};
 mod payload;
 pub(in crate::manager) mod release_fallback;
 pub(in crate::manager) use release_fallback::{ReleaseFallback, RsFallback};
