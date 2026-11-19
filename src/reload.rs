@@ -2150,16 +2150,15 @@ async fn reload_config_recorded(
     let config_path = std::path::Path::new(config_path);
     let source = std::fs::read_to_string(config_path).unwrap();
     write_tier_test_config(config_path, &source);
-    let prior = AcceptedConfigSnapshot::from_config_for_test(current.clone());
     let desired = Arc::new(
         AcceptedConfigSnapshot::load_for_reload(
             config_path,
-            &prior,
+            &AcceptedConfigSnapshot::from_config_for_test(current.clone()),
             &current.policy.dataset_bindings,
         )
         .expect("test reload config must parse"),
     );
-    reload_config_with_tcp_ao_recorded(
+    Box::pin(reload_config_with_tcp_ao_recorded(
         SighupReloadPlan {
             baseline_runtime: current.clone(),
             desired,
@@ -2175,7 +2174,7 @@ async fn reload_config_recorded(
         None,
         None,
         trace,
-    )
+    ))
     .await
 }
 
