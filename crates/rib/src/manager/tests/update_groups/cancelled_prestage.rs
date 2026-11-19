@@ -27,7 +27,7 @@ async fn check_founder_after_cleanup(
         for r in update.announce.iter() {
             assert_ne!(update.announce_source_exclusion, Some(r.peer));
             assert_eq!(r.peer, peer_v4(OVERLAP_SOURCE));
-            assert!(r.communities().is_empty());
+            assert_eq!(r.communities(), [] as [u32; 0]);
             assert!(observed.insert(r.prefix, r.local_pref()).is_none());
         }
         if !update.end_of_rib.is_empty() {

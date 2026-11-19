@@ -66,13 +66,8 @@ async fn ordinary_adopter_retires_the_acknowledged_inventory_and_unlocks_cold_re
     distribute_direct_route(&mut manager, OVERLAP_SOURCE, logged);
     expected.insert(Prefix::V4(logged), 100);
     for gid in [source, destination] {
-        assert!(
-            manager.group_ribs[&gid]
-                .inventory_log
-                .as_ref()
-                .unwrap()
-                .contains_key(&(Prefix::V4(logged), 0))
-        );
+        let log = manager.group_ribs[&gid].inventory_log.as_ref().unwrap();
+        assert!(log.contains_key(&(Prefix::V4(logged), 0)));
     }
     for witness in &mut witnesses {
         while witness.try_recv().is_ok() {}
