@@ -723,11 +723,9 @@ pub struct RibManager {
     /// tick's resync leaves the receiver clean and wherever its owed state
     /// is dropped (a flap, a registration, a regroup).
     owed_row_evicted: HashSet<PeerId>,
-    /// Receivers whose dirty resync skipped their admitted EVPN rows during
-    /// selection deferral. Their EVPN cursor cannot cover those rows. The
-    /// resync tick owns the diff while EVPN selection is open, including
-    /// collision staging. Other families can resync whenever it is held.
-    held_evpn_rebuilds: HashSet<PeerId>,
+    /// One set per enabled private-while-grouped cursor family. The tick
+    /// owns the diff skipped by a dirty resync during selection deferral.
+    held_rebuilds: [HashSet<PeerId>; outbound_owing::OwedFamily::GROUPED_CURSORS.len()],
     /// Fixed floor of every owed set's byte cap, for tests and bench builds.
     owing_theta_floor: Option<usize>,
     /// Owed keys and whole families recorded since the last read, so the
@@ -2980,7 +2978,7 @@ impl RibManager {
             owed_rows: Default::default(),
             owed_evpn_rows: outbound_owing::OwedRows::default(),
             owed_row_evicted: HashSet::new(),
-            held_evpn_rebuilds: HashSet::new(),
+            held_rebuilds: Default::default(),
             owing_theta_floor: None,
             #[cfg(test)]
             owing_log: HashMap::new(),
@@ -4578,19 +4576,16 @@ impl RibManager {
             // This unit is where a receiver the owed-row cap evicted is
             // built; it stays marked while it stays dirty.
             let evicted = self.owed_row_evicted.remove(&last);
-            let rebuild_evpn = self.held_evpn_rebuild_due(last);
-            if rebuild_evpn {
-                self.held_evpn_rebuilds.remove(&last);
-            }
-            let recovery = evicted || rebuild_evpn;
+            let rebuilds = self.take_due_held_rebuilds(last);
+            let recovery = evicted || rebuilds.contains(&true);
             self.take_late_joins_for_resync(last);
             let built = self.distribute_changes_without_stale_flush(recovery.then_some(last));
             let still_dirty = self.dirty_peers.contains(&last);
             if evicted && still_dirty {
                 self.owed_row_evicted.insert(last);
             }
-            if rebuild_evpn && still_dirty {
-                self.held_evpn_rebuilds.insert(last);
+            if still_dirty {
+                self.record_held_rebuilds(last, rebuilds);
             }
             let ran = recovery && (!still_dirty || self.selection_partial_caught_up(last));
             self.dirty_peers.extend(withheld);

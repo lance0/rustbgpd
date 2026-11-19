@@ -82,7 +82,7 @@
 //! in its own transaction: outside a hold that resync is the exit, inside
 //! one it records a held EVPN rebuild instead.
 //!
-//! A held rebuild ([`RibManager::held_evpn_rebuilds`]) owes a diff against
+//! A held rebuild ([`RibManager::held_rebuilds`]) owes a diff against
 //! the receiver's admitted EVPN rows. Other families retain their ordinary
 //! resync and refresh behavior. Its EVPN cursor is dead. When selection
 //! stages EVPN, the tick can run its rebuild on the same terms as an evicted
@@ -352,6 +352,10 @@ impl<K: Copy + Ord> OwedRows<K> {
         let _ = dropped;
     }
 
+    fn cap(&self) -> usize {
+        2 * self.peak + OWED_ROWS_SLACK
+    }
+
     /// With more than `cap` keys held: the sequence of the newest entry
     /// that has to go for `cap` to be left. A cursor before it has more
     /// than `cap` entries after it; a cursor at or past it has not. Reads
@@ -360,6 +364,11 @@ impl<K: Copy + Ord> OwedRows<K> {
     fn over(&self, cap: usize) -> Option<u64> {
         let over = self.len().checked_sub(cap).filter(|over| *over != 0)?;
         self.order.keys().nth(over - 1).copied()
+    }
+
+    fn cutoff(&self) -> Option<(usize, u64)> {
+        let cap = self.cap();
+        self.over(cap).map(|cut| (cap, cut))
     }
 
     /// Drop the oldest entries behind every cursor until `cap` are left:
@@ -405,6 +414,29 @@ impl<K: Copy + Ord> OwedRows<K> {
         self.live.len() * 2 * (entry * 11 / 5 + entry / 4)
     }
 }
+
+/// Physical lists with readers. Inactive families reserve no per-peer slots.
+#[derive(Clone, Copy)]
+enum RowCursor {
+    Ipv4Unicast,
+    Ipv6Unicast,
+    Evpn,
+}
+
+/// Which projection can own the receiver's advertised rows when it is grouped.
+#[derive(Clone, Copy)]
+enum KeyedOwner {
+    UnicastGroup,
+    VpnGroup,
+    EvpnGroup,
+    Peer,
+}
+
+/// Minimum live position per active list, also accumulated over paged releases.
+pub(super) type CursorFloors = [Option<u64>; OwedFamily::CURSORS.len()];
+
+/// Deferred families skipped or discharged by one resync unit.
+pub(super) type HeldRebuilds = [bool; OwedFamily::GROUPED_CURSORS.len()];
 
 /// One family a peer can owe, an index into [`OwedFamily::ALL`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -503,22 +535,67 @@ impl OwedFamily {
         usize::from(self == Self::IPV6_UNICAST)
     }
 
-    /// The families owed whole as a row cursor, by cursor index: the
-    /// unicast AFIs at their AFI index, then EVPN.
-    const CURSORS: [Self; 3] = [Self::IPV4_UNICAST, Self::IPV6_UNICAST, Self::EVPN];
+    /// The seven keyed families, indexed by their existing owed-family ID.
+    /// A missing list drains a whole-family operation when its key set fills.
+    const KEYED: [(KeyedOwner, Option<RowCursor>); 7] = [
+        (KeyedOwner::UnicastGroup, Some(RowCursor::Ipv4Unicast)),
+        (KeyedOwner::UnicastGroup, Some(RowCursor::Ipv6Unicast)),
+        (KeyedOwner::Peer, None),     // IPv4 labeled
+        (KeyedOwner::Peer, None),     // IPv6 labeled
+        (KeyedOwner::VpnGroup, None), // VPNv4
+        (KeyedOwner::VpnGroup, None), // VPNv6
+        (KeyedOwner::EvpnGroup, Some(RowCursor::Evpn)),
+    ];
 
-    /// The cursor index of the EVPN family.
-    const EVPN_CURSOR: usize = 2;
-
-    /// The cursor index of a family owed whole as a row cursor.
-    fn cursor_index(self) -> Option<usize> {
-        Self::CURSORS.iter().position(|family| *family == self)
+    const fn private_while_grouped(self) -> bool {
+        let index = self.0 as usize;
+        index < Self::KEYED.len()
+            && matches!(
+                Self::KEYED[index].0,
+                KeyedOwner::Peer | KeyedOwner::EvpnGroup
+            )
     }
 
-    /// Whether the family is owed whole as a row cursor, not as one
-    /// whole-table operation.
+    /// Active families in physical slot order. Unicast slots retain their AFI index.
+    const CURSORS: [Self; 3] = Self::cursor_families(false);
+
+    /// Active cursor families that may owe private rows as group members.
+    pub(super) const GROUPED_CURSORS: [Self; 1] = Self::cursor_families(true);
+
+    const fn cursor_families<const N: usize>(grouped_only: bool) -> [Self; N] {
+        let mut families = [Self::IPV4_UNICAST; N];
+        let mut count = 0;
+        let mut i = 0;
+        while i < Self::KEYED.len() {
+            let family = Self::ALL[i];
+            if let Some(list) = Self::KEYED[i].1
+                && (!grouped_only || family.private_while_grouped())
+            {
+                if grouped_only {
+                    families[count] = family;
+                } else {
+                    families[list as usize] = family;
+                }
+                count += 1;
+            }
+            i += 1;
+        }
+        assert!(count == N);
+        families
+    }
+
+    const EVPN_CURSOR: usize = RowCursor::Evpn as usize;
+
+    fn row_cursor(self) -> Option<RowCursor> {
+        Self::KEYED.get(usize::from(self.0))?.1
+    }
+
+    fn cursor_index(self) -> Option<usize> {
+        self.row_cursor().map(|cursor| cursor as usize)
+    }
+
     pub(super) fn has_cursor(self) -> bool {
-        self.cursor_index().is_some()
+        self.row_cursor().is_some()
     }
 
     /// A `FlowSpec` family, global (SAFI 133) or VPN (SAFI 134).
@@ -608,12 +685,12 @@ pub(super) struct PeerOwing {
     whole: u16,
     /// Per cursor family ([`OwedFamily::CURSORS`]) owed whole: the
     /// [`OwedRows`] sequence drained up to.
-    cursor: [u64; 3],
+    cursor: [u64; OwedFamily::CURSORS.len()],
     /// Per cursor family: how far past `cursor` the current selection hold
     /// has read for the rows it exempts (unicast only: EVPN has none).
     /// `cursor` does not move in a hold, so the release reads the held rows
     /// again.
-    hold_cursor: [u64; 3],
+    hold_cursor: [u64; OwedFamily::CURSORS.len()],
     /// A bit per whole family (not a cursor) already drained inside the
     /// current selection hold (its exempt rows); it stays owed for the
     /// release.
@@ -645,8 +722,8 @@ impl PeerOwing {
             vpn: Default::default(),
             evpn: OwedKeys::default(),
             whole: 0,
-            cursor: [0; 3],
-            hold_cursor: [0; 3],
+            cursor: Default::default(),
+            hold_cursor: Default::default(),
             hold_drained: 0,
             next_family: 0,
         }
@@ -774,26 +851,23 @@ impl PeerOwing {
     fn clear_family(&mut self, family: OwedFamily) {
         self.whole &= !family.bit();
         self.hold_drained &= !family.bit();
+        if let Some(index) = family.cursor_index() {
+            (self.cursor[index], self.hold_cursor[index]) = (0, 0);
+        }
         match family {
             OwedFamily::IPV4_UNICAST => {
                 self.unicast[0].clear();
                 self.unicast_exempt[0].clear();
-                (self.cursor[0], self.hold_cursor[0]) = (0, 0);
             }
             OwedFamily::IPV6_UNICAST => {
                 self.unicast[1].clear();
                 self.unicast_exempt[1].clear();
-                (self.cursor[1], self.hold_cursor[1]) = (0, 0);
             }
             OwedFamily::IPV4_LABELED => self.labeled[0].clear(),
             OwedFamily::IPV6_LABELED => self.labeled[1].clear(),
             OwedFamily::VPNV4 => self.vpn[0].clear(),
             OwedFamily::VPNV6 => self.vpn[1].clear(),
-            OwedFamily::EVPN => {
-                self.evpn.clear();
-                let index = OwedFamily::EVPN_CURSOR;
-                (self.cursor[index], self.hold_cursor[index]) = (0, 0);
-            }
+            OwedFamily::EVPN => self.evpn.clear(),
             _ => {}
         }
     }
@@ -1108,7 +1182,10 @@ impl RibManager {
         if self.owed_row_evicted.remove(&peer) {
             self.wake_evicted_late_join(peer);
         }
-        let held = self.held_evpn_rebuilds.remove(&peer);
+        let mut held = false;
+        for peers in &mut self.held_rebuilds {
+            held |= peers.remove(&peer);
+        }
         let Some(owing) = self.take_owing(peer) else {
             return held;
         };
@@ -1134,24 +1211,24 @@ impl RibManager {
         })
     }
 
-    /// The head of cursor family `index`'s shared list.
-    fn owed_rows_head(&self, index: usize) -> u64 {
-        if index == OwedFamily::EVPN_CURSOR {
-            self.owed_evpn_rows.head()
-        } else {
-            self.owed_rows[index].head()
+    fn owed_rows_head(&self, list: RowCursor) -> u64 {
+        match list {
+            RowCursor::Ipv4Unicast | RowCursor::Ipv6Unicast => self.owed_rows[list as usize].head(),
+            RowCursor::Evpn => self.owed_evpn_rows.head(),
         }
     }
 
-    /// Up to `count` keys after `cursor` in cursor family `index`'s shared
-    /// list, oldest first, and the cursor past them.
-    fn owed_rows_after(&self, index: usize, cursor: u64, count: usize) -> (Vec<OwedKey>, u64) {
-        if index == OwedFamily::EVPN_CURSOR {
-            let (keys, last) = self.owed_evpn_rows.after(cursor, count);
-            (keys.into_iter().map(OwedKey::Evpn).collect(), last)
-        } else {
-            let (keys, last) = self.owed_rows[index].after(cursor, count);
-            (keys.into_iter().map(OwedKey::Unicast).collect(), last)
+    /// Up to `count` keys after `cursor`, oldest first, and the position past them.
+    fn owed_rows_after(&self, list: RowCursor, cursor: u64, count: usize) -> (Vec<OwedKey>, u64) {
+        match list {
+            RowCursor::Ipv4Unicast | RowCursor::Ipv6Unicast => {
+                let (keys, position) = self.owed_rows[list as usize].after(cursor, count);
+                (keys.into_iter().map(OwedKey::Unicast).collect(), position)
+            }
+            RowCursor::Evpn => {
+                let (keys, position) = self.owed_evpn_rows.after(cursor, count);
+                (keys.into_iter().map(OwedKey::Evpn).collect(), position)
+            }
         }
     }
 
@@ -1164,30 +1241,32 @@ impl RibManager {
     fn live_cursor(&self, peer: PeerId, owing: &PeerOwing, index: usize) -> Option<u64> {
         (owing.is_whole(OwedFamily::CURSORS[index])
             && !self.owed_row_evicted.contains(&peer)
-            && !(index == OwedFamily::EVPN_CURSOR && self.held_evpn_rebuilds.contains(&peer)))
+            && !self.owes_held_rebuild(peer, OwedFamily::CURSORS[index]))
         .then(|| owing.cursor[index])
     }
 
     /// Whether `peer` owes anything of `family` (keys or the whole family).
     pub(super) fn owes(&self, peer: PeerId, family: (Afi, Safi)) -> bool {
-        (family == (Afi::L2Vpn, Safi::Evpn) && self.held_evpn_rebuilds.contains(&peer))
-            || OwedFamily::of(family)
-                .is_some_and(|family| self.owing(peer).is_some_and(|owing| owing.owes(family)))
+        OwedFamily::of(family).is_some_and(|family| {
+            self.owes_held_rebuild(peer, family)
+                || self.owing(peer).is_some_and(|owing| owing.owes(family))
+        })
     }
 
     /// Whether `family` toward `peer` is held in the peer's own Adj-RIB-Out
     /// and so may owe keys: group-owned and handoff EVPN families keep
     /// slice 1a's path.
     pub(super) fn owing_family_in_scope(&self, peer: PeerId, family: OwedFamily) -> bool {
-        match family {
-            OwedFamily::IPV4_UNICAST | OwedFamily::IPV6_UNICAST => {
-                self.grouped_member_of(peer).is_none()
-            }
-            OwedFamily::VPNV4 | OwedFamily::VPNV6 => self.vpn_grouped_member_of(peer).is_none(),
-            OwedFamily::EVPN => {
+        match OwedFamily::KEYED
+            .get(usize::from(family.0))
+            .map(|spec| spec.0)
+        {
+            Some(KeyedOwner::UnicastGroup) => self.grouped_member_of(peer).is_none(),
+            Some(KeyedOwner::VpnGroup) => self.vpn_grouped_member_of(peer).is_none(),
+            Some(KeyedOwner::EvpnGroup) => {
                 self.evpn_grouped_member_of(peer).is_none() && !self.has_private_evpn_handoff(peer)
             }
-            _ => true,
+            Some(KeyedOwner::Peer) | None => true,
         }
     }
 
@@ -1356,8 +1435,8 @@ impl RibManager {
                 && !owing.is_whole(family)
                 && owing.set_bytes(family) > self.owing_theta(peer, family)
             {
-                if let Some(index) = family.cursor_index() {
-                    owing.start_cursor(index, self.owed_rows_head(index));
+                if let Some(list) = family.row_cursor() {
+                    owing.start_cursor(list as usize, self.owed_rows_head(list));
                     evpn_cursor_started |= family == OwedFamily::EVPN;
                 } else {
                     owing.flip_whole(family);
@@ -1415,8 +1494,8 @@ impl RibManager {
             .unwrap_or_else(|| Box::new(PeerOwing::new(session_id)));
         let started = !owing.is_whole(family);
         if started {
-            if let Some(index) = family.cursor_index() {
-                owing.start_cursor(index, self.owed_rows_head(index));
+            if let Some(list) = family.row_cursor() {
+                owing.start_cursor(list as usize, self.owed_rows_head(list));
             } else {
                 owing.flip_whole(family);
             }
@@ -1966,15 +2045,16 @@ impl RibManager {
         scope: DrainScope,
         budget: usize,
     ) -> bool {
-        let Some(index) = family.cursor_index() else {
+        let Some(list) = family.row_cursor() else {
             return false;
         };
+        let index = list as usize;
         let held = scope == DrainScope::Exempt;
         let Some(from) = self.owing(peer).map(|owing| owing.cursor_from(index, held)) else {
             return false;
         };
         let count = self.owing_step_keys(peer, family, budget);
-        let (mut keys, last) = self.owed_rows_after(index, from, count);
+        let (mut keys, position) = self.owed_rows_after(list, from, count);
         if held {
             keys.retain(|key| self.owed_key_exempt(peer, key));
         }
@@ -1995,9 +2075,9 @@ impl RibManager {
         }
         if let Some(mut owing) = self.take_owing(peer) {
             if held {
-                owing.hold_cursor[index] = last;
+                owing.hold_cursor[index] = position;
             } else {
-                (owing.cursor[index], owing.hold_cursor[index]) = (last, 0);
+                (owing.cursor[index], owing.hold_cursor[index]) = (position, 0);
             }
             self.put_owing(peer, owing);
         }
@@ -2051,8 +2131,8 @@ impl RibManager {
     /// The slowest cursor per cursor family, after dropping a bounded
     /// number of the list entries behind it; `None` where no receiver holds
     /// one (that list is being freed).
-    pub(super) fn trim_owed_rows(&mut self) -> [Option<u64>; 3] {
-        let mut floors = [None::<u64>; 3];
+    pub(super) fn trim_owed_rows(&mut self) -> CursorFloors {
+        let mut floors = CursorFloors::default();
         #[cfg(test)]
         {
             self.adj_rib_out_commit_stats.owed_peer_scans += self.owing_peers.len();
@@ -2066,7 +2146,7 @@ impl RibManager {
 
     /// A release classifies its live peers in pages under one distribution
     /// transaction. Fold their cursor positions without another roster walk.
-    pub(super) fn collect_owed_floors(&mut self, peer: PeerId, floors: &mut [Option<u64>; 3]) {
+    pub(super) fn collect_owed_floors(&mut self, peer: PeerId, floors: &mut CursorFloors) {
         #[cfg(test)]
         {
             self.adj_rib_out_commit_stats.owed_peer_scans += 1;
@@ -2074,7 +2154,7 @@ impl RibManager {
         self.fold_owed_floors(peer, floors);
     }
 
-    fn fold_owed_floors(&self, peer: PeerId, floors: &mut [Option<u64>; 3]) {
+    fn fold_owed_floors(&self, peer: PeerId, floors: &mut CursorFloors) {
         let Some(owing) = self.owing(peer) else {
             return;
         };
@@ -2085,11 +2165,19 @@ impl RibManager {
         }
     }
 
-    fn trim_at_owed_floors(&mut self, floors: [Option<u64>; 3]) {
-        for (rows, floor) in self.owed_rows.iter_mut().zip(floors) {
-            rows.trim(floor);
+    fn trim_at_owed_floors(&mut self, floors: CursorFloors) {
+        for list in OwedFamily::CURSORS
+            .into_iter()
+            .filter_map(OwedFamily::row_cursor)
+        {
+            let index = list as usize;
+            match list {
+                RowCursor::Ipv4Unicast | RowCursor::Ipv6Unicast => {
+                    self.owed_rows[index].trim(floors[index]);
+                }
+                RowCursor::Evpn => self.owed_evpn_rows.trim(floors[index]),
+            }
         }
-        self.owed_evpn_rows.trim(floors[OwedFamily::EVPN_CURSOR]);
     }
 
     /// Whether no cursor list holds a key and no receiver owes anything:
@@ -2146,20 +2234,12 @@ impl RibManager {
         self.log_unicast_keys(changed.copied(), floors);
     }
 
-    pub(super) fn log_release_owed_rows(
-        &mut self,
-        keys: &HashSet<Prefix>,
-        floors: [Option<u64>; 3],
-    ) {
+    pub(super) fn log_release_owed_rows(&mut self, keys: &HashSet<Prefix>, floors: CursorFloors) {
         self.trim_at_owed_floors(floors);
         self.log_unicast_keys(keys.iter().copied(), floors);
     }
 
-    fn log_unicast_keys(
-        &mut self,
-        changed: impl Iterator<Item = Prefix>,
-        floors: [Option<u64>; 3],
-    ) {
+    fn log_unicast_keys(&mut self, changed: impl Iterator<Item = Prefix>, floors: CursorFloors) {
         if floors[..2] == [None, None] {
             return;
         }
@@ -2194,30 +2274,28 @@ impl RibManager {
     /// dirty here either: the capture of its group's table belongs to the
     /// tick too.
     pub(super) fn cap_owed_rows(&mut self) {
-        for index in 0..OwedFamily::UNICAST.len() {
-            self.cap_owed_rows_of(index);
+        for list in [RowCursor::Ipv4Unicast, RowCursor::Ipv6Unicast] {
+            self.cap_owed_rows_of(list);
         }
     }
 
     /// [`Self::cap_owed_rows`] for the EVPN list, after an EVPN pass's
     /// receiver loop.
     pub(super) fn cap_owed_evpn_rows(&mut self) {
-        self.cap_owed_rows_of(OwedFamily::EVPN_CURSOR);
+        self.cap_owed_rows_of(RowCursor::Evpn);
     }
 
     /// A release has logged at most its prefix batch. Only an overflowing
     /// list requires another (paged) pass over the peers.
     pub(super) fn release_owed_over_cap(&self) -> [Option<u64>; 2] {
-        self.owed_rows
-            .each_ref()
-            .map(|rows| rows.over(2 * rows.peak + OWED_ROWS_SLACK))
+        self.owed_rows.each_ref().map(|rows| rows.over(rows.cap()))
     }
 
     pub(super) fn cap_release_owed_peer(
         &mut self,
         peer: PeerId,
         over: [Option<u64>; 2],
-        floors: &mut [Option<u64>; 3],
+        floors: &mut CursorFloors,
     ) {
         if let Some(owing) = self.owing(peer) {
             for (index, cut) in over.into_iter().enumerate() {
@@ -2234,32 +2312,23 @@ impl RibManager {
         self.collect_owed_floors(peer, floors);
     }
 
-    pub(super) fn finish_release_owed_cap(
-        &mut self,
-        over: [Option<u64>; 2],
-        floors: [Option<u64>; 3],
-    ) {
+    pub(super) fn finish_release_owed_cap(&mut self, over: [Option<u64>; 2], floors: CursorFloors) {
         self.trim_at_owed_floors(floors);
         for (rows, cut) in self.owed_rows.iter_mut().zip(over) {
             if cut.is_some() {
-                rows.drop_over(2 * rows.peak + OWED_ROWS_SLACK);
+                rows.drop_over(rows.cap());
             }
         }
     }
 
-    fn cap_owed_rows_of(&mut self, index: usize) {
+    fn cap_owed_rows_of(&mut self, list: RowCursor) {
+        let index = list as usize;
         let family = OwedFamily::CURSORS[index];
-        let evpn = index == OwedFamily::EVPN_CURSOR;
-        let (cap, over) = if evpn {
-            let rows = &self.owed_evpn_rows;
-            let cap = 2 * rows.peak + OWED_ROWS_SLACK;
-            (cap, rows.over(cap))
-        } else {
-            let rows = &self.owed_rows[index];
-            let cap = 2 * rows.peak + OWED_ROWS_SLACK;
-            (cap, rows.over(cap))
+        let cutoff = match list {
+            RowCursor::Ipv4Unicast | RowCursor::Ipv6Unicast => self.owed_rows[index].cutoff(),
+            RowCursor::Evpn => self.owed_evpn_rows.cutoff(),
         };
-        let Some(over) = over else {
+        let Some((cap, over)) = cutoff else {
             return;
         };
         #[cfg(test)]
@@ -2281,23 +2350,18 @@ impl RibManager {
             self.evict_owed_cursor(peer, family);
         }
         self.trim_owed_rows();
-        if evpn {
-            self.owed_evpn_rows.drop_over(cap);
-        } else {
-            self.owed_rows[index].drop_over(cap);
+        match list {
+            RowCursor::Ipv4Unicast | RowCursor::Ipv6Unicast => self.owed_rows[index].drop_over(cap),
+            RowCursor::Evpn => self.owed_evpn_rows.drop_over(cap),
         }
     }
 
     fn evict_owed_cursor(&mut self, peer: PeerId, family: OwedFamily) {
         debug!(%peer, ?family, "owed-row list over its cap — receiver resyncs");
         self.metrics.record_rib_outbound_owing_fallback();
-        // A group member's dirty mark walks its group's table to
-        // capture what it was sent, and this pass may evict many
-        // members: the mark waits for the resync tick, one receiver a
-        // tick ([`Self::promote_evicted_receiver`]). Until its resync
-        // covers the family its debt stays, with a cursor no drain
-        // reads: EVPN passes skip the receiver and its End-of-RIB
-        // waits, as before, while its group's families flow to it.
+        // Only private rows can acquire a cursor. If its receiver is now a
+        // group member, dirtying it captures the group's table regardless
+        // of which list overflowed. Leave that capture to the tick.
         if self.grouped_member_of(peer).is_some() {
             self.owed_row_evicted.insert(peer);
             return;
@@ -2309,34 +2373,102 @@ impl RibManager {
         }
     }
 
-    /// A resync needs a complete view of any unicast family it will send.
-    /// Only a receiver that lost its row cursor must also wait for EVPN.
-    pub(super) fn resync_unit_held(&self, peer: PeerId) -> bool {
-        const EVPN: (Afi, Safi) = (Afi::L2Vpn, Safi::Evpn);
-        self.release_resync_waits(peer)
-            || (self.owed_row_evicted.contains(&peer)
-                && self.selection_deferred(EVPN)
-                && self
-                    .peer_sendable_families
-                    .get(&peer)
-                    .is_some_and(|families| families.contains(&EVPN)))
+    fn cursor_selection_deferred(&self, family: OwedFamily) -> bool {
+        family
+            .afi_safis()
+            .iter()
+            .any(|&pair| self.selection_deferred(pair))
     }
 
-    /// The tick owns an in-hold resync's EVPN rebuild only while selection
-    /// is open. A new waiter can defer selection again after collision staging.
-    pub(super) fn held_evpn_rebuild_due(&self, peer: PeerId) -> bool {
-        self.held_evpn_rebuilds.contains(&peer)
-            && !self.selection_deferred((Afi::L2Vpn, Safi::Evpn))
+    /// Paced unicast waits for the producer. A cap eviction also needs
+    /// every other sendable cursor family's selection to be open.
+    pub(super) fn resync_unit_held(&self, peer: PeerId) -> bool {
+        if self.release_resync_waits(peer) {
+            return true;
+        }
+        self.owed_row_evicted.contains(&peer)
+            && OwedFamily::CURSORS
+                .into_iter()
+                .filter(|family| !family.is_unicast())
+                .flat_map(OwedFamily::afi_safis)
+                .any(|pair| {
+                    self.selection_deferred(*pair)
+                        && self
+                            .peer_sendable_families
+                            .get(&peer)
+                            .is_some_and(|sendable| sendable.contains(pair))
+                })
+    }
+
+    pub(super) fn owes_held_rebuild(&self, peer: PeerId, family: OwedFamily) -> bool {
+        OwedFamily::GROUPED_CURSORS
+            .iter()
+            .zip(&self.held_rebuilds)
+            .any(|(&held, peers)| held == family && peers.contains(&peer))
+    }
+
+    /// An in-hold dirty resync cannot cover the peer's admitted rows of a
+    /// deferred family. A private EVPN handoff may hold only a recovery proof.
+    pub(super) fn skipped_held_rebuilds(
+        &self,
+        peer: PeerId,
+        evpn_held: bool,
+        evpn_recovery: bool,
+    ) -> HeldRebuilds {
+        OwedFamily::GROUPED_CURSORS.map(|family| match family {
+            OwedFamily::EVPN => {
+                evpn_held
+                    && (evpn_recovery
+                        || self
+                            .adj_ribs_out
+                            .get(&peer)
+                            .is_some_and(|out| out.evpn_len() != 0))
+            }
+            OwedFamily::IPV4_LABELED | OwedFamily::IPV6_LABELED => {
+                self.cursor_selection_deferred(family)
+                    && self.adj_ribs_out.get(&peer).is_some_and(|out| {
+                        out.family_lens().labeled[usize::from(family == OwedFamily::IPV6_LABELED)]
+                            != 0
+                    })
+            }
+            _ => false,
+        })
+    }
+
+    pub(super) fn record_held_rebuilds(&mut self, peer: PeerId, owed: HeldRebuilds) {
+        for (peers, owed) in self.held_rebuilds.iter_mut().zip(owed) {
+            if owed {
+                peers.insert(peer);
+            }
+        }
+    }
+
+    /// A new waiter can defer selection again after collision staging.
+    pub(super) fn held_rebuild_due(&self, peer: PeerId) -> bool {
+        OwedFamily::GROUPED_CURSORS
+            .iter()
+            .zip(&self.held_rebuilds)
+            .any(|(&family, peers)| {
+                peers.contains(&peer) && !self.cursor_selection_deferred(family)
+            })
+    }
+
+    /// The unit can discharge only the families that are open when it starts.
+    pub(super) fn take_due_held_rebuilds(&mut self, peer: PeerId) -> HeldRebuilds {
+        std::array::from_fn(|i| {
+            self.held_rebuilds[i].contains(&peer)
+                && !self.cursor_selection_deferred(OwedFamily::GROUPED_CURSORS[i])
+                && self.held_rebuilds[i].remove(&peer)
+        })
     }
 
     fn rebuild_candidates(&self) -> impl Iterator<Item = &PeerId> {
-        let open = !self.held_evpn_rebuilds.is_empty()
-            && !self.selection_deferred((Afi::L2Vpn, Safi::Evpn));
-        self.owed_row_evicted.iter().chain(
-            open.then_some(&self.held_evpn_rebuilds)
-                .into_iter()
-                .flatten(),
-        )
+        let open = OwedFamily::GROUPED_CURSORS
+            .into_iter()
+            .zip(&self.held_rebuilds)
+            .filter(|(family, peers)| !peers.is_empty() && !self.cursor_selection_deferred(*family))
+            .flat_map(|(_, peers)| peers);
+        self.owed_row_evicted.iter().chain(open)
     }
 
     /// Whether a group member the cap evicted still waits to be made dirty
@@ -2385,16 +2517,17 @@ impl RibManager {
     /// goes out now.
     fn owing_family_settled(&mut self, peer: PeerId, family: OwedFamily) {
         if let Some(mut owing) = self.take_owing(peer) {
-            let cursor = family.cursor_index();
-            let caught_up = cursor.is_some_and(|index| {
+            let cursor = family.row_cursor();
+            let caught_up = cursor.is_some_and(|list| {
+                let index = list as usize;
                 (!family.is_unicast() || !self.owed_rows[index].release_open)
                     && owing.keyed_len(family) == 0
                     && self
                         .live_cursor(peer, &owing, index)
-                        .is_some_and(|at| at >= self.owed_rows_head(index))
+                        .is_some_and(|at| at >= self.owed_rows_head(list))
             });
-            if let Some(index) = cursor.filter(|_| caught_up) {
-                owing.end_cursor(index);
+            if let Some(list) = cursor.filter(|_| caught_up) {
+                owing.end_cursor(list as usize);
             } else if owing.is_whole(family) && cursor.is_none() {
                 owing.clear_family(family);
             }
@@ -2467,7 +2600,7 @@ impl RibManager {
         if self.dirty_peers.contains(&peer) || self.force_outbound_peers.contains(&peer) {
             return Ok(());
         }
-        if family == OwedFamily::EVPN && self.held_evpn_rebuilds.contains(&peer) {
+        if self.owes_held_rebuild(peer, family) {
             return Err(super::outbound_credit::CREDIT_REFUSAL);
         }
         let Some(owing) = self.owing(peer) else {
@@ -2482,13 +2615,13 @@ impl RibManager {
             // Copied, not popped: a refusal leaves the set and the cursor
             // as they were. A cursor's remainder joins the keys.
             let mut keys = owing.copy_keys(family, DrainScope::All, usize::MAX);
-            if let Some(index) = family.cursor_index().filter(|_| owing.is_whole(family)) {
+            if let Some(list) = family.row_cursor().filter(|_| owing.is_whole(family)) {
                 // An evicted cursor has no remainder to absorb: the family
                 // stays owed for the tick's resync, as after a refusal.
-                let Some(cursor) = self.live_cursor(peer, owing, index) else {
+                let Some(cursor) = self.live_cursor(peer, owing, list as usize) else {
                     return Err(super::outbound_credit::CREDIT_REFUSAL);
                 };
-                keys.extend(self.owed_rows_after(index, cursor, usize::MAX).0);
+                keys.extend(self.owed_rows_after(list, cursor, usize::MAX).0);
             }
             OwingDrain::keyed(peer, family, usize::MAX, keys)
         };
@@ -2546,10 +2679,10 @@ impl RibManager {
                 // A cursor's remainder is flushed with the set and stays
                 // behind the cursor, which does not move.
                 let cursor_keys = family
-                    .cursor_index()
-                    .and_then(|index| Some((index, self.live_cursor(peer, owing, index)?)))
-                    .map_or_else(Vec::new, |(index, cursor)| {
-                        self.owed_rows_after(index, cursor, usize::MAX).0
+                    .row_cursor()
+                    .and_then(|list| Some((list, self.live_cursor(peer, owing, list as usize)?)))
+                    .map_or_else(Vec::new, |(list, cursor)| {
+                        self.owed_rows_after(list, cursor, usize::MAX).0
                     });
                 let mut popped = Vec::new();
                 let mut drain = if owing.is_whole(family) && !family.has_cursor() {
@@ -3529,6 +3662,25 @@ mod fifo_tests {
 #[cfg(test)]
 mod family_tests {
     use super::*;
+
+    #[test]
+    fn cursor_slots_and_private_group_ownership_match_enabled_families() {
+        use OwedFamily as F;
+        assert_eq!(F::CURSORS, [F::IPV4_UNICAST, F::IPV6_UNICAST, F::EVPN]);
+        assert_eq!(F::GROUPED_CURSORS, [F::EVPN]);
+        for family in F::ALL {
+            assert_eq!(
+                family.cursor_index(),
+                F::CURSORS.iter().position(|&active| active == family),
+                "{family:?}",
+            );
+            assert_eq!(
+                family.private_while_grouped(),
+                matches!(family, F::IPV4_LABELED | F::IPV6_LABELED | F::EVPN),
+                "{family:?}",
+            );
+        }
+    }
 
     /// Every `FlowSpec` family a rule can carry has its own owed family, and
     /// the table is a consistent index. A new AFI fails the known-set check

@@ -1015,8 +1015,8 @@ impl RibManager {
                 self.lift_orf_gate(peer, family);
                 // The resync tick rebuilds a receiver evicted by the owed-row cap.
                 if self.owed_row_evicted.contains(&peer)
-                    || (family == (Afi::L2Vpn, Safi::Evpn)
-                        && self.held_evpn_rebuilds.contains(&peer))
+                    || super::outbound_owing::OwedFamily::of(family)
+                        .is_some_and(|owed| self.owes_held_rebuild(peer, owed))
                 {
                     self.defer_refresh_answer(peer, family, suppress_eor);
                     return FamilyReplayOutcome::Failed;

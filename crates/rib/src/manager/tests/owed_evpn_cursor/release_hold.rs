@@ -279,6 +279,17 @@ fn a_held_evpn_rebuild_serves_ipv4_resync_and_both_refreshes() {
     drain(&mut manager, &mut receivers);
     assert!(!manager.dirty_peers.contains(&peer));
     assert!(receivers[0].wire.table.contains_key(&key(5)));
+    assert!(manager.owes_held_rebuild(peer, FAMILY));
+    for family in [
+        OwedFamily::IPV4_UNICAST,
+        OwedFamily::IPV6_UNICAST,
+        OwedFamily::IPV4_LABELED,
+        OwedFamily::IPV6_LABELED,
+        OwedFamily::VPNV4,
+        OwedFamily::VPNV6,
+    ] {
+        assert!(!manager.owes_held_rebuild(peer, family), "{family:?}");
+    }
 
     manager.mark_outbound_dirty(peer);
     received_unicast(&mut manager, UNICAST..2 * UNICAST);
@@ -364,7 +375,7 @@ fn a_force_waiting_for_unicast_leaves_the_evpn_release_rebuild_to_the_tick() {
     let mut receivers = Vec::from(missed_withdrawal(&mut manager, 0));
     drain(&mut manager, &mut receivers);
     let peer = receivers[0].peer;
-    assert!(manager.held_evpn_rebuilds.contains(&peer));
+    assert!(manager.owes_held_rebuild(peer, FAMILY));
     receivers.push(hold_family(&mut manager, v4_waiter, V4));
     let (reply, mut result) = oneshot::channel();
     manager.handle_update(RibUpdate::RefreshPeerOutbound { peer, reply });
@@ -396,7 +407,7 @@ fn evpn_rebuild_waits_for_active_unicast_and_runs_while_a_late_join_is_parked() 
     let peer = receivers[0].peer;
     drain(&mut manager, &mut receivers);
     assert!(manager.grouped_member_of(peer).is_some());
-    assert!(manager.held_evpn_rebuilds.contains(&peer));
+    assert!(manager.owes_held_rebuild(peer, FAMILY));
     assert!(!manager.owed_row_evicted.contains(&peer));
 
     manager.mark_outbound_dirty(peer);
@@ -434,7 +445,7 @@ fn evpn_rebuild_waits_for_active_unicast_and_runs_while_a_late_join_is_parked() 
     let builds = manager.adj_rib_out_commit_stats.resync_builds;
     release(&mut manager);
     assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
-    assert!(manager.held_evpn_rebuild_due(peer));
+    assert!(manager.held_rebuild_due(peer));
     assert!(manager.release_resync_waits(peer));
     assert!(!manager.dirty_peers.contains(&peer));
     assert!(

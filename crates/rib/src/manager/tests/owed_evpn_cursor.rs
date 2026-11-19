@@ -315,7 +315,7 @@ fn assert_idle(manager: &RibManager, receivers: &[Receiver]) {
         assert!(manager.owing(receiver.peer).is_none(), "{}", receiver.peer);
         assert!(!manager.dirty_peers.contains(&receiver.peer));
         assert!(!manager.owed_row_evicted.contains(&receiver.peer));
-        assert!(!manager.held_evpn_rebuilds.contains(&receiver.peer));
+        assert!(!manager.owes_held_rebuild(receiver.peer, FAMILY));
     }
     assert_eq!(manager.owed_evpn_rows.len(), 0);
     assert!(manager.owed_rows.iter().all(|list| list.len() == 0));
@@ -3164,8 +3164,8 @@ fn a_dirty_resync_inside_an_evpn_hold_loses_no_withdrawal() {
     let held = manager.adj_rib_out_commit_stats;
     assert_eq!(held.resync_builds - stats.resync_builds, 2, "one each");
     assert!(!manager.dirty_peers.contains(&peer), "resynced in the hold");
-    assert!(manager.held_evpn_rebuilds.contains(&peer), "and waits");
-    assert!(!manager.held_evpn_rebuilds.contains(&receivers[3].peer));
+    assert!(manager.owes_held_rebuild(peer, FAMILY), "and waits");
+    assert!(!manager.owes_held_rebuild(receivers[3].peer, FAMILY));
     assert!(!manager.dirty_peers.contains(&receivers[3].peer));
     assert!(!manager.resync_tick_pending(), "the tick rests in the hold");
     assert!(receivers[1].wire.table.contains_key(&key(5)));
@@ -3183,7 +3183,7 @@ fn a_dirty_resync_inside_an_evpn_hold_loses_no_withdrawal() {
         .chain(fresh)
         .collect();
     assert!(manager.owed_row_evicted.is_empty());
-    assert!(manager.held_evpn_rebuilds.is_empty());
+    assert!(manager.held_rebuilds.iter().all(HashSet::is_empty));
     for index in [0, 1, 3] {
         let receiver = &receivers[index];
         assert_eq!(receiver.wire.table, table(&expected), "{index}");
@@ -3212,7 +3212,7 @@ fn a_regroup_of_an_evicted_member_inside_an_evpn_hold_loses_no_withdrawal() {
             tick(&mut manager, &mut receivers);
         }
         assert!(!manager.dirty_peers.contains(&moved), "dirty={dirty}");
-        assert!(manager.held_evpn_rebuilds.contains(&moved), "dirty={dirty}");
+        assert!(manager.owes_held_rebuild(moved, FAMILY), "dirty={dirty}");
         assert!(!manager.resync_tick_pending(), "dirty={dirty}: rests");
         release(&mut manager);
         drain_one_unit_a_tick(&mut manager, &mut receivers);
@@ -3222,7 +3222,10 @@ fn a_regroup_of_an_evicted_member_inside_an_evpn_hold_loses_no_withdrawal() {
             .chain(fresh)
             .collect();
         assert!(manager.owed_row_evicted.is_empty(), "dirty={dirty}");
-        assert!(manager.held_evpn_rebuilds.is_empty(), "dirty={dirty}");
+        assert!(
+            manager.held_rebuilds.iter().all(HashSet::is_empty),
+            "dirty={dirty}"
+        );
         for (index, receiver) in receivers[..3].iter().enumerate() {
             assert_eq!(receiver.wire.table, table(&expected), "{dirty}: {index}");
             assert!(!manager.owes(receiver.peer, EVPN), "{dirty}: {index}");
@@ -3359,7 +3362,7 @@ fn only_a_dirty_resync_that_ends_clean_inside_an_evpn_hold_waits() {
     assert!(!manager.force_outbound_peers.contains(&forced), "served");
     assert!(!manager.dirty_peers.contains(&forced));
     assert!(
-        !manager.held_evpn_rebuilds.contains(&forced),
+        !manager.owes_held_rebuild(forced, FAMILY),
         "a forced resync does not wait"
     );
 
@@ -3379,7 +3382,7 @@ fn only_a_dirty_resync_that_ends_clean_inside_an_evpn_hold_waits() {
     );
     assert!(manager.dirty_peers.contains(&refused), "refused");
     assert!(
-        !manager.held_evpn_rebuilds.contains(&refused),
+        !manager.owes_held_rebuild(refused, FAMILY),
         "still dirty: not waiting"
     );
     assert!(receivers[1].wire.unicast_table.is_empty());
@@ -3390,13 +3393,13 @@ fn only_a_dirty_resync_that_ends_clean_inside_an_evpn_hold_waits() {
     assert!(manager.selection_deferred(EVPN), "all inside the hold");
     assert_eq!(receivers[1].wire.unicast_table, unicast_table(UNICAST));
     assert!(!manager.dirty_peers.contains(&refused), "admitted");
-    assert!(manager.held_evpn_rebuilds.contains(&refused), "and waits");
+    assert!(manager.owes_held_rebuild(refused, FAMILY), "and waits");
 
     release(&mut manager);
     let (built, _) = drain_one_unit_a_tick(&mut manager, &mut receivers);
     assert_eq!(built, 1, "the waiting receiver's unit only");
     assert!(manager.owed_row_evicted.is_empty());
-    assert!(manager.held_evpn_rebuilds.is_empty());
+    assert!(manager.held_rebuilds.iter().all(HashSet::is_empty));
     for receiver in &receivers {
         assert_eq!(receiver.wire.table, table(&all(8)));
         assert!(!manager.owes(receiver.peer, EVPN));
@@ -3469,7 +3472,7 @@ fn a_private_handoff_resynced_inside_an_evpn_hold_withdraws_after_the_release() 
     }
     assert!(manager.selection_deferred(EVPN));
     assert!(
-        manager.dirty_peers.contains(&peer) || manager.held_evpn_rebuilds.contains(&peer),
+        manager.dirty_peers.contains(&peer) || manager.owes_held_rebuild(peer, FAMILY),
         "its EVPN table is still owed"
     );
     assert!(

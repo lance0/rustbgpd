@@ -7927,7 +7927,7 @@ impl RibManager {
         }
         // An evicted group member not yet dirty: the forced table is the
         // resync tick's to build, as any evicted receiver's.
-        if self.owed_row_evicted.contains(&peer) || self.held_evpn_rebuild_due(peer) {
+        if self.owed_row_evicted.contains(&peer) || self.held_rebuild_due(peer) {
             self.mark_outbound_dirty(peer);
         }
         self.set_selection_partial_caught_up(peer, false);
@@ -9548,7 +9548,7 @@ impl RibManager {
                 let mut installed = false;
                 let mut eviction_started = None;
                 let mut commit_refused = false;
-                let mut evpn_rebuild_owed = false;
+                let mut skipped_rebuilds = super::outbound_owing::HeldRebuilds::default();
                 'member: {
                     let readiness = self.replacement_readiness.clone();
                     let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
@@ -9646,7 +9646,7 @@ impl RibManager {
                     // resync tick alone, one receiver per unit: any other
                     // pass leaves it dirty, as when its channel has no room.
                     if (is_dirty && self.owed_row_evicted.contains(&peer))
-                        || ((is_dirty || is_force) && self.held_evpn_rebuild_due(peer))
+                        || ((is_dirty || is_force) && self.held_rebuild_due(peer))
                     {
                         self.defer_unsent_outbound_pass(peer, member_of, group_stage, &checkpoint);
                         break 'member;
@@ -10033,13 +10033,13 @@ impl RibManager {
                     let private_evpn_resync = resync && !evpn_group_owned;
                     let evpn_held =
                         private_evpn_resync && self.selection_deferred((Afi::L2Vpn, Safi::Evpn));
-                    evpn_rebuild_owed = evpn_held
-                        && is_dirty
-                        && (private_evpn_recovery.is_some()
-                            || self
-                                .adj_ribs_out
-                                .get(&peer)
-                                .is_some_and(|out| out.evpn_len() != 0));
+                    if is_dirty {
+                        skipped_rebuilds = self.skipped_held_rebuilds(
+                            peer,
+                            evpn_held,
+                            private_evpn_recovery.is_some(),
+                        );
+                    }
                     let mut effective_evpn_keys = if private_evpn_resync && !evpn_held {
                         self.replacement_checkpoint(true);
                         let mut all: HashSet<rustbgpd_wire::EvpnRouteKey> = HashSet::with_capacity(
@@ -12009,9 +12009,9 @@ impl RibManager {
                     self.replacement_checkpoint(true);
                 }
                 // The release inventory omits withdrawals only the receiver
-                // still holds. Keep its EVPN diff due across other resyncs.
-                if evpn_rebuild_owed && !self.dirty_peers.contains(&peer) {
-                    self.held_evpn_rebuilds.insert(peer);
+                // still holds. Keep each skipped diff due across other resyncs.
+                if skipped_rebuilds.contains(&true) && !self.dirty_peers.contains(&peer) {
+                    self.record_held_rebuilds(peer, skipped_rebuilds);
                 }
                 self.finish_readiness_owner(installed);
                 if let Some(started) = eviction_started {
