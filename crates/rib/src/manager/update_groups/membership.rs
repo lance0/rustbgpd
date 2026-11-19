@@ -850,9 +850,19 @@ impl RibManager {
             // Deltas of the build passes are discarded: there are no
             // members yet, and the joining member replays the whole
             // table anyway.
+            #[cfg(test)]
+            let last = self
+                .cold_build_last_prefix
+                .and_then(|prefix| prefixes.take(&prefix));
             let mut staged = self.stage_group_prefixes(gid, &prefixes, &mut memo);
             staged.retire_with(&mut |force| self.replacement_checkpoint(force));
             drop(staged);
+            #[cfg(test)]
+            if let Some(last) = last {
+                let mut final_row =
+                    self.stage_group_prefixes(gid, &HashSet::from([last]), &mut memo);
+                final_row.retire_with(&mut |force| self.replacement_checkpoint(force));
+            }
             self.replacement_checkpoint(true);
             if self
                 .group_ribs

@@ -1497,7 +1497,7 @@ enum WalkEnd {
     clippy::too_many_lines,
     reason = "one fixture follows each way the walk can end through the destination's retirement"
 )]
-fn refused_cold_cohort_leaves_the_slot_available_before_paced_apply() {
+fn refused_cold_cohort_retires_before_the_next_registration() {
     const OLD: u32 = 0xFC00_0001;
     const SIZE: usize = 4;
     let arm = ResidualArm::MixedDestinations;
@@ -1560,8 +1560,9 @@ fn refused_cold_cohort_leaves_the_slot_available_before_paced_apply() {
                 receipt.destination_builds,
                 receipt.shared_members
             ),
-            (0, 0, 0)
+            (1, 1, 0)
         );
+        assert!(manager.optional_destination_retirement_active());
         assert_eq!(memberless_groups(&manager), 0);
         assert!(
             all.iter()
@@ -1571,11 +1572,13 @@ fn refused_cold_cohort_leaves_the_slot_available_before_paced_apply() {
         // its eventual complete replay must include an UPDATE installed now.
         manager.first_group_build_min_routes = 1;
         let (mut joining, _encoder) = join(&mut manager, SIZE, false, None);
-        assert!(manager.first_group_build.is_some());
+        assert!(manager.first_group_build.is_none());
+        assert!(manager.optional_destination_retirement_active());
         let marker = Prefix::V4(prefix(9, 0));
         manager.handle_update(routes_from(external(), 0, 9, 1));
         drain_route_chunks(&mut manager);
-        assert!(manager.first_group_build.is_some());
+        assert!(manager.first_group_build.is_none());
+        assert!(manager.optional_destination_retirement_active());
         assert!(manager.loc_rib.get(&marker).is_some());
         for rx in &mut receivers {
             let update = rx.try_recv().unwrap();
@@ -1585,6 +1588,12 @@ fn refused_cold_cohort_leaves_the_slot_available_before_paced_apply() {
                     .iter()
                     .any(|row| row.prefix == marker && row.communities().contains(&OLD))
             );
+        }
+        while manager.optional_destination_retirement_active() {
+            assert!(!manager.first_group_slot_available());
+            assert!(manager.first_group_build.is_none());
+            let charged = manager.advance_optional_destination_retirement();
+            assert!((1..=crate::loc_rib::REGISTRATION_PAGE_SIZE).contains(&charged));
         }
         for _ in 0..64 {
             if manager.pending_initial_registrations.is_empty()
@@ -1627,7 +1636,18 @@ fn refused_cold_cohort_leaves_the_slot_available_before_paced_apply() {
                     replacements: replacements(&old, &all),
                     reply,
                 });
-                response.try_recv().unwrap().unwrap();
+                let receipts = response.try_recv().unwrap().unwrap();
+                assert_eq!(
+                    receipts,
+                    all.iter()
+                        .rev()
+                        .map(
+                            |&peer| crate::update::PeerExportPolicyRestoreReceipt::Restored {
+                                peer
+                            }
+                        )
+                        .collect::<Vec<_>>()
+                );
                 assert!(
                     all.iter()
                         .all(|peer| manager.grouped_member_of(*peer) == Some(source)),
@@ -1645,6 +1665,11 @@ fn refused_cold_cohort_leaves_the_slot_available_before_paced_apply() {
                     let outcome = response.try_recv().unwrap().unwrap();
                     if matches!(end, WalkEnd::EveryMoverLeft) {
                         assert_eq!(outcome.applied, 0, "every mover is skipped");
+                        assert_eq!(outcome.skipped, pending);
+                    } else {
+                        assert!(outcome.skipped.is_empty());
+                        assert!(outcome.applied > 0);
+                        assert_eq!(outcome.pending, pending[outcome.applied..]);
                     }
                     pending = outcome.pending;
                 }
@@ -3868,3 +3893,5 @@ fn held_bulk_promotion_work_is_linear() {
         held_bulk_promotion,
     );
 }
+
+mod cold_cohort_ownership;

@@ -936,11 +936,17 @@ pub struct RibManager {
     /// superseded or failed over while queued resolves to its survivor.
     pending_initial_registrations: VecDeque<PeerId>,
     first_group_build: Option<Box<first_group_build::FirstGroupBuild>>,
-    /// Complete private-origin table handed to policy, until its first member binds.
+    /// A completed registration table handed to policy, or a fresh authoritative
+    /// destination awaiting its inventory verdict. Its first member adopts it;
+    /// a refused unowned table transfers to bounded retirement.
     paced_policy_destination: Option<usize>,
     optional_destination_retirement: Option<Box<first_group_build::OptionalDestinationRetirement>>,
     #[cfg(test)]
     first_group_build_min_routes: usize,
+    /// Stage this prefix last in a fresh join-time table, so a real
+    /// route-dependent refusal can exercise an already populated inventory.
+    #[cfg(test)]
+    cold_build_last_prefix: Option<Prefix>,
     /// When the next `bgp_rib_outbound_registration_pending_*` sample runs.
     /// Armed one interval ahead when a registration wait starts, so a burst
     /// of `PeerUp`s shares one scan; re-armed one interval out while the last
@@ -3063,6 +3069,8 @@ impl RibManager {
             optional_destination_retirement: None,
             #[cfg(test)]
             first_group_build_min_routes: INITIAL_DUMP_DEFER_MIN_ROUTES,
+            #[cfg(test)]
+            cold_build_last_prefix: None,
             registration_wait_sample_at: None,
             initial_dump_defer_min_routes: INITIAL_DUMP_DEFER_MIN_ROUTES,
             refresh_in_progress: HashMap::new(),
