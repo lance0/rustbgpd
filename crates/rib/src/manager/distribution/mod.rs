@@ -7672,7 +7672,10 @@ impl RibManager {
                 // table for the cohort or an explicit discard.
                 manager.prepared_destination = Some(destination);
                 manager.reclaim_unused_update_group_policies();
-                return Some((reply, Ok(())));
+                if reply.send(Ok(())).is_err() {
+                    manager.discard_prepared_export_destination();
+                }
+                return None;
             }
             // A leftover memberless table from an aborted legacy walk may be partial.
             // An occupied group is already maintained and stays available to its members.
