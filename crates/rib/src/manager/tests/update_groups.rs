@@ -20317,3 +20317,61 @@ async fn canceled_optional_preparation_returns_the_healthy_scan_to_the_founder()
     }
     assert_eq!(ends, 1);
 }
+
+#[tokio::test(start_paused = true)]
+async fn discarding_a_paced_preparation_retires_its_hold_withdrawals() {
+    let (manager, members, _receivers) = direct_clean_transition_manager(1, 2050, None);
+    let mut manager = manager.with_eor_grace(super::eor_grace::grace(&members));
+    manager.outbound_row_credit_override = None;
+    manager.first_group_build_min_routes = 1;
+    let _founder = join_overlap_founder(&mut manager, 1);
+    let (reply, mut prepared) = oneshot::channel();
+    manager.handle_update(RibUpdate::PrepareExportPolicyDestination {
+        peer: members[0],
+        export_policy: None,
+        reply,
+    });
+    while manager.first_group_build.is_some() {
+        manager.advance_first_group_build();
+    }
+    prepared.try_recv().unwrap().unwrap();
+    let gid = manager.paced_policy_destination.unwrap();
+    assert_eq!(manager.prepared_destination, Some(gid));
+
+    let route = super::eor_grace::local_route(88);
+    let prefix = route.prefix;
+    let (reply, mut injected) = oneshot::channel();
+    manager.handle_update(RibUpdate::InjectRoute { route, reply });
+    drain_route_chunks(&mut manager);
+    injected.try_recv().unwrap().unwrap();
+    assert!(manager.group_ribs[&gid].table.get(&prefix, 0).is_some());
+    let (reply, mut removed) = oneshot::channel();
+    manager.handle_update(RibUpdate::WithdrawInjected {
+        prefix,
+        path_id: 0,
+        allow_missing: false,
+        owner: String::new(),
+        override_owner: false,
+        reply,
+    });
+    drain_route_chunks(&mut manager);
+    assert!(removed.try_recv().unwrap().unwrap().removed);
+    let owner = super::super::HoldWithdrawOwner::Group(gid);
+    assert!(manager.hold_exempt_withdrawn[&owner].contains(&(prefix, 0)));
+
+    manager.handle_update(RibUpdate::DiscardPreparedExportPolicyDestination {
+        peer: members[0],
+        export_policy: None,
+    });
+    assert!(!manager.hold_exempt_withdrawn.contains_key(&owner));
+    assert!(!manager.group_ribs.contains_key(&gid));
+    assert_eq!(
+        manager.advance_optional_destination_retirement(),
+        crate::loc_rib::REGISTRATION_PAGE_SIZE
+    );
+    assert!(!manager.first_group_slot_available());
+    while manager.optional_destination_retirement_active() {
+        manager.advance_optional_destination_retirement();
+    }
+    assert!(manager.first_group_slot_available());
+}

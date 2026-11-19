@@ -106,6 +106,7 @@ pub(in crate::manager) struct PrestagedTransitionInventory {
 /// Detached scratch from an evicted optional policy destination. The two
 /// published groups stop recording writes at detach, before either can be
 /// removed or recreated. The slot owner supplies one shared poll budget.
+#[derive(Default)]
 pub(in crate::manager) struct OptionalInventoryRetirement {
     inventory: Option<PrestagedTransitionInventory>,
     logs: [Option<ShardedMap<(Prefix, u32), ()>>; 2],
@@ -745,6 +746,21 @@ impl RibManager {
             inventory.permit_totals.insert(label, total);
         }
         PrestagedInventoryOutcome::Ready(Box::new(inventory), prestaged.probe.take())
+    }
+
+    pub(in crate::manager) fn take_destination_inventory_retirement(
+        &mut self,
+        gid: usize,
+    ) -> OptionalInventoryRetirement {
+        if self
+            .prestaged_inventory
+            .as_ref()
+            .is_some_and(|state| state.destination == gid)
+        {
+            self.take_optional_inventory_retirement()
+        } else {
+            OptionalInventoryRetirement::default()
+        }
     }
 
     /// Transfer a completed or partial optional inventory to its retiring

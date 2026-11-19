@@ -176,25 +176,7 @@ impl RibManager {
             && self.first_group_build.is_none()
             && !self.optional_destination_retirement_active()
         {
-            let inventory = self.take_optional_inventory_retirement();
-            let table = self
-                .group_ribs
-                .remove(&prepared)
-                .expect("checked memberless preparation");
-            let withdrawn = self
-                .hold_exempt_withdrawn
-                .remove(&super::HoldWithdrawOwner::Group(prepared))
-                .unwrap_or_default();
-            self.prepared_destination = None;
-            if self.paced_policy_destination == Some(prepared) {
-                self.paced_policy_destination = None;
-            }
-            self.optional_destination_retirement = Some(Box::new(OptionalDestinationRetirement {
-                gid: prepared,
-                group: OptionalGroupRetirement::new(table),
-                inventory,
-                withdrawn,
-            }));
+            self.retire_memberless_destination(prepared);
         }
         false
     }
@@ -245,20 +227,32 @@ impl RibManager {
         {
             return false;
         }
-        debug_assert!(self.first_group_build.is_none());
-        self.paced_policy_destination = None;
-        self.first_group_build = Some(Box::new(FirstGroupBuild {
-            gid,
-            peer: crate::PeerId::LOCAL,
-            phase: FirstGroupPhase::Retiring,
-            writer: None,
-            prepare_source: None,
-            table: self
-                .group_ribs
-                .remove(&gid)
-                .expect("checked memberless destination"),
-        }));
+        self.retire_memberless_destination(gid);
         true
+    }
+
+    fn retire_memberless_destination(&mut self, gid: usize) {
+        debug_assert!(
+            self.first_group_build.is_none() && !self.optional_destination_retirement_active()
+        );
+        let inventory = self.take_destination_inventory_retirement(gid);
+        let table = self
+            .group_ribs
+            .remove(&gid)
+            .expect("checked memberless destination");
+        let withdrawn = self
+            .hold_exempt_withdrawn
+            .remove(&super::HoldWithdrawOwner::Group(gid))
+            .unwrap_or_default();
+        self.prepared_destination
+            .take_if(|prepared| *prepared == gid);
+        self.paced_policy_destination.take_if(|paced| *paced == gid);
+        self.optional_destination_retirement = Some(Box::new(OptionalDestinationRetirement {
+            gid,
+            group: OptionalGroupRetirement::new(table),
+            inventory,
+            withdrawn,
+        }));
     }
 
     fn prepare_source_is_current(&self, job: &FirstGroupBuild) -> bool {
