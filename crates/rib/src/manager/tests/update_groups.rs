@@ -6423,7 +6423,10 @@ async fn cold_registration_and_policy_use_one_destination_in_both_orders() {
         }
 
         if matches!(order, Arrival::FencedWithoutPrepare) {
-            assert_fenced_destination_waits_for_registration(manager, &members, dst).await;
+            Box::pin(assert_fenced_destination_waits_for_registration(
+                manager, &members, dst,
+            ))
+            .await;
             continue;
         }
 

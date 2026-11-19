@@ -142,7 +142,7 @@ impl RibManager {
                 }
             }
             MembershipChange::RemoveConditionalAttachment => {
-                input.conditional_advertisement = false
+                input.conditional_advertisement = false;
             }
             MembershipChange::ClearPolicy | MembershipChange::RecoverSlowPeer => {}
         }

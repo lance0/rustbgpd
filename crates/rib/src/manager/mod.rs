@@ -1269,7 +1269,7 @@ pub struct RibManager {
     /// Inert policy requests behind the current preparation, in admission
     /// order. Bounded by the primary channel capacity.
     first_group_deferred_intents: VecDeque<RibUpdate>,
-    /// One noncommuting head from the general lane (also typed RibUpdate).
+    /// One noncommuting head from the general lane.
     first_group_general_head: Option<Box<RibUpdate>>,
     /// Process-local mutation versions bound into opaque route-page tokens.
     /// A successful continuation must match the requested scope's current
