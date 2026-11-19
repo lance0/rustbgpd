@@ -4629,7 +4629,10 @@ impl RibManager {
         // Authority can detach a refused table while this command still has
         // preclassified destinations. Only now can an unused registry payload
         // move to that table's physical retirement owner.
-        if let Some(retiring) = &mut self.optional_destination_retirement
+        if let Some(retiring) = self
+            .optional_destination_retirement
+            .as_mut()
+            .and_then(|owner| owner.detached.as_mut())
             && retiring.interned_policy.is_none()
             && let Some(id) = self
                 .update_groups

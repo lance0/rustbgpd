@@ -751,15 +751,15 @@ impl RibManager {
     pub(in crate::manager) fn take_destination_inventory_retirement(
         &mut self,
         gid: usize,
-    ) -> OptionalInventoryRetirement {
+    ) -> Option<OptionalInventoryRetirement> {
         if self
             .prestaged_inventory
             .as_ref()
             .is_some_and(|state| state.destination == gid)
         {
-            self.take_optional_inventory_retirement()
+            Some(self.take_optional_inventory_retirement())
         } else {
-            OptionalInventoryRetirement::default()
+            None
         }
     }
 

@@ -235,3 +235,5 @@ async fn late_policy_writer_uses_old_authority_until_optional_eviction_finishes(
     Received::initial(&mut late_rx, &expected, &[NEXT_TAG]);
     Received::initial(&mut cold, &expected, &[]);
 }
+
+mod adopted_inventory;

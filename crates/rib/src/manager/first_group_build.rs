@@ -30,12 +30,17 @@ pub(super) struct FirstGroupBuild {
     table: GroupRibOut,
 }
 
-/// Detached as one owner. Until its last page finishes, this still occupies
-/// the same build slot as the memberless prepared table it replaced.
+/// Owns the build slot until every detached preparation allocation is released.
 pub(super) struct OptionalDestinationRetirement {
+    inventory: OptionalInventoryRetirement,
+    /// Absent when the first member adopted the live table and only the
+    /// preparation's inventory, encoder probe and change logs are retiring.
+    pub(super) detached: Option<DetachedDestination>,
+}
+
+pub(super) struct DetachedDestination {
     pub(super) gid: usize,
     group: OptionalGroupRetirement,
-    inventory: OptionalInventoryRetirement,
     pub(super) interned_policy: Option<rustbgpd_policy::PolicyChain>,
     withdrawn: BTreeSet<(Prefix, u32)>,
 }
@@ -235,23 +240,31 @@ impl RibManager {
             .as_mut()
             .expect("optional retirement");
         let mut budget = REGISTRATION_PAGE_SIZE;
-        while budget > 0 && retirement.withdrawn.pop_last().is_some() {
-            budget -= 1;
-        }
-        if retirement.withdrawn.is_empty()
-            && retirement.inventory.retire_page(&mut budget)
-            && retirement.group.retire_page(&mut budget)
-            && budget > 0
-        {
-            if retirement.interned_policy.is_some() {
+        if let Some(table) = &mut retirement.detached {
+            while budget > 0 && table.withdrawn.pop_last().is_some() {
                 budget -= 1;
-                drop(retirement.interned_policy.take());
             }
-            if budget == 0 {
+            if !table.withdrawn.is_empty() {
                 return REGISTRATION_PAGE_SIZE;
             }
-            // Release the group's configuration handle after the last route
-            // and the exclusive planning handle have both been released.
+        }
+        if !retirement.inventory.retire_page(&mut budget) {
+            return REGISTRATION_PAGE_SIZE - budget;
+        }
+        if let Some(table) = &mut retirement.detached {
+            if !table.group.retire_page(&mut budget) {
+                return REGISTRATION_PAGE_SIZE - budget;
+            }
+            if table.interned_policy.is_some() {
+                if budget == 0 {
+                    return REGISTRATION_PAGE_SIZE;
+                }
+                budget -= 1;
+                drop(table.interned_policy.take());
+            }
+        }
+        if budget > 0 {
+            // Release the owner, including any remaining group policy handle.
             budget -= 1;
             self.optional_destination_retirement = None;
             self.clear_first_group_commit_frontier();
@@ -262,6 +275,7 @@ impl RibManager {
     pub(super) fn registration_waits_for_optional_destination(&self, peer: PeerId) -> bool {
         self.optional_destination_retirement
             .as_ref()
+            .and_then(|retiring| retiring.detached.as_ref())
             .is_some_and(|retiring| {
                 self.pending_registration_matches_group(
                     peer,
@@ -288,8 +302,26 @@ impl RibManager {
     pub(super) fn refused_inventory_rows_remaining(&self) -> Option<usize> {
         self.optional_destination_retirement
             .as_ref()?
+            .detached
+            .as_ref()?
             .group
             .refused_inventory_rows_remaining()
+    }
+
+    /// A joining member takes the completed table. Its optional cohort proof
+    /// has no consumer now. Unlink both logs before the next group write.
+    pub(super) fn adopt_prepared_destination(&mut self, gid: usize) {
+        self.prepared_destination = None;
+        let Some(inventory) = self.take_destination_inventory_retirement(gid) else {
+            return;
+        };
+        debug_assert!(
+            self.optional_destination_retirement.is_none() && self.first_group_build.is_none()
+        );
+        self.optional_destination_retirement = Some(Box::new(OptionalDestinationRetirement {
+            inventory,
+            detached: None,
+        }));
     }
 
     pub(super) fn retire_refused_authoritative_destination(
@@ -309,7 +341,9 @@ impl RibManager {
         debug_assert!(
             self.first_group_build.is_none() && !self.optional_destination_retirement_active()
         );
-        let inventory = self.take_destination_inventory_retirement(gid);
+        let inventory = self
+            .take_destination_inventory_retirement(gid)
+            .unwrap_or_default();
         let table = self
             .group_ribs
             .remove(&gid)
@@ -322,17 +356,19 @@ impl RibManager {
             .take_if(|prepared| *prepared == gid);
         self.paced_policy_destination.take_if(|paced| *paced == gid);
         self.optional_destination_retirement = Some(Box::new(OptionalDestinationRetirement {
-            gid,
-            group: OptionalGroupRetirement::with_refusal(table, rejected),
-            // A batch can create another live owner of this chain before
-            // returning. Its final registry reconciliation decides exclusivity.
-            interned_policy: if self.update_groups.reclamation_deferred {
-                None
-            } else {
-                self.take_optional_registry_chain(gid)
-            },
             inventory,
-            withdrawn,
+            detached: Some(DetachedDestination {
+                gid,
+                group: OptionalGroupRetirement::with_refusal(table, rejected),
+                // A batch can create another live owner of this chain before
+                // returning. Its final registry reconciliation decides exclusivity.
+                interned_policy: if self.update_groups.reclamation_deferred {
+                    None
+                } else {
+                    self.take_optional_registry_chain(gid)
+                },
+                withdrawn,
+            }),
         }));
     }
 
