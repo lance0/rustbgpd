@@ -2183,7 +2183,11 @@ pub(super) fn test_routes_received(peer: PeerId, announced: Vec<Route>) -> RibUp
     test_session_routes_received(peer, 0, announced)
 }
 
-fn test_session_routes_received(peer: PeerId, session_id: u64, announced: Vec<Route>) -> RibUpdate {
+pub(super) fn test_session_routes_received(
+    peer: PeerId,
+    session_id: u64,
+    announced: Vec<Route>,
+) -> RibUpdate {
     RibUpdate::RoutesReceived {
         session_id,
         peer,

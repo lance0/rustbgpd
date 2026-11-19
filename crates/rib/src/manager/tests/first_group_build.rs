@@ -209,11 +209,19 @@ async fn pending_session_writer_orders_its_eor_but_later_config_allows_other_ing
     );
 }
 
-#[tokio::test(start_paused = true)]
-async fn held_writer_head_preserves_gr_expiry_cutoff_for_queued_refresh() {
+// One writer and its held peer's EoR, with two routes from a different
+// peer awaiting reannouncement after a real GR restart and reconnect.
+fn gr_writer_fixture(
+    kept: Prefix,
+    expired: Prefix,
+) -> (
+    RibManager,
+    mpsc::Sender<RibUpdate>,
+    [mpsc::Receiver<OutboundRouteUpdate>; 2],
+) {
     let (mut manager, primary, _) = fixture(0);
     let incumbent = receiver(1);
-    let _incumbent_rx = join(&mut manager, incumbent, 1, &DUAL);
+    let incumbent_rx = join(&mut manager, incumbent, 1, &DUAL);
     let slow = |slow| RibUpdate::PeerSlowState {
         peer: incumbent,
         session_id: 1,
@@ -221,8 +229,6 @@ async fn held_writer_head_preserves_gr_expiry_cutoff_for_queued_refresh() {
     };
     manager.handle_update(slow(true));
     let source = peer_v4(SOURCE);
-    let kept = prefixes(1)[0];
-    let expired = prefixes(2)[0];
     manager.handle_update(test_routes_received(
         source,
         vec![route(kept, SOURCE, 100), route(expired, SOURCE, 100)],
@@ -242,7 +248,7 @@ async fn held_writer_head_preserves_gr_expiry_cutoff_for_queued_refresh() {
     assert!(manager.loc_rib.get(&kept).unwrap().is_stale);
     assert!(manager.loc_rib.get(&expired).unwrap().is_stale);
 
-    let _founder_rx = join(&mut manager, receiver(2), 1, &DUAL);
+    let founder_rx = join(&mut manager, receiver(2), 1, &DUAL);
     manager.handle_update(slow(false));
     assert!(manager.first_group_pending_writer().is_some());
     primary
@@ -253,10 +259,17 @@ async fn held_writer_head_preserves_gr_expiry_cutoff_for_queued_refresh() {
             safi: Safi::Unicast,
         })
         .unwrap();
-    let mut refresh = test_routes_received(source, vec![route(kept, SOURCE, 190)]);
-    if let RibUpdate::RoutesReceived { session_id, .. } = &mut refresh {
-        *session_id = 1;
-    }
+    (manager, primary, [incumbent_rx, founder_rx])
+}
+
+#[tokio::test(start_paused = true)]
+async fn held_writer_head_preserves_gr_expiry_cutoff_for_queued_refresh() {
+    let source = peer_v4(SOURCE);
+    let kept = prefixes(1)[0];
+    let expired = prefixes(2)[0];
+    let (mut manager, primary, _receivers) = gr_writer_fixture(kept, expired);
+    let refresh =
+        super::lifecycle::test_session_routes_received(source, 1, vec![route(kept, SOURCE, 190)]);
     primary.try_send(refresh).unwrap();
 
     let timer = ExpiryTimer::GrStale;
@@ -298,6 +311,69 @@ async fn held_writer_head_preserves_gr_expiry_cutoff_for_queued_refresh() {
     assert!(!survivor.is_stale);
     assert_eq!(survivor.local_pref(), 190);
     assert!(manager.loc_rib.get(&expired).is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn gr_expiry_during_sealed_writer_precedes_late_refresh() {
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    let source = peer_v4(SOURCE);
+    let kept = prefixes(1)[0];
+    let (mut manager, primary, _receivers) = gr_writer_fixture(kept, prefixes(2)[0]);
+    let deadline = manager.gr_stale_deadlines[&source];
+    assert!(tokio::time::Instant::now() < deadline);
+    assert!(!manager.drain_ready_updates().await);
+    assert!(manager.first_group_commit_frontier_reached());
+    assert_eq!(manager.primary_backlog(), 1);
+    assert!(
+        manager
+            .expiry_cutoffs
+            .captured_at(ExpiryTimer::GrStale)
+            .is_none()
+    );
+
+    let mut actor = Box::pin(manager.run());
+    let mut poll = || {
+        assert!(
+            actor
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        )
+    };
+    tokio::time::advance(deadline - tokio::time::Instant::now()).await;
+    // The owner gets one real turn at the deadline with only the EoR queued.
+    poll();
+    let count = || {
+        let (reply, rx) = oneshot::channel();
+        primary
+            .try_send(RibUpdate::QueryLocRibCount { reply })
+            .unwrap();
+        rx
+    };
+    let mut before_refresh = count();
+    primary
+        .try_send(super::lifecycle::test_session_routes_received(
+            source,
+            1,
+            vec![route(kept, SOURCE, 190)],
+        ))
+        .unwrap();
+    let mut after_refresh = count();
+    for _ in 0..128 {
+        poll();
+        if let Ok(after) = after_refresh.try_recv() {
+            assert_eq!(
+                before_refresh.try_recv().unwrap(),
+                0,
+                "both stale routes must expire before late input"
+            );
+            assert_eq!(after, 1, "the late announcement installs a fresh route");
+            return;
+        }
+    }
+    panic!("the actor did not reach the input after expiry");
 }
 
 async fn assert_initial(

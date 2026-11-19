@@ -8088,63 +8088,44 @@ impl RibManager {
                 continue;
             }
 
-            if let Some(intent) = self.take_first_group_deferred_intent() {
-                self.handle_update(intent);
-                self.drain_readiness_queries(None);
-                self.drain_general_queries_if_unfenced();
-                tokio::task::yield_now().await;
-                continue;
-            }
-
-            // A noncommuting FIFO head or a captured commit frontier precedes
-            // later timer cutoffs. Finish admitted chunks before releasing it.
-            if self.first_group_commit_remaining == Some(0)
+            let deferred_intent = self.take_first_group_deferred_intent();
+            let sealed_owner = self.first_group_commit_remaining == Some(0)
                 && (self.first_group_pending_writer().is_some()
-                    || self.optional_destination_retirement_active())
-            {
-                if !self.traced_route_chunk() {
-                    if self.optional_destination_retirement_active() {
-                        self.advance_optional_destination_retirement();
-                    } else {
-                        self.advance_first_group_build();
-                    }
+                    || self.optional_destination_retirement_active());
+            let first_group_turn = deferred_intent.is_some() || sealed_owner;
+            if !first_group_turn {
+                let released_read = self.serve_released_read();
+                // One bounded validation slice per ordinary actor turn, including
+                // under sustained primary traffic. Clean transitions above retain
+                // their existing ownership fence.
+                let validated_flowspec = self.process_flowspec_validation_chunk();
+                let retired_dampening =
+                    self.dampening_history.retire(ROUTES_RECEIVED_CHUNK_SIZE) > 0;
+                if validated_flowspec || retired_dampening || released_read {
+                    self.drain_readiness_queries(None);
+                    self.drain_queries(QUERY_BUDGET_PER_CHUNK);
+                    tokio::task::yield_now().await;
                 }
-                self.drain_readiness_queries(None);
-                self.drain_general_queries_if_unfenced();
-                tokio::task::yield_now().await;
-                continue;
-            }
 
-            let released_read = self.serve_released_read();
-            // One bounded validation slice per ordinary actor turn, including
-            // under sustained primary traffic. Clean transitions above retain
-            // their existing ownership fence.
-            let validated_flowspec = self.process_flowspec_validation_chunk();
-            let retired_dampening = self.dampening_history.retire(ROUTES_RECEIVED_CHUNK_SIZE) > 0;
-            if validated_flowspec || retired_dampening || released_read {
-                self.drain_readiness_queries(None);
-                self.drain_queries(QUERY_BUDGET_PER_CHUNK);
-                tokio::task::yield_now().await;
-            }
-
-            // Arm the resync timer when resync work transitions none → some.
-            // Owed keys drain at the backlog cadence, including when other
-            // work already armed the ordinary interval: credit returns
-            // without telling the RIB, so the tick is what notices it.
-            if !resync_armed && self.resync_tick_pending() {
-                let interval = if self.owing_runnable() {
-                    DIRTY_RESYNC_BACKLOG_INTERVAL
-                } else {
-                    DIRTY_RESYNC_INTERVAL
-                };
-                resync_sleep
-                    .as_mut()
-                    .reset(tokio::time::Instant::now() + interval);
-                resync_armed = true;
-            } else if resync_armed && self.owing_runnable() {
-                let soon = tokio::time::Instant::now() + DIRTY_RESYNC_BACKLOG_INTERVAL;
-                if resync_sleep.deadline() > soon {
-                    resync_sleep.as_mut().reset(soon);
+                // Arm the resync timer when resync work transitions none → some.
+                // Owed keys drain at the backlog cadence, including when other
+                // work already armed the ordinary interval: credit returns
+                // without telling the RIB, so the tick is what notices it.
+                if !resync_armed && self.resync_tick_pending() {
+                    let interval = if self.owing_runnable() {
+                        DIRTY_RESYNC_BACKLOG_INTERVAL
+                    } else {
+                        DIRTY_RESYNC_INTERVAL
+                    };
+                    resync_sleep
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + interval);
+                    resync_armed = true;
+                } else if resync_armed && self.owing_runnable() {
+                    let soon = tokio::time::Instant::now() + DIRTY_RESYNC_BACKLOG_INTERVAL;
+                    if resync_sleep.deadline() > soon {
+                        resync_sleep.as_mut().reset(soon);
+                    }
                 }
             }
 
@@ -8273,6 +8254,24 @@ impl RibManager {
             ] {
                 self.expiry_cutoffs
                     .observe(timer, due.then_some(deadline), now, backlog);
+            }
+            // A writer still owns execution at its sealed frontier. Observe
+            // deadlines on each such turn so later sends cannot enlarge a
+            // cutoff while the writer settles or its admitted intents replay.
+            if first_group_turn {
+                if let Some(intent) = deferred_intent {
+                    self.handle_update(intent);
+                } else if !self.traced_route_chunk() {
+                    if self.optional_destination_retirement_active() {
+                        self.advance_optional_destination_retirement();
+                    } else {
+                        self.advance_first_group_build();
+                    }
+                }
+                self.drain_readiness_queries(None);
+                self.drain_general_queries_if_unfenced();
+                tokio::task::yield_now().await;
+                continue;
             }
             let accept_primary = self.can_receive_release_primary();
             let cutoffs = &self.expiry_cutoffs;
