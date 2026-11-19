@@ -275,17 +275,18 @@ HARNESS_MEMBER_FULL_PASS = "                    .with_member_full_pass()\n"
 MEMBER_FULL_PASS_BUILDER = "pub fn with_member_full_pass("
 
 
-PEER_ID_EXPORTS = {
+PEER_ID_EXPORTS = (
     "pub use peer_id::PeerId;",
     "pub use peer_id::{PeerEndpoint, PeerId};",
     "pub use peer_id::{PeerEndpoint, PeerId, PeerScope};",
-}
-# The RIB crate root declares modules, constants and re-exports before PeerId.
-# Consuming only complete items keeps quoted, nested and gated uses out.
-RIB_ROOT_ITEM = re.compile(
-    r'(?:#!\[(?:deny|warn)\([\w:]+\)\]\s*|#\[cfg\((?:test|feature = "[\w-]+")\)\]\s*)*'
-    r'(?:(?:pub )?mod \w+|pub const [\w: =(),]+|pub use [\w:]+(?:\{[\w,\s]+\})?)'
 )
+# Keep literals opaque so their braces and semicolons cannot start a root item.
+RUST_TOKEN = re.compile(
+    r'//[^\n]*|/\*|(?:br|cr|r)(?P<fence>#*)".*?"(?P=fence)|"(?:\\.|[^"\\])*"'
+    r"|'(?:\\(?:u\{[\w]+\}|x[\da-fA-F]{2}|.)|[^'\\\n])'|\w+|\S",
+    re.DOTALL,
+)
+BLOCK_COMMENT_DELIMITER = re.compile(r"/\*|\*/")
 # Outbound envelopes that carry a group's shared withdrawals beside their own.
 SHARED_WITHDRAW_FIELD = "    pub shared_withdraw: "
 HARNESS_SHARED_WITHDRAW_ROWS = (
@@ -308,15 +309,44 @@ PEER_ID_ADDR = "peer.addr()"
 
 
 def exports_peer_id(lib: str) -> bool:
-    if "PeerId" not in lib:
+    """Accept an unconditional root export, or a control predating the peer_id module."""
+    if "PeerId" not in lib and "peer_id" not in lib:
         return False
-    code = re.sub(r"(?m)^[ \t]*//[^\n]*", "", lib)
-    for item in code.split(";")[:-1]:
-        item = item.strip()
-        if item + ";" in PEER_ID_EXPORTS:
+    index = depth = 0
+    item_start = True
+    inner_attribute = False
+    previous = ""
+    while token := RUST_TOKEN.search(lib, index):
+        value = token[0]
+        index = token.end()
+        if value.startswith("//"):
+            continue
+        if value == "/*":
+            nesting = 1
+            for delimiter in BLOCK_COMMENT_DELIMITER.finditer(lib, index):
+                nesting += 1 if delimiter[0] == "/*" else -1
+                if nesting == 0:
+                    index = delimiter.end()
+                    break
+            else:
+                raise InvalidReceipt("unterminated block comment in RIB crate root")
+            continue
+        if item_start and value == "pub" and lib.startswith(PEER_ID_EXPORTS, token.start()):
             return True
-        if not RIB_ROOT_ITEM.fullmatch(item):
+        if depth == 0 and previous == "#" and value == "!":
+            inner_attribute = True
+        if inner_attribute and depth == 1 and value in ("cfg", "cfg_attr"):
             break
+        if value in ("{", "[", "("):
+            depth += 1
+        elif value in ("}", "]", ")"):
+            depth -= 1
+            require(depth >= 0, "unmatched delimiter in RIB crate root")
+        item_start = depth == 0 and value in (";", "}")
+        if inner_attribute and depth == 0 and value == "]":
+            item_start = True
+            inner_attribute = False
+        previous = value
     raise InvalidReceipt("unexpected PeerId export in the control")
 
 

@@ -517,27 +517,37 @@ class RecoveryReceiptTests(unittest.TestCase):
         current = Path(__file__).resolve().parents[2] / "crates/rib/src/lib.rs"
         for lib_source in (
             current.read_text(encoding="utf-8"),
+            "#![deny(unsafe_code)]\npub use peer_id::PeerId;",
+            "pub mod route; // per-peer storage\n"
+            "use std::net::IpAddr; /* outer /* inner */ peer types */\n"
+            "pub use peer_id::{PeerEndpoint, PeerId, PeerScope};",
+            'const EXAMPLE: &str = r#"/* ; } "#;\n'
+            "fn description() -> char { '}' }\n"
+            "pub use peer_id::PeerId;",
             "pub use peer_id::PeerId;",
             "pub use peer_id::{PeerEndpoint, PeerId};",
             "pub use peer_id::{PeerEndpoint, PeerId, PeerScope};",
         ):
-            with self.subTest(lib=lib_source if "\n" not in lib_source else "current"):
+            with self.subTest(lib=lib_source[:100]):
                 tree, harness = self.control_api_tree(swaps=True, lib_source=lib_source)
                 entrypoint = self.peer_id_harness(harness, self.PEER_ID_MAIN)
                 original = (harness.read_bytes(), entrypoint.read_bytes())
                 receipt.derive_control_api(tree)
                 self.assertEqual((harness.read_bytes(), entrypoint.read_bytes()), original)
 
-    def test_control_api_refuses_a_mention_without_a_peer_id_export(self) -> None:
+    def test_control_api_refuses_ambiguous_peer_id_exports(self) -> None:
         for mention in (
             "// pub use peer_id::PeerId;",
             "/*\npub use peer_id::{PeerEndpoint, PeerId, PeerScope};\n*/",
             "#[cfg(test)]\npub use peer_id::{PeerEndpoint, PeerId, PeerScope};",
             "/* outer /* inner */\npub use peer_id::PeerId;\n*/",
             'const EXAMPLE: &str = r#";\npub use peer_id::PeerId;\n"#;',
+            'const EXAMPLE: &[u8] = br#" ";\npub use peer_id::PeerId;\n"#;',
+            "#![cfg(test)]\nmod route;\npub use peer_id::PeerId;",
             "mod nested {\npub use peer_id::PeerId;\n}",
             "use peer_id::{PeerEndpoint, PeerId, PeerScope};",
             "pub use peer_id::PeerId as LegacyId;",
+            "pub use peer_id::*;",
         ):
             with self.subTest(mention=mention):
                 tree, harness = self.control_api_tree(swaps=False, hook=False, lib_source=mention)
