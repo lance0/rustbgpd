@@ -937,6 +937,10 @@ impl RibManager {
         }
         if let Some(group) = self.group_ribs.get_mut(&gid) {
             if group.members.is_empty() {
+                // A paced mover or ordinary join can be the first adopter
+                // after a shared inventory refused the prepared table.
+                self.prepared_destination
+                    .take_if(|prepared| *prepared == gid);
                 super::super::replacement_readiness_checkpoint(&readiness, true);
                 group.table.shrink_unicast_to_fit();
                 super::super::replacement_readiness_checkpoint(&readiness, true);

@@ -7084,7 +7084,6 @@ impl RibManager {
 
         // Everything below commits: no fallible step touches shared
         // state before this point.
-        self.prepared_destination.take_if(|gid| *gid == destination);
         let mut source_tombstones: Vec<(Prefix, u32)> = self
             .group_ribs
             .get(&source)
