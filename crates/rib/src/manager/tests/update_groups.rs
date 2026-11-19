@@ -20007,6 +20007,37 @@ fn policy_overlap() -> PolicyOverlap {
     }
 }
 
+fn observe_policy_during_retirement(
+    mut actor: std::pin::Pin<&mut impl std::future::Future>,
+    remaining: usize,
+    receivers: &mut [mpsc::Receiver<OutboundRouteUpdate>],
+    membership: impl std::future::Future<Output = String>,
+    original_group: usize,
+) -> [Vec<OutboundRouteUpdate>; 3] {
+    use std::task::{Context, Poll, Waker};
+
+    let mut membership = std::pin::pin!(membership);
+    let mut wire = [Vec::new(), Vec::new(), Vec::new()];
+    // Even one maximum retirement page on EVERY poll leaves part of the
+    // old allocation live when the marker and membership query arrive.
+    for _ in 0..(remaining - 1) / crate::loc_rib::REGISTRATION_PAGE_SIZE {
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(actor.as_mut().poll(&mut cx).is_pending());
+        for (receiver, log) in receivers.iter_mut().zip(&mut wire) {
+            log.extend(std::iter::from_fn(|| {
+                receiver.try_recv().ok().map(delivered)
+            }));
+        }
+        if !wire[2].is_empty()
+            && let Poll::Ready(label) = membership.as_mut().poll(&mut cx)
+        {
+            assert_eq!(label, format!("group:{original_group}"));
+            return wire;
+        }
+    }
+    panic!("the witness and the old membership must be observable during retirement");
+}
+
 async fn check_policy_during_overflow(policy: OverlapPolicy) {
     use crate::loc_rib::REGISTRATION_PAGE_SIZE;
     use OverlapEvent::{EndOfRibWithdrawal, Marker};
@@ -20029,6 +20060,9 @@ async fn check_policy_during_overflow(policy: OverlapPolicy) {
     let roster = manager.export_roster();
     let (tx, rx) = mpsc::channel(16);
     manager.rx = rx;
+    let original_group = manager.grouped_member_of(members[0]).unwrap();
+    let (query_tx, query_rx) = mpsc::channel(1);
+    manager.query_rx = query_rx;
     let mut response = policy.submit(&tx, &members);
     let source = peer_v4(OVERLAP_RESTARTER);
     let update = |pref| {
@@ -20039,25 +20073,13 @@ async fn check_policy_during_overflow(policy: OverlapPolicy) {
     };
     tx.try_send(update(170)).unwrap();
     let mut actor = Box::pin(manager.run_actor());
-    let mut wire = [Vec::new(), Vec::new(), Vec::new()];
-    // Poll the actual run loop to each executor yield. Even one maximum
-    // retirement page on EVERY poll leaves some of the old allocation live.
-    for _ in 0..(remaining - 1) / REGISTRATION_PAGE_SIZE {
-        assert!(
-            actor
-                .as_mut()
-                .poll(&mut Context::from_waker(Waker::noop()))
-                .is_pending()
-        );
-        for (receiver, log) in receivers.iter_mut().zip(&mut wire) {
-            log.extend(std::iter::from_fn(|| {
-                receiver.try_recv().ok().map(delivered)
-            }));
-        }
-        if !wire[2].is_empty() {
-            break;
-        }
-    }
+    let mut wire = observe_policy_during_retirement(
+        actor.as_mut(),
+        remaining,
+        &mut receivers,
+        query_update_group(&query_tx, members[0]),
+        original_group,
+    );
     for index in [0, 2] {
         assert_eq!(
             overlap_events(&wire[index], Prefix::V4(marker), Prefix::V4(sentinel)),
@@ -20082,6 +20104,7 @@ async fn check_policy_during_overflow(policy: OverlapPolicy) {
     tx.try_send(update(180)).unwrap();
     let actor = tokio::spawn(actor);
     response.await;
+    drop(query_tx);
     drop(tx);
     let manager = actor.await.unwrap();
     for (receiver, log) in receivers.iter_mut().zip(&mut wire) {
@@ -20184,4 +20207,61 @@ async fn closing_a_parked_policy_reply_cancels_forward_but_still_restores() {
         assert_eq!(manager.grouped_member_of(members[1]), Some(old_group));
         assert!(manager.export_policy_for(members[1]).is_some());
     }
+}
+
+#[tokio::test]
+async fn canceled_optional_preparation_returns_the_healthy_scan_to_the_founder() {
+    let (mut manager, members, _receivers) = direct_clean_transition_manager(1, 0, None);
+    manager.outbound_row_credit_override = None;
+    let mut expected: std::collections::HashSet<_> =
+        (0..4096).map(|i| Prefix::V4(overlap_prefix(i))).collect();
+    distribute_direct_routes(&mut manager, OVERLAP_SOURCE, (0..4096).map(overlap_prefix));
+    manager.first_group_build_min_routes = 1;
+    let mut founder = join_overlap_founder(&mut manager, 1);
+    manager.advance_first_group_build();
+    let staged = *expected
+        .iter()
+        .find(|p| manager.first_group_contains(**p))
+        .unwrap();
+    let (reply, response) = oneshot::channel();
+    manager.handle_update(RibUpdate::PrepareExportPolicyDestination {
+        peer: members[0],
+        export_policy: None,
+        reply,
+    });
+    assert!(manager.first_group_pending_writer().is_some());
+    drop(response);
+    manager.advance_first_group_build();
+    assert!(manager.first_group_pending_writer().is_none());
+
+    // The copied row must survive every intervening turn. A healthy table
+    // retired or restarted in place would lose it before publication.
+    for _ in 0..128 {
+        if manager.first_group_build.is_none() {
+            break;
+        }
+        assert!(manager.first_group_contains(staged));
+        assert!(founder.is_empty());
+        manager.advance_first_group_build();
+    }
+    assert!(manager.first_group_build.is_none());
+    let mut ends = 0;
+    while let Ok(update) = founder.try_recv().map(delivered) {
+        for row in update.announce.iter() {
+            assert_eq!(ends, 0);
+            assert_eq!(row.peer, peer_v4(OVERLAP_SOURCE));
+            assert!(!row.communities().contains(&OVERLAP_TAG));
+            assert!(
+                expected.remove(&row.prefix),
+                "unexpected or duplicate {}",
+                row.prefix
+            );
+        }
+        if !update.end_of_rib.is_empty() {
+            assert!(expected.is_empty());
+            assert_eq!(update.end_of_rib, ipv4_sendable());
+            ends += 1;
+        }
+    }
+    assert_eq!(ends, 1);
 }
