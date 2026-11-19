@@ -2494,9 +2494,9 @@ impl PeerSession {
             .await;
             return;
         }
-        // draft-ietf-sidrops-aspa-verification-28 §5.1: an AS_PATH whose most
-        // recently added AS is not the negotiated eBGP neighbor AS is
-        // semantically invalid and SHALL use RFC 7606 treat-as-withdraw. For
+        // draft-ietf-sidrops-aspa-verification-31 §5.1: rustbgpd applies the
+        // RFC 4271 §6.3 first-AS check before ASPA verification and treats a
+        // mismatch with the negotiated eBGP neighbor AS as withdraw (RFC 7606). For
         // an RFC 6793 OLD peer, `parse_revised` has already reconstructed the
         // effective path before this check. Section 6.2 scopes ASPA
         // verification to IPv4/IPv6 unicast. Apply this before policy/ASPA

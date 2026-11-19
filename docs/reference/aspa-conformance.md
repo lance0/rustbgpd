@@ -3,28 +3,41 @@
 > **Document class: REFERENCE.** This maintained page defines a contract, specification, or reusable procedure; follow any stated version scope.
 
 Per-procedure conformance of rustbgpd's ASPA implementation against
-[draft-ietf-sidrops-aspa-verification-28](https://datatracker.ietf.org/doc/html/draft-ietf-sidrops-aspa-verification-28),
+[draft-ietf-sidrops-aspa-verification-31](https://datatracker.ietf.org/doc/html/draft-ietf-sidrops-aspa-verification-31),
 with the RTR transport rows against draft-ietf-sidrops-8210bis. Every
 row cites the code, test, or interop receipt that backs its status, and
 a "Partial" row says exactly what is and is not implemented.
 
-The one-line summary: rustbgpd implements the draft-28 verification
+The one-line summary: rustbgpd implements the draft-31 verification
 procedures with role-aware direction selection and detailed
-diagnostics, and is deliberately **Partial on §5.7
+diagnostics, keeps AS 0 in a merged provider set where §5.3 now
+removes it (no received-route verdict differs), and is deliberately **Partial on §5.7
 mitigation/retention** — validation outcomes are surfaced for explicit
 operator policy; the daemon does not ship default rejection
 enforcement or lossless Adj-RIB-In retention.
 
 ## Implemented revisions
 
-- **draft-ietf-sidrops-aspa-verification-28** (24 August 2026) — the
-  implemented revision is the current revision. The -27→-28 delta
-  inserts a new §5.1, "Prerequisite AS_PATH Checks", that collects the
-  RFC 9774 AS_SET treat-as-withdraw rule and the neighbor-AS check (now
-  stated with its transparent IX route-server exception), renumbers the
-  former §5.1–§5.6 to §5.2–§5.7, and adds that an unexpected AS 0 in a
-  provider set has no influence on verification; no verification
-  procedure changed. The -26→-27 delta was editorial; the meaningful
+- **draft-ietf-sidrops-aspa-verification-31** (17 November 2026) — the
+  implemented revision is the current revision. One procedure changed
+  from -28 to -31, the construction of the Union SPAS in §5.3, which
+  row 2 marks Partial; §5.4–§5.6 differ only in notation, and no
+  received-route verdict changes. The -28→-29 delta retitles §5.1 "Interaction with
+  Other AS_PATH Checks", removes AS 0 from a Union SPAS that also holds
+  other ASes (§5.3, where -28 said that an unexpected AS 0 has no
+  influence on verification), makes the §5.7 policy RECOMMENDED "unless overridden by local
+  operational requirements", replaces "NOT RECOMMENDED" for iBGP with
+  "not applicable" (§6.2), makes the per-session choice of algorithm
+  for segregated Complex relations a MUST (§6.4) and removes the §6.6 Logging
+  section. The -29→-30 delta restates §5.1 as two quoted checks (RFC
+  9774 and RFC 4271 §6.3) that, if implemented, MUST precede ASPA
+  verification, adds that transparent IXP route servers need not be
+  listed as Provider ASes (§4), scopes the §6.2 and §6.3 requirements
+  to "when ASPA-based AS_PATH verification is deployed", and moves
+  "Relation to Other Technologies" to an appendix, where OTC is no
+  longer RECOMMENDED. The -30→-31 delta is editorial. Earlier, the
+  -27→-28 delta inserted §5.1 and renumbered the former §5.1–§5.6 to
+  §5.2–§5.7, the -26→-27 delta was editorial, and the meaningful
   -25→-26 clarifications (consecutive-duplicate compression,
   semantic-invalid first-AS handling) are implemented and covered below.
 - **draft-ietf-sidrops-8210bis-27** (13 August 2026) — the RTR client's
@@ -43,22 +56,22 @@ draft publishes a new revision. A delta that changes a normative
 requirement cited below reopens the affected row; each row's evidence
 column names the receipt to re-check against the new text.
 
-## Verification procedures (draft-ietf-sidrops-aspa-verification-28)
+## Verification procedures (draft-ietf-sidrops-aspa-verification-31)
 
 | # | Section | Requirement | Status | What exists | Evidence |
 |---|---------|-------------|--------|-------------|----------|
-| 1 | §5.1 | Prerequisite AS_PATH checks: RFC 9774 treat-as-withdraw for any AS_SET; the most recently added AS must match the neighbor ASN, with the transparent IX route-server exception | Implemented | AS_SET / AS_CONFED_SET in AS_PATH or AS4_PATH draws RFC 7606 treat-as-withdraw in the revised inbound decoder on every session and family. The neighbor-AS check is enforced on eligible eBGP IPv4/IPv6-unicast UPDATEs even with no BGP Role configured, before policy or cache state can influence the disposition. The exemption applies only when this speaker has the local `route_server_client` Role; `route_server_client = true` identifies a remote member and remains checked. An RFC 6793 OLD peer is checked against the reconstructed effective AS_PATH, not exempted. | RFC 9774 segment inspection in `crates/wire/src/attribute.rs` and [RFC 9774 notes](rfc-notes.md#rfc-9774--as_set--as_confed_set-deprecation) · `aspa_first_as_mismatch` in `crates/transport/src/session/inbound.rs` · `crates/transport/src/session/tests/rpki_aspa.rs` · [ADR-0049](../adr/0049-aspa-verification.md) 2026-08-19 amendment |
-| 2 | §5.2–§5.3 | Provider authorization function `authorized(customer, provider)` over the merged Set of Provider ASes | Implemented | `AspaTable::authorized` returns Provider+ / Not Provider+ / No Attestation from binary search on sorted provider sets; multiple records for one customer merge as a union across caches, with 8210bis replacement semantics within one cache. | `crates/rpki/src/aspa.rs` |
+| 1 | §5.1 | Checks that precede ASPA verification when implemented: RFC 9774 treat-as-withdraw for AS_SET / AS_CONFED_SET in AS_PATH or AS4_PATH; the RFC 4271 §6.3 match of the most recently added AS with the neighbor ASN, with the transparent IX route-server exception (RFC 7947) | Implemented | AS_SET / AS_CONFED_SET in AS_PATH or AS4_PATH draws RFC 7606 treat-as-withdraw in the revised inbound decoder on every session and family. The neighbor-AS check is enforced on eligible eBGP IPv4/IPv6-unicast UPDATEs even with no BGP Role configured, before policy or cache state can influence the disposition. The exemption applies only when this speaker has the local `route_server_client` Role; `route_server_client = true` identifies a remote member and remains checked. An RFC 6793 OLD peer is checked against the reconstructed effective AS_PATH, not exempted. | RFC 9774 segment inspection in `crates/wire/src/attribute.rs` and [RFC 9774 notes](rfc-notes.md#rfc-9774--as_set--as_confed_set-deprecation) · `aspa_first_as_mismatch` in `crates/transport/src/session/inbound.rs` · `crates/transport/src/session/tests/rpki_aspa.rs` · [ADR-0049](../adr/0049-aspa-verification.md) 2026-08-19 amendment |
+| 2 | §5.2–§5.3 | Provider authorization function `authorized(customer, provider)` over the Union SPAS, from which AS 0 is removed when it holds other ASes | **Partial** | `AspaTable::authorized` returns Provider+ / Not Provider+ / No Attestation from binary search on sorted provider sets; multiple records for one customer merge as a union across caches, with 8210bis replacement semantics within one cache. Not implemented: the removal of AS 0 from a merged set that also holds other ASes, which `AspaTable::new` keeps (one cache cannot send such a set, two caches can: `[0]` from one and `[65000]` from the other). No received-route verdict differs, because RFC 7607 handling rejects AS 0 in a received AS_PATH before verification; `AspaTable::providers` and `rbgp rpki aspa` show the AS 0. | `crates/rpki/src/aspa.rs` |
 | 3 | §5.5/§5.6 preamble | Path preparation: AS4_PATH reconstruction, consecutive-duplicate compression, AS_SET makes the path unverifiable (Invalid), empty AS_PATH Invalid, single-hop Valid | Implemented | `compress_as_path` flattens segments and removes consecutive duplicates, returns Invalid on any AS_SET; verification runs on the post-reconstruction effective path. | `crates/rpki/src/aspa_verify.rs` · reconstruction in `crates/transport/src/session/inbound.rs` |
 | 4 | §5.4 | Up-ramp / down-ramp bounds computation | Implemented | Downstream verification computes `max_up_ramp` / `min_up_ramp` / `max_down_ramp` / `min_down_ramp` directly per §5.4. Upstream uses the equivalent pairwise walk; the equivalence to the §5.4 bounds form is exhaustively verified by a 69,210-case synthetic corpus with a bounds-checker reference implementation kept in-tree as a regression oracle. | `spike_bounds_equivalence_on_synthetic_corpus` in `crates/rpki/src/aspa_verify.rs` |
 | 5 | §5.5 | Upstream verification (routes from customers, lateral peers, RS, RS-clients) | Implemented | Full procedure including the local RS-client-role first-AS exemption. Outcomes pinned by unit tests including an offline subset of the NIST-BRIO ASPA demo corpus (b7.1.2), and end-to-end against FRR with an RTR v2 cache. | `crates/rpki/src/aspa_verify.rs` · M27 row in [interop.md](../interop.md) |
 | 6 | §5.6 | Downstream verification (routes from providers) | Implemented | Selected when the local BGP Role is `customer`; §5.4 bounds evaluation with the downstream Invalid/Unknown/Valid inequalities. Proven end-to-end: downstream-Valid and downstream-Invalid verdicts asserted over gRPC in a containerlab topology. | `verify_downstream_detailed` in `crates/rpki/src/aspa_verify.rs` · M59 row in [interop.md](../interop.md) |
-| 7 | §5.7 | Mitigation: Invalid SHOULD be ineligible for selection and MUST be kept in Adj-RIB-In for re-evaluation; Unknown SHOULD get the same preference as Valid | **Partial** | Validation outcomes are computed, stored, revalidated on every cache update, and fully surfaced to policy and diagnostics — but selection keeps the shipped `Valid > Unknown > Invalid` ranking, Invalid stays eligible unless operator policy denies it, and there is no lossless Adj-RIB-In retention. Detailed below. | [ADR-0123](../adr/0123-aspa-v27-mitigation-and-retention.md) · `aspa_preference` in `crates/rib/src/best_path.rs` |
-| 8 | §6.2 | Apply only to {IPv4, unicast} and {IPv6, unicast}; MUST NOT other families by default; edge-ingress; NOT RECOMMENDED on iBGP | Implemented | The family gate returns Unknown for any non-unicast family; iBGP-learned unicast routes are assigned Unknown before import policy and keep that state across cache revalidation. | `ValidationSnapshot::validate_aspa` in `crates/rpki/src/lib.rs` · `validate_route_aspa` in `crates/rib/src/manager/helpers.rs` · `crates/rib/src/manager/tests/rpki.rs` |
-| 9 | §6.3 | RFC 9234 BGP Roles RECOMMENDED to select upstream vs downstream procedures | Implemented | Roles with the OPEN cross-check are implemented; the configured local Role selects the verification direction (`customer` → downstream, all others and roleless → upstream), and the role-selected context is stored per route so revalidation replays the same direction. | `direction_for_role` in `crates/rpki/src/aspa_verify.rs` · [ADR-0071](../adr/0071-bgp-roles-otc.md) · M59 row in [interop.md](../interop.md) |
-| 10 | §6.4 | Complex peering: choose the algorithm per session; optionally per prefix | **Partial** | Per-session selection is implemented — direction follows each peer's configured Role, so segregated complex relations (separate sessions per relationship) work as the draft describes. Per-prefix algorithm selection on a single unsegregated session is not implemented. | Per-peer `role` in [configuration.md](configuration.md) |
-| 11 | §6.6 | Causes of Invalid AS_PATH SHOULD be logged | Implemented | The verifier retains the first proven Not Provider+ hop; first-AS failures log structured warnings; an ASPA cache refresh emits one bounded top-eight Invalid summary; per-route ASPA state and the invalid hop are retained in the rejected-routes store, queryable via `ListRejectedRoutes` / `rbgp rib received <peer> --rejected`. | `verify_detailed` in `crates/rpki/src/aspa_verify.rs` · `crates/transport/src/session/rejected_routes.rs` · rejection table in [operations.md](operations.md) |
-| 12 | §8.4 | OTC-based procedures RECOMMENDED to complement ASPA | Implemented | RFC 9234 Only-to-Customer attribute handling ships alongside Roles. | [ADR-0071](../adr/0071-bgp-roles-otc.md) |
+| 7 | §5.7 | Mitigation, RECOMMENDED unless overridden by local operational requirements: Invalid SHOULD be ineligible for selection and MUST be kept in Adj-RIB-In for re-evaluation; Unknown SHOULD get the same preference as Valid | **Partial** | Validation outcomes are computed, stored, revalidated on every cache update, and fully surfaced to policy and diagnostics — but selection keeps the shipped `Valid > Unknown > Invalid` ranking, Invalid stays eligible unless operator policy denies it, and there is no lossless Adj-RIB-In retention. Detailed below. | [ADR-0123](../adr/0123-aspa-v27-mitigation-and-retention.md) · `aspa_preference` in `crates/rib/src/best_path.rs` |
+| 8 | §6.2 | Apply only to {IPv4, unicast} and {IPv6, unicast}; MUST NOT other families by default; edge-ingress; not applicable on iBGP | Implemented | The family gate returns Unknown for any non-unicast family; iBGP-learned unicast routes are assigned Unknown before import policy and keep that state across cache revalidation. | `ValidationSnapshot::validate_aspa` in `crates/rpki/src/lib.rs` · `validate_route_aspa` in `crates/rib/src/manager/helpers.rs` · `crates/rib/src/manager/tests/rpki.rs` |
+| 9 | §6.3 | RFC 9234 BGP Roles RECOMMENDED when ASPA verification is deployed; they help select upstream vs downstream procedures | Implemented | Roles with the OPEN cross-check are implemented; the configured local Role selects the verification direction (`customer` → downstream, all others and roleless → upstream), and the role-selected context is stored per route so revalidation replays the same direction. | `direction_for_role` in `crates/rpki/src/aspa_verify.rs` · [ADR-0071](../adr/0071-bgp-roles-otc.md) · M59 row in [interop.md](../interop.md) |
+| 10 | §6.4 | Complex peering: when separate sessions can segregate the relationship, the algorithm MUST be chosen for each session. On a single unsegregated session, operators may choose per prefix or, if that is infeasible, MAY use downstream verification | **Partial** | Per-session selection is implemented — direction follows each peer's configured Role, so segregated complex relations (separate sessions per relationship) work as the draft describes. Per-prefix algorithm selection on a single unsegregated session is not implemented. | Per-peer `role` in [configuration.md](configuration.md) |
+| 11 | — (§6.6 until -28) | Causes of Invalid AS_PATH logged: a SHOULD until -28, whose section -29 removed | Implemented | The verifier retains the first proven Not Provider+ hop; first-AS failures log structured warnings; an ASPA cache refresh emits one bounded top-eight Invalid summary; per-route ASPA state and the invalid hop are retained in the rejected-routes store, queryable via `ListRejectedRoutes` / `rbgp rib received <peer> --rejected`. | `verify_detailed` in `crates/rpki/src/aspa_verify.rs` · `crates/transport/src/session/rejected_routes.rs` · rejection table in [operations.md](operations.md) |
+| 12 | Appendix B.2 (§8.4 until -29) | OTC complements ASPA: RECOMMENDED until -29, informative since -30 | Implemented | RFC 9234 Only-to-Customer attribute handling ships alongside Roles. | [ADR-0071](../adr/0071-bgp-roles-otc.md) |
 | 13 | §4, §6.5 | ASPA registration and AS-migration guidance | Not applicable | Operator/CA-side process recommendations with no router implementation requirement. | — |
 
 ### Received path and import policy

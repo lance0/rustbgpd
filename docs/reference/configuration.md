@@ -4425,8 +4425,8 @@ the member's AS_PATH without adding its own ASN. RFC 6793 OLD peers are checked
 after AS_PATH reconstruction. Routes learned over iBGP
 always present `aspa = "unknown"` to import policy and keep that state across
 ASPA cache revalidation, following
-`draft-ietf-sidrops-aspa-verification-28` §6.2's recommendation against
-internal-session verification.
+`draft-ietf-sidrops-aspa-verification-31` §6.2, which makes the procedures
+not applicable to internal sessions.
 
 ### Route modifications (set actions)
 

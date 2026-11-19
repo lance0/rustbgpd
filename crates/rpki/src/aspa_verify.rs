@@ -114,7 +114,7 @@ fn leftmost_as_matches_neighbor(hops: &[u32], neighbor_asn: Option<u32>) -> bool
 }
 
 /// Verify an `AS_PATH` using the role-aware ASPA procedures from
-/// `draft-ietf-sidrops-aspa-verification-28` §5.5 and §5.6.
+/// `draft-ietf-sidrops-aspa-verification-31` §5.5 and §5.6.
 ///
 /// With no configured role, rustbgpd uses upstream verification; the session
 /// boundary independently enforces the current draft's first-AS precondition.
@@ -142,7 +142,7 @@ pub fn verify_detailed(
 }
 
 /// Verify an `AS_PATH` using upstream ASPA verification per
-/// `draft-ietf-sidrops-aspa-verification-28` §5.5.
+/// `draft-ietf-sidrops-aspa-verification-31` §5.5.
 ///
 /// The compressed path is indexed as `hop[0]` = neighbor AS (closest),
 /// `hop[N-1]` = origin AS (farthest). The algorithm walks from origin
