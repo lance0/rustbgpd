@@ -20378,3 +20378,5 @@ async fn discarding_a_paced_preparation_retires_its_hold_withdrawals() {
     }
     assert!(manager.first_group_slot_available());
 }
+
+mod optional_eviction_writer;
