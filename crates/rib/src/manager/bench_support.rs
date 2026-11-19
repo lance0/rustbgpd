@@ -2105,7 +2105,13 @@ impl RibManager {
     /// Drive the production registration steps synchronously through initial replay.
     pub fn bench_complete_deferred_registrations(&mut self) {
         while self.first_group_build.is_some() || !self.pending_initial_registrations.is_empty() {
-            self.advance_pending_initial_registration();
+            if self.optional_destination_retirement_active() {
+                self.advance_optional_destination_retirement();
+            } else if self.pending_destination_prestage.is_some() {
+                self.advance_destination_prestage();
+            } else {
+                self.advance_pending_initial_registration();
+            }
         }
     }
 

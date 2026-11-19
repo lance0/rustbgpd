@@ -20323,9 +20323,10 @@ async fn canceled_optional_preparation_returns_the_healthy_scan_to_the_founder()
 
 #[tokio::test(start_paused = true)]
 async fn discarding_a_paced_preparation_retires_its_hold_withdrawals() {
-    let (manager, members, _receivers) = direct_clean_transition_manager(1, 2050, None);
+    let (manager, members, _receivers) = direct_clean_transition_manager(1, 0, None);
     let mut manager = manager.with_eor_grace(super::eor_grace::grace(&members));
     manager.outbound_row_credit_override = None;
+    distribute_direct_routes(&mut manager, OVERLAP_SOURCE, (0..2050).map(overlap_prefix));
     manager.first_group_build_min_routes = 1;
     let _founder = join_overlap_founder(&mut manager, 1);
     let (reply, mut prepared) = oneshot::channel();
