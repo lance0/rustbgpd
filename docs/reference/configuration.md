@@ -6518,8 +6518,9 @@ settlement detail. `rbgp reload` sends the signal and waits for that reload's
 outcome, exiting non-zero unless it is `complete`; a signal received during
 another reload is served by one follow-up reload. After a signal,
 `rbgp config last-reload` shows the latest
-recorded outcome, route, and bounded applied/unapplied effect receipt, and
-for a complete reload how many peers still have a RIB outbound resync
+recorded outcome, route, bounded applied/unapplied effect receipt, and fields
+observed to require a daemon restart. For a complete reload, it also reports
+how many peers still have a RIB outbound resync
 pending (`converging`), that none does (`converged`), or `applied` when the
 RIB did not answer the convergence query within 2 seconds. `converged` does
 not confirm that peers received the new export view, because transport

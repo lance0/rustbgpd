@@ -850,7 +850,7 @@ inventory is:
 | FlowSpec | Complete component details, curated actions and raw extended communities, including unknown values and duplicate ordering |
 | Topology and ORR | Complete node, link, vantage and input-diagnostic records |
 | EVPN routes, pages, explanations and runtime views | Route selectors, nested export decisions, instances, netdevs, nexthops, Ethernet Segments, VRFs and mutation receipts |
-| Configuration plan, apply, status, confirm, abort, history, rollback and last reload | Nested diffs, update-group impact, confirmation and history eligibility; the latest SIGHUP receipt preserves timing, outcome, route, closed failure fields and bounded applied/unapplied effects; effective config preserves the TOML document, including unknown keys |
+| Configuration plan, apply, status, confirm, abort, history, rollback and last reload | Nested diffs, update-group impact, confirmation and history eligibility; the latest SIGHUP receipt preserves timing, outcome, route, closed failure fields, bounded applied/unapplied effects and pending restart-required fields; effective config preserves the TOML document, including unknown keys |
 
 These are curated views, not protobuf JSON. List summaries intentionally count
 or select detail fields. Neighbor detail reports configured `role`, effective
@@ -879,7 +879,7 @@ This coverage does not widen the [stable surface](../../docs/reference/stability
 or the EVPN and Linux dataplane support boundaries.
 
 For a versioned document, select `rbgp -j --json-version 1 neighbor` (or another
-supported command). The result is `{"format":"rbgp-json","format_version":"1.4","data":...}`.
+supported command). The result is `{"format":"rbgp-json","format_version":"1.5","data":...}`.
 `data` contains the existing command result unchanged, including an empty `[]`,
 optional fields and bounded-list metadata. Ordinary `-j` keeps its current shape.
 The version describes the CLI JSON representation, not the daemon version.
@@ -890,6 +890,9 @@ Version 1.3 adds `admin_state` to `neighbor` rows and detail, so a neighbor the
 daemon holds down reads as disabled, with its owner, instead of plain `Idle`.
 Version 1.4 adds `last_error_unix_ms`, when `last_error` was recorded, to `neighbor`
 rows and detail; it is omitted when unknown.
+Version 1.5 adds `record.pending_restart_required_fields` to `reload` and
+`config last-reload`. It lists the fields the recorded SIGHUP found pending a
+daemon restart.
 
 Consumers should check the format and major version and ignore unknown fields.
 Additive fields increment the minor version; removing or renaming fields, changing

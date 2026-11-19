@@ -664,6 +664,43 @@ fn rbgp_reload_exit_code_follows_the_settled_outcome() {
     assert!(neighbor_exists(&fixture.grpc_addr, FIRST_NEIGHBOR));
 }
 
+#[test]
+fn last_reload_reports_restart_drift_for_each_settled_attempt() {
+    let fixture = Fixture::start(false);
+    let changed = format!(
+        "{}\n[[rpki.cache_servers]]\naddress = \"127.0.0.1:323\"\nmd5_password = \"test-rtr-key\"\n",
+        fixture.base
+    );
+    let invalid = format!("{}\n[[neighbors]\n", fixture.base);
+
+    for (config, expected_status, pending) in [
+        (&changed, 0, true),
+        (&changed, 0, true),
+        (&invalid, 3, false),
+        (&fixture.base, 0, false),
+    ] {
+        fixture.write(config);
+        let reload = rbgp(&fixture.grpc_addr, &["--json", "reload"]);
+        assert_eq!(reload.status.code(), Some(expected_status), "{reload:?}");
+        let last = rbgp(&fixture.grpc_addr, &["--json", "config", "last-reload"]);
+        assert!(last.status.success(), "{last:?}");
+        let reported: serde_json::Value = serde_json::from_slice(&last.stdout).unwrap();
+        let settled: serde_json::Value = serde_json::from_slice(&reload.stdout).unwrap();
+        assert_eq!(reported["record"], settled["record"]);
+        let fields = reported["record"]["pending_restart_required_fields"]
+            .as_array()
+            .unwrap();
+        if pending {
+            assert!(fields.contains(&serde_json::json!("[rpki].cache_servers[].md5_password")));
+        } else {
+            assert!(fields.is_empty(), "{fields:?}");
+        }
+    }
+    let log = fixture.daemon.log();
+    assert!(log.contains("cache_servers[0].md5_password"));
+    assert!(!log.contains("test-rtr-key"));
+}
+
 /// A restarted daemon's reload record says nothing about the reload the
 /// command's signal started, even when it began after the signal.
 #[test]

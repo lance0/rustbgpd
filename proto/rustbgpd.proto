@@ -533,6 +533,10 @@ message SighupReloadRecord {
   // the same clock before signalling knows its reload has settled once a
   // record starts at or after that reading. Meaningless on another host.
   uint64 started_monotonic_micros = 14;
+  // Names of restart-required differences this reload observed between the
+  // running config and the candidate. A failed attempt can stop before it
+  // compares them. An empty list means no differences were reported.
+  repeated string pending_restart_required_fields = 15;
 }
 
 // RIB-side outbound convergence of the export view the latest SIGHUP
