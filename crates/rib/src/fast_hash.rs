@@ -259,6 +259,30 @@ impl<K: Eq + std::hash::Hash, V, const SPLIT: usize, const N: usize, const PRESI
         }
     }
 
+    /// Whether the next `insert(key, ..)` can move existing entries in the
+    /// given shard. A physical bucket cursor must rewind before that insert.
+    pub(crate) fn insert_may_move_buckets(&self, key: &K, shard_index: usize) -> bool {
+        let shard = match self {
+            Self::One(one) => {
+                // insert checks the split threshold even for a replacement.
+                if one.len() >= SPLIT {
+                    return true;
+                }
+                one
+            }
+            Self::Split(shards) => {
+                if shard_of::<N>(hash_of(key)) != shard_index {
+                    return false;
+                }
+                &shards[shard_index]
+            }
+        };
+        // hashbrown's entry reserves one slot before looking up the key.
+        // When growth room runs out it may compact tombstones in place, so
+        // comparing bucket counts across an insert would miss a relocation.
+        shard.len() == shard.capacity()
+    }
+
     /// Move a single table's entries into the shards. Inserts split at
     /// `SPLIT`, so this moves at most that many entries.
     fn split(&mut self) {
@@ -274,6 +298,15 @@ impl<K: Eq + std::hash::Hash, V, const SPLIT: usize, const N: usize, const PRESI
             shards[shard_of::<N>(hash)].insert_unique(hash, entry, |(key, _)| hash_of(key));
         }
         *self = Self::Split(shards);
+    }
+
+    /// Start with independent empty shards before the first insert so a
+    /// paged producer never has to repartition a populated single table.
+    pub(crate) fn split_before_first_insert(&mut self) {
+        if let Self::One(one) = self {
+            assert!(one.is_empty(), "prepare shards before inserting any keys");
+            self.split();
+        }
     }
 
     #[inline]
@@ -604,6 +637,52 @@ mod tests {
             map.insert(i, i);
         }
         assert_eq!(map.shards().len(), SHARDS);
+    }
+
+    #[test]
+    fn bucket_cursor_detects_replacement_split_and_same_size_tombstone_rehash() {
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        struct Colliding(u32);
+        impl std::hash::Hash for Colliding {
+            fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+                state.write_u32(0);
+            }
+        }
+
+        // Fill a contiguous probe cluster. Removing from its interior leaves
+        // DELETED control bytes rather than returning insert capacity.
+        let mut map = ShardedMap::<Colliding, u32>::with_capacity(56);
+        let full = u32::try_from(map.capacity()).unwrap();
+        for n in 0..full {
+            map.insert(Colliding(n), n);
+        }
+        let buckets = map.shards()[0].num_buckets();
+        for n in 0..=full / 2 {
+            assert_eq!(map.remove(&Colliding(n)), Some(n));
+        }
+        let survivor = Colliding(full - 1);
+        assert_eq!(
+            map.capacity(),
+            map.len(),
+            "tombstones retain all growth room"
+        );
+        assert!(map.insert_may_move_buckets(&survivor, 0));
+        assert_eq!(map.insert(survivor, 93), Some(full - 1));
+        assert_eq!(map.shards()[0].num_buckets(), buckets);
+        assert!(map.capacity() > map.len(), "replacement rehashed in place");
+        assert!(!map.insert_may_move_buckets(&survivor, 0));
+
+        let mut small = ShardedMap::<u32, u32, 4, 2>::default();
+        for n in 0..4 {
+            small.insert(n, n);
+        }
+        assert!(small.insert_may_move_buckets(&0, 0));
+        assert_eq!(small.insert(0, 9), Some(0));
+        assert_eq!(
+            small.shards().len(),
+            2,
+            "replacement split the original shard"
+        );
     }
 
     /// A large map stays one plain table through its split point, then

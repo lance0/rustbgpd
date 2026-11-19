@@ -49,6 +49,7 @@ use crate::fast_hash::{AddrMap, FastMap, FastState, ShardedMap};
 use rustbgpd_wire::ExtendedCommunity;
 
 pub(in crate::manager) mod admitted_recovery;
+mod first_group_retirement;
 mod membership;
 mod payload;
 pub(in crate::manager) mod release_fallback;
@@ -218,6 +219,28 @@ pub(super) struct GroupKey {
 }
 
 impl GroupKey {
+    fn from_fingerprint(
+        fingerprint: crate::update::UpdateGroupFingerprint,
+        chain: Option<usize>,
+        owns_evpn: bool,
+    ) -> Self {
+        Self {
+            chain,
+            target_is_ebgp: fingerprint.target_is_ebgp,
+            target_is_rr_client: fingerprint.target_is_rr_client,
+            target_local_role: fingerprint.target_local_role,
+            interpret_rfc1997: fingerprint.interpret_rfc1997,
+            sendable_ipv4_unicast: fingerprint.sendable_ipv4_unicast,
+            sendable_ipv6_unicast: fingerprint.sendable_ipv6_unicast,
+            sendable_vpnv4: fingerprint.sendable_vpnv4,
+            sendable_vpnv6: fingerprint.sendable_vpnv6,
+            owns_evpn,
+            rtc_negotiated: fingerprint.rtc_negotiated,
+            per_client_best: fingerprint.per_client_best,
+            llgr_families: fingerprint.llgr_families,
+        }
+    }
+
     /// Whether two groups differ only by the effective export-chain content.
     fn same_staging_profile_except_chain(&self, other: &Self) -> bool {
         let mut left = self.clone();
@@ -4370,8 +4393,23 @@ impl RibManager {
         chain: Option<&PolicyChain>,
         orf_installed: bool,
         with_policy_fingerprint: bool,
+        pending: Option<&super::LiveSessionRecord>,
     ) -> UpdateGroupClassifierInput {
-        let sendable = self.peer_sendable_families.get(&peer);
+        // These four inputs install only when the pending registration commits.
+        let (sendable, llgr, add_path_send, orr_vantage) = match pending {
+            Some(record) => (
+                Some(&record.sendable_families),
+                Some(&record.negotiated_llgr_families),
+                record.add_path_send_max > 0 && !record.add_path_send_families.is_empty(),
+                record.orr_vantage,
+            ),
+            None => (
+                self.peer_sendable_families.get(&peer),
+                self.peer_advertised_llgr_families.get(&peer),
+                self.peer_has_any_add_path_send(peer),
+                self.peer_orr_vantage.get(&peer).copied(),
+            ),
+        };
         let mut sendable_families = sendable
             .into_iter()
             .flatten()
@@ -4379,9 +4417,7 @@ impl RibManager {
             .collect::<Vec<_>>();
         sendable_families.sort_unstable();
         sendable_families.dedup();
-        let mut llgr_families = self
-            .peer_advertised_llgr_families
-            .get(&peer)
+        let mut llgr_families = llgr
             .into_iter()
             .flatten()
             .map(|&(afi, safi)| (afi as u16, safi as u8))
@@ -4410,9 +4446,9 @@ impl RibManager {
             // with its own exact family-local cap. If Add-Path grouping is
             // introduced, the effective `(AFI, SAFI) -> max` map MUST become part
             // of GroupKey before this disqualifier is relaxed.
-            add_path_send: self.peer_has_any_add_path_send(peer),
+            add_path_send,
             per_client_best: self.peer_per_client_best.contains(&peer),
-            orr_vantage: self.peer_orr_vantage.get(&peer).copied(),
+            orr_vantage,
             orf_installed,
             conditional_advertisement: self.peer_has_conditional_advertisements(peer),
         }
@@ -4446,6 +4482,7 @@ impl RibManager {
                     chain,
                     orf_negotiated || self.peer_orf_filters.contains_key(&peer),
                     true,
+                    None,
                 );
                 UpdateGroupPeerSnapshot {
                     peer,

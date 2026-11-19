@@ -21,6 +21,7 @@ mod eor_grace;
 mod eor_hold;
 mod evpn_recovery;
 mod export_chains;
+mod first_group_build;
 mod flowspec_validation;
 mod graceful_restart;
 mod helpers;
@@ -933,6 +934,9 @@ pub struct RibManager {
     /// registers the peer's CURRENT last live session, so a session
     /// superseded or failed over while queued resolves to its survivor.
     pending_initial_registrations: VecDeque<PeerId>,
+    first_group_build: Option<Box<first_group_build::FirstGroupBuild>>,
+    #[cfg(test)]
+    first_group_build_min_routes: usize,
     /// When the next `bgp_rib_outbound_registration_pending_*` sample runs.
     /// Armed one interval ahead when a registration wait starts, so a burst
     /// of `PeerUp`s shares one scan; re-armed one interval out while the last
@@ -3035,6 +3039,9 @@ impl RibManager {
             pending_refresh_suppress_eor: HashSet::new(),
             deferred_refresh_cursor: None,
             pending_initial_registrations: VecDeque::new(),
+            first_group_build: None,
+            #[cfg(test)]
+            first_group_build_min_routes: INITIAL_DUMP_DEFER_MIN_ROUTES,
             registration_wait_sample_at: None,
             initial_dump_defer_min_routes: INITIAL_DUMP_DEFER_MIN_ROUTES,
             refresh_in_progress: HashMap::new(),
@@ -4632,23 +4639,43 @@ impl RibManager {
     /// sends fail harmlessly and the session's `PeerDown` cleans up.
     fn advance_pending_initial_registration(&mut self) {
         while let Some(peer) = self.pending_initial_registrations.pop_front() {
-            let target = self
+            let waiting = self
                 .live_sessions
                 .get(&peer)
                 .and_then(|sessions| sessions.last())
-                .map(|record| record.session_id);
-            match target {
-                Some(session_id) if self.outbound_session_ids.get(&peer) != Some(&session_id) => {
-                    self.complete_deferred_registration(peer);
+                .is_some_and(|live| live.registration_wait_since.is_some());
+            if !waiting {
+                continue;
+            }
+            // A replacement session or a changed export policy must retire its
+            // superseded table before this peer can fall back to a full build.
+            if self
+                .first_group_build
+                .as_ref()
+                .is_some_and(|job| job.peer == peer)
+            {
+                self.pending_initial_registrations.push_back(peer);
+                self.advance_first_group_build();
+                return;
+            }
+            if let Some((gid, session_id, sender)) = self.first_group_candidate(peer) {
+                // Rotate the queue so another group's warm registration can
+                // proceed while this cold table is being staged.
+                self.pending_initial_registrations.push_back(peer);
+                if self.prestaging_destination(gid) {
                     return;
                 }
-                _ => {
-                    debug!(
-                        %peer,
-                        "dropping deferred outbound registration — session gone or already registered"
-                    );
+                if self.first_group_build.is_none() {
+                    self.start_first_group(peer, gid, session_id, sender);
                 }
+                self.advance_first_group_build();
+                return;
             }
+            self.complete_deferred_registration(peer);
+            return;
+        }
+        if self.first_group_build.is_some() {
+            self.advance_first_group_build();
         }
     }
 
@@ -7760,6 +7787,8 @@ impl RibManager {
         // Start of the primary work admitted since the last prestage slice.
         let mut prestage_primary_since: Option<std::time::Instant> = None;
         let mut release_primary_due = true;
+        let mut registration_primary_due = true;
+        let mut registration_search = 0;
 
         // A deferred attribute sweep must also run when UPDATE traffic stops.
         let attr_gc_sleep = tokio::time::sleep(ATTR_INTERN_GC_INTERVAL);
@@ -8263,18 +8292,20 @@ impl RibManager {
             }
             prestage_primary_since = None;
 
-            // Deferred outbound registrations (LAN-475): complete one
-            // initial table dump per iteration, and only after every queued
-            // mutation batch has drained — imports and their fan-out to
-            // established peers always preempt the reconnecting peers'
-            // full-table catch-up, so a mass reconnect cannot head-of-line
-            // block re-announcement delivery to survivors.
-            if !self.pending_initial_registrations.is_empty() {
-                if self.drain_ready_updates().await {
+            // Private construction alternates with queued primary work. Ordinary
+            // registrations retain their existing priority behind queued imports.
+            if self.first_group_build.is_some() || !self.pending_initial_registrations.is_empty() {
+                if registration_primary_due && self.drain_ready_updates().await {
+                    registration_primary_due = false;
                     continue;
                 }
                 self.drain_readiness_queries(None);
-                self.advance_pending_initial_registration();
+                registration_primary_due = true;
+                if !self.pending_route_batches.is_empty() || self.primary_backlog() > 0 {
+                    self.advance_busy_first_group(&mut registration_search);
+                } else {
+                    self.advance_pending_initial_registration();
+                }
                 self.drain_queries(QUERY_BUDGET_PER_CHUNK);
                 tokio::task::yield_now().await;
                 continue;

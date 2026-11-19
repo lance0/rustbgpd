@@ -11,7 +11,7 @@ use rustbgpd_wire::{Afi, AsPath, EvpnRouteKey, Origin, PathAttribute, Prefix};
 // Aliased to the std name so the storage types read unchanged.
 
 use crate::best_path::{best_path_cmp, best_path_cmp_ranked, compare_bgp_identifier, stale_rank};
-use crate::fast_hash::{FastMap as HashMap, ShardedMap};
+use crate::fast_hash::{FastMap as HashMap, FastSet, ShardedMap};
 use crate::prefix_map::FamilyPrefixMap;
 use crate::route::{
     BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecKey, FlowSpecRoute,
@@ -22,6 +22,59 @@ use crate::update::{RouteQueryKey, route_query_key};
 /// Floor for the ordered-index journal cap: below this table size, replaying
 /// a short journal always beats a rebuild, so don't thrash the rebuild flag.
 const ORDERED_JOURNAL_MIN_CAP: usize = 64;
+
+/// One registration turn discovers buckets or services previously changed keys.
+pub(crate) const REGISTRATION_PAGE_SIZE: usize = 1024;
+const REGISTRATION_REPAIR_LIMIT: usize = 4096;
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RegistrationScanStatus {
+    Scanning,
+    Ready,
+    Overflow,
+}
+
+pub(crate) struct RegistrationPage {
+    pub(crate) keys: Vec<Prefix>,
+    pub(crate) bucket_visits: usize,
+    pub(crate) repairs: usize,
+}
+
+/// There is one private group build. Only it needs a cursor and a repair log.
+/// Changes behind the cursor include replacements and withdrawals, so callers
+/// stage each key against the live Loc-RIB even when it now has no winner.
+#[derive(Default)]
+struct RegistrationScan {
+    shard: usize,
+    bucket: usize,
+    discovery_finished: bool,
+    repairs: Vec<Prefix>,
+    queued: FastSet<Prefix>,
+    overflow: bool,
+}
+
+impl RegistrationScan {
+    fn record(&mut self, key: Prefix) {
+        if self.overflow {
+            return;
+        }
+        if self.repairs.len() == REGISTRATION_REPAIR_LIMIT {
+            self.overflow = !self.queued.contains(&key);
+        } else if self.queued.insert(key) {
+            self.repairs.push(key);
+        }
+    }
+
+    fn status(&self) -> RegistrationScanStatus {
+        if self.overflow {
+            RegistrationScanStatus::Overflow
+        } else if self.discovery_finished && self.repairs.is_empty() {
+            RegistrationScanStatus::Ready
+        } else {
+            RegistrationScanStatus::Scanning
+        }
+    }
+}
 
 fn ancestor_probe_lengths(query: &Prefix) -> impl Iterator<Item = u8> {
     let family_max = match query {
@@ -54,6 +107,7 @@ pub struct LocRib {
     /// per hit) for only ~4 MiB of the ~19 MiB the Adj-RIB slab conversion
     /// saved at the 2p×100k profile shape.
     routes: ShardedMap<Prefix, (Route, SystemTime)>,
+    registration_scan: Option<Box<RegistrationScan>>,
     /// Compact ordered prefix index for resumable listings and release walks.
     /// The lookup-hot best-path table stays hash-backed; this second index
     /// adds ordered continuation without retaining per-walk snapshots.
@@ -160,6 +214,7 @@ impl LocRib {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             routes: ShardedMap::with_capacity(capacity),
+            registration_scan: None,
             ordered_prefixes: FamilyPrefixMap::default(),
             // Pre-reserve the journal floor so recompute's membership note
             // never allocates on the hot path.
@@ -213,6 +268,17 @@ impl LocRib {
                     || old.attributes != new_best.attributes
             });
             if changed {
+                if let Some(scan) = &mut self.registration_scan {
+                    if !scan.discovery_finished
+                        && scan.bucket != 0
+                        && self.routes.insert_may_move_buckets(&prefix, scan.shard)
+                    {
+                        // Earlier shards are complete. A split of the original
+                        // single table always rewinds its only cursor, shard 0.
+                        scan.bucket = 0;
+                    }
+                    scan.record(prefix);
+                }
                 let was_absent = self
                     .routes
                     .insert(prefix, (new_best, SystemTime::now()))
@@ -229,10 +295,79 @@ impl LocRib {
             let v6 = matches!(prefix, Prefix::V6(_));
             track(&mut self.second_family.unicast, v6, false, removed);
             if removed {
+                if let Some(scan) = &mut self.registration_scan {
+                    // Removing a bucket leaves other entries in place.
+                    scan.record(prefix);
+                }
                 self.note_membership_change(prefix);
             }
             removed
         }
+    }
+
+    pub(crate) fn start_registration_scan(&mut self) {
+        assert!(
+            self.registration_scan.is_none(),
+            "one registration scan at a time"
+        );
+        self.registration_scan = Some(Box::default());
+    }
+
+    pub(crate) fn stop_registration_scan(&mut self) {
+        self.registration_scan = None;
+    }
+
+    pub(crate) fn registration_scan_status(&self) -> RegistrationScanStatus {
+        self.registration_scan
+            .as_ref()
+            .expect("registration owns a scan")
+            .status()
+    }
+
+    pub(crate) fn take_registration_page(&mut self) -> RegistrationPage {
+        let scan = self
+            .registration_scan
+            .as_mut()
+            .expect("registration owns a scan");
+        let mut page = RegistrationPage {
+            keys: Vec::new(),
+            bucket_visits: 0,
+            repairs: 0,
+        };
+        if scan.overflow {
+            return page;
+        }
+        if scan.discovery_finished {
+            let count = scan.repairs.len().min(REGISTRATION_PAGE_SIZE);
+            page.keys.reserve_exact(count);
+            for key in scan.repairs.drain(scan.repairs.len() - count..) {
+                scan.queued.remove(&key);
+                page.keys.push(key);
+            }
+            page.repairs = count;
+            return page;
+        }
+        let shards = self.routes.shards();
+        while let Some(shard) = shards.get(scan.shard) {
+            let end = shard.num_buckets();
+            let count = (end - scan.bucket).min(REGISTRATION_PAGE_SIZE - page.bucket_visits);
+            for index in scan.bucket..scan.bucket + count {
+                if let Some((key, _)) = shard.get_bucket(index) {
+                    page.keys.push(*key);
+                }
+            }
+            page.bucket_visits += count;
+            scan.bucket += count;
+            if scan.bucket == end {
+                scan.shard += 1;
+                scan.bucket = 0;
+            }
+            if page.bucket_visits == REGISTRATION_PAGE_SIZE {
+                break;
+            }
+        }
+        scan.discovery_finished = scan.shard == shards.len();
+        page
     }
 
     /// Record that `prefix` entered or left `routes`, deferring the ordered
@@ -1968,6 +2103,153 @@ mod tests {
             Ipv4Addr::new(10, 0, 0, peer_oct),
             local_pref,
         )
+    }
+
+    fn registration_route(n: u32) -> Route {
+        make_route(1, Ipv4Prefix::new(Ipv4Addr::from(n), 32), 100)
+    }
+
+    #[test]
+    fn registration_repairs_fresh_insert_behind_cursor_replace_and_withdraw() {
+        use std::hash::BuildHasher;
+        let mut loc = LocRib::with_capacity(1500);
+        for n in 0..1200 {
+            let route = registration_route(n);
+            loc.recompute(route.prefix, [&route].into_iter());
+        }
+        let mut built = HashMap::default();
+        loc.start_registration_scan();
+        let first = loc.take_registration_page();
+        assert_eq!(first.bucket_visits, REGISTRATION_PAGE_SIZE);
+        assert!(
+            first.keys.len() < first.bucket_visits,
+            "charge empty buckets"
+        );
+        for &key in &first.keys {
+            built.insert(key, loc.get(&key).unwrap().path_id);
+        }
+        let [withdrawn, replaced, ..] = first.keys[..] else {
+            panic!("populated first page")
+        };
+        loc.recompute(withdrawn, std::iter::empty());
+        let mut replacement = loc.get(&replaced).unwrap().clone();
+        replacement.path_id = 42;
+        assert!(loc.recompute(replaced, [&replacement].into_iter()));
+
+        let shard = &loc.routes.shards()[0];
+        let hasher = crate::fast_hash::FastState::default();
+        let mask = u64::try_from(shard.num_buckets() - 1).unwrap();
+        let fresh = (1200..100_000)
+            .map(registration_route)
+            .find(|route| {
+                let bucket = usize::try_from(hasher.hash_one(route.prefix) & mask).unwrap();
+                bucket < first.bucket_visits && shard.get_bucket(bucket).is_none()
+            })
+            .unwrap();
+        assert!(loc.recompute(fresh.prefix, [&fresh].into_iter()));
+        let installed = loc.routes.shards()[0]
+            .find_bucket_index(hasher.hash_one(fresh.prefix), |(key, _)| {
+                *key == fresh.prefix
+            })
+            .unwrap();
+        assert!(
+            installed < first.bucket_visits,
+            "fresh key must be behind cursor"
+        );
+
+        let mut repairs = 0;
+        while loc.registration_scan_status() == RegistrationScanStatus::Scanning {
+            let page = loc.take_registration_page();
+            assert!(page.bucket_visits + page.repairs <= REGISTRATION_PAGE_SIZE);
+            repairs += page.repairs;
+            for key in page.keys {
+                if let Some(route) = loc.get(&key) {
+                    built.insert(key, route.path_id);
+                } else {
+                    built.remove(&key);
+                }
+            }
+        }
+        assert_eq!(repairs, 3);
+        let wanted = loc
+            .iter()
+            .map(|route| (route.prefix, route.path_id))
+            .collect();
+        assert_eq!(built, wanted);
+        assert_eq!(
+            loc.registration_scan_status(),
+            RegistrationScanStatus::Ready
+        );
+        loc.stop_registration_scan();
+    }
+
+    #[test]
+    fn registration_rewinds_a_partially_scanned_table_that_grows_on_replacement() {
+        let mut loc = LocRib::with_capacity(1500);
+        let capacity = u32::try_from(loc.routes.capacity()).unwrap();
+        for n in 0..capacity {
+            let route = registration_route(n);
+            loc.recompute(route.prefix, [&route].into_iter());
+        }
+        let before = loc.routes.shards()[0].num_buckets();
+        loc.start_registration_scan();
+        let first = loc.take_registration_page();
+        assert_eq!(first.bucket_visits, REGISTRATION_PAGE_SIZE);
+        let mut route = registration_route(0);
+        route.path_id = 17;
+        assert!(loc.recompute(route.prefix, [&route].into_iter()));
+        assert!(loc.routes.shards()[0].num_buckets() > before);
+        let mut rediscovered = FastSet::default();
+        while loc.registration_scan_status() == RegistrationScanStatus::Scanning {
+            let page = loc.take_registration_page();
+            if page.bucket_visits > 0 {
+                rediscovered.extend(page.keys);
+            }
+        }
+        assert_eq!(
+            rediscovered.len(),
+            loc.len(),
+            "rescan every relocated winner"
+        );
+    }
+
+    #[test]
+    fn registration_coalesces_repairs_and_invalidates_on_the_first_excess_key() {
+        let mut loc = LocRib::new();
+        loc.start_registration_scan();
+        loc.take_registration_page();
+        assert_eq!(
+            loc.registration_scan_status(),
+            RegistrationScanStatus::Ready
+        );
+        for n in 0..u32::try_from(REGISTRATION_REPAIR_LIMIT).unwrap() {
+            let route = registration_route(n);
+            loc.recompute(route.prefix, [&route].into_iter());
+        }
+        let mut route = registration_route(0);
+        route.path_id = 2;
+        assert!(loc.recompute(route.prefix, [&route].into_iter()));
+        assert_eq!(
+            loc.registration_scan_status(),
+            RegistrationScanStatus::Scanning
+        );
+        let fresh = registration_route(u32::try_from(REGISTRATION_REPAIR_LIMIT).unwrap());
+        assert!(loc.recompute(fresh.prefix, [&fresh].into_iter()));
+        assert_eq!(
+            loc.registration_scan_status(),
+            RegistrationScanStatus::Overflow
+        );
+        let scan = loc.registration_scan.as_ref().unwrap();
+        assert_eq!(scan.repairs.len(), REGISTRATION_REPAIR_LIMIT);
+        assert_eq!(scan.queued.len(), REGISTRATION_REPAIR_LIMIT);
+        assert_eq!(loc.take_registration_page().keys, []);
+        loc.stop_registration_scan();
+        loc.start_registration_scan();
+        assert_eq!(
+            loc.registration_scan_status(),
+            RegistrationScanStatus::Scanning
+        );
+        assert_eq!(loc.registration_scan.as_ref().unwrap().repairs, []);
     }
 
     /// The per-family gauges read these counts instead of walking a table:

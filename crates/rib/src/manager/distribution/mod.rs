@@ -1028,6 +1028,9 @@ pub(super) struct DestinationPrestage {
     pub(super) destination: usize,
     /// The current group of the preparing peer: the transition's source.
     source: usize,
+    /// A same-destination, policy-free registration must release its private
+    /// table before preparation allocates or snapshots a second one.
+    waiting_for_first_group: bool,
     /// The staging walk is done and the prestaged inventory walk
     /// ([`RibManager::extend_prestaged_transition_inventory`]) runs.
     staged: bool,
@@ -2537,6 +2540,12 @@ impl RibManager {
                 mut memo,
             } => {
                 if prefixes.is_none() {
+                    if !manager.retire_first_group_for_policy(destination) {
+                        pending.phase = Some(CleanPolicyTransitionPhase::StageDestination {
+                            source, destination, prefixes, cursor, memo,
+                        });
+                        return CleanPolicyTransitionAdvance::Continue(pending);
+                    }
                     match manager.begin_policy_transition_group(
                         destination,
                         pending.replacements[0].peer,
@@ -7589,6 +7598,16 @@ impl RibManager {
         export_policy: Option<&rustbgpd_policy::PolicyChain>,
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     ) {
+        self.begin_destination_prestage_for(peer, export_policy, reply, None);
+    }
+
+    fn begin_destination_prestage_for(
+        &mut self,
+        peer: PeerId,
+        export_policy: Option<&rustbgpd_policy::PolicyChain>,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+        expected: Option<(usize, usize)>,
+    ) {
         if self.pending_clean_policy_transition.is_some()
             || self.pending_destination_prestage.is_some()
         {
@@ -7598,8 +7617,9 @@ impl RibManager {
             return;
         }
         let completed = self.with_replacement_readiness(|manager| {
-            let Some((source, destination)) =
-                manager.clean_policy_transition_destination(peer, export_policy)
+            let Some((source, destination)) = manager
+                .clean_policy_transition_destination(peer, export_policy)
+                .filter(|pair| expected.is_none_or(|wanted| *pair == wanted))
             else {
                 manager.reclaim_unused_update_group_policies();
                 return Some((
@@ -7621,32 +7641,46 @@ impl RibManager {
             // from an aborted attempt; recreate it deterministically. An OWNED
             // group is maintained by definition — nothing to stage.
             let _ = manager.discard_uncommitted_policy_transition_group(destination);
-            let completed =
+            let waiting_for_first_group = manager.first_group_targets(destination);
+            let prefixes = if waiting_for_first_group {
+                debug_assert!(
+                    export_policy.is_none(),
+                    "only a policy-free registration stages privately"
+                );
+                Vec::new()
+            } else {
                 match manager.begin_policy_transition_group(destination, peer, export_policy) {
                     super::update_groups::PolicyTransitionGroupStart::Maintained => {
-                        Some((reply, Ok(())))
+                        manager.reclaim_unused_update_group_policies();
+                        return Some((reply, Ok(())));
                     }
-                    super::update_groups::PolicyTransitionGroupStart::Created(prefixes) => {
-                        manager.pending_destination_prestage = Some(DestinationPrestage {
-                            destination,
-                            source,
-                            staged: false,
-                            inventory_complete: false,
-                            peer,
-                            prefixes,
-                            cursor: 0,
-                            memo: ExportMemo::default(),
-                            reply: Some(reply),
-                        });
-                        None
-                    }
-                };
+                    super::update_groups::PolicyTransitionGroupStart::Created(prefixes) => prefixes,
+                }
+            };
+            manager.pending_destination_prestage = Some(DestinationPrestage {
+                destination,
+                source,
+                waiting_for_first_group,
+                staged: false,
+                inventory_complete: false,
+                peer,
+                prefixes,
+                cursor: 0,
+                memo: ExportMemo::default(),
+                reply: Some(reply),
+            });
             manager.reclaim_unused_update_group_policies();
-            completed
+            None
         });
         if let Some((reply, result)) = completed {
             let _ = reply.send(result);
         }
+    }
+
+    pub(super) fn prestaging_destination(&self, gid: usize) -> bool {
+        self.pending_destination_prestage
+            .as_ref()
+            .is_some_and(|job| job.destination == gid)
     }
 
     /// Discard a mid-walk destination prestage that a membership event is
@@ -7691,6 +7725,33 @@ impl RibManager {
     /// slices — and that same churn keeps already-staged prefixes current
     /// through the ordinary all-groups staging pass.
     pub(super) fn advance_destination_prestage(&mut self) {
+        if let Some(destination) = self
+            .pending_destination_prestage
+            .as_ref()
+            .filter(|prestage| prestage.waiting_for_first_group)
+            .map(|prestage| prestage.destination)
+        {
+            if !self.retire_first_group_for_policy(destination) {
+                return;
+            }
+            let mut waiting = self
+                .pending_destination_prestage
+                .take()
+                .expect("preparation just checked");
+            let reply = waiting
+                .reply
+                .take()
+                .expect("unsettled preparation has a reply");
+            // Only a no-policy destination can collide. The source session may
+            // have moved during retirement; never stage a different group.
+            self.begin_destination_prestage_for(
+                waiting.peer,
+                None,
+                reply,
+                Some((waiting.source, destination)),
+            );
+            return;
+        }
         let reply = self.with_replacement_readiness(|manager| {
             let readiness = manager.replacement_readiness.clone();
             let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);

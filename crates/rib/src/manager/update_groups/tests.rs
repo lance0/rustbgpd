@@ -313,6 +313,22 @@ fn register_growth_peer(
     outbound_rx
 }
 
+#[test]
+fn registration_with_local_role_uses_the_authoritative_group_build() {
+    let mut manager = staging_manager();
+    manager.first_group_build_min_routes = 0;
+    manager.handle_update(crate::RibUpdate::SetPeerExportContext {
+        peer: MEMBER,
+        session_id: 1,
+        local_role: Some(BgpRole::Provider),
+    });
+    // This helper requires the initial EoR immediately after PeerUp.
+    let _receiver = register_growth_peer(&mut manager, MEMBER, 1);
+    let gid = manager.grouped_member_of(MEMBER).expect("group installed");
+    assert_eq!(manager.group_ribs[&gid].local_role, Some(BgpRole::Provider));
+    assert!(manager.pending_initial_registrations.is_empty());
+}
+
 fn replace_growth_policy(manager: &mut RibManager, peer: PeerId, policy: Option<PolicyChain>) {
     assert_eq!(
         manager.replace_peer_export_policy_synchronously(peer, policy),

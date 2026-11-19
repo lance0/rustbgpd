@@ -839,6 +839,7 @@ impl RibManager {
             chain,
             orf_negotiated || self.peer_orf_filters.contains_key(&peer),
             false,
+            None,
         );
         let fingerprint = match classify_update_group(input) {
             UpdateGroupClassification::PolicyPeerContext => {
@@ -861,22 +862,11 @@ impl RibManager {
         let owns_evpn = self.bench_evpn_ownership_candidate(peer);
         #[cfg(not(feature = "bench-internals"))]
         let owns_evpn = false;
-        let key = GroupKey {
-            chain: chain_idx,
-            target_is_ebgp: fingerprint.target_is_ebgp,
-            target_is_rr_client: fingerprint.target_is_rr_client,
-            target_local_role: fingerprint.target_local_role,
-            interpret_rfc1997: fingerprint.interpret_rfc1997,
-            sendable_ipv4_unicast: fingerprint.sendable_ipv4_unicast,
-            sendable_ipv6_unicast: fingerprint.sendable_ipv6_unicast,
-            sendable_vpnv4: fingerprint.sendable_vpnv4,
-            sendable_vpnv6: fingerprint.sendable_vpnv6,
+        GroupMembership::Grouped(self.update_groups.group_for(GroupKey::from_fingerprint(
+            fingerprint,
+            chain_idx,
             owns_evpn,
-            rtc_negotiated: fingerprint.rtc_negotiated,
-            per_client_best: fingerprint.per_client_best,
-            llgr_families: fingerprint.llgr_families,
-        };
-        GroupMembership::Grouped(self.update_groups.group_for(key))
+        )))
     }
 
     /// Preflight the prospective group id for a clean unicast-only policy

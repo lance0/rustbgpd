@@ -6321,6 +6321,141 @@ fn start_clean_transition(
     response
 }
 
+fn assert_fenced_destination_waits_for_registration(
+    manager: &mut RibManager,
+    members: &[PeerId],
+    dst: usize,
+) {
+    let (reply, _response) = oneshot::channel();
+    manager.handle_update(RibUpdate::ReplacePeerExportPolicies {
+        replacements: members
+            .iter()
+            .map(|&peer| crate::update::PeerExportPolicyReplacement {
+                peer,
+                export_policy: None,
+            })
+            .collect(),
+        reply,
+    });
+    for _ in 0..16 {
+        assert!(!(manager.first_group_targets(dst) && manager.group_ribs.contains_key(&dst)));
+        if manager.group_ribs.contains_key(&dst) {
+            break;
+        }
+        assert_eq!(step_parked_transition(manager).1, "continue");
+    }
+    assert!(!manager.first_group_targets(dst));
+    assert!(manager.group_ribs.contains_key(&dst));
+}
+
+/// Registration and both policy paths may need the same previously absent
+/// no-policy group. Observe ownership at each physical staging seam.
+#[tokio::test]
+async fn cold_registration_and_policy_use_one_destination_in_both_orders() {
+    enum Arrival {
+        PrepareFirst,
+        RegistrationFirst,
+        FencedWithoutPrepare,
+    }
+    for order in [
+        Arrival::PrepareFirst,
+        Arrival::RegistrationFirst,
+        Arrival::FencedWithoutPrepare,
+    ] {
+        let (mut manager, members, mut receivers) = direct_clean_transition_manager(2, 0, None);
+        let source = Ipv4Addr::new(192, 0, 2, 42);
+        let prefixes: Vec<_> = (0..1100_u32)
+            .map(|i| Ipv4Prefix::new(Ipv4Addr::from(0xcb00_0000 + i), 32))
+            .collect();
+        for batch in prefixes.chunks(64) {
+            distribute_direct_routes(&mut manager, source, batch.iter().copied());
+            for receiver in &mut receivers {
+                while receiver.try_recv().map(delivered).is_ok() {}
+            }
+        }
+        manager.first_group_build_min_routes = 1;
+        let (_, dst) = manager
+            .clean_policy_transition_destination(members[0], None)
+            .unwrap();
+        let mut preparation = None;
+        if matches!(order, Arrival::PrepareFirst) {
+            let (reply, response) = oneshot::channel();
+            manager.begin_destination_prestage(members[0], None, reply);
+            preparation = Some(response);
+            assert!(manager.group_ribs.contains_key(&dst));
+        }
+        let peer = peer_v4(Ipv4Addr::new(10, 42, 0, 99));
+        let (outbound, mut receiver) = mpsc::channel(64);
+        let mut up = super::lifecycle::test_peer_up(peer, 17, outbound);
+        let RibUpdate::PeerUp {
+            is_ebgp,
+            route_reflector_client,
+            ..
+        } = &mut up
+        else {
+            unreachable!()
+        };
+        *is_ebgp = false;
+        *route_reflector_client = true;
+        manager.handle_update(up);
+        if matches!(order, Arrival::PrepareFirst) {
+            assert!(!manager.first_group_targets(dst));
+        } else {
+            assert!(manager.first_group_targets(dst));
+            manager.advance_first_group_build();
+            assert!(
+                prefixes
+                    .iter()
+                    .any(|p| manager.first_group_contains(Prefix::V4(*p)))
+            );
+        }
+
+        if matches!(order, Arrival::FencedWithoutPrepare) {
+            assert_fenced_destination_waits_for_registration(&mut manager, &members, dst);
+            continue;
+        }
+
+        if preparation.is_none() {
+            let (reply, response) = oneshot::channel();
+            manager.begin_destination_prestage(members[0], None, reply);
+            preparation = Some(response);
+            assert!(
+                !manager.group_ribs.contains_key(&dst),
+                "no second provisional table"
+            );
+            manager.advance_destination_prestage();
+            assert!(
+                !manager.group_ribs.contains_key(&dst),
+                "retire and allocate on separate turns"
+            );
+        }
+        while manager.pending_destination_prestage.is_some() {
+            assert!(!(manager.first_group_targets(dst) && manager.group_ribs.contains_key(&dst)));
+            manager.advance_destination_prestage();
+        }
+        assert_eq!(preparation.unwrap().await.unwrap(), Ok(()));
+        assert_eq!(manager.group_ribs[&dst].table.len(), prefixes.len());
+        assert!(!manager.outbound_peers.contains_key(&peer));
+        while !manager.pending_initial_registrations.is_empty() {
+            manager.advance_pending_initial_registration();
+        }
+        assert_eq!(manager.grouped_member_of(peer), Some(dst));
+        let mut remaining: std::collections::HashSet<_> =
+            prefixes.into_iter().map(Prefix::V4).collect();
+        loop {
+            let update = delivered(receiver.try_recv().expect("full initial table and EoR"));
+            for route in update.announce.iter() {
+                assert!(remaining.remove(&route.prefix));
+            }
+            if !update.end_of_rib.is_empty() {
+                assert_eq!(update.end_of_rib, ipv4_sendable());
+                assert!(remaining.is_empty());
+                break;
+            }
+        }
+    }
+}
+
 /// LAN-447: the dedicated readiness lane must be answerable BETWEEN commit
 /// batches. With a monolithic finalize poll (no Validate/CommitMembers
 /// split) no mid-flush seam exists and this test fails: the first

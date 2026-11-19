@@ -553,6 +553,17 @@ impl AdjRibOut {
             })
     }
 
+    /// Called only when a private first-group page is about to commit local
+    /// injection provenance. Network-only groups keep the inline empty map.
+    pub(crate) fn prepare_first_group_local_sources(&mut self) {
+        self.local_export_sources.split_before_first_insert();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn local_source_shards(&self) -> usize {
+        self.local_export_sources.shards().len()
+    }
+
     pub(crate) fn set_local_export_source(
         &mut self,
         key: (Prefix, u32),
@@ -610,6 +621,31 @@ impl AdjRibOut {
     /// Withdraw a route by prefix and path ID. Returns `true` if it existed.
     pub fn withdraw(&mut self, prefix: &Prefix, path_id: u32) -> bool {
         self.withdraw_with(prefix, path_id, &mut || {})
+    }
+
+    /// Remove one physical slot of an abandoned, unpublished single-best table.
+    /// Removing each trie key prunes its path before the empty trie is dropped.
+    pub(crate) fn retire_first_group_slot(&mut self) -> Option<(PeerId, Prefix)> {
+        let route = self.routes.pop_retiring_slot()?;
+        let (prefix, path_id) = (route.prefix, route.path_id);
+        let ids = self.prefix_path_ids.remove(&prefix).expect("indexed route");
+        debug_assert_eq!(ids.len(), 1);
+        let (id, handle) = ids[0];
+        debug_assert_eq!(id, path_id);
+        self.local_export_sources.remove(&(prefix, path_id));
+        self.next_hop_overrides.remove(&(prefix, path_id));
+        self.set_self_next_hop(handle, false);
+        track(
+            &mut self.second_family.unicast,
+            matches!(prefix, Prefix::V6(_)),
+            false,
+            true,
+        );
+        Some((route.peer, prefix))
+    }
+
+    pub(crate) fn first_group_retirement_finished(&self) -> bool {
+        self.routes.retirement_finished()
     }
 
     /// Withdraw a route with checkpoints around index walks and retired values.

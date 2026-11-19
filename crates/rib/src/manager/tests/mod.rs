@@ -1728,6 +1728,7 @@ mod explain_mrt;
 mod export_explain;
 mod exportability;
 mod family_pages;
+mod first_group_build;
 mod flowspec;
 mod flowspec_advertised;
 mod gr_helper_stale_exempt;

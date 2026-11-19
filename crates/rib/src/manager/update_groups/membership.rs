@@ -599,6 +599,101 @@ impl RibManager {
         self.install_group_member(gid, peer);
     }
 
+    /// Classify the live registration without installing its sender or group membership.
+    pub(in crate::manager) fn prospective_first_group(
+        &mut self,
+        peer: PeerId,
+        expected_gid: Option<usize>,
+    ) -> Option<(
+        usize,
+        u64,
+        tokio::sync::mpsc::Sender<crate::update::OutboundRouteUpdate>,
+    )> {
+        use crate::update::{UpdateGroupClassification, classify_update_group};
+        use rustbgpd_wire::{Afi, Safi};
+
+        #[cfg(test)]
+        if self.test_force_ungrouped {
+            return None;
+        }
+        let record = self.live_sessions.get(&peer)?.last()?;
+        record.registration_wait_since?;
+        if self.outbound_peers.contains_key(&peer)
+            || self.slow_isolated_peers.contains(&peer)
+            || record.export_policy.is_some()
+            || record.local_role.is_some()
+            || record.rs_control_asn.is_some()
+            || record.per_client_best
+            || record.sendable_families.is_empty()
+            || record.sendable_families.iter().any(|&family| {
+                !matches!(family, (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast))
+                    || self.selection_deferral.as_ref().is_some_and(|state| state.may_hold_family(family))
+            })
+            // With a local RR, export to a non-client depends on each source's
+            // current client status, which can change without a Loc-RIB write.
+            || (self.cluster_id.is_some() && !record.is_ebgp && !record.route_reflector_client)
+        {
+            return None;
+        }
+        let input = self.update_group_classifier_input(
+            peer,
+            None,
+            !record.negotiated_orf_recv.is_empty() || self.peer_orf_filters.contains_key(&peer),
+            false,
+            Some(record),
+        );
+        let UpdateGroupClassification::Groupable(fingerprint) = classify_update_group(input) else {
+            return None;
+        };
+        let session_id = record.session_id;
+        let sender = record.outbound_tx.clone();
+        let key = super::GroupKey::from_fingerprint(fingerprint, None, false);
+        let gid = match expected_gid {
+            Some(id) if self.update_groups.group_key(id) == Some(&key) => id,
+            Some(_) => return None,
+            None => self.update_groups.group_for(key),
+        };
+        Some((gid, session_id, sender))
+    }
+
+    /// Take the pending session's eligible profile. The segmented table grows
+    /// as rows stage, avoiding a Loc-RIB-sized reservation at admission.
+    pub(in crate::manager) fn first_group_table(&self, peer: PeerId, gid: usize) -> GroupRibOut {
+        let record = self.live_sessions[&peer]
+            .last()
+            .expect("registration just classified");
+        let key = self
+            .update_groups
+            .group_key(gid)
+            .expect("registration just classified");
+        GroupRibOut::new(
+            None,
+            key.target_is_ebgp,
+            key.interpret_rfc1997,
+            key.target_is_rr_client,
+            None,
+            record.sendable_families.clone(),
+            record.negotiated_llgr_families.clone(),
+            false,
+            0,
+        )
+    }
+
+    /// A table installed by an intervening join or policy preparation wins.
+    /// Return the losing table to its owner for bounded retirement.
+    pub(in crate::manager) fn publish_first_group(
+        &mut self,
+        gid: usize,
+        mut table: GroupRibOut,
+    ) -> Option<GroupRibOut> {
+        if self.group_ribs.contains_key(&gid) {
+            return Some(table);
+        }
+        table.evpn_table_stamp = self.next_evpn_table_stamp().unwrap_or(0);
+        self.group_ribs.insert(gid, table);
+        None
+    }
+
     /// Build the group's staged table when it does not exist yet — the
     /// join-time build pass (one shared staging walk, deltas discarded:
     /// correct only while the group is memberless). `peer` is the

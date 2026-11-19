@@ -1721,7 +1721,7 @@ impl RibManager {
             let (outbound_tx, mut outbound_rx) = mpsc::channel(channel_capacity);
             self.pending_peer_export_encoders
                 .insert((peer, session_id), make_exact_export_encoder(peer_asn));
-            self.handle_peer_up(
+            self.bench_register_peer(
                 peer,
                 PeerUpRegistration {
                     supersedes: None,
@@ -2035,6 +2035,16 @@ impl RibManager {
         outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
         exact_export_encoder: Arc<dyn ExactExportEncoder>,
     ) {
+        self.bench_enqueue_route_reflector_peer(index, outbound_tx, exact_export_encoder);
+        self.bench_complete_deferred_registrations();
+    }
+
+    fn bench_enqueue_route_reflector_peer(
+        &mut self,
+        index: usize,
+        outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
+        exact_export_encoder: Arc<dyn ExactExportEncoder>,
+    ) {
         let idx = u32::try_from(index).expect("bench peer index fits u32");
         let peer = Self::bench_peer_address(index);
         let session_id = u64::from(idx) + 1;
@@ -2083,14 +2093,18 @@ impl RibManager {
                 203, 0, 113, 255,
             ))));
         for (index, outbound_tx, encoder) in joiners {
-            self.bench_join_route_reflector_peer(index, outbound_tx, encoder);
+            self.bench_enqueue_route_reflector_peer(index, outbound_tx, encoder);
         }
     }
 
-    /// Complete every deferred registration through the run loop's
-    /// production advance seam, one call per loop turn.
+    fn bench_register_peer(&mut self, peer: PeerId, registration: PeerUpRegistration) {
+        self.handle_peer_up(peer, registration);
+        self.bench_complete_deferred_registrations();
+    }
+
+    /// Drive the production registration steps synchronously through initial replay.
     pub fn bench_complete_deferred_registrations(&mut self) {
-        while !self.pending_initial_registrations.is_empty() {
+        while self.first_group_build.is_some() || !self.pending_initial_registrations.is_empty() {
             self.advance_pending_initial_registration();
         }
     }
@@ -2178,7 +2192,7 @@ impl RibManager {
         let (tx, rx) = mpsc::channel(channel_capacity);
         self.pending_peer_export_encoders
             .insert((peer, session_id), exact_export_encoder);
-        self.handle_peer_up(
+        self.bench_register_peer(
             peer,
             PeerUpRegistration {
                 supersedes: None,
@@ -2225,7 +2239,7 @@ impl RibManager {
         let (tx, mut rx) = mpsc::channel(channel_capacity);
         self.pending_peer_export_encoders
             .insert((peer, session_id), exact_export_encoder);
-        self.handle_peer_up(
+        self.bench_register_peer(
             peer,
             PeerUpRegistration {
                 supersedes: None,
@@ -2341,7 +2355,7 @@ impl RibManager {
             } else {
                 vec![(Afi::Ipv4, Safi::Unicast)]
             };
-            self.handle_peer_up(
+            self.bench_register_peer(
                 peer,
                 PeerUpRegistration {
                     supersedes: None,
@@ -2526,7 +2540,7 @@ impl RibManager {
                 let (tx, mut rx) = mpsc::channel(channel_capacity);
                 self.pending_peer_export_encoders
                     .insert((peer, session_id), make_exact_export_encoder(peer_asn));
-                self.handle_peer_up(
+                self.bench_register_peer(
                     peer,
                     PeerUpRegistration {
                         supersedes: None,
@@ -2631,6 +2645,7 @@ impl RibManager {
             negotiated_orf_recv: Vec::new(),
             negotiated_llgr_families: Vec::new(),
         });
+        self.bench_complete_deferred_registrations();
     }
 
     /// Deliver one End-of-RIB through the production `EndOfRib` dispatch and
