@@ -5218,9 +5218,11 @@ log_format = "json"
             // lowering.
             // +4: the two honor partial fan-out tests write their prior and
             // candidate.
-            (concat!("write_tier", "_test_config("), 49),
+            // +2: the static TCP-AO pin test writes its prior and candidate.
+            (concat!("write_tier", "_test_config("), 51),
             // +2: the two honor partial fan-out tests load their prior.
-            (concat!("load_tier", "_test_config("), 39),
+            // +1: the static TCP-AO pin test loads its prior.
+            (concat!("load_tier", "_test_config("), 40),
             // +4: the two config-bridge advisory tests load their prior and
             // candidate.
             (concat!("load_tier", "_test_toml("), 13),
