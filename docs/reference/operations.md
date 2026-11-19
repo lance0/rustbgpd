@@ -1121,6 +1121,17 @@ and a sanitized target. The read-only outside-v1 `GetLastSighupReload` RPC
 retains one record in memory; restart clears it. Only a settled reload
 publishes a record, and each settled reload replaces the previous one; a
 coalesced signal publishes none of its own. The record's
+`pending_restart_required_fields` lists the field names this attempt found
+pending a daemon restart. For settings pinned together, the list identifies
+the section or shared control. For example, `[[dynamic_neighbors]].tcp_ao`
+covers edits to a protected range as well as its keys. Repeated entries in
+RPKI cache and BMP collector lists share one field name, such as
+`[rpki].cache_servers[].refresh_interval`. Use `rbgp config diff` to see
+which list entries changed. A reload of the same edited file reports the drift
+again. Reverting the file and reloading clears the corresponding entries.
+An attempt that fails before it can compare the configuration has an empty
+list. Use the outcome and failing bucket to distinguish an early failure
+from a completed reload with no pending fields. The record's
 `started_monotonic_micros` is the daemon host's `CLOCK_MONOTONIC` when that
 reload started, which `rbgp reload` compares with its own reading taken
 before it signals. `rbgp doctor` warns when the latest outcome is `rejected_no_effect`,

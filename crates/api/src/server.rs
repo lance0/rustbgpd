@@ -3645,6 +3645,7 @@ mod tests {
             Some(Arc::new(|| crate::proto::GetLastSighupReloadResponse {
                 record: Some(crate::proto::SighupReloadRecord {
                     outcome: "complete".to_string(),
+                    pending_restart_required_fields: vec!["[mrt].output_dir".to_string()],
                     ..Default::default()
                 }),
                 convergence: None,
@@ -3667,6 +3668,10 @@ mod tests {
             .into_inner();
         drop(service);
         rib.await.unwrap();
+        assert_eq!(
+            response.record.unwrap().pending_restart_required_fields,
+            ["[mrt].output_dir"]
+        );
         assert_eq!(
             response.convergence.map(|convergence| convergence.state),
             Some("converged".to_string())

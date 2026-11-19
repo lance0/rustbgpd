@@ -4894,6 +4894,11 @@ fn last_sighup_record(
         outcome: sighup_reload_metric_outcome(outcome).as_str().to_string(),
         route: trace.route.unwrap_or("").to_string(),
         reason_code: reason_code.to_string(),
+        pending_restart_required_fields: trace
+            .pending_restart_required_fields
+            .iter()
+            .cloned()
+            .collect(),
         failure_bucket,
         failure_target,
         applied_count,

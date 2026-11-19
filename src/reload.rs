@@ -378,6 +378,8 @@ pub(crate) struct SighupReloadTrace {
     pub(crate) dynamic_limit_snapshot_pending: bool,
     pub(crate) dialout_targets_pending: bool,
     pub(crate) explain_snapshot_pending: bool,
+    /// Schema paths observed on this attempt, without values or row indices.
+    pub(crate) pending_restart_required_fields: BTreeSet<String>,
     pub(crate) planned: BTreeSet<SighupEffect>,
     pub(crate) applied: BTreeSet<SighupEffect>,
 }
@@ -519,6 +521,74 @@ impl<'a> SighupMutationProgress<'a> {
         self.accepted_effect = true;
         if let Some(operation) = self.operation {
             operation.mark_sighup_accepted_effect();
+        }
+    }
+
+    fn pending_restart(&self, field: &str) {
+        if let Some(trace) = &self.trace {
+            trace
+                .lock()
+                .expect("SIGHUP trace poisoned")
+                .pending_restart_required_fields
+                .insert(field.to_owned());
+        }
+    }
+
+    fn report_restart_changes(&self, section: &str, changes: &[config::FieldChange]) {
+        if changes.is_empty() {
+            return;
+        }
+        let fields = changes
+            .iter()
+            .map(config::FieldChange::render)
+            .collect::<Vec<_>>()
+            .join(", ");
+        error!(fields = %fields, "{section} changed — requires full restart to take effect");
+
+        if let Some(trace) = &self.trace {
+            let mut trace = trace.lock().expect("SIGHUP trace poisoned");
+            for change in changes {
+                let mut path = section.to_owned();
+                if change.field != section {
+                    // Keep the receipt bounded by schema size, even when many
+                    // cache servers, keys or collectors changed the same field.
+                    for part in change.field.split('.') {
+                        path.push('.');
+                        if let Some((name, _index)) = part.split_once('[') {
+                            path.push_str(name);
+                            path.push_str("[]");
+                        } else {
+                            path.push_str(part);
+                        }
+                    }
+                }
+                trace.pending_restart_required_fields.insert(path);
+            }
+        }
+    }
+
+    fn pending_evpn_restart(&self, current: &Config, desired: &Config) {
+        for (changed, field) in [
+            (
+                current.evpn_instances != desired.evpn_instances,
+                "[[evpn_instances]]",
+            ),
+            (
+                current.evpn_ip_vrfs != desired.evpn_ip_vrfs,
+                "[[evpn_ip_vrfs]]",
+            ),
+            (
+                current.ethernet_segments != desired.ethernet_segments,
+                "[[ethernet_segments]]",
+            ),
+            (
+                current.evpn_core_isolation != desired.evpn_core_isolation,
+                "[evpn_core_isolation]",
+            ),
+        ] {
+            if changed {
+                self.pending_restart(field);
+            }
         }
     }
 
@@ -2181,31 +2251,38 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
 
     // Flag sections that require restart at ERROR, the documented level for
     // a restart-required edit.
-    let global_changes =
-        config::global_restart_required_changes(&current.global, &new_config.global);
-    if !global_changes.is_empty() {
-        let fields = global_changes
-            .iter()
-            .map(config::FieldChange::render)
-            .collect::<Vec<_>>()
-            .join(", ");
-        error!(fields = %fields, "[global] changed — requires full restart to take effect");
+    // Listener settings belong to the sockets captured at startup. Compare
+    // against that authority if the reconstructed runtime snapshot differs.
+    let mut live_global = std::borrow::Cow::Borrowed(&current.global);
+    if live_global.telemetry.grpc_tcp.as_ref() != live_grpc_tcp {
+        live_global.to_mut().telemetry.grpc_tcp = live_grpc_tcp.cloned();
     }
+    if live_global.telemetry.grpc_uds.as_ref() != live_grpc_uds {
+        live_global.to_mut().telemetry.grpc_uds = live_grpc_uds.cloned();
+    }
+    progress.report_restart_changes(
+        "[global]",
+        &config::global_restart_required_changes(&live_global, &new_config.global),
+    );
+    progress.report_restart_changes(
+        "[rpki]",
+        &config::rpki_restart_required_changes(current.rpki.as_ref(), new_config.rpki.as_ref()),
+    );
+    progress.report_restart_changes(
+        "[bmp]",
+        &config::bmp_restart_required_changes(current.bmp.as_ref(), new_config.bmp.as_ref()),
+    );
+    progress.report_restart_changes(
+        "[mrt]",
+        &config::mrt_restart_required_changes(current.mrt.as_ref(), new_config.mrt.as_ref()),
+    );
     if new_config.flowspec != current.flowspec {
+        progress.pending_restart("[flowspec].validation");
         error!(
             "[flowspec] changed — receive-side feasibility validation is configured \
              once at startup. Restart rustbgpd to apply; the RIB keeps its \
              startup validation mode until then."
         );
-    }
-    if new_config.rpki != current.rpki {
-        error!("[rpki] changed — requires full restart to take effect");
-    }
-    if new_config.bmp != current.bmp {
-        error!("[bmp] changed — requires full restart to take effect");
-    }
-    if new_config.mrt != current.mrt {
-        error!("[mrt] changed — requires full restart to take effect");
     }
 
     // Surface gRPC listener / TLS changes specifically and pin the
@@ -2253,6 +2330,9 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
     pin_unreconciled_daemon_runtime_fields(&mut new_config, current);
     let (static_mss_pinned, interface_mss_pinned) =
         config::pin_reload_tcp_mss(&mut new_config, current);
+    if static_mss_pinned || !interface_mss_pinned.is_empty() {
+        progress.pending_restart("[[neighbors]] / [peer_groups.*].tcp_mss");
+    }
     if static_mss_pinned {
         error!(
             "tcp_mss differs from the live static-neighbor/listener snapshot: active-open and \
@@ -2318,6 +2398,7 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
         config::pin_tcp_ao_startup_only_runtime(&mut new_config, current)
     };
     if tcp_ao_pinned_neighbors > 0 {
+        progress.pending_restart("[[neighbors]].tcp_ao");
         error!(
             neighbors = tcp_ao_pinned_neighbors,
             "[[neighbors]].tcp_ao is outside the live ordered rotation shapes: \
@@ -2335,6 +2416,7 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
         config::pin_dynamic_tcp_ao_startup_only(&mut new_config, current)
     };
     if pinned_dynamic_tcp_ao > 0 {
+        progress.pending_restart("[[dynamic_neighbors]].tcp_ao");
         error!(
             ranges = pinned_dynamic_tcp_ao,
             "[[dynamic_neighbors]].tcp_ao is outside the live ordered rotation shapes: \
@@ -2346,6 +2428,7 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
     }
 
     if config::pin_bfd_startup_only_runtime(&mut new_config, current) {
+        progress.pending_restart("[[bfd_profiles]]");
         error!(
             "[[bfd_profiles]] changed: profile definitions require restart and remain \
              at their running values for this reload. Member attachments may change \
@@ -2372,6 +2455,7 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
     new_config.policy.dataset_events = desired_config.policy.dataset_events.clone();
 
     if new_config.apply_bum_enforcement != current.apply_bum_enforcement {
+        progress.pending_restart("apply_bum_enforcement");
         error!(
             "apply_bum_enforcement differs from the live config: the \
              EVPN dataplane reconciler read this startup-only setting \
@@ -2388,6 +2472,7 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
     // startup snapshot (the operator's edit survives in the desired
     // on-disk config for the next restart).
     if new_config.security != current.security {
+        progress.pending_restart("[security.grpc]");
         error!(
             "[security.grpc] changed — gRPC authorization enforcement and roles \
              are resolved once at startup when listeners are built. Restart \
@@ -2397,6 +2482,7 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
         new_config.security = current.security.clone();
     }
     if new_config.inbound_admission != current.inbound_admission {
+        progress.pending_restart("[inbound_admission]");
         error!(
             "[inbound_admission] changed — the ADR-0120 accept-path limiter is \
              built once at startup. Restart rustbgpd to apply; inbound admission \
@@ -2405,6 +2491,7 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
         new_config.inbound_admission = current.inbound_admission.clone();
     }
     if new_config.managed_netdevs != current.managed_netdevs {
+        progress.pending_restart("[managed_netdevs]");
         error!(
             "[managed_netdevs] changed — the ADR-0091 managed-netdev lifecycle \
              reads this table once at startup. Restart rustbgpd to apply; the \
@@ -2415,16 +2502,43 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
     // `[[fib_tables]]` is hot-applied to the running FIB reconciler below
     // (after the honor knobs), ack-gated on the actor accepting the new set —
     // see the FIB hot-apply step.
-    if new_config.global.install_blackhole_discard != current.global.install_blackhole_discard
-        || new_config.global.allow_blackhole_broad_prefixes
-            != current.global.allow_blackhole_broad_prefixes
-        || new_config.global.blackhole_discard_max_active
-            != current.global.blackhole_discard_max_active
-        || new_config.global.blackhole_discard_install_rate_per_minute
-            != current.global.blackhole_discard_install_rate_per_minute
-        || new_config.global.blackhole_discard_install_burst
-            != current.global.blackhole_discard_install_burst
-    {
+    // The TCP-AO dependency pin can already have restored part of global.
+    // Report the operator's declared values while pinning the runtime candidate.
+    let discard_fields = [
+        (
+            desired_config.global.install_blackhole_discard
+                != current.global.install_blackhole_discard,
+            "[global].install_blackhole_discard",
+        ),
+        (
+            desired_config.global.allow_blackhole_broad_prefixes
+                != current.global.allow_blackhole_broad_prefixes,
+            "[global].allow_blackhole_broad_prefixes",
+        ),
+        (
+            desired_config.global.blackhole_discard_max_active
+                != current.global.blackhole_discard_max_active,
+            "[global].blackhole_discard_max_active",
+        ),
+        (
+            desired_config
+                .global
+                .blackhole_discard_install_rate_per_minute
+                != current.global.blackhole_discard_install_rate_per_minute,
+            "[global].blackhole_discard_install_rate_per_minute",
+        ),
+        (
+            desired_config.global.blackhole_discard_install_burst
+                != current.global.blackhole_discard_install_burst,
+            "[global].blackhole_discard_install_burst",
+        ),
+    ];
+    if discard_fields.iter().any(|(changed, _)| *changed) {
+        for (changed, field) in discard_fields {
+            if changed {
+                progress.pending_restart(field);
+            }
+        }
         error!(
             "[global] BLACKHOLE FIB discard settings differ from the live config: \
              the RFC 7999 kernel-discard reconciler is spawned only at startup. \
@@ -2444,6 +2558,7 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
             current.global.blackhole_discard_install_burst;
     }
     if blackhole_fib_reload_touches_spawn_gate && honor_blackhole_changed {
+        progress.pending_restart("[global].honor_blackhole");
         error!(
             "[global] honor_blackhole differs from the live config while \
              BLACKHOLE FIB discard is configured: the RFC 7999 \
@@ -2477,7 +2592,14 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
             "reload: [global].dynamic_neighbor_limit changed"
         );
     }
-    if config::pin_rfc8212_posture_startup_only(&mut new_config, current) {
+    config::pin_rfc8212_posture_startup_only(&mut new_config, current);
+    if config::rfc8212_posture_requires_restart(&desired_config, current) {
+        if desired_config.config_epoch != current.config_epoch {
+            progress.pending_restart("config_epoch");
+        }
+        if desired_config.global.ebgp_requires_policy != current.global.ebgp_requires_policy {
+            progress.pending_restart("[global].ebgp_requires_policy");
+        }
         error!(
             "config_epoch or [global].ebgp_requires_policy differs from the live config: \
              the ADR-0112/0119 RFC 8212 posture is read once at startup. Restart rustbgpd \
@@ -2506,6 +2628,9 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
     let explain_changed = current.policy.explain != new_config.policy.explain
         || current.policy.reject_retention != new_config.policy.reject_retention;
     let fib_tables_changed = new_config.fib_tables != current.fib_tables;
+    if fib_tables_changed && fib_cmd_tx.is_none() {
+        progress.pending_restart("[[fib_tables]]");
+    }
     let dynamic_neighbors_changed = new_config.dynamic_neighbors != current.dynamic_neighbors;
     let evpn_runtime_pending = evpn_runtime_changed(&new_config, current);
     // The listener inbound-auth inventory is config-derived, so the family
@@ -3147,6 +3272,7 @@ pub(crate) async fn reload_config_with_tcp_ao_recorded(
             }
         }
     } else if evpn_runtime_changed(&new_config, current) {
+        progress.pending_evpn_restart(current, &new_config);
         error!(
             "EVPN runtime config differs but the ADR-0063 coordinator is unavailable; \
              restart rustbgpd to apply [[evpn_instances]], [[evpn_ip_vrfs]], or \
@@ -7784,7 +7910,8 @@ metric = 200
             }
         });
 
-        let returned = reload_config(
+        let trace = Arc::new(Mutex::new(SighupReloadTrace::default()));
+        let returned = reload_config_recorded(
             path.to_str().unwrap(),
             &initial,
             tcp.as_ref(),
@@ -7792,6 +7919,7 @@ metric = 200
             &peer_mgr_tx,
             Some(&fib_tx),
             None,
+            Some(Arc::clone(&trace)),
         )
         .await
         .expect("reload should hot-apply fib_tables");
@@ -7806,6 +7934,13 @@ metric = 200
             peer_mgr.await.unwrap(),
             2,
             "peer-manager snapshot is refreshed before reload continues"
+        );
+        assert!(
+            trace
+                .lock()
+                .unwrap()
+                .pending_restart_required_fields
+                .is_empty()
         );
         std::fs::remove_file(&path).ok();
     }
@@ -7850,7 +7985,8 @@ metric = 200
         // fib_cmd_tx = None: the FIB runtime never spawned. `current` already has
         // tables, so this hits the "runtime unavailable; restart required" branch
         // — it must log + revert, never advance the snapshot.
-        let returned = reload_config(
+        let trace = Arc::new(Mutex::new(SighupReloadTrace::default()));
+        let returned = reload_config_recorded(
             path.to_str().unwrap(),
             &initial,
             tcp.as_ref(),
@@ -7858,6 +7994,7 @@ metric = 200
             &peer_mgr_tx,
             None,
             None,
+            Some(Arc::clone(&trace)),
         )
         .await
         .expect("reload returns a config when the FIB runtime is absent");
@@ -7866,6 +8003,10 @@ metric = 200
             returned.fib_tables.len(),
             1,
             "absent FIB runtime must not advance the snapshot"
+        );
+        assert_eq!(
+            trace.lock().unwrap().pending_restart_required_fields,
+            BTreeSet::from(["[[fib_tables]]".to_string()])
         );
         std::fs::remove_file(&path).ok();
     }
@@ -9208,11 +9349,19 @@ hold_time = 90
     #[tokio::test]
     async fn rejected_compound_reload_builds_redacted_api_receipt() {
         let path = unique_temp_path("reload-rejected-receipt");
-        write_tier_test_config(&path, baseline_toml());
+        let initial = format!(
+            "{}\n[[rpki.cache_servers]]\naddress = \"127.0.0.1:3323\"\nmd5_password = \"old-secret\"\n\
+             [[rpki.cache_servers]]\naddress = \"127.0.0.2:3323\"\nmd5_password = \"old-secret\"\n",
+            baseline_toml()
+        );
+        write_tier_test_config(&path, &initial);
         let current = load_tier_test_config(&path);
         let candidate = format!(
             "{}\n[peer_groups.ranges]\nhold_time = 30\n[[dynamic_neighbors]]\nprefix = \"192.0.2.0/24\"\npeer_group = \"ranges\"\nremote_asn = 65100\n",
-            baseline_toml().replace("hold_time = 90", "hold_time = 45")
+            initial
+                .replace("old-secret", "new-secret")
+                .replace("hold_time = 90", "hold_time = 45")
+                .replace("listen_port = 179", "listen_port = 180")
         );
         write_tier_test_config(&path, &candidate);
         let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(1);
@@ -9242,13 +9391,20 @@ hold_time = 90
         assert_eq!(record.reason_code, "unsupported_compound");
         assert_eq!(record.failure_bucket, "reload.preflight");
         assert_eq!(record.failure_target, "[[dynamic_neighbors]]");
+        assert_eq!(
+            record.pending_restart_required_fields,
+            [
+                "[global].listen_port",
+                "[rpki].cache_servers[].md5_password"
+            ]
+        );
         assert_eq!(record.applied_count, 0);
         assert_eq!(record.unapplied_count, 0);
         let state: crate::LastSighupReloadState = Arc::new(Mutex::new(None));
         crate::publish_last_sighup(&state, record.clone());
         assert_eq!(read_last_sighup_via_rpc(&state).await.unwrap(), record);
 
-        write_tier_test_config(&path, baseline_toml());
+        write_tier_test_config(&path, &initial);
         let noop_trace: SighupReloadTraceHandle =
             Arc::new(Mutex::new(SighupReloadTrace::default()));
         let noop = reload_config_recorded(
@@ -9272,6 +9428,7 @@ hold_time = 90
         let published = read_last_sighup_via_rpc(&state).await.unwrap();
         assert_eq!(published, noop_record);
         assert_eq!(published.outcome, "complete");
+        assert!(published.pending_restart_required_fields.is_empty());
         assert_eq!(published.applied_count, 0);
         assert_eq!(published.unapplied_count, 0);
         std::fs::remove_file(path).unwrap();
@@ -12053,7 +12210,7 @@ hold_time = 90
 
     /// The reload matrix documents a restart-required section as an
     /// `ERROR`-level log line. Capture the reload's structured log output and
-    /// pin that level for an `[rpki]`-only edit.
+    /// pin the level, names and redaction for each subsystem.
     #[tokio::test]
     async fn reload_logs_restart_required_section_at_error_level() {
         use std::io::Write;
@@ -12081,42 +12238,48 @@ hold_time = 90
         // under the current-thread test runtime.
         let _guard = tracing::subscriber::set_default(subscriber);
 
-        let desired = format!(
-            "{}\n[rpki]\n[[rpki.cache_servers]]\naddress = \"127.0.0.1:3323\"\n",
+        let initial = format!(
+            "{}\n[[rpki.cache_servers]]\naddress = \"127.0.0.1:3323\"\nmd5_password = \"old-secret\"\n\
+             [[bmp.collectors]]\naddress = \"127.0.0.1:5000\"\nreconnect_interval = 30\n\
+             [mrt]\noutput_dir = \"/tmp/rustbgpd-mrt\"\ndump_interval = 60\n",
             baseline_toml()
         );
+        let desired = initial
+            .replace("old-secret", "new-secret")
+            .replace("reconnect_interval = 30", "reconnect_interval = 45")
+            .replace("dump_interval = 60", "dump_interval = 90");
         // Sibling tests may register the `[rpki]` restart-required callsite
         // without a subscriber. Warm it inside this scope, then refresh its
         // cached interest before measuring the real reload.
-        let _ = drive_reload(baseline_toml(), &desired).await;
+        let _ = drive_reload(&initial, &desired).await;
         tracing::callsite::rebuild_interest_cache();
         sink.0.lock().unwrap().clear();
 
-        let (returned, tags) = drive_reload(baseline_toml(), &desired).await;
-        returned.expect("rpki-only reload must return the pinned runtime config");
+        let (returned, tags) = drive_reload(&initial, &desired).await;
+        returned.expect("restart-only reload must return the pinned runtime config");
         assert!(
             tags.is_empty(),
-            "rpki-only edit is restart-required and must not reconcile peers: {tags:?}"
+            "restart-only edits must not reconcile peers: {tags:?}"
         );
 
         let output = String::from_utf8(sink.0.lock().unwrap().clone()).expect("utf8 log output");
-        let line = output
-            .lines()
-            .find(|line| line.contains("[rpki] changed — requires full restart to take effect"))
-            .unwrap_or_else(|| {
-                panic!("reload must emit the rpki restart-required line; captured: {output}")
-            });
-        let json: serde_json::Value = serde_json::from_str(line).expect("structured log line");
-        assert_eq!(
-            json["level"], "ERROR",
-            "restart-required is documented as an ERROR-level line: {line}"
-        );
-        for other in ["[global]", "[bmp]", "[mrt]"] {
-            assert!(
-                !output.contains(&format!("{other} changed")),
-                "rpki-only edit must not flag {other}: {output}"
-            );
+        assert!(!output.contains("old-secret"));
+        assert!(!output.contains("new-secret"));
+        for (section, field) in [
+            ("[rpki]", "cache_servers[0].md5_password"),
+            ("[bmp]", "collectors[0].reconnect_interval"),
+            ("[mrt]", "dump_interval"),
+        ] {
+            let message = format!("{section} changed — requires full restart to take effect");
+            let line = output
+                .lines()
+                .find(|line| line.contains(&message))
+                .unwrap_or_else(|| panic!("missing {section} restart error: {output}"));
+            let json: serde_json::Value = serde_json::from_str(line).expect("structured log line");
+            assert_eq!(json["level"], "ERROR");
+            assert!(json["fields"]["fields"].as_str().unwrap().contains(field));
         }
+        assert!(!output.contains("[global] changed"));
     }
 
     /// The `[global]` restart-required ERROR names each changed field with
@@ -12903,6 +13066,74 @@ remote_asn = 65002
             "new-secret",
             "desired TOML must preserve the operator's edit for restart"
         );
+    }
+
+    #[tokio::test]
+    async fn static_tcp_ao_pin_keeps_declared_posture_and_discard_diagnostics() {
+        let initial = baseline_toml().replace(
+            "hold_time = 90",
+            "hold_time = 90\ntcp_ao = { key = \"prior-key\", send_id = 1, recv_id = 1, algorithm = \"hmac(sha256)\" }",
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.toml");
+        write_tier_test_config(&path, &initial);
+        let current = load_tier_test_config(&path);
+        let changed = initial.replace("prior-key", "edited-key").replace(
+            "listen_port = 179",
+            "listen_port = 179\nblackhole_discard_max_active = 15\nblackhole_discard_install_rate_per_minute = 60\nblackhole_discard_install_burst = 10",
+        );
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(1);
+        for (candidate, policy_changed) in [
+            (
+                changed.replace(
+                    "listen_port = 179",
+                    "listen_port = 179\nebgp_requires_policy = true",
+                ),
+                true,
+            ),
+            (
+                format!(
+                    "config_epoch = 1\n{}",
+                    changed.replace(
+                        "listen_port = 179",
+                        "listen_port = 179\nebgp_requires_policy = false"
+                    )
+                ),
+                false,
+            ),
+        ] {
+            write_tier_test_config(&path, &candidate);
+            let trace = Arc::new(Mutex::new(SighupReloadTrace::default()));
+            let settled = reload_config_recorded(
+                path.to_str().unwrap(),
+                &current,
+                current.global.telemetry.grpc_tcp.as_ref(),
+                current.global.telemetry.grpc_uds.as_ref(),
+                &peer_mgr_tx,
+                None,
+                None,
+                Some(Arc::clone(&trace)),
+            )
+            .await
+            .expect("the startup pins retain the running configuration");
+            assert_eq!(settled.runtime.global, current.global);
+            assert_eq!(settled.runtime.config_epoch, current.config_epoch);
+            assert_eq!(settled.runtime.neighbors, current.neighbors);
+            assert!(peer_mgr_rx.try_recv().is_err());
+            let mut expected = BTreeSet::from([
+                "[[neighbors]].tcp_ao".to_owned(),
+                "[global].blackhole_discard_install_burst".to_owned(),
+                "[global].blackhole_discard_install_rate_per_minute".to_owned(),
+                "[global].blackhole_discard_max_active".to_owned(),
+            ]);
+            if policy_changed {
+                expected.insert("[global].ebgp_requires_policy".to_owned());
+            }
+            assert_eq!(
+                trace.lock().unwrap().pending_restart_required_fields,
+                expected
+            );
+        }
     }
 
     #[tokio::test]

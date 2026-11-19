@@ -4,6 +4,7 @@ mod parse;
 pub mod profiles;
 mod resolution;
 pub(crate) use resolution::{ChunkedSetStore, transport_tcp_ao_keyring};
+mod restart_fields;
 mod schema;
 pub(crate) mod source_provenance;
 pub(crate) use source_provenance::AcceptedConfigSnapshot;
@@ -58,6 +59,9 @@ pub(crate) use resolution::reserved_rfc8212_deny_chain;
 pub use resolution::{
     EffectivePolicyChains, ResolvedNeighbor, UnpolicedEbgpNeighbor, is_reserved_rfc8212_deny,
     outbound_prefix_limits_loosen,
+};
+pub(crate) use restart_fields::{
+    bmp_restart_required_changes, mrt_restart_required_changes, rpki_restart_required_changes,
 };
 pub use schema::*;
 pub(crate) use validation::{effective_prefix, effective_prefix_str};
@@ -2764,6 +2768,17 @@ impl FieldChange {
         }
     }
 
+    fn withheld_restart_field(field: impl Into<std::borrow::Cow<'static, str>>) -> Self {
+        Self {
+            field: field.into(),
+            old: serde_json::Value::Null,
+            new: serde_json::Value::Null,
+            impact: Some(ConfigFieldImpact::RestartRequired),
+            annotation: None,
+            values_summarized: true,
+        }
+    }
+
     /// Human line for this change: `hold_time: 90 → 30  [session reset:
     /// OPEN renegotiation]`. Absent values render `(unset)`; withheld
     /// values render `<changed>`.
@@ -3192,13 +3207,16 @@ pub struct ConfigDiff {
     pub ebgp_requires_policy_changed: bool,
     pub ebgp_requires_policy: Option<Rfc8212PolicyChange>,
     pub rpki_changed: bool,
+    pub rpki_changes: Vec<FieldChange>,
     pub bmp_changed: bool,
+    pub bmp_changes: Vec<FieldChange>,
     /// `[gnmi_dialout]` changed. Reload-applied: the dial-out manager
     /// diffs the target set on SIGHUP — removed targets stop (their
     /// `gnmi_dialout_connected` series is reaped), added targets start,
     /// changed targets redial, unchanged targets keep their connection.
     pub gnmi_dialout_changed: bool,
     pub mrt_changed: bool,
+    pub mrt_changes: Vec<FieldChange>,
     /// `[[evpn_instances]]` blocks added/removed/modified between old and
     /// new. Surfaced as restart-required today — the Phase-2 foundation
     /// slice has no SIGHUP reconcile path; mutation lands with kernel
@@ -4988,14 +5006,20 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
             .restart_required_sections
             .push("[global].ebgp_requires_policy".to_string());
     }
-    if diff.rpki_changed {
-        class.restart_required_sections.push("[rpki]".to_string());
-    }
-    if diff.bmp_changed {
-        class.restart_required_sections.push("[bmp]".to_string());
-    }
-    if diff.mrt_changed {
-        class.restart_required_sections.push("[mrt]".to_string());
+    for (section, changed, fields) in [
+        ("[rpki]", diff.rpki_changed, &diff.rpki_changes),
+        ("[bmp]", diff.bmp_changed, &diff.bmp_changes),
+        ("[mrt]", diff.mrt_changed, &diff.mrt_changes),
+    ] {
+        if changed {
+            class.restart_required_sections.push(section.to_string());
+            class.restart_required_sections.extend(
+                fields
+                    .iter()
+                    .filter(|change| change.field != section)
+                    .map(|change| format!("{section}.{}", change.field)),
+            );
+        }
     }
     if diff.evpn_runtime_change_class.is_restart_required() && diff.evpn_instances_changed {
         class
@@ -5249,7 +5273,7 @@ fn push_transaction_external_policy_inputs_reason(
 /// config-diff API. The schema mirrors the human diff buckets:
 /// reload-applied, restart-required, and informational.
 pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
-    serde_json::json!({
+    let mut document = serde_json::json!({
         "has_actionable_changes": diff.has_actionable_changes(),
         "has_informational_changes": diff.has_informational_changes(),
         "has_any_changes": diff.has_any_changes(),
@@ -5326,7 +5350,11 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
         "sighup_reload": serde_json::to_value(&diff.sighup_route)
             .unwrap_or(serde_json::Value::Null),
         "informational": serde_json::Value::Object(serde_json::Map::new()),
-    })
+    });
+    document["rpki_changes"] = serde_json::json!(&diff.rpki_changes);
+    document["bmp_changes"] = serde_json::json!(&diff.bmp_changes);
+    document["mrt_changes"] = serde_json::json!(&diff.mrt_changes);
+    document
 }
 
 /// Text styling hooks for config-diff renderers.
@@ -5692,10 +5720,15 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
         }
         for section in &restart_sections {
             let _ = writeln!(out, "  {} {section} changed", style.restart_marker);
-            if *section == "[global]" {
-                for change in &diff.global_changes {
-                    let _ = writeln!(out, "      {}", change.render());
-                }
+            let fields: &[FieldChange] = match *section {
+                "[global]" => &diff.global_changes,
+                "[rpki]" => &diff.rpki_changes,
+                "[bmp]" => &diff.bmp_changes,
+                "[mrt]" => &diff.mrt_changes,
+                _ => &[],
+            };
+            for change in fields {
+                let _ = writeln!(out, "      {}", change.render());
             }
         }
         out.push('\n');
@@ -5919,6 +5952,9 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
     pin_unreconciled_daemon_runtime_fields(&mut interface_new, old);
     pin_rfc8212_posture_startup_only(&mut interface_new, old);
     let global_changes = global_restart_required_changes(&old.global, &new.global);
+    let rpki_changes = rpki_restart_required_changes(old.rpki.as_ref(), new.rpki.as_ref());
+    let bmp_changes = bmp_restart_required_changes(old.bmp.as_ref(), new.bmp.as_ref());
+    let mrt_changes = mrt_restart_required_changes(old.mrt.as_ref(), new.mrt.as_ref());
     let mut diff = ConfigDiff {
         neighbors,
         effective_neighbor_impact,
@@ -5935,10 +5971,13 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         config_epoch,
         ebgp_requires_policy_changed: ebgp_requires_policy.is_some(),
         ebgp_requires_policy,
-        rpki_changed: old.rpki != new.rpki,
-        bmp_changed: old.bmp != new.bmp,
+        rpki_changed: !rpki_changes.is_empty(),
+        rpki_changes,
+        bmp_changed: !bmp_changes.is_empty(),
+        bmp_changes,
         gnmi_dialout_changed: old.gnmi_dialout != new.gnmi_dialout,
-        mrt_changed: old.mrt != new.mrt,
+        mrt_changed: !mrt_changes.is_empty(),
+        mrt_changes,
         evpn_instances_changed: old.evpn_instances != new.evpn_instances,
         evpn_ip_vrfs_changed: old.evpn_ip_vrfs != new.evpn_ip_vrfs,
         ethernet_segments_changed: old.ethernet_segments != new.ethernet_segments,
@@ -6357,15 +6396,19 @@ pub(crate) fn pin_bfd_startup_only_runtime(new_config: &mut Config, current: &Co
 /// becomes explicit `true`. The running tuple is still retained, but nothing
 /// is reported.
 pub(crate) fn pin_rfc8212_posture_startup_only(new_config: &mut Config, current: &Config) -> bool {
-    let live = current.rfc8212_posture();
-    let candidate = new_config.rfc8212_posture();
-    if candidate == live {
-        return false;
-    }
+    let report = rfc8212_posture_requires_restart(new_config, current);
     new_config.config_epoch = current.config_epoch;
     new_config.global.ebgp_requires_policy = current.global.ebgp_requires_policy;
-    candidate.config_epoch_raw != Some(live.config_epoch_effective)
-        || candidate.policy_raw != Some(live.policy_effective)
+    report
+}
+
+/// Compare the declared tuple before other startup pins can restore its fields.
+pub(crate) fn rfc8212_posture_requires_restart(desired: &Config, current: &Config) -> bool {
+    let live = current.rfc8212_posture();
+    let candidate = desired.rfc8212_posture();
+    candidate != live
+        && (candidate.config_epoch_raw != Some(live.config_epoch_effective)
+            || candidate.policy_raw != Some(live.policy_effective))
 }
 
 fn neighbor_tcp_ao_restart_required_changed(old: &Config, new: &Config) -> bool {
@@ -6834,17 +6877,14 @@ fn global_leaf_changes(old: &serde_json::Value, new: &serde_json::Value) -> Vec<
     let mut changes = Vec::new();
     push_leaf_field_changes(&mut changes, "", old, new);
     if changes.is_empty() {
-        changes.push(FieldChange {
-            impact: Some(ConfigFieldImpact::RestartRequired),
-            ..FieldChange::summarized("[global]")
-        });
+        changes.push(FieldChange::withheld_restart_field("[global]"));
     }
     changes
 }
 
 /// Append one `FieldChange` per differing leaf of two serialized config
-/// values, naming each by its dotted TOML path. Tables recurse; any other
-/// value (including arrays and a table that appears or disappears) is one leaf.
+/// values, naming each by its dotted TOML path. A listener's credential paths
+/// stay redacted even when the entire table appears or disappears.
 fn push_leaf_field_changes(
     changes: &mut Vec<FieldChange>,
     path: &str,
@@ -6854,8 +6894,20 @@ fn push_leaf_field_changes(
     if old == new {
         return;
     }
-    if let (serde_json::Value::Object(old_map), serde_json::Value::Object(new_map)) = (old, new) {
-        let keys: BTreeSet<&String> = old_map.keys().chain(new_map.keys()).collect();
+    // A listener may be added or removed in one edit. Never render the
+    // entire table: its credential paths require the same treatment as edits.
+    let listener = matches!(path, "telemetry.grpc_tcp" | "telemetry.grpc_uds");
+    let listener_added_or_removed = listener && old.is_object() != new.is_object();
+    if listener_added_or_removed {
+        // Keep the existing field token for clients matching the listener itself.
+        changes.push(FieldChange::withheld_restart_field(path.to_string()));
+    }
+    if (old.is_object() && new.is_object()) || listener_added_or_removed {
+        let keys: BTreeSet<_> = [old, new]
+            .into_iter()
+            .filter_map(serde_json::Value::as_object)
+            .flat_map(serde_json::Map::keys)
+            .collect();
         for key in keys {
             let child = if path.is_empty() {
                 key.clone()
@@ -6865,10 +6917,22 @@ fn push_leaf_field_changes(
             push_leaf_field_changes(
                 changes,
                 &child,
-                old_map.get(key).unwrap_or(&serde_json::Value::Null),
-                new_map.get(key).unwrap_or(&serde_json::Value::Null),
+                old.get(key).unwrap_or(&serde_json::Value::Null),
+                new.get(key).unwrap_or(&serde_json::Value::Null),
             );
         }
+        return;
+    }
+    if matches!(
+        path,
+        "telemetry.grpc_tcp.token_file"
+            | "telemetry.grpc_uds.token_file"
+            | "telemetry.grpc_tcp.tls_cert_file"
+            | "telemetry.grpc_tcp.tls_key_file"
+            | "telemetry.grpc_tcp.tls_client_ca_file"
+            | "telemetry.grpc_tcp.tls_client_crl_file"
+    ) {
+        changes.push(FieldChange::withheld_restart_field(path.to_string()));
         return;
     }
     changes.push(FieldChange {
