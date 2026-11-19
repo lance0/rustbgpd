@@ -825,7 +825,7 @@ fn validator_identity_swaps_refuse_before_publication() {
         .unwrap();
         fs::set_permissions(&validator_a, fs::Permissions::from_mode(0o700)).unwrap();
         symlink(&validator_a, &validator).unwrap();
-        let validator_inode = fs::symlink_metadata(&validator).unwrap().ino();
+        assert_eq!(fs::read_link(&validator).unwrap(), validator_a);
         let before = fs::read(&path).unwrap();
         let output = run(
             &[&validator, &path],
@@ -838,9 +838,9 @@ fn validator_identity_swaps_refuse_before_publication() {
             text(&output)
         );
         assert_eq!(fs::read(&path).unwrap(), before);
-        assert_ne!(
-            fs::symlink_metadata(&validator).unwrap().ino(),
-            validator_inode,
+        assert_eq!(
+            fs::read_link(&validator).unwrap(),
+            validator_b,
             "{phase}: {:?}",
             text(&output)
         );
