@@ -437,7 +437,7 @@ run_container_cell() (
     owner_token=$(cat /proc/sys/kernel/random/uuid) || exit 1
     mkdir -p "$cdir" || exit 1
     cdir=$(realpath "$cdir") || exit 1
-    # shellcheck disable=SC2317 # Called by the EXIT trap below.
+    # shellcheck disable=SC2317,SC2329 # Called by the EXIT trap below.
     stop_owned_container() {
         local file=$1 role=$2 owned actual state token cleanup_rc=0
         if [ ! -s "$file" ]; then
@@ -472,7 +472,7 @@ run_container_cell() (
         timeout 10 docker rm "$owned" >/dev/null || return 1
         [ "$state" = $'0\tfalse\tfalse' ] && [ "$cleanup_rc" -eq 0 ]
     }
-    # shellcheck disable=SC2317 # Invoked by EXIT, including INT/TERM failures.
+    # shellcheck disable=SC2317,SC2329 # Invoked by EXIT, including INT/TERM failures.
     cleanup_container_cell() {
         local original=$? cleanup_rc=0 sampler_rc=0
         trap - EXIT

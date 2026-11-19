@@ -261,9 +261,9 @@ EOF
     (
         # These tripwires are reachable only if install_from_archive regresses
         # into a network consumer, which is precisely the negative under test.
-        # shellcheck disable=SC2317
+        # shellcheck disable=SC2317,SC2329
         curl() { fail_self_test "offline install invoked curl"; }
-        # shellcheck disable=SC2317
+        # shellcheck disable=SC2317,SC2329
         download_archive_once() { fail_self_test "offline install downloaded"; }
         install_from_archive \
             "$VERSION" "$checksum" "$valid_archive" \

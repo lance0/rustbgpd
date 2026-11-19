@@ -409,7 +409,7 @@ self_test() (
         fail_self_test "corrupt download emitted a skip annotation"
     fi
 
-    # shellcheck disable=SC2317
+    # shellcheck disable=SC2317,SC2329
     curl() { fail_self_test "offline stage invoked curl"; }
     stage_archive "$valid_checksum" "$valid_archive" \
         "$fixture_dir/offline-stage" >/dev/null \

@@ -271,9 +271,9 @@ EOF
         || fail_self_test "persistent failure published an archive"
 
     (
-        # shellcheck disable=SC2317
+        # shellcheck disable=SC2317,SC2329
         curl() { fail_self_test "offline install invoked curl"; }
-        # shellcheck disable=SC2317
+        # shellcheck disable=SC2317,SC2329
         download_archive_once() { fail_self_test "offline install downloaded"; }
         install_from_archive \
             "$GRPCURL_VERSION" "$checksum" "$valid_archive" \

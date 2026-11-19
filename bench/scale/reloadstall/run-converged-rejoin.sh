@@ -192,7 +192,7 @@ stop_group() { # stop_group PID SECS: TERM the process group, KILL after SECS; r
     wait "$pid" 2>/dev/null || rc=$?
     return "$rc"
 }
-# shellcheck disable=SC2317 # invoked by the EXIT trap
+# shellcheck disable=SC2317,SC2329 # invoked by the EXIT trap
 cleanup() {
     local rc=$? arm
     trap - EXIT INT TERM

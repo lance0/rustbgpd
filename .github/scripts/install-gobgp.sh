@@ -263,7 +263,7 @@ EOF
     [[ ! -e "$fixture_dir/cold-cache.tar.gz" ]] \
         || fail_self_test "failed cold-cache fetch left an artifact"
 
-    # shellcheck disable=SC2317
+    # shellcheck disable=SC2317,SC2329
     curl() { fail_self_test "offline stage invoked curl"; }
     stage_archive "$valid_checksum" "$valid_archive" \
         "$fixture_dir/offline-stage" >/dev/null \

@@ -217,7 +217,7 @@ if [ "${1:-}" = --self-test-competitor-identity ]; then
     exit $?
 fi
 
-# shellcheck disable=SC2317 # invoked indirectly by the shared host-quiet sampler
+# shellcheck disable=SC2317,SC2329 # invoked indirectly by the shared host-quiet sampler
 irrreload_host_quiet_extra_sample() {
     local disk_kib port1790 port9179
     local port1790_free=true port9179_free=true
