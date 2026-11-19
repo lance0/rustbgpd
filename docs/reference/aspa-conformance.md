@@ -10,7 +10,8 @@ a "Partial" row says exactly what is and is not implemented.
 
 The one-line summary: rustbgpd implements the draft-31 verification
 procedures with role-aware direction selection and detailed
-diagnostics, and is deliberately **Partial on §5.7
+diagnostics, keeps AS 0 in a merged provider set where §5.3 now
+removes it (no verdict differs), and is deliberately **Partial on §5.7
 mitigation/retention** — validation outcomes are surfaced for explicit
 operator policy; the daemon does not ship default rejection
 enforcement or lossless Adj-RIB-In retention.
@@ -18,11 +19,13 @@ enforcement or lossless Adj-RIB-In retention.
 ## Implemented revisions
 
 - **draft-ietf-sidrops-aspa-verification-31** (17 November 2026) — the
-  implemented revision is the current revision. No verification
-  procedure changed from -28 to -31: §5.2–§5.6 differ only in notation.
-  The -28→-29 delta retitles §5.1 "Interaction with Other AS_PATH
-  Checks", removes AS 0 from a Union SPAS that also holds other ASes
-  (§5.3), makes the §5.7 policy RECOMMENDED "unless overridden by local
+  implemented revision is the current revision. One procedure changed
+  from -28 to -31, the construction of the Union SPAS in §5.3, which
+  row 2 marks Partial; §5.4–§5.6 differ only in notation, and no
+  verdict changes. The -28→-29 delta retitles §5.1 "Interaction with
+  Other AS_PATH Checks", removes AS 0 from a Union SPAS that also holds
+  other ASes (§5.3, where -28 said that an unexpected AS 0 has no
+  influence on verification), makes the §5.7 policy RECOMMENDED "unless overridden by local
   operational requirements", replaces "NOT RECOMMENDED" for iBGP with
   "not applicable" (§6.2), makes the per-session choice of algorithm
   for Complex relations a MUST (§6.4) and removes the §6.6 Logging
@@ -58,7 +61,7 @@ column names the receipt to re-check against the new text.
 | # | Section | Requirement | Status | What exists | Evidence |
 |---|---------|-------------|--------|-------------|----------|
 | 1 | §5.1 | Checks that precede ASPA verification when implemented: RFC 9774 treat-as-withdraw for AS_SET / AS_CONFED_SET in AS_PATH or AS4_PATH; the RFC 4271 §6.3 match of the most recently added AS with the neighbor ASN, with the transparent IX route-server exception (RFC 7947) | Implemented | AS_SET / AS_CONFED_SET in AS_PATH or AS4_PATH draws RFC 7606 treat-as-withdraw in the revised inbound decoder on every session and family. The neighbor-AS check is enforced on eligible eBGP IPv4/IPv6-unicast UPDATEs even with no BGP Role configured, before policy or cache state can influence the disposition. The exemption applies only when this speaker has the local `route_server_client` Role; `route_server_client = true` identifies a remote member and remains checked. An RFC 6793 OLD peer is checked against the reconstructed effective AS_PATH, not exempted. | RFC 9774 segment inspection in `crates/wire/src/attribute.rs` and [RFC 9774 notes](rfc-notes.md#rfc-9774--as_set--as_confed_set-deprecation) · `aspa_first_as_mismatch` in `crates/transport/src/session/inbound.rs` · `crates/transport/src/session/tests/rpki_aspa.rs` · [ADR-0049](../adr/0049-aspa-verification.md) 2026-08-19 amendment |
-| 2 | §5.2–§5.3 | Provider authorization function `authorized(customer, provider)` over the merged Set of Provider ASes | Implemented | `AspaTable::authorized` returns Provider+ / Not Provider+ / No Attestation from binary search on sorted provider sets; multiple records for one customer merge as a union across caches, with 8210bis replacement semantics within one cache. A merged set that holds AS 0 next to other ASes keeps AS 0, where §5.3 removes it from the U-SPAS: no verdict differs, because RFC 7607 handling rejects AS 0 in a received AS_PATH before verification, and `rbgp rpki aspa` shows the AS 0. | `crates/rpki/src/aspa.rs` |
+| 2 | §5.2–§5.3 | Provider authorization function `authorized(customer, provider)` over the Union SPAS, from which AS 0 is removed when it holds other ASes | **Partial** | `AspaTable::authorized` returns Provider+ / Not Provider+ / No Attestation from binary search on sorted provider sets; multiple records for one customer merge as a union across caches, with 8210bis replacement semantics within one cache. Not implemented: the removal of AS 0 from a merged set that also holds other ASes, which `AspaTable::new` keeps (one cache cannot send such a set, two caches can: `[0]` from one and `[65000]` from the other). No verdict differs, because RFC 7607 handling rejects AS 0 in a received AS_PATH before verification; `AspaTable::providers` and `rbgp rpki aspa` show the AS 0. | `crates/rpki/src/aspa.rs` |
 | 3 | §5.5/§5.6 preamble | Path preparation: AS4_PATH reconstruction, consecutive-duplicate compression, AS_SET makes the path unverifiable (Invalid), empty AS_PATH Invalid, single-hop Valid | Implemented | `compress_as_path` flattens segments and removes consecutive duplicates, returns Invalid on any AS_SET; verification runs on the post-reconstruction effective path. | `crates/rpki/src/aspa_verify.rs` · reconstruction in `crates/transport/src/session/inbound.rs` |
 | 4 | §5.4 | Up-ramp / down-ramp bounds computation | Implemented | Downstream verification computes `max_up_ramp` / `min_up_ramp` / `max_down_ramp` / `min_down_ramp` directly per §5.4. Upstream uses the equivalent pairwise walk; the equivalence to the §5.4 bounds form is exhaustively verified by a 69,210-case synthetic corpus with a bounds-checker reference implementation kept in-tree as a regression oracle. | `spike_bounds_equivalence_on_synthetic_corpus` in `crates/rpki/src/aspa_verify.rs` |
 | 5 | §5.5 | Upstream verification (routes from customers, lateral peers, RS, RS-clients) | Implemented | Full procedure including the local RS-client-role first-AS exemption. Outcomes pinned by unit tests including an offline subset of the NIST-BRIO ASPA demo corpus (b7.1.2), and end-to-end against FRR with an RTR v2 cache. | `crates/rpki/src/aspa_verify.rs` · M27 row in [interop.md](../interop.md) |
