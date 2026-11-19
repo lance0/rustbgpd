@@ -66,7 +66,7 @@ fn observe_restart(
         assert!(
             update
                 .unicast_withdrawals()
-                .all(|key| !sentinels.contains(&key))
+                .all(|key| !sentinels.contains(key))
         );
         assert!(
             update
