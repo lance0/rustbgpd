@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 use super::update_groups::GroupRibOut;
 use super::{OutboundRouteUpdate, PeerId, RibManager};
 use crate::loc_rib::{REGISTRATION_PAGE_SIZE, RegistrationScanStatus};
+use crate::update::RibUpdate;
 
 struct Waiter {
     session_id: u64,
@@ -12,12 +13,19 @@ struct Waiter {
 }
 
 pub(super) struct FirstGroupBuild {
-    gid: usize,
+    pub(super) gid: usize,
     pub(super) peer: PeerId,
-    // None while discarding a canceled table. Keep the same allocation until
-    // retirement finishes so repeated reconnects cannot retain more tables.
-    waiter: Option<Waiter>,
+    phase: FirstGroupPhase,
+    writer: Option<Box<RibUpdate>>,
+    // Optional prepare belongs to the exact source cohort and session that asked.
+    prepare_source: Option<(usize, Waiter)>,
     table: GroupRibOut,
+}
+
+enum FirstGroupPhase {
+    Registration(Waiter),
+    PreparingWriter,
+    Retiring,
 }
 
 impl RibManager {
@@ -49,7 +57,9 @@ impl RibManager {
         self.first_group_build = Some(Box::new(FirstGroupBuild {
             gid,
             peer,
-            waiter: Some(Waiter { session_id, sender }),
+            phase: FirstGroupPhase::Registration(Waiter { session_id, sender }),
+            writer: None,
+            prepare_source: None,
             table: self.first_group_table(peer, gid),
         }));
     }
@@ -66,16 +76,122 @@ impl RibManager {
             .is_some_and(|job| job.gid == gid)
     }
 
-    /// A policy owner may claim this destination after the last private page retires.
-    pub(super) fn retire_first_group_for_policy(&mut self, gid: usize) -> bool {
-        let Some(job) = self.first_group_build.as_mut().filter(|job| job.gid == gid) else {
+    pub(super) fn first_group_pending_writer(&self) -> Option<&RibUpdate> {
+        self.first_group_build.as_ref()?.writer.as_deref()
+    }
+
+    fn writer_needs_group(&mut self, update: &RibUpdate, gid: usize) -> bool {
+        if let RibUpdate::PrepareExportPolicyDestination {
+            peer,
+            export_policy,
+            reply,
+        } = update
+        {
+            return !reply.is_closed()
+                && export_policy.is_none()
+                && self
+                    .clean_policy_transition_destination(*peer, None)
+                    .is_some_and(|(_, destination)| destination == gid);
+        }
+        self.mutation_targets_first_group(update, gid)
+    }
+
+    /// Reserve the original command, including its reply, before changing an
+    /// installed policy, membership, session projection or route-page version.
+    pub(super) fn first_group_writer_claim(&mut self, update: &RibUpdate) -> bool {
+        self.first_group_build
+            .as_ref()
+            .map(|job| job.gid)
+            .is_some_and(|gid| self.writer_needs_group(update, gid))
+    }
+
+    pub(super) fn reserve_first_group_writer(&mut self, update: RibUpdate) {
+        let prepare_source = match &update {
+            RibUpdate::PrepareExportPolicyDestination { peer, .. } => self
+                .grouped_member_of(*peer)
+                .zip(self.outbound_session_ids.get(peer))
+                .zip(self.outbound_peers.get(peer))
+                .map(|((gid, &session_id), sender)| {
+                    (
+                        gid,
+                        Waiter {
+                            session_id,
+                            sender: sender.clone(),
+                        },
+                    )
+                }),
+            _ => None,
+        };
+        let job = self
+            .first_group_build
+            .as_mut()
+            .expect("checked private owner");
+        assert!(
+            job.writer.is_none(),
+            "overlapping writer passed primary admission"
+        );
+        job.writer = Some(Box::new(update));
+        job.prepare_source = prepare_source;
+        // The staged profile is immutable. A healthy scan keeps all repairs;
+        // an invalid scan must finish retirement before reusing the profile.
+        if matches!(job.phase, FirstGroupPhase::Registration(_)) {
+            job.phase = FirstGroupPhase::PreparingWriter;
+        }
+    }
+
+    pub(super) fn first_group_slot_available(&self) -> bool {
+        self.first_group_build.is_none() && self.paced_policy_destination.is_none()
+    }
+
+    pub(super) fn retire_prepared_first_group(&mut self, gid: usize) -> bool {
+        if self.paced_policy_destination != Some(gid)
+            || !self
+                .group_ribs
+                .get(&gid)
+                .is_some_and(|group| group.members.is_empty())
+        {
+            return false;
+        }
+        debug_assert!(self.first_group_build.is_none());
+        self.paced_policy_destination = None;
+        self.first_group_build = Some(Box::new(FirstGroupBuild {
+            gid,
+            peer: crate::PeerId::LOCAL,
+            phase: FirstGroupPhase::Retiring,
+            writer: None,
+            prepare_source: None,
+            table: self
+                .group_ribs
+                .remove(&gid)
+                .expect("checked memberless destination"),
+        }));
+        true
+    }
+
+    fn prepare_source_is_current(&self, job: &FirstGroupBuild) -> bool {
+        let Some(RibUpdate::PrepareExportPolicyDestination { peer, .. }) = job.writer.as_deref()
+        else {
             return true;
         };
-        if job.waiter.take().is_some() {
-            self.loc_rib.stop_registration_scan();
+        job.prepare_source.as_ref().is_some_and(|(source, waiter)| {
+            self.grouped_member_of(*peer) == Some(*source)
+                && self.outbound_session_ids.get(peer) == Some(&waiter.session_id)
+                && self.outbound_peers.get(peer).is_some_and(|sender| {
+                    !sender.is_closed() && sender.same_channel(&waiter.sender)
+                })
+        })
+    }
+
+    fn settle_obsolete_first_group_writer(&mut self, writer: RibUpdate) {
+        // Optional preparation names a particular cohort. Authoritative
+        // writes and mandatory restores resolve against current registration.
+        if let RibUpdate::PrepareExportPolicyDestination { reply, .. } = writer {
+            let _ = reply.send(Err(
+                "source registration changed during destination preparation".into(),
+            ));
+        } else {
+            self.handle_update(writer);
         }
-        self.advance_first_group_build();
-        false
     }
 
     /// Look at one waiter per busy turn. A second cold group, or a retry after
@@ -93,7 +209,7 @@ impl RibManager {
             let Some((gid, session, sender)) = self.first_group_candidate(peer) else {
                 return;
             };
-            if self.prestaging_destination(gid) {
+            if self.prestaging_destination(gid) || !self.first_group_slot_available() {
                 return;
             }
             self.start_first_group(peer, gid, session, sender);
@@ -105,55 +221,119 @@ impl RibManager {
     // while this job is building. GR and collision handling consult that queue.
     pub(super) fn advance_first_group_build(&mut self) {
         let mut job = self.first_group_build.take().expect("active first group");
-        if let Some(waiter) = &job.waiter {
-            let current = self.prospective_first_group(job.peer, Some(job.gid));
-            let same_generation = current.is_some_and(|(gid, session_id, sender)| {
-                gid == job.gid
-                    && waiter.session_id == session_id
-                    && waiter.sender.same_channel(&sender)
-            });
-            if same_generation
-                && !self.group_ribs.contains_key(&job.gid)
-                && self.loc_rib.registration_scan_status() != RegistrationScanStatus::Overflow
-            {
-                let page = self.loc_rib.take_registration_page();
-                debug_assert!(page.bucket_visits + page.repairs <= REGISTRATION_PAGE_SIZE);
-                if !page.keys.is_empty() {
-                    let prefixes = page.keys.into_iter().collect();
-                    job.table = self.stage_first_group_page(job.gid, job.table, &prefixes);
-                }
-                if self.loc_rib.registration_scan_status() != RegistrationScanStatus::Ready
-                    || !self.pending_route_batches.is_empty()
-                {
-                    self.first_group_build = Some(job);
-                    return;
-                }
-                self.loc_rib.stop_registration_scan();
-                let peer = job.peer;
-                let Some(table) = self.publish_first_group(job.gid, job.table) else {
-                    // Publish, install the member and hand it the complete
-                    // initial replay in this turn. No other command observes
-                    // a memberless destination claimed by this registration.
-                    self.pending_initial_registrations
-                        .retain(|queued| *queued != peer);
-                    self.complete_deferred_registration(peer);
-                    return;
-                };
-                job.table = table;
-            } else {
-                self.loc_rib.stop_registration_scan();
-            }
-            job.waiter = None;
+        if matches!(job.phase, FirstGroupPhase::Retiring) {
+            self.retire_first_group_page(job);
+            return;
         }
+        let current = match &job.phase {
+            FirstGroupPhase::Registration(waiter) => self
+                .prospective_first_group(job.peer, Some(job.gid))
+                .is_some_and(|(_, session, sender)| {
+                    session == waiter.session_id && waiter.sender.same_channel(&sender)
+                }),
+            FirstGroupPhase::PreparingWriter => true,
+            FirstGroupPhase::Retiring => unreachable!(),
+        };
+        if !current
+            || self.group_ribs.contains_key(&job.gid)
+            || self.loc_rib.registration_scan_status() == RegistrationScanStatus::Overflow
+        {
+            self.clear_first_group_commit_frontier();
+            self.loc_rib.stop_registration_scan();
+            job.phase = FirstGroupPhase::Retiring;
+            self.retire_first_group_page(job);
+            return;
+        }
+        let page = self.loc_rib.take_registration_page();
+        debug_assert!(page.bucket_visits + page.repairs <= REGISTRATION_PAGE_SIZE);
+        if !page.keys.is_empty() {
+            let prefixes = page.keys.into_iter().collect();
+            job.table = self.stage_first_group_page(job.gid, job.table, &prefixes);
+        }
+        if self.loc_rib.registration_scan_status() != RegistrationScanStatus::Ready
+            || !self.pending_route_batches.is_empty()
+        {
+            self.first_group_build = Some(job);
+            return;
+        }
+        if let Some(writer) = job.writer.as_deref() {
+            self.capture_first_group_commit_frontier();
+            if !self.first_group_commit_frontier_reached() {
+                self.first_group_build = Some(job);
+                return;
+            }
+            self.clear_first_group_commit_frontier();
+            // The command is still an intent. Classify against the *current*
+            // registrations and effective inputs at this commit boundary.
+            if !self.prepare_source_is_current(&job) || !self.writer_needs_group(writer, job.gid) {
+                self.loc_rib.stop_registration_scan();
+                job.phase = FirstGroupPhase::Retiring;
+                let update = job.writer.take().expect("preparing writer");
+                self.first_group_build = Some(job);
+                self.settle_obsolete_first_group_writer(*update);
+                return;
+            }
+        }
+        self.loc_rib.stop_registration_scan();
+        let gid = job.gid;
+        let peer = job.peer;
+        if let Some(table) = self.publish_first_group(gid, job.table) {
+            job.table = table;
+            job.phase = FirstGroupPhase::Retiring;
+            self.first_group_build = Some(job);
+            return;
+        }
+        if let Some(writer) = job.writer.take() {
+            self.paced_policy_destination = Some(gid);
+            self.handle_update(*writer);
+            if self.pending_clean_policy_transition.is_none()
+                && !self.prestaging_destination(gid)
+                && self.prepared_destination != Some(gid)
+            {
+                self.retire_prepared_first_group(gid);
+            }
+        } else {
+            self.pending_initial_registrations
+                .retain(|queued| *queued != peer);
+            self.complete_deferred_registration(peer);
+        }
+    }
+
+    fn retire_first_group_page(&mut self, mut job: Box<FirstGroupBuild>) {
         if !job.table.retire_first_group_page(REGISTRATION_PAGE_SIZE) {
             self.first_group_build = Some(job);
+            return;
         }
+        let Some(writer) = job.writer.as_deref() else {
+            return;
+        };
+        if !self.prepare_source_is_current(&job)
+            || !self.writer_needs_group(writer, job.gid)
+            || self.group_ribs.contains_key(&job.gid)
+        {
+            self.clear_first_group_commit_frontier();
+            self.settle_obsolete_first_group_writer(*job.writer.take().expect("reserved writer"));
+            return;
+        }
+        // Retirement can discard slab handles and overflow can omit a
+        // withdrawal. Restart with fresh storage even for the same group key.
+        job.table = job.table.empty_first_group_table();
+        self.loc_rib.start_registration_scan();
+        job.phase = FirstGroupPhase::PreparingWriter;
+        self.first_group_build = Some(job);
+    }
+
+    #[cfg(test)]
+    pub(super) fn first_group_retiring_slots(&self) -> Option<usize> {
+        let job = self.first_group_build.as_ref()?;
+        matches!(job.phase, FirstGroupPhase::Retiring).then(|| job.table.table.unicast_slot_count())
     }
 
     #[cfg(test)]
     pub(super) fn first_group_contains(&self, prefix: rustbgpd_wire::Prefix) -> bool {
-        self.first_group_build
-            .as_ref()
-            .is_some_and(|job| job.waiter.is_some() && job.table.table.get(&prefix, 0).is_some())
+        self.first_group_build.as_ref().is_some_and(|job| {
+            !matches!(job.phase, FirstGroupPhase::Retiring)
+                && job.table.table.get(&prefix, 0).is_some()
+        })
     }
 }

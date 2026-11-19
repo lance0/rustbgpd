@@ -1011,6 +1011,9 @@ impl RibManager {
         &mut self,
         gid: usize,
     ) -> bool {
+        if self.retire_prepared_first_group(gid) {
+            return true;
+        }
         let removable = self
             .group_ribs
             .get(&gid)

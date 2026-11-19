@@ -2748,7 +2748,7 @@ impl RibManager {
                 self.pending_initial_registrations.push_back(peer);
             }
             if let Some((gid, session, sender)) = candidate
-                && self.first_group_build.is_none()
+                && self.first_group_slot_available()
                 && !self.prestaging_destination(gid)
             {
                 self.start_first_group(peer, gid, session, sender);

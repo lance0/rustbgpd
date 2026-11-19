@@ -1,6 +1,20 @@
 use super::GroupRibOut;
 
 impl GroupRibOut {
+    pub(in crate::manager) fn empty_first_group_table(&self) -> Self {
+        Self::new(
+            None,
+            self.is_ebgp,
+            self.interpret_rfc1997,
+            self.is_rr_client,
+            None,
+            self.sendable.clone(),
+            self.llgr.clone(),
+            false,
+            0,
+        )
+    }
+
     /// Retire an unpublished single-best unicast group with no policy, role,
     /// or members. Its only populated sidecars are keyed by route or source.
     /// Charge a slot even if a mid-build withdrawal already removed its row.

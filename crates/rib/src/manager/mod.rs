@@ -935,6 +935,8 @@ pub struct RibManager {
     /// superseded or failed over while queued resolves to its survivor.
     pending_initial_registrations: VecDeque<PeerId>,
     first_group_build: Option<Box<first_group_build::FirstGroupBuild>>,
+    /// Complete private-origin table handed to policy, until its first member binds.
+    paced_policy_destination: Option<usize>,
     #[cfg(test)]
     first_group_build_min_routes: usize,
     /// When the next `bgp_rib_outbound_registration_pending_*` sample runs.
@@ -3043,6 +3045,7 @@ impl RibManager {
             deferred_refresh_cursor: None,
             pending_initial_registrations: VecDeque::new(),
             first_group_build: None,
+            paced_policy_destination: None,
             #[cfg(test)]
             first_group_build_min_routes: INITIAL_DUMP_DEFER_MIN_ROUTES,
             registration_wait_sample_at: None,
@@ -4665,10 +4668,12 @@ impl RibManager {
                 if self.prestaging_destination(gid) {
                     return;
                 }
-                if self.first_group_build.is_none() {
+                if self.first_group_slot_available() {
                     self.start_first_group(peer, gid, session_id, sender);
                 }
-                self.advance_first_group_build();
+                if self.first_group_build.is_some() {
+                    self.advance_first_group_build();
+                }
                 return;
             }
             self.complete_deferred_registration(peer);
@@ -4941,6 +4946,10 @@ impl RibManager {
     fn handle_update(&mut self, update: RibUpdate) {
         if self.release_fences_read(&update) {
             self.release_primary_reads.push_back(update);
+            return;
+        }
+        if self.first_group_build.is_some() && self.first_group_writer_claim(&update) {
+            self.reserve_first_group_writer(update);
             return;
         }
         let turn = actor_turn::ActorTurn::new(&update, &self.ribs);
@@ -8000,6 +8009,20 @@ impl RibManager {
                 }
                 self.drain_readiness_queries(policy_transition_elapsed);
                 self.drain_general_queries_between_transition_polls();
+                tokio::task::yield_now().await;
+                continue;
+            }
+
+            // A commit frontier precedes later timer cutoffs. Finish its
+            // already-admitted work before running the next expiry.
+            if self.first_group_commit_remaining == Some(0)
+                && self.first_group_pending_writer().is_some()
+            {
+                if !self.traced_route_chunk() {
+                    self.advance_first_group_build();
+                }
+                self.drain_readiness_queries(None);
+                self.drain_general_queries_if_unfenced();
                 tokio::task::yield_now().await;
                 continue;
             }
