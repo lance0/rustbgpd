@@ -52,6 +52,9 @@ pub(in crate::manager) mod admitted_recovery;
 mod first_group_retirement;
 mod membership;
 mod mutation_target;
+mod optional_retirement;
+pub(in crate::manager) use optional_retirement::OptionalGroupRetirement;
+use optional_retirement::OtcBlocked;
 mod payload;
 pub(in crate::manager) mod release_fallback;
 pub(in crate::manager) use release_fallback::{ReleaseFallback, RsFallback};
@@ -679,7 +682,7 @@ pub(in crate::manager) struct GroupRibOut {
     /// path's RT gate precedes the policy evaluation).
     vpn_policy_denied: ShardedMap<VpnRouteKey, VpnDenialRecord>,
     /// Persistent RFC 9234 denial residue for join/resync diagnostics.
-    otc_blocked: FastMap<(Prefix, u32), Route>,
+    otc_blocked: OtcBlocked,
     /// Count aggregates beside `otc_blocked`, per unicast family
     /// `[v4, v6]`: total blocked staged winners plus their per-source
     /// split — the winner term of the Decision 4 count synthesis's
@@ -835,7 +838,7 @@ impl GroupRibOut {
         self.policy_filtered
             .keys()
             .copied()
-            .chain(self.otc_blocked.keys().map(|(prefix, _)| *prefix))
+            .chain(self.otc_blocked.values().map(|route| route.prefix))
             .chain(self.runner_up.keys().copied())
             // An rs-control member's resolved slot (and its OTC verdict) can
             // be a fallback entry on a prefix with no lane.
@@ -844,7 +847,7 @@ impl GroupRibOut {
 
     #[cfg(feature = "bench-internals")]
     pub(in crate::manager) fn bench_otc_storage_shape(&self) -> (usize, usize) {
-        (self.otc_blocked.len(), self.otc_blocked.capacity())
+        self.otc_blocked.storage_shape()
     }
 
     fn retire_with(&mut self, checkpoint: &mut impl FnMut()) {
@@ -859,7 +862,7 @@ impl GroupRibOut {
         }
         crate::adj_rib_out::release_sharded_map(&mut self.policy_filtered, checkpoint);
         crate::adj_rib_out::release_sharded_map(&mut self.vpn_policy_denied, checkpoint);
-        release_hash_map(&mut self.otc_blocked, checkpoint);
+        self.otc_blocked.retire_with(checkpoint);
         release_hash_map(&mut self.otc_blocked_sources, checkpoint);
         release_hash_map(&mut self.lane_otc_blocked_counts, checkpoint);
         release_hash_map(&mut self.vpn_member_counts, checkpoint);
@@ -930,7 +933,7 @@ impl GroupRibOut {
             policy_filtered: ShardedMap::default(),
             permit_policy_label,
             vpn_policy_denied: ShardedMap::default(),
-            otc_blocked: FastMap::default(),
+            otc_blocked: OtcBlocked::Ordinary(FastMap::default()),
             otc_blocked_totals: [0; 2],
             otc_blocked_sources: AddrMap::default(),
             lane_otc_blocked_counts: AddrMap::default(),
@@ -992,19 +995,7 @@ impl GroupRibOut {
         blocked: &[Route],
         checkpoint: &mut impl FnMut(),
     ) {
-        self.otc_blocked.retain(|(prefix, _), _| {
-            checkpoint();
-            !prefixes.contains(prefix)
-        });
-        // Reserve a fresh table before moving entries: in-place growth
-        // rehashes the complete route map without an actor checkpoint.
-        let mut incoming = FastMap::with_capacity_and_hasher(blocked.len(), FastState::default());
-        checkpoint();
-        for route in blocked {
-            checkpoint();
-            incoming.insert((route.prefix, route.path_id), route.clone());
-        }
-        merge_owned_maps(&mut self.otc_blocked, incoming, checkpoint);
+        self.otc_blocked.replace_for(prefixes, blocked, checkpoint);
         // Rebuild the count aggregates from the refreshed map — one
         // mutation seam keeps them exact, at O(blocked residue) per
         // pass (zero in the overwhelmingly common no-OTC case). Only
