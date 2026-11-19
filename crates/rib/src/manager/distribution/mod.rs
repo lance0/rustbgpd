@@ -7643,10 +7643,24 @@ impl RibManager {
                     ),
                 ));
             };
+            let handed_off = manager.paced_policy_destination == Some(destination);
+            if !handed_off
+                && (manager.first_group_build.is_some()
+                    || manager.paced_policy_destination.is_some())
+                && !manager
+                    .group_ribs
+                    .get(&destination)
+                    .is_some_and(|group| !group.members.is_empty())
+            {
+                manager.reclaim_unused_update_group_policies();
+                return Some((
+                    reply,
+                    Err("a first-member destination already owns the build slot".into()),
+                ));
+            }
             // A stale completed preparation that was never consumed (its
             // cohort never arrived) is discarded before a new one begins;
             // the record must only ever name the latest staged group.
-            let handed_off = manager.paced_policy_destination == Some(destination);
             if let Some(stale) = manager.prepared_destination.take()
                 && !(handed_off && stale == destination)
             {
