@@ -70,6 +70,10 @@ move with it.
      the exemption list in `global_restart_required_changes`; every other
      field is printed there by name and value, so summarize a secret-bearing
      one instead of printing it.
+   - For a new RPKI, BMP or MRT field, classify its value in
+     `src/config/restart_fields.rs`. The config diff and the SIGHUP log both
+     use that comparison. Report a credential or credential path by name only
+     and test adding, editing and removing it.
    - A new restart-required top-level section has touchpoints the compiler
      does not enforce: a `ConfigDiff` flag set in `diff_config`, the
      `ConfigDiff::has_restart_required_changes` check, the restart-required

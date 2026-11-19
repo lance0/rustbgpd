@@ -2114,6 +2114,15 @@ fn collect_evpn_dataplane_routes<'a>(
 pub(in crate::manager) const MAX_PRECOMMIT_POLICY_TRANSITION_OWNERSHIP: std::time::Duration =
     MAX_HEALTHY_POLICY_TRANSITION_AGE.saturating_mul(2);
 
+/// ORF state of a still-live connection displaced during collision resolution.
+/// Its initial dump resumes the same filter, gate and marker deadline on failback.
+struct SuspendedOrf {
+    filters: Option<HashMap<(Afi, Safi), crate::orf::OrfFilterSet>>,
+    gated: Option<HashSet<(Afi, Safi)>>,
+    eor_deadline: Option<tokio::time::Instant>,
+    eor_cap_passed: bool,
+}
+
 /// Registration material for one live transport session of a peer
 /// address, captured at `PeerUp`. Held in `RibManager::live_sessions` so
 /// an outbound-registration failover can re-register a surviving session
@@ -2160,6 +2169,11 @@ pub(super) struct LiveSessionRecord {
     /// map here so a collision failback replays it instead of clamping every
     /// family back to the scalar `add_path_send_max`.
     add_path_send_limits: HashMap<(Afi, Safi), u32>,
+    /// Present only while another session owns this peer's outbound state.
+    suspended_orf: Option<Box<SuspendedOrf>>,
+    /// Plain refreshes of this connection's ORF-negotiated unicast families
+    /// awaiting a sender. Each family needs a single response.
+    registration_orf_refresh: [bool; 2],
     negotiated_orf_recv: Vec<(Afi, Safi)>,
     negotiated_llgr_families: Vec<(Afi, Safi)>,
     gr_context: Option<PeerSelectionDeferralContext>,

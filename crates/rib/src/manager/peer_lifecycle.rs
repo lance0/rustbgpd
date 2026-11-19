@@ -2233,6 +2233,33 @@ impl RibManager {
                         .is_some_and(|previous| previous.same_channel(&outbound_tx)),
                 "same-channel PeerUp replay for {peer} session {session_id}"
             );
+            if let Some(previous) = self.live_sessions.get_mut(&peer).and_then(|s| s.last_mut())
+                && previous.session_id != session_id
+                && Some(previous.session_id) != supersedes
+                && !previous.negotiated_orf_recv.is_empty()
+                && !previous.outbound_tx.is_closed()
+            {
+                // The initial dump restores the view. Keep a requested refresh
+                // response with its connection until a sender can answer it.
+                for family in self
+                    .selection_deferred_refresh
+                    .remove(&peer)
+                    .into_iter()
+                    .chain(self.pending_refresh.remove(&peer))
+                    .flatten()
+                {
+                    if previous.negotiated_orf_recv.contains(&family) {
+                        previous.registration_orf_refresh[usize::from(family.0 == Afi::Ipv6)] =
+                            true;
+                    }
+                }
+                previous.suspended_orf = Some(Box::new(super::SuspendedOrf {
+                    filters: self.peer_orf_filters.remove(&peer),
+                    gated: self.peer_orf_pending.remove(&peer),
+                    eor_deadline: self.orf_eor_hold.remove(&peer),
+                    eor_cap_passed: self.orf_eor_cap_passed.remove(&peer),
+                }));
+            }
             self.clear_outbound_peer_state(peer);
         }
         // The session this one names is already retired by the peer
@@ -2322,6 +2349,8 @@ impl RibManager {
             // emits its per-family Paths-Limit map after this `PeerUp`.
             add_path_send_limits: std::collections::HashMap::new(),
             negotiated_orf_recv,
+            suspended_orf: None,
+            registration_orf_refresh: [false; 2],
             negotiated_llgr_families,
             gr_context: self.pending_peer_gr_context.remove(&(peer, session_id)),
             exact_export_encoder,
@@ -2386,26 +2415,21 @@ impl RibManager {
     fn register_active_session(&mut self, peer: PeerId, registration: ActiveSessionRegistration) {
         // A wait starts at PeerUp; a failback onto a survivor that never
         // registered keeps that survivor's PeerUp stamp.
-        if let Some(record) = self
+        let Some(record) = self
             .live_sessions
             .get_mut(&peer)
             .and_then(|sessions| sessions.last_mut())
-        {
-            record
-                .registration_wait_since
-                .get_or_insert_with(tokio::time::Instant::now);
-            self.registration_wait_sample_at.get_or_insert_with(|| {
-                tokio::time::Instant::now() + super::REGISTRATION_WAIT_SAMPLE_INTERVAL
-            });
-        }
-        let Some(record) = self
-            .live_sessions
-            .get(&peer)
-            .and_then(|sessions| sessions.last())
         else {
             debug_assert!(false, "register_active_session with no live session");
             return;
         };
+        record
+            .registration_wait_since
+            .get_or_insert_with(tokio::time::Instant::now);
+        self.registration_wait_sample_at.get_or_insert_with(|| {
+            tokio::time::Instant::now() + super::REGISTRATION_WAIT_SAMPLE_INTERVAL
+        });
+        let suspended_orf = record.suspended_orf.take();
         let session_id = record.session_id;
         let peer_asn = record.peer_asn;
         let peer_router_id = record.peer_router_id;
@@ -2456,24 +2480,30 @@ impl RibManager {
             self.peer_interpret_rfc1997.remove(&peer);
         }
 
-        // A peer that may hold our routes stale deletes them at the gated
-        // families' initial `EoR` (RFC 4724 §4.2), so that `EoR` follows the
-        // gated table, bounded by the cap for a peer that never refreshes.
-        self.orf_eor_cap_passed.remove(&peer);
-        if self.peer_may_hold_stale.contains(&peer) && !negotiated_orf_recv.is_empty() {
-            self.orf_eor_hold
-                .insert(peer, tokio::time::Instant::now() + super::ORF_EOR_HOLD_CAP);
-        } else {
-            self.orf_eor_hold.remove(&peer);
-        }
-
-        // RFC 5291 §6: gate the initial advertisement for ORF-receive families
-        // until the peer sends a ROUTE-REFRESH, so we don't flood the full
-        // table before its filter arrives. The gate is lifted in
-        // `handle_route_refresh_request` / `handle_peer_orf_update`.
-        if !negotiated_orf_recv.is_empty() {
+        if let Some(suspended) = suspended_orf {
+            if let Some(filters) = suspended.filters {
+                self.peer_orf_filters.insert(peer, filters);
+            }
+            if let Some(gated) = suspended.gated {
+                self.peer_orf_pending.insert(peer, gated);
+            }
+            if suspended.eor_cap_passed
+                || suspended
+                    .eor_deadline
+                    .is_some_and(|deadline| deadline <= tokio::time::Instant::now())
+            {
+                self.orf_eor_cap_passed.insert(peer);
+            } else if let Some(deadline) = suspended.eor_deadline {
+                self.orf_eor_hold.insert(peer, deadline);
+            }
+        } else if !negotiated_orf_recv.is_empty() {
+            // RFC 5291 §6: the new session opens its family gates via refresh.
             self.peer_orf_pending
                 .insert(peer, negotiated_orf_recv.into_iter().collect());
+            if self.peer_may_hold_stale.contains(&peer) {
+                self.orf_eor_hold
+                    .insert(peer, tokio::time::Instant::now() + super::ORF_EOR_HOLD_CAP);
+            }
         }
 
         // The planned-restart grace window holds End-of-RIB only toward a
@@ -2792,6 +2822,7 @@ impl RibManager {
         };
         // This session's registration wait ends here.
         record.registration_wait_since = None;
+        let orf_refresh = std::mem::take(&mut record.registration_orf_refresh);
         let session_id = record.session_id;
         let outbound_tx = record.outbound_tx.clone();
         let export_policy = record.export_policy.clone();
@@ -2829,6 +2860,7 @@ impl RibManager {
         self.drop_peer_owing(peer);
         self.outbound_session_ids.insert(peer, session_id);
         self.track_release_peer(peer);
+        self.resume_registration_orf_refresh(peer, orf_refresh);
         self.metrics.set_rib_outbound_registered_peers(
             i64::try_from(self.outbound_peers.len()).unwrap_or(i64::MAX),
         );
@@ -3680,12 +3712,14 @@ impl RibManager {
         let loc_rib = &self.loc_rib;
         let mut export_tally = crate::update::NeighborPolicyStats::default();
         let policy_stats = &mut export_tally;
+        let orf_filters = self.peer_orf_filters.get(&peer);
         for prefix in staging_prefixes {
             checkpoint_at("initial_ungrouped_staging");
-            if orf_gated.contains(&prefix_family(prefix)) {
+            let family = prefix_family(prefix);
+            if orf_gated.contains(&family) {
                 continue;
             }
-            let family = prefix_family(prefix);
+            let orf_filter = orf_filters.and_then(|filters| filters.get(&family));
             let prefix_send_max = if peer_add_path_send_families.contains(&family) {
                 peer_add_path_send_limits
                     .get(&family)
@@ -3718,9 +3752,7 @@ impl RibManager {
                     sendable.as_ref(),
                     llgr.as_ref(),
                     export_pol.as_ref(),
-                    // ORF: gated families are skipped above; a non-gated family
-                    // has no installed filter during the initial dump.
-                    None,
+                    orf_filter,
                     conditional.as_ref(),
                     orr_ctx,
                     &mut export_memo,
@@ -3770,9 +3802,7 @@ impl RibManager {
                     sendable.as_ref(),
                     llgr.as_ref(),
                     export_pol.as_ref(),
-                    // ORF: gated families are skipped above; a non-gated family
-                    // has no installed filter during the initial dump.
-                    None,
+                    orf_filter,
                     conditional.as_ref(),
                     None,
                     &mut export_memo,
@@ -3809,9 +3839,7 @@ impl RibManager {
                     sendable.as_ref(),
                     llgr.as_ref(),
                     export_pol.as_ref(),
-                    // ORF: gated families are skipped above; a non-gated family
-                    // has no installed filter during the initial dump.
-                    None,
+                    orf_filter,
                     conditional.as_ref(),
                     &mut export_memo,
                     &metrics,
@@ -3850,9 +3878,7 @@ impl RibManager {
                     sendable.as_ref(),
                     llgr.as_ref(),
                     export_pol.as_ref(),
-                    // ORF: gated families are skipped above; a non-gated family
-                    // has no installed filter during the initial dump.
-                    None,
+                    orf_filter,
                     conditional.as_ref(),
                     &mut export_memo,
                     &mut unicast,

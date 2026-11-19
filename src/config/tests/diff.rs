@@ -2541,3 +2541,188 @@ fn global_restart_required_comparator_exempts_separately_reported_knobs() {
         assert!(own_flag(&diff), "{field} must raise its own diff flag");
     }
 }
+
+fn restart_section_fixture() -> Config {
+    let sections = r#"
+[rpki]
+max_records_per_cache = 500
+max_records_total = 1000
+local_revalidation = true
+
+[[rpki.cache_servers]]
+address = "192.0.2.1:3323"
+md5_password = "private-marker-md5"
+
+[[rpki.cache_servers]]
+address = "192.0.2.2:3323"
+max_expire_interval = 9000
+[rpki.cache_servers.tcp_ao]
+key = "private-marker-ao"
+send_id = 1
+recv_id = 2
+algorithm = "hmac(sha256)"
+
+[bmp]
+sys_name = "private-marker-name"
+sys_descr = "private-marker-description"
+[[bmp.collectors]]
+address = "192.0.2.3:11019"
+
+[mrt]
+output_dir = "/var/private-marker-dir"
+file_prefix = "private-marker-prefix"
+max_files = 3
+"#;
+    parse(&format!("{}{sections}", valid_toml())).unwrap()
+}
+
+#[test]
+fn restart_section_diffs_name_nested_fields_and_withhold_sensitive_values() {
+    let absent = parse(valid_toml()).unwrap();
+    let present = restart_section_fixture();
+    for (old, new) in [(&absent, &present), (&present, &absent)] {
+        let diff = super::diff_config(old, new);
+        let json = super::config_diff_json_value(&diff);
+        let text =
+            super::format_config_diff_with_style(&diff, &super::ConfigDiffTextStyle::default());
+        let names = super::classify_config_transaction_v1(&diff).restart_required_sections;
+        for (section, fields) in [
+            ("rpki", &diff.rpki_changes),
+            ("bmp", &diff.bmp_changes),
+            ("mrt", &diff.mrt_changes),
+        ] {
+            assert!(names.contains(&format!("[{section}]")));
+            for change in fields {
+                assert!(names.contains(&format!("[{section}].{}", change.field)));
+                assert!(text.contains(&change.render()));
+                assert_eq!(change.impact, Some(ConfigFieldImpact::RestartRequired));
+            }
+        }
+        for (section, field) in [
+            ("rpki", "cache_servers[0].md5_password"),
+            ("rpki", "cache_servers[1].tcp_ao[0].key"),
+            ("bmp", "sys_name"),
+            ("bmp", "sys_descr"),
+            ("mrt", "output_dir"),
+            ("mrt", "file_prefix"),
+        ] {
+            let entry = json[format!("{section}_changes")]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["field"] == field)
+                .unwrap();
+            assert!(entry["old"].is_null() && entry["new"].is_null());
+            assert!(text.contains(&format!("{field}: <changed>")));
+        }
+        assert!(!json.to_string().contains("private-marker"));
+        assert!(!text.contains("private-marker"));
+        assert!(!names.join(" ").contains("private-marker"));
+    }
+}
+
+#[test]
+fn restart_section_diff_prints_classified_values() {
+    let absent = parse(valid_toml()).unwrap();
+    let present = restart_section_fixture();
+    let additions = super::config_diff_json_value(&super::diff_config(&absent, &present));
+    let expected = serde_json::json!({
+        "rpki_changes": {
+            "local_revalidation": true, "max_records_per_cache": 500, "max_records_total": 1000,
+            "cache_servers[0].address": "192.0.2.1:3323",
+            "cache_servers[0].refresh_interval": 3600, "cache_servers[0].retry_interval": 600,
+            "cache_servers[0].expire_interval": 7200, "cache_servers[1].max_expire_interval": 9000,
+            "cache_servers[1].tcp_ao[0].send_id": 1, "cache_servers[1].tcp_ao[0].recv_id": 2,
+            "cache_servers[1].tcp_ao[0].algorithm": "hmac(sha256)",
+            "cache_servers[1].tcp_ao[0].preferred": false,
+            "cache_servers[1].tcp_ao[0].deprecated": false
+        },
+        "bmp_changes": {
+            "collectors[0].address": "192.0.2.3:11019",
+            "collectors[0].reconnect_interval": 30, "collectors[0].monitor": ["rib_in_pre"],
+            "collectors[0].version": 3, "collectors[0].on_identity_conflict": "refuse"
+        },
+        "mrt_changes": {"dump_interval": 7200, "compress": false, "max_files": 3}
+    });
+    for (section, fields) in expected.as_object().unwrap() {
+        for (field, value) in fields.as_object().unwrap() {
+            let entry = additions[section]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["field"].as_str() == Some(field.as_str()))
+                .unwrap();
+            assert!(entry["old"].is_null(), "{field}");
+            assert_eq!(&entry["new"], value, "{field}");
+        }
+    }
+}
+
+#[test]
+fn rpki_key_only_rotation_is_named_without_disclosing_either_value() {
+    let base = r#"[[cache_servers]]
+address = "192.0.2.1:3323"
+[[cache_servers.tcp_ao]]
+key = "first-marker"
+algorithm = "hmac(sha256)"
+send_id = 1
+recv_id = 1
+[[cache_servers.tcp_ao]]
+key = "before-marker"
+algorithm = "hmac(sha256)"
+send_id = 2
+recv_id = 2"#;
+    let old: RpkiConfig = toml::from_str(base).unwrap();
+    let new: RpkiConfig = toml::from_str(&base.replace("before-marker", "after-marker")).unwrap();
+    let changes = super::rpki_restart_required_changes(Some(&old), Some(&new));
+    assert_eq!(changes.len(), 1);
+    assert_eq!(
+        changes[0].render(),
+        "cache_servers[0].tcp_ao[1].key: <changed>"
+    );
+    assert!(changes[0].old.is_null() && changes[0].new.is_null());
+    assert!(super::rpki_restart_required_changes(Some(&new), Some(&new)).is_empty());
+}
+
+#[test]
+fn listener_credential_paths_are_redacted_on_add_edit_and_removal() {
+    let absent = serde_json::json!({"telemetry": {"grpc_tcp": null, "grpc_uds": null}});
+    let listener = |marker| {
+        serde_json::json!({"telemetry": {
+            "grpc_tcp": {
+                "address": "192.0.2.4:50051",
+                "token_file": marker, "tls_key_file": marker, "tls_cert_file": marker,
+                "tls_client_ca_file": marker, "tls_client_crl_file": marker
+            },
+            "grpc_uds": {"token_file": marker}
+        }})
+    };
+    let old = listener("/old/private-marker");
+    let new = listener("/new/private-marker");
+    for (a, b) in [(&absent, &old), (&old, &new), (&new, &absent)] {
+        let changes = super::global_leaf_changes(a, b);
+        for listener in ["telemetry.grpc_tcp", "telemetry.grpc_uds"] {
+            assert_eq!(
+                changes.iter().any(|c| c.field == listener),
+                a == &absent || b == &absent
+            );
+        }
+        for field in [
+            "telemetry.grpc_tcp.token_file",
+            "telemetry.grpc_tcp.tls_key_file",
+            "telemetry.grpc_tcp.tls_cert_file",
+            "telemetry.grpc_tcp.tls_client_ca_file",
+            "telemetry.grpc_tcp.tls_client_crl_file",
+            "telemetry.grpc_uds.token_file",
+        ] {
+            let change = changes.iter().find(|c| c.field == field).unwrap();
+            assert!(change.old.is_null() && change.new.is_null());
+            assert_eq!(change.render(), format!("{field}: <changed>"));
+        }
+        assert!(
+            !serde_json::to_string(&changes)
+                .unwrap()
+                .contains("private-marker")
+        );
+    }
+}

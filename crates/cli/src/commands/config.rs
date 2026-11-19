@@ -952,6 +952,12 @@ fn last_reload_human(
     for effect in &record.unapplied {
         lines.push(format!("  unapplied {} {}", effect.bucket, effect.target));
     }
+    if !record.pending_restart_required_fields.is_empty() {
+        lines.push(format!(
+            "Pending restart-required fields: {}",
+            record.pending_restart_required_fields.join(", ")
+        ));
+    }
     lines.extend(convergence.map(convergence_human));
     format!("{}\n", lines.join("\n"))
 }
@@ -977,6 +983,7 @@ fn last_reload_to_json(record: &SighupReloadRecord) -> serde_json::Value {
         "unapplied_count": record.unapplied_count,
         "unapplied": effects(&record.unapplied),
         "unapplied_omitted": record.unapplied_omitted,
+        "pending_restart_required_fields": record.pending_restart_required_fields,
     })
 }
 
@@ -1719,6 +1726,7 @@ mod tests {
             }],
             unapplied_omitted: 0,
             started_monotonic_micros: 7,
+            pending_restart_required_fields: vec!["[bmp].collectors[].address".to_string()],
         };
         assert_eq!(
             last_reload_to_json(&record),
@@ -1736,6 +1744,7 @@ mod tests {
                 "unapplied_count": 1,
                 "unapplied": [{"bucket": "neighbors.reconcile", "target": "192.0.2.1"}],
                 "unapplied_omitted": 0,
+                "pending_restart_required_fields": ["[bmp].collectors[].address"],
             })
         );
     }
@@ -1761,6 +1770,11 @@ mod tests {
             ..Default::default()
         };
         let rendered = last_reload_human(Some(&record), None);
+        assert!(!rendered.contains("Pending restart-required"));
+        assert_eq!(
+            last_reload_to_json(&record)["pending_restart_required_fields"],
+            serde_json::json!([])
+        );
         assert!(rendered.contains("Finished: 1970-01-01T00:00:00Z\nReason: "));
         assert!(rendered.contains("Applied operations: 1 (0 omitted)\nUnapplied operations: 1"));
         assert!(rendered.contains("  applied policy.add edge\n  unapplied neighbors.reconcile"));
@@ -1775,6 +1789,10 @@ mod tests {
         let record = SighupReloadRecord {
             outcome: "complete".to_string(),
             route: "generation".to_string(),
+            pending_restart_required_fields: vec![
+                "[global].router_id".into(),
+                "[mrt].output_dir".into(),
+            ],
             ..Default::default()
         };
         let converging = SighupReloadConvergence {
@@ -1783,6 +1801,11 @@ mod tests {
             oldest_pending_seconds: 75,
         };
         let rendered = last_reload_human(Some(&record), Some(&converging));
+        assert!(
+            rendered.contains(
+                "Pending restart-required fields: [global].router_id, [mrt].output_dir\n"
+            )
+        );
         assert!(rendered.ends_with(
             "Convergence: converging (2 peers with a RIB outbound resync pending, oldest 00:01:15)\n"
         ));

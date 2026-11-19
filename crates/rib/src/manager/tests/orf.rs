@@ -1312,12 +1312,28 @@ async fn peer_down_clears_gr_deferred_eor() {
 fn dual_stack_orf_manager(peer: PeerId) -> (RibManager, mpsc::Receiver<OutboundRouteUpdate>) {
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let out_rx = register_orf_session(&mut manager, peer, 7, false, 0);
+    assert_eq!(
+        manager.peer_orf_pending.get(&peer).map(HashSet::len),
+        Some(2),
+        "both families start gated"
+    );
+    (manager, out_rx)
+}
+
+fn register_orf_session(
+    manager: &mut RibManager,
+    peer: PeerId,
+    session_id: u64,
+    per_client_best: bool,
+    add_path_max: u32,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (out_tx, out_rx) = mpsc::channel(16);
     manager.handle_update(RibUpdate::PeerUp {
         supersedes: None,
-        per_client_best: false,
+        per_client_best,
         interpret_rfc1997: true,
-        session_id: 7,
+        session_id,
         peer,
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -1327,17 +1343,16 @@ fn dual_stack_orf_manager(peer: PeerId) -> (RibManager, mpsc::Receiver<OutboundR
         is_ebgp: true,
         route_reflector_client: false,
         orr_vantage: None,
-        add_path_send_families: vec![],
-        add_path_send_max: 0,
+        add_path_send_families: if add_path_max == 0 {
+            vec![]
+        } else {
+            ipv4_sendable()
+        },
+        add_path_send_max: add_path_max,
         negotiated_orf_recv: dual_stack_sendable(),
         negotiated_llgr_families: Vec::new(),
     });
-    assert_eq!(
-        manager.peer_orf_pending.get(&peer).map(HashSet::len),
-        Some(2),
-        "both families start gated"
-    );
-    (manager, out_rx)
+    out_rx
 }
 
 fn push_orf_entries(
@@ -1362,7 +1377,20 @@ fn push_orf_entries(
 #[test]
 fn orf_capacity_accumulates_atomically_and_remove_all_recovers() {
     let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
-    let (mut manager, _out_rx) = dual_stack_orf_manager(peer);
+    let (manager, _out_rx) = dual_stack_orf_manager(peer);
+    assert_orf_capacity_and_order(manager, peer);
+}
+
+#[test]
+fn deferred_orf_keeps_the_registered_capacity_and_order_contract() {
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
+    let (tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let _out_rx = hold_orf_registration(&mut manager, &tx, peer, 7, false, 0);
+    assert_orf_capacity_and_order(manager, peer);
+}
+
+fn assert_orf_capacity_and_order(mut manager: RibManager, peer: PeerId) {
     let family = (Afi::Ipv4, Safi::Unicast);
     let cap = u32::try_from(crate::orf::MAX_ORF_ENTRIES).unwrap();
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
@@ -1860,10 +1888,20 @@ fn push_orf_groups(
     when: WhenToRefresh,
     groups: Vec<Vec<AddressPrefixOrf>>,
 ) -> Result<(), String> {
+    push_session_orf(manager, peer, 7, when, groups)
+}
+
+fn push_session_orf(
+    manager: &mut RibManager,
+    peer: PeerId,
+    session_id: u64,
+    when: WhenToRefresh,
+    groups: Vec<Vec<AddressPrefixOrf>>,
+) -> Result<(), String> {
     let (reply, mut response) = oneshot::channel();
     manager.handle_update(RibUpdate::PeerOrfUpdate {
         peer,
-        session_id: 7,
+        session_id,
         afi: Afi::Ipv4,
         safi: Safi::Unicast,
         when,
@@ -1871,6 +1909,349 @@ fn push_orf_groups(
         reply,
     });
     response.try_recv().expect("synchronous ORF reply")
+}
+
+fn permit_only(
+    manager: &mut RibManager,
+    peer: PeerId,
+    session_id: u64,
+    when: WhenToRefresh,
+    prefix: Ipv4Prefix,
+) {
+    push_session_orf(
+        manager,
+        peer,
+        session_id,
+        when,
+        vec![vec![orf_permit(1, 24, 24, prefix)]],
+    )
+    .unwrap();
+}
+
+fn first_ipv4_inventory(outbound: &mut mpsc::Receiver<OutboundRouteUpdate>) -> Vec<Prefix> {
+    let mut announced = Vec::new();
+    let mut eor = 0;
+    while let Ok(update) = outbound.try_recv() {
+        if !update.announce.is_empty() {
+            assert_eq!(eor, 0, "initial announcements precede EoR");
+            announced.extend(update.announce.iter().map(|route| route.prefix));
+        }
+        eor += usize::from(update.end_of_rib.contains(&(Afi::Ipv4, Safi::Unicast)));
+    }
+    assert_eq!(eor, 1);
+    announced
+}
+
+/// Hold the registration owner at its existing one-step boundary. Every ORF
+/// response is read synchronously, before the test grants a registration turn.
+fn hold_orf_registration(
+    manager: &mut RibManager,
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: PeerId,
+    session_id: u64,
+    per_client_best: bool,
+    add_path_max: u32,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    let (reply, _response) = oneshot::channel();
+    tx.try_send(RibUpdate::QueryLocRibCount { reply }).unwrap();
+    manager.initial_dump_defer_min_routes = 0;
+    let out_rx = register_orf_session(manager, peer, session_id, per_client_best, add_path_max);
+    assert!(matches!(
+        manager.rx.try_recv(),
+        Ok(RibUpdate::QueryLocRibCount { .. })
+    ));
+    assert_eq!(manager.current_session_id(peer), Some(session_id));
+    assert!(manager.pending_initial_registrations.contains(&peer));
+    assert!(!manager.outbound_peers.contains_key(&peer));
+    out_rx
+}
+
+#[test]
+fn acknowledged_orf_filters_first_inventory_for_each_export_mode() {
+    let allowed = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    let second = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let family = (Afi::Ipv4, Safi::Unicast);
+    let target = peer_v4(Ipv4Addr::new(192, 0, 2, 2));
+    let source_addr = Ipv4Addr::new(192, 0, 2, 1);
+    let source = peer_v4(source_addr);
+    for (per_client_best, add_path_max) in [(false, 0), (true, 0), (false, 1), (false, 2)] {
+        let (tx, rx) = mpsc::channel(8);
+        let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+        register_test_peer(&mut manager, source, 0);
+        let mut outbound =
+            hold_orf_registration(&mut manager, &tx, target, 7, per_client_best, add_path_max);
+
+        // Replace the same sequence twice. The final grant belongs to this
+        // session before its outbound registration has had a turn.
+        permit_only(&mut manager, target, 7, WhenToRefresh::Defer, second);
+        assert!(manager.peer_orf_pending[&target].contains(&family));
+        permit_only(&mut manager, target, 7, WhenToRefresh::Immediate, allowed);
+        let filter = &manager.peer_orf_filters[&target][&family];
+        assert_eq!(filter.len(), 1);
+        assert!(filter.permits(&Prefix::V4(allowed)));
+        assert!(!filter.permits(&Prefix::V4(second)));
+        assert!(!manager.peer_orf_pending[&target].contains(&family));
+        assert!(!manager.outbound_peers.contains_key(&target));
+        assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, 0);
+
+        manager.handle_update(super::lifecycle::test_routes_received(
+            source,
+            vec![
+                make_route(allowed, source_addr),
+                make_route(second, source_addr),
+            ],
+        ));
+        drain_route_chunks(&mut manager);
+        assert!(outbound.try_recv().is_err());
+        // Plain refreshes still need a response after IMMEDIATE opened the gate.
+        for _ in 0..2 {
+            manager.handle_update(RibUpdate::RouteRefreshRequest {
+                peer: target,
+                session_id: 7,
+                afi: family.0,
+                safi: family.1,
+                queued: Arc::default(),
+            });
+        }
+        manager.retry_deferred_refreshes(std::time::Instant::now());
+        manager.advance_pending_initial_registration();
+
+        assert_eq!(
+            first_ipv4_inventory(&mut outbound),
+            [Prefix::V4(allowed)],
+            "per_client_best={per_client_best}, add_path_max={add_path_max}"
+        );
+        manager.retry_pending_refresh(target);
+        assert_ipv4_refresh_response(&mut outbound, Prefix::V4(allowed));
+    }
+}
+
+#[test]
+fn replacement_session_owns_its_deferred_filter_and_gate() {
+    let family = (Afi::Ipv4, Safi::Unicast);
+    let target = peer_v4(Ipv4Addr::new(192, 0, 2, 2));
+    let first = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    let second = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let (tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+
+    let mut old = hold_orf_registration(&mut manager, &tx, target, 7, false, 0);
+    permit_only(&mut manager, target, 7, WhenToRefresh::Immediate, first);
+    let _replacement = hold_orf_registration(&mut manager, &tx, target, 8, false, 0);
+    assert!(manager.peer_orf_pending[&target].contains(&family));
+    assert!(!manager.peer_orf_filters.contains_key(&target));
+    permit_only(&mut manager, target, 8, WhenToRefresh::Defer, second);
+    assert!(
+        push_session_orf(
+            &mut manager,
+            target,
+            7,
+            WhenToRefresh::Immediate,
+            vec![vec![orf_remove_all()]]
+        )
+        .is_err()
+    );
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: target,
+        session_id: 7,
+    });
+    manager.advance_pending_initial_registration();
+
+    assert_eq!(manager.outbound_session_ids.get(&target), Some(&8));
+    let filter = &manager.peer_orf_filters[&target][&family];
+    assert!(filter.permits(&Prefix::V4(second)));
+    assert!(!filter.permits(&Prefix::V4(first)));
+    assert!(manager.peer_orf_pending[&target].contains(&family));
+    assert!(old.try_recv().is_err());
+
+    // An ordinary refresh of the now-registered session releases its DEFER.
+    manager.handle_update(RibUpdate::RouteRefreshRequest {
+        peer: target,
+        session_id: 8,
+        afi: family.0,
+        safi: family.1,
+        queued: Arc::default(),
+    });
+    assert!(!manager.peer_orf_pending[&target].contains(&family));
+    assert!(manager.peer_orf_filters[&target][&family].permits(&Prefix::V4(second)));
+}
+
+#[test]
+fn live_collision_survivor_recovers_its_acknowledged_orf_and_first_inventory() {
+    let family = (Afi::Ipv4, Safi::Unicast);
+    let peer = peer_v4(Ipv4Addr::new(192, 0, 2, 2));
+    let source_addr = Ipv4Addr::new(192, 0, 2, 1);
+    let source = peer_v4(source_addr);
+    let first = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    let second = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let (tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    register_test_peer(&mut manager, source, 0);
+    let mut survivor = hold_orf_registration(&mut manager, &tx, peer, 7, false, 0);
+    permit_only(&mut manager, peer, 7, WhenToRefresh::Immediate, first);
+    let mut other = hold_orf_registration(&mut manager, &tx, peer, 8, false, 0);
+    assert!(manager.peer_orf_pending[&peer].contains(&family));
+    assert!(!manager.peer_orf_filters.contains_key(&peer));
+    permit_only(&mut manager, peer, 8, WhenToRefresh::Defer, second);
+    manager.handle_update(super::lifecycle::test_routes_received(
+        source,
+        vec![
+            make_route(first, source_addr),
+            make_route(second, source_addr),
+        ],
+    ));
+    drain_route_chunks(&mut manager);
+
+    manager.handle_update(RibUpdate::PeerDown {
+        peer,
+        session_id: 8,
+    });
+    manager.advance_pending_initial_registration();
+    assert_eq!(manager.outbound_session_ids.get(&peer), Some(&7));
+    assert!(!manager.peer_orf_pending[&peer].contains(&family));
+    let filter = &manager.peer_orf_filters[&peer][&family];
+    assert!(filter.permits(&Prefix::V4(first)));
+    assert!(!filter.permits(&Prefix::V4(second)));
+    assert_eq!(first_ipv4_inventory(&mut survivor), [Prefix::V4(first)]);
+    assert!(other.try_recv().is_err());
+}
+
+fn assert_ipv4_refresh_response(
+    receiver: &mut mpsc::Receiver<OutboundRouteUpdate>,
+    permitted: Prefix,
+) {
+    let family = (Afi::Ipv4, Safi::Unicast);
+    let mut markers = Vec::new();
+    let mut response = Vec::new();
+    while let Ok(update) = receiver.try_recv().map(delivered) {
+        response.extend(update.announce.iter().map(|route| route.prefix));
+        markers.extend(update.refresh_markers);
+    }
+    assert_eq!(response, [permitted]);
+    assert_eq!(
+        markers,
+        [
+            (family.0, family.1, RouteRefreshSubtype::BoRR),
+            (family.0, family.1, RouteRefreshSubtype::EoRR),
+        ]
+    );
+}
+
+/// Both sessions negotiate ORF. Only A receives a filter, and only the
+/// refresh case asks for the IPv4 table before selection releases.
+#[tokio::test(start_paused = true)]
+async fn live_collision_survivor_keeps_its_orf_deadline_and_held_refresh() {
+    let family = (Afi::Ipv4, Safi::Unicast);
+    let peer = peer_v4(Ipv4Addr::new(192, 0, 2, 2));
+    let source_addr = Ipv4Addr::new(192, 0, 2, 1);
+    let source = peer_v4(source_addr);
+    let source_session = 11;
+    let permit = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let deny = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+
+    for refresh in [false, true] {
+        let (_tx, rx) = mpsc::channel(8);
+        let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+            .with_selection_deferral(SelectionDeferralConfig {
+                timeout: Duration::from_secs(600),
+                waiters: vec![SelectionDeferralWaiterConfig {
+                    peer: source.into(),
+                    families: vec![family],
+                }],
+            });
+        let _source_rx = super::selection_deferral_dirty_rtbh::connect_session(
+            &mut manager,
+            source_addr,
+            source_session,
+            64,
+            true,
+            false,
+            false,
+        );
+        manager.handle_update(super::timer_cutoffs::received(
+            source_addr,
+            source_session,
+            vec![
+                make_route(permit, source_addr),
+                make_route(deny, source_addr),
+            ],
+        ));
+        drain_route_chunks(&mut manager);
+        let mut survivor = register_orf_session(&mut manager, peer, 7, false, 0);
+        while survivor.try_recv().map(delivered).is_ok() {}
+        permit_only(&mut manager, peer, 7, WhenToRefresh::Defer, permit);
+        let deadline = tokio::time::Instant::now() + crate::manager::ORF_EOR_HOLD_CAP;
+        assert_eq!(manager.orf_eor_hold[&peer], deadline);
+        assert!(manager.selection_convergence_held(family));
+        if refresh {
+            manager.handle_update(RibUpdate::RouteRefreshRequest {
+                queued: Arc::default(),
+                peer,
+                session_id: 7,
+                afi: family.0,
+                safi: family.1,
+            });
+            assert!(manager.selection_deferred_refresh[&peer].contains(&family));
+        }
+        assert!(manager.peer_orf_pending[&peer].contains(&family));
+        assert!(survivor.try_recv().is_err());
+
+        let mut other = register_orf_session(&mut manager, peer, 8, false, 0);
+        assert!(manager.peer_orf_pending[&peer].contains(&family));
+        assert!(!manager.selection_deferred_refresh.contains_key(&peer));
+        tokio::time::advance(crate::manager::ORF_EOR_HOLD_CAP).await;
+        manager.expire_eor_holds(tokio::time::Instant::now());
+        manager.handle_update(RibUpdate::EndOfRib {
+            peer: source,
+            session_id: source_session,
+            afi: family.0,
+            safi: family.1,
+        });
+        drain_unicast_release(&mut manager);
+        assert!(!manager.selection_convergence_held(family));
+        while let Ok(update) = other.try_recv().map(delivered) {
+            assert!(update.announce.is_empty());
+            assert_eq!(update.refresh_markers, []);
+        }
+        assert!(survivor.try_recv().is_err());
+
+        manager.handle_update(RibUpdate::PeerDown {
+            peer,
+            session_id: 8,
+        });
+        manager.advance_pending_initial_registration();
+        assert_eq!(manager.outbound_session_ids.get(&peer), Some(&7));
+        assert!(manager.orf_eor_cap_passed.contains(&peer));
+        assert!(!manager.orf_eor_hold.contains_key(&peer));
+        let filter = &manager.peer_orf_filters[&peer][&family];
+        assert!(filter.permits(&Prefix::V4(permit)));
+        assert!(!filter.permits(&Prefix::V4(deny)));
+        let initial = first_ipv4_inventory(&mut survivor);
+        assert_eq!(manager.peer_orf_pending[&peer].contains(&family), !refresh);
+        if refresh {
+            assert_eq!(initial, [Prefix::V4(permit)]);
+            manager.retry_pending_refresh(peer);
+            assert_ipv4_refresh_response(&mut survivor, Prefix::V4(permit));
+        } else {
+            assert_eq!(initial, []);
+        }
+    }
+}
+
+#[test]
+fn reused_session_id_with_new_channel_starts_with_a_fresh_orf_gate() {
+    let target = peer_v4(Ipv4Addr::new(192, 0, 2, 2));
+    let first = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    let (tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let mut old = hold_orf_registration(&mut manager, &tx, target, 7, false, 0);
+    permit_only(&mut manager, target, 7, WhenToRefresh::Immediate, first);
+    let mut new = hold_orf_registration(&mut manager, &tx, target, 7, false, 0);
+    manager.advance_pending_initial_registration();
+    assert!(manager.peer_orf_pending[&target].contains(&(Afi::Ipv4, Safi::Unicast)));
+    assert!(!manager.peer_orf_filters.contains_key(&target));
+    assert_eq!(first_ipv4_inventory(&mut new), []);
+    assert!(old.try_recv().is_err());
 }
 
 fn orf_remove_all() -> AddressPrefixOrf {

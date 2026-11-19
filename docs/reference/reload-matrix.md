@@ -487,7 +487,8 @@ that are stood up once at startup. Three fields are not restart-required:
 `dynamic_neighbor_limit`.
 
 A restart-required `[global]` edit is reported by field, with its old and new
-value, on every surface: the SIGHUP `[global] changed` `ERROR` line carries a
+value where it can be displayed. gRPC bearer-token and TLS credential file
+paths are redacted. The SIGHUP `[global] changed` `ERROR` line carries a
 `fields` value such as `router_id: 10.0.0.1 → 10.0.0.9, telemetry.log_format:
 json → text`; `rustbgpd --diff` lists each field under `[global] changed` and
 in the JSON `global_changes` array; and a config transaction's
@@ -655,6 +656,19 @@ chains all add/change/remove cleanly via reload.
 | `[rpki]` | restart-required | RPKI VRP tables + cache connections stand up once at startup. |
 | `[bmp]` | restart-required | BMP exporter binds once. |
 | `[mrt]` | restart-required | The MRT manager takes its writer settings, including `max_files`, at startup; the output directory is prepared and checked before each dump. |
+
+The SIGHUP error and config diff name the edited field, for example
+`cache_servers[0].refresh_interval` under `[rpki]`. Indices are zero-based
+positions in the configured lists. The JSON diff exposes `rpki_changes`,
+`bmp_changes` and `mrt_changes`. Transaction responses retain each section
+name and add its qualified field names to `restart_required_sections`.
+
+The diff and log show old and new values for numeric endpoints, timers,
+limits, flags and protocol settings. They show only the field name for RTR
+MD5 passwords and TCP-AO keys, BMP system names and descriptions, and MRT
+output directories and filename prefixes. The text diff marks those values
+as `<changed>`. The JSON diff uses `null` for their old and new values,
+including when a whole section or cache server is added or removed.
 
 [ADR-0134](../adr/0134-reload-monitoring-and-validation-endpoints.md) proposes
 reload-applying these sections for subsystems already enabled at startup; until

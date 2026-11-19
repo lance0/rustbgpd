@@ -8061,7 +8061,19 @@ impl RibManager {
         groups: &[Vec<rustbgpd_wire::AddressPrefixOrf>],
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     ) {
-        if !self.outbound_peers.contains_key(&peer) {
+        let family = (afi, safi);
+        let registered = self.outbound_peers.contains_key(&peer);
+        // PeerUp arms the gate and owns the filter before installing the sender.
+        // The dispatch fence already checked the current session ID.
+        if !registered
+            && !self
+                .live_sessions
+                .get(&peer)
+                .and_then(|sessions| sessions.last())
+                .is_some_and(|record| {
+                    !record.outbound_tx.is_closed() && record.negotiated_orf_recv.contains(&family)
+                })
+        {
             let _ = reply.send(Err(format!(
                 "peer {peer} not registered for outbound updates"
             )));
@@ -8075,7 +8087,6 @@ impl RibManager {
             self.grouped_member_of(peer).is_none(),
             "an ORF-receive peer must never be registered in an update group"
         );
-        let family = (afi, safi);
         // The filter generation moves only when the installed list changes,
         // so only a real filter change advances the export-settings generation.
         let installed = self
@@ -8197,7 +8208,9 @@ impl RibManager {
         {
             self.advance_export_settings();
         }
-        if reset || when == WhenToRefresh::Immediate {
+        // A deferred sender has no advertised inventory to resync. Its initial
+        // dump reads the installed filter and gate when registration completes.
+        if registered && (reset || when == WhenToRefresh::Immediate) {
             // If this peer's EoR for the family was withheld at `PeerUp`
             // (GR restarter + §6 gate, see `send_initial_table`), the forced
             // resync below is the gated flood: end the family's ORF table
