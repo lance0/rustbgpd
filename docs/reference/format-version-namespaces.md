@@ -19,7 +19,7 @@ a matching numeral does not imply a shared compatibility contract.
 | CLI machine formats | `rbgp-json/1.4`, `rbgp-rib/1.1`, `rbgp-ribdiff/1`, `rbgp-ribsnap/1` ([`crates/cli/README.md`](../../crates/cli/README.md)) | Versioned `rbgp` output documents. `rbgp-json` and `rbgp-rib` grow by additive minor versions (`rbgp-rib/1.1` added the `next_page_token` end-record field); incompatible types, meaning, or removal need a major version. `rbgp-ribdiff` may gain additive fields. The `rbgp-ribsnap` parser is closed and rejects unknown fields, so any schema change takes a new version. | [v1 stable contract](v1-stable-contract.md#stable-surfaces) |
 | Policy check report | `rbgp-policy-check/1.0` ([`crates/cli/README.md`](../../crates/cli/README.md#policy-check-as-a-ci-and-editor-gate)) | The `rbgp policy check -j` document. Consumers check `format` and the major version and ignore unknown fields; additive fields increment the minor version. A versioned format outside the v1 inventory for now. | [CLI reference](../../crates/cli/README.md#policy-check-as-a-ci-and-editor-gate) |
 | Support bundle | manifest `format: 2` (`support-bundle-manifest/2`) | Frozen machine-readable doctor bundle layout with additive-fields-only evolution. Not a config-transaction format. | [v1-stable-surface.json](v1-stable-surface.json) |
-| General FIB owned state | v5 current, loads v1–v5 ([`src/fib_runtime.rs`](../../src/fib_runtime.rs)) | Crash-restart ownership receipt: v1 single next-hop scalar, v2 equal-cost set, v3 per-next-hop weights, v4/v5 link-local ifindexes (landed together; no standalone v4 shipped). One serde model plus an on-load upgrader, not parallel readers. | [ADR-0066](../adr/0066-unicast-multipath-ecmp-fib.md), [ADR-0068](../adr/0068-weighted-multipath.md), [ADR-0069](../adr/0069-bgp-unnumbered.md), [ADR-0079](../adr/0079-kernel-state-crash-restart-reconciliation.md) |
+| General FIB owned state | v5 current, loads v1–v5 ([`src/fib_runtime.rs`](../../src/fib_runtime.rs)) | Crash-restart ownership receipt: v1 single next-hop scalar, v2 equal-cost set, v3 per-next-hop weights, v4/v5 link-local ifindexes (landed together; no standalone v4 shipped). The v5 scalar `next_hop` records the selected best next hop for reload. | [ADR-0066](../adr/0066-unicast-multipath-ecmp-fib.md), [ADR-0068](../adr/0068-weighted-multipath.md), [ADR-0069](../adr/0069-bgp-unnumbered.md), [ADR-0079](../adr/0079-kernel-state-crash-restart-reconciliation.md) |
 | GR restart marker | v3 current, accepts v1–v3 (`gr-restart.toml`, [`src/main.rs`](../../src/main.rs)) | Planned-restart marker: v1 carries the wall-clock expiry only, v2 binds the warm-checkpoint generation, v3 adds the restart clock domain (boot id, time namespace, boottime offsets and boottime expiry). The writer emits v3 and degrades to v2/v1 when clock sampling fails; the validator accepts each version only with its exact field set. | [ADR-0040](../adr/0040-gr-restarting-speaker.md), [ADR-0104](../adr/0104-shutdown-warm-checkpoint-publication.md) |
 | BLACKHOLE ownership receipt | `schema = "rustbgpd.blackhole-owned/v1"` in `blackhole-owned.json` ([`src/blackhole/owned_state.rs`](../../src/blackhole/owned_state.rs)) | Exact-prefix authority for BLACKHOLE discard routes. The reader accepts only this schema string and rejects unknown fields; any load error leaves the file untouched and disables BLACKHOLE kernel mutations for the run. | [ADR-0060](../adr/0060-rfc-7999-blackhole.md), [ADR-0079](../adr/0079-kernel-state-crash-restart-reconciliation.md) |
 | Warm checkpoint bundle | `format_version = 2` in `warm-bundle-v1/manifest.json` ([`crates/mrt/src/warm_bundle.rs`](../../crates/mrt/src/warm_bundle.rs)) | MRT encoding contract of the optional shutdown checkpoint. The reader requires the exact version. Startup never restores the bundle; with checkpointing enabled, a manifest of another version makes startup skip stale-entry cleanup with a warning, and shutdown publication stays available. | [ADR-0104](../adr/0104-shutdown-warm-checkpoint-publication.md), [ADR-0106](../adr/0106-warm-checkpoint-restore-decision.md) |
@@ -32,6 +32,14 @@ The v1 inventory pins `Config.config_epoch` and `Global.ebgp_requires_policy`
 as stable fields whose contextual default is that matrix; the epoch value is a
 semantics selector, not a format version.
 
+## On-disk reader support window
+
+Keep a reader while any supported upgrade source can still leave that format
+on disk. A release that writes only the new format can still leave an older
+file untouched across restarts. Before v1.0, the supported upgrade sources
+are the previous two minor releases. For v1.0, the supported source is the
+last 0.x release.
+
 ## Why the compatibility behaviors differ
 
 The namespaces deliberately do not share one policy:
@@ -43,10 +51,10 @@ The namespaces deliberately do not share one policy:
   lists a newer release's history row as unreadable and skips recording
   (with a warning) while it exists, so it never reuses that row's sequence or
   evicts it.
-- **Load and upgrade** (FIB owned state): when refusal would orphan live
-  kernel state — misclassifying rustbgpd's own programmed routes as foreign —
-  old receipts are upgraded on load, and only versions newer than the build
-  understands are quarantined.
+- **Load and upgrade** (FIB owned state). On loading a valid v1–v4 receipt,
+  rustbgpd rewrites it as v5 and reads the file back to verify the upgrade,
+  even when the owned routes have not changed. A v5 receipt needs no rewrite
+  on load.
 - **Opaque equality values** (runtime snapshot tokens): tokens are keyed and
   process-local; the only supported operation is passing one back verbatim
   for equality comparison. Never parse a token or depend on its prefix, and
@@ -62,5 +70,4 @@ The namespaces deliberately do not share one policy:
 
 Changing a reader floor, a token algorithm, the frozen bundle format, or the
 streamed frame version is a separately reviewed behavior change owned by the
-ADR or machine inventory linked above. This page records the map; it creates
-no new compatibility policy.
+ADR or machine inventory linked above.
