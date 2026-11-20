@@ -26,6 +26,7 @@ pub(super) struct ReleaseProbe {
     family: Family,
     trigger: oneshot::Receiver<()>,
     admitted: oneshot::Sender<Result<(Instant, Instant)>>,
+    finish: oneshot::Receiver<FinalScrape>,
 }
 
 impl ReleaseProbe {
@@ -48,7 +49,62 @@ impl ReleaseProbe {
             }
         }
         drop(rib);
+        FinalScrape::serve(actor, self.finish).await;
+    }
+}
+
+struct FinalScrape {
+    metrics: BgpMetrics,
+    reply: oneshot::Sender<FinalSample>,
+}
+
+struct FinalSample {
+    slice: BTreeMap<String, f64>,
+    polls: u64,
+    poll_end: Instant,
+    steps_end: Buckets,
+}
+
+impl FinalSample {
+    fn read(metrics: &BgpMetrics) -> Self {
+        let poll_end = Instant::now();
+        let mut slice = BTreeMap::new();
+        drop(fold_slice_maxima(metrics, &mut slice));
+        Self {
+            slice,
+            polls: poll_count(metrics),
+            poll_end,
+            steps_end: buckets(metrics, STEP_HISTOGRAM, "scope"),
+        }
+    }
+}
+
+impl FinalScrape {
+    // The poll that offers the last EoR can still be running when the stub
+    // decodes it. TimedActor publishes its duration only after the poll returns.
+    async fn serve(actor: impl std::future::Future<Output = ()>, finish: oneshot::Receiver<Self>) {
+        tokio::pin!(actor);
+        tokio::select! {
+            biased;
+            request = finish => {
+                if let Ok(request) = request {
+                    let _ = request.reply.send(FinalSample::read(&request.metrics));
+                }
+            }
+            () = &mut actor => return,
+        }
         actor.await;
+    }
+
+    async fn request(finish: oneshot::Sender<Self>, metrics: &BgpMetrics) -> Result<FinalSample> {
+        let (reply, result) = oneshot::channel();
+        finish
+            .send(Self {
+                metrics: metrics.clone(),
+                reply,
+            })
+            .map_err(|_| anyhow::anyhow!("RIB ended before the final poll sample"))?;
+        Ok(result.await?)
     }
 }
 
@@ -246,6 +302,7 @@ pub async fn run(family: Family, output: &Path, options: &Options) -> Result<boo
     };
     let (trigger, trigger_rx) = oneshot::channel();
     let (admitted, stamps) = oneshot::channel();
+    let (finish, finish_rx) = oneshot::channel();
     let mut fixture = Fixture::start_with_probe(
         options,
         Some(config),
@@ -253,6 +310,7 @@ pub async fn run(family: Family, output: &Path, options: &Options) -> Result<boo
             family,
             trigger: trigger_rx,
             admitted,
+            finish: finish_rx,
         }),
     );
     let watching = StopOnDrop(Arc::new(AtomicBool::new(false)));
@@ -378,11 +436,13 @@ pub async fn run(family: Family, output: &Path, options: &Options) -> Result<boo
         let resume = Instant::now();
         fixture.set_paused(0..receivers, false).await?;
         let all_eors = wait_for_receivers(&mut events, receivers, Progress::Eor, until).await;
-        let mut slice = BTreeMap::new();
-        drop(fold_slice_maxima(&fixture.metrics, &mut slice));
-        let polls = poll_count(&fixture.metrics).saturating_sub(base_polls);
-        let poll_end = Instant::now();
-        let steps_end = buckets(&fixture.metrics, STEP_HISTOGRAM, "scope");
+        let FinalSample {
+            slice,
+            polls,
+            poll_end,
+            steps_end,
+        } = FinalScrape::request(finish, &fixture.metrics).await?;
+        let polls = polls.saturating_sub(base_polls);
         let winner = tokio::time::timeout_at(until, winner_probe).await???;
         let mut drained = false;
         if all_eors {
@@ -583,6 +643,42 @@ pub async fn run(family: Family, output: &Path, options: &Options) -> Result<boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn final_scrape_waits_for_the_poll_that_sent_the_decoded_eor() {
+        use rustbgpd_telemetry::metrics::RibActorSliceStage;
+        use std::future::Future;
+        use std::task::{Context, Waker};
+
+        let metrics = BgpMetrics::new();
+        let mut recorder = metrics.rib_actor_slice_recorder();
+        let (sent, decoded) = oneshot::channel();
+        let (end_poll, held) = std::sync::mpsc::channel::<()>();
+        let (shutdown, stopped) = oneshot::channel::<()>();
+        let actor = async move {
+            sent.send(()).unwrap();
+            // The test observer has the marker while this physical poll is open.
+            // Dropping end_poll on a failed assertion also releases this worker.
+            let _ = held.recv();
+            recorder.observe(RibActorSliceStage::ActorPoll, Duration::from_millis(17));
+            recorder.flush();
+            let _ = stopped.await;
+        };
+        let (finish, requested) = oneshot::channel();
+        let worker = tokio::spawn(FinalScrape::serve(actor, requested));
+        decoded.await.unwrap();
+        let mut scrape = std::pin::pin!(FinalScrape::request(finish, &metrics));
+        assert!(scrape
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending());
+        end_poll.send(()).unwrap();
+        let sample = scrape.await.unwrap();
+        assert_eq!(sample.polls, 1);
+        assert_eq!(sample.slice["actor_poll"], 17_000.0);
+        shutdown.send(()).unwrap();
+        worker.await.unwrap();
+    }
 
     #[test]
     fn step_witness_distinguishes_a_missing_scope_from_an_idle_one() {

@@ -363,8 +363,10 @@ the last End-of-RIB, along with the longest step's histogram bucket.
 The campaign sets the performance thresholds.
 
 Recovery has two clocks, release to last decoded End-of-RIB and reader
-resume to that marker. The physical RIB poll maximum covers release
-through the last marker. The single unrelated IPv4 UPDATE samples the
+resume to that marker. After the final receiver decodes its marker, the
+harness reads the poll maximum between RIB polls. This includes the whole
+poll that offered the marker, even when the receiver decoded it before
+that poll returned. The single unrelated IPv4 UPDATE samples the
 release turn. It is queued behind the releasing marker between actor polls.
 The receipt timestamps the first lookup returning its matching winner
 (an upper bound on installation) and delivery to a separate TCP receiver.
