@@ -22,6 +22,7 @@
   instead, by the resync tick alone, and counted in
   `bgp_rib_outbound_owing_fallback_total`, as for unicast and EVPN. A
   receiver resynced inside a labeled-unicast selection hold while it holds
-  routes of the held family gets that family from one resync after the
-  release. VPN, FlowSpec, BGP-LS and RT-Constrain keep the whole-family
+  routes of the held family is resynced as a whole peer after the release;
+  `bgp_rib_outbound_eviction_recovery_seconds` times that resync and the
+  one after a fallback. VPN, FlowSpec, BGP-LS and RT-Constrain keep the whole-family
   send; see [known issues](../docs/reference/known-issues.md).

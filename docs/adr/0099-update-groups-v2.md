@@ -780,9 +780,13 @@ non-best change reaches an Add-Path or ORR receiver and a release reaches
 a receiver that joined in the hold. Every receiver holds these families
 outside its group, so the waiting state, the one-unit-per-tick rebuild
 and the in-hold rule apply as they do for EVPN. No labeled fanout parks
-across turns and no input changes one receiver's labeled export with
-every candidate unchanged, so neither unlogged marks nor the parked-fanout
-hook is used. VPN, FlowSpec, BGP-LS and RT-Constrain still drain whole.
+across turns, so the parked-fanout hook is not used. Three inputs do
+change one receiver's labeled export with every candidate unchanged: a
+replacement of its export policy, a swap of a policy dataset, and a change
+of its ORR topology. None of them goes through a labeled pass. Each
+resyncs the receiver as a whole peer, which ends its cursor, so no
+unlogged mark is needed either. VPN, FlowSpec, BGP-LS and RT-Constrain
+still drain whole.
 
 Each owed key carries a *logged deferral*: a test-build record of (session,
 receiver, AFI/SAFI, key). It opens when the key becomes owed. It closes when the

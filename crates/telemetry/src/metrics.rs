@@ -1923,14 +1923,18 @@ impl BgpMetrics {
             "bgp_rib_outbound_owing_fallback_total",
             "Peers that owed private-family keys and fell back to a whole-peer \
              resync instead: a drain refused for a reason other than capacity \
-             or credit, or a gated batch refused for credit.",
+             or credit, a gated batch refused for credit, or a receiver that \
+             fell behind the cap of its unicast, labeled-unicast or EVPN \
+             owed-row list.",
         )
         .expect("valid metric definition");
         let rib_outbound_owing_flips = IntCounter::new(
             "bgp_rib_outbound_owing_flips_total",
             "Private families a peer began to owe whole: its owed-key set \
-             outgrew its byte cap, or a FlowSpec, BGP-LS or RT-Constrain \
-             pass found the peer without credit.",
+             outgrew its byte cap, a FlowSpec, BGP-LS or RT-Constrain \
+             pass found the peer without credit, or a selection release \
+             owed it the family. Unicast, labeled unicast and EVPN then \
+             drain in bounded steps.",
         )
         .expect("valid metric definition");
         let rib_outbound_eviction_recovery_seconds = HistogramVec::new(
@@ -1938,8 +1942,8 @@ impl BgpMetrics {
                 "bgp_rib_outbound_eviction_recovery_seconds",
                 "Wall-clock duration of one receiver's whole-table recovery build after preflight, \
                  through commit handling and cleanup, by data commit outcome (processed or commit_refused). \
-                 Covers owed-row cap evictions and post-release rebuilds for EVPN state that a dirty \
-                 resync deferred during a selection hold.",
+                 Covers owed-row cap evictions and post-release rebuilds for EVPN or labeled-unicast \
+                 state that a dirty resync deferred during a selection hold.",
             )
             .buckets(actor_buckets_with_250ms()),
             &["outcome"],

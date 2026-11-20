@@ -171,8 +171,9 @@ resolved.
     outside its update group, so the fallback and the in-hold rule are
     EVPN's: a receiver that fell behind, or one resynced inside a
     labeled-unicast selection hold while it holds routes of the held
-    family, gets that family from one resync after the release, one
-    receiver per tick. The evidence is work counts and wire content in
+    family, is resynced as a whole peer after the release (every family
+    it is sent, with a capture of its group's table for a group member),
+    one receiver per tick. The evidence is work counts and wire content in
     unit-level tests; no timed run has been made.
   - Whole-family sends of the other families, still on main: VPN,
     FlowSpec, BGP-LS and RT-Constrain owed whole still go
