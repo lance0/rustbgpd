@@ -829,3 +829,311 @@ fn refused_pcb_release_keeps_member_denials_for_corrective_admission() {
     }
     assert_eq!((rows, markers), (1, 1));
 }
+
+// Work a startup release spends on one group of route-server clients that
+// were Established during the hold. `per_client` selects RFC 7947 per-client
+// best; the ordinary single-best group of the same shape is the control.
+
+const PROBE_SOURCE: Ipv6Addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+const V6: (Afi, Safi) = (Afi::Ipv6, Safi::Unicast);
+
+#[derive(Debug)]
+struct ReleaseWork {
+    polls: usize,
+    longest_fenced_polls: usize,
+    longest_fenced: Duration,
+    elapsed: Duration,
+    handoffs: usize,
+}
+
+fn client(n: usize) -> PeerId {
+    let high = u8::try_from(n / 200).unwrap();
+    let low = u8::try_from(n % 200).unwrap() + 1;
+    peer_v4(Ipv4Addr::new(10, 200, high, low))
+}
+
+fn held_client_group(
+    members: usize,
+    rows: u32,
+    per_client: bool,
+) -> (
+    RibManager,
+    mpsc::Sender<RibUpdate>,
+    Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+) {
+    let (tx, rx) = mpsc::channel(64);
+    let mut manager = gated_source(rx);
+    manager.test_force_ungrouped = false;
+    let receivers = (0..members)
+        .map(|n| {
+            let mut registration = registering_peer_up(client(n), 2);
+            let RibUpdate::PeerUp {
+                outbound_tx,
+                sendable_families,
+                per_client_best,
+                ..
+            } = &mut registration
+            else {
+                unreachable!()
+            };
+            // No send is refused, so every count below is the clean path.
+            let (out, rx) = mpsc::channel(rows as usize + 64);
+            *outbound_tx = out;
+            *sendable_families = vec![FAMILY];
+            *per_client_best = per_client;
+            manager.handle_update(registration);
+            rx
+        })
+        .collect();
+    let gid = manager
+        .grouped_member_of(client(0))
+        .expect("grouped client");
+    for n in 0..members {
+        assert_eq!(manager.grouped_member_of(client(n)), Some(gid));
+    }
+    assert_eq!(manager.group_ribs[&gid].per_client_best, per_client);
+    manager.handle_update(update(
+        (0..rows).map(|n| make_indexed_route(n, SOURCE)).collect(),
+        vec![],
+    ));
+    drain_route_chunks(&mut manager);
+    assert_eq!(manager.loc_rib.len(), 0);
+    assert!(manager.selection_deferred(FAMILY));
+    (manager, tx, receivers)
+}
+
+fn source_end_of_rib() -> RibUpdate {
+    RibUpdate::EndOfRib {
+        peer: peer_v4(SOURCE),
+        session_id: 1,
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    }
+}
+
+fn drive_release(manager: &mut RibManager) -> ReleaseWork {
+    let handoffs = EXECUTOR_HANDOFFS.with(|handoffs| handoffs.get().0);
+    let start = Instant::now();
+    manager.handle_update(source_end_of_rib());
+    let mut work = ReleaseWork {
+        polls: 0,
+        longest_fenced_polls: 0,
+        longest_fenced: Duration::ZERO,
+        elapsed: Duration::ZERO,
+        handoffs: 0,
+    };
+    let mut run = 0;
+    let mut fence = None;
+    // The actor loop admits primary input and timers only when this is false.
+    while manager.unicast_release_runnable() {
+        let opened = *fence.get_or_insert_with(Instant::now);
+        manager.advance_unicast_release();
+        work.polls += 1;
+        if manager.release_delivery_pending() {
+            run += 1;
+            work.longest_fenced_polls = work.longest_fenced_polls.max(run);
+        } else {
+            if run > 0 {
+                work.longest_fenced = work.longest_fenced.max(opened.elapsed());
+            }
+            run = 0;
+            fence = None;
+        }
+    }
+    work.elapsed = start.elapsed();
+    work.handoffs = EXECUTOR_HANDOFFS.with(|handoffs| handoffs.get().0) - handoffs;
+    work
+}
+
+/// Row-carrying envelopes for the busiest member, and the largest envelope.
+fn tally(receivers: &mut [mpsc::Receiver<OutboundRouteUpdate>], rows: u32) -> (usize, usize) {
+    let (mut most, mut largest) = (0, 0);
+    for receiver in receivers {
+        let (mut envelopes, mut seen, mut markers) = (0, BTreeSet::new(), 0);
+        while let Ok(update) = receiver.try_recv() {
+            if !update.announce.is_empty() {
+                envelopes += 1;
+                largest = largest.max(update.announce.len());
+                apply(&mut seen, &update);
+            }
+            markers += usize::from(update.end_of_rib.contains(&FAMILY));
+        }
+        assert_eq!((seen.len(), markers), (rows as usize, 1));
+        most = most.max(envelopes);
+    }
+    (most, largest)
+}
+
+#[test]
+fn a_per_client_best_release_batch_is_not_paged_by_prefix_times_member() {
+    let mut failures = Vec::new();
+    for (members, rows) in [(4_usize, 64_u32), (32, 64), (32, 256)] {
+        for per_client in [false, true] {
+            let (mut manager, _tx, mut receivers) = held_client_group(members, rows, per_client);
+            let work = drive_release(&mut manager);
+            let (envelopes, largest) = tally(&mut receivers, rows);
+            let rows = rows as usize;
+            eprintln!(
+                "release-work per_client_best={per_client} members={members} rows={rows} \
+                 fenced_polls={} total_polls={} handoffs={} envelopes_per_member={envelopes} \
+                 max_rows_per_envelope={largest}",
+                work.longest_fenced_polls, work.polls, work.handoffs
+            );
+            // Ranking is per prefix and member delivery is per 16 members, so a
+            // paged batch is additive in the two. One envelope carries a page of rows.
+            let poll_bound = 8 * rows + 4 * members;
+            if work.longest_fenced_polls > poll_bound {
+                failures.push(format!(
+                    "per_client_best={per_client} {members}x{rows}: {} fenced polls > {poll_bound}",
+                    work.longest_fenced_polls
+                ));
+            }
+            if envelopes > rows.div_ceil(64) {
+                failures.push(format!(
+                    "per_client_best={per_client} {members}x{rows}: {envelopes} envelopes for one member > {}",
+                    rows.div_ceil(64)
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+const TIMED_SHAPES: [(usize, u32); 2] = [(32, 16_384), (150, 16_384)];
+
+#[test]
+#[ignore = "indicative wall-clock probe; run by name in an optimized profile"]
+fn timing_client_group_release_direct_drive() {
+    for (members, rows) in TIMED_SHAPES {
+        for per_client in [false, true] {
+            let (mut manager, _tx, mut receivers) = held_client_group(members, rows, per_client);
+            let work = drive_release(&mut manager);
+            let (envelopes, largest) = tally(&mut receivers, rows);
+            eprintln!(
+                "release-direct per_client_best={per_client} members={members} rows={rows} \
+                 wall_ms={:.1} longest_fenced_ms={:.1} fenced_polls={} total_polls={} \
+                 ns_per_poll={} handoffs={} envelopes_per_member={envelopes} \
+                 max_rows_per_envelope={largest}",
+                work.elapsed.as_secs_f64() * 1e3,
+                work.longest_fenced.as_secs_f64() * 1e3,
+                work.longest_fenced_polls,
+                work.polls,
+                work.elapsed.as_nanos() / work.polls as u128,
+                work.handoffs
+            );
+        }
+    }
+}
+
+/// An unrelated peer's IPv6 UPDATE, timed from the primary queue to its receiver.
+async fn primary_lane_probe(
+    tx: &mpsc::Sender<RibUpdate>,
+    receiver: &mut mpsc::Receiver<OutboundRouteUpdate>,
+    n: u32,
+) -> Duration {
+    let [high, low] = [n >> 16, n & 0xffff].map(|half| u16::try_from(half).unwrap());
+    let prefix = Ipv6Prefix::new(Ipv6Addr::new(0x2001, 0xdb8, 1, 0, 0, 0, high, low), 128);
+    let mut probe = update(vec![make_v6_route(prefix, PROBE_SOURCE)], vec![]);
+    if let RibUpdate::RoutesReceived { peer, .. } = &mut probe {
+        *peer = PeerId::from_addr(IpAddr::V6(PROBE_SOURCE));
+    }
+    let sent = Instant::now();
+    tx.send(probe).await.unwrap();
+    loop {
+        let update = tokio::time::timeout(Duration::from_mins(20), receiver.recv())
+            .await
+            .expect("probe delivered")
+            .expect("actor alive");
+        if update
+            .announce
+            .iter()
+            .any(|row| row.prefix == Prefix::V6(prefix))
+        {
+            return sent.elapsed();
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "indicative wall-clock probe; run by name in an optimized profile"]
+async fn timing_client_group_release_through_the_actor_loop() {
+    for (members, rows) in TIMED_SHAPES {
+        for per_client in [false, true] {
+            let (mut manager, tx, receivers) = held_client_group(members, rows, per_client);
+            manager.handle_update(registering_peer_up(
+                PeerId::from_addr(IpAddr::V6(PROBE_SOURCE)),
+                1,
+            ));
+            let mut registration = registering_peer_up(peer_v4(Ipv4Addr::new(203, 0, 113, 9)), 1);
+            let RibUpdate::PeerUp {
+                outbound_tx,
+                sendable_families,
+                ..
+            } = &mut registration
+            else {
+                unreachable!()
+            };
+            let (out, mut probe_rx) = mpsc::channel(64);
+            *outbound_tx = out;
+            *sendable_families = vec![V6];
+            manager.handle_update(registration);
+            let actor = tokio::spawn(manager.run());
+            let idle = primary_lane_probe(&tx, &mut probe_rx, 0).await;
+
+            let start = Instant::now();
+            tx.send(source_end_of_rib()).await.unwrap();
+            let clients: Vec<_> = receivers
+                .into_iter()
+                .map(|mut receiver| {
+                    tokio::spawn(async move {
+                        let (mut envelopes, mut seen, mut largest) = (0_usize, 0_usize, 0_usize);
+                        loop {
+                            let update = receiver.recv().await.expect("actor alive");
+                            if !update.announce.is_empty() {
+                                envelopes += 1;
+                                seen += update.announce.len();
+                                largest = largest.max(update.announce.len());
+                            }
+                            if update.end_of_rib.contains(&FAMILY) {
+                                return (envelopes, seen, largest, Instant::now());
+                            }
+                        }
+                    })
+                })
+                .collect();
+            let all = tokio::spawn(async move {
+                let mut results = Vec::new();
+                for client in clients {
+                    results.push(client.await.unwrap());
+                }
+                results
+            });
+            let (mut probes, mut worst, mut total) = (0_u32, Duration::ZERO, Duration::ZERO);
+            while !all.is_finished() {
+                probes += 1;
+                let wait = primary_lane_probe(&tx, &mut probe_rx, probes).await;
+                worst = worst.max(wait);
+                total += wait;
+            }
+            let results = all.await.unwrap();
+            let last_marker = results.iter().map(|r| r.3).max().unwrap();
+            eprintln!(
+                "release-actor per_client_best={per_client} members={members} rows={rows} \
+                 wall_ms={:.1} probe_idle_us={} probe_worst_ms={:.1} probe_mean_ms={:.2} \
+                 probes={probes} envelopes_per_member={}..{} rows_per_member={}..{} \
+                 max_rows_per_envelope={}",
+                (last_marker - start).as_secs_f64() * 1e3,
+                idle.as_micros(),
+                worst.as_secs_f64() * 1e3,
+                total.as_secs_f64() * 1e3 / f64::from(probes.max(1)),
+                results.iter().map(|r| r.0).min().unwrap(),
+                results.iter().map(|r| r.0).max().unwrap(),
+                results.iter().map(|r| r.1).min().unwrap(),
+                results.iter().map(|r| r.1).max().unwrap(),
+                results.iter().map(|r| r.2).max().unwrap(),
+            );
+            drop(tx);
+            actor.await.unwrap();
+        }
+    }
+}
