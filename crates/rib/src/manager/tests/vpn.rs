@@ -48,6 +48,88 @@ fn drain_vpn_delta(
     (announced, withdrawn)
 }
 
+#[test]
+fn grouped_vpn_refresh_settles_refused_proof_withdrawal_before_eorr() {
+    use super::super::update_groups::RecoveryFallbackCause::AllocationFailure;
+    use rustbgpd_wire::RouteRefreshSubtype::{BoRR, EoRR};
+    use std::collections::HashMap;
+    let (afi, safi) = (Afi::Ipv4, Safi::MplsVpn);
+    let family = (afi, safi);
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = peer_v4(Ipv4Addr::new(192, 0, 2, 30));
+    let (writer, mut receiver) = mpsc::channel(4096);
+    let mut up = super::update_groups_recovery::peer_up(peer, writer.clone(), None);
+    if let RibUpdate::PeerUp {
+        sendable_families,
+        is_ebgp,
+        ..
+    } = &mut up
+    {
+        sendable_families.push(family);
+        *is_ebgp = true;
+    }
+    manager.handle_update(up);
+    assert!(manager.vpn_grouped_member_of(peer).is_some());
+    assert!(receiver.try_recv().unwrap().end_of_rib.contains(&family));
+    let src = Ipv4Addr::new(192, 0, 2, 1);
+    let rows = [1, 2].map(|n| make_vpn_rib_route(src, n, 100, 100));
+    let [owed, kept] = rows.each_ref().map(VpnRibRoute::key);
+    manager.handle_vpn_routes_received(peer_v4(src), rows.into(), vec![]);
+    let mut held: HashMap<_, _> = drain_vpn_delta(&mut receiver)
+        .0
+        .iter()
+        .map(|row| (row.key(), false))
+        .collect();
+    assert_eq!(
+        held,
+        HashMap::from([(owed.clone(), false), (kept.clone(), false)])
+    );
+    // Hold every production writer slot and fail the speculative proof allocation.
+    let permits = writer.try_reserve_many(writer.max_capacity()).unwrap();
+    manager
+        .pending_group_admitted
+        .fail_next_allocation_for_test();
+    manager.handle_vpn_routes_received(peer_v4(src), vec![], vec![owed.clone()]);
+    assert!(manager.dirty_peers.contains(&peer));
+    assert!(manager.pending_group_admitted.get(&peer).is_none());
+    assert_eq!(
+        manager.group_recovery_fallback(peer),
+        Some(AllocationFailure)
+    );
+    drop(permits);
+    manager.send_route_refresh_response(peer, afi, safi);
+    let mut markers = Vec::new();
+    let mut withdrawals = Vec::new();
+    for _ in 0..4 {
+        while let Ok(update) = receiver.try_recv().map(delivered) {
+            if update.refresh_markers.contains(&(afi, safi, BoRR)) {
+                markers.push(BoRR);
+                for stale in held.values_mut() {
+                    *stale = true;
+                }
+            }
+            for key in update.vpn_withdraw {
+                held.remove(&key);
+                withdrawals.push((key, markers.contains(&EoRR)));
+            }
+            held.extend(update.vpn_announce.iter().map(|row| (row.key(), false)));
+            if update.refresh_markers.contains(&(afi, safi, EoRR)) {
+                markers.push(EoRR);
+                held.retain(|_, stale| !*stale);
+            }
+        }
+        if !manager.resync_tick_pending() {
+            break;
+        }
+        manager.resync_dirty_peers_bounded();
+    }
+    assert_eq!(markers, [BoRR, EoRR]);
+    assert_eq!(held, HashMap::from([(kept, false)]));
+    assert_eq!(withdrawals, [(owed, false)], "VPN withdrawal followed EoRR");
+    assert!(!manager.resync_tick_pending());
+}
+
 /// RFC 9252 section 7 distinguishes semantic SID ineligibility from malformed
 /// UPDATE handling: keep the received route, but select only usable candidates.
 #[test]

@@ -1019,6 +1019,37 @@ impl RibManager {
         })
     }
 
+    /// A proofless resync draws its withdrawals from these candidates in
+    /// `assemble_group_resync` and `assemble_group_vpn_resync`.
+    fn refresh_waits_for_group_withdrawals(&self, peer: PeerId, safi: Safi) -> bool {
+        if !self.dirty_peers.contains(&peer) || self.pending_group_admitted.contains_key(&peer) {
+            return false;
+        }
+        let Some(group) = self
+            .grouped_member_of(peer)
+            .and_then(|gid| self.group_ribs.get(&gid))
+        else {
+            return false;
+        };
+        let baseline = self.pending_regroup_baseline.get(&peer);
+        let extras = self.pending_extra_withdraws.get(&peer);
+        match safi {
+            Safi::Unicast => {
+                !group.tombstones.is_empty()
+                    || baseline.is_some_and(|base| !base.unicast.is_empty())
+                    || extras.is_some_and(|extra| !extra.unicast.is_empty())
+                    // A suppressed route-server slot can itself be a candidate.
+                    || self.peer_rs_control.contains_key(&peer)
+            }
+            Safi::MplsVpn if group.stages_vpn() => {
+                !group.vpn_tombstones.is_empty()
+                    || baseline.is_some_and(|base| !base.vpn.is_empty())
+                    || extras.is_some_and(|extra| !extra.vpn.is_empty())
+            }
+            _ => false,
+        }
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "route-refresh replay keeps family staging, ORF gating, and EoR together"
@@ -1069,8 +1100,11 @@ impl RibManager {
                 // RFC 5291 §6: a peer ROUTE-REFRESH lifts the initial-
                 // advertisement gate. Internal recovery may only observe it.
                 self.lift_orf_gate(peer, family);
-                // The resync tick rebuilds a receiver evicted by the owed-row cap.
-                if self.owed_row_evicted.contains(&peer)
+                // Without an admitted proof, the grouped resync owns the
+                // tombstone and regroup withdrawals. Let it commit them
+                // before BoRR, while the receiver still holds those routes.
+                if self.refresh_waits_for_group_withdrawals(peer, safi)
+                    || self.owed_row_evicted.contains(&peer)
                     || super::outbound_owing::OwedFamily::of(family)
                         .is_some_and(|owed| self.owes_held_rebuild(peer, owed))
                 {
