@@ -355,7 +355,12 @@ fn end_of_rib(manager: &mut RibManager, peer: PeerId, session_id: u64, family: (
 /// The waiter's session comes up restarting: the selection hold of `held`
 /// begins. The waiter is a labeled receiver too, and reads.
 fn hold(manager: &mut RibManager, held: &[(Afi, Safi)]) -> Receiver {
-    let peer = peer_v4(WAITER);
+    hold_from(manager, WAITER, held)
+}
+
+/// [`hold`] by any configured waiter.
+fn hold_from(manager: &mut RibManager, waiter: Ipv4Addr, held: &[(Afi, Safi)]) -> Receiver {
+    let peer = peer_v4(waiter);
     manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
         peer,
         session_id: 7,

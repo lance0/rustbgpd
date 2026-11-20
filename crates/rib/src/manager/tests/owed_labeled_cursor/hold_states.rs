@@ -938,3 +938,198 @@ fn a_stalled_receiver_awaiting_a_held_rebuild_keeps_no_list_entries() {
     }
     assert_idle(&manager, &receivers, "stalled held rebuild");
 }
+
+fn recoveries_observed(manager: &RibManager) -> (u64, u64) {
+    let samples = histogram_sample_counts_by_label(
+        &manager.metrics,
+        "bgp_rib_outbound_eviction_recovery_seconds",
+        "outcome",
+    );
+    let count = |outcome| samples.get(outcome).copied().unwrap_or(0);
+    (count("processed"), count("commit_refused"))
+}
+
+/// A labeled hold and an IPv4 unicast hold together. A receiver that
+/// resynced inside the labeled hold owes that family's rebuild; the labeled
+/// hold releases first. A unit refused after its build did not run and
+/// leaves the rebuild owed. The unit that runs sends the missed withdrawal
+/// and the family's End-of-RIB and discharges the rebuild, though the
+/// unicast hold keeps the receiver dirty: the rebuild is not recorded again,
+/// so a ROUTE-REFRESH for the family is answered at once and one recovery is
+/// counted. Labeled changes behind the unicast hold and the unicast rows it
+/// held reach the receiver, whose table ends exact with one End-of-RIB. With
+/// and without an operator replay waiting for the unicast hold. Red
+/// when a unit that ended dirty puts its rebuild back: the refresh waits for
+/// the unicast release.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario read top to bottom; splitting it would hide the order of events"
+)]
+#[test]
+fn a_discharged_labeled_rebuild_is_not_recorded_again_behind_the_unicast_hold() {
+    for (family, owed, forced) in [
+        (L4, F4, false),
+        (L6, F6, false),
+        (L4, F4, true),
+        (L6, F6, true),
+    ] {
+        let case = format!("{family:?} forced={forced}");
+        let afi = usize::from(family == L6);
+        let rows = |rows: &[(u32, u32)]| -> Vec<LabeledRibRoute> {
+            rows.iter()
+                .map(|&(index, label)| route_from(SOURCE, family, index, label, 200))
+                .collect()
+        };
+        let mut manager = manager(CREDIT).with_selection_deferral(SelectionDeferralConfig {
+            timeout: Duration::from_secs(60),
+            waiters: [(WAITER, family), (WAITER2, V4)]
+                .map(|(address, family)| SelectionDeferralWaiterConfig {
+                    peer: peer_v4(address).into(),
+                    families: vec![family],
+                })
+                .into(),
+        });
+        sources_up(&mut manager);
+        let mut receivers = vec![Receiver::up(
+            &mut manager,
+            receiver(0),
+            16,
+            &[V4, family],
+            0,
+        )];
+        let peer = receivers[0].peer;
+        send(&mut manager, SOURCE, rows(&all(8)), vec![]);
+        plain_rows(&mut manager, 0..2);
+        drain(&mut manager, &mut receivers);
+        assert_eq!(receivers[0].wire.table, table_of(family, &all(8)), "{case}");
+        receivers[0].wire.announced.clear();
+
+        // The receiver stops reading and misses row 5's withdrawal, then
+        // resyncs inside the labeled hold.
+        receivers[0].stall(&manager);
+        regroup(&mut manager, peer, Some(permit_all()));
+        send(&mut manager, SOURCE, vec![], vec![prefix(family, 5)]);
+        assert!(manager.dirty_peers.contains(&peer), "{case}");
+        receivers.push(hold(&mut manager, &[family]));
+        manager.owe_eor(peer, family);
+        drain(&mut manager, &mut receivers);
+        assert!(!manager.dirty_peers.contains(&peer), "{case}: resynced");
+        assert!(manager.owes_held_rebuild(peer, owed), "{case}");
+        assert!(
+            receivers[0]
+                .wire
+                .table
+                .contains_key(&(prefix(family, 5), 0)),
+            "{case}: the withdrawal waits for the release"
+        );
+
+        receivers.push(hold_from(&mut manager, WAITER2, &[V4]));
+        // An operator replay that waits for the unicast hold changes
+        // nothing here but the rows the unit replays.
+        if forced {
+            operator_refresh(&mut manager, peer);
+        }
+        let replayed = if forced { 7 } else { 0 };
+        let recoveries = recoveries_observed(&manager);
+        release(&mut manager, family);
+        // A unit refused after its build did not run: its rebuild stays owed.
+        let encoder = manager
+            .peer_export_encoders
+            .remove(&peer)
+            .expect("an exact export encoder");
+        let builds = manager.adj_rib_out_commit_stats.resync_builds;
+        // The waiter's own steps come first: stop at the first unit built.
+        for _ in 0..8 {
+            if manager.adj_rib_out_commit_stats.resync_builds != builds {
+                break;
+            }
+            tick(&mut manager, &mut receivers);
+        }
+        assert_eq!(
+            manager.adj_rib_out_commit_stats.resync_builds - builds,
+            1,
+            "{case}"
+        );
+        assert!(receivers[0].wire.withdrawn.is_empty(), "{case}: refused");
+        assert_eq!(receivers[0].wire.markers[afi], 0, "{case}: refused");
+        assert!(manager.owes_held_rebuild(peer, owed), "{case}: still owed");
+        manager.peer_export_encoders.insert(peer, encoder);
+        drain(&mut manager, &mut receivers);
+        // The unit ran: the missed withdrawal and the family's marker are on
+        // the wire, and the receiver stays dirty only for the IPv4 hold.
+        assert_eq!(
+            receivers[0].wire.withdrawn,
+            [prefix(family, 5)],
+            "{case}: the missed withdrawal, once"
+        );
+        assert_eq!(receivers[0].wire.announced.len(), replayed, "{case}");
+        assert_eq!(receivers[0].wire.markers[afi], 1, "{case}");
+        assert!(manager.selection_deferred(V4) && !manager.selection_deferred(family));
+        assert!(manager.dirty_peers.contains(&peer), "{case}");
+        assert!(
+            !manager.owes_held_rebuild(peer, owed),
+            "{case}: a discharged rebuild is recorded again"
+        );
+
+        refresh_request(&mut manager, peer, family);
+        receivers[0].write();
+        let answers = |receiver: &Receiver| {
+            let answers = receiver.wire.sent.iter();
+            answers
+                .filter(|sent| matches!(sent, Sent::Answer(_)))
+                .count()
+        };
+        assert_eq!(answers(&receivers[0]), 1, "{case}: the refresh is answered");
+        assert!(!manager.pending_refresh.contains_key(&peer), "{case}");
+        assert_eq!(
+            receivers[0].wire.announced.len(),
+            replayed + 7,
+            "{case}: the answer"
+        );
+        assert_eq!(receivers[0].wire.withdrawn.len(), 1, "{case}");
+
+        // Behind the unicast hold: a label change, a new row and a withdrawal
+        // for the labeled family, and two unicast rows the hold keeps back.
+        send(
+            &mut manager,
+            SOURCE,
+            rows(&[(1, 111), (9000, 222)]),
+            vec![prefix(family, 6)],
+        );
+        plain_rows(&mut manager, 2..4);
+        end_of_rib(&mut manager, peer_v4(WAITER2), 7, V4);
+        drain_unicast_release(&mut manager);
+        drain(&mut manager, &mut receivers);
+        tick(&mut manager, &mut receivers);
+        assert_eq!(
+            recoveries_observed(&manager),
+            (recoveries.0 + 1, recoveries.1 + 1),
+            "{case}: one admitted rebuild and the refused one"
+        );
+        let mut expected: Vec<(u32, u32)> = all(8);
+        expected.retain(|&(index, _)| index != 5 && index != 6);
+        expected[1].1 = 111;
+        expected.push((9000, 222));
+        let expected = table_of(family, &expected);
+        assert_eq!(selected(&manager), expected, "{case}: selected rows");
+        let wire = &receivers[0].wire;
+        assert_eq!(wire.table, expected, "{case}: exact table");
+        assert_eq!(wire.markers[afi], 1, "{case}: one End-of-RIB");
+        assert_eq!(wire.markers[1 - afi], 0, "{case}: none for the other AFI");
+        assert_eq!(
+            wire.withdrawn,
+            [5, 6].map(|index| prefix(family, index)),
+            "{case}: each withdrawal once"
+        );
+        // The operator's replay runs again for every family when the
+        // unicast hold ends, so only the unforced case counts rows.
+        if !forced {
+            assert_eq!(wire.announced.len(), 7 + 2, "{case}: no duplicate row");
+        }
+        assert_eq!(wire.unicast_table, plain_table(4), "{case}");
+        let waiter = &receivers[1].wire;
+        assert_eq!(waiter.table, expected, "{case}: waiter table");
+        assert_eq!(waiter.markers[afi], 1, "{case}: waiter End-of-RIB");
+        assert_idle(&manager, &receivers, &case);
+    }
+}
