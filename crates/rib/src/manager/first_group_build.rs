@@ -12,6 +12,16 @@ use super::{OutboundRouteUpdate, PeerId, RibManager};
 use crate::loc_rib::{REGISTRATION_PAGE_SIZE, RegistrationScanStatus};
 use crate::update::RibUpdate;
 
+/// Build turns in one attempt on which a claimed build may find its repair
+/// log more than half full behind a retained session end before it takes the
+/// actor's turns. The count is cumulative, because a steady feed of messages
+/// near two chunks holds the log at half and dips under it every few turns.
+/// A larger budget lets a longer burst from another peer pass without holding
+/// the other peers' input for the rest of the build (the largest UPDATE, 16
+/// chunks, keeps the log past half for 13 turns). A smaller one replays the
+/// session end sooner under input that does not stop.
+pub(super) const BEHIND_TURNS_BEFORE_SEAL: u16 = 64;
+
 struct Waiter {
     session_id: u64,
     sender: mpsc::Sender<OutboundRouteUpdate>,
@@ -27,6 +37,9 @@ pub(super) struct FirstGroupBuild {
     other_destination_waits: bool,
     // Optional prepare belongs to the exact source cohort and session that asked.
     prepare_source: Option<(usize, Waiter)>,
+    // Turns this attempt's writer found the repair log more than half full
+    // behind a retained session end.
+    behind_turns: u16,
     table: GroupRibOut,
 }
 
@@ -85,6 +98,7 @@ impl RibManager {
             writer: None,
             other_destination_waits: false,
             prepare_source: None,
+            behind_turns: 0,
             table: self.first_group_table(peer, gid),
         }));
     }
@@ -477,13 +491,17 @@ impl RibManager {
             return;
         }
         // Input that passed a retained session end can keep discovery
-        // waiting behind repairs for as long as it lasts. Give the build
-        // every turn so the writer commits and the session end replays.
+        // waiting behind repairs for as long as it lasts. Once it has done
+        // so for the budget, give the build every turn so the writer commits
+        // and the session end replays. A burst is over before that.
         if job.writer.is_some()
             && self.loc_rib.registration_scan_behind()
             && self.session_end_retained()
         {
-            self.seal_first_group_commit_frontier();
+            job.behind_turns = job.behind_turns.saturating_add(1);
+            if job.behind_turns >= BEHIND_TURNS_BEFORE_SEAL {
+                self.seal_first_group_commit_frontier();
+            }
         }
         let page = self.loc_rib.take_registration_page();
         debug_assert!(page.bucket_visits + page.repairs <= REGISTRATION_PAGE_SIZE);
@@ -543,6 +561,7 @@ impl RibManager {
         self.clear_first_group_commit_frontier();
         let writer = job.writer.take().expect("reserved writer");
         job.prepare_source = None;
+        job.behind_turns = 0;
         self.first_group_build = Some(job);
         self.settle_obsolete_first_group_writer(*writer);
     }
@@ -569,12 +588,18 @@ impl RibManager {
         // Retirement can discard slab handles and overflow can omit a
         // withdrawal. Restart with fresh storage even for the same group key.
         job.table = job.table.empty_first_group_table();
+        job.behind_turns = 0;
         self.loc_rib.start_registration_scan();
         let founder = self
             .prospective_first_group(job.peer, Some(job.gid))
             .map(|(_, session_id, sender)| Waiter { session_id, sender });
         job.phase = FirstGroupPhase::Scanning(founder);
         self.first_group_build = Some(job);
+    }
+
+    #[cfg(test)]
+    pub(super) fn first_group_behind_turns(&self) -> Option<u16> {
+        self.first_group_build.as_ref().map(|job| job.behind_turns)
     }
 
     #[cfg(test)]

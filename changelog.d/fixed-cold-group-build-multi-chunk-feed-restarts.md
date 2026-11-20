@@ -13,8 +13,12 @@
   group, no longer wait for such a stream to stop before they get their
   initial table and End-of-RIB. Their table still takes longer to arrive
   while the stream lasts, because most build turns then go to the changed
-  routes. Other peers were not delayed and are not affected. When such a
-  build also holds an export-policy change with a session end waiting behind
-  it, the RIB now stops reading other peers' input as soon as more than
-  2,048 changes are waiting and finishes the build first, without starting
-  it over; before, it did so only after the build had been thrown away once.
+  routes. Other peers' input was not delayed, and still is not, with one
+  exception. When such a build also holds an export-policy change with a
+  session end waiting behind it, and the stream has left more than 2,048
+  changes waiting on 64 of the build's turns, the RIB stops reading other
+  peers' input until the build finishes, so that the session end does not
+  wait for as long as the stream lasts. If the UPDATE being applied at that
+  point has more than 2,048 routes, the build can still be thrown away once
+  and is then built again with the input held. Before, the hold began only
+  after the build had been thrown away at least once.
