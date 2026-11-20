@@ -3454,7 +3454,11 @@ type UnicastFormRow = (
 
 /// Sent attributes: ORIGIN, `AS_PATH`, `NEXT_HOP` if any, MED. `LOCAL_PREF`
 /// never reaches these eBGP peers.
-fn unicast_form_attrs(as_path: &[u32], next_hop: Option<Ipv4Addr>, med: u32) -> Vec<PathAttribute> {
+fn unicast_form_attrs(
+    as_path: &[u32],
+    next_hop: Option<Ipv4Addr>,
+    med: Option<u32>,
+) -> Vec<PathAttribute> {
     let mut attrs = vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
@@ -3462,13 +3466,13 @@ fn unicast_form_attrs(as_path: &[u32], next_hop: Option<Ipv4Addr>, med: u32) -> 
         }),
     ];
     attrs.extend(next_hop.map(PathAttribute::NextHop));
-    attrs.push(PathAttribute::Med(med));
+    attrs.extend(med.map(PathAttribute::Med));
     attrs
 }
 
 /// Source attributes learned from AS 65002, with `LOCAL_PREF` before MED.
 fn unicast_form_source(next_hop: Option<Ipv4Addr>, med: u32) -> Arc<AttrSet> {
-    let mut attrs = unicast_form_attrs(&[65002], next_hop, med);
+    let mut attrs = unicast_form_attrs(&[65002], next_hop, Some(med));
     attrs.insert(attrs.len() - 1, PathAttribute::LocalPref(100));
     AttrSet::new(attrs)
 }
@@ -3546,7 +3550,7 @@ fn shared_unicast_form_frames<'r>(
 async fn unicast_forms_keep_exact_bytes_grouping_and_probe_lengths() {
     let stored = Ipv4Addr::new(10, 0, 0, 2);
     // A route-server client gets the attributes unchanged, less LOCAL_PREF.
-    let sent = |med, next_hop| unicast_form_attrs(&[65002], next_hop, med);
+    let sent = |med, next_hop| unicast_form_attrs(&[65002], next_hop, Some(med));
     let (body, bare) = (|med| sent(med, Some(stored)), |med| sent(med, None));
     // `s` is shared across forms, `e` equals it in another allocation.
     let source = |med| unicast_form_source(Some(stored), med);
@@ -3647,7 +3651,7 @@ async fn rewritten_self_and_absent_next_hops_keep_exact_bytes() {
     let local6: Ipv6Addr = "2001:db8::ffff".parse().unwrap();
     session.config.local_ipv6_nexthop = Some(local6);
     let profile = session.publish_export_profile();
-    let sent = |next_hop| unicast_form_attrs(&[65001, 65002], next_hop, 7);
+    let sent = |next_hop| unicast_form_attrs(&[65001, 65002], next_hop, None);
     let (mp4, mp6) = (
         Some((Afi::Ipv4, IpAddr::V6(local6))),
         Some((Afi::Ipv6, IpAddr::V6(local6))),
@@ -3677,7 +3681,7 @@ async fn rewritten_self_and_absent_next_hops_keep_exact_bytes() {
     // Route-server client: next-hop self, and sources without a NEXT_HOP.
     let (mut session, _wire) = unicast_forms_session().await;
     let profile = session.publish_export_profile();
-    let sent = |next_hop| unicast_form_attrs(&[65002], next_hop, 7);
+    let sent = |next_hop| unicast_form_attrs(&[65002], next_hop, Some(7));
     let (mp4, mp6) = (
         Some((Afi::Ipv4, a6.parse().unwrap())),
         Some((Afi::Ipv6, a6.parse().unwrap())),
