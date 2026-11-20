@@ -67,6 +67,11 @@ impl RegistrationScan {
         }
     }
 
+    /// Changes are arriving faster than alternate turns pick them up.
+    fn behind(&self) -> bool {
+        self.repairs.len() > REGISTRATION_REPAIR_LIMIT / 2
+    }
+
     fn status(&self) -> RegistrationScanStatus {
         if self.overflow {
             RegistrationScanStatus::Overflow
@@ -326,6 +331,13 @@ impl LocRib {
             .status()
     }
 
+    /// Repairs own every turn, and discovery waits for the changes to slow.
+    pub(crate) fn registration_scan_behind(&self) -> bool {
+        self.registration_scan
+            .as_ref()
+            .is_some_and(|scan| scan.behind())
+    }
+
     pub(crate) fn take_registration_page(&mut self) -> RegistrationPage {
         let scan = self
             .registration_scan
@@ -345,9 +357,7 @@ impl LocRib {
         // many keys as one route chunk can change, so a peer whose messages
         // span several chunks cannot fill the log. Discovery keeps the turns
         // on which the log is at most half full, at least one per message.
-        if scan.discovery_finished
-            || (scan.repair_due && !scan.repairs.is_empty())
-            || scan.repairs.len() > REGISTRATION_REPAIR_LIMIT / 2
+        if scan.discovery_finished || (scan.repair_due && !scan.repairs.is_empty()) || scan.behind()
         {
             scan.repair_due = false;
             let count = scan.repairs.len().min(REGISTRATION_PAGE_SIZE);

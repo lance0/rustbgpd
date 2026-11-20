@@ -15,8 +15,9 @@
   commands, other session changes, and the same peer's own later messages)
   still waits behind the session end, and the queue is held again, as
   before, when a timer for stale or refreshed routes falls due, when the
-  passing input overflows the build's repair log, or when eight commands and
-  session ends are already waiting. While the session end waits, a
+  passing input changes best routes faster than the build picks them up
+  (more than 2,048 changes waiting), or when eight commands and session
+  ends are already waiting. While the session end waits, a
   withdrawal from another peer can make the ended session's route best, and
   it is advertised until the build finishes; before, the withdrawn route
   stayed advertised for the same time.

@@ -476,6 +476,15 @@ impl RibManager {
             self.retire_first_group_page(job);
             return;
         }
+        // Input that passed a retained session end can keep discovery
+        // waiting behind repairs for as long as it lasts. Give the build
+        // every turn so the writer commits and the session end replays.
+        if job.writer.is_some()
+            && self.loc_rib.registration_scan_behind()
+            && self.session_end_retained()
+        {
+            self.seal_first_group_commit_frontier();
+        }
         let page = self.loc_rib.take_registration_page();
         debug_assert!(page.bucket_visits + page.repairs <= REGISTRATION_PAGE_SIZE);
         if !page.keys.is_empty() {

@@ -179,7 +179,7 @@ async fn feed_counts(feed: Feed, messages: u32, rows: u32, joiner: bool) -> Coun
             manager.advance_pending_initial_registration();
         }
         counts.build_turns += 1;
-        let has_build = manager.first_group_build.is_some();
+        let building = manager.first_group_build.is_some();
         let retiring = manager.first_group_retiring_slots();
         let grouped = manager.grouped_member_of(founder).is_some();
         if let Some(old) = was_retiring {
@@ -188,10 +188,10 @@ async fn feed_counts(feed: Feed, messages: u32, rows: u32, joiner: bool) -> Coun
             counts.max_slots_retired_in_a_turn = counts
                 .max_slots_retired_in_a_turn
                 .max(old.saturating_sub(retiring.unwrap_or(0)));
-        } else if !had_build && has_build {
+        } else if !had_build && building {
             counts.starts += 1;
             attempt_pages = 1;
-        } else if had_build && (retiring.is_some() || (!has_build && !grouped)) {
+        } else if had_build && (retiring.is_some() || (!building && !grouped)) {
             // The turn that saw the overflow also retired the first page.
             counts.overflows += 1;
             counts.discarded_scan_pages += attempt_pages;
@@ -202,10 +202,10 @@ async fn feed_counts(feed: Feed, messages: u32, rows: u32, joiner: bool) -> Coun
         }
     }
     assert!(manager.loc_rib.get(&marker).is_some());
-    let fed = (messages * rows) as usize;
+    let total = (messages * rows) as usize;
     let final_len = match feed {
-        Feed::Announce => table + fed + 1,
-        Feed::Withdraw => table - fed + 1,
+        Feed::Announce => table + total + 1,
+        Feed::Withdraw => table - total + 1,
         Feed::Replace => table + 1,
     };
     assert_eq!(manager.loc_rib.len(), final_len);

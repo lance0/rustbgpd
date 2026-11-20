@@ -1815,10 +1815,10 @@ async fn withdrawal_passing_a_retained_session_end_leaves_no_path_after_the_buil
 }
 
 // Unrelated input that passes a retained session end must not postpone the
-// writer and the end without bound: once it overflows the repair log, the
-// retry owns every turn.
+// writer and the end without bound: once it keeps the repair log more than
+// half full, the build owns every turn. Nothing is discarded.
 #[tokio::test]
-async fn repair_overflow_behind_a_retained_session_end_seals_the_lane() {
+async fn input_outrunning_the_build_behind_a_retained_session_end_seals_the_lane() {
     let (mut manager, primary, mut receivers) = cold_build_with_policy_members(8192, 1);
     let incumbent = receiver(1);
     let mut policy_reply = clear_policy(&mut manager, incumbent);
@@ -1829,7 +1829,7 @@ async fn repair_overflow_behind_a_retained_session_end_seals_the_lane() {
         })
         .unwrap();
     // An endless feed of new prefixes from another peer. A four-chunk message
-    // changes more keys per build turn than the repair log is serviced.
+    // changes keys on four build turns in five, which leaves discovery one.
     let mut sent = 0u32;
     let mut feed = |manager: &RibManager| {
         while manager.primary_backlog() < 8 {
@@ -1867,7 +1867,8 @@ async fn repair_overflow_behind_a_retained_session_end_seals_the_lane() {
              and {overflows} discarded builds"
         );
     }
-    assert_eq!(overflows, 1, "builds discarded before the lane sealed");
+    assert_eq!(overflows, 0, "builds discarded before the lane sealed");
+    assert!(turns < 200, "{turns} turns for a table of 16,384");
     assert_eq!(policy_reply.try_recv().unwrap(), Ok(()));
     assert!(manager.try_recv_primary().is_none());
     let end = manager.take_first_group_deferred_intent().unwrap();
