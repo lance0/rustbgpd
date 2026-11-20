@@ -31,3 +31,5 @@
   partial table, the policy change and any session end behind it run, and
   the joining peer's table is built again afterwards. No input is held for
   that. Before, the first thrown-away build made way in the same manner.
+  A policy change whose caller has stopped waiting, such as a reload that
+  timed out, is skipped and does not cost the build its table.

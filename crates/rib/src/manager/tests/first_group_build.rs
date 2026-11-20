@@ -1833,6 +1833,10 @@ enum Passing {
     Bursts(u32, u32),
     /// Endless messages of this many new prefixes.
     Endless(u32),
+    /// Endless messages that each replace the best paths of this many
+    /// prefixes of the 16,384-route table, in rotating blocks. The table
+    /// keeps its size, so a founder can finish its build during the feed.
+    Replacing(u32),
 }
 
 impl Passing {
@@ -1842,8 +1846,23 @@ impl Passing {
             Passing::Burst(rows) => [1, rows].get(message as usize).copied(),
             Passing::Bursts(rows, quiet) if message.is_multiple_of(quiet + 1) => Some(rows),
             Passing::Bursts(..) => Some(1),
-            Passing::Endless(rows) => Some(rows),
+            Passing::Endless(rows) | Passing::Replacing(rows) => Some(rows),
         }
+    }
+
+    fn update(self, message: u32, from: u32, rows: u32) -> RibUpdate {
+        let Passing::Replacing(_) = self else {
+            return new_prefixes(from, rows);
+        };
+        let blocks = (16384 / rows).max(1);
+        let block = message % blocks;
+        let routes = (block * rows..(block + 1) * rows)
+            .map(|n| {
+                let pair = prefixes(u16::try_from(n / 2).unwrap());
+                route(pair[(n % 2) as usize], OTHER, 150 + message / blocks % 2)
+            })
+            .collect();
+        test_routes_received(peer_v4(OTHER), routes)
     }
 }
 
@@ -2176,36 +2195,90 @@ async fn the_seal_budget_does_not_outlive_its_attempt_or_its_writer() {
     assert!(manager.first_group_commit_remaining.is_none());
 }
 
+/// What waits for the founder's slot.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Parked {
+    Nothing,
+    /// One command whose caller waits for the reply.
+    Live,
+    /// One command whose caller drops the reply before this owner turn.
+    Abandoned(usize),
+    /// The same, with a live command for a third destination queued behind.
+    AbandonedThenLive(usize),
+}
+
 #[derive(Debug, Default)]
 struct Waiting {
-    /// Owner turn on which the waiting command ran and replied.
+    /// Owner turn on which the live waiting command ran and replied.
     replied_turn: Option<usize>,
     end_applied_turn: Option<usize>,
     founder_grouped_turn: Option<usize>,
+    /// First turn after the reply on which a cold build exists again.
+    restarted_turn: Option<usize>,
+    /// First turn from the abandonment on which a live command holds the
+    /// reservation at the head of the retained intents.
+    live_reserved_turn: Option<usize>,
     sealed_turns: usize,
+    /// Turns that began with the lane sealed and no owner to open it.
+    ownerless_sealed_turns: usize,
     /// Founder builds retired before they published.
     discards: usize,
     max_behind_turns: u16,
+    /// The largest count from the second turn after the abandonment.
+    max_behind_turns_once_abandoned: u16,
 }
 
-/// A founder's cold build on 16,384 routes, a policy change that needs a
-/// different, cold destination parked behind it, and `feed` from another
-/// peer, stepped one `owner_turn` per iteration. Stops at `limit` turns, or
-/// once the command has replied, the session end has been applied and, if
-/// the feed has ended, the founder is grouped.
-async fn waiting_destination(feed: Passing, session_end: bool, limit: usize) -> Waiting {
-    let (mut manager, primary, mut receivers) = cold_build_with_policy_members(8192, 1);
-    let (incumbent, founder) = (receiver(1), receiver(100));
-    let (reply, mut response) = oneshot::channel();
-    manager.handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+type PolicyReply = oneshot::Receiver<Result<Vec<PeerId>, crate::RibCommandError>>;
+
+fn other_destination(peer: PeerId, chain: u32) -> (RibUpdate, PolicyReply) {
+    let (reply, response) = oneshot::channel();
+    let update = RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
         replacements: vec![crate::update::PeerExportPolicyReplacement {
-            peer: incumbent,
-            export_policy: Some(super::update_groups::community_chain(0xfde8_2415)),
+            peer,
+            export_policy: Some(super::update_groups::community_chain(chain)),
         }],
         reply,
-    });
-    assert_eq!(manager.first_group_deferred_intents.len(), 1);
-    assert!(manager.first_group_build.is_some() && response.try_recv().is_err());
+    };
+    (update, response)
+}
+
+/// A founder's cold build on 16,384 routes, `parked` policy changes that
+/// each need a different, cold destination behind it, and `feed` from
+/// another peer, stepped one `owner_turn` per iteration. Stops at `limit`
+/// turns, or once the live command has replied, the session end has been
+/// applied and the founder is grouped. Under an endless feed with a live
+/// command, the founder's next build having started stands in for the last.
+async fn waiting_destination(
+    feed: Passing,
+    parked: Parked,
+    session_end: bool,
+    limit: usize,
+) -> Waiting {
+    let members = if matches!(parked, Parked::AbandonedThenLive(_)) {
+        2
+    } else {
+        1
+    };
+    let (mut manager, primary, mut receivers) = cold_build_with_policy_members(8192, members);
+    let (incumbent, founder) = (receiver(1), receiver(100));
+    let (mut response, mut abandoned) = (None, None);
+    if parked != Parked::Nothing {
+        let (update, reply) = other_destination(incumbent, 0xfde8_2415);
+        manager.handle_update(update);
+        assert_eq!(manager.first_group_deferred_intents.len(), 1);
+        assert!(manager.first_group_build.is_some());
+        match parked {
+            Parked::Abandoned(turn) | Parked::AbandonedThenLive(turn) => {
+                abandoned = Some((turn, reply));
+            }
+            _ => response = Some(reply),
+        }
+    }
+    if matches!(parked, Parked::AbandonedThenLive(_)) {
+        let (update, reply) = other_destination(receiver(2), 0xfde8_2416);
+        primary.try_send(update).unwrap();
+        response = Some(reply);
+    }
     if session_end {
         primary
             .try_send(RibUpdate::PeerDown {
@@ -2213,16 +2286,34 @@ async fn waiting_destination(feed: Passing, session_end: bool, limit: usize) -> 
                 session_id: 1,
             })
             .unwrap();
+        // Another peer's End-of-RIB does not pass a retained session end: it
+        // is held at the head, which seals the lane behind the reservation.
+        if abandoned.is_some() {
+            primary
+                .try_send(RibUpdate::EndOfRib {
+                    peer: peer_v4(OTHER),
+                    session_id: 0,
+                    afi: Afi::Ipv4,
+                    safi: Safi::Unicast,
+                })
+                .unwrap();
+        }
     }
+    let abandon_turn = abandoned.as_ref().map(|(turn, _)| *turn);
+    let endless = feed.rows(u32::MAX).is_some();
     let (mut sent_rows, mut message) = (0u32, 0u32);
     let mut seen = Waiting::default();
     let (mut primary_due, mut search, mut retiring) = (true, 0usize, false);
     for turn in 1..=limit {
+        abandoned.take_if(|(at, _)| *at == turn);
         while manager.primary_backlog() < 2 {
             let Some(rows) = feed.rows(message) else {
                 break;
             };
-            if primary.try_send(new_prefixes(sent_rows, rows)).is_err() {
+            if primary
+                .try_send(feed.update(message, sent_rows, rows))
+                .is_err()
+            {
                 break;
             }
             sent_rows += rows;
@@ -2231,17 +2322,44 @@ async fn waiting_destination(feed: Passing, session_end: bool, limit: usize) -> 
         for rx in &mut receivers {
             while rx.try_recv().is_ok() {}
         }
+        let owned = manager.first_group_pending_writer().is_some()
+            || manager.optional_destination_retirement_active();
         let sealed = manager.first_group_commit_remaining == Some(0)
             && manager.first_group_pending_writer().is_some();
         seen.sealed_turns += usize::from(sealed);
+        seen.ownerless_sealed_turns +=
+            usize::from(manager.first_group_commit_remaining == Some(0) && !owned);
         owner_turn(&mut manager, sealed, &mut primary_due, &mut search).await;
-        seen.max_behind_turns = seen
-            .max_behind_turns
-            .max(manager.first_group_behind_turns().unwrap_or(0));
+        let behind_turns = manager.first_group_behind_turns().unwrap_or(0);
+        seen.max_behind_turns = seen.max_behind_turns.max(behind_turns);
+        if abandon_turn.is_some_and(|at| turn > at + 1) {
+            seen.max_behind_turns_once_abandoned =
+                seen.max_behind_turns_once_abandoned.max(behind_turns);
+        }
         let now_retiring = manager.first_group_retiring_slots().is_some();
         seen.discards += usize::from(now_retiring && !retiring);
         retiring = now_retiring;
-        if seen.replied_turn.is_none() && response.try_recv().is_ok() {
+        if abandon_turn.is_some_and(|at| turn >= at)
+            && seen.live_reserved_turn.is_none()
+            && matches!(
+                manager.first_group_pending_writer(),
+                Some(RibUpdate::ReplacePeerExportPoliciesAuthoritatively { reply, .. })
+                    if !reply.is_closed()
+            )
+        {
+            seen.live_reserved_turn = Some(turn);
+        }
+        if seen.replied_turn.is_some()
+            && seen.restarted_turn.is_none()
+            && manager.first_group_build.is_some()
+        {
+            seen.restarted_turn = Some(turn);
+        }
+        if seen.replied_turn.is_none()
+            && response
+                .as_mut()
+                .is_some_and(|response| response.try_recv().is_ok())
+        {
             seen.replied_turn = Some(turn);
         }
         if seen.end_applied_turn.is_none() && !manager.outbound_peers.contains_key(&incumbent) {
@@ -2250,9 +2368,9 @@ async fn waiting_destination(feed: Passing, session_end: bool, limit: usize) -> 
         if seen.founder_grouped_turn.is_none() && manager.grouped_member_of(founder).is_some() {
             seen.founder_grouped_turn = Some(turn);
         }
-        let settled = seen.replied_turn.is_some()
+        let settled = (response.is_none() || seen.replied_turn.is_some())
             && (seen.end_applied_turn.is_some() || !session_end)
-            && (seen.founder_grouped_turn.is_some() || feed.rows(message).is_some());
+            && (seen.founder_grouped_turn.is_some() || (endless && seen.restarted_turn.is_some()));
         if settled {
             break;
         }
@@ -2270,7 +2388,8 @@ async fn waiting_destination(feed: Passing, session_end: bool, limit: usize) -> 
 async fn input_outrunning_a_founder_hands_its_slot_to_the_waiting_destination() {
     for rows in [2048, 4096, 16378] {
         for session_end in [false, true] {
-            let seen = waiting_destination(Passing::Endless(rows), session_end, 1_000).await;
+            let seen =
+                waiting_destination(Passing::Endless(rows), Parked::Live, session_end, 1_000).await;
             eprintln!("endless x{rows}, session end {session_end}: {seen:?}");
             let replied = seen.replied_turn.unwrap_or_else(|| {
                 panic!("x{rows} {session_end}: the command waited for the feed: {seen:?}")
@@ -2292,8 +2411,113 @@ async fn input_outrunning_a_founder_hands_its_slot_to_the_waiting_destination() 
                     "x{rows}: {seen:?}"
                 );
             }
+            // The founder's retry starts once the replay is over, within
+            // the busy turns of the message then in flight.
+            let message_turns = 2 * (rows.div_ceil(1024) as usize + 1);
+            assert!(
+                seen.restarted_turn
+                    .is_some_and(|turn| turn <= replied + message_turns + 4),
+                "x{rows} {session_end}: the founder's build did not start again: {seen:?}"
+            );
         }
     }
+}
+
+// A caller whose deadline lapsed while its command was parked has dropped
+// the reply, and the command is skipped whole when it replays. The founder
+// does not spend its budget or its partial table on it: it registers at
+// about the turn it does with no command.
+#[tokio::test]
+async fn an_abandoned_waiting_destination_costs_the_founder_nothing() {
+    let feed = Passing::Replacing(4096);
+    let alone = waiting_destination(feed, Parked::Nothing, false, 1_000).await;
+    let seen = waiting_destination(feed, Parked::Abandoned(40), false, 1_000).await;
+    eprintln!("no command: {alone:?}\nabandoned: {seen:?}");
+    let alone = alone.founder_grouped_turn.expect("the founder registers");
+    assert_eq!(
+        (
+            seen.discards,
+            seen.sealed_turns,
+            seen.ownerless_sealed_turns
+        ),
+        (0, 0, 0),
+        "{seen:?}"
+    );
+    // The turns counted for the abandoned command are not left on the job
+    // for a later writer.
+    assert!(
+        seen.max_behind_turns > 0 && seen.max_behind_turns_once_abandoned == 0,
+        "{seen:?}"
+    );
+    assert!(
+        seen.founder_grouped_turn
+            .is_some_and(|turn| turn <= alone + 16),
+        "no command: {alone}, abandoned: {seen:?}"
+    );
+}
+
+// A session end retained behind the abandoned command does not wait for the
+// founder's budget, and the head held behind that session end, which sealed
+// the lane while the reservation stood, is admitted afterwards.
+#[tokio::test]
+async fn a_session_end_behind_an_abandoned_waiting_destination_is_applied_at_once() {
+    const ABANDONED: usize = 8;
+    let seen = waiting_destination(
+        Passing::Replacing(4096),
+        Parked::Abandoned(ABANDONED),
+        true,
+        1_000,
+    )
+    .await;
+    eprintln!("{seen:?}");
+    assert!(seen.sealed_turns > 0, "the held head sealed: {seen:?}");
+    // The abandoned command, then the session end: one replay each, after
+    // the build turn that noticed.
+    assert!(
+        seen.end_applied_turn
+            .is_some_and(|turn| turn <= ABANDONED + 4),
+        "{seen:?}"
+    );
+    assert_eq!(
+        (seen.discards, seen.ownerless_sealed_turns),
+        (0, 0),
+        "{seen:?}"
+    );
+    assert!(seen.founder_grouped_turn.is_some(), "{seen:?}");
+}
+
+// A live command for a third destination queued behind the abandoned one
+// takes over the reservation when it replays, in its place in the queue, and
+// gets the slot as a command parked alone does.
+#[tokio::test]
+async fn a_live_command_behind_an_abandoned_one_still_gets_the_slot() {
+    const ABANDONED: usize = 20;
+    let seen = waiting_destination(
+        Passing::Endless(4096),
+        Parked::AbandonedThenLive(ABANDONED),
+        false,
+        1_000,
+    )
+    .await;
+    eprintln!("{seen:?}");
+    // The message in flight finishes, then the two replays.
+    assert!(
+        seen.live_reserved_turn
+            .is_some_and(|turn| turn <= ABANDONED + 16),
+        "{seen:?}"
+    );
+    let replied = seen.replied_turn.expect("the live command replies");
+    assert!(replied <= ABANDONED + 8 * SEAL_BUDGET, "{seen:?}");
+    assert_eq!(
+        (
+            seen.discards,
+            seen.sealed_turns,
+            seen.ownerless_sealed_turns
+        ),
+        (1, 0, 0),
+        "{seen:?}"
+    );
+    assert!(seen.restarted_turn.is_some(), "{seen:?}");
 }
 
 // One UPDATE of any size is over before the budget is spent: the founder
@@ -2301,7 +2525,7 @@ async fn input_outrunning_a_founder_hands_its_slot_to_the_waiting_destination() 
 #[tokio::test]
 async fn a_burst_leaves_the_founder_its_slot_while_a_destination_waits() {
     for feed in [Passing::Burst(4096), Passing::Burst(16378)] {
-        let seen = waiting_destination(feed, true, 1_000).await;
+        let seen = waiting_destination(feed, Parked::Live, true, 1_000).await;
         eprintln!("{feed:?}: {seen:?}");
         let founder = seen.founder_grouped_turn.expect("the founder registers");
         assert_eq!(
@@ -2320,9 +2544,11 @@ async fn a_burst_leaves_the_founder_its_slot_while_a_destination_waits() {
     }
 }
 
-// The same on the real actor loop: the command replies while a good part
-// of the feed is still queued behind it. Before, it replied only after the
-// last message, once the founder's build had caught up.
+// The same on the real actor loop: the command replies while at least a
+// quarter of the queued feed is still behind it. An overflow that makes way
+// for the command satisfies this too. It fails when nothing makes way, or
+// when the founder's retry takes the slot back, and the command waits for
+// the feed.
 #[tokio::test]
 async fn actor_runs_a_waiting_destination_during_a_feed_that_outruns_the_founder() {
     const MESSAGES: u32 = 128;
