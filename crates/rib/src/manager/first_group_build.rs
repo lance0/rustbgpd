@@ -16,14 +16,15 @@ use crate::update::RibUpdate;
 /// may find its repair log more than half full. A claimed build with a
 /// session end retained behind it then takes the actor's turns. A founder's
 /// build whose slot another policy destination waits for gives the slot up,
-/// as it does on overflow, and holds no input. The count is cumulative,
-/// because a steady feed of messages near two chunks holds the log at half
-/// and dips under it every few turns. A larger budget lets a longer burst
-/// from another peer pass without holding the other peers' input for the
-/// rest of the build or discarding the founder's pages (the largest UPDATE,
-/// 16 chunks, keeps the log past half for 13 turns). A smaller one replays
-/// the session end or the waiting command sooner under input that does not
-/// stop.
+/// as it does on overflow, and holds no input. The count is cumulative over
+/// the attempt, because a steady feed of messages near two chunks holds the
+/// log at half and dips under it every few turns. Separate bursts within one
+/// attempt therefore add up. A larger budget lets a longer burst from
+/// another peer pass without holding the other peers' input for the rest of
+/// the build or discarding the founder's pages (the largest UPDATE, 16
+/// chunks, keeps the log past half for 13 turns; four of them back to back
+/// fit the budget, five spend it). A smaller one replays the session end or
+/// the waiting command sooner under input that does not stop.
 pub(super) const BEHIND_TURNS_BEFORE_SEAL: u16 = 64;
 
 struct Waiter {
@@ -433,9 +434,12 @@ impl RibManager {
     /// overflow, can start under steady ingress without reordering warm joins.
     pub(super) fn advance_busy_first_group(&mut self, search: &mut usize) {
         if self.first_group_build.is_none() {
-            // A command the last build made way for replays once the message
-            // in flight has run. The founder's retry must not take the slot
-            // back first: the command would wait for the retry again.
+            // No cold build starts on a busy turn while any replay is due: a
+            // retained intent or a held general head, with no writer and no
+            // optional retirement pending. That covers a command the last
+            // build made way for, which replays once the message in flight
+            // has run. The founder's retry must not take the slot back
+            // first: the command would wait for the retry again.
             if self.first_group_replay_due() {
                 return;
             }
@@ -513,8 +517,9 @@ impl RibManager {
         let outrun = job.behind_turns >= BEHIND_TURNS_BEFORE_SEAL;
         // Before repairs took every turn past half, such input overflowed
         // the log and the founder's build made way for the waiting command.
-        // It still does once the budget is spent. A burst is over before
-        // that, and no other peer's input is held.
+        // It still does once the attempt's budget is spent. Up to four
+        // back-to-back UPDATEs of the largest size are over before that,
+        // and no other peer's input is held.
         if !current
             || self.group_ribs.contains_key(&job.gid)
             || self.loc_rib.registration_scan_status() == RegistrationScanStatus::Overflow
