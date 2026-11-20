@@ -587,7 +587,7 @@ fn main() -> Result<()> {
         _ => bail!(
             "usage: rrtransport smoke | rrtransport rr1000 <output-dir> | rrtransport rrtiny <output-dir>\n\
              \x20      rrtransport credit-exhaust|credit-restart|credit-restart-churn <unicast|evpn> <output-dir> [--reduced] [--correctness-only] [--pause-ms N]\n\
-             \x20      rrtransport credit-restart <labeled4|labeled6> <output-dir> [--reduced] [--correctness-only] [--pause-ms N]\n\
+             \x20      rrtransport credit-restart <labeled4|labeled6|vpn4|vpn6> <output-dir> [--reduced] [--correctness-only] [--pause-ms N]\n\
              \x20      rrtransport credit-release-<mixed|timer|vpn4|vpn6|labeled4|labeled6> <output-dir> [--reduced] [--correctness-only]\n\
              \x20      rrtransport credit-paused <output-dir> [--reduced] [--correctness-only] [--seconds N]\n\
              \x20      rrtransport credit-fill <unicast|evpn|vpn|flowspec> <output-dir> [--reduced] [--correctness-only]\n\
@@ -610,14 +610,16 @@ fn credit_main(mode: &str, args: &[String]) -> Result<()> {
     };
     let passed = match (mode, args) {
         ("credit-restart", [family, output, rest @ ..])
-            if matches!(family.as_str(), "labeled4" | "labeled6") =>
+            if matches!(family.as_str(), "labeled4" | "labeled6" | "vpn4" | "vpn6") =>
         {
-            let family = if family == "labeled4" {
-                credit::Family::Labeled4
-            } else {
-                credit::Family::Labeled6
+            let family = match family.as_str() {
+                "labeled4" => credit::Family::Labeled4,
+                "labeled6" => credit::Family::Labeled6,
+                "vpn4" => credit::Family::Vpn,
+                "vpn6" => credit::Family::Vpn6,
+                _ => unreachable!(),
             };
-            harness.block_on(credit::labeled_restart::run(
+            harness.block_on(credit::family_restart::run(
                 family,
                 Path::new(output),
                 &options(rest)?,

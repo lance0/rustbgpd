@@ -10,28 +10,30 @@ import credit_bars
 
 
 class LabeledRestart(unittest.TestCase):
+    family = "labeled"
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        self.path = self.root / "restart-labeled6.json"
+        self.path = self.root / f"restart-{self.family}6.json"
         receiver = {
             "peer": "192.0.2.1", "exact": True, "exact_at_eor": True,
             "missing": 0, "outside": 0, "decode_failures": 0, "resets": 0,
             "routes_after_eor": 0, "eors": 1, "announced": 128, "withdrawals": 1,
-            "labeled_announced": 128, "labeled_withdrawn": 1, "routes_before_eor": 128,
+            f"{self.family}_announced": 128, f"{self.family}_withdrawn": 1, "routes_before_eor": 128,
             "post_eor_sentinel_changes": 1,
             "eor_ms": 17.5, "max_observed_stub_backlog_messages": 90,
         }
         self.run_data = {
-            "cell": "restart", "family": "labeled6", "mode": "correctness",
+            "cell": "restart", "family": f"{self.family}6", "mode": "correctness",
             "shape": {"receivers": 2, "rows_per_receiver": 128, "registered_peers": 6,
                       "trigger": credit_bars.RELEASE_TRIGGER, "chunk_rows": 1024,
                       "stub_backlog_capacity_messages": 65536, "pause_ms": 8},
             "checks": dict.fromkeys(
                 (*credit_bars.RESTART_WIRE_CHECKS, "selection_held", "selection_released",
                  "owed_at_release", "post_release_withdrawal", "physical_poll_observed",
-                 "release_update_delivered", "source_restart", "labeled_payload_counted", "memory_fenced"), True
+                 "release_update_delivered", "source_restart", f"{self.family}_payload_counted", "memory_fenced"), True
             ),
             "source": {"old_session": 1, "new_session": 2, "old_rows": 128, "retained_rows": 128,
                        "replayed_rows": 128, "retained_sample_stale": True,
@@ -56,6 +58,13 @@ class LabeledRestart(unittest.TestCase):
                 "cgroup_memory_peak_bytes": 2048000,
             },
         }
+        if self.family == "vpn":
+            self.run_data["checks"]["no_rtc"] = True
+            self.run_data["shape"].update(
+                rtc_negotiated=False, route_target="64512:100", export_policy="permit matching RT, default deny"
+            )
+            for peer in self.run_data["receivers"]:
+                peer["withdrawal_rd_sibling_present"] = True
         self.set_steps(self.run_data, "whole", 2)
         self.original = json.dumps(self.run_data).encode()
         self.path.write_bytes(self.original)
@@ -83,11 +92,11 @@ class LabeledRestart(unittest.TestCase):
         # clocks must catch the defect independently, including on a sibling.
         cases = (
             ("receivers.1.outside", 1, "FAIL", "outside"),
-            ("receivers.0.eors", 0, "FAIL", "one labeled EoR"),
+            ("receivers.0.eors", 0, "FAIL", f"one {self.family} EoR"),
             ("receivers.0.post_eor_sentinel_changes", 0, "FAIL", "sentinel withdrawal"),
             ("receivers.1.routes_before_eor", 127, "FAIL", "announcement count"),
-            ("receivers.0.labeled_announced", 0, "INVALID", "payload counters"),
-            ("receivers.1.labeled_withdrawn", 0, "INVALID", "payload counters"),
+            (f"receivers.0.{self.family}_announced", 0, "INVALID", "payload counters"),
+            (f"receivers.1.{self.family}_withdrawn", 0, "INVALID", "payload counters"),
             ("receivers.1.peer", "192.0.2.1", "INVALID", "duplicate receiver"),
             ("actor.slice_max_us.actor_poll", None, "INVALID", "actor_poll"),
             ("actor.poll_count", 0, "INVALID", "poll_count"),
@@ -110,6 +119,18 @@ class LabeledRestart(unittest.TestCase):
             ("witness.owed_steps_to_last_eor.whole.at_most_ms", -1, "INVALID", "upper bucket"),
             ("receivers.0.max_observed_stub_backlog_messages", 65537, "INVALID", "backlog"),
         )
+        if self.family == "vpn":
+            cases += (
+                ("family", "vpn4", "INVALID", "different cell"),
+                ("shape.rtc_negotiated", True, "INVALID", "RTC"),
+                ("checks.no_rtc", False, "INVALID", "no_rtc"),
+                ("shape.export_policy", "permit all", "INVALID", "export policy"),
+                ("shape.route_target", "64512:101", "INVALID", "route target"),
+                ("shape.rows_per_receiver", 0, "INVALID", "rows_per_receiver"),
+                ("shape.rows_per_receiver", 1, "INVALID", "two RDs"),
+                ("receivers.0.withdrawal_rd_sibling_present", False, "FAIL", "other RD"),
+                ("receivers.0.peer", self.run_data["source"]["peer"], "INVALID", "receiver also named"),
+            )
         for field, value, expected, reason in cases:
             with self.subTest(field=field):
                 bad = copy.deepcopy(self.run_data)
@@ -127,7 +148,7 @@ class LabeledRestart(unittest.TestCase):
                 self.assertEqual(self.grade()[0], "PASS")
 
     def test_exit_without_receipt_and_unexplained_exit(self):
-        (self.root / "restart-labeled6-exit.json").write_text('{"exit": 1}')
+        (self.root / f"restart-{self.family}6-exit.json").write_text('{"exit": 1}')
         self.assertEqual(self.grade()[0], "INVALID")
         self.path.unlink()
         verdict, detail = self.grade()
@@ -135,7 +156,7 @@ class LabeledRestart(unittest.TestCase):
         self.assertIn("without a result", detail)
 
     def test_measured_cell_needs_quiet_full_shape(self):
-        self.run_data.update(mode="measured", shape=credit_bars.LABELED_RELEASE_SHAPE)
+        self.run_data.update(mode="measured", shape=credit_bars.MPLS_RELEASE_SHAPE)
         self.run_data["host"] = {"compiler_watch": {"samples": 100, "observed": 1, "first": "rustc"}}
         self.path.write_text(json.dumps(self.run_data))
         verdict, detail = self.grade()
@@ -144,7 +165,7 @@ class LabeledRestart(unittest.TestCase):
 
     def test_interrupted_attempt_listed_alongside_success_is_invalid(self):
         (self.root / "provenance.jsonl").write_text(json.dumps({
-            "sha256": "binary", "cells": ["restart-labeled4", "restart-labeled6"],
+            "sha256": "binary", "cells": credit_bars.RESTART_CELLS[self.family],
         }))
         lines = credit_bars.check(self.root)
         self.assertEqual([line[1] for line in lines], ["INVALID", "PASS"])
@@ -155,16 +176,17 @@ class LabeledRestart(unittest.TestCase):
         directory.mkdir()
         (directory / "provenance.jsonl").write_text(json.dumps({
             "sha256": ("a" if name == "parent" else "b") * 64,
-            "cells": list(credit_bars.LABELED_RESTARTS), "measured": 1,
+            "cells": list(credit_bars.RESTART_CELLS[self.family]), "measured": 1,
         }))
-        for cell in credit_bars.LABELED_RESTARTS:
+        for cell in credit_bars.RESTART_CELLS[self.family]:
             run = copy.deepcopy(self.run_data)
             run.update(family=cell.split("-")[1], mode="measured")
-            run["shape"].update(credit_bars.LABELED_RELEASE_SHAPE)
+            run["shape"].update(credit_bars.MPLS_RELEASE_SHAPE)
             run["source"].update(old_rows=150000, replayed_rows=150000, retained_rows=150000)
             run["witness"]["owing_flip_delta_while_paused"] = 150
             peer = run["receivers"][0]
-            peer.update(announced=150000, labeled_announced=150000, routes_before_eor=150000, eor_ms=90022.25)
+            peer.update(announced=150000, routes_before_eor=150000, eor_ms=90022.25)
+            peer[f"{self.family}_announced"] = 150000
             run["receivers"] = [dict(peer, peer=f"192.0.2.{i}") for i in range(1, 151)]
             run["timing"].update(resume_issued_ms=90010.0, last_eor_ms=90022.25, release_to_last_eor_ms=90020.25)
             run["actor"]["to_ms"] += 90000.0
@@ -181,7 +203,7 @@ class LabeledRestart(unittest.TestCase):
     def test_compare_requires_matched_cells_and_the_expected_binary_and_drain(self):
         parent = self.measured_arm("parent", "whole")
         candidate = self.measured_arm("candidate", "cursor")
-        lines = credit_bars.compare_labeled(parent, candidate)
+        lines = credit_bars.compare_restart_family(parent, candidate, self.family)
         self.assertEqual([v for _, v, _ in lines].count("PASS"), 4, lines)
         ratios = {key: detail for key, verdict, detail in lines if verdict == "REPORT"}
         self.assertEqual(len(ratios), 10)
@@ -190,12 +212,12 @@ class LabeledRestart(unittest.TestCase):
             matches = [row for key, row in ratios.items() if title in key]
             self.assertEqual(len(matches), 2)
             self.assertTrue(all(f"candidate/parent {ratio}" in row for row in matches))
-        self.assertTrue(all(v == "INVALID" for _, v, _ in credit_bars.compare_labeled(candidate, parent)))
-        self.assertEqual(credit_bars.compare_labeled(parent, parent)[0][1], "INVALID")
-        self.assertTrue(all(row[1] == "INVALID" for row in credit_bars.check_labeled(candidate, "whole")))
-        self.assertTrue(all(row[1] == "PASS" for row in credit_bars.check_labeled(candidate, "cursor")))
+        self.assertTrue(all(v == "INVALID" for _, v, _ in credit_bars.compare_restart_family(candidate, parent, self.family)))
+        self.assertEqual(credit_bars.compare_restart_family(parent, parent, self.family)[0][1], "INVALID")
+        self.assertTrue(all(row[1] == "INVALID" for row in credit_bars.check_restart_family(candidate, "whole", self.family)))
+        self.assertTrue(all(row[1] == "PASS" for row in credit_bars.check_restart_family(candidate, "cursor", self.family)))
 
-        result = candidate / "restart-labeled6.json"
+        result = candidate / f"restart-{self.family}6.json"
         raw = result.read_bytes()
         for key, scope, value in (
             ("owed_steps_to_last_eor", "whole", {"observations": 1, "above_ms": 1, "at_most_ms": 5}),
@@ -210,18 +232,22 @@ class LabeledRestart(unittest.TestCase):
                 else:
                     run["witness"][key][scope] = value
                 result.write_text(json.dumps(run))
-                lines = credit_bars.compare_labeled(parent, candidate)
-                self.assertTrue(any(v == "INVALID" and "labeled6" in n for n, v, _ in lines))
-                self.assertFalse(any(v == "REPORT" and "labeled6" in n for n, v, _ in lines))
+                lines = credit_bars.compare_restart_family(parent, candidate, self.family)
+                self.assertTrue(any(v == "INVALID" and f"{self.family}6" in n for n, v, _ in lines))
+                self.assertFalse(any(v == "REPORT" and f"{self.family}6" in n for n, v, _ in lines))
         result.write_bytes(raw)
         run = json.loads(raw)
         run["shape"]["pause_ms"] = 30000
         result.write_text(json.dumps(run))
         self.assertTrue(any(v == "INVALID" and "pause_ms" in detail for _, v, detail in
-                            credit_bars.compare_labeled(parent, candidate)))
+                            credit_bars.compare_restart_family(parent, candidate, self.family)))
         result.unlink()
         self.assertTrue(any(v == "INVALID" and "attempted, no result" in detail for _, v, detail in
-                            credit_bars.compare_labeled(parent, candidate)))
+                            credit_bars.compare_restart_family(parent, candidate, self.family)))
+
+
+class VpnRestart(LabeledRestart):
+    family = "vpn"
 
 
 if __name__ == "__main__":

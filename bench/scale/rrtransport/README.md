@@ -342,6 +342,23 @@ bench/scale/rrtransport/run-credit-cells.sh --reduced --correctness-only \
 python3 bench/scale/rrtransport/credit_bars.py check-labeled whole /tmp/labeled-smoke
 ```
 
+The opt-in `restart-vpn4` and `restart-vpn6` cells use the same restart,
+pause and release sequence for VPN-IPv4 and VPN-IPv6 (SAFI 128). Each
+prefix appears under two route distinguishers, `64512:1` and `64512:2`.
+Every row carries RT `64512:100`. Each receiver has a private, single-best
+export policy that permits this RT and defaults to deny. The stub decodes
+the VPN table directly and has no VRF import stage. The cell checks that
+each receiver negotiated its VPN family and that none negotiated
+RT-Constrain. Each must receive the full inventory with the expected RDs,
+labels, RT, next hops and MEDs before its single End-of-RIB. Withdrawing
+one RD must leave the other copy of the prefix present.
+
+```sh
+bench/scale/rrtransport/run-credit-cells.sh --reduced --correctness-only \
+    target/scale/rrtransport /tmp/vpn-smoke restart-vpn4 restart-vpn6
+python3 bench/scale/rrtransport/credit_bars.py check-vpn whole /tmp/vpn-smoke
+```
+
 For A/B, compare the integrated cursor revision with the same main revision
 it was based on. Overlay the same `bench/scale/rrtransport` sources on both
 trees, check their directories with `diff -qr`, and build each with a
@@ -354,7 +371,8 @@ same repetition directory names under each arm.
 python3 bench/scale/rrtransport/credit_bars.py labeled PARENT_DIR CANDIDATE_DIR
 ```
 
-The labeled comparison checks both AFIs in each arm, then reports the ratio
+Use `credit_bars.py vpn PARENT_DIR CANDIDATE_DIR` for the VPN comparison.
+Both comparisons check both AFIs in each arm and report the ratio
 of candidate to parent arithmetic means for each AFI. A whole-family run
 must record one whole step per receiver. A cursor run must record at least
 `receivers × ceil(rows/1024)` cursor steps. Other scopes must record zero

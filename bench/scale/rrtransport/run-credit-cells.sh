@@ -18,8 +18,8 @@
 # limit is recorded as an OOM. Each invocation appends the binary hash and
 # its cell list to `provenance.jsonl`, which tells the analyzer what this
 # directory attempted. Use one directory per repetition and one binary per
-# directory. restart-labeled4 and restart-labeled6 use the same swap-fenced
-# scopes and run only when named. The report-only release cells and the
+# directory. The labeled and VPN restart cells for each AFI use the same
+# swap-fenced scopes and run only when named. The report-only release cells and the
 # source-burst and source-burst-control cells (an unpaced source burst
 # through real sessions, and its control without healthy updates) and their
 # source-burst-small counterparts (100 routes per UPDATE), run only when
@@ -68,7 +68,7 @@ result_of() {
     probes) echo probes.json ;;
     paused) echo paused-evpn.json ;;
     exhaust-unicast | exhaust-evpn | restart-unicast | restart-evpn) echo "$1.json" ;;
-    restart-churn-unicast | restart-churn-evpn | restart-labeled[46]) echo "$1.json" ;;
+    restart-churn-unicast | restart-churn-evpn | restart-labeled[46] | restart-vpn[46]) echo "$1.json" ;;
     fill-unicast | fill-evpn | fill-vpn | fill-flowspec) echo "$1.json" ;;
     *) return 1 ;;
     esac

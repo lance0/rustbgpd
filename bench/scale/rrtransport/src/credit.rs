@@ -28,7 +28,7 @@
 //! - `source_burst`: an unpaced burst and a healthy source's steady
 //!   updates, both through real sessions; see the module.
 
-pub mod labeled_restart;
+pub mod family_restart;
 pub mod release;
 pub mod source_burst;
 
@@ -410,7 +410,7 @@ fn release_destination(afi: Afi, index: usize) -> (Prefix, IpAddr) {
     }
 }
 
-fn labeled_destination(afi: Afi, index: usize) -> (Prefix, IpAddr) {
+fn indexed_destination(afi: Afi, index: usize) -> (Prefix, IpAddr) {
     if afi == Afi::Ipv6 && index > usize::from(u16::MAX) {
         let high = u16::try_from(index >> 16).expect("IPv6 fixture index fits u32");
         let low = u16::try_from(index & 0xffff).expect("lower subnet word");
@@ -466,6 +466,22 @@ fn vpn_route(
     }
 }
 
+fn paired_vpn_route(afi: Afi, index: usize, attrs: Arc<AttrSet>) -> VpnRibRoute {
+    let rd = RouteDistinguisher([0, 0, 0xfc, 0, 0, 0, 0, 1 + u8::from(index % 2 == 1)]);
+    vpn_route(index, attrs, rd, indexed_destination(afi, index / 2))
+}
+
+// Two-octet-AS transitive route target 64512:100, shared by both RDs.
+fn restart_vpn_route(afi: Afi, index: usize, med: u32) -> VpnRibRoute {
+    let mut attrs = attributes(index, med, 100);
+    AttrSet::edit(&mut attrs, |attrs| {
+        attrs.push(PathAttribute::ExtendedCommunities(vec![
+            rustbgpd_wire::ExtendedCommunity::new(0x0002_fc00_0000_0064),
+        ]));
+    });
+    paired_vpn_route(afi, index, attrs)
+}
+
 /// VPN release rows come in pairs with the same prefix and different RDs.
 pub(super) fn release_source_update(family: Family, indices: std::ops::Range<usize>) -> RibUpdate {
     let afi = family.afi_safi().0;
@@ -475,16 +491,7 @@ pub(super) fn release_source_update(family: Family, indices: std::ops::Range<usi
             peer,
             session_id: 1,
             announced: indices
-                .map(|index| {
-                    let rd =
-                        RouteDistinguisher([0, 0, 0xfc, 0, 0, 0, 0, 1 + u8::from(index % 2 == 1)]);
-                    vpn_route(
-                        index,
-                        attributes(index, BURST_VERSION, 100),
-                        rd,
-                        release_destination(afi, index / 2),
-                    )
-                })
+                .map(|index| paired_vpn_route(afi, index, attributes(index, BURST_VERSION, 100)))
                 .collect(),
             withdrawn: Vec::new(),
         },
@@ -508,7 +515,7 @@ fn labeled_source_update(
         session_id,
         announced: indices
             .map(|index| {
-                let (prefix, next_hop) = labeled_destination(afi, index);
+                let (prefix, next_hop) = indexed_destination(afi, index);
                 LabeledRibRoute {
                     nlri: LabeledNlri {
                         labels: vec![route_label(index)],
@@ -869,7 +876,7 @@ impl Fixture {
     fn start_with_probe(
         options: &Options,
         deferral: Option<SelectionDeferralConfig>,
-        probe: Option<labeled_restart::ReleaseProbe>,
+        probe: Option<family_restart::ReleaseProbe>,
     ) -> Self {
         let daemon = options
             .daemon
@@ -3357,6 +3364,29 @@ mod tests {
             release[0].nlri.route_distinguisher
         );
         assert_eq!(release[1].nlri.labels, fill[1].nlri.labels);
+    }
+
+    #[test]
+    fn vpn_restart_full_shape_has_distinct_rds_even_past_the_ipv6_subnet_boundary() {
+        for afi in [super::Afi::Ipv4, super::Afi::Ipv6] {
+            let mut keys = std::collections::HashSet::new();
+            for index in [0, 1, 131_070, 131_071, 131_072, 131_073, 149_998, 149_999] {
+                let row = super::restart_vpn_route(afi, index, super::BURST_VERSION);
+                assert!(keys.insert(row.key()));
+                assert_eq!(row.extended_communities().len(), 1);
+                assert_eq!(
+                    row.extended_communities()[0].route_target(),
+                    Some((64_512, 100))
+                );
+                assert_eq!(row.nlri.labels, [super::route_label(index)]);
+                let sibling = super::restart_vpn_route(afi, index ^ 1, super::BURST_VERSION);
+                assert_eq!(row.nlri.prefix, sibling.nlri.prefix);
+                assert_ne!(
+                    row.nlri.route_distinguisher,
+                    sibling.nlri.route_distinguisher
+                );
+            }
+        }
     }
 
     #[test]

@@ -79,6 +79,9 @@ pub struct Observed {
     /// Entries in the decoded SAFI 4 payloads, including rows rejected by the oracle.
     pub labeled_announced: usize,
     pub labeled_withdrawn: usize,
+    /// Entries decoded from the SAFI 128 payloads, even when the key or label is wrong.
+    pub vpn_announced: usize,
+    pub vpn_withdrawn: usize,
     /// Unexpected routes, or foreign family, label or next-hop data in an MPLS cell.
     pub outside: usize,
     pub end_of_rib: bool,
@@ -91,6 +94,14 @@ pub struct Observed {
 pub fn observe(
     update: &UpdateMessage,
     family: WireFamily,
+) -> Result<Observed, rustbgpd_wire::DecodeError> {
+    observe_with_vpn_rt(update, family, false)
+}
+
+fn observe_with_vpn_rt(
+    update: &UpdateMessage,
+    family: WireFamily,
+    require_vpn_rt: bool,
 ) -> Result<Observed, rustbgpd_wire::DecodeError> {
     let parsed = update.parse(true, false, &[])?;
     let mut observed = Observed::default();
@@ -144,23 +155,18 @@ pub fn observe(
             }
             observed.outside += parsed.announced.len() + parsed.withdrawn.len();
         }
-        WireFamily::Vpn4 => return Ok(observe_mpls(update, &parsed, Afi::Ipv4, Safi::MplsVpn)),
-        WireFamily::Vpn6 => return Ok(observe_mpls(update, &parsed, Afi::Ipv6, Safi::MplsVpn)),
-        WireFamily::Labeled4 => {
-            return Ok(observe_mpls(
-                update,
-                &parsed,
-                Afi::Ipv4,
-                Safi::LabeledUnicast,
-            ))
-        }
-        WireFamily::Labeled6 => {
-            return Ok(observe_mpls(
-                update,
-                &parsed,
-                Afi::Ipv6,
-                Safi::LabeledUnicast,
-            ))
+        WireFamily::Vpn4 | WireFamily::Vpn6 | WireFamily::Labeled4 | WireFamily::Labeled6 => {
+            let afi = if matches!(family, WireFamily::Vpn4 | WireFamily::Labeled4) {
+                Afi::Ipv4
+            } else {
+                Afi::Ipv6
+            };
+            let safi = if matches!(family, WireFamily::Vpn4 | WireFamily::Vpn6) {
+                Safi::MplsVpn
+            } else {
+                Safi::LabeledUnicast
+            };
+            return Ok(observe_mpls(update, &parsed, afi, safi, require_vpn_rt));
         }
     }
     Ok(observed)
@@ -196,12 +202,18 @@ fn vpn_index(nlri: &VpnNlri) -> Option<usize> {
         VpnPrefix::V4 { addr, len } => Prefix::V4(Ipv4Prefix::new(addr, len)),
         VpnPrefix::V6 { addr, len } => Prefix::V6(Ipv6Prefix::new(addr, len)),
     };
-    Some(2 * mpls_prefix_index(prefix)? + usize::from(rd - 1))
+    Some(2 * labeled_prefix_index(prefix)? + usize::from(rd - 1))
 }
 
 /// Each MPLS release receiver negotiates exactly one family. A foreign route
 /// or marker is a wire error even when the expected table also arrives.
-fn observe_mpls(update: &UpdateMessage, parsed: &ParsedUpdate, afi: Afi, safi: Safi) -> Observed {
+fn observe_mpls(
+    update: &UpdateMessage,
+    parsed: &ParsedUpdate,
+    afi: Afi,
+    safi: Safi,
+    require_vpn_rt: bool,
+) -> Observed {
     let mut observed = Observed {
         outside: parsed.announced.len() + parsed.withdrawn.len(),
         ..Observed::default()
@@ -223,6 +235,23 @@ fn observe_mpls(update: &UpdateMessage, parsed: &ParsedUpdate, afi: Afi, safi: S
                 {
                     observed.outside += 1;
                 }
+                if require_vpn_rt {
+                    // The restart fixture exports exactly one RT, 64512:100
+                    // (two-octet AS encoding). Compare the wire value as well
+                    // as the count so a second, unintended RT is detected.
+                    let mut targets = parsed
+                        .attributes
+                        .iter()
+                        .filter_map(PathAttribute::extended_communities)
+                        .flatten()
+                        .filter(|community| community.route_target().is_some());
+                    let exact = targets
+                        .next()
+                        .is_some_and(|rt| rt.as_u64() == 0x0002_fc00_0000_0064)
+                        && targets.next().is_none();
+                    observed.outside += usize::from(!exact);
+                }
+                observed.vpn_announced += mp.vpn_announced.len();
                 observed.labeled_announced += mp.labeled_announced.len();
                 let mut announce = |index: Option<usize>, labels: &[MplsLabelEntry]| {
                     if let Some(index) = index {
@@ -245,6 +274,7 @@ fn observe_mpls(update: &UpdateMessage, parsed: &ParsedUpdate, afi: Afi, safi: S
             }
             PathAttribute::MpUnreachNlri(mp) if (mp.afi, mp.safi) == (afi, safi) => {
                 saw_mp = true;
+                observed.vpn_withdrawn += mp.vpn_withdrawn.len();
                 observed.labeled_withdrawn += mp.labeled_withdrawn.len();
                 let empty = mp.vpn_withdrawn.is_empty() && mp.labeled_withdrawn.is_empty();
                 if empty {
@@ -347,8 +377,9 @@ impl Reference {
 pub struct WireState {
     family: WireFamily,
     reference: Arc<Reference>,
-    /// One advertised labeled row withdrawn after all receivers decoded their marker.
-    labeled_withdrawal: Option<usize>,
+    require_vpn_rt: bool,
+    /// One advertised MPLS row withdrawn after all receivers decoded their marker.
+    restart_withdrawal: Option<usize>,
     /// MED last announced per route index; 0 = absent.
     table: Vec<u32>,
     /// Routes that differ from the reference.
@@ -385,6 +416,8 @@ pub struct WireState {
     pub withdrawals: u64,
     pub labeled_announced: u64,
     pub labeled_withdrawn: u64,
+    pub vpn_announced: u64,
+    pub vpn_withdrawn: u64,
     /// The fewest and most wire bytes per announced row over every UPDATE
     /// that announced one: the message less its withdrawn routes, divided by
     /// its announced routes, rounded down.
@@ -417,7 +450,8 @@ impl WireState {
             table: vec![0; rows],
             mismatch: rows - absent,
             stable_mismatch: rows - churned,
-            labeled_withdrawal: None,
+            restart_withdrawal: None,
+            require_vpn_rt: false,
             reference,
             eor_seen: false,
             eor_at: None,
@@ -434,6 +468,8 @@ impl WireState {
             withdrawals: 0,
             labeled_announced: 0,
             labeled_withdrawn: 0,
+            vpn_announced: 0,
+            vpn_withdrawn: 0,
             row_bytes: None,
             max_rows_per_update: 0,
             outside: 0,
@@ -443,21 +479,39 @@ impl WireState {
         }
     }
 
+    /// VPN restart announcements carry the plain export fixture's RT.
+    pub fn with_restart_reference(family: WireFamily, reference: Arc<Reference>) -> Self {
+        let mut state = Self::with_reference(family, reference);
+        state.require_vpn_rt = matches!(family, WireFamily::Vpn4 | WireFamily::Vpn6);
+        state
+    }
+
     /// Arm the post-marker withdrawal without copying the reference shared by all receivers.
-    pub fn expect_labeled_withdrawal(&mut self, index: usize) {
+    pub fn expect_restart_withdrawal(&mut self, index: usize) {
         assert!(matches!(
             self.family,
-            WireFamily::Labeled4 | WireFamily::Labeled6
+            WireFamily::Labeled4 | WireFamily::Labeled6 | WireFamily::Vpn4 | WireFamily::Vpn6
         ));
         assert!(self.exact() && self.eors == 1 && self.table[index] != 0);
-        assert!(self.labeled_withdrawal.is_none());
-        self.labeled_withdrawal = Some(index);
+        assert!(self.restart_withdrawal.is_none());
+        self.restart_withdrawal = Some(index);
         self.mismatch += 1;
         self.settled_at = None;
     }
 
+    /// The first prefix lost RD 64512:1 while its RD 64512:2 route survived.
+    pub fn restart_rd_sibling_present(&self) -> bool {
+        matches!(self.family, WireFamily::Vpn4 | WireFamily::Vpn6)
+            && self.restart_withdrawal == Some(0)
+            && self.table[0] == 0
+            && self
+                .table
+                .get(1)
+                .is_some_and(|&med| med != 0 && med == self.reference.meds[1])
+    }
+
     fn churned(&self, index: usize) -> bool {
-        self.reference.churned[index] || self.labeled_withdrawal == Some(index)
+        self.reference.churned[index] || self.restart_withdrawal == Some(index)
     }
 
     fn set(&mut self, index: usize, value: u32) {
@@ -465,7 +519,7 @@ impl WireState {
             self.outside += 1;
             return;
         };
-        let reference = if self.labeled_withdrawal == Some(index) {
+        let reference = if self.restart_withdrawal == Some(index) {
             0
         } else {
             self.reference.meds[index]
@@ -493,7 +547,7 @@ impl WireState {
             Message::Notification(_) => self.resets += 1,
             Message::Update(update) => {
                 self.messages += 1;
-                match observe(update, self.family) {
+                match observe_with_vpn_rt(update, self.family, self.require_vpn_rt) {
                     Ok(observed) => {
                         if let Ok(rows @ 1..) = u64::try_from(observed.announced.len()) {
                             // Header, both length fields, attributes, NLRI.
@@ -516,6 +570,8 @@ impl WireState {
         self.outside += observed.outside as u64;
         self.labeled_announced += observed.labeled_announced as u64;
         self.labeled_withdrawn += observed.labeled_withdrawn as u64;
+        self.vpn_announced += observed.vpn_announced as u64;
+        self.vpn_withdrawn += observed.vpn_withdrawn as u64;
         // Only routes inside the burst key space count; others are `outside`.
         let rows = self.table.len();
         let (mut routes, mut churned) = (0, 0);
@@ -592,7 +648,7 @@ impl WireState {
 
     /// Routes the reference withdrew for good that the receiver still holds.
     pub fn withdrawn_survivors(&self) -> usize {
-        if let Some(index) = self.labeled_withdrawal {
+        if let Some(index) = self.restart_withdrawal {
             return usize::from(self.table[index] != 0);
         }
         self.table
@@ -836,6 +892,7 @@ mod tests {
                 observe(&announce(&nlri), family).unwrap(),
                 Observed {
                     labeled_announced: usize::from(!vpn),
+                    vpn_announced: usize::from(vpn),
                     ..routes([1], 7)
                 }
             );
@@ -844,6 +901,7 @@ mod tests {
                 observe(&mp_update(15, afi, safi, &nlri, None), family).unwrap(),
                 Observed {
                     labeled_withdrawn: usize::from(!vpn),
+                    vpn_withdrawn: usize::from(vpn),
                     ..withdrawn([1])
                 }
             );
@@ -965,6 +1023,116 @@ mod tests {
     }
 
     #[test]
+    fn vpn6_restart_keeps_the_rd_pair_across_the_subnet_boundary() {
+        for (subnet, fourth, len, pair) in [
+            (65_535, 0, 48, 131_070),
+            (1, 0, 64, 131_072),
+            (1, 9_463, 64, 149_998),
+        ] {
+            for rd in [1, 2] {
+                let nlri = VpnNlri {
+                    labels: vec![],
+                    route_distinguisher: RouteDistinguisher([0, 0, 0xfc, 0, 0, 0, 0, rd]),
+                    prefix: VpnPrefix::V6 {
+                        addr: Ipv6Addr::new(0x2001, 0xdb8, subnet, fourth, 0, 0, 0, 0),
+                        len,
+                    },
+                };
+                assert_eq!(vpn_index(&nlri), Some(pair + usize::from(rd - 1)));
+            }
+        }
+    }
+
+    #[test]
+    fn vpn_restart_checks_each_rd_label_and_rt_then_withdraws_just_one_rd() {
+        for (family, afi) in [(WireFamily::Vpn4, 1), (WireFamily::Vpn6, 2)] {
+            let (hop, prefix) = if afi == 1 {
+                (vec![192, 0, 2, 1], vec![10, 0, 0])
+            } else {
+                (
+                    Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)
+                        .octets()
+                        .to_vec(),
+                    vec![0x20, 1, 0x0d, 0xb8, 0, 0],
+                )
+            };
+            let nlri = |rd: u8, label: [u8; 3]| {
+                let mut bytes = vec![88 + u8::try_from(prefix.len() * 8).unwrap()];
+                bytes.extend_from_slice(&label);
+                bytes.extend_from_slice(&[0, 0, 0xfc, 0, 0, 0, 0, rd]);
+                bytes.extend_from_slice(&prefix);
+                bytes
+            };
+            let announce = |second_rd: u8, second_label: u8, rt: Option<u8>| {
+                let mut reach = vec![u8::try_from(8 + hop.len()).unwrap()];
+                reach.extend_from_slice(&[0; 8]);
+                reach.extend_from_slice(&hop);
+                reach.push(0);
+                reach.extend(nlri(1, [0, 1, 1])); // label 16
+                reach.extend(nlri(second_rd, [0, 1, second_label]));
+                let mut update = mp_update(14, afi, 128, &reach, Some(7));
+                if let Some(rt) = rt {
+                    update.path_attributes = [
+                        update.path_attributes.as_ref(),
+                        &[0xc0, 16, 8, 0, 2, 0xfc, 0, 0, 0, 0, rt],
+                    ]
+                    .concat()
+                    .into();
+                }
+                Message::Update(update)
+            };
+            let withdraw =
+                |rd| Message::Update(mp_update(15, afi, 128, &nlri(rd, [0x80, 0, 0]), None));
+            let marker = Message::Update(mp_update(15, afi, 128, &[], None));
+            let good = announce(2, 0x11, Some(100));
+            let gone = withdraw(1);
+            let fold = |messages: &[&Message]| {
+                let mut state =
+                    WireState::with_restart_reference(family, Arc::new(Reference::uniform(2, 7)));
+                for message in messages {
+                    state.apply(message, Instant::now());
+                    if state.exact() && state.eors == 1 && state.restart_withdrawal.is_none() {
+                        state.expect_restart_withdrawal(0);
+                    }
+                }
+                state
+            };
+            let clean = fold(&[&good, &marker, &gone]);
+            assert!(clean.exact() && clean.restart_rd_sibling_present());
+            assert_eq!((clean.vpn_announced, clean.vpn_withdrawn), (2, 1));
+            assert_eq!(
+                (clean.eors, clean.routes_before_eor, clean.routes_after_eor),
+                (1, 2, 0)
+            );
+            assert!(!clean.eor_premature);
+
+            // The second RD and label must match even when both rows share a prefix.
+            for bad in [
+                announce(1, 0x11, Some(100)),
+                announce(2, 1, Some(100)),
+                announce(2, 0x11, None),
+                announce(2, 0x11, Some(101)),
+            ] {
+                let state = fold(&[&bad, &marker, &gone]);
+                assert!(!state.exact());
+                assert_ne!(state.outside, 0);
+                assert_eq!((state.vpn_announced, state.vpn_withdrawn), (2, 1));
+            }
+            let other_rd = fold(&[&good, &marker, &withdraw(2)]);
+            assert!(!other_rd.exact() && !other_rd.restart_rd_sibling_present());
+            assert_eq!(other_rd.withdrawn_survivors(), 1);
+            let lost = fold(&[&good, &marker]);
+            assert!(!lost.exact());
+            assert_eq!(lost.vpn_withdrawn, 0);
+            let missing_marker = fold(&[&good, &gone]);
+            assert!(!missing_marker.exact());
+            assert_eq!(missing_marker.eors, 0);
+            assert!(fold(&[&marker, &good]).eor_premature);
+            assert_eq!(fold(&[&good, &marker, &gone, &marker]).eors, 2);
+        }
+    }
+
+    #[test]
     fn labeled_restart_wire_rejects_wrong_label_missing_marker_and_lost_withdrawal() {
         for (family, afi) in [(WireFamily::Labeled4, 1), (WireFamily::Labeled6, 2)] {
             let (next_hop, prefix) = if afi == 1 {
@@ -996,9 +1164,9 @@ mod tests {
                 let mut state = WireState::new(family, 1, 7);
                 for update in updates {
                     state.apply(&Message::Update(update.clone()), Instant::now());
-                    if state.eor_at.is_some() && state.exact() && state.labeled_withdrawal.is_none()
+                    if state.eor_at.is_some() && state.exact() && state.restart_withdrawal.is_none()
                     {
-                        state.expect_labeled_withdrawal(0);
+                        state.expect_restart_withdrawal(0);
                     }
                 }
                 state
