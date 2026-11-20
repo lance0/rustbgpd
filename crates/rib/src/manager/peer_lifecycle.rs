@@ -2885,7 +2885,7 @@ impl RibManager {
         self.drop_peer_owing(peer);
         self.outbound_session_ids.insert(peer, session_id);
         self.track_release_peer(peer);
-        self.resume_registration_orf_refresh(peer, orf_refresh);
+        self.resume_registration_unicast_refresh(peer, orf_refresh);
         self.metrics.set_rib_outbound_registered_peers(
             i64::try_from(self.outbound_peers.len()).unwrap_or(i64::MAX),
         );
