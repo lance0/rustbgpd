@@ -319,6 +319,35 @@ release owes each private receiver its family whole. Readers resume after
 reference, exactly one End-of-RIB arrives, every route of the table
 precedes it, and no session ends.
 
+The opt-in `restart-labeled4` and `restart-labeled6` cells run SAFI 4
+separately for IPv4 and IPv6. The fixture loads the source's table, checks
+that graceful restart retained it, and replays it on the replacement session.
+A second GR peer keeps selection held until replay is complete. Its
+End-of-RIB releases the family while the labeled readers are paused.
+Each receiver must decode the expected prefixes, MPLS labels, next hops and
+MEDs before its single family End-of-RIB. Once every receiver has the table, the source withdraws
+one advertised prefix. Each receiver must decode that withdrawal and
+retain every other row. The withdrawal check is outside the recovery clock.
+
+Run both reduced correctness cells and grade their receipts.
+
+```sh
+bench/scale/rrtransport/run-credit-cells.sh --reduced --correctness-only \
+    target/scale/rrtransport /tmp/labeled-smoke restart-labeled4 restart-labeled6
+python3 bench/scale/rrtransport/credit_bars.py check /tmp/labeled-smoke
+```
+
+For a comparison, build the same harness files on both daemon revisions.
+Omit the two flags to use 150 receivers and 150,000 rows per family.
+Each cell gets a fresh cgroup with `memory.swap.max=0` and reports
+`memory.peak`, the longest physical RIB poll, an unrelated IPv4 UPDATE's
+wait through release, and the time from release to the last decoded
+family End-of-RIB. The harness queues the unrelated UPDATE immediately
+behind the releasing marker between actor polls. It timestamps both the
+first lookup that returns the matching winner (an upper bound on installation
+time) and delivery to a separate TCP receiver. The checker validates the
+observations and wire inventory. Performance thresholds belong to the campaign.
+
 `credit-restart-churn` adds churn while the release drains. Halfway to the
 churn-free window (14.85 s into the pause on the full shape), with the
 release queued ahead of it and every burst reader still paused, the source

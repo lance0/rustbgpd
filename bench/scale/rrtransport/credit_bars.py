@@ -55,6 +55,7 @@ OPTIONAL_RELEASES = (
     "release-mixed", "release-timer", "release-vpn4", "release-vpn6",
     "release-labeled4", "release-labeled6",
 )
+LABELED_RESTARTS = ("restart-labeled4", "restart-labeled6")
 OPTIONAL_RELEASE_CHECKS = {
     "armed_after_staging",
     "release_reason",
@@ -335,10 +336,11 @@ class Arm:
     sha256: str = ""
 
     @classmethod
-    def load(cls, name: str, directory: Path) -> Arm:
+    def load(cls, name: str, directory: Path, *, recursive: bool = True) -> Arm:
         arm = cls(name, directory)
         hashes = set()
-        for provenance in sorted(directory.rglob("provenance.jsonl")):
+        pattern = "**/provenance.jsonl" if recursive else "provenance.jsonl"
+        for provenance in sorted(directory.glob(pattern)):
             rep = provenance.parent.relative_to(directory).as_posix()
             lines = [
                 json.loads(line) for line in provenance.read_text().splitlines() if line.strip()
@@ -1505,7 +1507,7 @@ def verdicts(
     for arm in (parent, candidate):
         for rep, directory in sorted(arm.repetitions.items()):
             results.extend(optional_release_reports(directory, arm, rep))
-            results.extend(source_burst_reports(directory, arm, rep))
+            results.extend(optional_cell_reports(directory, arm, rep))
             for cell in sorted(arm.attempted[rep]):
                 try:
                     run = arm.run(rep, cell)
@@ -1719,14 +1721,23 @@ def check(directory: Path) -> list[tuple[str, str, str]]:
     }
     for optional_dir in sorted(optional_dirs):
         results.extend(optional_release_reports(optional_dir))
-    burst_dirs = {
+    graded_dirs = {
         path.parent
-        for cell in SOURCE_BURST
+        for cell in (*SOURCE_BURST, *LABELED_RESTARTS)
         for suffix in (".json", "-exit.json")
         for path in directory.rglob(f"{cell}{suffix}")
     }
-    for burst_dir in sorted(burst_dirs):
-        results.extend(source_burst_reports(burst_dir))
+    graded_dirs.update(path.parent for path in directory.rglob("provenance.jsonl"))
+    for graded_dir in sorted(graded_dirs):
+        if (graded_dir / "provenance.jsonl").exists():
+            try:
+                arm = Arm.load(str(graded_dir), graded_dir, recursive=False)
+            except (Invalid, AttributeError, OSError, TypeError, ValueError) as error:
+                results.append((f"{graded_dir} provenance", "INVALID", str(error)))
+                continue
+            results.extend(optional_cell_reports(graded_dir, arm, "."))
+        else:
+            results.extend(optional_cell_reports(graded_dir))
     return results
 
 
@@ -1853,17 +1864,21 @@ def source_burst_readings(run: dict, what: str) -> dict:
             actual = need(run, f"shape.{key}", what)
             if actual != value:
                 raise Invalid(f"{what}: shape.{key} is {actual!r}, not the fixed {value!r}")
-        watch = need(run, "host.compiler_watch", what)
-        samples = number(run, "host.compiler_watch.samples", what)
-        observed = number(run, "host.compiler_watch.observed", what)
-        if watch.get("unavailable") is not None or samples < 1:
-            raise Invalid(f"{what}: compiler roster unavailable during the timed cell")
-        if observed:
-            raise Invalid(
-                f"{what}: compiler observed during the timed cell: {watch.get('first')} in "
-                f"{observed:.0f} of {samples:.0f} samples"
-            )
+        check_compiler_watch(run, what)
     return readings
+
+
+def check_compiler_watch(run: dict, what: str):
+    watch = need(run, "host.compiler_watch", what)
+    samples = number(run, "host.compiler_watch.samples", what)
+    observed = number(run, "host.compiler_watch.observed", what)
+    if watch.get("unavailable") is not None or not math.isfinite(samples) or samples < 1:
+        raise Invalid(f"{what}: compiler roster unavailable during the timed cell")
+    if observed:
+        raise Invalid(
+            f"{what}: compiler observed during the timed cell: {watch.get('first')} in "
+            f"{observed:.0f} of {samples:.0f} samples"
+        )
 
 
 def burst_sources(run: dict, what: str) -> list[str]:
@@ -2070,12 +2085,134 @@ def source_burst(run: dict, what: str) -> tuple[str, str]:
     return "PASS", "; ".join(parts)
 
 
-def source_burst_reports(
+def labeled_restart(run: dict, cell: str) -> tuple[str, str]:
+    """Validate the instruments without setting a performance threshold."""
+    if (run.get("cell"), run.get("family")) != identity(cell):
+        raise Invalid("result belongs to a different cell")
+
+    def positive(path: str):
+        value = number(run, path, cell)
+        if not math.isfinite(value) or value <= 0:
+            raise Invalid(f"invalid {path}: {value}")
+        return value
+
+    checks = need(run, "checks", cell)
+    required = RESTART_WIRE_CHECKS + (
+        "selection_held", "selection_released", "owed_at_release",
+        "post_release_withdrawal", "physical_poll_observed", "release_update_delivered",
+        "source_restart", "labeled_payload_counted", "memory_fenced",
+    )
+    if set(checks) != set(required) or any(type(value) is not bool for value in checks.values()):
+        raise Invalid("malformed restart checks")
+    for key in (*RESTART_WIRE_CHECKS, "post_release_withdrawal"):
+        if not checks[key]:
+            return "FAIL", f"failed {key}"
+    for key in required:
+        if not checks[key]:
+            raise Invalid(f"missing {key} witness")
+    mode = need(run, "mode", cell)
+    if mode not in ("correctness", "measured") or need(run, "shape.trigger", cell) != RELEASE_TRIGGER:
+        raise Invalid("unexpected restart shape or mode")
+    if mode == "measured":
+        measured([run], cell, {**RELEASE_SHAPE, "registered_peers": PEERS + 4})
+        check_compiler_watch(run, cell)
+    rows = positive("shape.rows_per_receiver")
+    n = positive("shape.receivers")
+    if positive("shape.registered_peers") != n + 4:
+        raise Invalid("incorrect labeled, healthy, or source peer count")
+    if (
+        need(run, "source.old_session", cell) == need(run, "source.new_session", cell)
+        or need(run, "source.peer", cell) == need(run, "source.release_helper", cell)
+        or need(run, "source.restart_state", cell) is not True
+        or need(run, "source.old_sample_stale", cell) is not False
+        or need(run, "source.retained_sample_stale", cell) is not True
+        or need(run, "source.replayed_sample_stale", cell) is not False
+        or any(
+            number(run, f"source.{key}", cell) != rows
+            for key in ("old_rows", "retained_rows", "replayed_rows")
+        )
+    ):
+        raise Invalid("source restart did not retain and replay the labeled table")
+    if any(number(run, f"witness.{key}", cell) != expected for key, expected in (
+        ("active_before_release", 1), ("waiters_before_release", 1), ("all_eor_releases", 1),
+        ("owing_flip_delta_while_paused", n),
+    )):
+        raise Invalid("absent hold, selection release or paused receiver debt")
+    peers = need(run, "receivers", cell)
+    if not isinstance(peers, list) or len(peers) != n:
+        raise Invalid("incomplete receiver records")
+    if len({need(peer, "peer", cell) for peer in peers}) != n:
+        raise Invalid("duplicate receiver records")
+    for peer in peers:
+        if need(peer, "exact", cell) is not True or need(peer, "exact_at_eor", cell) is not True:
+            return "FAIL", f"{peer['peer']} incomplete table or premature EoR"
+        for key in ("missing", "outside", "decode_failures", "resets", "routes_after_eor"):
+            if number(peer, key, cell) != 0:
+                return "FAIL", f"{peer['peer']} {key}"
+        if number(peer, "eors", cell) != 1:
+            return "FAIL", f"{peer['peer']} expected one labeled EoR"
+        announced = number(peer, "announced", cell)
+        withdrawn = number(peer, "withdrawals", cell)
+        if (number(peer, "labeled_announced", cell), number(peer, "labeled_withdrawn", cell)) != (
+            announced, withdrawn
+        ):
+            raise Invalid(f"{peer['peer']} labeled payload counters disagree with folded wire rows")
+        if announced != rows or number(peer, "routes_before_eor", cell) != rows:
+            return "FAIL", f"{peer['peer']} announcement count before EoR"
+        if withdrawn != 1 or number(peer, "post_eor_sentinel_changes", cell) != 1:
+            return "FAIL", f"{peer['peer']} incomplete advertisements or sentinel withdrawal"
+    positive("actor.poll_count")
+    poll_us = positive("actor.slice_max_us.actor_poll")
+    if number(run, "unaffected.release_update_sequence", cell) != 1:
+        raise Invalid("unrelated UPDATE sequence missing or mismatched")
+    if need(run, "unaffected.peer", cell) in (run["source"]["peer"], run["source"]["release_helper"]):
+        raise Invalid("UPDATE probe used a release participant")
+    wait = positive("unaffected.release_update_wait_ms")
+    admitted = number(run, "unaffected.release_update_admitted_ms", cell)
+    winner = number(run, "unaffected.release_update_winner_ms", cell)
+    received = number(run, "unaffected.release_update_received_ms", cell)
+    wire_wait = positive("unaffected.release_update_wire_ms")
+    recovery = positive("timing.release_to_last_eor_ms")
+    last = positive("timing.last_eor_ms")
+    start = number(run, "timing.release_sent_ms", cell)
+    resume = number(run, "timing.resume_issued_ms", cell)
+    markers = [number(peer, "eor_ms", cell) for peer in peers]
+    if not start <= resume or any(not math.isfinite(marker) or marker < resume for marker in markers):
+        raise Invalid("receiver EoR outside release window")
+    if not math.isclose(last, max(markers), abs_tol=1e-6):
+        raise Invalid("last EoR does not match the last receiver")
+    if start < 0 or not math.isclose(recovery, last - start, abs_tol=1e-6):
+        raise Invalid("recovery does not span release to last EoR")
+    if not number(run, "actor.from_ms", cell) <= start <= last <= number(run, "actor.to_ms", cell):
+        raise Invalid("physical poll window does not cover release through last EoR")
+    if (
+        not start <= admitted <= last
+        or not math.isclose(wait, winner - admitted, abs_tol=1e-6)
+        or not math.isclose(wire_wait, received - admitted, abs_tol=1e-6)
+    ):
+        raise Invalid("unrelated UPDATE wait does not match its release-window stamps")
+    peak = positive("memory.cgroup_memory_peak_bytes")
+    scope = need(run, "memory.cgroup", cell)
+    if (
+        not isinstance(scope, str)
+        or not scope.endswith(".scope")
+        or need(run, "memory.cgroup_swap_max", cell) != "0"
+        or need(run, "memory.cgroup_oom_kill", cell) != "0"
+    ):
+        raise Invalid("missing swap-fenced memory scope")
+    return "PASS", (
+        f"{mode}, {n:g} exact receivers; longest RIB poll {poll_us / 1000:.3f} ms, "
+        f"unrelated UPDATE wait {wait:.3f} ms, release to last EoR {recovery:.3f} ms, "
+        f"cgroup peak {peak} bytes"
+    )
+
+
+def optional_cell_reports(
     directory: Path, arm: Arm | None = None, rep: str = ""
 ) -> list[tuple[str, str, str]]:
-    """A verdict line per source-burst cell this directory ran or attempted."""
+    """A verdict line per optional graded cell this directory ran or attempted."""
     lines = []
-    for cell in SOURCE_BURST:
+    for cell in (*SOURCE_BURST, *LABELED_RESTARTS):
         result = directory / result_file(cell)
         marker = directory / f"{cell}-exit.json"
         if not (result.exists() or marker.exists() or (arm and cell in arm.attempted[rep])):
@@ -2087,9 +2224,10 @@ def source_burst_reports(
                 raise Invalid(f"{cell} exited without a result")
             else:
                 run = explained(read(result), read(marker) if marker.exists() else None, cell)
-            if not run or run.get("cell") != cell:
+            if not run or run.get("cell") != identity(cell)[0]:
                 raise Invalid("result belongs to a different cell")
-            verdict, reason = source_burst(run, cell)
+            grade = labeled_restart if cell in LABELED_RESTARTS else source_burst
+            verdict, reason = grade(run, cell)
         except Invalid as error:
             verdict, reason = "INVALID", str(error)
         except (AttributeError, KeyError, TypeError, ValueError) as error:
