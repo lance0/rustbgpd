@@ -488,24 +488,7 @@ impl RibManager {
                         session == waiter.session_id && waiter.sender.same_channel(&sender)
                     })
             });
-        // An abandoned authoritative batch is skipped whole when it replays.
-        // Do not spend the budget or the partial table on it: release the
-        // reservation, as for a writer whose caller has gone. The replay is
-        // then due at once, in admission order: the batch is skipped, and a
-        // live command behind it reserves the slot again when it replays.
-        // A head held while the reservation stood sealed the frontier, and
-        // the exits below clear it only for a standing reservation.
-        if job.other_destination_waits
-            && matches!(
-                self.first_group_deferred_intents.front().map(RibUpdate::unmetered),
-                Some(RibUpdate::ReplacePeerExportPoliciesAuthoritatively { reply, .. })
-                    if reply.is_closed()
-            )
-        {
-            job.other_destination_waits = false;
-            job.behind_turns = 0;
-            self.clear_first_group_commit_frontier();
-        }
+        self.release_abandoned_reservation(&mut job);
         // Input can keep discovery waiting behind repairs for as long as it
         // lasts. Count the turns on which it does so while a retained
         // session end or another destination's command waits for this build.
@@ -593,6 +576,27 @@ impl RibManager {
             self.pending_initial_registrations
                 .retain(|queued| *queued != peer);
             self.complete_deferred_registration(peer);
+        }
+    }
+
+    /// An abandoned authoritative batch is skipped whole when it replays.
+    /// Do not spend the budget or the partial table on it: release the
+    /// reservation, as for a writer whose caller has gone. The replay is
+    /// then due at once, in admission order: the batch is skipped, and a
+    /// live command behind it reserves the slot again when it replays.
+    /// A head held while the reservation stood sealed the frontier, and
+    /// the build's exits clear it only for a standing reservation.
+    fn release_abandoned_reservation(&mut self, job: &mut FirstGroupBuild) {
+        if job.other_destination_waits
+            && matches!(
+                self.first_group_deferred_intents.front().map(RibUpdate::unmetered),
+                Some(RibUpdate::ReplacePeerExportPoliciesAuthoritatively { reply, .. })
+                    if reply.is_closed()
+            )
+        {
+            job.other_destination_waits = false;
+            job.behind_turns = 0;
+            self.clear_first_group_commit_frontier();
         }
     }
 

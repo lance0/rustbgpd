@@ -2248,6 +2248,10 @@ fn other_destination(peer: PeerId, chain: u32) -> (RibUpdate, PolicyReply) {
 /// turns, or once the live command has replied, the session end has been
 /// applied and the founder is grouped. Under an endless feed with a live
 /// command, the founder's next build having started stands in for the last.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario read top to bottom; splitting it would hide the order of events"
+)]
 async fn waiting_destination(
     feed: Passing,
     parked: Parked,
