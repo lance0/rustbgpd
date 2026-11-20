@@ -1196,7 +1196,7 @@ fn release_ranks_crowded_per_client_best_candidates_in_pages() {
     let mut visits = 0;
     let _ = AdjRibIn::take_path_visits();
     let prepared = loop {
-        let result = manager.poll_release_pcb(PCB_GID, prefix, &mut walk);
+        let result = manager.poll_release_pcb(PCB_GID, prefix, &mut walk, &mut 128);
         let examined = AdjRibIn::take_path_visits();
         polls += 1;
         visits += examined;

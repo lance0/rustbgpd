@@ -118,7 +118,7 @@ impl RibManager {
         prefixes: &HashSet<Prefix>,
         memo: &mut crate::manager::distribution::ExportMemo,
         paged_members: bool,
-        pcb: Option<crate::manager::distribution::PreparedPcb>,
+        pcb: Option<crate::manager::distribution::PreparedPcbs>,
     ) -> GroupStageOutput {
         let mut out =
             self.stage_group_prefixes_inner(gid, prefixes, memo, paged_members, pcb, false);
@@ -180,7 +180,7 @@ impl RibManager {
         prefixes: &HashSet<Prefix, S>,
         memo: &mut crate::manager::distribution::ExportMemo,
         paged_members: bool,
-        mut pcb: Option<crate::manager::distribution::PreparedPcb>,
+        mut pcb: Option<crate::manager::distribution::PreparedPcbs>,
         speculative: bool,
     ) -> GroupStageOutput {
         self.replacement_checkpoint(true);
@@ -192,7 +192,7 @@ impl RibManager {
         let mut result = crate::manager::distribution::UnicastDistributionResult::default();
         let mut per_client_best_result =
             crate::manager::distribution::UnicastDistributionResult::default();
-        let paged_pcb_denials = pcb.is_some();
+        let paged_pcb_denials = pcb.as_ref().is_some_and(|pcb| pcb.paged_denials);
         let per_client_best;
         {
             let Some(group) = self.group_ribs.get(&gid) else {
@@ -215,10 +215,22 @@ impl RibManager {
                     // ADR-0126 Decision 2: first-permitted winner walk
                     // + runner-up lane.
                     let deltas_before = out.deltas.len();
-                    let stage = if let Some(prepared) = pcb.take() {
-                        per_client_best_result = prepared.rows;
-                        out.otc_blocked = prepared.otc_blocked;
-                        debug_assert!(prepared.evals.is_empty());
+                    let stage = if let Some(prepared) =
+                        pcb.as_mut().and_then(|pcb| pcb.prefixes.remove(prefix))
+                    {
+                        // The loop below drains everything but the denials.
+                        let rows = prepared.rows;
+                        per_client_best_result.announce = rows.announce;
+                        per_client_best_result.next_hop_override = rows.next_hop_override;
+                        per_client_best_result.withdraw = rows.withdraw;
+                        per_client_best_result.local_sources = rows.local_sources;
+                        per_client_best_result
+                            .policy_filtered
+                            .extend(rows.policy_filtered);
+                        out.otc_blocked.extend(prepared.otc_blocked);
+                        for page in prepared.evals {
+                            out.evals.absorb(page);
+                        }
                         prepared.stage
                     } else {
                         Self::distribute_group_per_client_best_prefix(

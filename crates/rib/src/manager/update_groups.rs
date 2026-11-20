@@ -2243,6 +2243,12 @@ impl GroupRibOut {
         }
     }
 
+    /// Stored denials and fallback candidates that staging `prefix` replaces.
+    pub(in crate::manager) fn release_history_len(&self, prefix: &Prefix) -> usize {
+        self.policy_filtered.get(prefix).map_or(0, AddrMap::len)
+            + self.rs_fallback.get(prefix).map_or(0, |list| list.len())
+    }
+
     pub(in crate::manager) fn small_release_history(&self, prefix: &Prefix, limit: usize) -> bool {
         self.policy_filtered
             .get(prefix)

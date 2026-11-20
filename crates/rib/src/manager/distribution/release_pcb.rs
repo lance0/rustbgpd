@@ -4,14 +4,14 @@
 use super::super::update_groups::{GroupEvalAccumulator, PerClientBestPrefixStage, PolicyLabel};
 use super::unicast::{PcbWalk, multipath_candidate_suppressed};
 use super::{
-    ExportMemo, PeerId, PolicyChain, PolicyFilteredRouteKey, Prefix, RibManager,
+    ExportMemo, HashMap, PeerId, PolicyChain, PolicyFilteredRouteKey, Prefix, RibManager,
     UnicastDistributionResult, prefix_family, should_suppress_ibgp_inner,
 };
 use crate::route::Route;
 
 use std::collections::VecDeque;
 
-const CANDIDATES_PER_POLL: usize = 128;
+pub(super) const CANDIDATES_PER_POLL: usize = 128;
 type Path = (PeerId, u32);
 
 /// A heap of identities, compared against the live Adj-RIB-In. The ordinary
@@ -64,6 +64,13 @@ pub(in crate::manager) struct PreparedPcb {
     pub(in crate::manager) otc_blocked: Vec<Route>,
 }
 
+/// Ranked results one staging call consumes, by prefix.
+pub(in crate::manager) struct PreparedPcbs {
+    pub(in crate::manager) prefixes: HashMap<Prefix, PreparedPcb>,
+    /// The release owner already replaced the group denials of its one prefix.
+    pub(in crate::manager) paged_denials: bool,
+}
+
 #[derive(Default)]
 pub(in crate::manager) struct ReleasePcb {
     source: usize,
@@ -77,11 +84,14 @@ pub(in crate::manager) struct ReleasePcb {
 }
 
 impl RibManager {
+    /// Spend `budget` candidate units on one prefix. A poll shares one budget
+    /// across the prefixes it ranks.
     pub(in crate::manager) fn poll_release_pcb(
         &self,
         gid: usize,
         prefix: Prefix,
         pcb: &mut ReleasePcb,
+        budget: &mut usize,
     ) -> Option<PreparedPcb> {
         let group = self.group_ribs.get(&gid)?;
         let family = prefix_family(&prefix);
@@ -92,9 +102,8 @@ impl RibManager {
                 .expect("candidate source is fenced during group staging")
         };
         let precedes = |a, b| crate::best_path::best_path_cmp(route(a), route(b)).is_lt();
-        let mut budget = CANDIDATES_PER_POLL;
         pcb.gathered |= !group.sendable.contains(&family);
-        while !pcb.gathered && budget > 0 {
+        while !pcb.gathered && *budget > 0 {
             let Some(epoch) = self.unicast_prefix_peers.epochs(&prefix).nth(pcb.source) else {
                 pcb.gathered = true;
                 break;
@@ -105,8 +114,8 @@ impl RibManager {
                 .map(|rib| rib.iter_prefix_after(&prefix, pcb.after))
                 .into_iter()
                 .flatten();
-            while budget > 0 {
-                budget -= 1;
+            while *budget > 0 {
+                *budget -= 1;
                 let Some(candidate) = paths.next() else {
                     pcb.source += 1;
                     pcb.after = None;
@@ -146,8 +155,8 @@ impl RibManager {
         let mut memo = ExportMemo::default();
         let mut done = false;
         let mut evals = GroupEvalAccumulator::default();
-        while budget > 0 {
-            budget -= 1;
+        while *budget > 0 {
+            *budget -= 1;
             let Some(path) = pcb.ranked.pop(precedes) else {
                 done = true;
                 break;
