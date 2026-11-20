@@ -1230,9 +1230,8 @@ pub struct RibManager {
     /// queued, when the next queued update is anything else (`PeerUp` /
     /// `PeerDown`, `EoR`, refresh, config, a primary-lane query), or when
     /// the window reaches its message, input-route, affected-prefix or
-    /// elapsed bound (`DistributionWindowLimits`). Dirty-peer resync
-    /// (`resync_dirty_peers_bounded`, the only resync entry that can run
-    /// mid-window) settles it before reading advertised state. The run loop admits
+    /// elapsed bound (`DistributionWindowLimits`). Mid-window resync and
+    /// marker work settle it before reading advertised state. The run loop admits
     /// other primary updates only while no route batch is queued, and a
     /// window always holds a queued batch until it settles, so the
     /// accumulator is empty whenever no route batch is queued and before
@@ -4450,7 +4449,7 @@ impl RibManager {
     /// Test and benchmark drivers advance both kinds of marker work in one tick.
     #[cfg(any(test, feature = "bench-internals"))]
     fn resync_tick_pending(&self) -> bool {
-        self.resync_timer_pending() || self.marker_release_pending()
+        self.resync_timer_pending() || self.marker_retry_pending() || self.marker_release_pending()
     }
 
     /// Whether the resync timer still has runnable work: failed outbound
@@ -4467,7 +4466,7 @@ impl RibManager {
     }
 
     /// [`Self::resync_timer_pending`] apart from owed keys: dirty peers and
-    /// every other retry.
+    /// retries other than the separately timed marker ring.
     fn resync_tick_pending_unowed(&self) -> bool {
         self.dirty_peers.iter().any(|&peer| {
             self.replacement_checkpoint(false);
@@ -4479,7 +4478,6 @@ impl RibManager {
                 self.helper_stale_needs_rescan(peer, carried)
                     && self.helper_stale_exempt_runnable(peer)
             })
-            || self.marker_retry_pending()
             || self.outbound_limit_recovery_runnable()
             || self.deferred_refresh_pending()
             || self.owed_eviction_pending()
@@ -4503,6 +4501,12 @@ impl RibManager {
         }
     }
 
+    /// Direct tick drivers advance the data and marker lanes together.
+    #[cfg(any(test, feature = "bench-internals"))]
+    fn resync_dirty_peers_bounded(&mut self) -> bool {
+        self.resync_dirty_peers(true)
+    }
+
     /// Run one bounded resync-timer tick. ADR-0113 recovery replays at most
     /// one peer/family; dirty peers are handed to `distribute_changes` in
     /// one-peer slices until the poll's wall-clock budget elapses.
@@ -4521,13 +4525,13 @@ impl RibManager {
     /// Safe to run partially: per-peer resync is idempotent — Adj-RIB-Out
     /// state and the dirty flag are committed/cleared only after a successful
     /// send, and withheld peers are not touched at all.
-    fn resync_dirty_peers_bounded(&mut self) -> bool {
+    fn resync_dirty_peers(&mut self, include_markers: bool) -> bool {
         // Owing peers keep the tick at the backlog cadence to see returned
         // credit; while none of them can progress and nothing else waits, a
         // tick is a cheap scan with no executor handoff.
         if !self.owing_peers.is_empty()
             && !self.resync_tick_pending_unowed()
-            && !self.marker_release_pending()
+            && !(include_markers && (self.marker_release_pending() || self.marker_retry_pending()))
             && !self.owing_tick_due()
             && !self.owed_rows_trimming()
         {
@@ -4538,7 +4542,9 @@ impl RibManager {
         }
         // A whole member replay can outlive the tick's peer-stride budget.
         // Activate its existing interior checkpoints on every timer arm.
-        self.with_resync_readiness(Self::resync_dirty_peers_with_readiness)
+        self.with_resync_readiness(|manager| {
+            manager.resync_dirty_peers_with_readiness(include_markers)
+        })
     }
 
     fn with_resync_readiness<T>(&mut self, work: impl FnOnce(&mut Self) -> T) -> T {
@@ -4558,7 +4564,7 @@ impl RibManager {
         outcome
     }
 
-    fn resync_dirty_peers_with_readiness(&mut self) -> bool {
+    fn resync_dirty_peers_with_readiness(&mut self, include_markers: bool) -> bool {
         self.recover_late_release_join();
         // ADR-0113 capacity recovery is family-scoped and already coalesced.
         // One live peer/family is replayed per timer tick; any runnable
@@ -4566,7 +4572,9 @@ impl RibManager {
         let recovered = self.drain_outbound_limit_recovery();
         self.retry_pending_inbound_refresh_bounded();
         self.flush_helper_stale_exempt(&HashSet::new());
-        self.retry_eor_markers_bounded();
+        if include_markers {
+            self.retry_eor_markers_bounded();
+        }
         // Owed-key drains, refresh-only retries and the dirty slices share
         // one poll budget. Owing peers keep the tick at the backlog
         // cadence, polling for returned credit.
@@ -7936,6 +7944,11 @@ impl RibManager {
         let marker_release_sleep = tokio::time::sleep(DIRTY_RESYNC_BACKLOG_INTERVAL);
         tokio::pin!(marker_release_sleep);
         let mut marker_release_armed = false;
+        // Returning a table operation wakes the data drain. A refused marker
+        // uses the ordinary retry interval even while other peers return credit.
+        let marker_retry_sleep = tokio::time::sleep(DIRTY_RESYNC_INTERVAL);
+        tokio::pin!(marker_retry_sleep);
+        let mut marker_retry_armed = false;
         let latch_released = Arc::clone(&self.outbound_latch_released);
         let mut query_rx_open = true;
         let mut primary_run = PrimaryRunBudget::default();
@@ -8149,6 +8162,13 @@ impl RibManager {
                         .reset(tokio::time::Instant::now() + DIRTY_RESYNC_BACKLOG_INTERVAL);
                 }
                 marker_release_armed = release_pending;
+                let retry_pending = self.marker_retry_pending();
+                if retry_pending && !marker_retry_armed {
+                    marker_retry_sleep
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + DIRTY_RESYNC_INTERVAL);
+                }
+                marker_retry_armed = retry_pending;
 
                 // Arm the resync timer when resync work transitions none → some.
                 // Owed keys drain at the backlog cadence, including when other
@@ -8242,6 +8262,7 @@ impl RibManager {
                 || has_registration_wait_timer
                 || resync_armed
                 || marker_release_armed
+                || marker_retry_armed
                 || has_gr_timers
                 || has_llgr_timers
                 || has_refresh_timers
@@ -8369,9 +8390,9 @@ impl RibManager {
                     count = self.dirty_peers.len(),
                     "resync timer fired for dirty peers"
                 );
-                marker_release_armed = false; // This tick shares its visit budget with releases.
-                let backlog =
-                    self.traced(PostCommitWork::ResyncTick, Self::resync_dirty_peers_bounded);
+                let backlog = self.traced(PostCommitWork::ResyncTick, |manager| {
+                    manager.resync_dirty_peers(false)
+                });
                 if self.resync_timer_pending() {
                     self.metrics
                         .record_rib_dirty_resync(self.resync_rearm_outcome());
@@ -8389,13 +8410,22 @@ impl RibManager {
                 }
                 continue;
             }
-            if marker_release_armed && marker_release_sleep.deadline() <= now {
+            let retry_due = marker_retry_armed && marker_retry_sleep.deadline() <= now;
+            if retry_due || (marker_release_armed && marker_release_sleep.deadline() <= now) {
                 self.traced(PostCommitWork::ResyncTick, |manager| {
                     manager.with_resync_readiness(|manager| {
-                        manager.service_marker_release_backlog(RESYNC_PEERS_PER_TICK);
+                        if retry_due {
+                            // Split the peer budget if both kinds of markers wait.
+                            manager.retry_eor_markers_bounded();
+                        } else {
+                            manager.service_marker_release_backlog(RESYNC_PEERS_PER_TICK);
+                        }
                     });
                 });
                 marker_release_armed = false;
+                if retry_due {
+                    marker_retry_armed = false;
+                }
                 continue;
             }
             if conditional_due {
@@ -8612,9 +8642,8 @@ impl RibManager {
                             count = self.dirty_peers.len(),
                             "resync timer fired for dirty peers"
                         );
-                        marker_release_armed = false;
                         let backlog = self
-                            .traced(PostCommitWork::ResyncTick, Self::resync_dirty_peers_bounded);
+                            .traced(PostCommitWork::ResyncTick, |manager| manager.resync_dirty_peers(false));
 
                         // Reset for next tick if work remains, otherwise disarm.
                         if self.resync_timer_pending() {
@@ -8635,6 +8664,7 @@ impl RibManager {
                     // Each timer only wakes the loop: expiry is applied by
                     // the due checks above, under its admission cutoff.
                     () = marker_release_sleep.as_mut(), if marker_release_armed => {}
+                    () = marker_retry_sleep.as_mut(), if marker_retry_armed => {}
                     () = gr_sleep.as_mut(), if has_gr_timers && wake_gr => {}
                     () = llgr_sleep.as_mut(), if has_llgr_timers && wake_llgr => {}
                     () = refresh_sleep.as_mut(), if has_refresh_timers && wake_refresh => {}

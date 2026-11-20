@@ -165,6 +165,38 @@ async fn release_preempts_an_armed_slow_tick_without_retrying_a_refused_writer_e
         mut outputs,
         _waiter_output,
     } = held_cohort(64, FAMILY);
+    // An eBGP source's VPN row feeds the receiver's deferred refresh when the
+    // waiter releases selection. Sending its nonempty table returns a latch.
+    let addr = Ipv4Addr::new(192, 0, 2, 9);
+    let advertiser = peer_v4(addr);
+    let (tx, _advertiser_output) = mpsc::channel(8);
+    let mut registration = super::super::lifecycle::test_peer_up(advertiser, 4, tx);
+    if let RibUpdate::PeerUp {
+        sendable_families, ..
+    } = &mut registration
+    {
+        *sendable_families = vec![FAMILY];
+    }
+    manager.handle_update(registration);
+    let mut route = make_vpn_rib_route(addr, 31, 100, 100);
+    route.origin_type = crate::route::RouteOrigin::Ebgp;
+    let key = route.key();
+    manager.handle_update(RibUpdate::VpnRoutesReceived {
+        peer: advertiser,
+        session_id: 4,
+        announced: vec![route],
+        withdrawn: vec![],
+    });
+    drain_route_chunks(&mut manager);
+    let target = peer_v4(Ipv4Addr::new(198, 18, 0, 63));
+    manager.handle_update(RibUpdate::RouteRefreshRequest {
+        peer: target,
+        session_id: 2,
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+        queued: Arc::default(),
+    });
+    assert!(manager.orf_refresh_queued(target, FAMILY));
     let mut refused = connect(&mut manager, RETRY_PEER, 3, V4);
     assert_eq!(markers_of(&mut refused, V4), 1);
     refuse_final_marker(&mut manager, RETRY_PEER, &mut refused);
@@ -175,6 +207,30 @@ async fn release_preempts_an_armed_slow_tick_without_retrying_a_refused_writer_e
     sleep_until(start + Duration::from_millis(500)).await;
     input.send(release_waiter(FAMILY)).await.unwrap();
     barrier(&input).await;
+    let mut target_output = outputs.pop().unwrap();
+    let mut latched_data = false;
+    let mut target_eors = 0;
+    let mut refresh_complete = false;
+    timeout_at(start + Duration::from_millis(700), async {
+        while !refresh_complete || target_eors == 0 {
+            let update = target_output.recv().await.unwrap();
+            for row in update.vpn_announce.iter() {
+                assert_eq!(row.key(), key);
+                latched_data |= update.latch.is_some();
+            }
+            target_eors += update.end_of_rib.iter().filter(|&&f| f == FAMILY).count();
+            refresh_complete |= update.refresh_markers.contains(&(
+                FAMILY.0,
+                FAMILY.1,
+                rustbgpd_wire::RouteRefreshSubtype::EoRR,
+            ));
+            drop(delivered(update));
+        }
+    })
+    .await
+    .expect("the nonempty deferred refresh must finish at the release cadence");
+    assert!(latched_data);
+    assert_eq!(target_eors, 1);
     sleep_until(start + Duration::from_millis(700)).await;
     barrier(&input).await;
     for output in &mut outputs {
