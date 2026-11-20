@@ -26,6 +26,7 @@ class Runner(unittest.TestCase):
         # The scope launcher runs the command after `--` in place.
         executable(
             shims / "systemd-run",
+            'echo "$*" >>"$(dirname "$0")/scopes"\n'
             'while [ "$1" != -- ]; do shift; done; shift; exec "$@"\n',
         )
         # One binary for every call: the exit code comes from the environment.
@@ -161,6 +162,19 @@ class Runner(unittest.TestCase):
                 calls,
                 ["credit-restart evpn", "credit-exhaust evpn", "credit-restart-churn unicast"],
             )
+
+    def test_labeled_restarts_run_in_separate_swap_fenced_scopes_when_requested(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scopes = root / "bin" / "scopes"
+            self.assertEqual(self.run_runner(root, 0), 0)
+            self.assertNotIn("credit-restart labeled", scopes.read_text())
+            scopes.write_text("")
+            self.assertEqual(self.run_runner(root, 0, "restart-labeled4", "restart-labeled6"), 0)
+            v4, v6 = scopes.read_text().splitlines()
+            for family, scope in ((4, v4), (6, v6)):
+                self.assertIn("--scope --quiet -p MemoryMax=64G -p MemorySwapMax=0 --", scope)
+                self.assertIn(f"credit-restart labeled{family} ", scope)
 
 
 if __name__ == "__main__":

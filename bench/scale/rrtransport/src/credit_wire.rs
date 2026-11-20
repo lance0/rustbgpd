@@ -76,6 +76,9 @@ pub struct Observed {
     /// `(index, MED)` per announced burst-family route.
     pub announced: Vec<(usize, Option<u32>)>,
     pub withdrawn: Vec<usize>,
+    /// Entries in the decoded SAFI 4 payloads, including rows rejected by the oracle.
+    pub labeled_announced: usize,
+    pub labeled_withdrawn: usize,
     /// Unexpected routes, or foreign family, label or next-hop data in an MPLS cell.
     pub outside: usize,
     pub end_of_rib: bool,
@@ -173,6 +176,18 @@ fn mpls_prefix_index(prefix: Prefix) -> Option<usize> {
     }
 }
 
+fn labeled_prefix_index(prefix: Prefix) -> Option<usize> {
+    match prefix {
+        Prefix::V6(p) if p.len == 64 => match p.addr.segments() {
+            [0x2001, 0xdb8, high, low, 0, 0, 0, 0] if high != 0 => {
+                Some((usize::from(high) << 16) | usize::from(low))
+            }
+            _ => None,
+        },
+        _ => mpls_prefix_index(prefix),
+    }
+}
+
 fn vpn_index(nlri: &VpnNlri) -> Option<usize> {
     let RouteDistinguisher([0, 0, 0xfc, 0, 0, 0, 0, rd @ 1..=2]) = nlri.route_distinguisher else {
         return None;
@@ -208,6 +223,7 @@ fn observe_mpls(update: &UpdateMessage, parsed: &ParsedUpdate, afi: Afi, safi: S
                 {
                     observed.outside += 1;
                 }
+                observed.labeled_announced += mp.labeled_announced.len();
                 let mut announce = |index: Option<usize>, labels: &[MplsLabelEntry]| {
                     if let Some(index) = index {
                         let label = 16 + u32::try_from(index % 1_000).expect("label fits");
@@ -224,11 +240,12 @@ fn observe_mpls(update: &UpdateMessage, parsed: &ParsedUpdate, afi: Afi, safi: S
                     announce(vpn_index(&entry.nlri), &entry.nlri.labels);
                 }
                 for entry in &mp.labeled_announced {
-                    announce(mpls_prefix_index(entry.nlri.prefix), &entry.nlri.labels);
+                    announce(labeled_prefix_index(entry.nlri.prefix), &entry.nlri.labels);
                 }
             }
             PathAttribute::MpUnreachNlri(mp) if (mp.afi, mp.safi) == (afi, safi) => {
                 saw_mp = true;
+                observed.labeled_withdrawn += mp.labeled_withdrawn.len();
                 let empty = mp.vpn_withdrawn.is_empty() && mp.labeled_withdrawn.is_empty();
                 if empty {
                     // Unknown optional non-transitive attributes disappear during parsing.
@@ -254,7 +271,7 @@ fn observe_mpls(update: &UpdateMessage, parsed: &ParsedUpdate, afi: Afi, safi: S
                     .chain(
                         mp.labeled_withdrawn
                             .iter()
-                            .map(|entry| mpls_prefix_index(entry.nlri.prefix)),
+                            .map(|entry| labeled_prefix_index(entry.nlri.prefix)),
                     )
                 {
                     if let Some(index) = index {
@@ -330,6 +347,8 @@ impl Reference {
 pub struct WireState {
     family: WireFamily,
     reference: Arc<Reference>,
+    /// One advertised labeled row withdrawn after all receivers decoded their marker.
+    labeled_withdrawal: Option<usize>,
     /// MED last announced per route index; 0 = absent.
     table: Vec<u32>,
     /// Routes that differ from the reference.
@@ -364,6 +383,8 @@ pub struct WireState {
     pub messages: u64,
     pub announced: u64,
     pub withdrawals: u64,
+    pub labeled_announced: u64,
+    pub labeled_withdrawn: u64,
     /// The fewest and most wire bytes per announced row over every UPDATE
     /// that announced one: the message less its withdrawn routes, divided by
     /// its announced routes, rounded down.
@@ -396,6 +417,7 @@ impl WireState {
             table: vec![0; rows],
             mismatch: rows - absent,
             stable_mismatch: rows - churned,
+            labeled_withdrawal: None,
             reference,
             eor_seen: false,
             eor_at: None,
@@ -410,6 +432,8 @@ impl WireState {
             messages: 0,
             announced: 0,
             withdrawals: 0,
+            labeled_announced: 0,
+            labeled_withdrawn: 0,
             row_bytes: None,
             max_rows_per_update: 0,
             outside: 0,
@@ -419,16 +443,37 @@ impl WireState {
         }
     }
 
+    /// Arm the post-marker withdrawal without copying the reference shared by all receivers.
+    pub fn expect_labeled_withdrawal(&mut self, index: usize) {
+        assert!(matches!(
+            self.family,
+            WireFamily::Labeled4 | WireFamily::Labeled6
+        ));
+        assert!(self.exact() && self.eors == 1 && self.table[index] != 0);
+        assert!(self.labeled_withdrawal.is_none());
+        self.labeled_withdrawal = Some(index);
+        self.mismatch += 1;
+        self.settled_at = None;
+    }
+
+    fn churned(&self, index: usize) -> bool {
+        self.reference.churned[index] || self.labeled_withdrawal == Some(index)
+    }
+
     fn set(&mut self, index: usize, value: u32) {
         let Some(slot) = self.table.get_mut(index) else {
             self.outside += 1;
             return;
         };
-        let reference = self.reference.meds[index];
+        let reference = if self.labeled_withdrawal == Some(index) {
+            0
+        } else {
+            self.reference.meds[index]
+        };
         let was = *slot == reference;
         *slot = value;
         let is = value == reference;
-        let stable = usize::from(!self.reference.churned[index]);
+        let stable = usize::from(!self.churned(index));
         match (was, is) {
             (true, false) => {
                 self.mismatch += 1;
@@ -469,6 +514,8 @@ impl WireState {
 
     pub fn apply_observed(&mut self, observed: &Observed, now: Instant) {
         self.outside += observed.outside as u64;
+        self.labeled_announced += observed.labeled_announced as u64;
+        self.labeled_withdrawn += observed.labeled_withdrawn as u64;
         // Only routes inside the burst key space count; others are `outside`.
         let rows = self.table.len();
         let (mut routes, mut churned) = (0, 0);
@@ -479,7 +526,7 @@ impl WireState {
             .chain(observed.withdrawn.iter().copied());
         for index in indices.filter(|&index| index < rows) {
             routes += 1;
-            churned += u64::from(self.reference.churned[index]);
+            churned += u64::from(self.churned(index));
         }
         if self.eor_seen {
             self.routes_after_eor += routes - churned;
@@ -545,6 +592,9 @@ impl WireState {
 
     /// Routes the reference withdrew for good that the receiver still holds.
     pub fn withdrawn_survivors(&self) -> usize {
+        if let Some(index) = self.labeled_withdrawal {
+            return usize::from(self.table[index] != 0);
+        }
         self.table
             .iter()
             .zip(&self.reference.meds)
@@ -782,11 +832,20 @@ mod tests {
             nlri.extend_from_slice(&prefix);
             let announce =
                 |nlri: &[u8]| mp_update(14, afi, safi, &[reach.as_slice(), nlri].concat(), Some(7));
-            assert_eq!(observe(&announce(&nlri), family).unwrap(), routes([1], 7));
+            assert_eq!(
+                observe(&announce(&nlri), family).unwrap(),
+                Observed {
+                    labeled_announced: usize::from(!vpn),
+                    ..routes([1], 7)
+                }
+            );
             nlri[1..4].copy_from_slice(&[0x80, 0, 0]); // compatibility withdrawal
             assert_eq!(
                 observe(&mp_update(15, afi, safi, &nlri, None), family).unwrap(),
-                withdrawn([1])
+                Observed {
+                    labeled_withdrawn: usize::from(!vpn),
+                    ..withdrawn([1])
+                }
             );
             if vpn {
                 nlri[11] = 3; // unknown RD on the withdrawal
@@ -888,6 +947,104 @@ mod tests {
         let mut with_body = mp_update(15, 1, 4, &[], None);
         with_body.nlri = vec![24, 10, 0, 0].into();
         assert!(!state(&[&row, &Message::Update(with_body), &marker]).exact());
+    }
+
+    #[test]
+    fn labeled_ipv6_full_shape_keys_are_unique_at_the_subnet_boundary() {
+        let prefix = |third, fourth, len| {
+            Prefix::V6(Ipv6Prefix::new(
+                Ipv6Addr::new(0x2001, 0xdb8, third, fourth, 0, 0, 0, 0),
+                len,
+            ))
+        };
+        assert_eq!(labeled_prefix_index(prefix(65535, 0, 48)), Some(65_535));
+        assert_eq!(labeled_prefix_index(prefix(1, 0, 64)), Some(65_536));
+        assert_eq!(labeled_prefix_index(prefix(2, 18_927, 64)), Some(149_999));
+        assert_eq!(labeled_prefix_index(prefix(0, 7, 64)), None);
+        assert_eq!(mpls_prefix_index(prefix(1, 0, 64)), None);
+    }
+
+    #[test]
+    fn labeled_restart_wire_rejects_wrong_label_missing_marker_and_lost_withdrawal() {
+        for (family, afi) in [(WireFamily::Labeled4, 1), (WireFamily::Labeled6, 2)] {
+            let (next_hop, prefix) = if afi == 1 {
+                (vec![192, 0, 2, 1], vec![10, 0, 0])
+            } else {
+                (
+                    Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)
+                        .octets()
+                        .to_vec(),
+                    vec![0x20, 1, 0x0d, 0xb8, 0, 0],
+                )
+            };
+            let bits = 24 + u8::try_from(prefix.len() * 8).unwrap();
+            let mut reach = vec![u8::try_from(next_hop.len()).unwrap()];
+            reach.extend_from_slice(&next_hop);
+            reach.push(0);
+            let label_offset = reach.len() + 3;
+            reach.extend_from_slice(&[bits, 0, 1, 1]); // label 16
+            reach.extend_from_slice(&prefix);
+            let mut unreach = vec![bits, 0x80, 0, 0];
+            unreach.extend_from_slice(&prefix);
+
+            let clean = vec![
+                mp_update(14, afi, 4, &reach, Some(7)),
+                mp_update(15, afi, 4, &[], None),
+                mp_update(15, afi, 4, &unreach, None),
+            ];
+            let fold = |updates: &[UpdateMessage]| {
+                let mut state = WireState::new(family, 1, 7);
+                for update in updates {
+                    state.apply(&Message::Update(update.clone()), Instant::now());
+                    if state.eor_at.is_some() && state.exact() && state.labeled_withdrawal.is_none()
+                    {
+                        state.expect_labeled_withdrawal(0);
+                    }
+                }
+                state
+            };
+            let check_clean = |state: WireState| {
+                assert!(state.exact());
+                assert_eq!((state.announced, state.withdrawals), (1, 1));
+                assert_eq!((state.labeled_announced, state.labeled_withdrawn), (1, 1));
+                assert_eq!((state.eors, state.churned_after_eor), (1, 1));
+                assert_eq!(state.routes_after_eor, 0);
+                assert!(!state.eor_premature);
+                assert!(state.eor_at.is_some());
+            };
+            check_clean(fold(&clean));
+
+            let mut changed = clean.clone();
+            reach[label_offset] = 0x11; // correct prefix and MED, label 17
+            changed[0] = mp_update(14, afi, 4, &reach, Some(7));
+            let wrong = fold(&changed);
+            assert!(!wrong.exact());
+            assert_eq!(
+                (wrong.labeled_announced, wrong.announced, wrong.outside),
+                (1, 0, 1)
+            );
+            changed[0] = clean[0].clone();
+            assert_eq!(changed, clean);
+            check_clean(fold(&changed));
+
+            let marker = changed.remove(1);
+            let missing_marker = fold(&changed);
+            assert!(!missing_marker.exact());
+            assert_eq!(missing_marker.eors, 0);
+            assert!(missing_marker.eor_at.is_none());
+            changed.insert(1, marker);
+            assert_eq!(changed, clean);
+            check_clean(fold(&changed));
+
+            let withdrawal = changed.pop().unwrap();
+            let missing_withdrawal = fold(&changed);
+            assert!(!missing_withdrawal.exact());
+            assert_eq!(missing_withdrawal.withdrawn_survivors(), 1);
+            assert_eq!(missing_withdrawal.labeled_withdrawn, 0);
+            changed.push(withdrawal);
+            assert_eq!(changed, clean);
+            check_clean(fold(&changed));
+        }
     }
 
     #[test]
