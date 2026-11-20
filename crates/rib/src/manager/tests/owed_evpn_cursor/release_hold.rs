@@ -399,6 +399,64 @@ fn a_force_waiting_for_unicast_leaves_the_evpn_release_rebuild_to_the_tick() {
 }
 
 #[test]
+fn a_discharged_evpn_rebuild_is_not_recorded_again_behind_the_unicast_hold() {
+    let v4_waiter = peer_v4(SECOND_SOURCE);
+    let mut manager = mixed_deferral_manager(v4_waiter);
+    let mut receivers = Vec::from(missed_withdrawal(&mut manager, 0));
+    drain(&mut manager, &mut receivers);
+    let peer = receivers[0].peer;
+    assert!(manager.owes_held_rebuild(peer, FAMILY));
+    receivers.push(hold_family(&mut manager, v4_waiter, V4));
+    let (reply, mut result) = oneshot::channel();
+    manager.handle_update(RibUpdate::RefreshPeerOutbound { peer, reply });
+    result.try_recv().unwrap().unwrap();
+    let recoveries = recoveries_observed(&manager);
+    release(&mut manager);
+    // A unit refused after its build did not run: its rebuild stays owed.
+    let encoder = manager
+        .peer_export_encoders
+        .remove(&peer)
+        .expect("an exact export encoder");
+    let builds = manager.adj_rib_out_commit_stats.resync_builds;
+    tick(&mut manager, &mut receivers);
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds - builds, 1);
+    assert_eq!(receivers[0].wire.count(5), (1, 0));
+    assert!(manager.owes_held_rebuild(peer, FAMILY));
+    manager.peer_export_encoders.insert(peer, encoder);
+    drain_one_unit_a_tick(&mut manager, &mut receivers);
+    // The unit ran: the missed withdrawal and the EVPN marker are on the
+    // wire, and the receiver stays dirty only for the IPv4 hold.
+    assert_eq!(receivers[0].wire.count(5), (1, 1));
+    assert_eq!(receivers[0].wire.markers, 1);
+    assert!(manager.selection_deferred(V4) && !manager.selection_deferred(EVPN));
+    assert!(manager.dirty_peers.contains(&peer));
+    assert!(!manager.owes_held_rebuild(peer, FAMILY));
+
+    refresh_request(&mut manager, peer);
+    receivers[0].write();
+    let answers = |receiver: &Receiver| {
+        receiver
+            .wire
+            .sent
+            .iter()
+            .filter(|sent| matches!(sent, Sent::Answer(_)))
+            .count()
+    };
+    assert_eq!(answers(&receivers[0]), 1, "the EVPN refresh is answered");
+    assert!(!manager.pending_refresh.contains_key(&peer));
+
+    end_of_rib(&mut manager, v4_waiter, 7, V4);
+    drain_unicast_release(&mut manager);
+    drain(&mut manager, &mut receivers);
+    assert_eq!(
+        recoveries_observed(&manager),
+        (recoveries.0 + 1, recoveries.1 + 1),
+        "one admitted rebuild and the refused one"
+    );
+    assert_idle(&manager, &receivers);
+}
+
+#[test]
 fn evpn_rebuild_waits_for_active_unicast_and_runs_while_a_late_join_is_parked() {
     let v4_waiter = peer_v4(SECOND_SOURCE);
     let mut manager = mixed_deferral_manager(v4_waiter);

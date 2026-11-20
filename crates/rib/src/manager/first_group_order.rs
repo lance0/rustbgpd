@@ -1,5 +1,6 @@
-//! Keep config intents in admission order without buffering any primary route
-//! updates. The pending writer's old policy remains authoritative.
+//! Keep config intents and session ends in admission order without buffering
+//! any primary route updates. The pending writer's old policy remains
+//! authoritative.
 use super::{PeerId, RibManager, RibUpdate};
 use rustbgpd_telemetry::metrics::RibActorTurnKind;
 
@@ -24,7 +25,71 @@ fn operation(mut message: &RibUpdate) -> &RibUpdate {
     }
 }
 
+fn session_end(message: &RibUpdate) -> bool {
+    matches!(
+        message,
+        RibUpdate::PeerDown { .. }
+            | RibUpdate::PeerGracefulRestart { .. }
+            | RibUpdate::LateSessionEnd(_)
+    )
+}
+
+fn plain_route_input(message: &RibUpdate) -> bool {
+    match message {
+        RibUpdate::WireRoutesReceived(batch) => {
+            batch.flowspec_announced.is_empty() && batch.flowspec_withdrawn.is_empty()
+        }
+        RibUpdate::RoutesReceived {
+            flowspec_announced,
+            flowspec_withdrawn,
+            ..
+        } => flowspec_announced.is_empty() && flowspec_withdrawn.is_empty(),
+        RibUpdate::VpnRoutesReceived { .. } | RibUpdate::LabeledRoutesReceived { .. } => true,
+        _ => false,
+    }
+}
+
 impl RibManager {
+    pub(super) fn session_end_retained(&self) -> bool {
+        self.first_group_deferred_intents.iter().any(session_end)
+    }
+
+    /// Give the pending owner every turn so that a retained session end
+    /// replays next. Without an owner the replay is already due at the next
+    /// turn and nothing would clear the seal.
+    pub(super) fn seal_behind_retained_session_end(&mut self) -> bool {
+        let seal = self.session_end_retained()
+            && (self.first_group_pending_writer().is_some()
+                || self.optional_destination_retirement_active());
+        if seal {
+            self.seal_first_group_commit_frontier();
+        }
+        seal
+    }
+
+    /// Intake for the primary FIFO. Only unicast, labeled, VPN and EVPN route
+    /// input from other peers' sessions passes a retained session end.
+    /// Everything else holds the head, as it did behind a held end: reads and
+    /// commands can be teardown barriers, an End-of-RIB can release a
+    /// selection deferral the teardown would re-arm, and a `FlowSpec` rule
+    /// can be validated against the ended session's unicast route.
+    pub(super) fn first_group_primary_intake(&self, message: &RibUpdate) -> Intake {
+        let intake = self.first_group_intake(message);
+        if !self.session_end_retained() || self.first_group_replay_due() {
+            return intake;
+        }
+        let next = operation(message);
+        let passes = match intake {
+            Intake::Apply => plain_route_input(next),
+            // Policy commands and session ends replay in admission order. A
+            // family unlock or slow-state clear changes what later route
+            // input exports, so it keeps the FIFO behind it.
+            Intake::Retain => next.actor_turn_kind() != RibActorTurnKind::PeerState,
+            Intake::Hold => true,
+        };
+        if passes { intake } else { Intake::Hold }
+    }
+
     pub(super) fn first_group_replay_due(&self) -> bool {
         (!self.first_group_deferred_intents.is_empty() || self.first_group_general_head.is_some())
             && self.first_group_pending_writer().is_none()
@@ -43,8 +108,9 @@ impl RibManager {
             .or_else(|| self.first_group_general_head.take().map(|head| *head))
     }
 
-    /// This check is also made at each primary read-ahead that can consume a
-    /// message directly. A hold leaves the complete original envelope at head.
+    /// Shared by both lanes. The general lane has no order against the
+    /// primary FIFO, so its reads are not held behind a retained session end.
+    /// A hold leaves the complete original envelope at head.
     pub(super) fn first_group_intake(&self, message: &RibUpdate) -> Intake {
         let writer = self.first_group_pending_writer().map(operation);
         let retiring_optional = self.optional_destination_retirement_active();
@@ -59,6 +125,8 @@ impl RibManager {
         }
         let next = operation(message);
         let kind = next.actor_turn_kind();
+        let room = self.first_group_deferred_intents.len()
+            < self.rx.max_capacity().min(MAX_DEFERRED_INTENTS);
         // A late writer may rebuild the evicted table. Keep its original
         // request and reply until the last allocation releases the slot.
         if kind == RibActorTurnKind::OutboundPolicy
@@ -69,14 +137,18 @@ impl RibManager {
                         | RibUpdate::PeerFamilySendable { .. }
                 ))
         {
-            return if self.first_group_deferred_intents.len()
-                < self.rx.max_capacity().min(MAX_DEFERRED_INTENTS)
-            {
-                Intake::Retain
-            } else {
-                Intake::Hold
-            };
+            return if room { Intake::Retain } else { Intake::Hold };
         }
+        // A session end is one small message that only has to follow the
+        // writer and its own peer's earlier input. Holding it at the FIFO head
+        // would make every other peer's routes wait for the rest of the build.
+        // Retained, it replays in admission order after the writer commits,
+        // and the peer check below keeps that peer's later messages behind it.
+        let behind_writer = if room && session_end(next) {
+            Intake::Retain
+        } else {
+            Intake::Hold
+        };
         let peer = match next {
             RibUpdate::PeerDeleted { peer, .. }
             | RibUpdate::ReleasePeer { peer }
@@ -96,7 +168,7 @@ impl RibManager {
                     .iter()
                     .any(|intent| intent.session_peer() == Some(peer)))
         {
-            return Intake::Hold;
+            return behind_writer;
         }
         if matches!(
             kind,
@@ -121,7 +193,7 @@ impl RibManager {
                     .as_ref()
                     .is_some_and(|job| self.mutation_targets_first_group(next, job.gid)))
         {
-            return Intake::Hold;
+            return behind_writer;
         }
         Intake::Apply
     }
@@ -174,7 +246,7 @@ impl RibManager {
         if self
             .primary_lookahead
             .as_ref()
-            .is_some_and(|head| matches!(self.first_group_intake(head), Intake::Hold))
+            .is_some_and(|head| matches!(self.first_group_primary_intake(head), Intake::Hold))
         {
             self.seal_first_group_commit_frontier();
             return false;

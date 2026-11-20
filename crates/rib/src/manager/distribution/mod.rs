@@ -56,7 +56,7 @@ mod release_fanout;
 pub(super) mod release_pcb;
 pub(super) use release_fanout::ReleaseDistribution;
 use release_fanout::ReleaseMembers;
-pub(in crate::manager) use release_pcb::PreparedPcb;
+pub(in crate::manager) use release_pcb::PreparedPcbs;
 // Emit-seam helpers are shared with `update_groups` (LAN-474).
 mod release_selection;
 pub(in crate::manager) mod rs_control;

@@ -8,8 +8,10 @@ const OTHER: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 2);
 const DUAL: [(Afi, Safi); 2] = [(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
 type Inventory = BTreeMap<Prefix, (PeerId, u32)>;
 
+const MEMBER: fn(u8) -> Ipv4Addr = |n| Ipv4Addr::new(198, 51, 100, n);
+
 fn receiver(n: u8) -> PeerId {
-    peer_v4(Ipv4Addr::new(198, 51, 100, n))
+    peer_v4(MEMBER(n))
 }
 
 fn prefixes(i: u16) -> [Prefix; 2] {
@@ -970,4 +972,1049 @@ async fn overflow_withdrawal_stays_withdrawn_across_retirement_and_sender_replac
         Some(manager.grouped_member_of(founder).unwrap())
     );
     assert_eq!(manager.group_ribs.len(), published + 1);
+}
+
+// A cold build caught mid-walk, with `members` registered peers whose policy
+// clear needs the table under construction. Member `n` is `receiver(n)`.
+fn cold_build_with_policy_members(
+    per_family: u16,
+    members: u8,
+) -> (
+    RibManager,
+    mpsc::Sender<RibUpdate>,
+    Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+) {
+    let (mut manager, primary, expected) = fixture(per_family);
+    let mut receivers = Vec::new();
+    for n in 1..=members {
+        let (out, rx) = mpsc::channel(32);
+        let mut up = test_peer_up(receiver(n), 1, out);
+        let RibUpdate::PeerUp {
+            is_ebgp,
+            route_reflector_client,
+            sendable_families,
+            export_policy,
+            ..
+        } = &mut up
+        else {
+            unreachable!()
+        };
+        *is_ebgp = false;
+        *route_reflector_client = true;
+        *sendable_families = DUAL.to_vec();
+        *export_policy = Some(deny_default_prefix_chain());
+        manager.handle_update(up);
+        finish(&mut manager);
+        receivers.push(rx);
+    }
+    for rx in &mut receivers {
+        while rx.try_recv().is_ok() {}
+    }
+    receivers.push(join(&mut manager, receiver(100), 1, &DUAL));
+    staged_keys(&mut manager, &expected);
+    assert!(manager.first_group_build.is_some());
+    (manager, primary, receivers)
+}
+
+fn clear_policy(
+    manager: &mut RibManager,
+    peer: PeerId,
+) -> oneshot::Receiver<Result<(), crate::RibCommandError>> {
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::ReplacePeerExportPolicy {
+        peer,
+        export_policy: None,
+        reply,
+    });
+    assert!(
+        manager.first_group_pending_writer().is_some(),
+        "the policy clear must be claimed by the cold build"
+    );
+    assert!(response.try_recv().is_err());
+    response
+}
+
+fn other_marker() -> (Prefix, RibUpdate) {
+    let marker = prefixes(u16::MAX)[0];
+    (
+        marker,
+        test_routes_received(peer_v4(OTHER), vec![route(marker, OTHER, 190)]),
+    )
+}
+
+// One owner turn per iteration, scheduled as the run loop does: admissible
+// primary work first, otherwise the build. Returns the build turns spent
+// before `marker` reached the Loc-RIB.
+async fn build_turns_until_installed(manager: &mut RibManager, marker: Prefix) -> usize {
+    let mut build_turns = 0;
+    while manager.loc_rib.get(&marker).is_none() {
+        if manager.drain_ready_updates().await {
+            continue;
+        }
+        assert!(
+            manager.first_group_build.is_some(),
+            "no build and no admissible primary work"
+        );
+        manager.advance_first_group_build();
+        build_turns += 1;
+        assert!(build_turns < 100_000, "the marker never entered");
+    }
+    build_turns
+}
+
+fn commit_claimed_writer(manager: &mut RibManager) {
+    for _ in 0..100_000 {
+        if manager.first_group_pending_writer().is_none() {
+            return;
+        }
+        manager.advance_first_group_build();
+    }
+    panic!("the claimed writer never committed");
+}
+
+#[tokio::test]
+async fn unrelated_update_passes_a_session_end_that_waits_for_the_cold_build() {
+    let mut waited = [0usize; 2];
+    for session_ends in [false, true] {
+        let (mut manager, primary, _receivers) = cold_build_with_policy_members(8192, 1);
+        let incumbent = receiver(1);
+        let source_group = manager.grouped_member_of(incumbent).unwrap();
+        let mut policy_reply = clear_policy(&mut manager, incumbent);
+        if session_ends {
+            primary
+                .try_send(RibUpdate::PeerDown {
+                    peer: incumbent,
+                    session_id: 1,
+                })
+                .unwrap();
+        }
+        let (marker, update) = other_marker();
+        primary.try_send(update).unwrap();
+
+        waited[usize::from(session_ends)] = build_turns_until_installed(&mut manager, marker).await;
+        assert!(
+            manager.first_group_pending_writer().is_some(),
+            "an unrelated UPDATE waited {} build turns, until the writer committed",
+            waited[usize::from(session_ends)]
+        );
+        assert!(policy_reply.try_recv().is_err());
+        // The session end has not taken effect ahead of the older writer.
+        assert!(manager.outbound_peers.contains_key(&incumbent));
+
+        commit_claimed_writer(&mut manager);
+        assert_eq!(policy_reply.try_recv().unwrap(), Ok(()));
+        assert!(
+            manager
+                .grouped_member_of(incumbent)
+                .is_some_and(|destination| destination != source_group),
+            "the writer moved the still-registered peer"
+        );
+        if session_ends {
+            // Newer primary input stays behind the retained session end.
+            primary.try_send(other_marker().1).unwrap();
+            assert!(manager.try_recv_primary().is_none());
+            assert_eq!(manager.primary_backlog(), 1);
+            let end = manager.take_first_group_deferred_intent().unwrap();
+            assert!(matches!(end, RibUpdate::PeerDown { peer, .. } if peer == incumbent));
+            manager.handle_update(end);
+            assert!(!manager.outbound_peers.contains_key(&incumbent));
+        }
+        assert!(manager.take_first_group_deferred_intent().is_none());
+    }
+    assert_eq!(
+        waited[1], waited[0],
+        "build turns an unrelated UPDATE waited behind the session end, and the control"
+    );
+}
+
+#[tokio::test]
+async fn peer_up_after_a_retained_session_end_stays_behind_it() {
+    let (mut manager, primary, _receivers) = cold_build_with_policy_members(2048, 1);
+    let incumbent = receiver(1);
+    let mut policy_reply = clear_policy(&mut manager, incumbent);
+    primary
+        .try_send(RibUpdate::PeerDown {
+            peer: incumbent,
+            session_id: 1,
+        })
+        .unwrap();
+    let (out, _replacement_rx) = mpsc::channel(32);
+    primary.try_send(test_peer_up(incumbent, 2, out)).unwrap();
+    let (marker, update) = other_marker();
+    primary.try_send(update).unwrap();
+
+    // The session end is retained. Its peer's next session holds the head.
+    assert!(manager.drain_ready_updates().await);
+    assert!(!manager.drain_ready_updates().await);
+    assert!(matches!(
+        manager.primary_lookahead,
+        Some(RibUpdate::PeerUp { peer, session_id: 2, .. }) if peer == incumbent
+    ));
+    assert!(manager.first_group_commit_frontier_reached());
+    assert_eq!(manager.outbound_session_ids.get(&incumbent), Some(&1));
+
+    commit_claimed_writer(&mut manager);
+    assert_eq!(policy_reply.try_recv().unwrap(), Ok(()));
+    assert_eq!(manager.outbound_session_ids.get(&incumbent), Some(&1));
+    assert!(manager.try_recv_primary().is_none());
+    let end = manager.take_first_group_deferred_intent().unwrap();
+    assert!(matches!(end, RibUpdate::PeerDown { session_id: 1, .. }));
+    manager.handle_update(end);
+    assert!(!manager.outbound_peers.contains_key(&incumbent));
+    assert!(manager.loc_rib.get(&marker).is_none());
+
+    let up = manager.try_recv_primary().unwrap();
+    assert!(matches!(up, RibUpdate::PeerUp { session_id: 2, .. }));
+    manager.handle_update(up);
+    finish(&mut manager);
+    assert_eq!(manager.outbound_session_ids.get(&incumbent), Some(&2));
+    assert!(manager.drain_ready_updates().await);
+    drain_route_chunks(&mut manager);
+    assert!(manager.loc_rib.get(&marker).is_some());
+}
+
+#[tokio::test]
+async fn two_session_ends_behind_one_writer_replay_in_admission_order() {
+    let (mut manager, primary, _receivers) = cold_build_with_policy_members(4096, 2);
+    let (first, second) = (receiver(1), receiver(2));
+    let source_group = manager.grouped_member_of(first).unwrap();
+    assert_eq!(manager.grouped_member_of(second), Some(source_group));
+    let (reply, mut policy_reply) = oneshot::channel();
+    manager.handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+        replacements: [first, second]
+            .map(|peer| crate::update::PeerExportPolicyReplacement {
+                peer,
+                export_policy: None,
+            })
+            .into(),
+        reply,
+    });
+    assert!(manager.first_group_pending_writer().is_some());
+    primary
+        .try_send(RibUpdate::PeerGracefulRestart {
+            peer: second,
+            session_id: 1,
+            restart_time: 10,
+            stale_routes_time: 30,
+            gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            peer_llgr_capable: false,
+            peer_llgr_families: vec![],
+            llgr_stale_time: 0,
+        })
+        .unwrap();
+    primary
+        .try_send(RibUpdate::PeerDown {
+            peer: first,
+            session_id: 1,
+        })
+        .unwrap();
+    let (marker, update) = other_marker();
+    primary.try_send(update).unwrap();
+
+    assert_eq!(build_turns_until_installed(&mut manager, marker).await, 0);
+    assert!(manager.first_group_pending_writer().is_some());
+    assert!(policy_reply.try_recv().is_err());
+    for peer in [first, second] {
+        assert!(manager.outbound_peers.contains_key(&peer));
+    }
+
+    commit_claimed_writer(&mut manager);
+    assert_eq!(policy_reply.try_recv().unwrap(), Ok(vec![]));
+    let destination = manager.grouped_member_of(first).unwrap();
+    assert_ne!(destination, source_group);
+    assert_eq!(manager.grouped_member_of(second), Some(destination));
+    let end = manager.take_first_group_deferred_intent().unwrap();
+    assert!(matches!(end, RibUpdate::PeerGracefulRestart { peer, .. } if peer == second));
+    manager.handle_update(end);
+    assert!(!manager.outbound_peers.contains_key(&second));
+    assert!(manager.outbound_peers.contains_key(&first));
+    let end = manager.take_first_group_deferred_intent().unwrap();
+    assert!(matches!(end, RibUpdate::PeerDown { peer, .. } if peer == first));
+    manager.handle_update(end);
+    assert!(!manager.outbound_peers.contains_key(&first));
+    assert!(manager.take_first_group_deferred_intent().is_none());
+}
+
+// The same order through the run loop: the still-registered peer is sent the
+// marker while the policy reply is pending, its channel closes only after
+// that reply, and a primary-lane barrier read behind the session end is
+// answered only after the close.
+#[tokio::test]
+async fn actor_installs_an_unrelated_update_before_the_writer_and_the_session_end() {
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    let (mut manager, primary, mut receivers) = cold_build_with_policy_members(8192, 1);
+    let incumbent = receiver(1);
+    let mut policy_reply = clear_policy(&mut manager, incumbent);
+    let routes = manager.loc_rib.len();
+    primary
+        .try_send(RibUpdate::PeerDown {
+            peer: incumbent,
+            session_id: 1,
+        })
+        .unwrap();
+    let (marker, update) = other_marker();
+    primary.try_send(update).unwrap();
+    let (reply, mut barrier) = oneshot::channel();
+    primary
+        .try_send(RibUpdate::QueryLocRibCount { reply })
+        .unwrap();
+
+    let mut actor = Box::pin(manager.run());
+    let mut founder_rx = receivers.pop().unwrap();
+    let mut incumbent_rx = receivers.pop().unwrap();
+    let (mut installed, mut replied, mut ended) = (false, false, false);
+    for _ in 0..100_000 {
+        assert!(
+            actor
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        while founder_rx.try_recv().is_ok() {}
+        if let Ok(len) = barrier.try_recv() {
+            assert!(
+                ended,
+                "the barrier read was answered before the session end"
+            );
+            assert_eq!(len, routes + 1);
+            return;
+        }
+        if !replied && let Ok(result) = policy_reply.try_recv() {
+            assert_eq!(result, Ok(()));
+            assert!(installed, "an unrelated UPDATE waited for the writer");
+            replied = true;
+        }
+        while !ended {
+            match incumbent_rx.try_recv() {
+                Ok(out) => {
+                    if out.announce.iter().any(|row| row.prefix == marker) {
+                        assert!(!replied, "an unrelated UPDATE waited for the writer");
+                        installed = true;
+                    }
+                }
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    assert!(installed && replied, "the session end ran early");
+                    ended = true;
+                }
+            }
+        }
+    }
+    panic!("the barrier read was never answered");
+}
+
+#[tokio::test]
+async fn full_window_holds_the_ninth_session_end_at_the_head() {
+    let (mut manager, primary, _receivers) = cold_build_with_policy_members(2048, 9);
+    let peers: Vec<PeerId> = (1..=9).map(receiver).collect();
+    let (reply, mut policy_reply) = oneshot::channel();
+    manager.handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+        replacements: peers
+            .iter()
+            .map(|&peer| crate::update::PeerExportPolicyReplacement {
+                peer,
+                export_policy: None,
+            })
+            .collect(),
+        reply,
+    });
+    assert!(manager.first_group_pending_writer().is_some());
+    for &peer in &peers {
+        primary
+            .try_send(RibUpdate::PeerDown {
+                peer,
+                session_id: 1,
+            })
+            .unwrap();
+    }
+    let (marker, update) = other_marker();
+    primary.try_send(update).unwrap();
+    while manager.drain_ready_updates().await {}
+    assert_eq!(manager.first_group_deferred_intents.len(), 8);
+    assert!(matches!(
+        manager.primary_lookahead,
+        Some(RibUpdate::PeerDown { peer, .. }) if peer == peers[8]
+    ));
+    assert!(manager.first_group_commit_frontier_reached());
+    assert!(manager.loc_rib.get(&marker).is_none());
+    commit_claimed_writer(&mut manager);
+    assert!(policy_reply.try_recv().unwrap().is_ok());
+    for &expected in &peers[..8] {
+        assert!(manager.try_recv_primary().is_none());
+        let end = manager.take_first_group_deferred_intent().unwrap();
+        assert!(matches!(end, RibUpdate::PeerDown { peer, .. } if peer == expected));
+        manager.handle_update(end);
+    }
+    let ninth = manager.try_recv_primary().unwrap();
+    assert!(matches!(ninth, RibUpdate::PeerDown { peer, .. } if peer == peers[8]));
+    manager.handle_update(ninth);
+    for peer in &peers {
+        assert!(!manager.outbound_peers.contains_key(peer));
+    }
+    assert!(manager.drain_ready_updates().await);
+    drain_route_chunks(&mut manager);
+    assert!(manager.loc_rib.get(&marker).is_some());
+}
+
+#[tokio::test]
+async fn late_session_end_is_retained_and_replayed() {
+    let (mut manager, primary, _receivers) = cold_build_with_policy_members(2048, 1);
+    let incumbent = receiver(1);
+    let mut policy_reply = clear_policy(&mut manager, incumbent);
+    primary
+        .try_send(RibUpdate::LateSessionEnd(Box::new(RibUpdate::PeerDown {
+            peer: incumbent,
+            session_id: 1,
+        })))
+        .unwrap();
+    let (marker, update) = other_marker();
+    primary.try_send(update).unwrap();
+    assert_eq!(build_turns_until_installed(&mut manager, marker).await, 0);
+    assert!(manager.first_group_pending_writer().is_some());
+    assert!(manager.outbound_peers.contains_key(&incumbent));
+    commit_claimed_writer(&mut manager);
+    assert_eq!(policy_reply.try_recv().unwrap(), Ok(()));
+    let end = manager.take_first_group_deferred_intent().unwrap();
+    assert!(matches!(end, RibUpdate::LateSessionEnd(_)));
+    manager.handle_update(end);
+    assert!(!manager.outbound_peers.contains_key(&incumbent));
+}
+
+// The writer names the peer but not its route input: only the retained end
+// itself keeps a sibling session's routes and End-of-RIB behind it.
+#[tokio::test]
+async fn same_peer_routes_and_end_of_rib_stay_behind_a_retained_session_end() {
+    let incumbent = receiver(1);
+    let own = prefixes(u16::MAX - 1)[0];
+    let later = [
+        super::lifecycle::test_session_routes_received(incumbent, 1, vec![route(own, OTHER, 190)]),
+        RibUpdate::EndOfRib {
+            peer: incumbent,
+            session_id: 1,
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+        },
+    ];
+    for message in later {
+        let (mut manager, primary, _receivers) = cold_build_with_policy_members(2048, 1);
+        let _policy_reply = clear_policy(&mut manager, incumbent);
+        primary
+            .try_send(RibUpdate::PeerDown {
+                peer: incumbent,
+                session_id: 1,
+            })
+            .unwrap();
+        primary.try_send(message).unwrap();
+        while manager.drain_ready_updates().await {}
+        drain_route_chunks(&mut manager);
+        assert_eq!(manager.first_group_deferred_intents.len(), 1);
+        assert!(
+            manager
+                .primary_lookahead
+                .as_ref()
+                .is_some_and(|head| head.session_peer() == Some(incumbent)),
+            "the peer's own input passed its retained session end"
+        );
+        assert!(manager.first_group_commit_frontier_reached());
+        assert!(manager.loc_rib.get(&own).is_none());
+    }
+}
+
+#[tokio::test]
+async fn session_end_of_a_peer_the_writer_does_not_name_applies_at_once() {
+    let (mut manager, primary, _receivers) = cold_build_with_policy_members(2048, 2);
+    let _policy_reply = clear_policy(&mut manager, receiver(1));
+    primary
+        .try_send(RibUpdate::PeerDown {
+            peer: receiver(2),
+            session_id: 1,
+        })
+        .unwrap();
+    assert!(manager.drain_ready_updates().await);
+    assert!(manager.first_group_pending_writer().is_some());
+    assert!(manager.first_group_deferred_intents.is_empty());
+    assert!(!manager.outbound_peers.contains_key(&receiver(2)));
+}
+
+type Answered = Box<dyn FnMut(&RibManager) -> bool>;
+
+// `message` reaches the primary FIFO behind a retained session end. It holds
+// the head until the claimed writer has committed and the end has replayed,
+// and it is the next primary message after that.
+async fn assert_held_behind_a_retained_session_end(
+    message: RibUpdate,
+    mut answered: Option<Answered>,
+) {
+    let incumbent = receiver(1);
+    let (mut manager, primary, _receivers) = cold_build_with_policy_members(2048, 2);
+    let mut policy_reply = clear_policy(&mut manager, incumbent);
+    assert!(
+        matches!(
+            manager.first_group_intake(&message),
+            first_group_order::Intake::Apply
+        ),
+        "{:?} is held by the pending writer alone",
+        message.actor_turn_kind()
+    );
+    primary
+        .try_send(RibUpdate::PeerDown {
+            peer: incumbent,
+            session_id: 1,
+        })
+        .unwrap();
+    let held = std::mem::discriminant(&message);
+    let kind = message.actor_turn_kind();
+    primary.try_send(message).unwrap();
+    while manager.drain_ready_updates().await {}
+    assert_eq!(manager.first_group_deferred_intents.len(), 1);
+    assert!(
+        manager
+            .primary_lookahead
+            .as_ref()
+            .is_some_and(|head| std::mem::discriminant(head) == held),
+        "{kind:?} passed the retained session end"
+    );
+    assert!(manager.first_group_commit_frontier_reached());
+    assert!(!answered.as_mut().is_some_and(|done| done(&manager)));
+
+    let (reply, mut general) = oneshot::channel();
+    manager.serve_general_query(RibUpdate::QueryLocRibCount { reply });
+    assert!(general.try_recv().is_ok(), "general-lane read answers");
+
+    commit_claimed_writer(&mut manager);
+    assert_eq!(policy_reply.try_recv().unwrap(), Ok(()));
+    assert!(manager.try_recv_primary().is_none());
+    assert!(!answered.as_mut().is_some_and(|done| done(&manager)));
+    let end = manager.take_first_group_deferred_intent().unwrap();
+    manager.handle_update(end);
+    assert!(!manager.outbound_peers.contains_key(&incumbent));
+    let next = manager.try_recv_primary().unwrap();
+    assert_eq!(std::mem::discriminant(&next), held);
+    manager.handle_update(next);
+    assert!(answered.as_mut().is_none_or(|done| done(&manager)));
+}
+
+// A primary-lane read can be a teardown barrier or read the ended session's
+// state, and a command has no proven order against the end. One message of
+// every kind that is not route input holds the head until the retained end
+// has replayed. The general lane is unordered against the primary FIFO and
+// still answers.
+#[tokio::test]
+async fn primary_reads_and_other_session_ends_wait_for_a_retained_session_end() {
+    fn read<T: 'static>(
+        make: impl FnOnce(oneshot::Sender<T>) -> RibUpdate,
+    ) -> (RibUpdate, Option<Answered>) {
+        let (reply, mut response) = oneshot::channel();
+        (
+            make(reply),
+            Some(Box::new(move |_| response.try_recv().is_ok())),
+        )
+    }
+    // The reply is not inspected: only the hold and the order are.
+    fn command<T: 'static>(
+        make: impl FnOnce(oneshot::Sender<T>) -> RibUpdate,
+    ) -> (RibUpdate, Option<Answered>) {
+        let (reply, response) = oneshot::channel();
+        std::mem::forget(response);
+        (make(reply), None)
+    }
+    let incumbent = receiver(1);
+    let (peer, session_id) = (receiver(2), 1);
+    let (out, _out_rx) = mpsc::channel(8);
+    let cases: Vec<(RibUpdate, Option<Answered>)> = vec![
+        read(|reply| RibUpdate::QueryLocRibCount { reply }),
+        read(|reply| RibUpdate::QueryEvpnSessionsSynced { reply }),
+        read(|reply| RibUpdate::QueryEvpnEsSnapshot { reply }),
+        read(|reply| RibUpdate::QueryPeerRetainedStale {
+            peer: incumbent,
+            reply,
+        }),
+        read(|reply| RibUpdate::QueryPeerRetention {
+            peer: incumbent,
+            reply,
+        }),
+        read(|reply| RibUpdate::QueryPeerRetentions {
+            peers: vec![incumbent],
+            reply,
+        }),
+        (
+            RibUpdate::PeerDown { peer, session_id },
+            Some(Box::new(move |manager| {
+                !manager.outbound_peers.contains_key(&peer)
+            })),
+        ),
+        // One message per remaining kind, none of them named by the writer.
+        (test_peer_up(receiver(9), 1, out), None),
+        (
+            RibUpdate::PeerSlowState {
+                peer,
+                session_id,
+                slow: true,
+            },
+            None,
+        ),
+        command(|reply| RibUpdate::ConfirmPeerOutbound {
+            peer: peer_v4(OTHER),
+            session_id: 0,
+            reply,
+        }),
+        (
+            RibUpdate::BeginRouteRefresh {
+                peer: peer_v4(OTHER),
+                session_id: 0,
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+            },
+            None,
+        ),
+        (RibUpdate::ExpireInjectionLeases { leases: vec![] }, None),
+        (
+            RibUpdate::RpkiCacheUpdate {
+                table: Arc::new(rustbgpd_rpki::VrpTable::new(vec![])),
+                delta: None,
+                admission: None,
+            },
+            None,
+        ),
+        command(|reply| RibUpdate::PublishDampeningOwners {
+            publication: 1,
+            owners: vec![],
+            reply,
+        }),
+    ];
+    for (message, answered) in cases {
+        assert_held_behind_a_retained_session_end(message, answered).await;
+    }
+}
+
+fn other_route_input(edit: impl FnOnce(&mut RibUpdate)) -> RibUpdate {
+    let mut update = test_routes_received(peer_v4(OTHER), vec![]);
+    edit(&mut update);
+    update
+}
+
+// Another peer's End-of-RIB can complete a selection deferral that the
+// retained teardown would have re-armed, so it does not pass the end.
+#[tokio::test]
+async fn end_of_rib_from_another_peer_waits_for_a_retained_session_end() {
+    let end_of_rib = RibUpdate::EndOfRib {
+        peer: peer_v4(OTHER),
+        session_id: 0,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    };
+    assert_held_behind_a_retained_session_end(end_of_rib, None).await;
+}
+
+// A FlowSpec rule is validated against the best unicast route covering its
+// destination (RFC 9117), which can still be the ended session's. Route input
+// passes a retained end only as unicast, EVPN, labeled or VPN routes; BGP-LS
+// and RT-Constrain input is held with the rest.
+#[tokio::test]
+async fn only_plain_route_input_from_another_peer_passes_a_retained_session_end() {
+    let other = peer_v4(OTHER);
+    let rule = crate::test_support::make_flowspec_route(OTHER);
+    let key = rule.selection_key();
+    let wire = other_route_input(|update| {
+        let RibUpdate::RoutesReceived {
+            flowspec_announced, ..
+        } = update
+        else {
+            unreachable!()
+        };
+        flowspec_announced.push(rule.clone());
+    });
+    let held = [
+        other_route_input(|update| {
+            let RibUpdate::RoutesReceived {
+                flowspec_announced, ..
+            } = update
+            else {
+                unreachable!()
+            };
+            flowspec_announced.push(rule.clone());
+        }),
+        other_route_input(|update| {
+            let RibUpdate::RoutesReceived {
+                flowspec_withdrawn, ..
+            } = update
+            else {
+                unreachable!()
+            };
+            flowspec_withdrawn.push(key);
+        }),
+        RibUpdate::WireRoutesReceived(crate::update::WireRoutesReceived::new(wire, 0)),
+        RibUpdate::BgpLsRoutesReceived {
+            peer: other,
+            session_id: 0,
+            announced: vec![],
+            withdrawn: vec![],
+        },
+        RibUpdate::RtcRoutesReceived {
+            peer: other,
+            session_id: 0,
+            announced: vec![],
+            withdrawn: vec![],
+        },
+    ];
+    for message in held {
+        assert_held_behind_a_retained_session_end(message, None).await;
+    }
+
+    let (mut manager, primary, _receivers) = cold_build_with_policy_members(2048, 1);
+    let _policy_reply = clear_policy(&mut manager, receiver(1));
+    primary
+        .try_send(RibUpdate::PeerDown {
+            peer: receiver(1),
+            session_id: 1,
+        })
+        .unwrap();
+    assert!(manager.drain_ready_updates().await);
+    assert!(manager.session_end_retained());
+    let passing = [
+        other_marker().1,
+        RibUpdate::WireRoutesReceived(crate::update::WireRoutesReceived::new(other_marker().1, 0)),
+        RibUpdate::VpnRoutesReceived {
+            peer: other,
+            session_id: 0,
+            announced: vec![],
+            withdrawn: vec![],
+        },
+        RibUpdate::LabeledRoutesReceived {
+            peer: other,
+            session_id: 0,
+            announced: vec![],
+            withdrawn: vec![],
+        },
+    ];
+    for message in passing {
+        assert!(
+            matches!(
+                manager.first_group_primary_intake(&message),
+                first_group_order::Intake::Apply
+            ),
+            "plain route input was held"
+        );
+    }
+}
+
+// The source of each unicast prefix a receiver currently holds.
+#[derive(Default)]
+struct Held(BTreeMap<Prefix, PeerId>);
+
+impl Held {
+    fn drain(&mut self, rx: &mut mpsc::Receiver<OutboundRouteUpdate>) {
+        while let Ok(update) = rx.try_recv() {
+            for (prefix, _) in update.unicast_withdrawals() {
+                self.0.remove(prefix);
+            }
+            for row in update
+                .announce
+                .iter()
+                .filter(|row| update.announce_source_exclusion != Some(row.peer))
+            {
+                self.0.insert(row.prefix, row.peer);
+            }
+        }
+    }
+}
+
+// Peers A and B both announce one prefix and B's path is best. A's session
+// ends behind its claimed policy writer, then B withdraws. The withdrawal
+// passes the retained end, so until the writer commits the receivers hold A's
+// path in place of the withdrawn one (held for the whole build, the
+// withdrawal waited behind the end). A's teardown is the first unit after the
+// commit and removes it: no path via A outlives the build.
+#[tokio::test]
+async fn withdrawal_passing_a_retained_session_end_leaves_no_path_after_the_build() {
+    let (a, b) = (receiver(1), receiver(2));
+    let shared = prefixes(u16::MAX - 2)[0];
+    let own = prefixes(u16::MAX - 3)[0];
+    let mut build_turns = [0usize; 2];
+    for withdraws in [false, true] {
+        let (mut manager, primary, mut receivers) = cold_build_with_policy_members(8192, 3);
+        manager.handle_update(super::lifecycle::test_session_routes_received(
+            a,
+            1,
+            vec![route(shared, MEMBER(1), 150), route(own, MEMBER(1), 150)],
+        ));
+        manager.handle_update(super::lifecycle::test_session_routes_received(
+            b,
+            1,
+            vec![route(shared, MEMBER(2), 190)],
+        ));
+        drain_route_chunks(&mut manager);
+        let mut held = [Held::default(), Held::default()];
+        let mut settle = |manager: &mut RibManager, held: &mut [Held; 2]| {
+            drain_route_chunks(manager);
+            held[0].drain(&mut receivers[1]);
+            held[1].drain(&mut receivers[2]);
+            while receivers[0].try_recv().is_ok() || receivers[3].try_recv().is_ok() {}
+        };
+        settle(&mut manager, &mut held);
+        // [B's view, the observer's view]. B is not sent its own best path.
+        assert_eq!(held[0].0.get(&shared), None);
+        assert_eq!(held[1].0.get(&shared), Some(&b));
+
+        let mut policy_reply = clear_policy(&mut manager, a);
+        primary
+            .try_send(RibUpdate::PeerDown {
+                peer: a,
+                session_id: 1,
+            })
+            .unwrap();
+        if withdraws {
+            let mut withdrawal = super::lifecycle::test_session_routes_received(b, 1, vec![]);
+            let RibUpdate::RoutesReceived { withdrawn, .. } = &mut withdrawal else {
+                unreachable!()
+            };
+            withdrawn.push((shared, 0));
+            primary.try_send(withdrawal).unwrap();
+        }
+        while manager.drain_ready_updates().await {}
+        settle(&mut manager, &mut held);
+        assert!(manager.first_group_pending_writer().is_some());
+        assert!(manager.outbound_peers.contains_key(&a));
+        let during = if withdraws { a } else { b };
+        assert_eq!(manager.loc_rib.get(&shared).unwrap().peer, during);
+        assert_eq!(held[1].0.get(&shared), Some(&during));
+        // The withdrawing peer is sent A's path too; it held none before.
+        assert_eq!(held[0].0.get(&shared), withdraws.then_some(&a));
+
+        while manager.first_group_pending_writer().is_some() {
+            manager.advance_first_group_build();
+            build_turns[usize::from(withdraws)] += 1;
+            assert!(build_turns[usize::from(withdraws)] < 100_000);
+        }
+        assert_eq!(policy_reply.try_recv().unwrap(), Ok(()));
+        assert!(manager.try_recv_primary().is_none());
+        let end = manager.take_first_group_deferred_intent().unwrap();
+        assert!(matches!(end, RibUpdate::PeerDown { peer, .. } if peer == a));
+        manager.handle_update(end);
+        finish(&mut manager);
+        settle(&mut manager, &mut held);
+        assert!(!manager.outbound_peers.contains_key(&a));
+        assert!(manager.loc_rib.get(&own).is_none());
+        for view in &held {
+            assert!(!view.0.contains_key(&own));
+            assert!(view.0.values().all(|source| *source != a));
+        }
+        if withdraws {
+            assert!(manager.loc_rib.get(&shared).is_none());
+            assert!(held.iter().all(|view| !view.0.contains_key(&shared)));
+        } else {
+            assert_eq!(held[1].0.get(&shared), Some(&b));
+        }
+    }
+    assert_eq!(
+        build_turns[1], build_turns[0],
+        "build turns before the teardown, with the withdrawal and without"
+    );
+}
+
+// Unrelated input that passes a retained session end must not postpone the
+// writer and the end without bound: once it overflows the repair log, the
+// retry owns every turn.
+#[tokio::test]
+async fn repair_overflow_behind_a_retained_session_end_seals_the_lane() {
+    let (mut manager, primary, mut receivers) = cold_build_with_policy_members(8192, 1);
+    let incumbent = receiver(1);
+    let mut policy_reply = clear_policy(&mut manager, incumbent);
+    primary
+        .try_send(RibUpdate::PeerDown {
+            peer: incumbent,
+            session_id: 1,
+        })
+        .unwrap();
+    // An endless feed of new prefixes from another peer. A four-chunk message
+    // changes more keys per build turn than the repair log is serviced.
+    let mut sent = 0u32;
+    let mut feed = |manager: &RibManager| {
+        while manager.primary_backlog() < 8 {
+            let routes = (0..4096)
+                .map(|i| {
+                    let prefix = Ipv4Prefix::new(Ipv4Addr::from(0x0b00_0000 + sent * 4096 + i), 32);
+                    route(Prefix::V4(prefix), OTHER, 100)
+                })
+                .collect();
+            if primary
+                .try_send(test_routes_received(peer_v4(OTHER), routes))
+                .is_err()
+            {
+                break;
+            }
+            sent += 1;
+        }
+    };
+    // The run loop's schedule: one primary unit, then one build turn.
+    let (mut turns, mut overflows, mut retiring) = (0usize, 0usize, false);
+    while manager.first_group_pending_writer().is_some() {
+        feed(&manager);
+        for rx in &mut receivers {
+            while rx.try_recv().is_ok() {}
+        }
+        manager.drain_ready_updates().await;
+        manager.advance_first_group_build();
+        turns += 1;
+        let now_retiring = manager.first_group_retiring_slots().is_some();
+        overflows += usize::from(now_retiring && !retiring);
+        retiring = now_retiring;
+        assert!(
+            turns < 2_000,
+            "the writer and the session end were postponed for {turns} turns \
+             and {overflows} discarded builds"
+        );
+    }
+    assert_eq!(overflows, 1, "builds discarded before the lane sealed");
+    assert_eq!(policy_reply.try_recv().unwrap(), Ok(()));
+    assert!(manager.try_recv_primary().is_none());
+    let end = manager.take_first_group_deferred_intent().unwrap();
+    manager.handle_update(end);
+    assert!(!manager.outbound_peers.contains_key(&incumbent));
+}
+
+// One stale route of a restarted, reconnected peer that has not sent
+// End-of-RIB, a claimed writer, and a queued command that concerns every
+// peer, so that this peer's next session end is retained behind it.
+fn restarted_source_behind_a_writer(
+    llgr: bool,
+) -> (RibManager, mpsc::Sender<RibUpdate>, Prefix, RibUpdate) {
+    let (mut manager, primary, _) = fixture(0);
+    let incumbent = receiver(1);
+    drop(join(&mut manager, incumbent, 1, &DUAL));
+    let slow = |slow| RibUpdate::PeerSlowState {
+        peer: incumbent,
+        session_id: 1,
+        slow,
+    };
+    manager.handle_update(slow(true));
+    let source = peer_v4(SOURCE);
+    let stale = prefixes(1)[0];
+    manager.handle_update(test_routes_received(
+        source,
+        vec![route(stale, SOURCE, 100)],
+    ));
+    drain_route_chunks(&mut manager);
+    let restart = |session_id| RibUpdate::PeerGracefulRestart {
+        peer: source,
+        session_id,
+        restart_time: 10,
+        stale_routes_time: 30,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: llgr,
+        peer_llgr_families: if llgr {
+            vec![rustbgpd_wire::LlgrFamily {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                forwarding_preserved: false,
+                stale_time: 3600,
+            }]
+        } else {
+            vec![]
+        },
+        llgr_stale_time: if llgr { 3600 } else { 0 },
+    };
+    if llgr {
+        manager.handle_update(restart(0));
+        manager.handle_update(registering_peer_up(source, 1));
+        assert!(manager.loc_rib.get(&stale).unwrap().is_stale);
+    }
+    drop(join(&mut manager, receiver(2), 1, &DUAL));
+    manager.handle_update(slow(false));
+    assert!(manager.first_group_pending_writer().is_some());
+    let (reply, reobserved) = oneshot::channel();
+    std::mem::forget(reobserved);
+    primary
+        .try_send(RibUpdate::ReobserveConditionalAdvertisements {
+            datasets: vec![],
+            changed: vec![],
+            reply,
+        })
+        .unwrap();
+    (manager, primary, stale, restart(u64::from(llgr)))
+}
+
+// The run loop's order around one due timer: a due replay, then the sealed
+// owner, then the drain that precedes the expiry.
+async fn drain_until_expiry_may_fire(manager: &mut RibManager, timer: ExpiryTimer) {
+    for _ in 0..512 {
+        if let Some(intent) = manager.take_first_group_deferred_intent() {
+            manager.handle_update(intent);
+        } else if manager.first_group_commit_remaining == Some(0)
+            && manager.first_group_pending_writer().is_some()
+        {
+            manager.advance_first_group_build();
+        } else if !manager.drain_before_expiry(timer).await {
+            assert!(manager.expiry_cutoffs.captured_at(timer).is_none());
+            return;
+        }
+    }
+    panic!("the expiry never became eligible");
+}
+
+// A second restart before End-of-RIB deletes the routes still stale from the
+// first (RFC 4724). Run after the stale timer instead, they would first be
+// promoted to long-lived stale and then survive the restart.
+#[tokio::test(start_paused = true)]
+async fn gr_expiry_waits_for_a_retained_second_restart_end() {
+    let (mut manager, primary, stale, restart) = restarted_source_behind_a_writer(true);
+    let source = peer_v4(SOURCE);
+    primary.try_send(restart).unwrap();
+    let due = manager.gr_stale_deadlines[&source];
+    tokio::time::advance(due - tokio::time::Instant::now()).await;
+    let now = tokio::time::Instant::now();
+    let timer = ExpiryTimer::GrStale;
+    manager
+        .expiry_cutoffs
+        .observe(timer, Some(due), now, manager.primary_backlog());
+    drain_until_expiry_may_fire(&mut manager, timer).await;
+    assert!(manager.first_group_pending_writer().is_none());
+    assert!(manager.first_group_deferred_intents.is_empty());
+    if manager
+        .gr_stale_deadlines
+        .get(&source)
+        .is_some_and(|deadline| *deadline <= now)
+    {
+        manager.sweep_gr_stale(source);
+    }
+    assert!(
+        manager.loc_rib.get(&stale).is_none(),
+        "the unrefreshed stale route outlived the second restart"
+    );
+}
+
+// A restart retains the peer's routes. Run after a due refresh-window
+// expiry instead, the unrefreshed route would already have been deleted.
+#[tokio::test(start_paused = true)]
+async fn refresh_window_expiry_waits_for_a_retained_restart_end() {
+    let (mut manager, primary, kept, restart) = restarted_source_behind_a_writer(false);
+    let source = peer_v4(SOURCE);
+    manager.handle_update(RibUpdate::BeginRouteRefresh {
+        peer: source,
+        session_id: 0,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    });
+    let due = manager
+        .next_refresh_deadline()
+        .expect("an open refresh window");
+    primary.try_send(restart).unwrap();
+    tokio::time::advance(due - tokio::time::Instant::now()).await;
+    let now = tokio::time::Instant::now();
+    let timer = ExpiryTimer::RefreshWindow;
+    manager
+        .expiry_cutoffs
+        .observe(timer, Some(due), now, manager.primary_backlog());
+    drain_until_expiry_may_fire(&mut manager, timer).await;
+    assert!(manager.first_group_deferred_intents.is_empty());
+    manager.expire_refresh_windows(now);
+    assert!(
+        manager
+            .loc_rib
+            .get(&kept)
+            .is_some_and(|route| route.is_stale),
+        "the restart retains the route the refresh had not replaced"
+    );
 }

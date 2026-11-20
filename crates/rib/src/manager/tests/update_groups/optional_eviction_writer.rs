@@ -236,4 +236,89 @@ async fn late_policy_writer_uses_old_authority_until_optional_eviction_finishes(
     Received::initial(&mut cold, &expected, &[]);
 }
 
+// A family unlock or slow-state clear is normally kept in the ordered window
+// while an optional destination retires, and later route input passes it.
+// Behind a retained session end it holds the FIFO head: the exports of that
+// later input depend on it.
+#[tokio::test]
+async fn family_unlock_holds_the_head_behind_a_session_end_during_optional_eviction() {
+    use crate::manager::first_group_order::Intake;
+    for unlock in [true, false] {
+        let (mut manager, members, _receivers) = direct_clean_transition_manager(3, 0, None);
+        manager.outbound_row_credit_override = None;
+        distribute_direct_routes(&mut manager, OVERLAP_SOURCE, (0..ROWS).map(overlap_prefix));
+        let target = community_chain(NEXT_TAG);
+        completed_preparation(&mut manager, members[0], &target);
+        manager.first_group_build_min_routes = 1;
+        manager.initial_dump_defer_min_routes = 1;
+        let _cold = join_overlap_founder(&mut manager, 1);
+        for _ in 0..3 {
+            if manager.optional_destination_retirement_active() {
+                break;
+            }
+            manager.advance_pending_initial_registration();
+        }
+        assert!(manager.optional_destination_retirement_active());
+        manager.flush_poll_budget = std::time::Duration::MAX;
+        let (primary, rx) = mpsc::channel(16);
+        manager.rx = rx;
+
+        let (reply, _applied) = oneshot::channel();
+        primary
+            .try_send(RibUpdate::ReplacePeerExportPolicy {
+                peer: members[0],
+                export_policy: Some(target),
+                reply,
+            })
+            .unwrap();
+        assert!(manager.drain_ready_updates().await);
+        let (peer, session_id) = (members[1], 0);
+        let state = || {
+            if unlock {
+                RibUpdate::PeerFamilySendable {
+                    peer,
+                    session_id,
+                    family: (Afi::Ipv6, Safi::Unicast),
+                    add_path_send_limit: None,
+                }
+            } else {
+                RibUpdate::PeerSlowState {
+                    peer,
+                    session_id,
+                    slow: false,
+                }
+            }
+        };
+        assert!(matches!(
+            manager.first_group_primary_intake(&state()),
+            Intake::Retain
+        ));
+
+        primary
+            .try_send(RibUpdate::PeerDown {
+                peer: members[0],
+                session_id: 0,
+            })
+            .unwrap();
+        primary.try_send(state()).unwrap();
+        while manager.drain_ready_updates().await {}
+        assert!(manager.optional_destination_retirement_active());
+        assert_eq!(manager.first_group_deferred_intents.len(), 2);
+        assert!(manager.session_end_retained());
+        assert!(
+            manager.primary_lookahead.as_ref().is_some_and(
+                |head| std::mem::discriminant(head) == std::mem::discriminant(&state())
+            ),
+            "the state change passed the retained session end"
+        );
+        assert!(manager.first_group_commit_frontier_reached());
+
+        while manager.optional_destination_retirement_active() {
+            manager.advance_optional_destination_retirement();
+        }
+        assert!(!manager.first_group_commit_frontier_reached());
+        assert!(manager.first_group_replay_due());
+    }
+}
+
 mod adopted_inventory;
