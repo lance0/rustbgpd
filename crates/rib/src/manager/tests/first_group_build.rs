@@ -2320,6 +2320,51 @@ async fn a_burst_leaves_the_founder_its_slot_while_a_destination_waits() {
     }
 }
 
+// The same on the real actor loop: the command replies while a good part
+// of the feed is still queued behind it. Before, it replied only after the
+// last message, once the founder's build had caught up.
+#[tokio::test]
+async fn actor_runs_a_waiting_destination_during_a_feed_that_outruns_the_founder() {
+    const MESSAGES: u32 = 128;
+    const ROWS: u32 = 4096;
+    let (mut manager, _fixture_primary, mut receivers) = cold_build_with_policy_members(8192, 1);
+    let (primary, rx) = mpsc::channel(MESSAGES as usize + 16);
+    manager.rx = rx;
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+        replacements: vec![crate::update::PeerExportPolicyReplacement {
+            peer: receiver(1),
+            export_policy: Some(super::update_groups::community_chain(0xfde8_2415)),
+        }],
+        reply,
+    });
+    assert_eq!(manager.first_group_deferred_intents.len(), 1);
+    for message in 0..MESSAGES {
+        primary
+            .try_send(new_prefixes(message * ROWS, ROWS))
+            .unwrap();
+    }
+    let actor = tokio::spawn(manager.run_actor());
+    let queued = tokio::time::timeout(Duration::from_secs(300), async {
+        loop {
+            for rx in &mut receivers {
+                while rx.try_recv().is_ok() {}
+            }
+            if let Ok(result) = response.try_recv() {
+                assert!(result.is_ok(), "{result:?}");
+                break primary.max_capacity() - primary.capacity();
+            }
+            assert!(!actor.is_finished());
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the command replies");
+    actor.abort();
+    eprintln!("{queued} of {MESSAGES} messages still queued at the reply");
+    assert!(queued >= MESSAGES as usize / 4, "{queued} messages left");
+}
+
 // One stale route of a restarted, reconnected peer that has not sent
 // End-of-RIB, a claimed writer, and a queued command that concerns every
 // peer, so that this peer's next session end is retained behind it.
