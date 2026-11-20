@@ -1241,6 +1241,25 @@ impl GroupEvalAccumulator {
         checkpoint(true);
     }
 
+    /// Add another accumulator's counts. `last` stays with its own walk.
+    pub(in crate::manager) fn absorb(&mut self, other: Self) {
+        let add = |rows: &mut Vec<(Option<PolicyLabel>, PolicyAction, u64)>, from| {
+            for (policy, action, n) in from {
+                match rows
+                    .iter_mut()
+                    .find(|(p, a, _)| *a == action && *p == policy)
+                {
+                    Some((_, _, total)) => *total += n,
+                    None => rows.push((policy, action, n)),
+                }
+            }
+        };
+        add(&mut self.totals, other.totals);
+        for (source, rows) in other.per_source {
+            add(self.per_source.entry(source).or_default(), rows);
+        }
+    }
+
     /// Record one chain evaluation for the route sourced by `source`.
     pub(in crate::manager) fn record(&mut self, evaluation: &PolicyEvaluation, source: PeerId) {
         bump_eval_row(

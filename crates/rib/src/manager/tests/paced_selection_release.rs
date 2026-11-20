@@ -672,18 +672,9 @@ fn live_joins_on_both_sides_of_enrollment_receive_the_full_released_family() {
     assert_eq!(manager.release_peer_batch(None, 1), []);
 }
 
-#[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one release transcript checks admission, refusal and corrective replay of per-client-best denials"
-)]
-fn refused_pcb_release_keeps_member_denials_for_corrective_admission() {
+fn deny_local_pref_from(local_pref: u32) -> rustbgpd_policy::PolicyChain {
     use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications};
-    let (_tx, rx) = mpsc::channel(8);
-    let mut manager = gated_source(rx);
-    manager.test_force_ungrouped = false;
-    let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
-    let deny = PolicyChain::new(vec![Policy {
+    PolicyChain::new(vec![Policy {
         entries: vec![PolicyStatement {
             prefix: None,
             ge: None,
@@ -698,7 +689,7 @@ fn refused_pcb_release_keeps_member_denials_for_corrective_admission() {
             match_aspa_validation: None,
             match_as_path_length_ge: None,
             match_as_path_length_le: None,
-            match_local_pref_ge: Some(200),
+            match_local_pref_ge: Some(local_pref),
             match_local_pref_le: None,
             match_med_ge: None,
             match_med_le: None,
@@ -706,7 +697,20 @@ fn refused_pcb_release_keeps_member_denials_for_corrective_admission() {
             modifications: RouteModifications::default(),
         }],
         default_action: PolicyAction::Permit,
-    }]);
+    }])
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one release transcript checks admission, refusal and corrective replay of per-client-best denials"
+)]
+fn refused_pcb_release_keeps_member_denials_for_corrective_admission() {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = gated_source(rx);
+    manager.test_force_ungrouped = false;
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let deny = deny_local_pref_from(200);
     let register = |manager: &mut RibManager, peer: PeerId| {
         let (tx, rx) = mpsc::channel(8);
         let mut registration = registering_peer_up(peer, 2);
@@ -966,37 +970,33 @@ fn tally(receivers: &mut [mpsc::Receiver<OutboundRouteUpdate>], rows: u32) -> (u
 
 #[test]
 fn a_per_client_best_release_batch_is_not_paged_by_prefix_times_member() {
-    let mut failures = Vec::new();
-    for (members, rows) in [(4_usize, 64_u32), (32, 64), (32, 256)] {
-        for per_client in [false, true] {
+    for (members, rows) in [(4_usize, 64_u32), (32, 64), (32, 256), (40, 1_024)] {
+        let [ordinary, per_client] = [false, true].map(|per_client| {
             let (mut manager, _tx, mut receivers) = held_client_group(members, rows, per_client);
             let work = drive_release(&mut manager);
             let (envelopes, largest) = tally(&mut receivers, rows);
-            let rows = rows as usize;
             eprintln!(
                 "release-work per_client_best={per_client} members={members} rows={rows} \
                  fenced_polls={} total_polls={} handoffs={} envelopes_per_member={envelopes} \
                  max_rows_per_envelope={largest}",
                 work.longest_fenced_polls, work.polls, work.handoffs
             );
-            // Ranking is per prefix and member delivery is per 16 members, so a
-            // paged batch is additive in the two. One envelope carries a page of rows.
-            let poll_bound = 8 * rows + 4 * members;
-            if work.longest_fenced_polls > poll_bound {
-                failures.push(format!(
-                    "per_client_best={per_client} {members}x{rows}: {} fenced polls > {poll_bound}",
-                    work.longest_fenced_polls
-                ));
-            }
-            if envelopes > rows.div_ceil(64) {
-                failures.push(format!(
-                    "per_client_best={per_client} {members}x{rows}: {envelopes} envelopes for one member > {}",
-                    rows.div_ceil(64)
-                ));
-            }
-        }
+            (work, envelopes, largest)
+        });
+        // One source and one candidate: four ranking units a prefix, 128 a poll.
+        // Nothing else separates the two groups: no poll per prefix, none per
+        // member, and in particular no denial poll for a member with no denials.
+        let ranking = (rows as usize).div_ceil(32) + 2;
+        assert!(
+            per_client.0.longest_fenced_polls <= ordinary.0.longest_fenced_polls + ranking,
+            "{members}x{rows}: {} fenced polls against {} for the ordinary group",
+            per_client.0.longest_fenced_polls,
+            ordinary.0.longest_fenced_polls
+        );
+        assert_eq!(per_client.0.handoffs, ordinary.0.handoffs);
+        assert_eq!((per_client.1, per_client.2), (1, rows as usize));
+        assert_eq!((ordinary.1, ordinary.2), (1, rows as usize));
     }
-    assert!(failures.is_empty(), "{failures:#?}");
 }
 
 const TIMED_SHAPES: [(usize, u32); 2] = [(32, 16_384), (150, 16_384)];
@@ -1135,5 +1135,480 @@ async fn timing_client_group_release_through_the_actor_loop() {
             drop(tx);
             actor.await.unwrap();
         }
+    }
+}
+
+// A route-server client group whose members also source routes, checked
+// against a ranking computed here from the announced candidates.
+
+const RS_AS: u32 = 65_000;
+const OTHER_SOURCE: Ipv4Addr = Ipv4Addr::new(203, 0, 113, 7);
+const DENIED_FROM: u32 = 200;
+
+fn client_addr(n: usize) -> Ipv4Addr {
+    let IpAddr::V4(address) = client(n).addr() else {
+        unreachable!()
+    };
+    address
+}
+
+fn client_asn(n: usize) -> u32 {
+    64_600 + u32::try_from(n).unwrap()
+}
+
+fn rs_client(
+    manager: &mut RibManager,
+    n: usize,
+    rs_control: bool,
+    capacity: usize,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    if rs_control {
+        manager.handle_update(RibUpdate::SetPeerRsControl {
+            peer: client(n),
+            session_id: 2,
+            rs_control_asn: Some(RS_AS),
+        });
+    }
+    let mut registration = registering_peer_up(client(n), 2);
+    let RibUpdate::PeerUp {
+        peer_asn,
+        outbound_tx,
+        export_policy,
+        sendable_families,
+        per_client_best,
+        ..
+    } = &mut registration
+    else {
+        unreachable!()
+    };
+    let (tx, rx) = mpsc::channel(capacity);
+    *peer_asn = client_asn(n);
+    *outbound_tx = tx;
+    *export_policy = Some(deny_local_pref_from(DENIED_FROM));
+    *sendable_families = vec![FAMILY];
+    *per_client_best = true;
+    manager.handle_update(registration);
+    rx
+}
+
+fn candidate(n: u32, source: Ipv4Addr, local_pref: u32) -> Route {
+    let Prefix::V4(prefix) = make_indexed_route(n, source).prefix else {
+        unreachable!()
+    };
+    make_route_with_lp(prefix, source, local_pref)
+}
+
+/// Standard community `0:asn`: do not announce to that client.
+fn hidden_from(mut route: Route, asn: u32) -> Route {
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.push(PathAttribute::Communities(vec![asn]));
+    });
+    route
+}
+
+fn routes_from(
+    peer: PeerId,
+    session_id: u64,
+    announced: Vec<Route>,
+    withdrawn: Vec<Prefix>,
+) -> RibUpdate {
+    RibUpdate::RoutesReceived {
+        peer,
+        session_id,
+        announced,
+        withdrawn: withdrawn.into_iter().map(|prefix| (prefix, 0)).collect(),
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    }
+}
+
+/// Every announced candidate, as the test sent it.
+#[derive(Default)]
+struct Candidates(BTreeMap<Prefix, Vec<Route>>);
+
+impl Candidates {
+    fn send(&mut self, manager: &mut RibManager, session_id: u64, announced: Vec<Route>) {
+        let peer = announced[0].peer;
+        for route in &announced {
+            let paths = self.0.entry(route.prefix).or_default();
+            paths.retain(|old| (old.peer, old.path_id) != (route.peer, route.path_id));
+            paths.push(route.clone());
+        }
+        manager.handle_update(routes_from(peer, session_id, announced, vec![]));
+        drain_route_chunks(manager);
+    }
+
+    fn withdraw(
+        &mut self,
+        manager: &mut RibManager,
+        peer: PeerId,
+        session_id: u64,
+        prefixes: Vec<Prefix>,
+    ) {
+        for prefix in &prefixes {
+            let paths = self.0.get_mut(prefix).expect("announced prefix");
+            paths.retain(|old| old.peer != peer);
+            if paths.is_empty() {
+                self.0.remove(prefix);
+            }
+        }
+        manager.handle_update(routes_from(peer, session_id, vec![], prefixes));
+        drain_route_chunks(manager);
+    }
+
+    /// The first candidate in best-path order that policy permits, the
+    /// client did not source and no control community hides from it.
+    fn table(
+        &self,
+        member: PeerId,
+        rs_control_asn: Option<u32>,
+    ) -> BTreeMap<Prefix, (PeerId, u32)> {
+        let mut table = BTreeMap::new();
+        for (prefix, paths) in &self.0 {
+            let mut ranked: Vec<_> = paths.iter().collect();
+            ranked.sort_by(|a, b| crate::best_path::best_path_cmp(a, b));
+            if let Some(best) = ranked.into_iter().find(|route| {
+                route.local_pref() < DENIED_FROM
+                    && route.peer != member
+                    && !rs_control_asn.is_some_and(|asn| route.communities().contains(&asn))
+            }) {
+                table.insert(*prefix, (best.peer, best.local_pref()));
+            }
+        }
+        table
+    }
+}
+
+#[derive(Default)]
+struct ClientTable {
+    rows: BTreeMap<Prefix, (PeerId, u32)>,
+    envelopes: usize,
+    largest: usize,
+    markers: usize,
+    // A corrective resync may repeat a row the client already holds.
+    replayed: bool,
+}
+
+impl ClientTable {
+    fn receive(&mut self, receiver: &mut mpsc::Receiver<OutboundRouteUpdate>) {
+        while let Ok(update) = receiver.try_recv() {
+            let rows = !update.announce.is_empty() || update.unicast_withdrawals().next().is_some();
+            assert!(!rows || self.markers == 0, "a row followed End-of-RIB");
+            self.envelopes += usize::from(rows);
+            self.largest = self.largest.max(update.announce.len());
+            for &(prefix, _) in update.unicast_withdrawals() {
+                assert!(
+                    self.rows.remove(&prefix).is_some(),
+                    "withdrew {prefix} twice"
+                );
+            }
+            for route in update.announce.iter() {
+                assert_eq!(route.path_id, 0);
+                let row = (route.peer, route.local_pref());
+                assert!(
+                    self.rows.insert(route.prefix, row) != Some(row) || self.replayed,
+                    "announced {} unchanged",
+                    route.prefix
+                );
+            }
+            self.markers += usize::from(update.end_of_rib.contains(&FAMILY));
+        }
+    }
+}
+
+fn denials(manager: &RibManager, peer: PeerId) -> BTreeSet<(Prefix, PeerId, u32)> {
+    manager
+        .policy_filtered_routes
+        .get(&peer)
+        .into_iter()
+        .flat_map(|routes| routes.values())
+        .flat_map(crate::manager::PolicyFilteredBucket::iter)
+        .map(|key| {
+            assert_eq!(key.target_peer, peer);
+            (key.prefix, key.source_peer, key.path_id)
+        })
+        .collect()
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one transcript populates the group, changes it under a hold and checks every client"
+)]
+fn per_client_best_release_matches_the_ranking_for_every_client() {
+    const CLIENTS: usize = 20;
+    const SLOW: usize = 7;
+    const CROWDED: u32 = 900;
+    let source = peer_v4(SOURCE);
+    let other = peer_v4(OTHER_SOURCE);
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.test_force_ungrouped = false;
+    register_test_peer(&mut manager, source, 77);
+    register_test_peer(&mut manager, other, 1);
+    // Even clients enforce control communities, on both 16-member pages.
+    let rs_control = |n: usize| (n % 2 == 0).then(|| client_asn(n));
+    let mut receivers: Vec<_> = (0..CLIENTS)
+        .map(|n| rs_client(&mut manager, n, rs_control(n).is_some(), 512))
+        .collect();
+    let gid = manager.grouped_member_of(client(0)).expect("grouped");
+    for n in 0..CLIENTS {
+        assert_eq!(manager.grouped_member_of(client(n)), Some(gid));
+    }
+    assert!(manager.group_ribs[&gid].per_client_best);
+    for receiver in &mut receivers {
+        while receiver.try_recv().is_ok() {}
+    }
+
+    // Populate: every prefix has two to four candidates of mixed preference,
+    // some denied, some hidden from one control-enforcing client.
+    let mut sent = Candidates::default();
+    let mut tables: Vec<ClientTable> = (0..CLIENTS).map(|_| ClientTable::default()).collect();
+    let lp = |n: u32, salt: u32| 100 + 10 * ((n * 7 + salt * 13) % 12);
+    let from_source = |n: u32| {
+        let route = candidate(n, SOURCE, lp(n, 1));
+        match n % 11 {
+            0 => hidden_from(route, client_asn(4)),
+            5 => hidden_from(route, client_asn(18)),
+            _ => route,
+        }
+    };
+    sent.send(&mut manager, 77, (0..300).map(from_source).collect());
+    sent.send(
+        &mut manager,
+        1,
+        (0..300)
+            .map(|n| candidate(n, OTHER_SOURCE, lp(n, 2)))
+            .collect(),
+    );
+    for member in [0_usize, 1] {
+        let salt = 3 + u32::try_from(member).unwrap();
+        sent.send(
+            &mut manager,
+            2,
+            (0..300)
+                .filter(|n| n % 3 != salt % 3)
+                .map(|n| candidate(n, client_addr(member), lp(n, salt)))
+                .collect(),
+        );
+    }
+    for (n, receiver) in receivers.iter_mut().enumerate() {
+        tables[n].receive(receiver);
+        assert_eq!(
+            tables[n].rows,
+            sent.table(client(n), rs_control(n)),
+            "client {n} before the hold"
+        );
+        tables[n].envelopes = 0;
+    }
+    // Control communities change what a client is sent.
+    assert_ne!(
+        sent.table(client(4), rs_control(4)),
+        sent.table(client(4), None)
+    );
+
+    // Hold the family with the tables populated, then change it underneath.
+    manager = manager.with_selection_deferral(SelectionDeferralConfig {
+        timeout: Duration::from_mins(1),
+        waiters: vec![SelectionDeferralWaiterConfig {
+            peer: source.into(),
+            families: vec![FAMILY],
+        }],
+    });
+    arm_selection_waiter(&mut manager, source, &[FAMILY]);
+    assert!(manager.selection_deferred(FAMILY));
+    for n in 0..CLIENTS {
+        manager.owe_eor(client(n), FAMILY);
+    }
+    let prefix_of = |n: u32| candidate(n, SOURCE, 0).prefix;
+    // Whole prefixes disappear, a winner disappears, a client becomes the
+    // source of the best path, a denied path takes the top rank, and new
+    // prefixes arrive. One prefix has more denied paths than a denial page.
+    for (peer, session) in [(source, 77), (other, 1), (client(0), 2), (client(1), 2)] {
+        let gone: Vec<_> = (0..300)
+            .filter(|n| n % 7 == 0)
+            .map(prefix_of)
+            .filter(|prefix| {
+                sent.0
+                    .get(prefix)
+                    .is_some_and(|paths| paths.iter().any(|route| route.peer == peer))
+            })
+            .collect();
+        sent.withdraw(&mut manager, peer, session, gone);
+    }
+    let winners_gone = (0..300).filter(|n| n % 7 == 1).map(prefix_of).collect();
+    sent.withdraw(&mut manager, source, 77, winners_gone);
+    sent.send(
+        &mut manager,
+        2,
+        (0..360)
+            .filter(|n| n % 7 == 2 || *n >= 300)
+            .map(|n| candidate(n, client_addr(0), 190))
+            .collect(),
+    );
+    let mut denied: Vec<_> = (0..360)
+        .filter(|n| n % 7 == 3 || *n >= 330)
+        .map(|n| candidate(n, OTHER_SOURCE, 300))
+        .collect();
+    denied.extend((1..=200).map(|path_id| {
+        let mut path = candidate(CROWDED, OTHER_SOURCE, 300);
+        path.path_id = path_id;
+        path
+    }));
+    sent.send(&mut manager, 1, denied);
+    sent.send(
+        &mut manager,
+        77,
+        (300..360)
+            .chain([CROWDED])
+            .map(|n| candidate(n, SOURCE, 120))
+            .collect(),
+    );
+    sent.send(
+        &mut manager,
+        2,
+        vec![candidate(CROWDED, client_addr(1), 150)],
+    );
+    for (n, receiver) in receivers.iter_mut().enumerate() {
+        tables[n].receive(receiver);
+        assert_eq!(
+            (tables[n].envelopes, tables[n].markers),
+            (0, 0),
+            "client {n} was sent a change under the hold"
+        );
+    }
+    // One client's writer is full for the whole release.
+    let slow = manager.outbound_peers[&client(SLOW)].clone();
+    while slow.try_send(OutboundRouteUpdate::default()).is_ok() {}
+
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: source,
+        session_id: 77,
+        afi: FAMILY.0,
+        safi: FAMILY.1,
+    });
+    drain_unicast_release(&mut manager);
+    assert!(manager.dirty_peers.contains(&client(SLOW)));
+    let expected = |n: usize| sent.table(client(n), rs_control(n));
+    for (n, receiver) in receivers.iter_mut().enumerate() {
+        if n == SLOW {
+            continue;
+        }
+        tables[n].receive(receiver);
+        assert_eq!(tables[n].rows, expected(n), "client {n} after the release");
+        assert_eq!(tables[n].markers, 1, "client {n} End-of-RIB");
+        // One stage for the batch and one for the crowded prefix.
+        assert_eq!(tables[n].envelopes, 2, "client {n} envelopes");
+    }
+    // The refused client recovers through its corrective resync.
+    tables[SLOW].receive(&mut receivers[SLOW]);
+    assert_eq!((tables[SLOW].envelopes, tables[SLOW].markers), (0, 0));
+    drain_resync_ticks(&mut manager);
+    assert!(!manager.dirty_peers.contains(&client(SLOW)));
+    tables[SLOW].replayed = true;
+    tables[SLOW].receive(&mut receivers[SLOW]);
+    assert_eq!(tables[SLOW].rows, expected(SLOW), "refused client");
+    assert_eq!(tables[SLOW].markers, 1, "refused client End-of-RIB");
+
+    // A client that sources the best path takes the next one.
+    let taken_over = prefix_of(2);
+    assert_eq!(expected(3)[&taken_over].0, client(0));
+    assert_ne!(expected(0)[&taken_over].0, client(0));
+    // Denials are the group's, minus the client's own paths.
+    let group = &manager.group_ribs[&gid];
+    let all: HashSet<Prefix> = sent.0.keys().copied().collect();
+    let crowded = prefix_of(CROWDED);
+    for n in 0..CLIENTS {
+        let from_group: BTreeSet<_> = group
+            .policy_filtered_for_member(client(n), &all)
+            .into_iter()
+            .map(|key| (key.prefix, key.source_peer, key.path_id))
+            .collect();
+        let recorded = denials(&manager, client(n));
+        assert_eq!(recorded, from_group, "client {n} denials");
+        assert_eq!(
+            recorded.iter().filter(|key| key.0 == crowded).count(),
+            200,
+            "client {n} crowded prefix"
+        );
+        assert!(recorded.contains(&(prefix_of(3), other, 0)));
+        assert!(recorded.iter().all(|key| sent.0.contains_key(&key.0)));
+        assert_eq!(
+            group.advertised_count_for(client(n)),
+            tables[n].rows.len(),
+            "client {n} advertised count"
+        );
+    }
+
+    // The synchronous ranking of every prefix finds nothing left to change.
+    let before: Vec<_> = (0..CLIENTS).map(|n| denials(&manager, client(n))).collect();
+    let mut events = manager.route_events_tx.subscribe();
+    manager.distribute_changes(&all, &all);
+    for (n, receiver) in receivers.iter_mut().enumerate() {
+        assert!(receiver.try_recv().is_err(), "client {n} synchronous delta");
+        assert_eq!(denials(&manager, client(n)), before[n]);
+    }
+    assert!(events.try_recv().is_err());
+}
+
+#[test]
+fn a_denial_heavy_per_client_best_batch_is_staged_in_bounded_parts() {
+    const PREFIXES: u32 = 3_000;
+    const DENIED: u32 = 8;
+    // Nine work units a prefix: the first stage to reach 2,048 holds 228.
+    const STAGE: u32 = 228;
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = gated_source(rx);
+    manager.test_force_ungrouped = false;
+    let mut receivers: Vec<_> = (0..4)
+        .map(|n| rs_client(&mut manager, n, false, 256))
+        .collect();
+    let mut routes = Vec::new();
+    for n in 0..PREFIXES {
+        routes.push(candidate(n, SOURCE, 100));
+        routes.extend((1..=DENIED).map(|path_id| {
+            let mut path = candidate(n, SOURCE, 300);
+            path.path_id = path_id;
+            path
+        }));
+    }
+    manager.handle_update(update(routes, vec![]));
+    drain_route_chunks(&mut manager);
+    let denied = |manager: &RibManager| {
+        manager
+            .export_policy_counters
+            .get(&client(0))
+            .map_or(0, |counters| {
+                counters.snapshot().export_policy_routes_denied
+            })
+    };
+    let before_release = denied(&manager);
+    manager.handle_update(source_end_of_rib());
+    let mut largest = 0;
+    while manager.unicast_release_runnable() {
+        let before = denied(&manager);
+        manager.advance_unicast_release();
+        largest = largest.max(denied(&manager) - before);
+    }
+    // Each prefix is under a denial page, so none is staged alone. A full
+    // batch of 1,024 prefixes carries 8,192 denials, more than one group
+    // stage or member page may.
+    assert_eq!(largest, u64::from(STAGE * DENIED), "denials in one poll");
+    assert_eq!(
+        denied(&manager) - before_release,
+        u64::from(PREFIXES * DENIED)
+    );
+    for (n, receiver) in receivers.iter_mut().enumerate() {
+        let mut table = ClientTable::default();
+        table.receive(receiver);
+        assert_eq!((table.rows.len(), table.markers), (PREFIXES as usize, 1));
+        assert_eq!(table.largest, STAGE as usize, "client {n}");
+        assert_eq!(
+            denials(&manager, client(n)).len(),
+            (PREFIXES * DENIED) as usize
+        );
     }
 }

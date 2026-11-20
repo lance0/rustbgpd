@@ -3,8 +3,8 @@
 
 use super::super::outbound_owing::CursorFloors;
 use super::super::update_groups::{GroupRibOut, GroupStageOutput, ReleaseFallback};
-use super::release_denials::{MemberVerdicts, ReleaseDenials};
-use super::release_pcb::{PreparedPcb, ReleasePcb};
+use super::release_denials::{DENIALS_PER_POLL, MemberVerdicts, ReleaseDenials};
+use super::release_pcb::{CANDIDATES_PER_POLL, PreparedPcb, PreparedPcbs, ReleasePcb};
 use super::{
     DistributionPass, ExactExportKey, ExportMemo, HashMap, HashSet, OutboundCommitBatch, PeerId,
     Prefix, RibManager, UnicastDistributionResult, rs_control,
@@ -13,6 +13,10 @@ use rustbgpd_wire::Afi;
 use std::collections::BTreeMap;
 
 const RELEASE_MEMBERS_PER_POLL: usize = 16;
+/// Prefixes plus denial and fallback rows one per-client-best group stage may
+/// carry. A clean batch of 1,024 prefixes fits; a member page stays within
+/// about twice an ordinary group's.
+const PCB_STAGE_WORK: usize = 2_048;
 
 pub(super) struct ReleaseMembers<'a> {
     pub(super) afi: Afi,
@@ -26,8 +30,7 @@ enum Phase {
     Classify(Option<PeerId>),
     MemberlessGroups(usize),
     Stage,
-    StagePcb(usize),
-    RankPcb(usize, Prefix),
+    RankPcb(usize),
     GroupDenials(usize),
     PrepareFallback(usize, Prefix),
     RetireFallback(usize, Prefix),
@@ -49,7 +52,12 @@ pub(in crate::manager) struct ReleaseDistribution {
     current: Vec<PeerId>,
     next_member: usize,
     pcb_keys: Vec<Prefix>,
-    pcb: Option<Box<ReleasePcb>>,
+    pcb: Option<(Prefix, Box<ReleasePcb>)>,
+    // Ranked prefixes with at most one page of denial and fallback history.
+    // They share one group stage and ordinary member pages.
+    batch: HashMap<Prefix, PreparedPcb>,
+    batch_work: usize,
+    // A prefix with more history, staged alone under the paged owners below.
     prepared: Option<Box<PreparedPcb>>,
     denials: Option<Box<ReleaseDenials>>,
     fallback: Option<Box<ReleaseFallback>>,
@@ -78,6 +86,8 @@ impl ReleaseDistribution {
             next_member: 0,
             pcb_keys: Vec::new(),
             pcb: None,
+            batch: HashMap::new(),
+            batch_work: 0,
             prepared: None,
             denials: None,
             fallback: None,
@@ -185,7 +195,7 @@ impl RibManager {
                         .is_some_and(|group| group.per_client_best)
                     {
                         pass.pcb_keys.extend(pass.prefixes.iter().copied());
-                        pass.phase = Phase::StagePcb(gid);
+                        pass.phase = Phase::RankPcb(gid);
                         return false;
                     }
                     pass.phase = self.next_release_group_phase(gid);
@@ -210,29 +220,50 @@ impl RibManager {
                 self.settle_eor_after_pass();
                 return true;
             }
-            Phase::StagePcb(gid) => {
-                // PCB ranks every eligible path, accounts for its denied
-                // candidates, and can keep a runner-up list for this prefix.
-                // Keep that work out of every other prefix's staging unit.
-                let prefix = pass.pcb_keys.pop().expect("pending PCB prefix");
-                pass.pcb_scope.clear();
-                pass.pcb_scope.insert(prefix);
-                pass.next_member = 0;
-                pass.pcb = Some(Box::default());
-                pass.phase = Phase::RankPcb(gid, prefix);
-            }
-            Phase::RankPcb(gid, prefix) => {
-                if let Some(mut prepared) = self.poll_release_pcb(
-                    gid,
-                    prefix,
-                    pass.pcb.as_deref_mut().expect("pending PCB selection"),
-                ) {
+            Phase::RankPcb(gid) => {
+                // Ranking is paged by candidates: one prefix can hold thousands.
+                // Delivery is not. Only a prefix with more than a page of denial
+                // or fallback history keeps its own stage and member polls.
+                let mut budget = CANDIDATES_PER_POLL;
+                while budget > 0 {
+                    if pass.pcb.is_none() {
+                        if pass.pcb_keys.is_empty() || pass.batch_work >= PCB_STAGE_WORK {
+                            debug_assert!(!pass.batch.is_empty());
+                            pass.pcb_scope.clear();
+                            pass.pcb_scope.extend(pass.batch.keys().copied());
+                            pass.batch_work = 0;
+                            pass.next_member = 0;
+                            pass.phase = self.next_release_group_phase(gid);
+                            return false;
+                        }
+                        let prefix = pass.pcb_keys.pop().expect("pending PCB prefix");
+                        pass.pcb = Some((prefix, Box::default()));
+                    }
+                    let (prefix, pcb) = pass.pcb.as_mut().expect("pending PCB selection");
+                    let prefix = *prefix;
+                    let Some(mut prepared) = self.poll_release_pcb(gid, prefix, pcb, &mut budget)
+                    else {
+                        break;
+                    };
+                    pass.pcb = None;
+                    let group = self.group_ribs.get_mut(&gid).expect("group being staged");
+                    let history = prepared.rows.policy_filtered.len()
+                        + group.release_history_len(&prefix)
+                        + prepared
+                            .stage
+                            .rs_fallback
+                            .as_ref()
+                            .map_or(0, |list| list.len());
+                    if history <= DENIALS_PER_POLL {
+                        pass.batch_work += 1 + history;
+                        pass.batch.insert(prefix, prepared);
+                        continue;
+                    }
+                    pass.pcb_scope.clear();
+                    pass.pcb_scope.insert(prefix);
+                    pass.next_member = 0;
                     let rows = std::mem::take(&mut prepared.rows.policy_filtered);
-                    pass.denials = Some(Box::new(ReleaseDenials::new(
-                        self.group_ribs.get_mut(&gid).expect("group being staged"),
-                        prefix,
-                        rows,
-                    )));
+                    pass.denials = Some(Box::new(ReleaseDenials::new(group, prefix, rows)));
                     if self.release_fallback_needs_pages(gid, prefix, &prepared.stage) {
                         pass.fallback = Some(Box::default());
                         pass.phase = Phase::PrepareFallback(gid, prefix);
@@ -244,7 +275,7 @@ impl RibManager {
                         .expect("PCB denials")
                         .take_evals(&mut prepared.evals);
                     pass.prepared = Some(Box::new(prepared));
-                    pass.pcb = None;
+                    return false;
                 }
             }
             Phase::PrepareFallback(gid, prefix) => {
@@ -318,7 +349,20 @@ impl RibManager {
                 }
             }
             Phase::StageGroup(gid) => {
-                let pcb = pass.prepared.take().map(|prepared| *prepared);
+                let pcb = if let Some(prepared) = pass.prepared.take() {
+                    let prefix = *pass.pcb_scope.iter().next().expect("staged prefix");
+                    Some(PreparedPcbs {
+                        prefixes: HashMap::from([(prefix, *prepared)]),
+                        paged_denials: true,
+                    })
+                } else if pass.pcb_scope.is_empty() {
+                    None
+                } else {
+                    Some(PreparedPcbs {
+                        prefixes: std::mem::take(&mut pass.batch),
+                        paged_denials: false,
+                    })
+                };
                 let stage = self.stage_group_delivery(
                     gid,
                     pass.scope(),
@@ -394,14 +438,14 @@ impl RibManager {
     }
 
     fn finish_release_group(&self, pass: &mut ReleaseDistribution, staged_gid: Option<usize>) {
-        if pass.pcb_keys.is_empty() {
+        if pass.pcb_keys.is_empty() && pass.batch.is_empty() {
             if let Some(group) = staged_gid.and_then(|gid| self.group_ribs.get(&gid)) {
                 pass.lane_entries += group.runner_up_count();
             }
             pass.pcb_scope.clear();
             pass.phase = Phase::Stage;
         } else {
-            pass.phase = Phase::StagePcb(staged_gid.expect("staged PCB group"));
+            pass.phase = Phase::RankPcb(staged_gid.expect("staged PCB group"));
         }
     }
 
