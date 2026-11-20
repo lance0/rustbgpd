@@ -4313,6 +4313,62 @@ fn receipt_only_release_work(unrelated: u16) -> super::work_scaling::Work {
 }
 
 #[test]
+fn staged_evpn_feeds_do_not_scan_unrelated_owing_peers() {
+    use crate::manager::outbound_owing::OwedFamily;
+    let (manager, gid, mut outputs) = evpn_marker_receivers();
+    let route = received(100);
+    let mut manager = stage_evpn_until_refresh(manager, route.peer);
+    for (peer, output) in &mut outputs {
+        admit_waiting_for_marker(&mut manager, *peer, gid, &route, false);
+        assert_eq!(
+            output
+                .try_recv()
+                .map(delivered)
+                .unwrap()
+                .evpn_announce
+                .len(),
+            1
+        );
+        manager.invalidate_evpn_feed_completion(*peer);
+        assert!(manager.eor_waits_for_evpn_feed(*peer, EVPN));
+    }
+    let mut debtors = Vec::new();
+    for host in 1..=8 {
+        let peer = peer_v4(Ipv4Addr::new(198, 51, 100, host));
+        let (tx, rx) = mpsc::channel(8);
+        let mut up = super::lifecycle::test_peer_up(peer, 1, tx);
+        if let RibUpdate::PeerUp {
+            sendable_families, ..
+        } = &mut up
+        {
+            *sendable_families = vec![(Afi::Ipv4, Safi::LabeledUnicast)];
+        }
+        manager.handle_update(up);
+        manager.owe_whole_family(peer, OwedFamily::IPV4_LABELED);
+        debtors.push((peer, rx));
+    }
+    let before = manager.adj_rib_out_commit_stats.owed_peer_scans;
+    release_staged_evpn(&mut manager, route.peer);
+    let visits = crate::manager::RESYNC_PEERS_PER_TICK;
+    for _ in 0..outputs.len().div_ceil(visits) {
+        manager.service_marker_release_backlog(visits);
+    }
+    assert!(!manager.marker_release_pending());
+    let scans = manager.adj_rib_out_commit_stats.owed_peer_scans - before;
+    for (peer, mut output) in outputs {
+        let markers = std::iter::from_fn(|| output.try_recv().map(delivered).ok())
+            .flat_map(|update| update.end_of_rib)
+            .filter(|family| *family == EVPN)
+            .count();
+        assert_eq!(markers, 1, "missing or duplicate marker at {peer}");
+    }
+    for (peer, _) in debtors {
+        assert!(manager.owes_whole(peer, OwedFamily::IPV4_LABELED));
+    }
+    assert_eq!(scans, 0, "EVPN release visited unrelated owing peers");
+}
+
+#[test]
 fn staged_evpn_release_work_is_independent_of_unrelated_held_markers() {
     let control = receipt_only_release_work(0);
     let populated = receipt_only_release_work(448);

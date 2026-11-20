@@ -9531,7 +9531,9 @@ impl RibManager {
         let all_affected = owned_affected.as_ref().unwrap_or(all_affected);
         // Receivers that owe a unicast family whole stage and mark nothing
         // below: the pass logs its keys for their cursors once, here.
-        if !draining && !RELEASING {
+        // An EVPN marker visit rebuilds one receiver from existing state.
+        // It has no changed prefixes and must not trim every other peer's cursor.
+        if !draining && !RELEASING && !matches!(pass_kind, DistributionPass::SelectionMarker(_)) {
             self.log_owed_rows(best_changed, all_affected);
         }
         // FIB install-candidate wake. Route events fire only when the
