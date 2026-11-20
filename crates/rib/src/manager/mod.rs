@@ -4856,7 +4856,7 @@ impl RibManager {
             self.primary_lookahead = Some(update);
             return None;
         }
-        match self.first_group_intake(&update) {
+        match self.first_group_primary_intake(&update) {
             first_group_order::Intake::Apply => {}
             first_group_order::Intake::Retain => {
                 self.charge_primary_admission();
@@ -4962,6 +4962,11 @@ impl RibManager {
         // without admitting the head. Keep its pre-deadline FIFO budget
         // while the next owner turn finishes the writer.
         if remaining > 0 && self.first_group_commit_remaining == Some(0) {
+            return true;
+        }
+        // A retained session end was admitted before this deadline. Let it
+        // replay before the expiry, as it ran first when it held the head.
+        if self.seal_behind_retained_session_end() {
             return true;
         }
         self.expiry_cutoffs.clear(timer);

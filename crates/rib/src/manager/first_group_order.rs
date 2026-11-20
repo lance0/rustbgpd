@@ -25,7 +25,52 @@ fn operation(mut message: &RibUpdate) -> &RibUpdate {
     }
 }
 
+fn session_end(message: &RibUpdate) -> bool {
+    matches!(
+        message,
+        RibUpdate::PeerDown { .. }
+            | RibUpdate::PeerGracefulRestart { .. }
+            | RibUpdate::LateSessionEnd(_)
+    )
+}
+
 impl RibManager {
+    pub(super) fn session_end_retained(&self) -> bool {
+        self.first_group_deferred_intents.iter().any(session_end)
+    }
+
+    /// Give the pending owner every turn so that a retained session end
+    /// replays next. Without an owner the replay is already due at the next
+    /// turn and nothing would clear the seal.
+    pub(super) fn seal_behind_retained_session_end(&mut self) -> bool {
+        let seal = self.session_end_retained()
+            && (self.first_group_pending_writer().is_some()
+                || self.optional_destination_retirement_active());
+        if seal {
+            self.seal_first_group_commit_frontier();
+        }
+        seal
+    }
+
+    /// Intake for the primary FIFO. Only route input and End-of-RIB from
+    /// other peers' sessions pass a retained session end. Queries and
+    /// commands on this lane can be teardown barriers or read the ended
+    /// session's state, so they hold the head as they did behind a held end.
+    pub(super) fn first_group_primary_intake(&self, message: &RibUpdate) -> Intake {
+        let intake = self.first_group_intake(message);
+        if matches!(intake, Intake::Apply)
+            && self.session_end_retained()
+            && !self.first_group_replay_due()
+            && !matches!(
+                operation(message).actor_turn_kind(),
+                RibActorTurnKind::Routes | RibActorTurnKind::EndOfRib
+            )
+        {
+            return Intake::Hold;
+        }
+        intake
+    }
+
     pub(super) fn first_group_replay_due(&self) -> bool {
         (!self.first_group_deferred_intents.is_empty() || self.first_group_general_head.is_some())
             && self.first_group_pending_writer().is_none()
@@ -44,8 +89,9 @@ impl RibManager {
             .or_else(|| self.first_group_general_head.take().map(|head| *head))
     }
 
-    /// This check is also made at each primary read-ahead that can consume a
-    /// message directly. A hold leaves the complete original envelope at head.
+    /// Shared by both lanes. The general lane has no order against the
+    /// primary FIFO, so its reads are not held behind a retained session end.
+    /// A hold leaves the complete original envelope at head.
     pub(super) fn first_group_intake(&self, message: &RibUpdate) -> Intake {
         let writer = self.first_group_pending_writer().map(operation);
         let retiring_optional = self.optional_destination_retirement_active();
@@ -79,13 +125,7 @@ impl RibManager {
         // would make every other peer's routes wait for the rest of the build.
         // Retained, it replays in admission order after the writer commits,
         // and the peer check below keeps that peer's later messages behind it.
-        let behind_writer = if room
-            && matches!(
-                next,
-                RibUpdate::PeerDown { .. }
-                    | RibUpdate::PeerGracefulRestart { .. }
-                    | RibUpdate::LateSessionEnd(_)
-            ) {
+        let behind_writer = if room && session_end(next) {
             Intake::Retain
         } else {
             Intake::Hold
@@ -187,7 +227,7 @@ impl RibManager {
         if self
             .primary_lookahead
             .as_ref()
-            .is_some_and(|head| matches!(self.first_group_intake(head), Intake::Hold))
+            .is_some_and(|head| matches!(self.first_group_primary_intake(head), Intake::Hold))
         {
             self.seal_first_group_commit_frontier();
             return false;

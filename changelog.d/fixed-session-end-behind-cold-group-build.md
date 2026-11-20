@@ -9,8 +9,10 @@
   about 2,000 actor turns on a 1M-route table. It is now kept in the ordered
   window that already holds later policy commands, and it runs right after
   the policy change commits and before any newer input.
-  **Operator-visible:** routes from other peers keep installing during such a
-  build. The order of one peer's own messages is unchanged; a new session of
-  the same peer that arrives before the commit still waits at the head of the
-  queue, as before. At most eight commands and session ends are kept this
-  way; beyond that the previous behavior applies.
+  **Operator-visible:** route input and End-of-RIB from other peers keep
+  installing during such a build. Everything else on that queue (reads,
+  commands, other session changes, and the same peer's own later messages)
+  still waits behind the session end, and the queue is held again, as
+  before, when a timer for stale or refreshed routes falls due, when the
+  passing input overflows the build's repair log, or when eight commands and
+  session ends are already waiting.

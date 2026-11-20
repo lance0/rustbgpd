@@ -465,6 +465,12 @@ impl RibManager {
             || self.loc_rib.registration_scan_status() == RegistrationScanStatus::Overflow
         {
             self.clear_first_group_commit_frontier();
+            // Input that passed a retained session end can overflow the
+            // repair log on every attempt. Give the retry every turn so the
+            // writer commits and the session end is not postponed again.
+            if job.writer.is_some() && self.session_end_retained() {
+                self.seal_first_group_commit_frontier();
+            }
             self.loc_rib.stop_registration_scan();
             job.phase = FirstGroupPhase::Retiring;
             self.retire_first_group_page(job);
