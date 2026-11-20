@@ -187,6 +187,57 @@ fn evpn_body(bodies: &RouteSlab<EvpnRibRoute>, handle: u32) -> &EvpnRibRoute {
     bodies.get(handle).expect("EVPN index names a live slot")
 }
 
+/// `(path ID, route handle)` pairs of a prefix advertised with two or more
+/// paths, sorted by path ID.
+type PathList = SmallVec<[(u32, u32); 2]>;
+
+/// What the unicast prefix trie stores per prefix: the route's handle in
+/// `routes` when the prefix has one path (its path ID is on the route), or
+/// the tagged slot of its [`PathList`] in `path_lists`. The trie keeps its
+/// cells in one vector that doubles by copying, so the cell is 4 bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PathCell(u32);
+
+// The cell sets the bytes a trie doubling moves per prefix; a path list
+// slot is what an Add-Path prefix adds to it.
+const _: () = assert!(std::mem::size_of::<PathCell>() == 4);
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+const _: () = assert!(std::mem::size_of::<Option<PathList>>() == 32);
+
+impl Default for PathCell {
+    /// The cell of a prefix the trie has just created; never left stored.
+    fn default() -> Self {
+        Self::VACANT
+    }
+}
+
+impl PathCell {
+    const LIST: u32 = 1 << 31;
+    const VACANT: Self = Self(u32::MAX);
+
+    fn one(handle: u32) -> Self {
+        assert!(handle < Self::LIST, "route handle exceeds the cell");
+        Self(handle)
+    }
+
+    fn list(slot: u32) -> Self {
+        assert!(slot < Self::LIST - 1, "path-list slot exceeds the cell");
+        Self(slot | Self::LIST)
+    }
+
+    /// The single route's handle, or the path-list slot.
+    fn route(self) -> Result<u32, u32> {
+        if self.0 < Self::LIST {
+            Ok(self.0)
+        } else {
+            Err(self.0 & !Self::LIST)
+        }
+    }
+}
+
+const LIVE_ROUTE: &str = "a prefix cell names a live route";
+const LIVE_LIST: &str = "a tagged prefix cell names a live path list";
+
 /// Per-peer Adj-RIB-Out: routes advertised to a specific peer.
 ///
 /// Routes are keyed by `(Prefix, path_id)` for Add-Path (RFC 7911).
@@ -213,11 +264,13 @@ pub struct AdjRibOut {
     self_next_hop: Vec<bool>,
     /// Set entries in `self_next_hop`, keeping the empty check O(1).
     self_next_hop_count: usize,
-    /// Primary index: prefix → `(path_id, slab handle)` pairs, backed by a
-    /// family-split prefix trie. `SmallVec<[(u32, u32); 1]>` inlines the
-    /// single-best case (`path_id=0`) without heap allocation; Add-Path
-    /// multi-path spills to heap transparently. Pairs stay sorted by path ID.
-    prefix_path_ids: FamilyPrefixMap<SmallVec<[(u32, u32); 1]>>,
+    /// Primary index: prefix → its route handle or path list (see
+    /// [`PathCell`]), backed by a family-split prefix trie.
+    prefix_path_ids: FamilyPrefixMap<PathCell>,
+    /// Path lists of the prefixes advertised with two or more paths. A list
+    /// is created with the second path and freed when one path is left, in
+    /// the same methods that change the cell naming it.
+    path_lists: RouteSlab<PathList>,
     /// `FlowSpec` routes advertised to this peer (always single-best, `path_id=0`).
     flowspec_routes: HashMap<FlowSpecKey, FlowSpecRoute>,
     /// RFC 7432 route identity → slot in `evpn_bodies`. The two change
@@ -459,6 +512,7 @@ impl AdjRibOut {
             self_next_hop: Vec::new(),
             self_next_hop_count: 0,
             prefix_path_ids: FamilyPrefixMap::default(),
+            path_lists: RouteSlab::default(),
             flowspec_routes: HashMap::default(),
             evpn_index: ShardedMap::default(),
             evpn_bodies: RouteSlab::default(),
@@ -557,38 +611,73 @@ impl AdjRibOut {
         let key = (route.prefix, route.path_id);
         self.next_hop_overrides.remove(&key);
         checkpoint();
-        let ids = self.prefix_path_ids.entry_or_default(route.prefix);
+        let cell = self.prefix_path_ids.entry_or_default(route.prefix);
         checkpoint();
-        let position = if ids.last().is_none_or(|(id, _)| *id < key.1) {
-            Err(ids.len())
-        } else {
-            ids.binary_search_by(|(id, _)| {
+        let v6 = matches!(key.0, Prefix::V6(_));
+        let handle = match cell.route() {
+            Err(_) if *cell == PathCell::VACANT => {
                 checkpoint();
-                id.cmp(&key.1)
-            })
-        };
-        let handle = match position {
-            Ok(position) => {
-                let handle = ids[position].1;
-                checkpoint();
-                self.routes.set(handle, route);
-                checkpoint();
-                handle
-            }
-            Err(position) => {
-                checkpoint();
-                let v6 = matches!(key.0, Prefix::V6(_));
                 track(&mut self.second_family.unicast, v6, true, false);
                 let handle = self.routes.insert(route);
                 checkpoint();
-                ids.push((key.1, handle));
-                for index in (position..ids.len() - 1).rev() {
-                    checkpoint();
-                    ids[index + 1] = ids[index];
-                }
-                ids[position] = (key.1, handle);
+                *cell = PathCell::one(handle);
                 checkpoint();
                 handle
+            }
+            Ok(first) => {
+                let first_id = self.routes.get(first).expect(LIVE_ROUTE).path_id;
+                checkpoint();
+                if first_id == key.1 {
+                    self.routes.set(first, route);
+                    checkpoint();
+                    first
+                } else {
+                    // A second path: the prefix gets a list.
+                    track(&mut self.second_family.unicast, v6, true, false);
+                    let handle = self.routes.insert(route);
+                    checkpoint();
+                    let mut ids = PathList::from_buf([(first_id, first), (key.1, handle)]);
+                    if key.1 < first_id {
+                        ids.swap(0, 1);
+                    }
+                    *cell = PathCell::list(self.path_lists.insert(ids));
+                    checkpoint();
+                    handle
+                }
+            }
+            Err(slot) => {
+                let ids = self.path_lists.get_mut(slot).expect(LIVE_LIST);
+                let position = if ids.last().is_none_or(|(id, _)| *id < key.1) {
+                    Err(ids.len())
+                } else {
+                    ids.binary_search_by(|(id, _)| {
+                        checkpoint();
+                        id.cmp(&key.1)
+                    })
+                };
+                match position {
+                    Ok(position) => {
+                        let handle = ids[position].1;
+                        checkpoint();
+                        self.routes.set(handle, route);
+                        checkpoint();
+                        handle
+                    }
+                    Err(position) => {
+                        checkpoint();
+                        track(&mut self.second_family.unicast, v6, true, false);
+                        let handle = self.routes.insert(route);
+                        checkpoint();
+                        ids.push((key.1, handle));
+                        for index in (position..ids.len() - 1).rev() {
+                            checkpoint();
+                            ids[index + 1] = ids[index];
+                        }
+                        ids[position] = (key.1, handle);
+                        checkpoint();
+                        handle
+                    }
+                }
             }
         };
         let is_self = matches!(action, Some(NextHopAction::Self_));
@@ -735,10 +824,8 @@ impl AdjRibOut {
     pub(crate) fn retire_first_group_slot(&mut self) -> Option<(PeerId, Prefix)> {
         let route = self.routes.pop_retiring_slot()?;
         let (prefix, path_id) = (route.prefix, route.path_id);
-        let ids = self.prefix_path_ids.remove(&prefix).expect("indexed route");
-        debug_assert_eq!(ids.len(), 1);
-        let (id, handle) = ids[0];
-        debug_assert_eq!(id, path_id);
+        let cell = self.prefix_path_ids.remove(&prefix).expect("indexed route");
+        let handle = cell.route().expect("a first-group table is single-best");
         self.local_export_sources.remove(&(prefix, path_id));
         self.next_hop_overrides.remove(&(prefix, path_id));
         self.set_self_next_hop(handle, false);
@@ -762,31 +849,49 @@ impl AdjRibOut {
         path_id: u32,
         checkpoint: &mut impl FnMut(),
     ) -> bool {
-        let (handle, remove_prefix) = {
-            let Some(ids) = self.prefix_path_ids.get_mut(prefix) else {
-                return false;
-            };
-            let Ok(pos) = ids.binary_search_by(|(id, _)| {
+        let Some(cell) = self.prefix_path_ids.get_mut(prefix) else {
+            return false;
+        };
+        checkpoint();
+        let (handle, remove_prefix) = match cell.route() {
+            Ok(handle) => {
                 checkpoint();
-                id.cmp(&path_id)
-            }) else {
-                return false;
-            };
-            let handle = ids[pos].1;
-            for index in pos..ids.len() - 1 {
+                if self.routes.get(handle).expect(LIVE_ROUTE).path_id != path_id {
+                    return false;
+                }
                 checkpoint();
-                ids[index] = ids[index + 1];
+                (handle, true)
             }
-            checkpoint();
-            let _ = ids.pop();
-            checkpoint();
-            (handle, ids.is_empty())
+            Err(slot) => {
+                let ids = self.path_lists.get_mut(slot).expect(LIVE_LIST);
+                let Ok(pos) = ids.binary_search_by(|(id, _)| {
+                    checkpoint();
+                    id.cmp(&path_id)
+                }) else {
+                    return false;
+                };
+                let handle = ids[pos].1;
+                for index in pos..ids.len() - 1 {
+                    checkpoint();
+                    ids[index] = ids[index + 1];
+                }
+                checkpoint();
+                let _ = ids.pop();
+                checkpoint();
+                if let [(_, last)] = ids[..] {
+                    // One path left: the cell names its route again.
+                    *cell = PathCell::one(last);
+                    checkpoint();
+                    drop(self.path_lists.remove(slot));
+                    checkpoint();
+                }
+                (handle, false)
+            }
         };
         if remove_prefix {
             checkpoint();
             let retired = self.prefix_path_ids.remove(prefix);
             debug_assert!(retired.is_some(), "withdrawn prefix must still be present");
-            drop(retired);
             checkpoint();
         }
         checkpoint();
@@ -813,9 +918,24 @@ impl AdjRibOut {
     }
 
     fn handle(&self, prefix: &Prefix, path_id: u32) -> Option<u32> {
-        let ids = self.prefix_path_ids.get(prefix)?;
-        let position = ids.binary_search_by_key(&path_id, |(id, _)| *id).ok()?;
-        Some(ids[position].1)
+        match self.prefix_path_ids.get(prefix)?.route() {
+            Ok(handle) => (self.routes.get(handle)?.path_id == path_id).then_some(handle),
+            Err(slot) => {
+                let ids = self.path_lists.get(slot)?;
+                let position = ids.binary_search_by_key(&path_id, |(id, _)| *id).ok()?;
+                Some(ids[position].1)
+            }
+        }
+    }
+
+    /// The route handles a prefix's cell names, in path-ID order.
+    fn handles(&self, cell: PathCell) -> impl Iterator<Item = u32> + use<'_> {
+        let (one, ids) = match cell.route() {
+            Ok(handle) => (Some(handle), None),
+            Err(slot) => (None, self.path_lists.get(slot)),
+        };
+        let listed = ids.into_iter().flatten().map(|&(_, handle)| handle);
+        one.into_iter().chain(listed)
     }
 
     /// Iterate over all advertised routes.
@@ -855,13 +975,12 @@ impl AdjRibOut {
         let routes = &self.routes;
         self.prefix_path_ids
             .iter_from(crate::update::route_query_start_prefix(after, family))
-            .flat_map(move |(_, ids)| {
-                let mut ordered = ids.clone();
-                ordered
-                    .sort_unstable_by_key(|(_, handle)| routes.get(*handle).map(route_query_key));
+            .flat_map(move |(_, cell)| {
+                let mut ordered: SmallVec<[u32; 2]> = self.handles(*cell).collect();
+                ordered.sort_unstable_by_key(|handle| routes.get(*handle).map(route_query_key));
                 ordered
                     .into_iter()
-                    .filter_map(move |(_, handle)| routes.get(handle))
+                    .filter_map(move |handle| routes.get(handle))
             })
             .filter(move |route| after.is_none_or(|cursor| route_query_key(route) > cursor))
     }
@@ -883,10 +1002,8 @@ impl AdjRibOut {
         self.prefix_path_ids
             .get(prefix)
             .into_iter()
-            .flat_map(move |ids| {
-                ids.iter()
-                    .filter_map(move |&(_, handle)| routes.get(handle))
-            })
+            .flat_map(move |cell| self.handles(*cell))
+            .filter_map(move |handle| routes.get(handle))
     }
 
     /// Return the number of DISTINCT unicast prefixes advertised in one
@@ -899,10 +1016,16 @@ impl AdjRibOut {
     /// Return all path IDs currently advertised for a given prefix.
     #[must_use]
     pub fn path_ids_for_prefix(&self, prefix: &Prefix) -> SmallVec<[u32; 1]> {
-        self.prefix_path_ids
-            .get(prefix)
-            .map(|ids| ids.iter().map(|&(id, _)| id).collect())
-            .unwrap_or_default()
+        let mut path_ids = SmallVec::new();
+        match self.prefix_path_ids.get(prefix).map(|cell| cell.route()) {
+            Some(Ok(handle)) => path_ids.extend(self.routes.get(handle).map(|route| route.path_id)),
+            Some(Err(slot)) => {
+                let ids = self.path_lists.get(slot).into_iter().flatten();
+                path_ids.extend(ids.map(|&(id, _)| id));
+            }
+            None => {}
+        }
+        path_ids
     }
 
     /// Remove only the unicast routes and their secondary prefix index,
@@ -917,6 +1040,7 @@ impl AdjRibOut {
         self.self_next_hop.clear();
         self.self_next_hop_count = 0;
         self.prefix_path_ids.clear();
+        self.path_lists.clear();
     }
 
     /// Remove only the unicast routes and their secondary prefix index,
@@ -936,6 +1060,7 @@ impl AdjRibOut {
         self.self_next_hop = Vec::new();
         self.self_next_hop_count = 0;
         self.prefix_path_ids = FamilyPrefixMap::default();
+        self.path_lists = RouteSlab::default();
     }
 
     /// Retire and release unicast bodies for group transfer. Local admission
@@ -947,6 +1072,7 @@ impl AdjRibOut {
         self.self_next_hop = Vec::new();
         self.self_next_hop_count = 0;
         self.prefix_path_ids.release_with(checkpoint);
+        self.path_lists.release_with(checkpoint);
     }
 
     /// Reserve the unicast route slab for a known outbound batch.
@@ -1032,6 +1158,7 @@ impl AdjRibOut {
         self.self_next_hop.clear();
         self.self_next_hop_count = 0;
         self.prefix_path_ids.clear();
+        self.path_lists.clear();
         self.flowspec_routes.clear();
         self.evpn_index.clear();
         self.evpn_bodies.clear();
@@ -1053,6 +1180,7 @@ impl AdjRibOut {
         self.self_next_hop.clear();
         self.self_next_hop_count = 0;
         self.prefix_path_ids.retire_with(checkpoint);
+        self.path_lists.retire_with(checkpoint);
         retire_hash_map(&mut self.flowspec_routes, checkpoint);
         // Slab slot, then index entry: an EVPN row reports `Progress` from
         // both, as a unicast row does from its slab and its prefix index.
@@ -1139,7 +1267,7 @@ impl AdjRibOut {
 
     /// Return the prefix trie's structural memory, excluding stored values'
     /// own heap allocations.
-    #[cfg(feature = "bench-internals")]
+    #[cfg(any(test, feature = "bench-internals"))]
     #[must_use]
     pub fn bench_prefix_index_mem_size(&self) -> usize {
         self.prefix_path_ids.mem_size()
@@ -2823,6 +2951,278 @@ mod tests {
         assert!(rib.withdraw_with(&prefix, 1, &mut || checkpoints += 1));
         assert!(checkpoints >= 7);
         assert!(rib.path_ids_for_prefix(&prefix).is_empty());
+    }
+
+    /// Bytes each insert moved while one unicast table fills with `count`
+    /// distinct /24s in a fixed scattered order, as `(rows before the
+    /// insert, bytes)` for every insert that moved any. The trie's vectors
+    /// and the slab's first segment double, so the capacity an insert adds
+    /// is the size of the buffer it had to move.
+    fn unicast_growth_moves(count: u32) -> Vec<(u32, usize)> {
+        let mut rib = AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+        let template = make_route(prefix_a(), 0);
+        let probe = |rib: &AdjRibOut| {
+            let slab = rib.routes.segment_capacities();
+            (rib.bench_prefix_index_mem_size(), slab)
+        };
+        let mut before = probe(&rib);
+        let mut moves = Vec::new();
+        for row in 0..count {
+            // A bijection on 21 bits, repeated until it lands below `count`:
+            // every index once, in an order like a hash table's.
+            let mut index = row;
+            loop {
+                index = index.wrapping_mul(0x9E37_79B1) & 0x1F_FFFF;
+                index ^= index >> 11;
+                index = index.wrapping_mul(0x85EB_CA6B) & 0x1F_FFFF;
+                index ^= index >> 7;
+                if index < count {
+                    break;
+                }
+            }
+            let mut route = template.clone();
+            route.prefix = Prefix::V4(Ipv4Prefix::new(
+                Ipv4Addr::from((1 << 24) + (index << 8)),
+                24,
+            ));
+            rib.insert(route);
+            let after = probe(&rib);
+            let regrown = before
+                .1
+                .iter()
+                .zip(&after.1)
+                .filter(|(old, new)| old != new);
+            let slab = regrown.map(|(old, _)| *old).sum::<usize>() * size_of::<Option<Route>>();
+            let bytes = after.0 - before.0 + slab;
+            if bytes != 0 {
+                moves.push((row, bytes));
+            }
+            before = after;
+        }
+        assert_eq!(rib.len(), count as usize);
+        moves
+    }
+
+    /// Every unicast receiver and group table holds one trie cell per
+    /// prefix in a vector that doubles by copying, and nothing can reserve
+    /// it. Filling one table with 1.2M prefixes never moves more than 6 MiB
+    /// in one insert, across the doubling at 1,048,576 cells.
+    /// Red proof: a 24-byte cell moves 25,165,824 bytes at that doubling.
+    ///
+    /// The cells a table needs depend on the order its prefixes arrive in:
+    /// this order crosses 1,048,576 cells at 581,000 prefixes and sorted
+    /// order at 1,048,568, while an order that fills every trie node at the
+    /// same rate reaches 2,097,152 cells by 717,000 and moves 8 MiB there.
+    #[test]
+    fn unicast_trie_growth_moves_at_most_six_mebibytes_per_insert() {
+        let moves = unicast_growth_moves(1_200_000);
+        for (rows, bytes) in moves.iter().filter(|(_, bytes)| *bytes >= 1 << 20) {
+            println!("UNICAST_GROWTH rows={rows} moved_bytes={bytes}");
+        }
+        let worst = moves.iter().max_by_key(|(_, bytes)| *bytes).unwrap();
+        assert!(
+            worst.1 <= 6 << 20,
+            "the insert after {} rows moved {} bytes",
+            worst.0,
+            worst.1
+        );
+        assert!(
+            moves.iter().any(|(_, bytes)| *bytes >= 4 << 20),
+            "the fill never crossed 1,048,576 trie cells"
+        );
+    }
+
+    fn model_prefix(index: u32) -> Prefix {
+        if index.is_multiple_of(2) {
+            Prefix::V4(Ipv4Prefix::new(
+                Ipv4Addr::from(0x0a00_0000 + (index << 8)),
+                24,
+            ))
+        } else {
+            let addr = std::net::Ipv6Addr::new(
+                0x2001,
+                0xdb8,
+                u16::try_from(index).unwrap(),
+                0,
+                0,
+                0,
+                0,
+                0,
+            );
+            Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(addr, 48))
+        }
+    }
+
+    /// Every unicast accessor agrees with a plain ordered map through
+    /// inserts, replacements, second paths, withdrawals back to one path and
+    /// to none, re-inserts and every way of emptying the table, for both
+    /// families. A prefix keeps a path list only while it has two or more
+    /// paths, and freed lists and route slots are reused.
+    #[test]
+    fn unicast_cells_follow_a_model() {
+        let mut rib = AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+        let mut model = BTreeMap::<Prefix, BTreeMap<u32, Route>>::new();
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = |bound: u32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            u32::try_from(seed >> 33).unwrap() % bound
+        };
+        let (mut promoted, mut demoted, mut emptied) = (0, 0, 0);
+        for step in 0..20_000_u32 {
+            let prefix = model_prefix(next(PREFIXES));
+            let path_id = next(PATH_IDS) * 7;
+            match next(100) {
+                0 => {
+                    match next(4) {
+                        0 => rib.clear_unicast(),
+                        1 => rib.release_unicast(),
+                        2 => rib.release_unicast_with(&mut || {}),
+                        _ => rib.retire_with(&mut || {}),
+                    }
+                    model.clear();
+                    emptied += 1;
+                }
+                1..=55 => {
+                    let mut route = make_route(prefix, path_id);
+                    route.next_hop = IpAddr::V4(Ipv4Addr::from(step));
+                    // Listing order is by source peer before path ID.
+                    route.peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::from(100 - path_id)));
+                    let paths = model.entry(prefix).or_default();
+                    promoted += usize::from(paths.len() == 1 && !paths.contains_key(&path_id));
+                    paths.insert(path_id, route.clone());
+                    rib.insert(route);
+                }
+                _ => {
+                    let paths = model.get_mut(&prefix);
+                    let existed = paths.is_some_and(|paths| {
+                        let existed = paths.remove(&path_id).is_some();
+                        demoted += usize::from(existed && paths.len() == 1);
+                        existed
+                    });
+                    model.retain(|_, paths| !paths.is_empty());
+                    assert_eq!(rib.withdraw(&prefix, path_id), existed, "step {step}");
+                }
+            }
+            assert_unicast_matches(&rib, &model, step);
+        }
+        assert!(
+            promoted > 500 && demoted > 500 && emptied > 50,
+            "the walk covered each change"
+        );
+    }
+
+    const PREFIXES: u32 = 12;
+    const PATH_IDS: u32 = 5;
+    type Row = (Prefix, u32, IpAddr, PeerId);
+
+    fn row(route: &Route) -> Row {
+        (route.prefix, route.path_id, route.next_hop, route.peer)
+    }
+
+    fn assert_unicast_matches(
+        rib: &AdjRibOut,
+        model: &BTreeMap<Prefix, BTreeMap<u32, Route>>,
+        step: u32,
+    ) {
+        {
+            let rows = model.values().map(BTreeMap::len).sum::<usize>();
+            assert_eq!(rib.len(), rows, "step {step}");
+            let v6 = model.keys().filter(|p| matches!(p, Prefix::V6(_))).count();
+            assert_eq!(rib.unicast_prefix_count(Afi::Ipv6), v6);
+            assert_eq!(rib.unicast_prefix_count(Afi::Ipv4), model.len() - v6);
+            for index in 0..PREFIXES {
+                let prefix = model_prefix(index);
+                let paths = model.get(&prefix).cloned().unwrap_or_default();
+                let ids: Vec<u32> = paths.keys().copied().collect();
+                assert_eq!(
+                    rib.path_ids_for_prefix(&prefix).to_vec(),
+                    ids,
+                    "step {step}"
+                );
+                assert_eq!(
+                    rib.iter_prefix(&prefix).map(row).collect::<Vec<_>>(),
+                    paths.values().map(row).collect::<Vec<_>>(),
+                    "step {step}"
+                );
+                for path_id in (0..PATH_IDS * 7).chain([u32::MAX, 1 << 31]) {
+                    assert_eq!(
+                        rib.get(&prefix, path_id).map(row),
+                        paths.get(&path_id).map(row),
+                        "step {step}"
+                    );
+                }
+            }
+            let mut ordered: Vec<&Route> = model.values().flat_map(BTreeMap::values).collect();
+            ordered.sort_unstable_by_key(|route| route_query_key(route));
+            assert_eq!(
+                rib.iter_ordered_from(None).map(row).collect::<Vec<_>>(),
+                ordered.into_iter().map(row).collect::<Vec<_>>(),
+                "step {step}"
+            );
+            let mut stored: Vec<Row> = rib.iter().map(row).collect();
+            stored.sort_unstable();
+            let flat = model.values().flat_map(BTreeMap::values);
+            assert_eq!(stored, flat.map(row).collect::<Vec<_>>(), "step {step}");
+
+            let lists = model.values().filter(|paths| paths.len() >= 2).count();
+            assert_eq!(
+                rib.path_lists.len(),
+                lists,
+                "step {step}: a path list leaked"
+            );
+            assert!(
+                rib.path_lists.slot_count() <= PREFIXES as usize,
+                "list slots are reused"
+            );
+            assert!(rib.routes.slot_count() <= (PREFIXES * PATH_IDS) as usize);
+        }
+    }
+
+    /// The cell of a prefix names its route while it has one path and a
+    /// path list while it has more, whichever path arrives or leaves first.
+    #[test]
+    fn unicast_cell_is_a_handle_for_one_path_and_a_list_for_more() {
+        for prefix in [model_prefix(0), model_prefix(1)] {
+            for (first, second) in [(3, 8), (8, 3)] {
+                let mut rib = AdjRibOut::new(PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+                // Another prefix's list holds slot 0 throughout.
+                rib.insert(make_route(prefix_b(), 1));
+                rib.insert(make_route(prefix_b(), 2));
+                rib.insert(make_route(prefix, first));
+                let handle = rib.handle(&prefix, first).unwrap();
+                let cell = |rib: &AdjRibOut| rib.prefix_path_ids.get(&prefix).copied();
+                assert_eq!(cell(&rib), Some(PathCell(handle)));
+                assert_eq!(rib.path_lists.len(), 1);
+
+                rib.insert(make_route(prefix, second));
+                assert_eq!(cell(&rib), Some(PathCell(1 | PathCell::LIST)));
+                assert_eq!(rib.path_ids_for_prefix(&prefix).as_slice(), [3, 8]);
+                assert_eq!(rib.handle(&prefix, first), Some(handle));
+                assert_eq!(rib.path_lists.len(), 2);
+
+                assert!(rib.withdraw(&prefix, first));
+                let survivor = rib.handle(&prefix, second).unwrap();
+                assert_eq!(cell(&rib), Some(PathCell(survivor)));
+                assert_eq!(rib.path_ids_for_prefix(&prefix).as_slice(), [second]);
+                assert_eq!(rib.path_lists.len(), 1);
+                assert!(!rib.withdraw(&prefix, first));
+
+                rib.insert(make_route(prefix, first));
+                assert_eq!(
+                    cell(&rib),
+                    Some(PathCell(1 | PathCell::LIST)),
+                    "the freed list slot"
+                );
+                assert_eq!(rib.path_lists.slot_count(), 2);
+                assert!(rib.withdraw(&prefix, first));
+                assert!(rib.withdraw(&prefix, second));
+                assert_eq!(cell(&rib), None);
+                assert_eq!(rib.path_ids_for_prefix(&prefix_b()).as_slice(), [1, 2]);
+                assert_eq!(rib.len(), 2);
+            }
+        }
     }
 
     #[test]

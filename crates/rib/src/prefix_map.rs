@@ -67,7 +67,7 @@ impl<V> FamilyPrefixMap<V> {
         self.v4.len() + self.v6.len()
     }
 
-    #[cfg(feature = "bench-internals")]
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn mem_size(&self) -> usize {
         self.v4.mem_size() + self.v6.mem_size()
     }
