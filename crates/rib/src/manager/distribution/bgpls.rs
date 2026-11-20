@@ -181,9 +181,10 @@ impl RibManager {
             let mut modified = best.clone();
             if !result.modifications.is_empty() {
                 checkpoint();
-                let nh = AttrSet::edit(&mut modified.attributes, |attrs| {
-                    rustbgpd_policy::apply_modifications(attrs, &result.modifications)
-                });
+                let nh = AttrSet::apply_export_modifications(
+                    &mut modified.attributes,
+                    &result.modifications,
+                );
                 checkpoint();
                 if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = nh {
                     modified.next_hop = addr;

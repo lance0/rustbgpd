@@ -98,13 +98,14 @@ fn saturating_u32(len: usize) -> u32 {
 
 /// An immutable path-attribute list plus its [`SelectionSummary`].
 ///
-/// Routes hold it as `Arc<AttrSet>`. Equality, hashing and `Debug` cover the
-/// attribute list only; the summary and the cached hash are pure functions of
-/// it.
+/// Routes hold it as `Arc<AttrSet>`. Equality and hashing cover the
+/// attribute list and whether export policy set MED. Both affect outbound
+/// encoding even when the two MED values happen to be equal.
 #[derive(Clone)]
 pub struct AttrSet {
     attrs: Vec<PathAttribute>,
     summary: SelectionSummary,
+    export_policy_med: bool,
     /// The attribute list's hash, so a sharded intern lookup (shard choice
     /// plus table probe) and a rehash never walk the list again.
     hash: u64,
@@ -133,6 +134,7 @@ impl AttrSet {
         Arc::new(Self {
             attrs,
             summary,
+            export_policy_med: false,
             hash,
         })
     }
@@ -151,9 +153,12 @@ impl AttrSet {
     }
 
     /// Edit the attribute list copy-on-write (`Arc::make_mut`) and rebuild
-    /// the summary and hash, including if the callback unwinds. This is the
-    /// only way to mutate an `AttrSet`.
+    /// the summary and hash, including if the callback unwinds.
     pub fn edit<R>(this: &mut Arc<Self>, f: impl FnOnce(&mut Vec<PathAttribute>) -> R) -> R {
+        Arc::make_mut(this).edit_attrs(f)
+    }
+
+    fn edit_attrs<R>(&mut self, f: impl FnOnce(&mut Vec<PathAttribute>) -> R) -> R {
         struct RebuildSummary<'a>(&'a mut AttrSet);
 
         impl Drop for RebuildSummary<'_> {
@@ -163,8 +168,26 @@ impl AttrSet {
             }
         }
 
-        let guard = RebuildSummary(Arc::make_mut(this));
+        let guard = RebuildSummary(self);
         f(&mut guard.0.attrs)
+    }
+
+    /// Whether the local export policy supplied the MED on this advertisement.
+    #[must_use]
+    pub fn export_policy_med(&self) -> bool {
+        self.export_policy_med
+    }
+
+    /// Apply an outbound policy result, retaining the provenance needed at
+    /// the eBGP encoding boundary. Import policy edits use ordinary `edit`.
+    pub fn apply_export_modifications(
+        this: &mut Arc<Self>,
+        mods: &rustbgpd_policy::RouteModifications,
+    ) -> Option<rustbgpd_policy::NextHopAction> {
+        let set = Arc::make_mut(this);
+        let next_hop = set.edit_attrs(|attrs| rustbgpd_policy::apply_modifications(attrs, mods));
+        set.export_policy_med |= mods.set_med.is_some();
+        next_hop
     }
 
     /// The attributes other than `NEXT_HOP`, for an encoder that emits the
@@ -194,7 +217,9 @@ impl Deref for AttrSet {
 
 impl PartialEq for AttrSet {
     fn eq(&self, other: &Self) -> bool {
-        self.hash == other.hash && self.attrs == other.attrs
+        self.hash == other.hash
+            && self.export_policy_med == other.export_policy_med
+            && self.attrs == other.attrs
     }
 }
 
@@ -208,7 +233,7 @@ impl PartialEq<Vec<PathAttribute>> for AttrSet {
 
 impl std::hash::Hash for AttrSet {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        state.write_u64(self.hash);
+        state.write_u64(self.hash ^ u64::from(self.export_policy_med));
     }
 }
 
@@ -252,6 +277,26 @@ mod tests {
                 llgr_stale: true,
             }
         );
+    }
+
+    #[test]
+    fn export_med_policy_identity_survives_interning() {
+        let mut received = AttrSet::new(vec![PathAttribute::Med(0)]);
+        let mut outbound = Arc::clone(&received);
+        AttrSet::apply_export_modifications(
+            &mut outbound,
+            &rustbgpd_policy::RouteModifications {
+                set_med: Some(0),
+                ..Default::default()
+            },
+        );
+        let mut table = crate::attr_intern::AttrInternTable::new();
+        table.intern(&mut received);
+        table.intern(&mut outbound);
+        assert_eq!(received.as_slice(), outbound.as_slice());
+        assert_ne!(received, outbound);
+        assert!(!received.export_policy_med());
+        assert!(outbound.export_policy_med());
     }
 
     #[test]

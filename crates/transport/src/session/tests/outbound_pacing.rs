@@ -1,13 +1,21 @@
 use super::*;
 
+// The pacing fixtures model staged eBGP announcements. Their MED distinguishes
+// frames on the wire, including when the selected value is zero.
+fn set_pacing_med(attrs: &mut Arc<AttrSet>, med: u32) {
+    let modifications = rustbgpd_policy::RouteModifications {
+        set_med: Some(med),
+        ..Default::default()
+    };
+    assert!(AttrSet::apply_export_modifications(attrs, &modifications).is_none());
+}
+
 fn pacing_routes(count: u32, distinct: bool) -> Vec<Route> {
     (0..count)
         .map(|index| {
             let mut route = make_route(100);
             route.prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from((20 << 24) | index), 32));
-            AttrSet::edit(&mut route.attributes, |attrs| {
-                attrs.push(PathAttribute::Med(if distinct { index } else { 0 }));
-            });
+            set_pacing_med(&mut route.attributes, if distinct { index } else { 0 });
             route
         })
         .collect()
@@ -2413,13 +2421,10 @@ fn small_flowspec_route(index: usize, vpn_v6: bool, distinct: bool) -> FlowSpecR
                 segments: vec![AsPathSegment::AsSequence(vec![65_002, 64_600, 64_700])],
             }),
             PathAttribute::Communities(vec![100, 200]),
-            PathAttribute::Med(if distinct {
-                u32::try_from(index).unwrap()
-            } else {
-                0
-            }),
         ]);
     });
+    let med = u32::try_from(if distinct { index } else { 0 }).unwrap();
+    set_pacing_med(&mut route.attributes, med);
     route
 }
 

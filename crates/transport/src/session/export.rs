@@ -558,6 +558,19 @@ impl SessionExportProfile {
         }
     }
 
+    // RFC 4271 §5.1.4 scopes received MED to the neighboring AS. A
+    // transparent route server passes it between clients (RFC 7947 §2.2.3).
+    fn advertise_med(
+        &self,
+        origin: rustbgpd_rib::RouteOrigin,
+        attrs: &rustbgpd_rib::AttrSet,
+    ) -> bool {
+        !self.is_ebgp
+            || self.route_server_client
+            || origin == rustbgpd_rib::RouteOrigin::Local
+            || attrs.export_policy_med()
+    }
+
     /// Prepare the classic unicast attribute set using only this immutable
     /// profile and the post-policy route candidate.
     #[expect(
@@ -624,6 +637,8 @@ impl SessionExportProfile {
                         attrs.push(attr.clone());
                     }
                 }
+                PathAttribute::Med(_)
+                    if !self.advertise_med(route.origin_type, &route.attributes) => {}
                 PathAttribute::LocalPref(_) => {
                     if !is_ebgp {
                         attrs.push(attr.clone());
@@ -715,14 +730,14 @@ impl SessionExportProfile {
 
     fn prepare_mp_attributes(
         &self,
-        attributes: &[PathAttribute],
+        attributes: &rustbgpd_rib::AttrSet,
         origin_type: rustbgpd_rib::RouteOrigin,
         peer_router_id: Ipv4Addr,
         family: (Afi, Safi),
     ) -> Vec<PathAttribute> {
         let is_ebgp = self.is_ebgp();
         let mut attrs = Vec::new();
-        for attr in attributes {
+        for attr in attributes.iter() {
             match attr {
                 PathAttribute::AsPath(as_path) if is_ebgp && !self.route_server_client => {
                     let cleaned =
@@ -749,6 +764,7 @@ impl SessionExportProfile {
                 PathAttribute::NextHop(_)
                 | PathAttribute::MpReachNlri(_)
                 | PathAttribute::MpUnreachNlri(_) => {}
+                PathAttribute::Med(_) if !self.advertise_med(origin_type, attributes) => {}
                 PathAttribute::LocalPref(_) => {
                     if !is_ebgp {
                         attrs.push(attr.clone());
@@ -3634,6 +3650,71 @@ mod tests {
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
             received_as_path: None,
             aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
+        }
+    }
+
+    #[test]
+    fn export_med_depends_on_session_origin_and_outbound_policy() {
+        use rustbgpd_rib::RouteOrigin::{Ebgp, Ibgp, Local};
+
+        let cfg = config_with_auth_secret("not-retained");
+        let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
+        for (external, transparent, origin, set_med, expected) in [
+            (true, false, Ebgp, None, None),
+            (true, false, Ibgp, None, None),
+            (true, false, Local, None, Some(77)),
+            (false, false, Ebgp, None, Some(77)),
+            (true, true, Ebgp, None, Some(77)),
+            (true, false, Ebgp, Some(77), Some(77)),
+            (true, false, Ibgp, Some(0), Some(0)),
+        ] {
+            let mut profile = SessionExportProfile::initial(&cfg, None, false);
+            profile.is_ebgp = external;
+            profile.route_server_client = transparent;
+            profile.four_octet_as = true;
+            let mut route = as4_projection_route(prefix, "192.0.2.1".parse().unwrap());
+            route.origin_type = origin;
+            AttrSet::edit(&mut route.attributes, |attrs| {
+                attrs.push(PathAttribute::Med(77))
+            });
+            let learned = Arc::clone(&route.attributes);
+            if set_med.is_some() {
+                AttrSet::apply_export_modifications(
+                    &mut route.attributes,
+                    &rustbgpd_policy::RouteModifications {
+                        set_med,
+                        ..Default::default()
+                    },
+                );
+            }
+            let classic = profile
+                .probe_announcement(ExportCandidate::Unicast {
+                    route: &route,
+                    next_hop_override: None,
+                })
+                .unwrap()
+                .message
+                .parse(true, false, &[])
+                .unwrap()
+                .attributes;
+            let mp = profile.prepare_mp_attributes(
+                &route.attributes,
+                origin,
+                route.peer_router_id,
+                (Afi::L2Vpn, Safi::Evpn),
+            );
+            for attrs in [classic, mp] {
+                let med = attrs.iter().find_map(|attr| match attr {
+                    PathAttribute::Med(value) => Some(*value),
+                    _ => None,
+                });
+                assert_eq!(
+                    med, expected,
+                    "external={external} transparent={transparent} origin={origin:?} policy={set_med:?}"
+                );
+            }
+            assert_eq!(learned.summary().med, 77);
+            assert!(!learned.export_policy_med());
         }
     }
 
