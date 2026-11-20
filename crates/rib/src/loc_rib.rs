@@ -341,7 +341,14 @@ impl LocRib {
         }
         // Alternate when both have work. Deferring all repairs until the last
         // bucket lets even a trickle of distinct changes overflow a long scan.
-        if scan.discovery_finished || (scan.repair_due && !scan.repairs.is_empty()) {
+        // Past half the log, repairs take every turn. A page then serves as
+        // many keys as one route chunk can change, so a peer whose messages
+        // span several chunks cannot fill the log. Discovery keeps the turns
+        // on which the log is at most half full, at least one per message.
+        if scan.discovery_finished
+            || (scan.repair_due && !scan.repairs.is_empty())
+            || scan.repairs.len() > REGISTRATION_REPAIR_LIMIT / 2
+        {
             scan.repair_due = false;
             let count = scan.repairs.len().min(REGISTRATION_PAGE_SIZE);
             page.keys.reserve_exact(count);

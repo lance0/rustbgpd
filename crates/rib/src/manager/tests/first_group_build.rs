@@ -2018,3 +2018,5 @@ async fn refresh_window_expiry_waits_for_a_retained_restart_end() {
         "the restart retains the route the refresh had not replaced"
     );
 }
+
+mod sustained_feed;
