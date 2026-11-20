@@ -3559,11 +3559,9 @@ mod fifo_tests {
             let address = (0x2001_0db8_u128 << 96) | u128::from(index);
             Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(address.into(), 128))
         };
-        let cases: [(OwedFamily, fn(u32) -> Prefix); 2] = [
-            (OwedFamily::IPV4_LABELED, row),
-            (OwedFamily::IPV6_LABELED, v6),
-        ];
-        for (afi, (family, key)) in cases.into_iter().enumerate() {
+        let families = [OwedFamily::IPV4_LABELED, OwedFamily::IPV6_LABELED];
+        for (afi, family) in families.into_iter().enumerate() {
+            let key = |index: u32| if afi == 0 { row(index) } else { v6(index) };
             let mut owing = PeerOwing::new(1);
             for index in 0..KEYS {
                 owing.insert(OwedKey::Labeled(key(index)), false);
