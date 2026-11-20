@@ -2405,6 +2405,57 @@ fn selection_release_wakes_a_receipt_only_evpn_end_of_refresh() {
     }
 }
 
+#[test]
+fn released_evpn_receipt_survives_other_family_debt_until_its_first_offer() {
+    for resync_due in [false, true] {
+        let (manager, peer, gid, mut output) = fixture();
+        let route = received(100);
+        let mut manager = stage_evpn_until_refresh(manager, route.peer);
+        admit_waiting_for_marker(&mut manager, peer, gid, &route, true);
+        let data = output.try_recv().map(delivered).unwrap();
+        assert_eq!(data.evpn_announce[0].key(), route.key());
+        release_staged_evpn(&mut manager, route.peer);
+
+        // This unrelated family's table still waits for its first refresh.
+        let v4 = (Afi::Ipv4, Safi::Unicast);
+        manager.owe_eor_behind_orf_table(peer, v4);
+        assert!(
+            manager.marker_release_pending(),
+            "lost the EVPN release wake"
+        );
+        let sender = manager.outbound_peers[&peer].clone();
+        while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
+        let visits = count_marker_work(&mut manager, "evpn_marker_candidate");
+        if resync_due {
+            manager.retry_eor_markers_bounded();
+        } else {
+            manager.service_marker_release_backlog(crate::manager::RESYNC_PEERS_PER_TICK);
+        }
+        assert_eq!(visits.load(Ordering::SeqCst), 1, "one refused offer");
+        assert!(!manager.marker_release_pending());
+        assert!(manager.marker_retry_pending());
+        while let Ok(update) = output.try_recv().map(delivered) {
+            assert!(update.end_of_rib.is_empty() && update.refresh_markers.is_empty());
+        }
+
+        manager.service_marker_release_backlog(crate::manager::RESYNC_PEERS_PER_TICK);
+        assert!(
+            output.try_recv().is_err(),
+            "release tick retried the refusal"
+        );
+        manager.retry_eor_markers_bounded();
+        let marker = output.try_recv().map(delivered).unwrap();
+        assert_eq!(
+            marker.refresh_markers,
+            [(EVPN.0, EVPN.1, RouteRefreshSubtype::EoRR)]
+        );
+        assert_eq!(marker.end_of_rib, []);
+        assert!(output.try_recv().is_err());
+        assert!(manager.eor.behind_orf_table(peer, v4));
+        assert!(!manager.resync_tick_pending());
+    }
+}
+
 fn assert_review2_selection_release(nonempty: bool, staged: bool) {
     use crate::manager::selection_deferral::SelectionDeferralTransition;
     let (manager, peer, gid, mut output) = fixture();
@@ -4301,18 +4352,35 @@ fn staged_evpn_release_resumes_ordinary_markers_on_their_own_channels() {
     assert!((1..=LIMIT).contains(&visits.swap(0, Ordering::SeqCst)));
 
     // Replace one receiver whose marker has not yet been offered. The
-    // new channel reuses its numeric ID and negotiates only IPv4.
+    // new channel negotiates the released family and reuses the numeric ID.
     let (peer, mut old) = outputs.swap_remove(
         outputs
             .iter()
-            .rposition(|(peer, _)| manager.eor.owes(*peer, EVPN))
+            .rposition(|(peer, _)| manager.eor.release_pending(*peer, EVPN))
             .unwrap(),
     );
     assert!(old.try_recv().is_err());
     let (sender, mut replacement) = mpsc::channel(8);
-    manager.handle_update(super::lifecycle::test_peer_up(peer, 7, sender));
-    let fresh = replacement.try_recv().map(delivered).unwrap();
-    assert_eq!(fresh.end_of_rib, [(Afi::Ipv4, Safi::Unicast)]);
+    let mut up = super::lifecycle::test_peer_up(peer, 7, sender);
+    if let RibUpdate::PeerUp {
+        sendable_families, ..
+    } = &mut up
+    {
+        *sendable_families = vec![EVPN];
+    }
+    manager.handle_update(up);
+    assert!(
+        !manager.eor.release_pending(peer, EVPN),
+        "the old release visit must not hold the new session's EVPN marker"
+    );
+    let fresh: Vec<_> = std::iter::from_fn(|| replacement.try_recv().map(delivered).ok())
+        .flat_map(|update| update.end_of_rib)
+        .collect();
+    assert_eq!(
+        fresh,
+        [EVPN],
+        "the replacement sends its own initial marker"
+    );
     visits.store(0, Ordering::SeqCst);
     let mut answers = HashMap::new();
     for _ in 0..2 * outputs.len() {

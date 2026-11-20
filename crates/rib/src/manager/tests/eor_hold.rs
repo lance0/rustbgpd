@@ -7,6 +7,8 @@
 //! own producers and are pinned in `evpn_complete_feed` and
 //! `outbound_owing`.
 
+mod marker_cadence;
+
 use super::*;
 use crate::manager::eor_hold::EorHold;
 use crate::{
@@ -1067,6 +1069,15 @@ async fn a_dirty_peer_held_by_another_family_gets_the_released_marker_once() {
 /// keeps the resync parked while the marker retries on its own.
 #[tokio::test(start_paused = true)]
 async fn refused_release_marker_retries_behind_a_partial_sibling_resync() {
+    check_partial_sibling_marker(false);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_missed_delta_parks_the_partial_sibling_marker() {
+    check_partial_sibling_marker(true);
+}
+
+fn check_partial_sibling_marker(miss_delta: bool) {
     let families = [V4, V6];
     let receivers: Vec<_> = (1..=48u8)
         .map(|index| {
@@ -1098,6 +1109,23 @@ async fn refused_release_marker_retries_behind_a_partial_sibling_resync() {
     drain_unicast_release(&mut manager);
     assert!(manager.eor.owes(peer, V4));
     assert!(manager.selection_partial_caught_up(peer));
+    assert!(manager.marker_retry_pending());
+    if miss_delta {
+        // Already dirty for IPv6: a second missed delta invalidates IPv4's
+        // table receipt before the marker ring gets another turn.
+        manager.mark_outbound_dirty(peer);
+        assert!(!manager.selection_partial_caught_up(peer));
+        assert!(
+            !manager.marker_retry_pending(),
+            "the resync now owns the marker"
+        );
+        drop(occupied);
+        manager.retry_eor_markers_bounded();
+        assert_eq!(markers_of(output, V4), 0);
+        manager.resync_dirty_peers_bounded();
+        assert_eq!(markers_of(output, V4), 1);
+        return;
+    }
     drop(occupied);
     let builds = manager.adj_rib_out_commit_stats.resync_builds;
     manager.resync_dirty_peers_bounded();
@@ -1164,6 +1192,70 @@ fn a_refresh_releases_the_marker_of_an_orf_gated_family() {
     assert_eq!(markers_of(&mut output, V4), 1);
     assert!(!manager.eor.owes(TARGET, V4));
     assert!(!manager.resync_tick_pending());
+}
+
+/// A negotiated family withheld for lack of next-hop has no ORF table to
+/// flood. Its first refresh must wake any refused honest-empty marker
+/// before the deferred response can start.
+#[tokio::test(start_paused = true)]
+async fn a_withheld_family_refresh_wakes_its_refused_marker() {
+    let mut manager = plain_manager().with_selection_deferral(SelectionDeferralConfig {
+        timeout: Duration::from_mins(2),
+        waiters: vec![SelectionDeferralWaiterConfig {
+            peer: SOURCE.into(),
+            families: vec![V6],
+        }],
+    });
+    let _source = connect(&mut manager, SOURCE, 1, V6);
+    assert!(manager.selection_convergence_held(V6));
+    manager.handle_update(RibUpdate::SetPeerWithheldFamilies {
+        peer: TARGET,
+        session_id: 2,
+        families: vec![(V6, crate::update::ExactExportErrorCode::MissingIpv6NextHop)],
+    });
+    let (sender, mut output) = mpsc::channel(8);
+    let mut up = registering_peer_up(TARGET, 2);
+    let RibUpdate::PeerUp {
+        outbound_tx,
+        sendable_families,
+        negotiated_orf_recv,
+        ..
+    } = &mut up
+    else {
+        unreachable!()
+    };
+    *outbound_tx = sender.clone();
+    *sendable_families = vec![V4];
+    *negotiated_orf_recv = vec![V6];
+    manager.handle_update(up);
+    assert_eq!(markers_of(&mut output, V6), 0);
+    assert!(manager.eor.owes(TARGET, V6));
+
+    let occupied: Vec<_> = std::iter::from_fn(|| sender.clone().try_reserve_owned().ok()).collect();
+    source_end_of_rib(&mut manager, V6);
+    drain_unicast_release(&mut manager);
+    assert!(manager.eor_holds(TARGET, V6).contains(EorHold::Writer));
+    assert!(
+        !manager.marker_retry_pending(),
+        "the ORF gate is still closed"
+    );
+    drop(occupied);
+
+    manager.handle_update(RibUpdate::RouteRefreshRequest {
+        peer: TARGET,
+        session_id: 2,
+        afi: V6.0,
+        safi: V6.1,
+        queued: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+    });
+    assert!(manager.pending_refresh[&TARGET].contains(&V6));
+    assert!(
+        manager.marker_retry_pending(),
+        "the empty marker can now go first"
+    );
+    manager.retry_eor_markers_bounded();
+    assert_eq!(markers_of(&mut output, V6), 1);
+    assert!(!manager.eor.owes(TARGET, V6));
 }
 
 /// The check after an actor turn is stricter than the fallback about that
@@ -1374,6 +1466,25 @@ fn refuse_final_marker(
     assert_eq!(markers_of(output, V4), 0);
 }
 
+#[test]
+fn a_newly_dirty_peer_parks_its_refused_marker_until_resync() {
+    let mut manager = plain_manager();
+    let mut output = connect(&mut manager, TARGET, 1, V4);
+    assert_eq!(markers_of(&mut output, V4), 1);
+    refuse_final_marker(&mut manager, TARGET, &mut output);
+    assert!(manager.marker_retry_pending());
+
+    manager.mark_outbound_dirty(TARGET);
+    assert!(
+        !manager.marker_retry_pending(),
+        "resync owns the refused marker"
+    );
+    manager.retry_eor_markers_bounded();
+    assert_eq!(markers_of(&mut output, V4), 0);
+    manager.resync_dirty_peers_bounded();
+    assert_eq!(markers_of(&mut output, V4), 1);
+}
+
 #[tokio::test(start_paused = true)]
 async fn marker_retry_bounds_examined_peers_and_quiesces_held_debt() {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1460,6 +1571,29 @@ fn refused_final_marker_stays_with_its_sender_on_same_id_replacement() {
     assert_eq!(markers_of(&mut old, V4), 0);
     assert!(manager.eor_pending(TARGET).is_empty());
     assert!(!manager.resync_tick_pending());
+}
+
+#[test]
+fn peer_down_disarms_refused_marker_before_same_id_same_family_reconnect() {
+    let mut manager = plain_manager();
+    let mut old = connect(&mut manager, TARGET, 7, V4);
+    assert_eq!(markers_of(&mut old, V4), 1);
+    refuse_final_marker(&mut manager, TARGET, &mut old);
+    assert!(manager.marker_retry_pending());
+
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: TARGET,
+        session_id: 7,
+    });
+    assert!(
+        !manager.marker_retry_pending(),
+        "teardown must disarm the old writer's retry before another tick or registration"
+    );
+    let mut fresh = connect(&mut manager, TARGET, 7, V4);
+    assert_eq!(markers_of(&mut fresh, V4), 1);
+    manager.retry_eor_markers_bounded();
+    assert_eq!(markers_of(&mut fresh, V4), 0);
+    assert_eq!(markers_of(&mut old, V4), 0);
 }
 
 #[test]

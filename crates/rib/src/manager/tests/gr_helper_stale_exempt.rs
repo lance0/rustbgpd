@@ -2219,11 +2219,8 @@ fn orf_gated_family_waits_then_withdraws_once_its_hold_arms() {
 }
 
 /// A session that is clean and caught up while its unicast End-of-RIB is
-/// queued but not held: production reaches this for an EVPN receiver
-/// whose feed is current, where a full writer at the End-of-RIB leaves the
-/// peer clean (`send_initial_table_with_readiness`, `settle_eor`).
-/// The test reaches it with a writer that fits the table but not the
-/// End-of-RIB, then clears the dirty mark the plain unicast session gets.
+/// queued but not held: the receiver's mixed initial table fills the writer.
+/// Its current EVPN feed makes the ensuing refusal a marker-only retry.
 /// The carried key must wait for the hold, not retire as if the End-of-RIB
 /// had gone out. Red proof: retiring regardless of a queued End-of-RIB
 /// drops it, and the RTBH stays until release.
@@ -2245,14 +2242,41 @@ fn queued_unheld_end_of_rib_keeps_the_carry_for_the_hold() {
         *stale = true;
     }
     delete(&mut manager, rtbh);
-    // Room for the table only: the End-of-RIB queues behind it.
-    let (_new_tx, mut new_rx) = register_dual_stack(&mut manager, 182, 1);
+    // The new session joins an existing group with a complete EVPN table.
+    // The old session's retained unicast rows still belong to the helper.
+    let keeper = peer_v4(Ipv4Addr::new(192, 0, 2, 84));
+    let (tx, _keeper_rx) = mpsc::channel(8);
+    super::evpn_group_storage::register(&mut manager, keeper, tx);
+    let group = manager.grouped_member_of(keeper).unwrap();
+    manager
+        .group_ribs
+        .get_mut(&group)
+        .unwrap()
+        .set_evpn_ownership_for_test(true);
+    super::evpn_group_storage::stage(
+        &mut manager,
+        group,
+        &super::evpn_group_storage::received(100),
+    );
+    manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
+        peer: observer,
+        session_id: 7,
+        peer_restart_state: false,
+        peer_gr_helper: true,
+        peer_gr_families: vec![FAMILY],
+        peer_enhanced_refresh: true,
+        peer_llgr_families: vec![],
+        local_llgr_stale_time: 0,
+    });
+    let (tx, mut new_rx) = mpsc::channel(1);
+    super::evpn_group_storage::register(&mut manager, observer, tx);
+    assert!(manager.evpn_feed_is_current(observer));
+    assert!(!manager.dirty_peers.contains(&observer));
+    assert!(manager.marker_retry_pending());
     assert!(
         manager.eor_pending(observer).contains(&FAMILY),
         "the IPv4 End-of-RIB is queued"
     );
-    // An EVPN receiver with a current feed stays clean here.
-    manager.dirty_peers.remove(&observer);
     manager.flush_helper_stale_exempt(&HashSet::new());
     let key = (Prefix::V4(rtbh), 0);
     assert!(
