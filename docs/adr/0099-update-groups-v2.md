@@ -773,6 +773,21 @@ receiver also leaves the table to the tick. Labeled unicast, VPN, EVPN, FlowSpec
 BGP-LS and RT-Constrain owed whole keep the whole-family operation and its
 absorption, a stated exception until they move to the same list.
 
+Labeled unicast (IPv4 and IPv6) has since moved: each AFI has its own list
+of prefixes, and every labeled pass logs the prefixes it selected among,
+not only the changed winners, before it returns or fans out, so a
+non-best change reaches an Add-Path or ORR receiver and a release reaches
+a receiver that joined in the hold. Every receiver holds these families
+outside its group, so the waiting state, the one-unit-per-tick rebuild
+and the in-hold rule apply as they do for EVPN. No labeled fanout parks
+across turns, so the parked-fanout hook is not used. Three inputs do
+change one receiver's labeled export with every candidate unchanged: a
+replacement of its export policy, a swap of a policy dataset, and a change
+of its ORR topology. None of them goes through a labeled pass. Each
+resyncs the receiver as a whole peer, which ends its cursor, so no
+unlogged mark is needed either. VPN, FlowSpec, BGP-LS and RT-Constrain
+still drain whole.
+
 Each owed key carries a *logged deferral*: a test-build record of (session,
 receiver, AFI/SAFI, key). It opens when the key becomes owed. It closes when the
 key is drained, absorbed or cancelled, or when a resync covers it.

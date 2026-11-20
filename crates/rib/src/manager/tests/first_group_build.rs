@@ -984,7 +984,17 @@ fn cold_build_with_policy_members(
     mpsc::Sender<RibUpdate>,
     Vec<mpsc::Receiver<OutboundRouteUpdate>>,
 ) {
-    let (mut manager, primary, expected) = fixture(per_family);
+    cold_build_with_policy_members_on(fixture(per_family), members)
+}
+
+fn cold_build_with_policy_members_on(
+    (mut manager, primary, expected): (RibManager, mpsc::Sender<RibUpdate>, Inventory),
+    members: u8,
+) -> (
+    RibManager,
+    mpsc::Sender<RibUpdate>,
+    Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+) {
     let mut receivers = Vec::new();
     for n in 1..=members {
         let (out, rx) = mpsc::channel(32);
@@ -2308,6 +2318,247 @@ async fn refresh_window_expiry_waits_for_a_retained_restart_end() {
             .is_some_and(|route| route.is_stale),
         "the restart retains the route the refresh had not replaced"
     );
+}
+
+const LABELED: [(Afi, Safi); 2] = [
+    (Afi::Ipv4, Safi::LabeledUnicast),
+    (Afi::Ipv6, Safi::LabeledUnicast),
+];
+
+fn labeled_row(source: u8, prefix: Prefix, label: u32, pref: u32) -> crate::route::LabeledRibRoute {
+    let mut row = make_labeled_rib_route(MEMBER(source), 0, label, pref);
+    row.nlri.prefix = prefix;
+    // The fixture is no route reflector: an eBGP-learned row reaches C.
+    row.origin_type = crate::route::RouteOrigin::Ebgp;
+    if matches!(prefix, Prefix::V6(_)) {
+        row.next_hop = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 1, 0, 0, 0, 0, 1));
+    }
+    row
+}
+
+// Rows `(index, label)` of both labeled AFIs from member `source`, with the
+// withdrawal of `withdrawn` in both.
+fn labeled_input(source: u8, pref: u32, rows: &[(u16, u32)], withdrawn: &[u16]) -> RibUpdate {
+    RibUpdate::LabeledRoutesReceived {
+        peer: receiver(source),
+        session_id: 1,
+        announced: rows
+            .iter()
+            .flat_map(|&(i, label)| {
+                prefixes(i).map(|prefix| labeled_row(source, prefix, label, pref))
+            })
+            .collect(),
+        withdrawn: withdrawn
+            .iter()
+            .flat_map(|&i| prefixes(i))
+            .map(|prefix| crate::route::LabeledRibRouteKey { prefix, path_id: 0 })
+            .collect(),
+    }
+}
+
+// The source and label stack of each labeled prefix a receiver holds.
+type LabeledTable = BTreeMap<Prefix, (PeerId, String)>;
+
+fn read_labeled(table: &mut LabeledTable, rx: &mut mpsc::Receiver<OutboundRouteUpdate>) {
+    while let Ok(update) = rx.try_recv() {
+        for key in &update.labeled_withdraw {
+            assert!(
+                table.remove(&key.prefix).is_some(),
+                "withdrawal of {key:?}, which the receiver does not hold"
+            );
+        }
+        for row in &update.labeled_announce {
+            table.insert(
+                row.nlri.prefix,
+                (row.peer, format!("{:?}", row.nlri.labels)),
+            );
+        }
+    }
+}
+
+// Tick the resync timer while it is armed; the receiver reads throughout.
+fn read_until_idle(
+    manager: &mut RibManager,
+    table: &mut LabeledTable,
+    rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
+) {
+    for _ in 0..100_000 {
+        read_labeled(table, rx);
+        if !manager.resync_tick_pending() {
+            return;
+        }
+        manager.resync_dirty_peers_bounded();
+    }
+    panic!("the labeled receiver never caught up");
+}
+
+// Peer A's session ends behind its claimed policy writer while a cold build
+// runs. Peer B's labeled input passes the retained end: it withdraws a prefix
+// both announced, changes a label and rotates fresh rows. Labeled receiver C
+// is not reading, so it comes to owe both labeled families whole and reads
+// them through the row cursor. After the writer commits and the retained end
+// replays, C holds exactly B's rows with their labels: none of A's, the
+// shared prefix included. C resumes before the commit or after the teardown.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario read top to bottom; splitting it would hide the order of events"
+)]
+#[tokio::test]
+async fn labeled_input_passing_a_retained_session_end_reaches_a_paused_cursor_receiver() {
+    use super::super::outbound_owing::OwedFamily;
+
+    const SHARED: u16 = 40_000;
+    let (a, b, c) = (receiver(1), receiver(2), receiver(200));
+    let whole = |manager: &RibManager| {
+        [OwedFamily::IPV4_LABELED, OwedFamily::IPV6_LABELED]
+            .iter()
+            .all(|family| manager.owes_whole(c, *family))
+    };
+    for resumes_before_commit in [false, true] {
+        let case = format!("resumes_before_commit={resumes_before_commit}");
+        let (mut manager, primary, expected) = fixture(8192);
+        let mut c_rx = join(&mut manager, c, 1, &LABELED);
+        finish(&mut manager);
+        assert!(manager.first_group_build.is_none(), "{case}");
+        let (mut manager, primary, _receivers) =
+            cold_build_with_policy_members_on((manager, primary, expected), 2);
+        let mut held = LabeledTable::new();
+        let mut b_rows: BTreeMap<u16, u32> = (0..8).map(|i| (i, 100)).collect();
+        b_rows.insert(SHARED, 500);
+        let offered: Vec<_> = b_rows.iter().map(|(&i, &label)| (i, label)).collect();
+        manager.handle_update(labeled_input(
+            1,
+            150,
+            &[(SHARED, 400), (30_000, 400), (30_001, 400)],
+            &[],
+        ));
+        manager.handle_update(labeled_input(2, 190, &offered, &[]));
+        drain_route_chunks(&mut manager);
+        read_until_idle(&mut manager, &mut held, &mut c_rx);
+        assert_eq!(held.len(), 2 * 11, "{case}: admitted");
+        assert_eq!(held[&prefixes(SHARED)[0]].0, b, "{case}");
+        assert_eq!(held[&prefixes(30_000)[1]].0, a, "{case}");
+
+        // C stops reading.
+        let sender = manager.outbound_peers[&c].clone();
+        while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
+        drop(sender);
+        let mut policy_reply = clear_policy(&mut manager, a);
+        primary
+            .try_send(RibUpdate::PeerDown {
+                peer: a,
+                session_id: 1,
+            })
+            .unwrap();
+        let mut previous: Vec<u16> = Vec::new();
+        let mut rounds_after_cursor = 0;
+        for round in 0..400u16 {
+            let base = 1000 + round * 64;
+            let fresh: Vec<(u16, u32)> = (base..base + 64).map(|i| (i, 100)).collect();
+            let mut withdrawn = previous.clone();
+            let mut rows = fresh.clone();
+            if rounds_after_cursor == 1 {
+                // With the cursor live: the shared prefix falls to A's path
+                // and a row C holds changes its label.
+                withdrawn.push(SHARED);
+                b_rows.remove(&SHARED);
+                rows.push((0, 777));
+            }
+            for index in &previous {
+                b_rows.remove(index);
+            }
+            b_rows.extend(rows.iter().copied());
+            primary
+                .try_send(labeled_input(2, 190, &rows, &withdrawn))
+                .unwrap();
+            while manager.drain_ready_updates().await {}
+            drain_route_chunks(&mut manager);
+            previous = (base..base + 64).collect();
+            rounds_after_cursor += u32::from(whole(&manager));
+            if rounds_after_cursor == 3 {
+                break;
+            }
+        }
+        assert!(
+            whole(&manager),
+            "{case}: C owes both labeled families whole"
+        );
+        assert!(!manager.dirty_peers.contains(&c), "{case}");
+        assert!(
+            !manager.owed_row_evicted.contains(&c),
+            "{case}: cursor live"
+        );
+        assert!(manager.session_end_retained(), "{case}");
+        assert!(manager.first_group_pending_writer().is_some(), "{case}");
+        assert!(manager.outbound_peers.contains_key(&a), "{case}");
+        assert!(policy_reply.try_recv().is_err(), "{case}");
+        for prefix in prefixes(SHARED) {
+            let during = manager
+                .loc_rib
+                .iter_labeled()
+                .find(|r| r.nlri.prefix == prefix);
+            assert_eq!(
+                during.map(|r| r.peer),
+                Some(a),
+                "{case}: A's path until the teardown"
+            );
+        }
+        assert_eq!(held.len(), 2 * 11, "{case}: nothing reached C");
+
+        if resumes_before_commit {
+            read_until_idle(&mut manager, &mut held, &mut c_rx);
+            assert_eq!(held[&prefixes(SHARED)[0]].0, a, "{case}");
+            assert!(manager.session_end_retained(), "{case}");
+        }
+        commit_claimed_writer(&mut manager);
+        assert_eq!(policy_reply.try_recv().unwrap(), Ok(()), "{case}");
+        assert!(manager.try_recv_primary().is_none(), "{case}");
+        let end = manager.take_first_group_deferred_intent().unwrap();
+        assert!(matches!(end, RibUpdate::PeerDown { peer, .. } if peer == a));
+        manager.handle_update(end);
+        finish(&mut manager);
+        drain_route_chunks(&mut manager);
+        assert!(!manager.outbound_peers.contains_key(&a), "{case}");
+        read_until_idle(&mut manager, &mut held, &mut c_rx);
+
+        let expected: LabeledTable = b_rows
+            .iter()
+            .flat_map(|(&i, &label)| {
+                prefixes(i).map(|prefix| {
+                    let labels = format!("{:?}", labeled_row(2, prefix, label, 190).nlri.labels);
+                    (prefix, (b, labels))
+                })
+            })
+            .collect();
+        let selected: LabeledTable = manager
+            .loc_rib
+            .iter_labeled()
+            .map(|r| (r.nlri.prefix, (r.peer, format!("{:?}", r.nlri.labels))))
+            .collect();
+        assert_eq!(selected, expected, "{case}: selected rows");
+        assert_eq!(expected.len(), 2 * (8 + 64), "{case}");
+        assert!(
+            held.values().all(|(source, _)| *source != a),
+            "{case}: A's rows left"
+        );
+        assert_eq!(held, expected, "{case}: C's exact labeled table");
+        let steps = histogram_sample_counts_by_label(
+            &manager.metrics,
+            "bgp_rib_outbound_owed_drain_step_seconds",
+            "scope",
+        );
+        assert!(
+            steps.get("cursor").is_some_and(|n| *n > 0),
+            "{case}: {steps:?}"
+        );
+        assert_eq!(steps.get("whole").copied().unwrap_or(0), 0, "{case}");
+        assert!(manager.owing(c).is_none(), "{case}: nothing owed");
+        assert!(!manager.dirty_peers.contains(&c), "{case}");
+        assert!(
+            manager.owed_rows.iter().all(|list| list.len() == 0),
+            "{case}"
+        );
+    }
 }
 
 mod sustained_feed;

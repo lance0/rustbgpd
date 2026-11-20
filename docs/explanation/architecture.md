@@ -116,7 +116,7 @@ channels to the PeerManager, FIB reconciler, and config persistence bridge.
    └──────────────────────────────────────────────┘
 ```
 
-Each peer session runs a `tokio::select!` loop over TCP socket I/O, protocol timers (hold, keepalive, connect-retry), and inbound commands. The RIB task processes updates sequentially — no locks, no contention. IPv4 and IPv6 routes coexist in the same `HashMap<Prefix, Route>`. The sharding seam is at the channel boundary: if scale demands it, split to prefix-range sharding across tasks without changing session code ([ADR-0100 §2(a)](../adr/0100-parallel-rib-manager.md), which rejected family sharding as primary).
+Each peer session runs a `tokio::select!` loop over TCP socket I/O, protocol timers (hold, keepalive, connect-retry), and inbound commands. The RIB task processes updates sequentially — no locks, no contention. IPv4 and IPv6 routes coexist in the same `HashMap<Prefix, Route>`. The [RIB lifecycle](../reference/rib-lifecycle.md) follows a session through that task stage by stage, with the longest turn each session shape can cause. The sharding seam is at the channel boundary: if scale demands it, split to prefix-range sharding across tasks without changing session code ([ADR-0100 §2(a)](../adr/0100-parallel-rib-manager.md), which rejected family sharding as primary).
 
 ---
 

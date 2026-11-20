@@ -26,14 +26,19 @@ impl Cell {
 const RECEIVERS: usize = 2;
 const FLIPS: &str = "bgp_rib_outbound_owing_flips_total";
 
-async fn barrier(rib: &mpsc::Sender<RibUpdate>) -> Result<()> {
+pub(super) async fn barrier(rib: &mpsc::Sender<RibUpdate>) -> Result<()> {
     let (reply, count) = oneshot::channel();
     rib.send(RibUpdate::QueryLocRibCount { reply }).await?;
     count.await?;
     Ok(())
 }
 
-fn family_metric(snapshot: &Snapshot, metric: &str, family: Family, reason: Option<&str>) -> f64 {
+pub(super) fn family_metric(
+    snapshot: &Snapshot,
+    metric: &str,
+    family: Family,
+    reason: Option<&str>,
+) -> f64 {
     let (afi, safi) = family.afi_safi();
     let label = rustbgpd_wire::family_label(afi, safi).expect("fixture family");
     snapshot

@@ -12,7 +12,8 @@
 //!   mark its keys; the drain stages them.
 //! - A family whose set outgrows its byte cap θ, and every `FlowSpec`,
 //!   BGP-LS or RT-Constrain family, owes the whole family instead.
-//! - A unicast or EVPN family owed whole is a row cursor ([`OwedRows`]):
+//! - A unicast, labeled-unicast or EVPN family owed whole is a row cursor
+//!   ([`OwedRows`]):
 //!   one list per family, shared by every receiver, of the keys passes
 //!   carried since the oldest debt began, in the order they last changed.
 //!   The receiver holds a sequence number; a drain step sends the next keys
@@ -36,7 +37,11 @@
 //! - A key no source still offers and the peer does not hold is cancelled
 //!   (the keep-set below mirrors the resync enumeration).
 //!
-//! # A receiver's EVPN debt as one state machine
+//! # A receiver's EVPN or labeled-unicast debt as one state machine
+//!
+//! Written for EVPN; a labeled-unicast family (always private, so a group
+//! member can owe it) follows the same table, with no parked fanout, no
+//! unlogged restage and no recovery proof.
 //!
 //! | State | Record | Dirty | Evicted |
 //! | --- | --- | --- | --- |
@@ -73,6 +78,10 @@
 //! | regroup | `R` | `R` (mark and record dropped) | `R` |
 //! | session end or registration | `N` | `N` | `N` |
 //! | shutdown flush | set and remainder | set only | set only |
+//!
+//! The replay and limit-recovery row does not occur for labeled debt: an
+//! operator replay and the outbound prefix limits cover IPv4 and IPv6
+//! unicast only.
 //!
 //! A unit that builds an evicted receiver is the only exit from `W`/`D`
 //! besides a session end, and it runs only when EVPN is enumerated
@@ -243,7 +252,7 @@ const TRIM_ROWS: usize = 4 * CHUNK_ROWS;
 /// cursor is resynced instead ([`RibManager::cap_owed_rows`]).
 const OWED_ROWS_SLACK: usize = 4 * CHUNK_ROWS;
 
-/// The keys of one cursor family (a unicast AFI, or EVPN) that passes
+/// The keys of one cursor family (a unicast or labeled AFI, or EVPN) that passes
 /// carried while some receiver owed
 /// the family whole, in the order they last changed: a key that changes
 /// again moves to the back. A receiver's debt is every entry after its
@@ -420,6 +429,8 @@ impl<K: Copy + Ord> OwedRows<K> {
 enum RowCursor {
     Ipv4Unicast,
     Ipv6Unicast,
+    Ipv4Labeled,
+    Ipv6Labeled,
     Evpn,
 }
 
@@ -540,8 +551,8 @@ impl OwedFamily {
     const KEYED: [(KeyedOwner, Option<RowCursor>); 7] = [
         (KeyedOwner::UnicastGroup, Some(RowCursor::Ipv4Unicast)),
         (KeyedOwner::UnicastGroup, Some(RowCursor::Ipv6Unicast)),
-        (KeyedOwner::Peer, None),     // IPv4 labeled
-        (KeyedOwner::Peer, None),     // IPv6 labeled
+        (KeyedOwner::Peer, Some(RowCursor::Ipv4Labeled)),
+        (KeyedOwner::Peer, Some(RowCursor::Ipv6Labeled)),
         (KeyedOwner::VpnGroup, None), // VPNv4
         (KeyedOwner::VpnGroup, None), // VPNv6
         (KeyedOwner::EvpnGroup, Some(RowCursor::Evpn)),
@@ -557,10 +568,10 @@ impl OwedFamily {
     }
 
     /// Active families in physical slot order. Unicast slots retain their AFI index.
-    const CURSORS: [Self; 3] = Self::cursor_families(false);
+    const CURSORS: [Self; 5] = Self::cursor_families(false);
 
     /// Active cursor families that may owe private rows as group members.
-    pub(super) const GROUPED_CURSORS: [Self; 1] = Self::cursor_families(true);
+    pub(super) const GROUPED_CURSORS: [Self; 3] = Self::cursor_families(true);
 
     const fn cursor_families<const N: usize>(grouped_only: bool) -> [Self; N] {
         let mut families = [Self::IPV4_UNICAST; N];
@@ -585,6 +596,8 @@ impl OwedFamily {
     }
 
     const EVPN_CURSOR: usize = RowCursor::Evpn as usize;
+    /// The first of the two labeled lists, which follow by AFI index.
+    const LABELED_CURSOR: usize = RowCursor::Ipv4Labeled as usize;
 
     fn row_cursor(self) -> Option<RowCursor> {
         Self::KEYED.get(usize::from(self.0))?.1
@@ -810,6 +823,10 @@ impl PeerOwing {
                     self.unicast[index].remove(prefix);
                     self.unicast_exempt[index].remove(prefix);
                 }
+            }
+            // Kept under a cursor, the set only drains.
+            OwedKey::Labeled(prefix) if self.is_whole(OwedFamily::labeled_of(prefix)) => {
+                self.labeled[afi_index(prefix)].remove_draining(prefix);
             }
             OwedKey::Labeled(prefix) => self.labeled[afi_index(prefix)].remove(prefix),
             OwedKey::Vpn(key) => {
@@ -1213,23 +1230,23 @@ impl RibManager {
 
     fn owed_rows_head(&self, list: RowCursor) -> u64 {
         match list {
-            RowCursor::Ipv4Unicast | RowCursor::Ipv6Unicast => self.owed_rows[list as usize].head(),
             RowCursor::Evpn => self.owed_evpn_rows.head(),
+            _ => self.owed_rows[list as usize].head(),
         }
     }
 
     /// Up to `count` keys after `cursor`, oldest first, and the position past them.
     fn owed_rows_after(&self, list: RowCursor, cursor: u64, count: usize) -> (Vec<OwedKey>, u64) {
-        match list {
-            RowCursor::Ipv4Unicast | RowCursor::Ipv6Unicast => {
-                let (keys, position) = self.owed_rows[list as usize].after(cursor, count);
-                (keys.into_iter().map(OwedKey::Unicast).collect(), position)
-            }
+        let wrap = match list {
             RowCursor::Evpn => {
                 let (keys, position) = self.owed_evpn_rows.after(cursor, count);
-                (keys.into_iter().map(OwedKey::Evpn).collect(), position)
+                return (keys.into_iter().map(OwedKey::Evpn).collect(), position);
             }
-        }
+            RowCursor::Ipv4Unicast | RowCursor::Ipv6Unicast => OwedKey::Unicast,
+            RowCursor::Ipv4Labeled | RowCursor::Ipv6Labeled => OwedKey::Labeled,
+        };
+        let (keys, position) = self.owed_rows[list as usize].after(cursor, count);
+        (keys.into_iter().map(wrap).collect(), position)
     }
 
     /// `peer`'s position in cursor family `index`'s shared list, or `None`
@@ -2172,10 +2189,8 @@ impl RibManager {
         {
             let index = list as usize;
             match list {
-                RowCursor::Ipv4Unicast | RowCursor::Ipv6Unicast => {
-                    self.owed_rows[index].trim(floors[index]);
-                }
                 RowCursor::Evpn => self.owed_evpn_rows.trim(floors[index]),
+                _ => self.owed_rows[index].trim(floors[index]),
             }
         }
     }
@@ -2231,30 +2246,62 @@ impl RibManager {
                 .iter()
                 .filter(|prefix| !best_changed.contains(*prefix)),
         );
-        self.log_unicast_keys(changed.copied(), floors);
+        self.log_prefix_keys(0, changed.copied(), floors);
     }
 
     pub(super) fn log_release_owed_rows(&mut self, keys: &HashSet<Prefix>, floors: CursorFloors) {
         self.trim_at_owed_floors(floors);
-        self.log_unicast_keys(keys.iter().copied(), floors);
+        self.log_prefix_keys(0, keys.iter().copied(), floors);
     }
 
-    fn log_unicast_keys(&mut self, changed: impl Iterator<Item = Prefix>, floors: CursorFloors) {
-        if floors[..2] == [None, None] {
+    /// A labeled pass selected among `affected` (every prefix an input
+    /// changed for, or a selection release's whole inventory): log them
+    /// once for the receivers that owe their family whole, whose gate
+    /// stages and marks nothing. Not only the changed winners: an Add-Path
+    /// or ORR receiver stages a non-best change, and a receiver that joined
+    /// during a hold has none of the unchanged winners. With no such
+    /// receiver nothing is logged.
+    pub(super) fn log_owed_labeled_rows(&mut self, affected: &HashSet<Prefix>) {
+        if self.owed_rows_idle() {
+            return;
+        }
+        let floors = self.trim_owed_rows();
+        #[cfg(test)]
+        if floors[OwedFamily::LABELED_CURSOR..][..2] != [None, None] {
+            self.adj_rib_out_commit_stats.owed_labeled_logs += 1;
+        }
+        self.log_prefix_keys(OwedFamily::LABELED_CURSOR, affected.iter().copied(), floors);
+    }
+
+    /// Log `changed` in the two prefix lists that start at slot `first`
+    /// (unicast or labeled), each prefix in its AFI's list.
+    fn log_prefix_keys(
+        &mut self,
+        first: usize,
+        changed: impl Iterator<Item = Prefix>,
+        floors: CursorFloors,
+    ) {
+        if floors[first..first + 2] == [None, None] {
             return;
         }
         let mut carried = [0usize; 2];
         for prefix in changed {
             self.replacement_checkpoint(false);
             let index = afi_index(&prefix);
-            if floors[index].is_some() {
-                self.owed_rows[index].touch(prefix);
+            if floors[first + index].is_some() {
+                self.owed_rows[first + index].touch(prefix);
                 carried[index] += 1;
             }
         }
-        let table = self.loc_rib.family_lens().unicast;
-        for (index, rows) in self.owed_rows.iter_mut().enumerate() {
-            if floors[index].is_some() {
+        let lens = self.loc_rib.family_lens();
+        let table = if first == 0 {
+            lens.unicast
+        } else {
+            lens.labeled
+        };
+        for index in 0..2 {
+            if floors[first + index].is_some() {
+                let rows = &mut self.owed_rows[first + index];
                 rows.peak = rows.peak.max(table[index] + carried[index]);
             }
         }
@@ -2279,6 +2326,14 @@ impl RibManager {
         }
     }
 
+    /// [`Self::cap_owed_rows`] for the labeled lists, after a labeled
+    /// pass's receiver loop.
+    pub(super) fn cap_owed_labeled_rows(&mut self) {
+        for list in [RowCursor::Ipv4Labeled, RowCursor::Ipv6Labeled] {
+            self.cap_owed_rows_of(list);
+        }
+    }
+
     /// [`Self::cap_owed_rows`] for the EVPN list, after an EVPN pass's
     /// receiver loop.
     pub(super) fn cap_owed_evpn_rows(&mut self) {
@@ -2288,7 +2343,7 @@ impl RibManager {
     /// A release has logged at most its prefix batch. Only an overflowing
     /// list requires another (paged) pass over the peers.
     pub(super) fn release_owed_over_cap(&self) -> [Option<u64>; 2] {
-        self.owed_rows.each_ref().map(|rows| rows.over(rows.cap()))
+        [0, 1].map(|index| self.owed_rows[index].over(self.owed_rows[index].cap()))
     }
 
     pub(super) fn cap_release_owed_peer(
@@ -2325,8 +2380,8 @@ impl RibManager {
         let index = list as usize;
         let family = OwedFamily::CURSORS[index];
         let cutoff = match list {
-            RowCursor::Ipv4Unicast | RowCursor::Ipv6Unicast => self.owed_rows[index].cutoff(),
             RowCursor::Evpn => self.owed_evpn_rows.cutoff(),
+            _ => self.owed_rows[index].cutoff(),
         };
         let Some((cap, over)) = cutoff else {
             return;
@@ -2351,8 +2406,8 @@ impl RibManager {
         }
         self.trim_owed_rows();
         match list {
-            RowCursor::Ipv4Unicast | RowCursor::Ipv6Unicast => self.owed_rows[index].drop_over(cap),
             RowCursor::Evpn => self.owed_evpn_rows.drop_over(cap),
+            _ => self.owed_rows[index].drop_over(cap),
         }
     }
 
@@ -3137,7 +3192,7 @@ mod fifo_tests {
             owing.insert(key, true);
             owing.start_cursor(0, 5);
             owing.start_cursor(1, 6);
-            owing.hold_cursor = [7, 8, 0];
+            owing.hold_cursor = [7, 8, 0, 0, 0];
             assert_eq!(owing.keyed_len(v4), 1, "the set survives the flip");
             assert_eq!(owing.exempt_len(v4), 1);
             assert_eq!(owing.cursor_from(0, false), 5);
@@ -3495,6 +3550,54 @@ mod fifo_tests {
         assert!(owing.is_whole(family), "the cursor is ended by its step");
     }
 
+    /// As above for a labeled set, whose removal has its own arm, in each
+    /// AFI.
+    #[test]
+    fn a_labeled_set_kept_under_a_cursor_drains_without_rebuilding() {
+        const KEYS: u32 = 50_000;
+        let v6 = |index: u32| {
+            let address = (0x2001_0db8_u128 << 96) | u128::from(index);
+            Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(address.into(), 128))
+        };
+        let families = [OwedFamily::IPV4_LABELED, OwedFamily::IPV6_LABELED];
+        for (afi, family) in families.into_iter().enumerate() {
+            let key = |index: u32| if afi == 0 { row(index) } else { v6(index) };
+            let mut owing = PeerOwing::new(1);
+            for index in 0..KEYS {
+                owing.insert(OwedKey::Labeled(key(index)), false);
+            }
+            owing.start_cursor(OwedFamily::LABELED_CURSOR + afi, 0);
+            let shape = |owing: &PeerOwing| {
+                let set = &owing.labeled[afi];
+                (set.order.capacity(), set.live.capacity(), set.order.len())
+            };
+            let mut left = KEYS as usize;
+            while left != 0 {
+                for key in owing.copy_keys(family, DrainScope::All, CHUNK_ROWS) {
+                    let before = shape(&owing);
+                    owing.remove(&key);
+                    left -= 1;
+                    if left == 0 {
+                        assert_eq!(owing.set_bytes(family), 0, "an empty set is freed");
+                        continue;
+                    }
+                    let after = shape(&owing);
+                    assert!(
+                        after.0 == before.0 && before.1 - after.1 <= 1,
+                        "a capacity changed with {left} keys left: {before:?} to {after:?}"
+                    );
+                    assert!(
+                        before.2 - after.2 <= 1,
+                        "{} entries moved",
+                        before.2 - after.2
+                    );
+                }
+                assert_eq!(owing.keyed_len(family), left);
+            }
+            assert!(owing.is_whole(family), "the cursor is ended by its step");
+        }
+    }
+
     #[test]
     fn canceled_tail_compaction_has_linear_hash_work() {
         #[derive(Clone)]
@@ -3666,8 +3769,20 @@ mod family_tests {
     #[test]
     fn cursor_slots_and_private_group_ownership_match_enabled_families() {
         use OwedFamily as F;
-        assert_eq!(F::CURSORS, [F::IPV4_UNICAST, F::IPV6_UNICAST, F::EVPN]);
-        assert_eq!(F::GROUPED_CURSORS, [F::EVPN]);
+        assert_eq!(
+            F::CURSORS,
+            [
+                F::IPV4_UNICAST,
+                F::IPV6_UNICAST,
+                F::IPV4_LABELED,
+                F::IPV6_LABELED,
+                F::EVPN
+            ]
+        );
+        assert_eq!(
+            F::GROUPED_CURSORS,
+            [F::IPV4_LABELED, F::IPV6_LABELED, F::EVPN]
+        );
         for family in F::ALL {
             assert_eq!(
                 family.cursor_index(),
