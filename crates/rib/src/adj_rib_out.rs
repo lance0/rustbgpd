@@ -853,6 +853,8 @@ impl AdjRibOut {
             return false;
         };
         checkpoint();
+        // A cell still holding the creation value decodes as a list here;
+        // only a panic inside an insert can leave one.
         let (handle, remove_prefix) = match cell.route() {
             Ok(handle) => {
                 checkpoint();
@@ -3011,8 +3013,10 @@ mod tests {
     ///
     /// The cells a table needs depend on the order its prefixes arrive in:
     /// this order crosses 1,048,576 cells at 581,000 prefixes and sorted
-    /// order at 1,048,568, while an order that fills every trie node at the
-    /// same rate reaches 2,097,152 cells by 717,000 and moves 8 MiB there.
+    /// order at 1,048,568, while filling the trie nodes in strict rotation
+    /// crosses 2,097,152 cells at 660,759 and moves 8 MiB there. The trie's
+    /// node vector (16 bytes a slot) doubles the same way; these dense /24s
+    /// are its best case, 2 MiB.
     #[test]
     fn unicast_trie_growth_moves_at_most_six_mebibytes_per_insert() {
         let moves = unicast_growth_moves(1_200_000);
@@ -3030,6 +3034,19 @@ mod tests {
             moves.iter().any(|(_, bytes)| *bytes >= 4 << 20),
             "the fill never crossed 1,048,576 trie cells"
         );
+    }
+
+    /// A route handle and a list slot each have 31 bits, and the last list
+    /// slot is not the value of a cell the trie has just created.
+    #[test]
+    fn path_cell_limits_are_exact() {
+        let top = PathCell::LIST;
+        assert_eq!(PathCell::one(top - 1).route(), Ok(top - 1));
+        assert_eq!(PathCell::list(0).route(), Err(0));
+        assert_eq!(PathCell::list(top - 2).route(), Err(top - 2));
+        assert_ne!(PathCell::list(top - 2), PathCell::VACANT);
+        assert!(std::panic::catch_unwind(|| PathCell::one(top)).is_err());
+        assert!(std::panic::catch_unwind(|| PathCell::list(top - 1)).is_err());
     }
 
     fn model_prefix(index: u32) -> Prefix {
@@ -3075,10 +3092,11 @@ mod tests {
             let path_id = next(PATH_IDS) * 7;
             match next(100) {
                 0 => {
-                    match next(4) {
+                    match next(5) {
                         0 => rib.clear_unicast(),
                         1 => rib.release_unicast(),
                         2 => rib.release_unicast_with(&mut || {}),
+                        3 => rib.clear(),
                         _ => rib.retire_with(&mut || {}),
                     }
                     model.clear();
@@ -3092,7 +3110,8 @@ mod tests {
                     let paths = model.entry(prefix).or_default();
                     promoted += usize::from(paths.len() == 1 && !paths.contains_key(&path_id));
                     paths.insert(path_id, route.clone());
-                    rib.insert(route);
+                    let action = model_action(&route);
+                    rib.insert_with_next_hop(route, action, &mut || {});
                 }
                 _ => {
                     let paths = model.get_mut(&prefix);
@@ -3119,6 +3138,18 @@ mod tests {
 
     fn row(route: &Route) -> Row {
         (route.prefix, route.path_id, route.next_hop, route.peer)
+    }
+
+    /// The next-hop action the model admits a route with, from its next hop.
+    fn model_action(route: &Route) -> Option<NextHopAction> {
+        let IpAddr::V4(next_hop) = route.next_hop else {
+            return None;
+        };
+        match u32::from(next_hop) % 3 {
+            0 => None,
+            1 => Some(NextHopAction::Self_),
+            _ => Some(NextHopAction::Specific(route.next_hop)),
+        }
     }
 
     fn assert_unicast_matches(
@@ -3150,6 +3181,11 @@ mod tests {
                     assert_eq!(
                         rib.get(&prefix, path_id).map(row),
                         paths.get(&path_id).map(row),
+                        "step {step}"
+                    );
+                    assert_eq!(
+                        rib.next_hop_override(&prefix, path_id).cloned(),
+                        paths.get(&path_id).and_then(model_action),
                         "step {step}"
                     );
                 }

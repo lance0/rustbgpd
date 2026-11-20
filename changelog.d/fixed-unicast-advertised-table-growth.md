@@ -12,9 +12,14 @@
   the table: it is six times smaller, not bounded. The evidence is a work
   count in a unit test (1.2 million prefixes, no insert above 6 MiB), not a
   timing. How many cells a table needs depends on the order its prefixes
-  arrive in, between about one and three per prefix.
-  **Operator-visible:** the prefix index of a single-path unicast table
-  takes one sixth of the memory, 8 MiB against 48 MiB of cell capacity at
-  one million prefixes by the cell sizes, not a daemon measurement. A
-  prefix advertised with several Add-Path paths takes a 32-byte list slot
-  beside its cell; lists of more than two paths allocate as before.
+  arrive in, between about one and three per prefix. The trie's node
+  vector, 16 bytes per slot, is unchanged and still doubles the same way:
+  on a sparse prefix shape arriving in hash-like order it moves 8,388,608
+  bytes in one insert, before and after this change.
+  **Operator-visible:** the cell capacity of a single-path unicast table is
+  one sixth of what it was, 8 MiB against 48 MiB at one million prefixes by
+  the cell sizes. The whole prefix index, cells and nodes, went from 28.0
+  to 8.0 MiB (3.5 times smaller) in a work count on 660,350 IPv4 prefixes
+  of a real shape; neither figure is a daemon measurement. A prefix
+  advertised with several Add-Path paths takes a 32-byte list slot beside
+  its cell; lists of more than two paths allocate as before.
