@@ -1,5 +1,6 @@
-//! Keep config intents in admission order without buffering any primary route
-//! updates. The pending writer's old policy remains authoritative.
+//! Keep config intents and session ends in admission order without buffering
+//! any primary route updates. The pending writer's old policy remains
+//! authoritative.
 use super::{PeerId, RibManager, RibUpdate};
 use rustbgpd_telemetry::metrics::RibActorTurnKind;
 
@@ -59,6 +60,8 @@ impl RibManager {
         }
         let next = operation(message);
         let kind = next.actor_turn_kind();
+        let room = self.first_group_deferred_intents.len()
+            < self.rx.max_capacity().min(MAX_DEFERRED_INTENTS);
         // A late writer may rebuild the evicted table. Keep its original
         // request and reply until the last allocation releases the slot.
         if kind == RibActorTurnKind::OutboundPolicy
@@ -69,14 +72,24 @@ impl RibManager {
                         | RibUpdate::PeerFamilySendable { .. }
                 ))
         {
-            return if self.first_group_deferred_intents.len()
-                < self.rx.max_capacity().min(MAX_DEFERRED_INTENTS)
-            {
-                Intake::Retain
-            } else {
-                Intake::Hold
-            };
+            return if room { Intake::Retain } else { Intake::Hold };
         }
+        // A session end is one small message that only has to follow the
+        // writer and its own peer's earlier input. Holding it at the FIFO head
+        // would make every other peer's routes wait for the rest of the build.
+        // Retained, it replays in admission order after the writer commits,
+        // and the peer check below keeps that peer's later messages behind it.
+        let behind_writer = if room
+            && matches!(
+                next,
+                RibUpdate::PeerDown { .. }
+                    | RibUpdate::PeerGracefulRestart { .. }
+                    | RibUpdate::LateSessionEnd(_)
+            ) {
+            Intake::Retain
+        } else {
+            Intake::Hold
+        };
         let peer = match next {
             RibUpdate::PeerDeleted { peer, .. }
             | RibUpdate::ReleasePeer { peer }
@@ -96,7 +109,7 @@ impl RibManager {
                     .iter()
                     .any(|intent| intent.session_peer() == Some(peer)))
         {
-            return Intake::Hold;
+            return behind_writer;
         }
         if matches!(
             kind,
@@ -121,7 +134,7 @@ impl RibManager {
                     .as_ref()
                     .is_some_and(|job| self.mutation_targets_first_group(next, job.gid)))
         {
-            return Intake::Hold;
+            return behind_writer;
         }
         Intake::Apply
     }

@@ -971,3 +971,327 @@ async fn overflow_withdrawal_stays_withdrawn_across_retirement_and_sender_replac
     );
     assert_eq!(manager.group_ribs.len(), published + 1);
 }
+
+// A cold build caught mid-walk, with `members` registered peers whose policy
+// clear needs the table under construction. Member `n` is `receiver(n)`.
+fn cold_build_with_policy_members(
+    per_family: u16,
+    members: u8,
+) -> (
+    RibManager,
+    mpsc::Sender<RibUpdate>,
+    Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+) {
+    let (mut manager, primary, expected) = fixture(per_family);
+    let mut receivers = Vec::new();
+    for n in 1..=members {
+        let (out, rx) = mpsc::channel(32);
+        let mut up = test_peer_up(receiver(n), 1, out);
+        let RibUpdate::PeerUp {
+            is_ebgp,
+            route_reflector_client,
+            sendable_families,
+            export_policy,
+            ..
+        } = &mut up
+        else {
+            unreachable!()
+        };
+        *is_ebgp = false;
+        *route_reflector_client = true;
+        *sendable_families = DUAL.to_vec();
+        *export_policy = Some(deny_default_prefix_chain());
+        manager.handle_update(up);
+        finish(&mut manager);
+        receivers.push(rx);
+    }
+    for rx in &mut receivers {
+        while rx.try_recv().is_ok() {}
+    }
+    receivers.push(join(&mut manager, receiver(100), 1, &DUAL));
+    staged_keys(&mut manager, &expected);
+    assert!(manager.first_group_build.is_some());
+    (manager, primary, receivers)
+}
+
+fn clear_policy(
+    manager: &mut RibManager,
+    peer: PeerId,
+) -> oneshot::Receiver<Result<(), crate::RibCommandError>> {
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::ReplacePeerExportPolicy {
+        peer,
+        export_policy: None,
+        reply,
+    });
+    assert!(
+        manager.first_group_pending_writer().is_some(),
+        "the policy clear must be claimed by the cold build"
+    );
+    assert!(response.try_recv().is_err());
+    response
+}
+
+fn other_marker() -> (Prefix, RibUpdate) {
+    let marker = prefixes(u16::MAX)[0];
+    (
+        marker,
+        test_routes_received(peer_v4(OTHER), vec![route(marker, OTHER, 190)]),
+    )
+}
+
+// One owner turn per iteration, scheduled as the run loop does: admissible
+// primary work first, otherwise the build. Returns the build turns spent
+// before `marker` reached the Loc-RIB.
+async fn build_turns_until_installed(manager: &mut RibManager, marker: Prefix) -> usize {
+    let mut build_turns = 0;
+    while manager.loc_rib.get(&marker).is_none() {
+        if manager.drain_ready_updates().await {
+            continue;
+        }
+        assert!(
+            manager.first_group_build.is_some(),
+            "no build and no admissible primary work"
+        );
+        manager.advance_first_group_build();
+        build_turns += 1;
+        assert!(build_turns < 100_000, "the marker never entered");
+    }
+    build_turns
+}
+
+fn commit_claimed_writer(manager: &mut RibManager) {
+    for _ in 0..100_000 {
+        if manager.first_group_pending_writer().is_none() {
+            return;
+        }
+        manager.advance_first_group_build();
+    }
+    panic!("the claimed writer never committed");
+}
+
+#[tokio::test]
+async fn unrelated_update_passes_a_session_end_that_waits_for_the_cold_build() {
+    let mut waited = [0usize; 2];
+    for session_ends in [false, true] {
+        let (mut manager, primary, _receivers) = cold_build_with_policy_members(8192, 1);
+        let incumbent = receiver(1);
+        let source_group = manager.grouped_member_of(incumbent).unwrap();
+        let mut policy_reply = clear_policy(&mut manager, incumbent);
+        if session_ends {
+            primary
+                .try_send(RibUpdate::PeerDown {
+                    peer: incumbent,
+                    session_id: 1,
+                })
+                .unwrap();
+        }
+        let (marker, update) = other_marker();
+        primary.try_send(update).unwrap();
+
+        waited[usize::from(session_ends)] = build_turns_until_installed(&mut manager, marker).await;
+        assert!(
+            manager.first_group_pending_writer().is_some(),
+            "an unrelated UPDATE waited {} build turns, until the writer committed",
+            waited[usize::from(session_ends)]
+        );
+        assert!(policy_reply.try_recv().is_err());
+        // The session end has not taken effect ahead of the older writer.
+        assert!(manager.outbound_peers.contains_key(&incumbent));
+
+        commit_claimed_writer(&mut manager);
+        assert_eq!(policy_reply.try_recv().unwrap(), Ok(()));
+        assert!(
+            manager
+                .grouped_member_of(incumbent)
+                .is_some_and(|destination| destination != source_group),
+            "the writer moved the still-registered peer"
+        );
+        if session_ends {
+            // Newer primary input stays behind the retained session end.
+            assert!(manager.try_recv_primary().is_none());
+            let end = manager.take_first_group_deferred_intent().unwrap();
+            assert!(matches!(end, RibUpdate::PeerDown { peer, .. } if peer == incumbent));
+            manager.handle_update(end);
+            assert!(!manager.outbound_peers.contains_key(&incumbent));
+        }
+        assert!(manager.take_first_group_deferred_intent().is_none());
+    }
+    assert_eq!(
+        waited[1], waited[0],
+        "build turns an unrelated UPDATE waited behind the session end, and the control"
+    );
+}
+
+#[tokio::test]
+async fn peer_up_after_a_retained_session_end_stays_behind_it() {
+    let (mut manager, primary, _receivers) = cold_build_with_policy_members(2048, 1);
+    let incumbent = receiver(1);
+    let mut policy_reply = clear_policy(&mut manager, incumbent);
+    primary
+        .try_send(RibUpdate::PeerDown {
+            peer: incumbent,
+            session_id: 1,
+        })
+        .unwrap();
+    let (out, _replacement_rx) = mpsc::channel(32);
+    primary.try_send(test_peer_up(incumbent, 2, out)).unwrap();
+    let (marker, update) = other_marker();
+    primary.try_send(update).unwrap();
+
+    // The session end is retained. Its peer's next session holds the head.
+    assert!(manager.drain_ready_updates().await);
+    assert!(!manager.drain_ready_updates().await);
+    assert!(matches!(
+        manager.primary_lookahead,
+        Some(RibUpdate::PeerUp { peer, session_id: 2, .. }) if peer == incumbent
+    ));
+    assert!(manager.first_group_commit_frontier_reached());
+    assert_eq!(manager.outbound_session_ids.get(&incumbent), Some(&1));
+
+    commit_claimed_writer(&mut manager);
+    assert_eq!(policy_reply.try_recv().unwrap(), Ok(()));
+    assert_eq!(manager.outbound_session_ids.get(&incumbent), Some(&1));
+    assert!(manager.try_recv_primary().is_none());
+    let end = manager.take_first_group_deferred_intent().unwrap();
+    assert!(matches!(end, RibUpdate::PeerDown { session_id: 1, .. }));
+    manager.handle_update(end);
+    assert!(!manager.outbound_peers.contains_key(&incumbent));
+    assert!(manager.loc_rib.get(&marker).is_none());
+
+    let up = manager.try_recv_primary().unwrap();
+    assert!(matches!(up, RibUpdate::PeerUp { session_id: 2, .. }));
+    manager.handle_update(up);
+    finish(&mut manager);
+    assert_eq!(manager.outbound_session_ids.get(&incumbent), Some(&2));
+    assert!(manager.drain_ready_updates().await);
+    drain_route_chunks(&mut manager);
+    assert!(manager.loc_rib.get(&marker).is_some());
+}
+
+#[tokio::test]
+async fn two_session_ends_behind_one_writer_replay_in_admission_order() {
+    let (mut manager, primary, _receivers) = cold_build_with_policy_members(4096, 2);
+    let (first, second) = (receiver(1), receiver(2));
+    let source_group = manager.grouped_member_of(first).unwrap();
+    assert_eq!(manager.grouped_member_of(second), Some(source_group));
+    let (reply, mut policy_reply) = oneshot::channel();
+    manager.handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+        replacements: [first, second]
+            .map(|peer| crate::update::PeerExportPolicyReplacement {
+                peer,
+                export_policy: None,
+            })
+            .into(),
+        reply,
+    });
+    assert!(manager.first_group_pending_writer().is_some());
+    primary
+        .try_send(RibUpdate::PeerGracefulRestart {
+            peer: second,
+            session_id: 1,
+            restart_time: 10,
+            stale_routes_time: 30,
+            gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            peer_llgr_capable: false,
+            peer_llgr_families: vec![],
+            llgr_stale_time: 0,
+        })
+        .unwrap();
+    primary
+        .try_send(RibUpdate::PeerDown {
+            peer: first,
+            session_id: 1,
+        })
+        .unwrap();
+    let (marker, update) = other_marker();
+    primary.try_send(update).unwrap();
+
+    assert_eq!(build_turns_until_installed(&mut manager, marker).await, 0);
+    assert!(manager.first_group_pending_writer().is_some());
+    assert!(policy_reply.try_recv().is_err());
+    for peer in [first, second] {
+        assert!(manager.outbound_peers.contains_key(&peer));
+    }
+
+    commit_claimed_writer(&mut manager);
+    assert_eq!(policy_reply.try_recv().unwrap(), Ok(vec![]));
+    let destination = manager.grouped_member_of(first).unwrap();
+    assert_ne!(destination, source_group);
+    assert_eq!(manager.grouped_member_of(second), Some(destination));
+    let end = manager.take_first_group_deferred_intent().unwrap();
+    assert!(matches!(end, RibUpdate::PeerGracefulRestart { peer, .. } if peer == second));
+    manager.handle_update(end);
+    assert!(!manager.outbound_peers.contains_key(&second));
+    assert!(manager.outbound_peers.contains_key(&first));
+    let end = manager.take_first_group_deferred_intent().unwrap();
+    assert!(matches!(end, RibUpdate::PeerDown { peer, .. } if peer == first));
+    manager.handle_update(end);
+    assert!(!manager.outbound_peers.contains_key(&first));
+    assert!(manager.take_first_group_deferred_intent().is_none());
+}
+
+// The same order through the run loop: the marker is visible to a later
+// primary read while the policy reply is pending, and the peer's channel
+// closes only after that reply.
+#[tokio::test]
+async fn actor_installs_an_unrelated_update_before_the_writer_and_the_session_end() {
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    let (mut manager, primary, mut receivers) = cold_build_with_policy_members(8192, 1);
+    let incumbent = receiver(1);
+    let mut policy_reply = clear_policy(&mut manager, incumbent);
+    let routes = manager.loc_rib.len();
+    primary
+        .try_send(RibUpdate::PeerDown {
+            peer: incumbent,
+            session_id: 1,
+        })
+        .unwrap();
+    primary.try_send(other_marker().1).unwrap();
+    let (reply, mut count) = oneshot::channel();
+    primary
+        .try_send(RibUpdate::QueryLocRibCount { reply })
+        .unwrap();
+
+    let mut actor = Box::pin(manager.run());
+    let mut founder_rx = receivers.pop().unwrap();
+    let mut incumbent_rx = receivers.pop().unwrap();
+    let (mut counted, mut replied) = (false, false);
+    for _ in 0..100_000 {
+        assert!(
+            actor
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        while founder_rx.try_recv().is_ok() {}
+        if !counted && let Ok(len) = count.try_recv() {
+            assert_eq!(len, routes + 1);
+            assert!(
+                !replied && policy_reply.try_recv().is_err(),
+                "an unrelated UPDATE waited for the writer to commit"
+            );
+            counted = true;
+        }
+        if !replied && let Ok(result) = policy_reply.try_recv() {
+            assert_eq!(result, Ok(()));
+            replied = true;
+        }
+        loop {
+            match incumbent_rx.try_recv() {
+                Ok(_) => {}
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    assert!(
+                        counted && replied,
+                        "the session end preceded the unrelated UPDATE or the reply"
+                    );
+                    return;
+                }
+            }
+        }
+    }
+    panic!("the session end never took effect");
+}
