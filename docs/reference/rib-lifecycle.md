@@ -41,7 +41,7 @@ finishes the unit it is in, and one unit can be a whole table.
 
 | Shape | [Session comes up](#session-comes-up) | [Steady state](#steady-state) | [Receiver falls behind](#receiver-falls-behind) | [Refresh, ORF, RTC](#refresh-orf-and-rt-constrain) | [Policy change](#policy-or-config-change) | [Restart](#restart) | [Session ends](#session-ends) |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Plain unicast, grouped | Table build **paced** ([receipt](../perf/first-group-build-registration-2026-11.md)); initial table **one turn** | **paced** by read gate and window | Resync **one turn** per member | **one turn** per request; queued requests share it | **bounded turns**: updates held until commit; two snapshot turns | **paced** between batches; input held inside a batch | **one turn** |
+| Plain unicast, grouped | Table build **paced**; initial table **one turn** (both in the [receipt](../perf/first-group-build-registration-2026-11.md)) | **paced** by read gate and window | Resync **one turn** per member | **one turn** per request; queued requests share it | **bounded turns**: updates held until commit; two snapshot turns | **paced** between batches; input held inside a batch | **one turn** |
 | Export policy | Table build and initial table together in **one turn**; not measured | As plain | As plain | As plain | As plain | As plain; not measured with policy | One turn |
 | Configured role | As export policy; not measured | As plain; not measured | As plain; not measured | As plain; not measured | As export policy; not measured | As plain; not measured | One turn; not measured |
 | Route-server per-client best | Table build and own initial table together in **one turn**; not measured | Window; per-client ranking not measured | As plain; not measured | One turn per request, never shared | Shared cohort **one turn**; other members **paced** by command; not measured | **paced** between batches, as plain; a crowded prefix alone | One turn; not measured |
@@ -98,8 +98,8 @@ What backs each **paced** and **bounded turns** mark:
   policy-free plain-unicast group build, unrelated UPDATE latency fell from
   2,209 ms to 0.60 ms. Sessions with export policy, a configured role,
   per-client-best, or mixed families can still take the synchronous build
-  path. The receipt covers the build only; the initial table that follows
-  is still one turn.
+  path. The initial table that follows is still one turn; the receipt
+  times it too, for this shape only.
 - *Steady state.* The read-gate test named under
   [Steady state](#steady-state) and the window thresholds. It bounds the
   input ahead of another peer's update, not the cost of one pass.
@@ -245,18 +245,37 @@ flowchart TD
     V --> X
 ```
 
-A new session registers at once on a quiet or small RIB and waits behind
-queued input on a large busy one. A group's first member builds the group
-table, in paced turns only for a plain unicast session; a later member
-skips the build. Every session then gets its table in one turn, which for
-every shape but the paced one is the same turn as the build.
+A new session registers at once on a quiet or small RIB. On a large busy
+one an ordinary registration waits behind queued input, while a plain
+unicast session that is the first member of its group is always deferred
+and builds the group table in paced turns that run between that input. A
+later member skips the build. Every session then gets its table in one
+turn, which for every shape but the paced one is the same turn as the
+build.
 
 **Registration.** The transport sends `PeerUp` with the negotiated families
 and the session's outbound channel. `register_active_session` in
 [`peer_lifecycle.rs`](../../crates/rib/src/manager/peer_lifecycle.rs)
-completes the registration inline unless the Loc-RIB has at least 10,000
-routes and the actor has queued work. Deferred registrations run one at a
-time, only when no route batch or primary input is waiting.
+decides between three cases:
+
+- *Inline.* A Loc-RIB under 10,000 routes, or a quiet actor, completes
+  the registration in the `PeerUp` turn.
+- *Ordinary deferred registration.* With at least 10,000 routes and
+  queued work, the registration is queued. Queued registrations complete
+  one at a time, only when no route batch or primary input is waiting, so
+  a sustained feed holds them back.
+- *Cold paced build.* A session eligible for the paced build below (with
+  at least 10,000 routes in the Loc-RIB) is deferred even when the actor
+  is quiet, and its build does not wait for the queue to empty: one
+  waiting session is examined per busy turn, so the build starts and
+  advances between queued input, and a second cold group can start and
+  finish after the first (`advance_busy_first_group` in
+  [`first_group_build.rs`](../../crates/rib/src/manager/first_group_build.rs);
+  test `busy_primary_fifo_allows_successive_cold_groups_to_start_and_finish`
+  in
+  [`tests/first_group_build.rs`](../../crates/rib/src/manager/tests/first_group_build.rs)).
+  One table is built at a time. Sustained input therefore does not block
+  these builds, only the ordinary deferred registrations.
 
 **Group or private.** The session's negotiated state and export chain are
 classified. A groupable session joins the group with its key, creating it
@@ -320,8 +339,13 @@ turn. End-of-RIB for each family follows its routes.
   group replay, held the actor for 211–246 ms at 700 route-server peers
   and 400,400 IPv4 prefixes
   ([receipt](../perf/route-refresh-readiness-2026-10.md)).
-- Not measured: the initial table at one million routes, for any shape.
-  Splitting it into bounded turns is not on main.
+- Measured for the plain shape: after a paced build, the initial table
+  of one IPv4 session with no policy was one turn of 1.33–1.38 s at one
+  million routes and 410–432 ms at 400,000
+  ([receipt](../perf/first-group-build-registration-2026-11.md),
+  in-process harness).
+- Not measured: the initial table at one million routes for any other
+  shape. Splitting it into bounded turns is not on main.
 
 ## Steady state
 
