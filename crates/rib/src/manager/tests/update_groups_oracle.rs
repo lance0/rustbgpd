@@ -7860,8 +7860,10 @@ async fn oracle_pcb_rs_control_action_free_fallback_skips_action_scan() {
 /// All requests are queued before the actor runs. Distinct own-source rows,
 /// a different policy group and negotiated private paths retain the same
 /// normalized announcements, next hops, withdrawals and refresh markers.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn oracle_queued_refresh_cohort_matches_private_replays() {
+    use rustbgpd_wire::RouteRefreshSubtype::{BoRR, EoRR};
+
     for features in [
         OraclePeerFeatures::default(),
         OraclePeerFeatures {
@@ -7921,16 +7923,23 @@ async fn oracle_queued_refresh_cohort_matches_private_replays() {
                     .into(),
             )
             .await;
+            // The policy withdrawal can hold C's operation latch when its
+            // second refresh arrives. The prompt reader has now released it.
+            tokio::time::advance(DIRTY_RESYNC_INTERVAL).await;
+            o.settle().await;
         };
         let (grouped, ungrouped) =
             run_grouped_and_ungrouped(Some(Ipv4Addr::new(192, 0, 2, 1)), scenario).await;
         assert_route_parity(&grouped, &ungrouped);
         for peer in [A, B, C] {
-            assert!(
-                grouped[&peer_v4(peer)]
-                    .iter()
-                    .any(|message| { !message.refresh_markers.is_empty() }),
-                "each member received a refresh response"
+            let markers: Vec<_> = grouped[&peer_v4(peer)]
+                .iter()
+                .flat_map(|message| message.refresh_markers.iter().copied())
+                .collect();
+            assert_eq!(
+                markers,
+                [BoRR, EoRR, BoRR, EoRR].map(|kind| (Afi::Ipv4, Safi::Unicast, kind)),
+                "each request needs a complete refresh response for {peer}"
             );
         }
     }
