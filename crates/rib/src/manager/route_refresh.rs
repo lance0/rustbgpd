@@ -111,6 +111,18 @@ pub(super) fn remove_family_drop_empty(
 }
 
 impl RibManager {
+    /// Take the session's queued response, retiring an empty family frontier.
+    pub(super) fn take_selection_refresh(&mut self, peer: PeerId, family: (Afi, Safi)) -> bool {
+        let Some(peers) = self.selection_deferred_refresh.get_mut(&family) else {
+            return false;
+        };
+        let taken = peers.remove(&peer);
+        if peers.is_empty() {
+            self.selection_deferred_refresh.remove(&family);
+        }
+        taken
+    }
+
     pub(super) fn update_peer_refresh_metrics(&self, peer: PeerId) {
         if let Some(families) = self.refresh_in_progress.get(&peer) {
             for &(afi, safi) in families {
@@ -509,6 +521,7 @@ impl RibManager {
     pub(super) fn lift_orf_gate(&mut self, peer: PeerId, family: (Afi, Safi)) {
         if remove_family_drop_empty(&mut self.peer_orf_pending, peer, family) {
             self.advance_export_settings();
+            self.refresh_eor_retry(peer);
         }
     }
 
@@ -519,9 +532,9 @@ impl RibManager {
                 let family = (afi, Safi::Unicast);
                 if self.selection_peer_convergence_held(peer, family) {
                     self.selection_deferred_refresh
-                        .entry(peer)
+                        .entry(family)
                         .or_default()
-                        .insert(family);
+                        .insert(peer);
                 } else {
                     self.lift_orf_gate(peer, family);
                     self.defer_refresh_answer(peer, family, false);
@@ -1038,11 +1051,18 @@ impl RibManager {
                 {
                     self.owe_eor_behind_orf_table(peer, family);
                 }
-                if self.selection_peer_convergence_held(peer, family) {
+                // A refresh-only owner can still be queued behind earlier
+                // visits after the family-wide convergence hold has opened.
+                if self.selection_peer_convergence_held(peer, family)
+                    || self
+                        .selection_deferred_refresh
+                        .get(&family)
+                        .is_some_and(|peers| peers.contains(&peer))
+                {
                     self.selection_deferred_refresh
-                        .entry(peer)
+                        .entry(family)
                         .or_default()
-                        .insert(family);
+                        .insert(peer);
                     debug!(%peer, ?afi, ?safi, "route-refresh response deferred behind RFC 4724 convergence gate");
                     return FamilyReplayOutcome::Deferred;
                 }
@@ -2683,7 +2703,7 @@ impl RibManager {
 
     /// A current session can request a refresh before its outbound sender is
     /// installed. Replacement and teardown clear that session's refresh debt.
-    fn refresh_waits_for_registration(&self, peer: PeerId) -> bool {
+    pub(super) fn refresh_waits_for_registration(&self, peer: PeerId) -> bool {
         self.live_sessions
             .get(&peer)
             .and_then(|sessions| sessions.last())

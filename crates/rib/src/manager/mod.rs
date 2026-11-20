@@ -774,7 +774,7 @@ pub struct RibManager {
     /// handle is released.
     superseded_session: HashMap<PeerId, u64>,
     /// Physical live-session completion options, including collision records.
-    /// Zero avoids fleet scans while EVPN completion control is inactive.
+    /// Zero skips receipt lookups while EVPN completion control is inactive.
     evpn_feed_receipt_count: usize,
     /// Session-stamped local role staged before `PeerUp`, so the initial
     /// Adj-RIB-Out build can enforce RFC 9234 OTC egress rules.
@@ -1096,7 +1096,7 @@ pub struct RibManager {
     deferred_selection_keys: selection_deferral::DeferredSelectionKeys,
     /// Route-refresh responses received while family convergence and `EoR`
     /// remain held. Replayed after the convergence `EoR` is queued.
-    selection_deferred_refresh: HashMap<PeerId, HashSet<(Afi, Safi)>>,
+    selection_deferred_refresh: HashMap<(Afi, Safi), BTreeSet<PeerId>>,
     /// Current RPKI VRP table for origin validation. `None` = no RPKI data.
     vrp_table: Option<Arc<VrpTable>>,
     /// Current ASPA table for path verification. `None` = no ASPA data.
@@ -1163,6 +1163,8 @@ pub struct RibManager {
     replacement_readiness: Option<Arc<ReplacementReadinessContext>>,
     #[cfg(test)]
     replacement_readiness_test_hook: Option<Arc<dyn Fn(&'static str) + Send + Sync>>,
+    #[cfg(test)]
+    marker_retry_test_hook: Option<Arc<dyn Fn(&'static str) + Send + Sync>>,
     /// Runs synchronously at the start of every applied primary update.
     #[cfg(test)]
     test_primary_update_hook: Option<PrimaryUpdateHook>,
@@ -3197,6 +3199,8 @@ impl RibManager {
             #[cfg(test)]
             replacement_readiness_test_hook: None,
             #[cfg(test)]
+            marker_retry_test_hook: None,
+            #[cfg(test)]
             test_primary_update_hook: None,
             slow_actor_turn_log: actor_turn::SlowActorTurnLog::default(),
             #[cfg(test)]
@@ -3610,6 +3614,7 @@ impl RibManager {
         self.selection_deferral = selection_deferral::SelectionDeferral::new(config, &self.metrics);
         self.update_selection_inventory_index();
         self.initialize_release_peers();
+        self.initialize_selection_marker_peers();
         self
     }
 
@@ -3700,8 +3705,8 @@ impl RibManager {
     /// convergence hold deferred it, or it waits for a dirty peer's resync.
     fn orf_refresh_queued(&self, peer: PeerId, family: (Afi, Safi)) -> bool {
         self.selection_deferred_refresh
-            .get(&peer)
-            .is_some_and(|queued| queued.contains(&family))
+            .get(&family)
+            .is_some_and(|queued| queued.contains(&peer))
             || self
                 .pending_refresh
                 .get(&peer)
@@ -3751,6 +3756,7 @@ impl RibManager {
             })
             .collect();
         if released.is_empty() {
+            self.refresh_eor_retry(peer);
             return;
         }
         info!(
@@ -4467,15 +4473,7 @@ impl RibManager {
                 self.helper_stale_needs_rescan(peer, carried)
                     && self.helper_stale_exempt_runnable(peer)
             })
-            || (self.evpn_feed_receipt_count != 0
-                && self.live_sessions.keys().any(|&peer| {
-                    self.replacement_checkpoint(false);
-                    self.eor_retry_runnable(peer)
-                }))
-            || self.eor.peers().any(|peer| {
-                self.replacement_checkpoint(false);
-                self.eor_retry_runnable(peer)
-            })
+            || self.marker_retry_pending()
             || self.outbound_limit_recovery_runnable()
             || self.deferred_refresh_pending()
             || self.owed_eviction_pending()

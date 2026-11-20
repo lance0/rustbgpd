@@ -2646,6 +2646,60 @@ fn unrelated_hold_events_do_not_walk_the_owners() {
     assert_eq!(peer_ledgers(&manager), 16, "nothing retired");
 }
 
+#[test]
+fn missing_evpn_selection_feed_checks_only_its_own_helper_carry() {
+    use super::evpn_complete_feed::{release_staged_evpn, stage_evpn_with_waiter};
+    use super::evpn_group_storage::{fixture, received, stage};
+    const EVPN: (Afi, Safi) = (Afi::L2Vpn, Safi::Evpn);
+    let (manager, peer, gid, mut output) = fixture();
+    let route = received(100);
+    let mut manager = stage_evpn_with_waiter(manager, route.peer, true);
+
+    // End these helpers' sessions after they have received a local RTBH.
+    // The sibling selection gate keeps their carried keys through EVPN release.
+    let helpers: Vec<_> = (1..=16)
+        .map(|index| {
+            let address = Ipv4Addr::new(192, 0, 4, index);
+            let id = u64::from(index);
+            let (_, rx, _) = register_peer(&mut manager, address, id, false, false, false);
+            (address, id, rx)
+        })
+        .collect();
+    let rtbh = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32);
+    inject_rtbh(&mut manager, rtbh);
+    for (address, id, mut rx) in helpers {
+        let mut rib = PeerRib::new();
+        apply(&mut rx, &mut rib, None);
+        assert!(rib.contains_key(&(Prefix::V4(rtbh), 0)));
+        clean_end_of(&mut manager, address, id);
+    }
+    assert_eq!(manager.helper_stale_exempt.len(), 16);
+    while output.try_recv().map(delivered).is_ok() {}
+
+    assert!(manager.capture_private_evpn_admitted(peer));
+    stage(&mut manager, gid, &route);
+    manager.owe_eor(peer, EVPN);
+    assert!(!manager.evpn_feed_is_current(peer));
+    let builds = manager.evpn_complete_feed_builds;
+    let work =
+        super::work_scaling::checkpoints_in(|| release_staged_evpn(&mut manager, route.peer));
+    assert_eq!(manager.evpn_complete_feed_builds, builds + 1);
+    assert_eq!(work.get("helper_stale_candidate"), Some(&1));
+    assert_eq!(manager.helper_stale_exempt.len(), 16);
+
+    let mut announcements = Vec::new();
+    let mut markers = 0;
+    while let Ok(update) = output.try_recv().map(delivered) {
+        announcements.extend(update.evpn_announce.iter().map(EvpnRibRoute::key));
+        if update.end_of_rib.contains(&EVPN) {
+            assert_eq!(announcements, [route.key()]);
+            markers += 1;
+        }
+    }
+    assert_eq!(announcements, [route.key()]);
+    assert_eq!(markers, 1);
+}
+
 /// Registers OBSERVER as a GR-helper per-client-best route-server client of
 /// AS65004 that enforces RFC 7947 control communities.
 fn register_rs_client(manager: &mut RibManager, session_id: u64, grouped: bool) -> Session {

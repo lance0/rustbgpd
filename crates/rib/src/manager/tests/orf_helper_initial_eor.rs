@@ -650,7 +650,12 @@ async fn dirty_at_release_then_cap_keeps_table_first() {
     let (tx, mut rx, mut rib) = flapped_of(&mut manager, OBSERVER, Open::HelperOnly, 4);
     assert!(manager.eor_behind_orf_table(peer).contains(&FAMILY));
     refresh(&mut manager, 182);
-    assert!(queued(&manager.selection_deferred_refresh, peer));
+    assert!(
+        manager
+            .selection_deferred_refresh
+            .get(&FAMILY)
+            .is_some_and(|peers| peers.contains(&peer))
+    );
     fill(&tx);
     manager.mark_outbound_dirty(peer);
     manager.handle_update(RibUpdate::EndOfRib {

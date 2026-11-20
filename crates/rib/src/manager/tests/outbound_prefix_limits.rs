@@ -1571,7 +1571,10 @@ fn selection_held_recovery_parks_without_protocol_state_or_timer_spin() {
     assert_eq!(manager.outbound_limit_recovery_for(peer), vec![Afi::Ipv4]);
     assert!(ipv4_row(&manager, peer).blocking);
     assert!(
-        !manager.selection_deferred_refresh.contains_key(&peer),
+        !manager
+            .selection_deferred_refresh
+            .values()
+            .any(|peers| peers.contains(&peer)),
         "internal recovery must not become a deferred peer refresh"
     );
     assert!(!manager.pending_refresh.contains_key(&peer));

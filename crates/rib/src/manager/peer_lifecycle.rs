@@ -1422,7 +1422,20 @@ impl RibManager {
             return;
         }
         self.retire_helper_stale_exempt();
-        for peer in self.helper_stale_exempt_ready(changed) {
+        let ready = self.helper_stale_exempt_ready(changed);
+        self.flush_ready_helper_stale_exempt(&ready, changed);
+    }
+
+    /// A selection marker feed changes only this receiver's admission state.
+    /// Its resync can unblock stale withdrawals before the release continues.
+    pub(super) fn flush_peer_helper_stale_exempt(&mut self, peer: PeerId) {
+        if !self.helper_stale_exempt.is_empty() && self.helper_stale_flush_candidate(peer) {
+            self.flush_ready_helper_stale_exempt(&[peer], &HashSet::new());
+        }
+    }
+
+    fn flush_ready_helper_stale_exempt(&mut self, peers: &[PeerId], changed: &HashSet<Prefix>) {
+        for &peer in peers {
             if self.helper_stale_flush_refused(peer, changed) {
                 continue;
             }
@@ -1533,7 +1546,7 @@ impl RibManager {
         let mut ready = Vec::new();
         let mut skipped_touched = Vec::new();
         for (&peer, carried) in &self.helper_stale_exempt {
-            if self.helper_stale_exempt_runnable(peer) {
+            if self.helper_stale_flush_candidate(peer) {
                 ready.push(peer);
             } else if carried.settled && touches_changed(&carried.keys, changed) {
                 skipped_touched.push(peer);
@@ -1545,6 +1558,12 @@ impl RibManager {
             }
         }
         ready
+    }
+
+    fn helper_stale_flush_candidate(&self, peer: PeerId) -> bool {
+        #[cfg(test)]
+        super::slice_timing::checkpoint(Some("helper_stale_candidate"));
+        self.helper_stale_exempt_runnable(peer)
     }
 
     /// Whether our End-of-RIB toward `peer` may still be held for some
@@ -2025,6 +2044,10 @@ impl RibManager {
         // The owed End-of-RIB markers are per-session too, with the ORF
         // table and RFC 4684 §6 holds they carry: a new session re-derives
         // them on `PeerUp`.
+        self.selection_deferred_refresh.retain(|_, peers| {
+            peers.remove(&peer);
+            !peers.is_empty()
+        });
         self.forget_eor(peer);
         self.orf_eor_hold.remove(&peer);
         self.orf_eor_cap_passed.remove(&peer);
@@ -2033,7 +2056,6 @@ impl RibManager {
         // A forced resync is owed to the session whose channel it could not
         // reach; the next registration's initial table already sends it all.
         self.force_outbound_peers.remove(&peer);
-        self.selection_deferred_refresh.remove(&peer);
         // Purge the peer's queued route batches. This upholds the
         // "peer rib must exist before chunk processing" expectation in
         // the distribution chunk handlers: `enqueue_routes_received`
@@ -2241,14 +2263,16 @@ impl RibManager {
             {
                 // The initial dump restores the view. Keep a requested refresh
                 // response with its connection until a sender can answer it.
-                for family in self
-                    .selection_deferred_refresh
-                    .remove(&peer)
-                    .into_iter()
-                    .chain(self.pending_refresh.remove(&peer))
-                    .flatten()
-                {
-                    if previous.negotiated_orf_recv.contains(&family) {
+                let pending = self.pending_refresh.remove(&peer);
+                for &family in &previous.negotiated_orf_recv {
+                    if self
+                        .selection_deferred_refresh
+                        .get(&family)
+                        .is_some_and(|peers| peers.contains(&peer))
+                        || pending
+                            .as_ref()
+                            .is_some_and(|families| families.contains(&family))
+                    {
                         previous.registration_orf_refresh[usize::from(family.0 == Afi::Ipv6)] =
                             true;
                     }

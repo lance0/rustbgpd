@@ -25,6 +25,14 @@ use crate::{
 const FAMILY: (Afi, Safi) = (Afi::Ipv4, Safi::Unicast);
 const READY_FAMILY: (Afi, Safi) = (Afi::Ipv6, Safi::Unicast);
 
+fn selection_refresh_families(manager: &RibManager, peer: PeerId) -> HashSet<(Afi, Safi)> {
+    manager
+        .selection_deferred_refresh
+        .iter()
+        .filter_map(|(&family, peers)| peers.contains(&peer).then_some(family))
+        .collect()
+}
+
 #[test]
 fn deferred_registration_failback_rearms_exact_live_survivor() {
     let a = peer(1);
@@ -1219,8 +1227,8 @@ fn staged_selection_classifies_refresh_response_as_convergence_deferred() {
     manager.send_route_refresh_response(target, FAMILY.0, FAMILY.1);
 
     assert_eq!(
-        manager.selection_deferred_refresh.get(&target),
-        Some(&HashSet::from([FAMILY]))
+        selection_refresh_families(&manager, target),
+        HashSet::from([FAMILY])
     );
     assert!(!manager.pending_refresh.contains_key(&target));
     assert!(outbound_rx.try_recv().is_err());
@@ -1493,8 +1501,8 @@ fn dirty_observer_emits_convergence_eor_before_deferred_refresh() {
         safi: FAMILY.1,
     });
     assert_eq!(
-        manager.selection_deferred_refresh.get(&observer),
-        Some(&HashSet::from([FAMILY]))
+        selection_refresh_families(&manager, observer),
+        HashSet::from([FAMILY])
     );
     assert!(observer_rx.try_recv().is_err());
 
@@ -1617,8 +1625,8 @@ fn no_diff_dirty_resync_keeps_refresh_behind_failed_convergence_eor() {
         safi: FAMILY.1,
     });
     assert_eq!(
-        manager.selection_deferred_refresh.get(&observer),
-        Some(&HashSet::from([FAMILY]))
+        selection_refresh_families(&manager, observer),
+        HashSet::from([FAMILY])
     );
 
     assert!(
@@ -3295,8 +3303,8 @@ fn release_sends_single_eor_to_refresh_deferred_peer() {
         safi: FAMILY.1,
     });
     assert_eq!(
-        manager.selection_deferred_refresh.get(&target),
-        Some(&HashSet::from([FAMILY]))
+        selection_refresh_families(&manager, target),
+        HashSet::from([FAMILY])
     );
     assert!(outbound_rx.try_recv().is_err());
 

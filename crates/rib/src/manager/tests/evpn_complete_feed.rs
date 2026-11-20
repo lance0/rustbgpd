@@ -1934,6 +1934,19 @@ fn review_mixed_family_marker_refusal_retries_every_ready_family_without_data() 
     assert!(!manager.resync_tick_pending());
 }
 
+fn count_marker_work(manager: &mut RibManager, stage: &'static str) -> Arc<AtomicUsize> {
+    let visits = Arc::new(AtomicUsize::new(0));
+    manager.marker_retry_test_hook = Some(Arc::new({
+        let visits = visits.clone();
+        move |seam| {
+            if seam == stage {
+                visits.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }));
+    visits
+}
+
 #[test]
 fn review_inactive_marker_scheduler_visits_no_ordinary_peers() {
     let (mut manager, peer, gid, mut output) = fixture();
@@ -1957,15 +1970,7 @@ fn review_inactive_marker_scheduler_visits_no_ordinary_peers() {
     assert_eq!(receivers.len(), 32);
     assert_eq!(manager.live_sessions.len(), 33);
     assert!(manager.dirty_peers.is_empty());
-    let visits = Arc::new(AtomicUsize::new(0));
-    manager.replacement_readiness_test_hook = Some(Arc::new({
-        let visits = visits.clone();
-        move |seam| {
-            if seam == "evpn_marker_candidate" {
-                visits.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-    }));
+    let visits = count_marker_work(&mut manager, "evpn_marker_candidate");
     for _ in 0..2 {
         assert!(!manager.resync_tick_pending());
         manager.retry_eor_markers_bounded();
@@ -1985,11 +1990,11 @@ fn review_inactive_marker_scheduler_visits_no_ordinary_peers() {
     output.try_recv().map(delivered).unwrap();
     visits.store(0, Ordering::SeqCst);
     assert!(manager.resync_tick_pending());
+    manager.retry_eor_markers_bounded();
     assert!(
         visits.load(Ordering::SeqCst) > 0,
         "the visit observer must see real active debt"
     );
-    manager.retry_eor_markers_bounded();
     assert_eq!(output.try_recv().map(delivered).unwrap().end_of_rib, [EVPN]);
     visits.store(0, Ordering::SeqCst);
     assert!(!manager.resync_tick_pending());
@@ -2273,6 +2278,131 @@ fn review_receipt_count_tracks_replacement_retirement_and_teardown() {
     manager.peer_down_teardown(peer);
     assert_count(&manager);
     assert_eq!(manager.evpn_feed_receipt_count, 0);
+}
+
+fn evpn_marker_receivers() -> (
+    RibManager,
+    usize,
+    Vec<(PeerId, mpsc::Receiver<OutboundRouteUpdate>)>,
+) {
+    let (mut manager, original, gid, output) = fixture();
+    let mut outputs = vec![(original, output)];
+    manager
+        .group_ribs
+        .get_mut(&gid)
+        .unwrap()
+        .set_evpn_ownership_for_test(false);
+    for host in 40..56 {
+        let peer = PeerId::from_addr(Ipv4Addr::new(192, 0, 2, host).into());
+        let (tx, mut rx) = mpsc::channel(8);
+        register(&mut manager, peer, tx);
+        while rx.try_recv().map(delivered).is_ok() {}
+        assert_eq!(manager.grouped_member_of(peer), Some(gid));
+        outputs.push((peer, rx));
+    }
+    manager
+        .group_ribs
+        .get_mut(&gid)
+        .unwrap()
+        .set_evpn_ownership_for_test(true);
+    for (peer, _) in &outputs {
+        assert!(manager.register_evpn_recovery(*peer, false));
+    }
+    (manager, gid, outputs)
+}
+
+#[test]
+fn selection_release_wakes_a_receipt_only_evpn_end_of_refresh() {
+    const LIMIT: usize = crate::manager::RESYNC_PEERS_PER_TICK;
+    let (manager, gid, mut outputs) = evpn_marker_receivers();
+    let route = received(100);
+    let source = route.peer;
+    let mut manager = manager.with_selection_deferral(crate::SelectionDeferralConfig {
+        timeout: Duration::from_secs(60),
+        waiters: vec![crate::SelectionDeferralWaiterConfig {
+            peer: source.into(),
+            families: vec![EVPN],
+        }],
+    });
+    assert!(outputs.len() > LIMIT);
+    for (peer, output) in &mut outputs {
+        admit_waiting_for_marker(&mut manager, *peer, gid, &route, true);
+        let data = output.try_recv().map(delivered).unwrap();
+        assert_eq!(data.evpn_announce[0].key(), route.key());
+    }
+    let metrics = manager.metrics.clone();
+    let wait = manager
+        .selection_deferral
+        .as_mut()
+        .unwrap()
+        .classify_session(source, 12, false, &HashSet::from([EVPN]), &metrics);
+    assert_eq!(wait, []);
+    assert!(manager.selection_convergence_held(EVPN));
+    let visits = count_marker_work(&mut manager, "evpn_marker_candidate");
+    for _ in 0..outputs.len() {
+        if !manager.resync_tick_pending() {
+            break;
+        }
+        manager.retry_eor_markers_bounded();
+        assert!(visits.swap(0, Ordering::SeqCst) <= LIMIT);
+    }
+    assert!(!manager.resync_tick_pending());
+    manager.retry_eor_markers_bounded();
+    assert_eq!(visits.swap(0, Ordering::SeqCst), 0);
+    for (peer, output) in &mut outputs {
+        assert!(output.try_recv().is_err());
+        assert!(manager.eor_pending(*peer).is_empty());
+        assert_eq!(manager.evpn_feed_owed_markers(*peer), (false, true));
+    }
+
+    let eligibility = count_marker_work(&mut manager, "evpn_marker_eligibility");
+    manager.refresh_eor_retry(outputs[0].0);
+    assert_eq!(eligibility.swap(0, Ordering::SeqCst), 1);
+    let release = manager
+        .selection_deferral
+        .as_mut()
+        .unwrap()
+        .end_of_rib(source, 12, EVPN, &metrics)
+        .unwrap();
+    manager.apply_selection_deferral_transitions([release], "waiter supplied EVPN EoR");
+    assert!(!manager.selection_convergence_held(EVPN));
+    assert!(manager.resync_tick_pending());
+    assert_eq!(
+        eligibility.swap(0, Ordering::SeqCst),
+        0,
+        "release and timer arming must not reclassify every waiter"
+    );
+    let visits = count_marker_work(&mut manager, "evpn_marker_candidate");
+    let mut total_visits = 0;
+    let mut ticks = 0;
+    for _ in 0..outputs.len() * 2 {
+        if !manager.resync_tick_pending() {
+            break;
+        }
+        manager.retry_eor_markers_bounded();
+        let examined = visits.swap(0, Ordering::SeqCst);
+        assert!(
+            (1..=LIMIT).contains(&examined),
+            "examined {examined} candidates"
+        );
+        total_visits += examined;
+        ticks += 1;
+    }
+    assert!(ticks > 1);
+    assert!((outputs.len()..=2 * outputs.len()).contains(&total_visits));
+    assert!(!manager.resync_tick_pending());
+    for (peer, output) in &mut outputs {
+        let marker = output.try_recv().map(delivered).unwrap();
+        assert!(marker.evpn_announce.is_empty() && marker.evpn_withdraw.is_empty());
+        assert_eq!(marker.end_of_rib, []);
+        assert_eq!(
+            marker.refresh_markers,
+            [(EVPN.0, EVPN.1, RouteRefreshSubtype::EoRR)]
+        );
+        assert!(output.try_recv().is_err());
+        assert!(manager.eor_pending(*peer).is_empty());
+        assert!(!manager.has_evpn_feed_completion(*peer));
+    }
 }
 
 fn assert_review2_selection_release(nonempty: bool, staged: bool) {
@@ -3090,6 +3220,10 @@ fn sparse_renewal_inherits_the_owed_marker_behind_its_data() {
         manager.evpn_feed_is_current(peer),
         "the renewal kept the owed marker"
     );
+    assert!(
+        manager.resync_tick_pending(),
+        "the EoRR receipt alone arms its retry"
+    );
     manager.retry_eor_markers_bounded();
     let marker = output.try_recv().map(delivered).unwrap();
     assert_eq!(
@@ -3098,6 +3232,7 @@ fn sparse_renewal_inherits_the_owed_marker_behind_its_data() {
     );
     assert!(marker.evpn_announce.is_empty() && marker.evpn_withdraw.is_empty());
     assert!(!manager.has_evpn_feed_completion(peer));
+    assert!(!manager.resync_tick_pending());
     assert_eq!(manager.evpn_admitted_count(peer), 2);
 }
 
@@ -3794,6 +3929,25 @@ fn operator_replay_of_a_clean_member_keeps_the_proof_cycle() {
 /// the EVPN End-of-RIB, and its refresh markers.
 type EvpnWire = (usize, bool, Vec<RouteRefreshSubtype>);
 
+fn drain_evpn_answer(output: &mut mpsc::Receiver<OutboundRouteUpdate>, wire: &mut Vec<EvpnWire>) {
+    while let Ok(update) = output.try_recv().map(delivered) {
+        assert_eq!(update.evpn_withdraw, [] as [rustbgpd_wire::EvpnRouteKey; 0]);
+        let markers = update
+            .refresh_markers
+            .iter()
+            .map(|&(afi, safi, subtype)| {
+                assert_eq!((afi, safi), EVPN);
+                subtype
+            })
+            .collect();
+        wire.push((
+            update.evpn_announce.len(),
+            update.end_of_rib.contains(&EVPN),
+            markers,
+        ));
+    }
+}
+
 /// A refresh of `peer`'s EVPN family, then up to four resync ticks while
 /// the tick has work: everything the peer was sent.
 fn refresh_evpn_and_tick(
@@ -3801,24 +3955,6 @@ fn refresh_evpn_and_tick(
     peer: PeerId,
     output: &mut mpsc::Receiver<OutboundRouteUpdate>,
 ) -> Vec<EvpnWire> {
-    fn drain(output: &mut mpsc::Receiver<OutboundRouteUpdate>, wire: &mut Vec<EvpnWire>) {
-        while let Ok(update) = output.try_recv().map(delivered) {
-            assert_eq!(update.evpn_withdraw, [] as [rustbgpd_wire::EvpnRouteKey; 0]);
-            let markers = update
-                .refresh_markers
-                .iter()
-                .map(|&(afi, safi, subtype)| {
-                    assert_eq!((afi, safi), EVPN);
-                    subtype
-                })
-                .collect();
-            wire.push((
-                update.evpn_announce.len(),
-                update.end_of_rib.contains(&EVPN),
-                markers,
-            ));
-        }
-    }
     let mut wire = Vec::new();
     manager.handle_update(RibUpdate::RouteRefreshRequest {
         peer,
@@ -3827,13 +3963,13 @@ fn refresh_evpn_and_tick(
         safi: EVPN.1,
         queued: Arc::default(),
     });
-    drain(output, &mut wire);
+    drain_evpn_answer(output, &mut wire);
     for _ in 0..4 {
         if !manager.resync_tick_pending() {
             break;
         }
         manager.resync_dirty_peers_bounded();
-        drain(output, &mut wire);
+        drain_evpn_answer(output, &mut wire);
     }
     wire
 }
@@ -3938,4 +4074,269 @@ fn refresh_of_an_owned_member_owing_its_marker_sends_it_once_first() {
     assert_marker_then_bracketed_answer(&wire);
     assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
     assert_refresh_settled(&manager, peer);
+}
+
+/// A collision waiter wants a refresh. Selection can stage the table now,
+/// but convergence and the terminal markers wait for the waiter's `EoRR`.
+fn stage_evpn_until_refresh(manager: RibManager, source: PeerId) -> RibManager {
+    stage_evpn_with_waiter(manager, source, false)
+}
+
+pub(super) fn stage_evpn_with_waiter(
+    manager: RibManager,
+    source: PeerId,
+    hold_vpn: bool,
+) -> RibManager {
+    use crate::manager::selection_deferral::SelectionDeferralTransition;
+    let vpn = (Afi::Ipv4, Safi::MplsVpn);
+    let vpn_source = peer_v4(Ipv4Addr::new(192, 0, 2, 240));
+    let mut waiters = vec![crate::SelectionDeferralWaiterConfig {
+        peer: source.into(),
+        families: vec![EVPN],
+    }];
+    if hold_vpn {
+        waiters.push(crate::SelectionDeferralWaiterConfig {
+            peer: vpn_source.into(),
+            families: vec![vpn],
+        });
+    }
+    let mut manager = manager.with_selection_deferral(crate::SelectionDeferralConfig {
+        timeout: Duration::from_secs(60),
+        waiters,
+    });
+    let metrics = manager.metrics.clone();
+    let selection = manager.selection_deferral.as_mut().unwrap();
+    if hold_vpn {
+        assert_eq!(
+            selection.classify_session(vpn_source, 19, false, &HashSet::from([vpn]), &metrics),
+            []
+        );
+    }
+    let transitions = selection
+        .await_collision_failback_refresh(source, 12, false, &HashSet::from([EVPN]), true, &metrics)
+        .unwrap();
+    assert!(matches!(
+        transitions.as_slice(),
+        [SelectionDeferralTransition::Stage { family: EVPN }]
+    ));
+    assert!(selection.begin_route_refresh(source, 12, EVPN).is_none());
+    manager.apply_selection_deferral_transitions(transitions, "collision waiter started refresh");
+    assert!(manager.selection_convergence_held(EVPN));
+    assert!(!manager.selection_deferred(EVPN));
+    manager
+}
+
+pub(super) fn release_staged_evpn(manager: &mut RibManager, source: PeerId) {
+    use crate::manager::selection_deferral::SelectionDeferralTransition;
+    let metrics = manager.metrics.clone();
+    let release = manager
+        .selection_deferral
+        .as_mut()
+        .unwrap()
+        .end_route_refresh(source, 12, EVPN, &metrics)
+        .unwrap();
+    assert!(matches!(
+        release,
+        SelectionDeferralTransition::Release {
+            already_staged: true,
+            ..
+        }
+    ));
+    manager.apply_selection_deferral_transitions([release], "collision waiter completed refresh");
+    assert!(!manager.selection_convergence_held(EVPN));
+}
+
+fn request_held_refresh(manager: &mut RibManager, peer: PeerId, family: (Afi, Safi)) {
+    assert!(manager.selection_convergence_held(family));
+    manager.handle_update(RibUpdate::RouteRefreshRequest {
+        peer,
+        session_id: 7,
+        afi: family.0,
+        safi: family.1,
+        queued: Arc::default(),
+    });
+    assert!(manager.orf_refresh_queued(peer, family));
+}
+
+fn receipt_only_release_work(unrelated: u16) -> super::work_scaling::Work {
+    let (mut manager, peer, gid, mut output) = fixture();
+    let route = received(100);
+    let mut requesters = Vec::new();
+    for host in 80..89 {
+        let requester = peer_v4(Ipv4Addr::new(192, 0, 2, host));
+        let (tx, mut answers) = mpsc::channel(8);
+        register(&mut manager, requester, tx);
+        while answers.try_recv().map(delivered).is_ok() {}
+        assert!(manager.eor_pending(requester).is_empty());
+        requesters.push((requester, answers, Vec::new()));
+    }
+    let mut manager = stage_evpn_with_waiter(manager, route.peer, true);
+    let vpn = (Afi::Ipv4, Safi::MplsVpn);
+    let mut held = Vec::new();
+    for n in 0..unrelated {
+        let [hi, lo] = n.to_be_bytes();
+        let debtor = peer_v4(Ipv4Addr::new(198, 18, hi, lo));
+        let (sender, mut receiver) = mpsc::channel(8);
+        let mut up = super::lifecycle::test_peer_up(debtor, 7, sender);
+        if let RibUpdate::PeerUp {
+            sendable_families, ..
+        } = &mut up
+        {
+            *sendable_families = vec![crate::route::RtcRibRouteKey::afi_safi(), vpn];
+        }
+        manager.handle_update(up);
+        while receiver.try_recv().map(delivered).is_ok() {}
+        assert!(manager.eor.owes(debtor, vpn));
+        assert!(!manager.eor.owes(debtor, EVPN));
+        request_held_refresh(&mut manager, debtor, vpn);
+        assert!(receiver.try_recv().is_err());
+        held.push((debtor, receiver));
+    }
+
+    admit_waiting_for_marker(&mut manager, peer, gid, &route, true);
+    assert_eq!(
+        output.try_recv().map(delivered).unwrap().evpn_announce[0].key(),
+        route.key()
+    );
+    assert!(manager.eor_pending(peer).is_empty());
+    assert_eq!(manager.evpn_feed_owed_markers(peer), (false, true));
+    assert!(!manager.resync_tick_pending());
+    for (requester, answers, _) in &mut requesters {
+        request_held_refresh(&mut manager, *requester, EVPN);
+        assert!(answers.try_recv().is_err());
+    }
+    let visits = count_marker_work(&mut manager, "evpn_marker_candidate");
+    let work =
+        super::work_scaling::checkpoints_in(|| release_staged_evpn(&mut manager, route.peer));
+    assert!(manager.resync_tick_pending());
+    assert!(visits.swap(0, Ordering::SeqCst) <= crate::manager::RESYNC_PEERS_PER_TICK);
+    let mut previous_started = 0;
+    for _ in 0..2 * requesters.len() {
+        let mut started = 0;
+        for (_, answers, wire) in &mut requesters {
+            drain_evpn_answer(answers, wire);
+            started += usize::from(
+                wire.iter()
+                    .any(|(_, _, markers)| markers.contains(&RouteRefreshSubtype::BoRR)),
+            );
+        }
+        assert!(started - previous_started <= crate::manager::RESYNC_PEERS_PER_TICK);
+        previous_started = started;
+        if !manager.resync_tick_pending() {
+            break;
+        }
+        manager.resync_dirty_peers_bounded();
+        assert!(visits.swap(0, Ordering::SeqCst) <= crate::manager::RESYNC_PEERS_PER_TICK);
+    }
+    for (_, mut answers, mut wire) in requesters {
+        drain_evpn_answer(&mut answers, &mut wire);
+        let markers: Vec<_> = wire
+            .iter()
+            .flat_map(|(_, _, markers)| markers)
+            .copied()
+            .collect();
+        assert_eq!(
+            markers,
+            [RouteRefreshSubtype::BoRR, RouteRefreshSubtype::EoRR]
+        );
+        assert_eq!(wire.iter().map(|(ann, _, _)| ann).sum::<usize>(), 1);
+    }
+    let marker = output.try_recv().map(delivered).unwrap();
+    assert_eq!(
+        marker.refresh_markers,
+        [(EVPN.0, EVPN.1, RouteRefreshSubtype::EoRR)]
+    );
+    assert!(
+        marker.end_of_rib.is_empty()
+            && marker.evpn_announce.is_empty()
+            && marker.evpn_withdraw.is_empty()
+    );
+    assert!(output.try_recv().is_err());
+    assert!(!manager.resync_tick_pending());
+    for (debtor, mut receiver) in held {
+        assert!(manager.eor.owes(debtor, vpn));
+        assert!(manager.orf_refresh_queued(debtor, vpn));
+        assert!(receiver.try_recv().is_err());
+    }
+    work
+}
+
+#[test]
+fn staged_evpn_release_work_is_independent_of_unrelated_held_markers() {
+    let control = receipt_only_release_work(0);
+    let populated = receipt_only_release_work(448);
+    // The registered-peer release inventory uses named checkpoints, and
+    // the ordinary EoR scan for EVPN coverage uses unnamed checkpoints.
+    for stage in ["selection_inventory", ""] {
+        assert_eq!(
+            populated.get(stage),
+            control.get(stage),
+            "448 unrelated held markers added release work at {stage:?}: {control:?} -> {populated:?}"
+        );
+    }
+}
+
+#[test]
+fn staged_evpn_release_resumes_ordinary_markers_on_their_own_channels() {
+    const LIMIT: usize = crate::manager::RESYNC_PEERS_PER_TICK;
+    let (manager, gid, mut outputs) = evpn_marker_receivers();
+    let route = received(100);
+    let mut manager = stage_evpn_until_refresh(manager, route.peer);
+    for (peer, output) in &mut outputs {
+        admit_waiting_for_marker(&mut manager, *peer, gid, &route, false);
+        assert_eq!(
+            output.try_recv().map(delivered).unwrap().evpn_announce[0].key(),
+            route.key()
+        );
+        assert!(manager.eor.owes(*peer, EVPN));
+        request_held_refresh(&mut manager, *peer, EVPN);
+        assert!(output.try_recv().is_err());
+    }
+    assert!(outputs.len() > 2 * LIMIT);
+    let visits = count_marker_work(&mut manager, "evpn_marker_candidate");
+    release_staged_evpn(&mut manager, route.peer);
+    assert!(visits.swap(0, Ordering::SeqCst) <= LIMIT);
+    assert!(manager.resync_tick_pending());
+    manager.resync_dirty_peers_bounded();
+    assert!((1..=LIMIT).contains(&visits.swap(0, Ordering::SeqCst)));
+
+    // Replace one receiver whose marker has not yet been offered. The
+    // new channel reuses its numeric ID and negotiates only IPv4.
+    let (peer, mut old) = outputs.swap_remove(
+        outputs
+            .iter()
+            .rposition(|(peer, _)| manager.eor.owes(*peer, EVPN))
+            .unwrap(),
+    );
+    assert!(old.try_recv().is_err());
+    let (sender, mut replacement) = mpsc::channel(8);
+    manager.handle_update(super::lifecycle::test_peer_up(peer, 7, sender));
+    let fresh = replacement.try_recv().map(delivered).unwrap();
+    assert_eq!(fresh.end_of_rib, [(Afi::Ipv4, Safi::Unicast)]);
+    visits.store(0, Ordering::SeqCst);
+    let mut answers = HashMap::new();
+    for _ in 0..2 * outputs.len() {
+        for (peer, output) in &mut outputs {
+            drain_evpn_answer(output, answers.entry(*peer).or_default());
+        }
+        if !manager.resync_tick_pending() {
+            break;
+        }
+        manager.resync_dirty_peers_bounded();
+        assert!(visits.swap(0, Ordering::SeqCst) <= LIMIT);
+    }
+    assert!(!manager.resync_tick_pending());
+    assert!(replacement.try_recv().is_err());
+    assert!(old.try_recv().is_err());
+    for (peer, mut output) in outputs {
+        let answer = answers.get_mut(&peer).unwrap();
+        drain_evpn_answer(&mut output, answer);
+        assert_marker_then_bracketed_answer(answer);
+        assert_eq!(
+            answer.iter().filter(|(_, eor, _)| *eor).count(),
+            1,
+            "the queued refresh must not duplicate the convergence EoR: {answer:?}"
+        );
+        assert!(!manager.eor.owes(peer, EVPN));
+    }
 }

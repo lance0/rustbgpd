@@ -256,10 +256,11 @@ async fn a_refused_marker_waits_for_the_tick_with_only_the_writer_reason() {
     let sender = manager.outbound_peers[&TARGET].clone();
     while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
     release(&mut manager, EorHold::RtMembership);
+    // Model the resync admitting the last data slot. The marker behind it
+    // still meets a full writer, so only its writer hold remains.
+    assert!(manager.dirty_peers.remove(&TARGET));
+    manager.settle_eor_behind_resync(TARGET);
     assert_eq!(markers(&mut output), 0);
-    // A refused marker of a session without a current EVPN feed also
-    // resyncs; clear that to isolate the writer reason.
-    manager.dirty_peers.remove(&TARGET);
     assert_holds(&manager, &[EorHold::Writer], "refused");
     manager.retry_eor_markers_bounded();
     assert_eq!(markers(&mut output), 1);
@@ -1232,7 +1233,8 @@ async fn the_tick_does_not_report_a_refused_marker() {
     let sender = manager.outbound_peers[&TARGET].clone();
     while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
     release(&mut manager, EorHold::RtMembership);
-    manager.dirty_peers.remove(&TARGET);
+    assert!(manager.dirty_peers.remove(&TARGET));
+    manager.settle_eor_behind_resync(TARGET);
     assert_eq!(markers(&mut output), 0);
     manager.retry_eor_markers_bounded();
     assert_eq!(markers(&mut output), 1);
@@ -1355,4 +1357,136 @@ fn an_unrelated_family_release_does_not_replay_a_caught_up_receiver() {
     assert!(manager.force_outbound_peers.contains(&TARGET));
     assert!(!manager.dirty_peers.contains(&TARGET));
     assert!(!manager.resync_pending(TARGET));
+}
+
+/// Release owes only the marker. A full writer refuses it until the next retry.
+fn refuse_final_marker(
+    manager: &mut RibManager,
+    peer: PeerId,
+    output: &mut mpsc::Receiver<OutboundRouteUpdate>,
+) {
+    let sender = manager.outbound_peers[&peer].clone();
+    while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
+    manager.owe_eor(peer, V4);
+    manager.settle_unicast_release_eor(peer, V4, false);
+    assert!(manager.eor_holds(peer, V4).contains(EorHold::Writer));
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert_eq!(markers_of(output, V4), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn marker_retry_bounds_examined_peers_and_quiesces_held_debt() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    const HELD: usize = 448;
+    const LIMIT: usize = crate::manager::RESYNC_PEERS_PER_TICK;
+    let mut manager = plain_manager();
+    let cap = tokio::time::Instant::now() + WINDOW;
+    let mut outputs = Vec::with_capacity(HELD);
+    for n in 0..HELD {
+        let [hi, lo] = u16::try_from(n).unwrap().to_be_bytes();
+        let peer = peer_v4(Ipv4Addr::new(192, 0, hi, lo));
+        let mut output = connect(&mut manager, peer, 1, FAMILY);
+        assert_eq!(markers(&mut output), 1);
+        manager.hold_eor_for_rt_membership(peer, cap);
+        manager.owe_eor(peer, FAMILY);
+        outputs.push((peer, output));
+    }
+    // This sender sorts after every held peer and enters retry last.
+    let last = peer_v4(Ipv4Addr::new(198, 51, 100, 1));
+    let mut ready = connect(&mut manager, last, 1, V4);
+    assert_eq!(markers_of(&mut ready, V4), 1);
+    refuse_final_marker(&mut manager, last, &mut ready);
+
+    let examined = Arc::new(AtomicUsize::new(0));
+    let eligibility = Arc::new(AtomicUsize::new(0));
+    manager.marker_retry_test_hook = Some(Arc::new({
+        let examined = Arc::clone(&examined);
+        let eligibility = Arc::clone(&eligibility);
+        move |seam| {
+            if seam == "evpn_marker_candidate" {
+                examined.fetch_add(1, Ordering::Relaxed);
+            } else if seam == "evpn_marker_eligibility" {
+                eligibility.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }));
+    assert!(manager.resync_tick_pending());
+    let arm_visits = examined.swap(0, Ordering::Relaxed);
+    assert_eq!(eligibility.load(Ordering::Relaxed), 0);
+    manager.retry_eor_markers_bounded();
+    let tick_visits = examined.swap(0, Ordering::Relaxed);
+    eprintln!(
+        "marker peer checks with {HELD} held: timer arm {arm_visits}, execution {tick_visits}"
+    );
+    assert_eq!(arm_visits, 0);
+    assert!((1..=LIMIT).contains(&tick_visits));
+    assert!((1..=LIMIT).contains(&eligibility.swap(0, Ordering::Relaxed)));
+    assert_eq!(markers_of(&mut ready, V4), 1);
+    assert!(!manager.eor.owes(last, V4));
+    for (peer, output) in &mut outputs {
+        assert!(manager.eor.owes(*peer, FAMILY));
+        assert_eq!(markers(output), 0);
+    }
+
+    // All remaining debts are held. Idle turns neither arm the timer nor
+    // revisit the held roster. A local release still reaches its marker.
+    for _ in 0..2 {
+        assert!(!manager.resync_tick_pending());
+        manager.retry_eor_markers_bounded();
+    }
+    assert_eq!(examined.load(Ordering::Relaxed), 0);
+    assert_eq!(eligibility.load(Ordering::Relaxed), 0);
+    let (first, output) = &mut outputs[0];
+    manager.end_rt_membership_hold(*first);
+    assert_eq!(markers(output), 1);
+    assert!(!manager.eor.owes(*first, FAMILY));
+    assert!(!manager.resync_tick_pending());
+}
+
+#[test]
+fn refused_final_marker_stays_with_its_sender_on_same_id_replacement() {
+    let mut manager = plain_manager();
+    let mut old = connect(&mut manager, TARGET, 7, V4);
+    assert_eq!(markers_of(&mut old, V4), 1);
+    refuse_final_marker(&mut manager, TARGET, &mut old);
+    assert!(manager.resync_tick_pending());
+
+    let mut replacement = connect(&mut manager, TARGET, 7, V6);
+    manager.retry_eor_markers_bounded();
+    let sent: Vec<_> = std::iter::from_fn(|| replacement.try_recv().map(delivered).ok())
+        .flat_map(|update| update.end_of_rib)
+        .collect();
+    assert_eq!(sent, [V6]);
+    assert_eq!(markers_of(&mut old, V4), 0);
+    assert!(manager.eor_pending(TARGET).is_empty());
+    assert!(!manager.resync_tick_pending());
+}
+
+#[test]
+fn a_new_refused_marker_behind_the_live_cursor_gets_a_turn() {
+    let mut manager = plain_manager();
+    let mut blocked = Vec::new();
+    for host in 10..=18 {
+        let peer = peer_v4(Ipv4Addr::new(192, 0, 2, host));
+        let mut output = connect(&mut manager, peer, 1, V4);
+        assert_eq!(markers_of(&mut output, V4), 1);
+        refuse_final_marker(&mut manager, peer, &mut output);
+        let sender = &manager.outbound_peers[&peer];
+        while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
+        blocked.push((peer, output));
+    }
+    manager.retry_eor_markers_bounded();
+    let cursor = manager.evpn_marker_cursor.expect("retry cursor advanced");
+    let newcomer = peer_v4(Ipv4Addr::new(192, 0, 2, 1));
+    assert!(newcomer < cursor);
+    let mut ready = connect(&mut manager, newcomer, 2, V4);
+    assert_eq!(markers_of(&mut ready, V4), 1);
+    refuse_final_marker(&mut manager, newcomer, &mut ready);
+    manager.retry_eor_markers_bounded();
+    assert_eq!(markers_of(&mut ready, V4), 1);
+    assert!(!manager.eor.owes(newcomer, V4));
+    for (peer, mut output) in blocked {
+        assert_eq!(markers_of(&mut output, V4), 0);
+        assert!(manager.eor.owes(peer, V4));
+    }
 }
