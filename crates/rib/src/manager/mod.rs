@@ -323,6 +323,9 @@ struct AdjRibOutCommitStats {
     /// EVPN passes that logged their keys for the cursors.
     #[cfg(test)]
     owed_evpn_logs: usize,
+    /// Labeled passes that logged their prefixes for the cursors.
+    #[cfg(test)]
+    owed_labeled_logs: usize,
     /// Distinct keys collected into per-peer VPN resync enumerations.
     #[cfg(test)]
     vpn_resync_key_inserts: usize,
@@ -712,7 +715,7 @@ pub struct RibManager {
     owing_cursor: Option<PeerId>,
     /// Per unicast AFI: the keys passes carried while a receiver owed the
     /// family whole, read by those receivers' cursors (`outbound_owing`).
-    owed_rows: [outbound_owing::OwedRows<Prefix>; 2],
+    owed_rows: [outbound_owing::OwedRows<Prefix>; 4],
     /// The same list for EVPN, keyed by route key.
     owed_evpn_rows: outbound_owing::OwedRows<rustbgpd_wire::EvpnRouteKey>,
     /// Receivers the owed-row cap evicted ([`Self::cap_owed_rows`]): dirty,

@@ -10364,9 +10364,9 @@ impl RibManager {
                         FastSet::default()
                     };
 
-                    let labeled_whole = whole(super::outbound_owing::OwedFamily::IPV4_LABELED)
-                        || whole(super::outbound_owing::OwedFamily::IPV6_LABELED);
-                    let mut effective_labeled_keys: FastSet<Prefix> = if resync || labeled_whole {
+                    // Labeled unicast is never drained whole: owed whole it
+                    // is a row cursor, whose steps bring their keys.
+                    let mut effective_labeled_keys: FastSet<Prefix> = if resync {
                         self.replacement_checkpoint(true);
                         let mut all = FastSet::with_capacity_and_hasher(
                             self.loc_rib.labeled_len()
@@ -10420,14 +10420,14 @@ impl RibManager {
                                 Prefix::V6(_) => Afi::Ipv6,
                             };
                             !self.selection_deferred((afi, Safi::LabeledUnicast))
-                                && (resync
-                                    || drain_whole
-                                        == Some(super::outbound_owing::OwedFamily::labeled_of(
-                                            prefix,
-                                        )))
                         });
                         all
                     } else if let Some(drain) = drain.as_deref_mut() {
+                        #[cfg(test)]
+                        {
+                            self.adj_rib_out_commit_stats.owed_drain_rows_read +=
+                                drain.labeled.len();
+                        }
                         std::mem::take(&mut drain.labeled)
                     } else {
                         FastSet::default()
