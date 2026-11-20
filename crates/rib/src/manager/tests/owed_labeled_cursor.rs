@@ -613,7 +613,7 @@ fn labeled_changes_behind_and_ahead_of_the_cursor_reach_each_receiver_at_their_n
     assert_eq!((fast.count(b), fast.count(d)), ((1, 0), (1, 0)), "once");
     let lagging = &receivers[1].wire;
     assert_eq!(lagging.announced.len(), model.0.len(), "each row once");
-    assert!(lagging.withdrawn.is_empty());
+    assert_eq!(lagging.withdrawn, Vec::<Prefix>::new());
 }
 
 /// Contract 3 (relabel behind the cursor): a row the receiver has read
