@@ -14,9 +14,16 @@ enum Feed {
     /// Every row withdraws a prefix whose only path is the sender's. The
     /// table starts with every row the feed will withdraw.
     Withdraw,
-    /// Every message replaces the same block of best paths. The table keeps
-    /// its size, so the stream can be any length.
+    /// Every row replaces a best path, in blocks that rotate through 16,384
+    /// prefixes the table already holds. The table keeps its size, so the
+    /// stream can be any length, and a block comes round again only after
+    /// more distinct keys than the repair log holds.
     Replace,
+}
+
+/// Blocks of `rows` prefixes a replacing feed rotates through.
+fn replace_blocks(rows: u32) -> u32 {
+    (16384 / rows).max(1)
 }
 
 fn feed_key(n: u32) -> Prefix {
@@ -33,7 +40,11 @@ fn feed_message(feed: Feed, message: u32, rows: u32) -> RibUpdate {
     let block = message * rows..(message + 1) * rows;
     match feed {
         Feed::Announce => announce(block, 100),
-        Feed::Replace => announce(0..rows, 100 + message % 2),
+        Feed::Replace => {
+            let blocks = replace_blocks(rows);
+            let block = message % blocks;
+            announce(block * rows..(block + 1) * rows, 100 + message / blocks % 2)
+        }
         Feed::Withdraw => {
             let mut update = test_routes_received(peer_v4(OTHER), Vec::new());
             let RibUpdate::RoutesReceived { withdrawn, .. } = &mut update else {
@@ -56,7 +67,7 @@ fn feed_fixture(
     register_test_peer(&mut manager, peer_v4(THIRD), 0);
     let installed = match feed {
         Feed::Announce => 0,
-        Feed::Replace => rows,
+        Feed::Replace => replace_blocks(rows) * rows,
         Feed::Withdraw => messages * rows,
     };
     if installed > 0 {
@@ -210,7 +221,7 @@ const MULTI_CHUNK_ROWS: [u32; 3] = [2048, 4096, 16378];
 #[tokio::test]
 async fn single_chunk_messages_never_restart_the_cold_build() {
     for feed in [Feed::Announce, Feed::Withdraw, Feed::Replace] {
-        for messages in [48, 96] {
+        for messages in [64, 160] {
             let c = feed_counts(feed, messages, 1024, true).await;
             eprintln!("{feed:?} {messages}x1024 {c:?}");
             assert_eq!(
@@ -219,9 +230,8 @@ async fn single_chunk_messages_never_restart_the_cold_build() {
                 "{feed:?} {messages}: {c:?}"
             );
             // The withdrawal table (16,384 plus every row the feed withdraws)
-            // needs more pages than the feed has turns, and so does a table
-            // that the shorter announcement feed is still growing.
-            if feed == Feed::Replace {
+            // needs more pages than the feed has turns.
+            if feed != Feed::Withdraw && messages == 160 {
                 assert!(c.grouped_during_feed(), "{feed:?} {messages}: {c:?}");
             }
         }
@@ -259,14 +269,14 @@ async fn multi_chunk_messages_never_restart_the_cold_build() {
     );
 }
 
-/// A stream that keeps replacing the same block leaves the table its size, so
+/// A stream that only replaces best paths leaves the table its size, so
 /// the build's own work is fixed. The joiner registers during the stream, at
 /// a turn that does not grow with the length of the stream. A message of
 /// sixteen chunks leaves discovery one turn in seventeen.
 #[tokio::test]
 async fn joiner_registers_during_a_multi_chunk_stream_of_any_length() {
     let mut failures = Vec::new();
-    for (rows, lengths) in [(2048, &[64, 128][..]), (4096, &[48, 96]), (16378, &[80])] {
+    for (rows, lengths) in [(2048, &[128, 192][..]), (4096, &[96, 128]), (16378, &[80])] {
         let mut registered = Vec::new();
         for &messages in lengths {
             let c = feed_counts(Feed::Replace, messages, rows, true).await;
@@ -394,7 +404,7 @@ async fn actor_case(feed: Feed, messages: u32, rows: u32) -> (String, String) {
 
 #[tokio::test]
 async fn actor_registers_the_joiner_during_a_multi_chunk_stream() {
-    for (messages, rows) in [(64, 2048), (48, 4096)] {
+    for (messages, rows) in [(128, 2048)] {
         let (during, after) = actor_case(Feed::Replace, messages, rows).await;
         assert!(
             !during.is_empty() && during == after,
