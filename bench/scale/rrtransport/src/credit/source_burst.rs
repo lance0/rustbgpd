@@ -58,7 +58,7 @@ const STALL_SEQUENCE: u32 = 5;
 /// next hop, so the sources' own addresses cannot serve.
 const NEXT_HOP: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
 const COMPILERS: [&str; 4] = ["cargo", "rustc", "rustdoc", "clippy-driver"];
-const COMPILER_WATCH_EVERY: Duration = Duration::from_secs(1);
+pub(super) const COMPILER_WATCH_EVERY: Duration = Duration::from_secs(1);
 
 /// The cell's own flags, taken out of `args` before [`Options::parse`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -501,11 +501,11 @@ fn marked(burst: &[&[usize]], per_update: usize) -> Vec<bool> {
 }
 
 #[derive(Debug, Default)]
-struct CompilerWatch {
-    samples: usize,
-    observed: usize,
-    first: Option<String>,
-    unavailable: Option<String>,
+pub(super) struct CompilerWatch {
+    pub(super) samples: usize,
+    pub(super) observed: usize,
+    pub(super) first: Option<String>,
+    pub(super) unavailable: Option<String>,
 }
 
 fn compilers_running() -> std::io::Result<Option<String>> {
@@ -541,7 +541,7 @@ fn process_gone(error: &std::io::Error) -> bool {
 
 /// Sample the process table for a compiler until `stop`, as the timed
 /// EVPN qualification cells do.
-fn watch_compilers(stop: Arc<AtomicBool>) -> thread::JoinHandle<CompilerWatch> {
+pub(super) fn watch_compilers(stop: Arc<AtomicBool>) -> thread::JoinHandle<CompilerWatch> {
     thread::spawn(move || {
         let mut watch = CompilerWatch::default();
         loop {
