@@ -1502,13 +1502,13 @@ async fn rib_park_continues_a_multi_slice_envelope() {
     let (bulk, mut frames) = mpsc::channel(1);
     session.writer_bulk_tx = Some(bulk);
     park_with_buffered(&mut session, &[]).await;
-    // A distinct MED per route: one frame each.
+    // A distinct community per route keeps one frame per prefix.
     let routes: Vec<Route> = (0..ROUTES)
         .map(|index| {
             let mut route = make_route(100);
             route.prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from((20 << 24) | index), 32));
             AttrSet::edit(&mut route.attributes, |attrs| {
-                attrs.push(PathAttribute::Med(index));
+                attrs.push(PathAttribute::Communities(vec![0xFDE8_0000 | index]));
             });
             route
         })

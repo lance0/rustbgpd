@@ -311,9 +311,10 @@ impl RibManager {
                     let mut modified = (*candidate).clone();
                     if !result.modifications.is_empty() {
                         checkpoint.borrow_mut()();
-                        let nh = AttrSet::edit(&mut modified.attributes, |attrs| {
-                            rustbgpd_policy::apply_modifications(attrs, &result.modifications)
-                        });
+                        let nh = AttrSet::apply_export_modifications(
+                            &mut modified.attributes,
+                            &result.modifications,
+                        );
                         // Evaluation applies no next-hop action to a labeled or VPN
                         // route: its labels are bound at the received next hop
                         // (RFC 8277 §3.2.2), which is therefore kept.
@@ -632,9 +633,10 @@ impl RibManager {
             let mut modified = best.clone();
             if !result.modifications.is_empty() {
                 checkpoint.borrow_mut()();
-                let nh = AttrSet::edit(&mut modified.attributes, |attrs| {
-                    rustbgpd_policy::apply_modifications(attrs, &result.modifications)
-                });
+                let nh = AttrSet::apply_export_modifications(
+                    &mut modified.attributes,
+                    &result.modifications,
+                );
                 // Evaluation applies no next-hop action to a labeled or VPN
                 // route: its labels are bound at the received next hop
                 // (RFC 8277 §3.2.2), which is therefore kept.

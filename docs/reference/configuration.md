@@ -4441,6 +4441,14 @@ These fields modify matching routes. Only valid with `action = "permit"`.
 | `set_community_remove` | [string]    | Communities to remove                              |
 | `set_as_path_prepend`  | table       | `{ asn = 65001, count = 3 }` (ASN 1–4294967295, count 1–10) |
 
+Ordinary eBGP export omits a learned route's MED by default. Export policy
+can still match the received MED and use `set_med` to advertise a metric
+to that neighbor, including zero. iBGP and transparent route-server clients
+retain the route's MED by default. The advertised-routes view shows the
+post-policy RIB attributes before the session applies this wire filter.
+See [RFC 4271 §5.1.4](https://www.rfc-editor.org/rfc/rfc4271#section-5.1.4)
+and [RFC 7947 §2.2.3](https://www.rfc-editor.org/rfc/rfc7947#section-2.2.3).
+
 `set_next_hop` refuses an unspecified (`0.0.0.0`, `::`) or multicast address
 at config load, reload and API policy edits; IPv4 and IPv6 link-local
 addresses are accepted. `.rpol` `set next-hop` applies the same rule.

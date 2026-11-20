@@ -1,13 +1,21 @@
 use super::*;
 
+// The pacing fixtures model staged eBGP announcements. Their MED distinguishes
+// frames on the wire, including when the selected value is zero.
+fn set_pacing_med(attrs: &mut Arc<AttrSet>, med: u32) {
+    let modifications = rustbgpd_policy::RouteModifications {
+        set_med: Some(med),
+        ..Default::default()
+    };
+    assert!(AttrSet::apply_export_modifications(attrs, &modifications).is_none());
+}
+
 fn pacing_routes(count: u32, distinct: bool) -> Vec<Route> {
     (0..count)
         .map(|index| {
             let mut route = make_route(100);
             route.prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from((20 << 24) | index), 32));
-            AttrSet::edit(&mut route.attributes, |attrs| {
-                attrs.push(PathAttribute::Med(if distinct { index } else { 0 }));
-            });
+            set_pacing_med(&mut route.attributes, if distinct { index } else { 0 });
             route
         })
         .collect()
@@ -2413,13 +2421,10 @@ fn small_flowspec_route(index: usize, vpn_v6: bool, distinct: bool) -> FlowSpecR
                 segments: vec![AsPathSegment::AsSequence(vec![65_002, 64_600, 64_700])],
             }),
             PathAttribute::Communities(vec![100, 200]),
-            PathAttribute::Med(if distinct {
-                u32::try_from(index).unwrap()
-            } else {
-                0
-            }),
         ]);
     });
+    let med = u32::try_from(if distinct { index } else { 0 }).unwrap();
+    set_pacing_med(&mut route.attributes, med);
     route
 }
 
@@ -3449,7 +3454,11 @@ type UnicastFormRow = (
 
 /// Sent attributes: ORIGIN, `AS_PATH`, `NEXT_HOP` if any, MED. `LOCAL_PREF`
 /// never reaches these eBGP peers.
-fn unicast_form_attrs(as_path: &[u32], next_hop: Option<Ipv4Addr>, med: u32) -> Vec<PathAttribute> {
+fn unicast_form_attrs(
+    as_path: &[u32],
+    next_hop: Option<Ipv4Addr>,
+    med: Option<u32>,
+) -> Vec<PathAttribute> {
     let mut attrs = vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
@@ -3457,13 +3466,13 @@ fn unicast_form_attrs(as_path: &[u32], next_hop: Option<Ipv4Addr>, med: u32) -> 
         }),
     ];
     attrs.extend(next_hop.map(PathAttribute::NextHop));
-    attrs.push(PathAttribute::Med(med));
+    attrs.extend(med.map(PathAttribute::Med));
     attrs
 }
 
 /// Source attributes learned from AS 65002, with `LOCAL_PREF` before MED.
 fn unicast_form_source(next_hop: Option<Ipv4Addr>, med: u32) -> Arc<AttrSet> {
-    let mut attrs = unicast_form_attrs(&[65002], next_hop, med);
+    let mut attrs = unicast_form_attrs(&[65002], next_hop, Some(med));
     attrs.insert(attrs.len() - 1, PathAttribute::LocalPref(100));
     AttrSet::new(attrs)
 }
@@ -3541,7 +3550,7 @@ fn shared_unicast_form_frames<'r>(
 async fn unicast_forms_keep_exact_bytes_grouping_and_probe_lengths() {
     let stored = Ipv4Addr::new(10, 0, 0, 2);
     // A route-server client gets the attributes unchanged, less LOCAL_PREF.
-    let sent = |med, next_hop| unicast_form_attrs(&[65002], next_hop, med);
+    let sent = |med, next_hop| unicast_form_attrs(&[65002], next_hop, Some(med));
     let (body, bare) = (|med| sent(med, Some(stored)), |med| sent(med, None));
     // `s` is shared across forms, `e` equals it in another allocation.
     let source = |med| unicast_form_source(Some(stored), med);
@@ -3642,7 +3651,7 @@ async fn rewritten_self_and_absent_next_hops_keep_exact_bytes() {
     let local6: Ipv6Addr = "2001:db8::ffff".parse().unwrap();
     session.config.local_ipv6_nexthop = Some(local6);
     let profile = session.publish_export_profile();
-    let sent = |next_hop| unicast_form_attrs(&[65001, 65002], next_hop, 7);
+    let sent = |next_hop| unicast_form_attrs(&[65001, 65002], next_hop, None);
     let (mp4, mp6) = (
         Some((Afi::Ipv4, IpAddr::V6(local6))),
         Some((Afi::Ipv6, IpAddr::V6(local6))),
@@ -3672,7 +3681,7 @@ async fn rewritten_self_and_absent_next_hops_keep_exact_bytes() {
     // Route-server client: next-hop self, and sources without a NEXT_HOP.
     let (mut session, _wire) = unicast_forms_session().await;
     let profile = session.publish_export_profile();
-    let sent = |next_hop| unicast_form_attrs(&[65002], next_hop, 7);
+    let sent = |next_hop| unicast_form_attrs(&[65002], next_hop, Some(7));
     let (mp4, mp6) = (
         Some((Afi::Ipv4, a6.parse().unwrap())),
         Some((Afi::Ipv6, a6.parse().unwrap())),

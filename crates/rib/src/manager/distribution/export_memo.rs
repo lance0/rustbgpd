@@ -209,9 +209,8 @@ impl ExportMemo {
         if let Some((_, attrs, nh)) = entry.modified.iter().find(|(m, _, _)| m == mods) {
             return (Arc::clone(attrs), nh.clone());
         }
-        let mut new_attrs = source.to_vec();
-        let nh = rustbgpd_policy::apply_modifications(&mut new_attrs, mods);
-        let attrs = AttrSet::new(new_attrs);
+        let mut attrs = Arc::clone(source);
+        let nh = AttrSet::apply_export_modifications(&mut attrs, mods);
         entry
             .modified
             .push((mods.clone(), Arc::clone(&attrs), nh.clone()));
@@ -455,10 +454,20 @@ mod tests {
                 let (expect_route, expect_nh) = bypass(&r, &mods);
                 let (miss, miss_nh) = memo.apply(&r, &mods);
                 let (hit, hit_nh) = memo.apply(&r, &mods);
-                assert_eq!(*miss.attributes, *expect_route.attributes, "mods {mods:?}");
+                assert_eq!(
+                    miss.attributes.as_slice(),
+                    expect_route.attributes.as_slice(),
+                    "mods {mods:?}"
+                );
+                assert_eq!(miss.attributes.export_policy_med(), mods.set_med.is_some());
                 assert_eq!(miss.next_hop, expect_route.next_hop, "mods {mods:?}");
                 assert_eq!(miss_nh, expect_nh, "mods {mods:?}");
-                assert_eq!(*hit.attributes, *expect_route.attributes, "mods {mods:?}");
+                assert_eq!(
+                    hit.attributes.as_slice(),
+                    expect_route.attributes.as_slice(),
+                    "mods {mods:?}"
+                );
+                assert_eq!(hit.attributes.export_policy_med(), mods.set_med.is_some());
                 assert_eq!(hit.next_hop, expect_route.next_hop, "mods {mods:?}");
                 assert_eq!(hit_nh, expect_nh, "mods {mods:?}");
                 if mods.is_empty() {
@@ -497,9 +506,13 @@ mod tests {
         let (c, _) = memo.apply(&r2, &med100);
         assert!(!Arc::ptr_eq(&a.attributes, &b.attributes));
         assert!(!Arc::ptr_eq(&a.attributes, &c.attributes));
-        assert_eq!(*a.attributes, *bypass(&r1, &med100).0.attributes);
-        assert_eq!(*b.attributes, *bypass(&r1, &med200).0.attributes);
-        assert_eq!(*c.attributes, *bypass(&r2, &med100).0.attributes);
+        for (staged, source, mods) in [(&a, &r1, &med100), (&b, &r1, &med200), (&c, &r2, &med100)] {
+            assert_eq!(
+                staged.attributes.as_slice(),
+                bypass(source, mods).0.attributes.as_slice()
+            );
+            assert!(staged.attributes.export_policy_med());
+        }
         // Same content from the same source: shared.
         let (a2, _) = memo.apply(&r1, &med100);
         assert!(Arc::ptr_eq(&a.attributes, &a2.attributes));
