@@ -4640,10 +4640,12 @@ impl RibManager {
             if evicted && still_dirty {
                 self.owed_row_evicted.insert(last);
             }
-            if still_dirty {
+            let ran = recovery && (!still_dirty || self.selection_partial_caught_up(last));
+            // A unit that ran discharged its rebuilds, even when another
+            // family's selection hold leaves the receiver dirty.
+            if !ran {
                 self.record_held_rebuilds(last, rebuilds);
             }
-            let ran = recovery && (!still_dirty || self.selection_partial_caught_up(last));
             self.dirty_peers.extend(withheld);
             self.dirty_since.extend(withheld_since);
             self.force_outbound_peers.extend(withheld_force);
