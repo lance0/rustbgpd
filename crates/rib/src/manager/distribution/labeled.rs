@@ -877,7 +877,12 @@ impl RibManager {
                 .is_some_and(|vantage| self.orr.spf.contains_key(vantage))
                 || self.peer_labeled_add_path_send(*peer)
         });
+        // Receivers that owe a labeled family whole stage and mark nothing
+        // in the loop below: the pass logs its prefixes for their cursors
+        // once, here, before the unchanged winners are left out.
+        self.log_owed_labeled_rows(&affected_nlri);
         if changed_keys.is_empty() && !any_widened_peer {
+            self.cap_owed_labeled_rows();
             super::super::retire_hash_set(&mut affected_nlri, &mut checkpoint);
             return;
         }
@@ -1066,6 +1071,9 @@ impl RibManager {
                 warn!(%peer, "outbound channel full — labeled update deferred");
             }
         }
+        // After the receiver loop, as for unicast: an evicted receiver's
+        // resync is a unit of the dirty ring, never part of this pass.
+        self.cap_owed_labeled_rows();
         super::super::retire_hash_set(&mut changed_keys, &mut checkpoint);
         super::super::retire_hash_set(&mut affected_nlri, &mut checkpoint);
     }

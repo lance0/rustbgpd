@@ -1761,6 +1761,7 @@ mod outbound_prefix_limits;
 mod outbound_resync_state;
 mod owed_cancellation;
 mod owed_evpn_cursor;
+mod owed_labeled_cursor;
 mod owed_row_cursor;
 mod paced_selection_release;
 mod paged_query;

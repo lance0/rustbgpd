@@ -162,8 +162,21 @@ resolved.
     start.
     An EVPN family owned by an update group, and a receiver in a private
     handoff, keep the recovery path and its complete feed.
-  - Whole-family sends of the other families, still on main: labeled
-    unicast, VPN, FlowSpec, BGP-LS and RT-Constrain owed whole still go
+  - Labeled-unicast whole-family sends, fixed on main after v0.83.0:
+    IPv4 and IPv6 labeled unicast owed whole are sent as EVPN is, from one
+    shared list per address family, at most 1,024 prefixes per step, each
+    step charged against the receiver's credit, with the End-of-RIB after
+    the last step. A receiver that is sent every Add-Path path of a prefix
+    takes one prefix per step. Every receiver holds these families
+    outside its update group, so the fallback and the in-hold rule are
+    EVPN's: a receiver that fell behind, or one resynced inside a
+    labeled-unicast selection hold while it holds routes of the held
+    family, is resynced as a whole peer after the release (every family
+    it is sent, with a capture of its group's table for a group member),
+    one receiver per tick. The evidence is work counts and wire content in
+    unit-level tests; no timed run has been made.
+  - Whole-family sends of the other families, still on main: VPN,
+    FlowSpec, BGP-LS and RT-Constrain owed whole still go
     out as one operation per receiver that is not charged against the
     outbound credit, in one RIB turn that grows with the family's table.
 

@@ -178,7 +178,7 @@ impl RibManager {
                         i64::try_from(pass.lane_entries).unwrap_or(i64::MAX),
                     );
                     let over = self.release_owed_over_cap();
-                    pass.floors = [None; 3];
+                    pass.floors = Default::default();
                     pass.phase = if over.iter().any(Option::is_some) {
                         Phase::Cap(None, over)
                     } else {
