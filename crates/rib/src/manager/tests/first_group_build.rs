@@ -8,8 +8,10 @@ const OTHER: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 2);
 const DUAL: [(Afi, Safi); 2] = [(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
 type Inventory = BTreeMap<Prefix, (PeerId, u32)>;
 
+const MEMBER: fn(u8) -> Ipv4Addr = |n| Ipv4Addr::new(198, 51, 100, n);
+
 fn receiver(n: u8) -> PeerId {
-    peer_v4(Ipv4Addr::new(198, 51, 100, n))
+    peer_v4(MEMBER(n))
 }
 
 fn prefixes(i: u16) -> [Prefix; 2] {
@@ -1436,21 +1438,92 @@ async fn session_end_of_a_peer_the_writer_does_not_name_applies_at_once() {
     assert!(!manager.outbound_peers.contains_key(&receiver(2)));
 }
 
+type Answered = Box<dyn FnMut(&RibManager) -> bool>;
+
+// `message` reaches the primary FIFO behind a retained session end. It holds
+// the head until the claimed writer has committed and the end has replayed,
+// and it is the next primary message after that.
+async fn assert_held_behind_a_retained_session_end(
+    message: RibUpdate,
+    mut answered: Option<Answered>,
+) {
+    let incumbent = receiver(1);
+    let (mut manager, primary, _receivers) = cold_build_with_policy_members(2048, 2);
+    let mut policy_reply = clear_policy(&mut manager, incumbent);
+    assert!(
+        matches!(
+            manager.first_group_intake(&message),
+            first_group_order::Intake::Apply
+        ),
+        "{:?} is held by the pending writer alone",
+        message.actor_turn_kind()
+    );
+    primary
+        .try_send(RibUpdate::PeerDown {
+            peer: incumbent,
+            session_id: 1,
+        })
+        .unwrap();
+    let held = std::mem::discriminant(&message);
+    let kind = message.actor_turn_kind();
+    primary.try_send(message).unwrap();
+    while manager.drain_ready_updates().await {}
+    assert_eq!(manager.first_group_deferred_intents.len(), 1);
+    assert!(
+        manager
+            .primary_lookahead
+            .as_ref()
+            .is_some_and(|head| std::mem::discriminant(head) == held),
+        "{kind:?} passed the retained session end"
+    );
+    assert!(manager.first_group_commit_frontier_reached());
+    assert!(!answered.as_mut().is_some_and(|done| done(&manager)));
+
+    let (reply, mut general) = oneshot::channel();
+    manager.serve_general_query(RibUpdate::QueryLocRibCount { reply });
+    assert!(general.try_recv().is_ok(), "general-lane read answers");
+
+    commit_claimed_writer(&mut manager);
+    assert_eq!(policy_reply.try_recv().unwrap(), Ok(()));
+    assert!(manager.try_recv_primary().is_none());
+    assert!(!answered.as_mut().is_some_and(|done| done(&manager)));
+    let end = manager.take_first_group_deferred_intent().unwrap();
+    manager.handle_update(end);
+    assert!(!manager.outbound_peers.contains_key(&incumbent));
+    let next = manager.try_recv_primary().unwrap();
+    assert_eq!(std::mem::discriminant(&next), held);
+    manager.handle_update(next);
+    assert!(answered.as_mut().is_none_or(|done| done(&manager)));
+}
+
 // A primary-lane read can be a teardown barrier or read the ended session's
-// state, and a command has no proven order against the end. Each holds the
-// head until the retained end has replayed. The general lane is unordered
-// against the primary FIFO and still answers.
+// state, and a command has no proven order against the end. One message of
+// every kind that is not route input holds the head until the retained end
+// has replayed. The general lane is unordered against the primary FIFO and
+// still answers.
 #[tokio::test]
 async fn primary_reads_and_other_session_ends_wait_for_a_retained_session_end() {
-    type Answered = Box<dyn FnMut(&RibManager) -> bool>;
     fn read<T: 'static>(
         make: impl FnOnce(oneshot::Sender<T>) -> RibUpdate,
-    ) -> (RibUpdate, Answered) {
+    ) -> (RibUpdate, Option<Answered>) {
         let (reply, mut response) = oneshot::channel();
-        (make(reply), Box::new(move |_| response.try_recv().is_ok()))
+        (
+            make(reply),
+            Some(Box::new(move |_| response.try_recv().is_ok())),
+        )
+    }
+    // The reply is not inspected: only the hold and the order are.
+    fn command<T: 'static>(
+        make: impl FnOnce(oneshot::Sender<T>) -> RibUpdate,
+    ) -> (RibUpdate, Option<Answered>) {
+        let (reply, response) = oneshot::channel();
+        std::mem::forget(response);
+        (make(reply), None)
     }
     let incumbent = receiver(1);
-    let cases: Vec<(RibUpdate, Answered)> = vec![
+    let (peer, session_id) = (receiver(2), 1);
+    let (out, _out_rx) = mpsc::channel(8);
+    let cases: Vec<(RibUpdate, Option<Answered>)> = vec![
         read(|reply| RibUpdate::QueryLocRibCount { reply }),
         read(|reply| RibUpdate::QueryEvpnSessionsSynced { reply }),
         read(|reply| RibUpdate::QueryEvpnEsSnapshot { reply }),
@@ -1467,51 +1540,278 @@ async fn primary_reads_and_other_session_ends_wait_for_a_retained_session_end() 
             reply,
         }),
         (
-            RibUpdate::PeerDown {
-                peer: receiver(2),
-                session_id: 1,
-            },
-            Box::new(|manager| !manager.outbound_peers.contains_key(&receiver(2))),
+            RibUpdate::PeerDown { peer, session_id },
+            Some(Box::new(move |manager| {
+                !manager.outbound_peers.contains_key(&peer)
+            })),
         ),
+        // One message per remaining kind, none of them named by the writer.
+        (test_peer_up(receiver(9), 1, out), None),
+        (
+            RibUpdate::PeerSlowState {
+                peer,
+                session_id,
+                slow: true,
+            },
+            None,
+        ),
+        command(|reply| RibUpdate::ConfirmPeerOutbound {
+            peer: peer_v4(OTHER),
+            session_id: 0,
+            reply,
+        }),
+        (
+            RibUpdate::BeginRouteRefresh {
+                peer: peer_v4(OTHER),
+                session_id: 0,
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+            },
+            None,
+        ),
+        (RibUpdate::ExpireInjectionLeases { leases: vec![] }, None),
+        (
+            RibUpdate::RpkiCacheUpdate {
+                table: Arc::new(rustbgpd_rpki::VrpTable::new(vec![])),
+                delta: None,
+                admission: None,
+            },
+            None,
+        ),
+        command(|reply| RibUpdate::PublishDampeningOwners {
+            publication: 1,
+            owners: vec![],
+            reply,
+        }),
     ];
-    for (message, mut answered) in cases {
-        let (mut manager, primary, _receivers) = cold_build_with_policy_members(2048, 2);
-        let mut policy_reply = clear_policy(&mut manager, incumbent);
+    for (message, answered) in cases {
+        assert_held_behind_a_retained_session_end(message, answered).await;
+    }
+}
+
+fn other_route_input(edit: impl FnOnce(&mut RibUpdate)) -> RibUpdate {
+    let mut update = test_routes_received(peer_v4(OTHER), vec![]);
+    edit(&mut update);
+    update
+}
+
+// Another peer's End-of-RIB can complete a selection deferral that the
+// retained teardown would have re-armed, so it does not pass the end.
+#[tokio::test]
+async fn end_of_rib_from_another_peer_waits_for_a_retained_session_end() {
+    let end_of_rib = RibUpdate::EndOfRib {
+        peer: peer_v4(OTHER),
+        session_id: 0,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    };
+    assert_held_behind_a_retained_session_end(end_of_rib, None).await;
+}
+
+// A FlowSpec rule is validated against the best unicast route covering its
+// destination (RFC 9117), which can still be the ended session's. Route input
+// passes a retained end only as unicast, EVPN, labeled or VPN routes; BGP-LS
+// and RT-Constrain input is held with the rest.
+#[tokio::test]
+async fn only_plain_route_input_from_another_peer_passes_a_retained_session_end() {
+    let other = peer_v4(OTHER);
+    let rule = crate::test_support::make_flowspec_route(OTHER);
+    let key = rule.selection_key();
+    let wire = other_route_input(|update| {
+        let RibUpdate::RoutesReceived {
+            flowspec_announced, ..
+        } = update
+        else {
+            unreachable!()
+        };
+        flowspec_announced.push(rule.clone());
+    });
+    let held = [
+        other_route_input(|update| {
+            let RibUpdate::RoutesReceived {
+                flowspec_announced, ..
+            } = update
+            else {
+                unreachable!()
+            };
+            flowspec_announced.push(rule.clone());
+        }),
+        other_route_input(|update| {
+            let RibUpdate::RoutesReceived {
+                flowspec_withdrawn, ..
+            } = update
+            else {
+                unreachable!()
+            };
+            flowspec_withdrawn.push(key);
+        }),
+        RibUpdate::WireRoutesReceived(crate::update::WireRoutesReceived::new(wire, 0)),
+        RibUpdate::BgpLsRoutesReceived {
+            peer: other,
+            session_id: 0,
+            announced: vec![],
+            withdrawn: vec![],
+        },
+        RibUpdate::RtcRoutesReceived {
+            peer: other,
+            session_id: 0,
+            announced: vec![],
+            withdrawn: vec![],
+        },
+    ];
+    for message in held {
+        assert_held_behind_a_retained_session_end(message, None).await;
+    }
+
+    let (mut manager, primary, _receivers) = cold_build_with_policy_members(2048, 1);
+    let _policy_reply = clear_policy(&mut manager, receiver(1));
+    primary
+        .try_send(RibUpdate::PeerDown {
+            peer: receiver(1),
+            session_id: 1,
+        })
+        .unwrap();
+    assert!(manager.drain_ready_updates().await);
+    assert!(manager.session_end_retained());
+    let passing = [
+        other_marker().1,
+        RibUpdate::WireRoutesReceived(crate::update::WireRoutesReceived::new(other_marker().1, 0)),
+        RibUpdate::VpnRoutesReceived {
+            peer: other,
+            session_id: 0,
+            announced: vec![],
+            withdrawn: vec![],
+        },
+        RibUpdate::LabeledRoutesReceived {
+            peer: other,
+            session_id: 0,
+            announced: vec![],
+            withdrawn: vec![],
+        },
+    ];
+    for message in passing {
+        assert!(
+            matches!(
+                manager.first_group_primary_intake(&message),
+                first_group_order::Intake::Apply
+            ),
+            "plain route input was held"
+        );
+    }
+}
+
+// The source of each unicast prefix a receiver currently holds.
+#[derive(Default)]
+struct Held(BTreeMap<Prefix, PeerId>);
+
+impl Held {
+    fn drain(&mut self, rx: &mut mpsc::Receiver<OutboundRouteUpdate>) {
+        while let Ok(update) = rx.try_recv() {
+            for (prefix, _) in update.unicast_withdrawals() {
+                self.0.remove(prefix);
+            }
+            for row in update
+                .announce
+                .iter()
+                .filter(|row| update.announce_source_exclusion != Some(row.peer))
+            {
+                self.0.insert(row.prefix, row.peer);
+            }
+        }
+    }
+}
+
+// Peers A and B both announce one prefix and B's path is best. A's session
+// ends behind its claimed policy writer, then B withdraws. The withdrawal
+// passes the retained end, so until the writer commits the receivers hold A's
+// path in place of the withdrawn one (held for the whole build, the
+// withdrawal waited behind the end). A's teardown is the first unit after the
+// commit and removes it: no path via A outlives the build.
+#[tokio::test]
+async fn withdrawal_passing_a_retained_session_end_leaves_no_path_after_the_build() {
+    let (a, b) = (receiver(1), receiver(2));
+    let shared = prefixes(u16::MAX - 2)[0];
+    let own = prefixes(u16::MAX - 3)[0];
+    let mut build_turns = [0usize; 2];
+    for withdraws in [false, true] {
+        let (mut manager, primary, mut receivers) = cold_build_with_policy_members(8192, 3);
+        manager.handle_update(super::lifecycle::test_session_routes_received(
+            a,
+            1,
+            vec![route(shared, MEMBER(1), 150), route(own, MEMBER(1), 150)],
+        ));
+        manager.handle_update(super::lifecycle::test_session_routes_received(
+            b,
+            1,
+            vec![route(shared, MEMBER(2), 190)],
+        ));
+        drain_route_chunks(&mut manager);
+        let mut held = [Held::default(), Held::default()];
+        let mut settle = |manager: &mut RibManager, held: &mut [Held; 2]| {
+            drain_route_chunks(manager);
+            held[0].drain(&mut receivers[1]);
+            held[1].drain(&mut receivers[2]);
+            while receivers[0].try_recv().is_ok() || receivers[3].try_recv().is_ok() {}
+        };
+        settle(&mut manager, &mut held);
+        // [B's view, the observer's view]. B is not sent its own best path.
+        assert_eq!(held[0].0.get(&shared), None);
+        assert_eq!(held[1].0.get(&shared), Some(&b));
+
+        let mut policy_reply = clear_policy(&mut manager, a);
         primary
             .try_send(RibUpdate::PeerDown {
-                peer: incumbent,
+                peer: a,
                 session_id: 1,
             })
             .unwrap();
-        let held = std::mem::discriminant(&message);
-        primary.try_send(message).unwrap();
+        if withdraws {
+            let mut withdrawal = super::lifecycle::test_session_routes_received(b, 1, vec![]);
+            let RibUpdate::RoutesReceived { withdrawn, .. } = &mut withdrawal else {
+                unreachable!()
+            };
+            withdrawn.push((shared, 0));
+            primary.try_send(withdrawal).unwrap();
+        }
         while manager.drain_ready_updates().await {}
-        assert_eq!(manager.first_group_deferred_intents.len(), 1);
-        assert!(
-            manager
-                .primary_lookahead
-                .as_ref()
-                .is_some_and(|head| std::mem::discriminant(head) == held),
-            "the message passed the retained session end"
-        );
-        assert!(manager.first_group_commit_frontier_reached());
-        assert!(!answered(&manager));
+        settle(&mut manager, &mut held);
+        assert!(manager.first_group_pending_writer().is_some());
+        assert!(manager.outbound_peers.contains_key(&a));
+        let during = if withdraws { a } else { b };
+        assert_eq!(manager.loc_rib.get(&shared).unwrap().peer, during);
+        assert_eq!(held[1].0.get(&shared), Some(&during));
+        // The withdrawing peer is sent A's path too; it held none before.
+        assert_eq!(held[0].0.get(&shared), withdraws.then_some(&a));
 
-        let (reply, mut general) = oneshot::channel();
-        manager.serve_general_query(RibUpdate::QueryLocRibCount { reply });
-        assert!(general.try_recv().is_ok(), "general-lane read answers");
-
-        commit_claimed_writer(&mut manager);
+        while manager.first_group_pending_writer().is_some() {
+            manager.advance_first_group_build();
+            build_turns[usize::from(withdraws)] += 1;
+            assert!(build_turns[usize::from(withdraws)] < 100_000);
+        }
         assert_eq!(policy_reply.try_recv().unwrap(), Ok(()));
         assert!(manager.try_recv_primary().is_none());
-        assert!(!answered(&manager));
         let end = manager.take_first_group_deferred_intent().unwrap();
+        assert!(matches!(end, RibUpdate::PeerDown { peer, .. } if peer == a));
         manager.handle_update(end);
-        assert!(!manager.outbound_peers.contains_key(&incumbent));
-        let next = manager.try_recv_primary().unwrap();
-        manager.handle_update(next);
-        assert!(answered(&manager));
+        finish(&mut manager);
+        settle(&mut manager, &mut held);
+        assert!(!manager.outbound_peers.contains_key(&a));
+        assert!(manager.loc_rib.get(&own).is_none());
+        for view in &held {
+            assert!(!view.0.contains_key(&own));
+            assert!(view.0.values().all(|source| *source != a));
+        }
+        if withdraws {
+            assert!(manager.loc_rib.get(&shared).is_none());
+            assert!(held.iter().all(|view| !view.0.contains_key(&shared)));
+        } else {
+            assert_eq!(held[1].0.get(&shared), Some(&b));
+        }
     }
+    assert_eq!(
+        build_turns[1], build_turns[0],
+        "build turns before the teardown, with the withdrawal and without"
+    );
 }
 
 // Unrelated input that passes a retained session end must not postpone the
@@ -1567,8 +1867,7 @@ async fn repair_overflow_behind_a_retained_session_end_seals_the_lane() {
              and {overflows} discarded builds"
         );
     }
-    assert!(overflows >= 1, "the feed must overflow the repair log");
-    assert!(overflows <= 2, "{overflows} builds were discarded");
+    assert_eq!(overflows, 1, "builds discarded before the lane sealed");
     assert_eq!(policy_reply.try_recv().unwrap(), Ok(()));
     assert!(manager.try_recv_primary().is_none());
     let end = manager.take_first_group_deferred_intent().unwrap();

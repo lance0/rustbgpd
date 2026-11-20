@@ -34,6 +34,21 @@ fn session_end(message: &RibUpdate) -> bool {
     )
 }
 
+fn plain_route_input(message: &RibUpdate) -> bool {
+    match message {
+        RibUpdate::WireRoutesReceived(batch) => {
+            batch.flowspec_announced.is_empty() && batch.flowspec_withdrawn.is_empty()
+        }
+        RibUpdate::RoutesReceived {
+            flowspec_announced,
+            flowspec_withdrawn,
+            ..
+        } => flowspec_announced.is_empty() && flowspec_withdrawn.is_empty(),
+        RibUpdate::VpnRoutesReceived { .. } | RibUpdate::LabeledRoutesReceived { .. } => true,
+        _ => false,
+    }
+}
+
 impl RibManager {
     pub(super) fn session_end_retained(&self) -> bool {
         self.first_group_deferred_intents.iter().any(session_end)
@@ -52,23 +67,27 @@ impl RibManager {
         seal
     }
 
-    /// Intake for the primary FIFO. Only route input and End-of-RIB from
-    /// other peers' sessions pass a retained session end. Queries and
-    /// commands on this lane can be teardown barriers or read the ended
-    /// session's state, so they hold the head as they did behind a held end.
+    /// Intake for the primary FIFO. Only unicast, labeled, VPN and EVPN route
+    /// input from other peers' sessions passes a retained session end.
+    /// Everything else holds the head, as it did behind a held end: reads and
+    /// commands can be teardown barriers, an End-of-RIB can release a
+    /// selection deferral the teardown would re-arm, and a `FlowSpec` rule
+    /// can be validated against the ended session's unicast route.
     pub(super) fn first_group_primary_intake(&self, message: &RibUpdate) -> Intake {
         let intake = self.first_group_intake(message);
-        if matches!(intake, Intake::Apply)
-            && self.session_end_retained()
-            && !self.first_group_replay_due()
-            && !matches!(
-                operation(message).actor_turn_kind(),
-                RibActorTurnKind::Routes | RibActorTurnKind::EndOfRib
-            )
-        {
-            return Intake::Hold;
+        if !self.session_end_retained() || self.first_group_replay_due() {
+            return intake;
         }
-        intake
+        let next = operation(message);
+        let passes = match intake {
+            Intake::Apply => plain_route_input(next),
+            // Policy commands and session ends replay in admission order. A
+            // family unlock or slow-state clear changes what later route
+            // input exports, so it keeps the FIFO behind it.
+            Intake::Retain => next.actor_turn_kind() != RibActorTurnKind::PeerState,
+            Intake::Hold => true,
+        };
+        if passes { intake } else { Intake::Hold }
     }
 
     pub(super) fn first_group_replay_due(&self) -> bool {
