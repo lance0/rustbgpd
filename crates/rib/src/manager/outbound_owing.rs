@@ -79,6 +79,10 @@
 //! | session end or registration | `N` | `N` | `N` |
 //! | shutdown flush | set and remainder | set only | set only |
 //!
+//! The replay and limit-recovery row does not occur for labeled debt: an
+//! operator replay and the outbound prefix limits cover IPv4 and IPv6
+//! unicast only.
+//!
 //! A unit that builds an evicted receiver is the only exit from `W`/`D`
 //! besides a session end, and it runs only when EVPN is enumerated
 //! ([`RibManager::resync_unit_held`]), so the dead position is never read
@@ -3544,6 +3548,56 @@ mod fifo_tests {
             assert_eq!(owing.keyed_len(family), left);
         }
         assert!(owing.is_whole(family), "the cursor is ended by its step");
+    }
+
+    /// As above for a labeled set, whose removal has its own arm, in each
+    /// AFI.
+    #[test]
+    fn a_labeled_set_kept_under_a_cursor_drains_without_rebuilding() {
+        const KEYS: u32 = 50_000;
+        let v6 = |index: u32| {
+            let address = (0x2001_0db8_u128 << 96) | u128::from(index);
+            Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(address.into(), 128))
+        };
+        let cases: [(OwedFamily, fn(u32) -> Prefix); 2] = [
+            (OwedFamily::IPV4_LABELED, row),
+            (OwedFamily::IPV6_LABELED, v6),
+        ];
+        for (afi, (family, key)) in cases.into_iter().enumerate() {
+            let mut owing = PeerOwing::new(1);
+            for index in 0..KEYS {
+                owing.insert(OwedKey::Labeled(key(index)), false);
+            }
+            owing.start_cursor(OwedFamily::LABELED_CURSOR + afi, 0);
+            let shape = |owing: &PeerOwing| {
+                let set = &owing.labeled[afi];
+                (set.order.capacity(), set.live.capacity(), set.order.len())
+            };
+            let mut left = KEYS as usize;
+            while left != 0 {
+                for key in owing.copy_keys(family, DrainScope::All, CHUNK_ROWS) {
+                    let before = shape(&owing);
+                    owing.remove(&key);
+                    left -= 1;
+                    if left == 0 {
+                        assert_eq!(owing.set_bytes(family), 0, "an empty set is freed");
+                        continue;
+                    }
+                    let after = shape(&owing);
+                    assert!(
+                        after.0 == before.0 && before.1 - after.1 <= 1,
+                        "a capacity changed with {left} keys left: {before:?} to {after:?}"
+                    );
+                    assert!(
+                        before.2 - after.2 <= 1,
+                        "{} entries moved",
+                        before.2 - after.2
+                    );
+                }
+                assert_eq!(owing.keyed_len(family), left);
+            }
+            assert!(owing.is_whole(family), "the cursor is ended by its step");
+        }
     }
 
     #[test]

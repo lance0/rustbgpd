@@ -1210,3 +1210,5 @@ fn a_send_all_add_path_labeled_cursor_takes_one_prefix_a_step() {
     assert_settled(&manager, &receivers, &expected, "send-all");
     assert_eq!(receivers[0].wire.announced.len(), 2 * ROWS as usize);
 }
+
+mod hold_states;
