@@ -7,7 +7,7 @@ use super::{HashSet, PeerId, PolicyFilteredRouteKey, Prefix, RibManager};
 use crate::fast_hash::AddrMap;
 use std::collections::{VecDeque, hash_map::IntoIter};
 
-const DENIALS_PER_POLL: usize = 128;
+pub(super) const DENIALS_PER_POLL: usize = 128;
 
 type LabelledKey = (PolicyFilteredRouteKey, Option<PolicyLabel>);
 type DenialMap = AddrMap<(PeerId, u32), Option<PolicyLabel>>;
