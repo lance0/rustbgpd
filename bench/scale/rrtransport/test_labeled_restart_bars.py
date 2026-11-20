@@ -21,12 +21,13 @@ class LabeledRestart(unittest.TestCase):
             "routes_after_eor": 0, "eors": 1, "announced": 128, "withdrawals": 1,
             "labeled_announced": 128, "labeled_withdrawn": 1, "routes_before_eor": 128,
             "post_eor_sentinel_changes": 1,
-            "eor_ms": 17.5,
+            "eor_ms": 17.5, "max_observed_stub_backlog_messages": 90,
         }
         self.run_data = {
             "cell": "restart", "family": "labeled6", "mode": "correctness",
             "shape": {"receivers": 2, "rows_per_receiver": 128, "registered_peers": 6,
-                      "trigger": credit_bars.RELEASE_TRIGGER},
+                      "trigger": credit_bars.RELEASE_TRIGGER, "chunk_rows": 1024,
+                      "stub_backlog_capacity_messages": 65536, "pause_ms": 8},
             "checks": dict.fromkeys(
                 (*credit_bars.RESTART_WIRE_CHECKS, "selection_held", "selection_released",
                  "owed_at_release", "post_release_withdrawal", "physical_poll_observed",
@@ -48,18 +49,28 @@ class LabeledRestart(unittest.TestCase):
                 "release_update_received_ms": 6.5, "release_update_wire_ms": 4.0,
             },
             "timing": {"release_sent_ms": 2.0, "resume_issued_ms": 10.0,
-                       "last_eor_ms": 22.25, "release_to_last_eor_ms": 20.25},
+                       "last_eor_ms": 22.25, "release_to_last_eor_ms": 20.25,
+                       "resume_to_last_eor_ms": 12.25},
             "memory": {
                 "cgroup": "/sys/fs/cgroup/test.scope", "cgroup_swap_max": "0", "cgroup_oom_kill": "0",
                 "cgroup_memory_peak_bytes": 2048000,
             },
         }
+        self.set_steps(self.run_data, "whole", 2)
         self.original = json.dumps(self.run_data).encode()
         self.path.write_bytes(self.original)
 
     def grade(self):
         (line,) = credit_bars.check(self.root)
         return line[1:]
+
+    @staticmethod
+    def set_steps(run, scope, count, paused=None):
+        for window, n in (("while_paused", count if paused is None else paused), ("to_last_eor", count)):
+            steps = {label: {"observations": 0, "above_ms": None, "at_most_ms": None}
+                     for label in credit_bars.STEP_SCOPES}
+            steps[scope] = {"observations": n, "above_ms": 1, "at_most_ms": 5}
+            run["witness"]["owed_steps_" + window] = steps
 
     def test_readings_and_receivers(self):
         verdict, detail = self.grade()
@@ -86,6 +97,7 @@ class LabeledRestart(unittest.TestCase):
             ("unaffected.release_update_wait_ms", None, "INVALID", "release_update_wait_ms"),
             ("unaffected.release_update_received_ms", 6, "INVALID", "release-window stamps"),
             ("timing.release_to_last_eor_ms", 12, "INVALID", "release to last EoR"),
+            ("timing.resume_to_last_eor_ms", 12, "INVALID", "resume to last EoR"),
             ("timing.last_eor_ms", 17.5, "INVALID", "last receiver"),
             ("memory.cgroup_memory_peak_bytes", 0, "INVALID", "peak"),
             ("memory.cgroup_swap_max", "max", "INVALID", "swap-fenced"),
@@ -95,6 +107,8 @@ class LabeledRestart(unittest.TestCase):
             ("source.retained_rows", 0, "INVALID", "source restart"),
             ("source.restart_state", False, "INVALID", "source restart"),
             ("source.replayed_sample_stale", True, "INVALID", "source restart"),
+            ("witness.owed_steps_to_last_eor.whole.at_most_ms", -1, "INVALID", "upper bucket"),
+            ("receivers.0.max_observed_stub_backlog_messages", 65537, "INVALID", "backlog"),
         )
         for field, value, expected, reason in cases:
             with self.subTest(field=field):
@@ -121,7 +135,7 @@ class LabeledRestart(unittest.TestCase):
         self.assertIn("without a result", detail)
 
     def test_measured_cell_needs_quiet_full_shape(self):
-        self.run_data.update(mode="measured", shape={**credit_bars.RELEASE_SHAPE, "registered_peers": 154})
+        self.run_data.update(mode="measured", shape=credit_bars.LABELED_RELEASE_SHAPE)
         self.run_data["host"] = {"compiler_watch": {"samples": 100, "observed": 1, "first": "rustc"}}
         self.path.write_text(json.dumps(self.run_data))
         verdict, detail = self.grade()
@@ -135,6 +149,79 @@ class LabeledRestart(unittest.TestCase):
         lines = credit_bars.check(self.root)
         self.assertEqual([line[1] for line in lines], ["INVALID", "PASS"])
         self.assertIn("attempted, no result", lines[0][2])
+
+    def measured_arm(self, name, scope):
+        directory = self.root / name
+        directory.mkdir()
+        (directory / "provenance.jsonl").write_text(json.dumps({
+            "sha256": ("a" if name == "parent" else "b") * 64,
+            "cells": list(credit_bars.LABELED_RESTARTS), "measured": 1,
+        }))
+        for cell in credit_bars.LABELED_RESTARTS:
+            run = copy.deepcopy(self.run_data)
+            run.update(family=cell.split("-")[1], mode="measured")
+            run["shape"].update(credit_bars.LABELED_RELEASE_SHAPE)
+            run["source"].update(old_rows=150000, replayed_rows=150000, retained_rows=150000)
+            run["witness"]["owing_flip_delta_while_paused"] = 150
+            peer = run["receivers"][0]
+            peer.update(announced=150000, labeled_announced=150000, routes_before_eor=150000, eor_ms=90022.25)
+            run["receivers"] = [dict(peer, peer=f"192.0.2.{i}") for i in range(1, 151)]
+            run["timing"].update(resume_issued_ms=90010.0, last_eor_ms=90022.25, release_to_last_eor_ms=90020.25)
+            run["actor"]["to_ms"] += 90000.0
+            run["host"] = {"compiler_watch": {"samples": 100, "observed": 0}}
+            self.set_steps(run, scope, 150 if scope == "whole" else 22050, 100)
+            if scope == "cursor":
+                run["actor"]["slice_max_us"]["actor_poll"] *= 0.5
+                run["unaffected"]["release_update_wait_ms"] *= 2
+                run["unaffected"]["release_update_winner_ms"] = 8.75
+                run["memory"]["cgroup_memory_peak_bytes"] *= 3
+            (directory / f"{cell}.json").write_text(json.dumps(run))
+        return directory
+
+    def test_compare_requires_matched_cells_and_the_expected_binary_and_drain(self):
+        parent = self.measured_arm("parent", "whole")
+        candidate = self.measured_arm("candidate", "cursor")
+        lines = credit_bars.compare_labeled(parent, candidate)
+        self.assertEqual([v for _, v, _ in lines].count("PASS"), 4, lines)
+        ratios = {key: detail for key, verdict, detail in lines if verdict == "REPORT"}
+        self.assertEqual(len(ratios), 10)
+        for title, ratio in (("longest RIB poll", "0.5000"), ("release-turn UPDATE", "2.0000"),
+                             ("whole-process cgroup", "3.0000"), ("resume → last EoR", "1.0000")):
+            matches = [row for key, row in ratios.items() if title in key]
+            self.assertEqual(len(matches), 2)
+            self.assertTrue(all(f"candidate/parent {ratio}" in row for row in matches))
+        self.assertTrue(all(v == "INVALID" for _, v, _ in credit_bars.compare_labeled(candidate, parent)))
+        self.assertEqual(credit_bars.compare_labeled(parent, parent)[0][1], "INVALID")
+        self.assertTrue(all(row[1] == "INVALID" for row in credit_bars.check_labeled(candidate, "whole")))
+        self.assertTrue(all(row[1] == "PASS" for row in credit_bars.check_labeled(candidate, "cursor")))
+
+        result = candidate / "restart-labeled6.json"
+        raw = result.read_bytes()
+        for key, scope, value in (
+            ("owed_steps_to_last_eor", "whole", {"observations": 1, "above_ms": 1, "at_most_ms": 5}),
+            ("owed_steps_to_last_eor", "cursor", {"observations": 22049, "above_ms": 1, "at_most_ms": 5}),
+            ("owed_steps_while_paused", "cursor", {"observations": 22051, "above_ms": 1, "at_most_ms": 5}),
+            ("owed_steps_while_paused", "whole", None),
+        ):
+            with self.subTest(key=key, scope=scope, value=value):
+                run = json.loads(raw)
+                if value is None:
+                    del run["witness"][key][scope]
+                else:
+                    run["witness"][key][scope] = value
+                result.write_text(json.dumps(run))
+                lines = credit_bars.compare_labeled(parent, candidate)
+                self.assertTrue(any(v == "INVALID" and "labeled6" in n for n, v, _ in lines))
+                self.assertFalse(any(v == "REPORT" and "labeled6" in n for n, v, _ in lines))
+        result.write_bytes(raw)
+        run = json.loads(raw)
+        run["shape"]["pause_ms"] = 30000
+        result.write_text(json.dumps(run))
+        self.assertTrue(any(v == "INVALID" and "pause_ms" in detail for _, v, detail in
+                            credit_bars.compare_labeled(parent, candidate)))
+        result.unlink()
+        self.assertTrue(any(v == "INVALID" and "attempted, no result" in detail for _, v, detail in
+                            credit_bars.compare_labeled(parent, candidate)))
 
 
 if __name__ == "__main__":

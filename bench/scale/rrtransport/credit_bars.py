@@ -3,6 +3,8 @@
 
     credit_bars.py analyze [--require-cursor FAMILY]... PARENT_DIR CANDIDATE_DIR
     credit_bars.py check RESULT_DIR
+    credit_bars.py check-labeled whole|cursor RESULT_DIR
+    credit_bars.py labeled PARENT_DIR CANDIDATE_DIR
 
 Each arm directory holds one or more repetitions: every directory under it
 that `run-credit-cells.sh` wrote a ``provenance.jsonl`` into (the arm
@@ -181,6 +183,7 @@ RELEASE_SHAPE = {
     "trigger": RELEASE_TRIGGER,
     "registered_peers": 153,
 }
+LABELED_RELEASE_SHAPE = {**RELEASE_SHAPE, "pause_ms": 90_000, "registered_peers": PEERS + 4}
 # (cell prefix, line label): the plain release and the release under churn.
 RELEASE_KINDS = (("restart", "selection release"), ("restart-churn", "release under churn"))
 # Cell 2: fewest sampler samples on the exhaustion plateau. The fixed shape
@@ -333,6 +336,7 @@ class Arm:
     directory: Path
     repetitions: dict[str, Path] = field(default_factory=dict)
     attempted: dict[str, set[str]] = field(default_factory=dict)
+    measured_cells: dict[str, dict[str, int | None]] = field(default_factory=dict)
     sha256: str = ""
 
     @classmethod
@@ -353,6 +357,9 @@ class Arm:
             hashes |= shas
             arm.repetitions[rep] = provenance.parent
             arm.attempted[rep] = {cell for line in lines for cell in line.get("cells") or []}
+            arm.measured_cells[rep] = {
+                cell: line.get("measured") for line in lines for cell in line.get("cells") or []
+            }
         if not arm.repetitions:
             raise Invalid(f"{name}: no repetition (no provenance.jsonl under {directory})")
         paths = list(arm.repetitions.values())
@@ -1507,7 +1514,8 @@ def verdicts(
     for arm in (parent, candidate):
         for rep, directory in sorted(arm.repetitions.items()):
             results.extend(optional_release_reports(directory, arm, rep))
-            results.extend(optional_cell_reports(directory, arm, rep))
+            expected = "whole" if arm is parent else "cursor"
+            results.extend(optional_cell_reports(directory, arm, rep, labeled_scope=expected))
             for cell in sorted(arm.attempted[rep]):
                 try:
                     run = arm.run(rep, cell)
@@ -2085,7 +2093,58 @@ def source_burst(run: dict, what: str) -> tuple[str, str]:
     return "PASS", "; ".join(parts)
 
 
-def labeled_restart(run: dict, cell: str) -> tuple[str, str]:
+def labeled_step_window(run: dict, key: str, cell: str) -> dict:
+    steps = need(run, f"witness.{key}", cell)
+    if not isinstance(steps, dict) or set(steps) != set(STEP_SCOPES):
+        raise Invalid(f"{cell}: {key} needs the observed cursor, keyed and whole series")
+    for scope, entry in steps.items():
+        if not isinstance(entry, dict) or not {"observations", "above_ms", "at_most_ms"} <= entry.keys():
+            raise Invalid(f"{key}.{scope}: incomplete histogram")
+        count, lo, hi = entry["observations"], entry["above_ms"], entry["at_most_ms"]
+        if type(count) is not int or count < 0:
+            raise Invalid(f"{key}.{scope}: invalid step count")
+        if count == 0:
+            if lo is not None or hi is not None:
+                raise Invalid(f"{key}.{scope}: duration with no steps")
+            continue
+        if type(lo) not in (int, float) or not math.isfinite(lo) or lo < 0:
+            raise Invalid(f"{key}.{scope}: invalid lower bucket edge")
+        if hi is not None and (type(hi) not in (int, float) or not math.isfinite(hi) or hi <= lo):
+            raise Invalid(f"{key}.{scope}: invalid upper bucket edge")
+    return steps
+
+
+def labeled_drain(run: dict, cell: str, expected: str | None) -> str:
+    before = labeled_step_window(run, "owed_steps_while_paused", cell)
+    total = labeled_step_window(run, "owed_steps_to_last_eor", cell)
+    for scope in STEP_SCOPES:
+        if before[scope]["observations"] > total[scope]["observations"] or (
+            before[scope]["observations"] and before[scope]["above_ms"] > total[scope]["above_ms"]
+        ):
+            raise Invalid(f"{cell}: {scope} paused histogram exceeds the complete window")
+    seen = [scope for scope in STEP_SCOPES if total[scope]["observations"]]
+    if seen not in (["whole"], ["cursor"]) or (expected and seen != [expected]):
+        raise Invalid(f"{cell}: expected {expected or 'whole-only or cursor-only'} drain, observed {seen}")
+    scope = seen[0]
+    n = run["shape"]["receivers"]
+    rows = run["shape"]["rows_per_receiver"]
+    chunk = need(run, "shape.chunk_rows", cell)
+    if chunk != PASS_ROWS:
+        raise Invalid(f"{cell}: unexpected labeled drain unit {chunk!r}")
+    count = total[scope]["observations"]
+    paused = before[scope]["observations"]
+    if scope == "whole" and count != n:
+        raise Invalid(f"{cell}: observed {count} whole steps for {n} receivers")
+    if scope == "cursor" and count < n * math.ceil(rows / chunk):
+        raise Invalid(f"{cell}: too few cursor steps for the labeled inventory")
+    if run["mode"] == "measured" and paused == 0:
+        raise Invalid(f"{cell}: no {scope} steps observed while paused")
+    lo, hi = total[scope]["above_ms"], total[scope]["at_most_ms"]
+    bracket = f">{lo:g} ms" if hi is None else f"({lo:g}, {hi:g}] ms"
+    return f"{count} {scope} steps ({paused} while paused), longest {bracket}"
+
+
+def labeled_restart(run: dict, cell: str, expected_scope: str | None = None) -> tuple[str, str]:
     """Validate the instruments without setting a performance threshold."""
     if (run.get("cell"), run.get("family")) != identity(cell):
         raise Invalid("result belongs to a different cell")
@@ -2114,7 +2173,7 @@ def labeled_restart(run: dict, cell: str) -> tuple[str, str]:
     if mode not in ("correctness", "measured") or need(run, "shape.trigger", cell) != RELEASE_TRIGGER:
         raise Invalid("unexpected restart shape or mode")
     if mode == "measured":
-        measured([run], cell, {**RELEASE_SHAPE, "registered_peers": PEERS + 4})
+        measured([run], cell, LABELED_RELEASE_SHAPE)
         check_compiler_watch(run, cell)
     rows = positive("shape.rows_per_receiver")
     n = positive("shape.receivers")
@@ -2143,7 +2202,13 @@ def labeled_restart(run: dict, cell: str) -> tuple[str, str]:
         raise Invalid("incomplete receiver records")
     if len({need(peer, "peer", cell) for peer in peers}) != n:
         raise Invalid("duplicate receiver records")
+    capacity = positive("shape.stub_backlog_capacity_messages")
+    backlogs = []
     for peer in peers:
+        backlog = need(peer, "max_observed_stub_backlog_messages", cell)
+        if type(backlog) is not int or not 0 <= backlog <= capacity:
+            raise Invalid(f"{peer['peer']} invalid sampled receive backlog")
+        backlogs.append(backlog)
         if need(peer, "exact", cell) is not True or need(peer, "exact_at_eor", cell) is not True:
             return "FAIL", f"{peer['peer']} incomplete table or premature EoR"
         for key in ("missing", "outside", "decode_failures", "resets", "routes_after_eor"):
@@ -2183,6 +2248,11 @@ def labeled_restart(run: dict, cell: str) -> tuple[str, str]:
         raise Invalid("last EoR does not match the last receiver")
     if start < 0 or not math.isclose(recovery, last - start, abs_tol=1e-6):
         raise Invalid("recovery does not span release to last EoR")
+    resumed_recovery = positive("timing.resume_to_last_eor_ms")
+    if not math.isclose(resumed_recovery, last - resume, abs_tol=1e-6):
+        raise Invalid("recovery does not span resume to last EoR")
+    if mode == "measured" and resume - start < LABELED_RELEASE_SHAPE["pause_ms"]:
+        raise Invalid("readers resumed before the fixed labeled pause elapsed")
     if not number(run, "actor.from_ms", cell) <= start <= last <= number(run, "actor.to_ms", cell):
         raise Invalid("physical poll window does not cover release through last EoR")
     if (
@@ -2200,19 +2270,23 @@ def labeled_restart(run: dict, cell: str) -> tuple[str, str]:
         or need(run, "memory.cgroup_oom_kill", cell) != "0"
     ):
         raise Invalid("missing swap-fenced memory scope")
+    drain = labeled_drain(run, cell, expected_scope)
     return "PASS", (
         f"{mode}, {n:g} exact receivers; longest RIB poll {poll_us / 1000:.3f} ms, "
-        f"unrelated UPDATE wait {wait:.3f} ms, release to last EoR {recovery:.3f} ms, "
-        f"cgroup peak {peak} bytes"
+        f"release-turn UPDATE wait {wait:.3f} ms, release to last EoR {recovery:.3f} ms, "
+        f"resume to last EoR {resumed_recovery:.3f} ms; {drain}; "
+        f"cgroup peak {peak} bytes (includes harness), largest sampled receiver backlog "
+        f"{max(backlogs)} of {capacity:g} messages"
     )
 
 
 def optional_cell_reports(
-    directory: Path, arm: Arm | None = None, rep: str = ""
+    directory: Path, arm: Arm | None = None, rep: str = "", *,
+    cells=(*SOURCE_BURST, *LABELED_RESTARTS), labeled_scope: str | None = None,
 ) -> list[tuple[str, str, str]]:
     """A verdict line per optional graded cell this directory ran or attempted."""
     lines = []
-    for cell in (*SOURCE_BURST, *LABELED_RESTARTS):
+    for cell in cells:
         result = directory / result_file(cell)
         marker = directory / f"{cell}-exit.json"
         if not (result.exists() or marker.exists() or (arm and cell in arm.attempted[rep])):
@@ -2226,8 +2300,10 @@ def optional_cell_reports(
                 run = explained(read(result), read(marker) if marker.exists() else None, cell)
             if not run or run.get("cell") != identity(cell)[0]:
                 raise Invalid("result belongs to a different cell")
-            grade = labeled_restart if cell in LABELED_RESTARTS else source_burst
-            verdict, reason = grade(run, cell)
+            if cell in LABELED_RESTARTS:
+                verdict, reason = labeled_restart(run, cell, labeled_scope)
+            else:
+                verdict, reason = source_burst(run, cell)
         except Invalid as error:
             verdict, reason = "INVALID", str(error)
         except (AttributeError, KeyError, TypeError, ValueError) as error:
@@ -2242,6 +2318,69 @@ def mean_readings(readings: list[dict]) -> dict:
     them (no update before the burst, no pass recorded) is left out."""
     keys = [key for key in readings[0] if all(r.get(key) is not None for r in readings)]
     return {key: statistics.fmean(r[key] for r in readings) for key in keys}
+
+
+def labeled_arm(name: str, directory: Path) -> Arm:
+    arm = Arm.load(name, directory)
+    if not isinstance(arm.sha256, str) or len(arm.sha256) != 64 or any(
+        ch not in "0123456789abcdef" for ch in arm.sha256
+    ):
+        raise Invalid(f"{name}: missing binary SHA-256")
+    return arm
+
+
+def check_labeled(directory: Path, expected: str) -> list[tuple[str, str, str]]:
+    try:
+        arm = labeled_arm(str(directory), directory)
+        return [
+            line for rep, path in sorted(arm.repetitions.items())
+            for line in optional_cell_reports(path, arm, rep, cells=LABELED_RESTARTS, labeled_scope=expected)
+        ] or [(str(directory), "INVALID", "no labeled restart was attempted")]
+    except (Invalid, OSError, TypeError, ValueError) as error:
+        return [(str(directory), "INVALID", str(error))]
+
+
+def compare_labeled(parent_dir: Path, candidate_dir: Path) -> list[tuple[str, str, str]]:
+    """Ratios of arithmetic means across matched measured runs, by AFI."""
+    try:
+        parent = labeled_arm("parent", parent_dir)
+        candidate = labeled_arm("candidate", candidate_dir)
+        if parent.sha256 == candidate.sha256:
+            raise Invalid("A/B requires distinct parent and candidate binaries")
+    except (Invalid, OSError, TypeError, ValueError) as error:
+        return [("labeled A/B", "INVALID", str(error))]
+    results = []
+    readings = (
+        ("longest RIB poll (µs)", "actor.slice_max_us.actor_poll"),
+        ("release-turn UPDATE wait (ms)", "unaffected.release_update_wait_ms"),
+        ("release → last EoR (ms)", "timing.release_to_last_eor_ms"),
+        ("resume → last EoR (ms)", "timing.resume_to_last_eor_ms"),
+        ("whole-process cgroup peak (bytes, includes harness)", "memory.cgroup_memory_peak_bytes"),
+    )
+    for cell in LABELED_RESTARTS:
+        try:
+            old, new = pair(parent, candidate, cell)
+            passed = True
+            for arm, scope, runs in ((parent, "whole", old), (candidate, "cursor", new)):
+                repetitions = sorted(rep for rep, cells in arm.attempted.items() if cell in cells)
+                for rep, run in zip(repetitions, runs, strict=True):
+                    verdict, reason = labeled_restart(run, cell, scope)
+                    results.append((f"{arm.name} {rep} {cell}", verdict, reason))
+                    passed &= verdict == "PASS"
+                    if verdict == "PASS" and arm.measured_cells[rep][cell] != 1:
+                        raise Invalid(f"{arm.name}/{rep}: {cell} was not measured by the runner")
+            if not passed:
+                continue
+            measured(old + new, cell, LABELED_RELEASE_SHAPE)
+            for title, field in readings:
+                p, c = (statistics.fmean(number(run, field, cell) for run in runs) for runs in (old, new))
+                results.append((
+                    f"{cell} {title}", "REPORT",
+                    f"parent {p:.3f}, candidate {c:.3f}, candidate/parent {c / p:.4f} ({len(old)} matched pairs)",
+                ))
+        except (Invalid, OSError, AttributeError, KeyError, TypeError, ValueError) as error:
+            results.append((cell, "INVALID", str(error)))
+    return results
 
 
 def source_burst_compare(parent: Arm, candidate: Arm, cell: str) -> tuple[str, str, str] | None:
@@ -2313,6 +2452,10 @@ def main(argv: list[str]) -> int:
     if len(args) == 2 and args[0] == "check" and not require:
         directory = Path(args[1])
         return report(check(directory), check_allocator_readings(directory))
+    if len(args) == 3 and args[0] == "check-labeled" and args[1] in ("whole", "cursor") and not require:
+        return report(check_labeled(Path(args[2]), args[1]))
+    if len(args) == 3 and args[0] == "labeled" and not require:
+        return report(compare_labeled(Path(args[1]), Path(args[2])))
     print(__doc__, file=sys.stderr)
     return 2
 

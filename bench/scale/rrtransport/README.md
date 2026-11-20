@@ -320,7 +320,10 @@ reference, exactly one End-of-RIB arrives, every route of the table
 precedes it, and no session ends.
 
 The opt-in `restart-labeled4` and `restart-labeled6` cells run SAFI 4
-separately for IPv4 and IPv6. The fixture loads the source's table, checks
+separately for IPv4 and IPv6. Each measured cell has 150 ungrouped,
+labeled-only, single-best receivers with identical private export policy,
+150,000 rows and a 90 s reader pause. Every prefix has one label.
+The fixture loads the source's table, checks
 that graceful restart retained it, and replays it on the replacement session.
 A second GR peer keeps selection held until replay is complete. Its
 End-of-RIB releases the family while the labeled readers are paused.
@@ -329,24 +332,49 @@ MEDs before its single family End-of-RIB. Once every receiver has the table, the
 one advertised prefix. Each receiver must decode that withdrawal and
 retain every other row. The withdrawal check is outside the recovery clock.
 
-Run both reduced correctness cells and grade their receipts.
+Run both reduced correctness cells and check the expected drain mechanism for
+the binary under test. Use `whole` for the whole-family implementation and
+`cursor` for the row cursor.
 
 ```sh
 bench/scale/rrtransport/run-credit-cells.sh --reduced --correctness-only \
     target/scale/rrtransport /tmp/labeled-smoke restart-labeled4 restart-labeled6
-python3 bench/scale/rrtransport/credit_bars.py check /tmp/labeled-smoke
+python3 bench/scale/rrtransport/credit_bars.py check-labeled whole /tmp/labeled-smoke
 ```
 
-For a comparison, build the same harness files on both daemon revisions.
-Omit the two flags to use 150 receivers and 150,000 rows per family.
-Each cell gets a fresh cgroup with `memory.swap.max=0` and reports
-`memory.peak`, the longest physical RIB poll, an unrelated IPv4 UPDATE's
-wait through release, and the time from release to the last decoded
-family End-of-RIB. The harness queues the unrelated UPDATE immediately
-behind the releasing marker between actor polls. It timestamps both the
-first lookup that returns the matching winner (an upper bound on installation
-time) and delivery to a separate TCP receiver. The checker validates the
-observations and wire inventory. Performance thresholds belong to the campaign.
+For A/B, compare the integrated cursor revision with the same main revision
+it was based on. Overlay the same `bench/scale/rrtransport` sources on both
+trees, check their directories with `diff -qr`, and build each with a
+separate Cargo target directory. Save both product revisions and the harness
+revision with the campaign. The runner records the binary SHA-256 in
+`provenance.jsonl`. Omit both smoke flags for a measured run. Use the
+same repetition directory names under each arm.
+
+```sh
+python3 bench/scale/rrtransport/credit_bars.py labeled PARENT_DIR CANDIDATE_DIR
+```
+
+The labeled comparison checks both AFIs in each arm, then reports the ratio
+of candidate to parent arithmetic means for each AFI. A whole-family run
+must record one whole step per receiver. A cursor run must record at least
+`receivers × ceil(rows/1024)` cursor steps. Other scopes must record zero
+steps. Each receipt shows the counts while reads were paused and through
+the last End-of-RIB, along with the longest step's histogram bucket.
+The campaign sets the performance thresholds.
+
+Recovery has two clocks, release to last decoded End-of-RIB and reader
+resume to that marker. The physical RIB poll maximum covers release
+through the last marker. The single unrelated IPv4 UPDATE samples the
+release turn. It is queued behind the releasing marker between actor polls.
+The receipt timestamps the first lookup returning its matching winner
+(an upper bound on installation) and delivery to a separate TCP receiver.
+
+Every cell runs in a fresh cgroup with `memory.swap.max=0`. Its
+`memory.peak` includes the harness and its decoded-message queues. The
+receipt records each stub's maximum observed queue depth in messages,
+sampled just after dequeue. These samples can miss a transient maximum,
+occur at different times across stubs, and cannot bound the queue's bytes.
+The relative peak memory reading is report-only.
 
 `credit-restart-churn` adds churn while the release drains. Halfway to the
 churn-free window (14.85 s into the pause on the full shape), with the

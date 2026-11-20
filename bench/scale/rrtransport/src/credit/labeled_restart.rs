@@ -4,6 +4,10 @@ use super::*;
 const REPLACEMENT: u64 = 2;
 const RELEASE_HELPER: Ipv4Addr = Ipv4Addr::new(127, 254, 0, 3);
 const SEQUENCE: u32 = 1;
+// Long enough for the full parent to produce its whole-family sends and
+// for the candidate's row credit to bind before the readers resume.
+const FULL_PAUSE: Duration = Duration::from_secs(90);
+const STEP_HISTOGRAM: &str = "bgp_rib_outbound_owed_drain_step_seconds";
 const FLIPS: &str = "bgp_rib_outbound_owing_flips_total";
 
 fn eor(source: Ipv4Addr, session_id: u64, family: Family) -> RibUpdate {
@@ -142,13 +146,17 @@ async fn collect(
     mut state: WireState,
     progress: mpsc::Sender<Progress>,
     mut stop: watch::Receiver<bool>,
-) -> (WireState, bool) {
+) -> (WireState, bool, usize) {
     let mut initial_exact = false;
+    let mut max_backlog = 0;
     loop {
         tokio::select! {
             _ = stop.changed() => break,
             msg = rx.recv() => {
                 let Some(msg) = msg else { state.closed(); break };
+                // Messages waiting in the decoded stub channel at dequeue.
+                // Bytes retained by those messages are not exposed here.
+                max_backlog = max_backlog.max(rx.len());
                 let first_eor = state.eors == 0;
                 let first_withdrawal = state.withdrawals == 0;
                 state.apply(&msg, Instant::now());
@@ -163,7 +171,7 @@ async fn collect(
             }
         }
     }
-    (state, initial_exact)
+    (state, initial_exact, max_backlog)
 }
 
 async fn wait_for_receivers(
@@ -189,6 +197,22 @@ fn poll_count(metrics: &BgpMetrics) -> u64 {
         .map_or(0, |(count, _)| *count)
 }
 
+/// Keep a zero for each exported idle scope; an unexported scope stays absent.
+fn drain_step_deltas(before: &Buckets, after: &Buckets) -> Value {
+    let mut delta = longest(before, after);
+    let scopes = delta.as_object_mut().expect("brackets by scope");
+    for scope in after.keys() {
+        scopes.entry(scope).or_insert_with(|| {
+            json!({
+                "observations": 0,
+                "above_ms": null,
+                "at_most_ms": null,
+            })
+        });
+    }
+    delta
+}
+
 pub async fn run(family: Family, output: &Path, options: &Options) -> Result<bool> {
     ensure!(
         matches!(family, Family::Labeled4 | Family::Labeled6) && options.seconds.is_none(),
@@ -202,12 +226,7 @@ pub async fn run(family: Family, output: &Path, options: &Options) -> Result<boo
             Duration::from_secs(120),
         )
     } else {
-        (
-            150,
-            150_000,
-            Trigger::Restart.pause(),
-            Duration::from_secs(900),
-        )
+        (150, 150_000, FULL_PAUSE, Duration::from_secs(900))
     };
     let pause = options.pause.unwrap_or(pause);
     check_read_hold(pause)?;
@@ -281,6 +300,11 @@ pub async fn run(family: Family, output: &Path, options: &Options) -> Result<boo
         let (stop, stop_rx) = watch::channel(false);
         let (progress, mut events) = mpsc::channel(2 * receivers);
         let mut collectors = tokio::task::JoinSet::new();
+        let stub_capacity = fixture.receivers[0]
+            .rx
+            .as_ref()
+            .expect("labeled stream")
+            .max_capacity();
         for r in &mut fixture.receivers[..receivers] {
             let state = WireState::with_reference(family.wire()?, Arc::clone(&reference));
             let (rx, ip) = (r.rx.take().expect("labeled stream"), r.ip);
@@ -319,6 +343,7 @@ pub async fn run(family: Family, output: &Path, options: &Options) -> Result<boo
         let before = fold_slice_maxima(&fixture.metrics, &mut setup);
         let base_polls = poll_count(&fixture.metrics);
         let base_flips = before.total(FLIPS).context("missing owed-family counter")?;
+        let steps_before = buckets(&fixture.metrics, STEP_HISTOGRAM, "scope");
         let active = release::family_metric(&before, "bgp_selection_deferral_active", family, None);
         let waiters =
             release::family_metric(&before, "bgp_selection_deferral_waiters", family, None);
@@ -349,6 +374,7 @@ pub async fn run(family: Family, output: &Path, options: &Options) -> Result<boo
             family,
             Some("all_eor"),
         );
+        let steps_while_paused = buckets(&fixture.metrics, STEP_HISTOGRAM, "scope");
         let resume = Instant::now();
         fixture.set_paused(0..receivers, false).await?;
         let all_eors = wait_for_receivers(&mut events, receivers, Progress::Eor, until).await;
@@ -356,6 +382,7 @@ pub async fn run(family: Family, output: &Path, options: &Options) -> Result<boo
         drop(fold_slice_maxima(&fixture.metrics, &mut slice));
         let polls = poll_count(&fixture.metrics).saturating_sub(base_polls);
         let poll_end = Instant::now();
+        let steps_end = buckets(&fixture.metrics, STEP_HISTOGRAM, "scope");
         let winner = tokio::time::timeout_at(until, winner_probe).await???;
         let mut drained = false;
         if all_eors {
@@ -386,7 +413,7 @@ pub async fn run(family: Family, output: &Path, options: &Options) -> Result<boo
         let mut eors = Vec::new();
         let mut resets = 0;
         while let Some(report) = collectors.join_next().await {
-            let (ip, (s, initial)) = report?;
+            let (ip, (s, initial, backlog)) = report?;
             let at = s
                 .eor_at
                 .and_then(|t| t.checked_duration_since(t0))
@@ -422,13 +449,19 @@ pub async fn run(family: Family, output: &Path, options: &Options) -> Result<boo
                     "routes_before_eor": s.routes_before_eor,
                     "routes_after_eor": s.routes_after_eor,
                     "post_eor_sentinel_changes": s.churned_after_eor,
+                    "max_observed_stub_backlog_messages": backlog,
                     "outside": s.outside,
                     "decode_failures": s.decode_failures,
                     "resets": s.resets,
                 }),
             );
         }
-        let last = (eors.len() == receivers).then(|| eors.into_iter().fold(0.0, f64::max));
+        let duration_from = |clock: Instant| -> Option<f64> {
+            let start_ms = since(clock);
+            (eors.len() == receivers && eors.iter().all(|&at| at >= start_ms))
+                .then(|| eors.iter().copied().fold(0.0, f64::max) - start_ms)
+        };
+        let resume_to_last_eor = duration_from(resume);
         let down = fixture.not_established().await;
         Ok::<_, anyhow::Error>(json!({
             "schema": "rrtransport-credit/1",
@@ -444,6 +477,7 @@ pub async fn run(family: Family, output: &Path, options: &Options) -> Result<boo
                 "trigger": Trigger::Restart.name(),
                 "registered_peers": fixture.receivers.len() + 3,
                 "receiver_rcvbuf_bytes": RECEIVER_RCVBUF,
+                "stub_backlog_capacity_messages": stub_capacity,
             },
             "source": {
                 "peer": SOURCE.to_string(),
@@ -461,6 +495,7 @@ pub async fn run(family: Family, output: &Path, options: &Options) -> Result<boo
             "actor": {
                 "poll_count": polls,
                 "slice_max_us": slice,
+                "setup_slice_max_us": setup,
                 "from_ms": 0.0,
                 "to_ms": since(poll_end),
             },
@@ -477,14 +512,17 @@ pub async fn run(family: Family, output: &Path, options: &Options) -> Result<boo
             "timing": {
                 "release_sent_ms": since(release_at),
                 "resume_issued_ms": since(resume),
-                "last_eor_ms": last,
-                "release_to_last_eor_ms": last.map(|ms| ms - since(release_at)),
+                "last_eor_ms": duration_from(t0),
+                "release_to_last_eor_ms": duration_from(release_at),
+                "resume_to_last_eor_ms": resume_to_last_eor,
             },
             "witness": {
                 "active_before_release": active,
                 "waiters_before_release": waiters,
                 "all_eor_releases": releases,
                 "owing_flip_delta_while_paused": flips,
+                "owed_steps_while_paused": drain_step_deltas(&steps_before, &steps_while_paused),
+                "owed_steps_to_last_eor": drain_step_deltas(&steps_before, &steps_end),
             },
             "checks": {
                 "selection_held": active == 1.0 && waiters == 1.0,
@@ -493,7 +531,7 @@ pub async fn run(family: Family, output: &Path, options: &Options) -> Result<boo
                 "source_restart": old == (rows as u64, false) && stale == (rows as u64, true)
                     && replayed == (rows as u64, false),
                 "final_state_exact": all_exact,
-                "eor_after_every_route": all_eors && ordered,
+                "eor_after_every_route": all_eors && ordered && resume_to_last_eor.is_some(),
                 "post_release_withdrawal": withdrawals,
                 "labeled_payload_counted": payload,
                 "physical_poll_observed": polls > 0 && slice.get("actor_poll").is_some_and(|&v| v > 0.0),
@@ -540,4 +578,31 @@ pub async fn run(family: Family, output: &Path, options: &Options) -> Result<boo
     });
     write_result(output, &format!("restart-{}.json", family.name()), &report)?;
     Ok(recorded_pass(&report))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn step_witness_distinguishes_a_missing_scope_from_an_idle_one() {
+        let before = Buckets::from([
+            ("whole".into(), (3, vec![(0.001, 3)])),
+            ("keyed".into(), (1, vec![(0.001, 1)])),
+        ]);
+        let after = Buckets::from([
+            ("cursor".into(), (2, vec![(0.001, 1), (0.005, 2)])),
+            ("keyed".into(), (1, vec![(0.001, 1)])),
+        ]);
+        let delta = drain_step_deltas(&before, &after);
+        assert!(delta.get("whole").is_none());
+        assert_eq!(
+            delta["keyed"],
+            json!({"observations": 0, "above_ms": null, "at_most_ms": null})
+        );
+        assert_eq!(
+            delta["cursor"],
+            json!({"observations": 2, "above_ms": 1.0, "at_most_ms": 5.0})
+        );
+    }
 }
