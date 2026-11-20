@@ -3675,7 +3675,7 @@ mod tests {
             let mut route = as4_projection_route(prefix, "192.0.2.1".parse().unwrap());
             route.origin_type = origin;
             AttrSet::edit(&mut route.attributes, |attrs| {
-                attrs.push(PathAttribute::Med(77))
+                attrs.push(PathAttribute::Med(77));
             });
             let learned = Arc::clone(&route.attributes);
             if set_med.is_some() {
