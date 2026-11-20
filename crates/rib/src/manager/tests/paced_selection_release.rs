@@ -1350,7 +1350,7 @@ fn per_client_best_release_matches_the_ranking_for_every_client() {
     register_test_peer(&mut manager, source, 77);
     register_test_peer(&mut manager, other, 1);
     // Even clients enforce control communities, on both 16-member pages.
-    let rs_control = |n: usize| (n % 2 == 0).then(|| client_asn(n));
+    let rs_control = |n: usize| n.is_multiple_of(2).then(|| client_asn(n));
     let mut receivers: Vec<_> = (0..CLIENTS)
         .map(|n| rs_client(&mut manager, n, rs_control(n).is_some(), 512))
         .collect();
@@ -1521,7 +1521,7 @@ fn per_client_best_release_matches_the_ranking_for_every_client() {
     let group = &manager.group_ribs[&gid];
     let all: HashSet<Prefix> = sent.0.keys().copied().collect();
     let crowded = prefix_of(CROWDED);
-    for n in 0..CLIENTS {
+    for (n, table) in tables.iter().enumerate() {
         let from_group: BTreeSet<_> = group
             .policy_filtered_for_member(client(n), &all)
             .into_iter()
@@ -1538,7 +1538,7 @@ fn per_client_best_release_matches_the_ranking_for_every_client() {
         assert!(recorded.iter().all(|key| sent.0.contains_key(&key.0)));
         assert_eq!(
             group.advertised_count_for(client(n)),
-            tables[n].rows.len(),
+            table.rows.len(),
             "client {n} advertised count"
         );
     }
