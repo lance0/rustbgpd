@@ -1142,6 +1142,8 @@ impl RibManager {
 
     /// Offer released receipts once. A refusal remains on the ordinary ring.
     pub(super) fn service_marker_release_backlog(&mut self, budget: usize) {
+        // One membership completion can settle several families for the peer and
+        // run their replay completion hooks. Keep this cap even on an RTC-only tick.
         let rtc = self.service_released_rt_membership(budget.min(RESYNC_PEERS_PER_TICK / 4));
         let remaining = budget - rtc;
         let family_budget = if self.released_evpn_markers_pending() {

@@ -75,7 +75,7 @@ async fn barrier(input: &mpsc::Sender<RibUpdate>) {
     response.await.unwrap();
 }
 
-async fn check_release(size: u16, family: (Afi, Safi), peers_per_tick: u16) {
+async fn check_release(size: u16, family: (Afi, Safi), expected_ticks: u64) {
     let Cohort {
         manager,
         input,
@@ -115,13 +115,12 @@ async fn check_release(size: u16, family: (Afi, Safi), peers_per_tick: u16) {
         outputs.push(output);
     }
     assert_eq!(outputs.len(), usize::from(size));
-    // Include the waiter itself and allow a timer quantum for the last group.
-    let ticks = (size + 1).div_ceil(peers_per_tick);
-    let bound = Duration::from_millis(u64::from(ticks) * 10 + 1);
+    let expected = Duration::from_millis(expected_ticks * 10);
+    let window = expected..=expected + Duration::from_millis(1);
     eprintln!("{family:?} release to {size} receivers: first VPN marker {first:?}, last {last:?}");
     assert!(
-        last <= bound,
-        "{size} receivers: last VPN marker at {last:?}, allowed {bound:?}"
+        window.contains(&last),
+        "{size} receivers: last VPN marker at {last:?}, expected {expected_ticks} ticks ({window:?})"
     );
     sleep(Duration::from_secs(2)).await;
     barrier(&input).await;
@@ -136,6 +135,7 @@ async fn check_release(size: u16, family: (Afi, Safi), peers_per_tick: u16) {
     actor.await.unwrap();
 }
 
+// VPN selection visits the waiter and seven receivers inline, then eight per tick.
 #[tokio::test(start_paused = true)]
 async fn vpn_release_64() {
     check_release(64, FAMILY, 8).await;
@@ -143,17 +143,18 @@ async fn vpn_release_64() {
 
 #[tokio::test(start_paused = true)]
 async fn vpn_release_448() {
-    check_release(448, FAMILY, 8).await;
+    check_release(448, FAMILY, 56).await;
 }
 
+// The RTC rebuild releases four membership holds inline, then two per tick.
 #[tokio::test(start_paused = true)]
 async fn rebuilt_rtc_memberships_64() {
-    check_release(64, RtcRibRouteKey::afi_safi(), 2).await;
+    check_release(64, RtcRibRouteKey::afi_safi(), 30).await;
 }
 
 #[tokio::test(start_paused = true)]
 async fn rebuilt_rtc_memberships_448() {
-    check_release(448, RtcRibRouteKey::afi_safi(), 2).await;
+    check_release(448, RtcRibRouteKey::afi_safi(), 222).await;
 }
 
 #[tokio::test(start_paused = true)]
