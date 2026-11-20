@@ -12,14 +12,18 @@ use super::{OutboundRouteUpdate, PeerId, RibManager};
 use crate::loc_rib::{REGISTRATION_PAGE_SIZE, RegistrationScanStatus};
 use crate::update::RibUpdate;
 
-/// Build turns in one attempt on which a claimed build may find its repair
-/// log more than half full behind a retained session end before it takes the
-/// actor's turns. The count is cumulative, because a steady feed of messages
-/// near two chunks holds the log at half and dips under it every few turns.
-/// A larger budget lets a longer burst from another peer pass without holding
-/// the other peers' input for the rest of the build (the largest UPDATE, 16
-/// chunks, keeps the log past half for 13 turns). A smaller one replays the
-/// session end sooner under input that does not stop.
+/// Build turns in one attempt on which a build that keeps something waiting
+/// may find its repair log more than half full. A claimed build with a
+/// session end retained behind it then takes the actor's turns. A founder's
+/// build whose slot another policy destination waits for gives the slot up,
+/// as it does on overflow, and holds no input. The count is cumulative,
+/// because a steady feed of messages near two chunks holds the log at half
+/// and dips under it every few turns. A larger budget lets a longer burst
+/// from another peer pass without holding the other peers' input for the
+/// rest of the build or discarding the founder's pages (the largest UPDATE,
+/// 16 chunks, keeps the log past half for 13 turns). A smaller one replays
+/// the session end or the waiting command sooner under input that does not
+/// stop.
 pub(super) const BEHIND_TURNS_BEFORE_SEAL: u16 = 64;
 
 struct Waiter {
@@ -37,8 +41,8 @@ pub(super) struct FirstGroupBuild {
     other_destination_waits: bool,
     // Optional prepare belongs to the exact source cohort and session that asked.
     prepare_source: Option<(usize, Waiter)>,
-    // Turns this attempt's writer found the repair log more than half full
-    // behind a retained session end.
+    // Turns this attempt found the repair log more than half full while its
+    // writer kept a session end retained or another destination waited.
     behind_turns: u16,
     table: GroupRibOut,
 }
@@ -429,6 +433,12 @@ impl RibManager {
     /// overflow, can start under steady ingress without reordering warm joins.
     pub(super) fn advance_busy_first_group(&mut self, search: &mut usize) {
         if self.first_group_build.is_none() {
+            // A command the last build made way for replays once the message
+            // in flight has run. The founder's retry must not take the slot
+            // back first: the command would wait for the retry again.
+            if self.first_group_replay_due() {
+                return;
+            }
             let queue = &self.pending_initial_registrations;
             if *search >= queue.len() {
                 *search = 0;
@@ -474,9 +484,23 @@ impl RibManager {
                         session == waiter.session_id && waiter.sender.same_channel(&sender)
                     })
             });
+        // Input can keep discovery waiting behind repairs for as long as it
+        // lasts. Count the turns on which it does so while a retained
+        // session end or another destination's command waits for this build.
+        let keeps_waiting =
+            job.other_destination_waits || (job.writer.is_some() && self.session_end_retained());
+        if keeps_waiting && self.loc_rib.registration_scan_behind() {
+            job.behind_turns = job.behind_turns.saturating_add(1);
+        }
+        let outrun = job.behind_turns >= BEHIND_TURNS_BEFORE_SEAL;
+        // Before repairs took every turn past half, such input overflowed
+        // the log and the founder's build made way for the waiting command.
+        // It still does once the budget is spent. A burst is over before
+        // that, and no other peer's input is held.
         if !current
             || self.group_ribs.contains_key(&job.gid)
             || self.loc_rib.registration_scan_status() == RegistrationScanStatus::Overflow
+            || (outrun && job.other_destination_waits)
         {
             self.clear_first_group_commit_frontier();
             // Input that passed a retained session end can overflow the
@@ -490,18 +514,10 @@ impl RibManager {
             self.retire_first_group_page(job);
             return;
         }
-        // Input that passed a retained session end can keep discovery
-        // waiting behind repairs for as long as it lasts. Once it has done
-        // so for the budget, give the build every turn so the writer commits
-        // and the session end replays. A burst is over before that.
-        if job.writer.is_some()
-            && self.loc_rib.registration_scan_behind()
-            && self.session_end_retained()
-        {
-            job.behind_turns = job.behind_turns.saturating_add(1);
-            if job.behind_turns >= BEHIND_TURNS_BEFORE_SEAL {
-                self.seal_first_group_commit_frontier();
-            }
+        // A writer that input has outrun for the budget gets every turn, so
+        // that it commits and the session end replays.
+        if outrun {
+            self.seal_first_group_commit_frontier();
         }
         let page = self.loc_rib.take_registration_page();
         debug_assert!(page.bucket_visits + page.repairs <= REGISTRATION_PAGE_SIZE);

@@ -2176,6 +2176,150 @@ async fn the_seal_budget_does_not_outlive_its_attempt_or_its_writer() {
     assert!(manager.first_group_commit_remaining.is_none());
 }
 
+#[derive(Debug, Default)]
+struct Waiting {
+    /// Owner turn on which the waiting command ran and replied.
+    replied_turn: Option<usize>,
+    end_applied_turn: Option<usize>,
+    founder_grouped_turn: Option<usize>,
+    sealed_turns: usize,
+    /// Founder builds retired before they published.
+    discards: usize,
+    max_behind_turns: u16,
+}
+
+/// A founder's cold build on 16,384 routes, a policy change that needs a
+/// different, cold destination parked behind it, and `feed` from another
+/// peer, stepped one `owner_turn` per iteration. Stops at `limit` turns, or
+/// once the command has replied, the session end has been applied and, if
+/// the feed has ended, the founder is grouped.
+async fn waiting_destination(feed: Passing, session_end: bool, limit: usize) -> Waiting {
+    let (mut manager, primary, mut receivers) = cold_build_with_policy_members(8192, 1);
+    let (incumbent, founder) = (receiver(1), receiver(100));
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+        replacements: vec![crate::update::PeerExportPolicyReplacement {
+            peer: incumbent,
+            export_policy: Some(super::update_groups::community_chain(0xfde8_2415)),
+        }],
+        reply,
+    });
+    assert_eq!(manager.first_group_deferred_intents.len(), 1);
+    assert!(manager.first_group_build.is_some() && response.try_recv().is_err());
+    if session_end {
+        primary
+            .try_send(RibUpdate::PeerDown {
+                peer: incumbent,
+                session_id: 1,
+            })
+            .unwrap();
+    }
+    let (mut sent_rows, mut message) = (0u32, 0u32);
+    let mut seen = Waiting::default();
+    let (mut primary_due, mut search, mut retiring) = (true, 0usize, false);
+    for turn in 1..=limit {
+        while manager.primary_backlog() < 2 {
+            let Some(rows) = feed.rows(message) else {
+                break;
+            };
+            if primary.try_send(new_prefixes(sent_rows, rows)).is_err() {
+                break;
+            }
+            sent_rows += rows;
+            message += 1;
+        }
+        for rx in &mut receivers {
+            while rx.try_recv().is_ok() {}
+        }
+        let sealed = manager.first_group_commit_remaining == Some(0)
+            && manager.first_group_pending_writer().is_some();
+        seen.sealed_turns += usize::from(sealed);
+        owner_turn(&mut manager, sealed, &mut primary_due, &mut search).await;
+        seen.max_behind_turns = seen
+            .max_behind_turns
+            .max(manager.first_group_behind_turns().unwrap_or(0));
+        let now_retiring = manager.first_group_retiring_slots().is_some();
+        seen.discards += usize::from(now_retiring && !retiring);
+        retiring = now_retiring;
+        if seen.replied_turn.is_none() && response.try_recv().is_ok() {
+            seen.replied_turn = Some(turn);
+        }
+        if seen.end_applied_turn.is_none() && !manager.outbound_peers.contains_key(&incumbent) {
+            seen.end_applied_turn = Some(turn);
+        }
+        if seen.founder_grouped_turn.is_none() && manager.grouped_member_of(founder).is_some() {
+            seen.founder_grouped_turn = Some(turn);
+        }
+        let settled = seen.replied_turn.is_some()
+            && (seen.end_applied_turn.is_some() || !session_end)
+            && (seen.founder_grouped_turn.is_some() || feed.rows(message).is_some());
+        if settled {
+            break;
+        }
+    }
+    seen
+}
+
+// A policy change that needs a different cold destination waits for the
+// founder's slot, and a session end can wait behind it. Input that keeps the
+// founder's repair log more than half full would keep both waiting for as
+// long as it lasts. Once it has done so on 64 build turns the founder gives
+// the slot up, as it did when such input overflowed the log, and the command
+// runs before the founder's retry can take the slot back. No input is held.
+#[tokio::test]
+async fn input_outrunning_a_founder_hands_its_slot_to_the_waiting_destination() {
+    for rows in [2048, 4096, 16378] {
+        for session_end in [false, true] {
+            let seen = waiting_destination(Passing::Endless(rows), session_end, 1_000).await;
+            eprintln!("endless x{rows}, session end {session_end}: {seen:?}");
+            let replied = seen.replied_turn.unwrap_or_else(|| {
+                panic!("x{rows} {session_end}: the command waited for the feed: {seen:?}")
+            });
+            // Four owner turns per budgeted turn, as for the seal. The
+            // pages staged by then are retired one per build turn, which
+            // takes at most as long again.
+            assert!(replied <= 8 * SEAL_BUDGET, "x{rows}: {seen:?}");
+            assert_eq!(
+                (seen.discards, seen.sealed_turns),
+                (1, 0),
+                "x{rows} {session_end}: {seen:?}"
+            );
+            assert_eq!(usize::from(seen.max_behind_turns), SEAL_BUDGET);
+            if session_end {
+                assert!(
+                    seen.end_applied_turn
+                        .is_some_and(|turn| turn <= replied + 2),
+                    "x{rows}: {seen:?}"
+                );
+            }
+        }
+    }
+}
+
+// One UPDATE of any size is over before the budget is spent: the founder
+// keeps its pages, registers, and the command runs after it.
+#[tokio::test]
+async fn a_burst_leaves_the_founder_its_slot_while_a_destination_waits() {
+    for feed in [Passing::Burst(4096), Passing::Burst(16378)] {
+        let seen = waiting_destination(feed, true, 1_000).await;
+        eprintln!("{feed:?}: {seen:?}");
+        let founder = seen.founder_grouped_turn.expect("the founder registers");
+        assert_eq!(
+            (seen.discards, seen.sealed_turns),
+            (0, 0),
+            "{feed:?}: {seen:?}"
+        );
+        assert!(
+            usize::from(seen.max_behind_turns) < SEAL_BUDGET / 2,
+            "{feed:?}: {seen:?}"
+        );
+        assert!(
+            seen.replied_turn.is_some_and(|turn| turn > founder),
+            "{feed:?}: {seen:?}"
+        );
+    }
+}
+
 // One stale route of a restarted, reconnected peer that has not sent
 // End-of-RIB, a claimed writer, and a queued command that concerns every
 // peer, so that this peer's next session end is retained behind it.
