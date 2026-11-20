@@ -9,8 +9,9 @@ mod bench_support;
 #[cfg(feature = "bench-internals")]
 pub use bench_support::{
     AdjRibOutFanoutBenchReceipt, DataplanePrefixIndexBenchReceipt, EvpnDataplaneQueryBenchReceipt,
-    EvpnGroupBenchReceipt, EvpnPeerBenchReceipt, PolicyTransitionBenchReceipt, RecoveryScanReceipt,
-    RecoveryScanSpec, UnicastPrefixPeersMemoryReceipt, bench_evpn_dataplane_generation_query,
+    EvpnGroupBenchReceipt, EvpnPeerBenchReceipt, GroupCaptureBenchEvent,
+    PolicyTransitionBenchReceipt, RecoveryScanReceipt, RecoveryScanSpec,
+    UnicastPrefixPeersMemoryReceipt, bench_evpn_dataplane_generation_query,
     bench_evpn_dataplane_generation_snapshot, bench_evpn_dataplane_legacy_snapshot,
     bench_recovery_capture_scan,
 };
@@ -1163,6 +1164,8 @@ pub struct RibManager {
     replacement_readiness: Option<Arc<ReplacementReadinessContext>>,
     #[cfg(test)]
     replacement_readiness_test_hook: Option<Arc<dyn Fn(&'static str) + Send + Sync>>,
+    #[cfg(feature = "bench-internals")]
+    group_capture_observer: Option<bench_support::GroupCaptureObserver>,
     /// Runs synchronously at the start of every applied primary update.
     #[cfg(test)]
     test_primary_update_hook: Option<PrimaryUpdateHook>,
@@ -3198,6 +3201,8 @@ impl RibManager {
             replacement_readiness_test_hook: None,
             #[cfg(test)]
             test_primary_update_hook: None,
+            #[cfg(feature = "bench-internals")]
+            group_capture_observer: None,
             slow_actor_turn_log: actor_turn::SlowActorTurnLog::default(),
             #[cfg(test)]
             replacement_readiness_receipts: Vec::new(),
@@ -5114,6 +5119,10 @@ impl RibManager {
         reason = "dispatcher needs one arm per RibUpdate variant"
     )]
     fn dispatch_update(&mut self, update: RibUpdate) {
+        #[cfg(feature = "bench-internals")]
+        if let Some(observer) = &self.group_capture_observer {
+            observer.on_dispatch(&update);
+        }
         #[cfg(test)]
         if let Some(hook) = &self.test_primary_update_hook {
             hook(&update);

@@ -28,6 +28,167 @@ use crate::update::{
     RouteQueryScope,
 };
 
+/// Boundaries of one ordinary distribution pass selected by its changed prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupCaptureBenchEvent {
+    /// The selected distribution pass has entered.
+    PassStarted,
+    /// Its first fresh full grouped proof is about to begin its shape walk.
+    CaptureStarted,
+    /// Pre-staging capture has returned, before the desired group tables advance.
+    CaptureCompleted,
+    /// The same pass has finished sending and retiring its temporary proofs.
+    PassCompleted {
+        /// Peers marked dirty when the pass returns, before the next UPDATE can run.
+        dirty_peers: usize,
+        /// Fresh grouped proofs successfully sealed in the pre-staging loop.
+        fresh_captures: usize,
+        /// Shape and population walks that reached their end, including walks of empty tables.
+        walks: usize,
+        /// Actual projections of occupied unicast or VPN rows, including rejected rows.
+        projections: usize,
+        /// Whether this RIB build contains the test-only checkpoint tally.
+        checkpoint_tally_compiled: bool,
+    },
+    /// The actor has entered the healthy source's primary UPDATE handler.
+    ProbeDispatched,
+}
+
+pub(super) type GroupCaptureCallback = Arc<dyn Fn(GroupCaptureBenchEvent) + Send + Sync>;
+
+pub(super) struct GroupCaptureObserver {
+    trigger: Option<Prefix>,
+    probe: PeerId,
+    callback: GroupCaptureCallback,
+}
+
+impl RibManager {
+    /// Observe the first ordinary pass touching `trigger_prefix` and primary
+    /// route update dispatches for `probe_peer` after the pass starts.
+    pub fn bench_observe_group_capture(
+        &mut self,
+        trigger_prefix: Prefix,
+        probe_peer: PeerId,
+        observer: impl Fn(GroupCaptureBenchEvent) + Send + Sync + 'static,
+    ) {
+        self.group_capture_observer = Some(GroupCaptureObserver {
+            trigger: Some(trigger_prefix),
+            probe: probe_peer,
+            callback: Arc::new(observer),
+        });
+    }
+}
+
+impl GroupCaptureObserver {
+    pub(super) fn on_dispatch(&self, update: &RibUpdate) {
+        if self.trigger.is_some() {
+            return;
+        }
+        let peer = match update {
+            RibUpdate::RoutesReceived { peer, .. } => *peer,
+            RibUpdate::WireRoutesReceived(batch) => batch.peer,
+            _ => return,
+        };
+        if peer == self.probe {
+            (self.callback)(GroupCaptureBenchEvent::ProbeDispatched);
+        }
+    }
+
+    pub(super) fn begin(
+        &mut self,
+        changed: &HashSet<Prefix>,
+        affected: &HashSet<Prefix>,
+    ) -> Option<GroupCaptureCallback> {
+        let trigger = self.trigger?;
+        if !changed.contains(&trigger) && !affected.contains(&trigger) {
+            return None;
+        }
+        self.trigger = None;
+        (self.callback)(GroupCaptureBenchEvent::PassStarted);
+        Some(Arc::clone(&self.callback))
+    }
+}
+
+#[derive(Default)]
+struct GroupCaptureWork {
+    started: bool,
+    fresh_captures: usize,
+    walks: usize,
+    projections: usize,
+}
+
+// The pre-staging loop and both full-OLD walks are synchronous on the actor.
+// Scope these counters to that loop, including early exits/panic unwinding.
+thread_local! {
+    static GROUP_CAPTURE: std::cell::RefCell<Option<(GroupCaptureCallback, GroupCaptureWork)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+pub(super) struct GroupCapturePhase;
+
+impl GroupCapturePhase {
+    pub(super) fn new(callback: GroupCaptureCallback) -> Self {
+        GROUP_CAPTURE.with_borrow_mut(|active| {
+            assert!(active.is_none(), "nested grouped capture observation");
+            *active = Some((callback, GroupCaptureWork::default()));
+        });
+        Self
+    }
+
+    pub(super) fn finish(self) -> impl FnOnce(usize) {
+        let (callback, work) = GROUP_CAPTURE
+            .with_borrow_mut(Option::take)
+            .expect("active capture");
+        drop(self);
+        (callback)(GroupCaptureBenchEvent::CaptureCompleted);
+        move |dirty_peers| {
+            (callback)(GroupCaptureBenchEvent::PassCompleted {
+                dirty_peers,
+                fresh_captures: work.fresh_captures,
+                walks: work.walks,
+                projections: work.projections,
+                checkpoint_tally_compiled: cfg!(test),
+            });
+        }
+    }
+}
+
+impl Drop for GroupCapturePhase {
+    fn drop(&mut self) {
+        GROUP_CAPTURE.with_borrow_mut(Option::take);
+    }
+}
+
+pub(super) fn grouped_walk_observed() -> bool {
+    GROUP_CAPTURE.with_borrow_mut(|active| {
+        let Some((callback, work)) = active else {
+            return false;
+        };
+        if !work.started {
+            work.started = true;
+            callback(GroupCaptureBenchEvent::CaptureStarted);
+        }
+        true
+    })
+}
+
+pub(super) fn record_grouped_walk(projections: usize, completed: bool) {
+    GROUP_CAPTURE.with_borrow_mut(|active| {
+        if let Some((_, work)) = active {
+            work.walks += usize::from(completed);
+            work.projections += projections;
+        }
+    });
+}
+
+pub(super) fn record_sealed_group_capture() {
+    GROUP_CAPTURE.with_borrow_mut(|active| {
+        if let Some((_, work)) = active {
+            work.fresh_captures += 1;
+        }
+    });
+}
+
 // A retirement receipt runs one actor per process. Keeping its optional capture
 // here adds no fields or clocks to the normal manager build.
 static RETIREMENT_ACTIVE: AtomicBool = AtomicBool::new(false);

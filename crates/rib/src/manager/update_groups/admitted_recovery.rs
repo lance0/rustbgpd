@@ -1119,6 +1119,37 @@ impl AdmittedRecovery {
         project_uc: &U,
         project_vpn: &V,
         checkpoint: &mut C,
+        visit: impl FnMut(Option<usize>, Key, Option<&VpnRibRoute>, &mut C) -> Result<(), Failure>,
+    ) -> Result<(), Failure>
+    where
+        U: Fn(&Route) -> Option<Key>,
+        V: Fn(&VpnRibRoute) -> Option<Key>,
+        C: FnMut(bool),
+    {
+        #[cfg(feature = "bench-internals")]
+        if crate::manager::bench_support::grouped_walk_observed() {
+            let projections = std::cell::Cell::new(0);
+            let counted_uc = |row: &Route| {
+                projections.set(projections.get() + 1);
+                project_uc(row)
+            };
+            let counted_vpn = |row: &VpnRibRoute| {
+                projections.set(projections.get() + 1);
+                project_vpn(row)
+            };
+            let result =
+                Self::walk_projected_rows(table, &counted_uc, &counted_vpn, checkpoint, visit);
+            crate::manager::bench_support::record_grouped_walk(projections.get(), result.is_ok());
+            return result;
+        }
+        Self::walk_projected_rows(table, project_uc, project_vpn, checkpoint, visit)
+    }
+
+    fn walk_projected_rows<U, V, C>(
+        table: &AdjRibOut,
+        project_uc: &U,
+        project_vpn: &V,
+        checkpoint: &mut C,
         mut visit: impl FnMut(Option<usize>, Key, Option<&VpnRibRoute>, &mut C) -> Result<(), Failure>,
     ) -> Result<(), Failure>
     where

@@ -93,6 +93,68 @@ CI never runs the scale shape. It runs the original smoke, a 4×100 real-TCP
 fixture through the same scale collector/verifier/RSS seams, and destructive
 parser/mechanics fixtures.
 
+## Established route-server clients at first refusal
+
+The `grouped-old-capture` cell measures the ordinary RIB turn that saves an
+established group member’s previously admitted unicast keys (OLD). Use the
+supervised runner to collect cgroup and compiler evidence alongside the actor
+receipt. It accepts a prebuilt scale-profile binary and a fresh output directory.
+
+```sh
+CARGO_INCREMENTAL=0 cargo build --locked --profile scale -p rrtransport
+bench/scale/rrtransport/run-grouped-old.sh target/scale/rrtransport /tmp/grouped-old-smoke smoke
+```
+
+| Runner shape | Established group clients | Routes before the trigger |
+| --- | ---: | ---: |
+| `smoke` (correctness only) | 4 | 64 |
+| `smoke-chunked` (multiple seed and recovery batches, correctness only) | 12 | 2,049 |
+| `150x37000` | 150 | 37,000 |
+| `700x400000` | 700 | 400,000 |
+
+Each client is a real IPv4 loopback eBGP route-server session. The clients share
+one remote ASN and a prefix-deny/default-permit export policy. A denied route
+must win locally and remain absent from every receiver. The two sources submit
+session-scoped route batches at the RIB boundary. The harness controls
+each member's outbound channel so every target can start the measured turn
+with a full writer and a previously clean view. A separate source submits one
+ordinary unicast UPDATE at the start of the first capture. The primary-lane
+clock ends when the actor enters that UPDATE’s handler. The subsequent
+observation of its matching Loc-RIB winner is an upper bound on application.
+The capture clock runs from the first OLD walk until the pre-staging loop
+returns. The receipt records the triggering pass, its enclosing physical RIB poll,
+and the longest physical RIB poll through the post-recovery barrier separately.
+The enclosing poll includes any other work done in that poll.
+
+The witness counts fresh grouped proofs that sealed, completed table walks,
+and actual member projections in the selected pass. A capture includes a
+sizing walk and a population walk on the current implementation. A successful
+run must exercise fresh capture for every target, through the same turn as
+the unrelated probe. Missing or zero work evidence makes the run INVALID.
+Independent checks fold both accepted RIB envelopes and decoded TCP UPDATEs.
+After recovery each client must have the correct keys, origin, next hop, AS path
+and communities, including the replacements and the final withdrawal. Each
+stream is checked at a decoded IPv4 ROUTE-REFRESH fence. A wrong table or a
+session reset fails the run. The controlled quantity is backpressure at the
+physical sender's RIB queue, not the time for a TCP socket to fill.
+
+The counters and probe hook require `bench-internals`; the normal daemon
+exports no metric for them. Optimized runs require the test checkpoint tally
+to be compiled out. The elapsed times include the bench observation itself.
+
+Grade a saved directory with
+`python3 bench/scale/rrtransport/grouped_old.py check OUTPUT_DIR SHAPE`. The files `grouped-old.json` and `host.json` retain
+per-receiver wire evidence, actor clocks and work counts, and the cgroup and
+compiler observations. The runner records the executable SHA-256 and uses the
+quiet-host gate for the two full shapes. It samples for compilers every 250 ms
+and at the process boundaries.
+
+Every shape uses a dedicated 64 GiB cgroup with swap disabled. The receipt
+records kernel memory peak and swap peak and watches for a compiler throughout
+the run. The limit is a fence, not a prediction of memory use. An OOM or
+incomplete capture leaves that size unqualified. The full shapes report
+measurements without a predeclared latency pass/fail threshold.
+
 ## Outbound-credit cells
 
 `rrtransport credit-*` runs the cells that qualify a change to the RIB's

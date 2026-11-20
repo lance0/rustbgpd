@@ -2579,6 +2579,8 @@ impl RibManager {
             self.record_group_recovery_refusal(peer, error, mark_dirty_on_refusal);
             return false;
         }
+        #[cfg(feature = "bench-internals")]
+        let mut walked_group = false;
         let result = if self.pending_regroup_baseline.contains_key(&peer) || gid.is_none() {
             let count = self.pending_regroup_baseline.get(&peer).map_or_else(
                 || {
@@ -2633,6 +2635,10 @@ impl RibManager {
             #[cfg(test)]
             {
                 self.adj_rib_out_commit_stats.group_table_captures += 1;
+            }
+            #[cfg(feature = "bench-internals")]
+            {
+                walked_group = true;
             }
             let rejected = self.peer_unexportable.get(&peer);
             let limits = self.outbound_prefix_limits.get(&peer);
@@ -2692,6 +2698,10 @@ impl RibManager {
         {
             self.record_group_recovery_refusal(peer, error, mark_dirty_on_refusal);
             return false;
+        }
+        #[cfg(feature = "bench-internals")]
+        if walked_group {
+            super::bench_support::record_sealed_group_capture();
         }
         self.refresh_group_recovery_gauges();
         true

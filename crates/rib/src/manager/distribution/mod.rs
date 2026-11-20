@@ -9445,6 +9445,19 @@ impl RibManager {
         drain: Option<&mut super::outbound_owing::OwingDrain>,
         mut release: Option<ReleaseMembers<'_>>,
     ) -> bool {
+        #[cfg(feature = "bench-internals")]
+        let capture_callback = if !RELEASING
+            && !DRAINING
+            && matches!(
+                pass_kind,
+                DistributionPass::Ordinary | DistributionPass::Ingest
+            ) {
+            self.group_capture_observer
+                .as_mut()
+                .and_then(|observer| observer.begin(best_changed, all_affected))
+        } else {
+            None
+        };
         // Ordinary passes and the two continuations each select their mode at the caller.
         debug_assert_eq!(RELEASING, release.is_some());
         debug_assert_eq!(DRAINING, drain.is_some());
@@ -9572,6 +9585,8 @@ impl RibManager {
         // per-client-best groups stage the widened all-affected union
         // (their winner walk reads the candidate list, not the Loc-RIB
         // best).
+        #[cfg(feature = "bench-internals")]
+        let capture_phase = capture_callback.map(super::bench_support::GroupCapturePhase::new);
         let mut speculative_group_admitted = Vec::new();
         for &peer in &peers {
             if !RELEASING
@@ -9583,6 +9598,8 @@ impl RibManager {
                 speculative_group_admitted.push(peer);
             }
         }
+        #[cfg(feature = "bench-internals")]
+        let capture_pass_done = capture_phase.map(super::bench_support::GroupCapturePhase::finish);
         let mut staged_here = if draining || RELEASING {
             HashMap::new()
         } else {
@@ -12198,6 +12215,10 @@ impl RibManager {
             super::with_executor_handoff(retire);
         } else {
             retire();
+        }
+        #[cfg(feature = "bench-internals")]
+        if let Some(done) = capture_pass_done {
+            done(self.dirty_peers.len());
         }
         resync_built
     }
