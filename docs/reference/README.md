@@ -10,6 +10,7 @@ Look up commands, configuration, and compatibility boundaries.
 - [Configuration](configuration.md) — TOML fields and examples.
 - [Configuration schema](rustbgpd.schema.json) — Machine-readable schema for editor integration.
 - [Reload matrix](reload-matrix.md) — When each configuration change takes effect.
+- [RIB lifecycle](rib-lifecycle.md) — What the RIB does at each stage of a session, per session shape, and what has been measured.
 - [Operations](operations.md) — Reload semantics, metrics, failure modes, and audit events.
 - [gRPC API](api.md) — Services, RPCs, and request examples.
 - [gRPC authorization inventory](grpc-method-inventory.md) — Method tiers and their authorization classification.

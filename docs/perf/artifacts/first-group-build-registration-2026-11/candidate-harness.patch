@@ -1,0 +1,1134 @@
+diff --git a/bench/scale/rrharness/src/main.rs b/bench/scale/rrharness/src/main.rs
+index a550a051e..5e3f20789 100644
+--- a/bench/scale/rrharness/src/main.rs
++++ b/bench/scale/rrharness/src/main.rs
+@@ -35,6 +35,7 @@ use rustbgpd_wire::{
+ };
+ use tokio::sync::{mpsc, oneshot};
+ 
++mod first_registration;
+ mod recovery_memory;
+ mod recovery_retirement;
+ mod recovery_scan;
+@@ -252,6 +253,10 @@ struct Harness {
+ }
+ 
+ async fn setup(n_clients: u32, n_sources: u32) -> Harness {
++    setup_with_metrics(n_clients, n_sources, None).await
++}
++
++async fn setup_with_metrics(n_clients: u32, n_sources: u32, measurement: Option<BgpMetrics>) -> Harness {
+     let ticks_per_second = clock_ticks_per_second().expect("failed to query sysconf(_SC_CLK_TCK)");
+     let (tx, rx) = mpsc::channel::<RibUpdate>(1024);
+     let (qtx, qrx) = mpsc::channel::<RibUpdate>(64);
+@@ -260,18 +265,28 @@ async fn setup(n_clients: u32, n_sources: u32) -> Harness {
+         .name("ribmgr".into())
+         .spawn(move || {
+             tid_tx.send(unsafe { libc::gettid() }).unwrap();
+-            let rt = tokio::runtime::Builder::new_current_thread()
+-                .enable_all()
+-                .build()
+-                .unwrap();
++            let measured = measurement.is_some();
++            let mut builder = if measured {
++                let mut builder = tokio::runtime::Builder::new_multi_thread();
++                builder.worker_threads(2);
++                builder
++            } else {
++                tokio::runtime::Builder::new_current_thread()
++            };
++            let rt = builder.enable_all().build().unwrap();
+             let mgr = RibManager::new(
+                 rx,
+                 qrx,
+                 None,
+                 Some(Ipv4Addr::new(10, 255, 255, 255)),
+-                BgpMetrics::new(),
++                measurement.unwrap_or_else(BgpMetrics::new),
+             );
+-            rt.block_on(mgr.run());
++            if measured {
++                let (_readiness_tx, readiness_rx) = mpsc::channel(8);
++                rt.block_on(rt.spawn(mgr.with_readiness_queries(readiness_rx).run())).unwrap();
++            } else {
++                rt.block_on(mgr.run());
++            }
+         })
+         .unwrap();
+     let mgr_tid = tid_rx.recv().unwrap();
+@@ -652,6 +667,9 @@ fn main() {
+         .unwrap();
+     rt.block_on(async move {
+         match mode.as_str() {
++            "first-registration" => {
++                first_registration::run(&args[2..]).await;
++            }
+             "late-join" => {
+                 assert_eq!(
+                     args.len(),
+diff --git a/crates/rib/src/loc_rib.rs b/crates/rib/src/loc_rib.rs
+index 44ca96447..5c1254bbe 100644
+--- a/crates/rib/src/loc_rib.rs
++++ b/crates/rib/src/loc_rib.rs
+@@ -64,6 +64,7 @@ impl RegistrationScan {
+             self.overflow = !self.queued.contains(&key);
+         } else if self.queued.insert(key) {
+             self.repairs.push_back(key);
++            crate::manager::registration_probe::changed_backlog(self.repairs.len());
+         }
+     }
+ 
+@@ -346,18 +347,24 @@ impl LocRib {
+             let count = scan.repairs.len().min(REGISTRATION_PAGE_SIZE);
+             page.keys.reserve_exact(count);
+             // Changes to just-serviced keys rejoin behind older outstanding repairs.
++            let mut repaired = 0;
+             for key in scan.repairs.drain(..count) {
++                repaired += 1;
+                 scan.queued.remove(&key);
+                 page.keys.push(key);
+             }
++            assert_eq!(repaired, count);
++            crate::manager::registration_probe::scan_page(0, repaired, page.keys.len());
+             page.repairs = count;
+             return page;
+         }
++        let mut examined = 0;
+         let shards = self.routes.shards();
+         while let Some(shard) = shards.get(scan.shard) {
+             let end = shard.num_buckets();
+             let count = (end - scan.bucket).min(REGISTRATION_PAGE_SIZE - page.bucket_visits);
+             for index in scan.bucket..scan.bucket + count {
++                examined += 1;
+                 if let Some((key, _)) = shard.get_bucket(index) {
+                     page.keys.push(*key);
+                 }
+@@ -372,6 +379,8 @@ impl LocRib {
+                 break;
+             }
+         }
++        assert_eq!(examined, page.bucket_visits);
++        crate::manager::registration_probe::scan_page(examined, 0, page.keys.len());
+         scan.discovery_finished = scan.shard == shards.len();
+         scan.repair_due = true;
+         page
+diff --git a/crates/rib/src/manager/distribution/mod.rs b/crates/rib/src/manager/distribution/mod.rs
+index 56dad2f1c..5e8ef4297 100644
+--- a/crates/rib/src/manager/distribution/mod.rs
++++ b/crates/rib/src/manager/distribution/mod.rs
+@@ -5862,6 +5862,14 @@ impl RibManager {
+             credit: None,
+             latch: None,
+         };
++        if super::registration_probe::target(peer) {
++            let _ = Self::registration_measure_first_enqueue_ns().compare_exchange(
++                0,
++                super::registration_probe::now_ns(),
++                std::sync::atomic::Ordering::Release,
++                std::sync::atomic::Ordering::Relaxed,
++            );
++        }
+         match admission {
+             LadderAdmission::Slot(slot) => slot.send(update),
+             LadderAdmission::Ordinary {
+@@ -9110,11 +9118,39 @@ impl RibManager {
+         self.emit_bmp_loc_rib(pdu, status, timestamp);
+     }
+ 
++    #[doc(hidden)]
++    pub fn registration_measure_first_enqueue_ns() -> &'static std::sync::atomic::AtomicU64 {
++        static NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++        &NS
++    }
++
++    #[doc(hidden)]
++    pub fn registration_measure_handler_ns() -> &'static std::sync::atomic::AtomicU64 {
++        static NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++        &NS
++    }
++
++    #[doc(hidden)]
++    pub fn registration_measure_marker_ns() -> &'static std::sync::atomic::AtomicU64 {
++        static NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++        &NS
++    }
++
+     /// Emit the route event for a Loc-RIB best change already applied
+     /// (added / withdrawn / replaced), diffing `previous_best` against the
+     /// freshly installed state. Shared by the full rescan and the announce
+     /// fast path's direct install.
+     fn publish_best_change_events(&mut self, prefix: Prefix, previous_best: Option<BestSource>) {
++        if matches!(prefix, Prefix::V4(p) if p.len == 32 && p.addr == Ipv4Addr::new(198, 18, 0, 1))
++            && self.loc_rib.get(&prefix).is_some_and(|r|
++                r.path_id == 0 && r.peer.addr() == IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5))
++                && r.next_hop == r.peer.addr() && r.local_pref() == 117)
++        {
++            Self::registration_measure_marker_ns().compare_exchange(
++                0, super::registration_probe::now_ns(), std::sync::atomic::Ordering::Release,
++                std::sync::atomic::Ordering::Relaxed,
++            ).expect("registration marker installed twice");
++        }
+         let current_best = self.loc_rib.get(&prefix).map(BestSource::of);
+         match (previous_best, current_best) {
+             (None, Some(current)) => {
+diff --git a/crates/rib/src/manager/first_group_build.rs b/crates/rib/src/manager/first_group_build.rs
+index 0dedcd891..c1b0d9d90 100644
+--- a/crates/rib/src/manager/first_group_build.rs
++++ b/crates/rib/src/manager/first_group_build.rs
+@@ -1,5 +1,6 @@
+ //! Build a cold registration's unicast table privately, one actor turn at a time.
+ 
++use super::registration_probe as probe;
+ use std::collections::BTreeSet;
+ 
+ use rustbgpd_wire::Prefix;
+@@ -77,6 +78,8 @@ impl RibManager {
+         sender: mpsc::Sender<OutboundRouteUpdate>,
+     ) {
+         debug_assert!(self.first_group_slot_available());
++        probe::begin_pending(peer, self.loc_rib.len());
++        let _allocation = probe::build_span();
+         self.loc_rib.start_registration_scan();
+         self.first_group_build = Some(Box::new(FirstGroupBuild {
+             gid,
+@@ -87,6 +90,10 @@ impl RibManager {
+             prepare_source: None,
+             table: self.first_group_table(peer, gid),
+         }));
++        probe::record(|o| {
++            o.provisional_tables += 1;
++            o.max_provisional_tables = o.max_provisional_tables.max(o.provisional_tables);
++        });
+     }
+ 
+     pub(super) fn registration_waits_for_first_group(&self, peer: PeerId) -> bool {
+@@ -437,7 +444,12 @@ impl RibManager {
+     // Keep the existing queue as the authority on pending registrations, even
+     // while this job is building. GR and collision handling consult that queue.
+     pub(super) fn advance_first_group_build(&mut self) {
++        let advance = probe::build_span();
+         let mut job = self.first_group_build.take().expect("active first group");
++        if probe::active() {
++            assert!(probe::target(job.peer) && job.writer.is_none(),
++                "expected the target registration without a policy writer");
++        }
+         if job.writer.as_deref().is_some_and(|writer| match writer {
+             RibUpdate::ReplacePeerExportPoliciesAuthoritatively { reply, .. } => reply.is_closed(),
+             RibUpdate::ApplyPacedExportPolicies { reply, .. } => reply.is_closed(),
+@@ -520,6 +532,7 @@ impl RibManager {
+             }
+             self.pending_initial_registrations
+                 .retain(|queued| *queued != peer);
++            drop(advance);
+             self.complete_deferred_registration(peer);
+         }
+     }
+@@ -537,6 +550,7 @@ impl RibManager {
+             self.first_group_build = Some(job);
+             return;
+         }
++        probe::record(|o| o.provisional_tables -= 1);
+         let Some(writer) = job.writer.as_deref() else {
+             if job.other_destination_waits {
+                 self.clear_first_group_commit_frontier();
+diff --git a/crates/rib/src/manager/mod.rs b/crates/rib/src/manager/mod.rs
+index 359f875a2..2f6e7bbfa 100644
+--- a/crates/rib/src/manager/mod.rs
++++ b/crates/rib/src/manager/mod.rs
+@@ -33,6 +33,8 @@ mod outbound_prefix_limits;
+ mod peer_lifecycle;
+ mod queries;
+ mod replacement_summaries;
++#[doc(hidden)]
++pub mod registration_probe;
+ use crate::PeerId;
+ use crate::fast_hash::ShardedMap;
+ use peer_lifecycle::{PeerUpRegistration, SessionTeardownDisposition};
+@@ -5104,6 +5106,15 @@ impl RibManager {
+         reason = "dispatcher needs one arm per RibUpdate variant"
+     )]
+     fn dispatch_update(&mut self, update: RibUpdate) {
++        if let RibUpdate::RoutesReceived {peer, session_id: 0, announced, ..} = &update
++            && peer.addr() == std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 5))
++            && matches!(announced.as_slice(), [r] if r.peer == *peer && r.path_id == 0 && r.local_pref() == 117
++                && matches!(r.prefix, rustbgpd_wire::Prefix::V4(p) if p.len == 32 && p.addr == std::net::Ipv4Addr::new(198, 18, 0, 1)))
++        {
++            Self::registration_measure_handler_ns().compare_exchange(0, registration_probe::now_ns(),
++                std::sync::atomic::Ordering::Release, std::sync::atomic::Ordering::Relaxed)
++                .expect("registration marker dispatched twice");
++        }
+         #[cfg(test)]
+         if let Some(hook) = &self.test_primary_update_hook {
+             hook(&update);
+diff --git a/crates/rib/src/manager/peer_lifecycle.rs b/crates/rib/src/manager/peer_lifecycle.rs
+index f5ac08d25..3969904de 100644
+--- a/crates/rib/src/manager/peer_lifecycle.rs
++++ b/crates/rib/src/manager/peer_lifecycle.rs
+@@ -2795,6 +2795,7 @@ impl RibManager {
+     /// re-reads the live-session record so a deferred completion always
+     /// registers the CURRENT session's negotiated state.
+     pub(super) fn complete_outbound_registration(&mut self, peer: PeerId) {
++        let _window = super::registration_probe::begin(peer, false);
+         if self.install_outbound_registration(peer) {
+             self.send_initial_table(peer);
+         }
+@@ -2809,10 +2810,19 @@ impl RibManager {
+     /// recovery ledger, so the install takes the readiness lane (with the
+     /// executor handoff). Inside a cohort's owner this adds nothing.
+     fn install_outbound_registration(&mut self, peer: PeerId) -> bool {
+-        self.with_ingest_readiness(|manager| manager.install_registration_state(peer))
++        let installed =
++            self.with_ingest_readiness(|manager| manager.install_registration_state(peer));
++        super::registration_probe::record(|o| {
++            o.install_end_ns = super::registration_probe::now_ns()
++        });
++        installed
+     }
+ 
+     fn install_registration_state(&mut self, peer: PeerId) -> bool {
++        super::registration_probe::record(|o| {
++            if !o.paced { o.loc_rows = self.loc_rib.len(); }
++            o.readiness_owned = self.replacement_readiness.is_some();
++        });
+         let Some(record) = self
+             .live_sessions
+             .get_mut(&peer)
+@@ -3105,6 +3115,7 @@ impl RibManager {
+     /// Nothing else runs on the actor in between, so no live update can
+     /// overtake an unfinished member's initial table.
+     pub(super) fn complete_deferred_registration(&mut self, leader: PeerId) {
++        let _window = super::registration_probe::begin(leader, true);
+         if !self.install_outbound_registration(leader) {
+             return;
+         }
+@@ -3368,9 +3379,14 @@ impl RibManager {
+         rs_control: Option<(u32, u32)>,
+         mut checkpoint: impl FnMut(),
+     ) -> Vec<super::update_groups::AdvEntry<'a>> {
++        super::registration_probe::record(|o| {
++            o.replay_start_ns = super::registration_probe::now_ns()
++        });
++        let mut replay_visited = 0usize;
+         let mut replay = Vec::new();
+         let mut unicast_deferral_exemptions = crate::fast_hash::FastMap::default();
+         for staged in group.table.iter() {
++            replay_visited += 1;
+             checkpoint();
+             // adv(m) resolves the slot ([`GroupRibOut::adv_entry`],
+             // ADR-0126 Decision 4): the staged winner for a
+@@ -3390,6 +3406,11 @@ impl RibManager {
+             }
+             replay.push(entry);
+         }
++        super::registration_probe::record(|o| {
++            o.replay_visited = replay_visited;
++            o.replay_rows = replay.len();
++            o.replay_end_ns = super::registration_probe::now_ns();
++        });
+         replay
+     }
+ 
+diff --git a/crates/rib/src/manager/slice_timing.rs b/crates/rib/src/manager/slice_timing.rs
+index 6ac16d242..eea8c8c6f 100644
+--- a/crates/rib/src/manager/slice_timing.rs
++++ b/crates/rib/src/manager/slice_timing.rs
+@@ -152,6 +152,7 @@ impl<F> TimedActor<F> {
+         recorder: RibActorSliceRecorder,
+         suspended: Arc<AtomicBool>,
+     ) -> Self {
++        super::registration_probe::now_ns();
+         Self {
+             inner: Box::pin(inner),
+             recorder: Some(Box::new(recorder)),
+@@ -213,6 +214,7 @@ impl<F: Future> TimedActor<F> {
+                 .observe(RibActorSliceStage::ActorPoll, ended.duration_since(started));
+             active.recorder.flush();
+             this.recorder = Some(active.recorder);
++            super::registration_probe::finished_poll(started, ended);
+         }
+         output
+     }
+diff --git a/crates/rib/src/manager/update_groups/first_group_retirement.rs b/crates/rib/src/manager/update_groups/first_group_retirement.rs
+index 0d0e17499..a64eee422 100644
+--- a/crates/rib/src/manager/update_groups/first_group_retirement.rs
++++ b/crates/rib/src/manager/update_groups/first_group_retirement.rs
+@@ -22,14 +22,17 @@ impl GroupRibOut {
+         debug_assert!(self.members.is_empty() && !self.per_client_best);
+         debug_assert!(self.export_chain.is_none() && self.local_role.is_none());
+         debug_assert!(self.policy_filtered.is_empty() && self.otc_blocked.is_empty());
++        let mut slots_examined = 0;
+         for _ in 0..budget {
+             if self.table.first_group_retirement_finished() {
+                 break;
+             }
++            slots_examined += 1;
+             if let Some((source, prefix)) = self.table.retire_first_group_slot() {
+                 self.dec_source(source, &prefix);
+             }
+         }
++        crate::manager::registration_probe::record(|o| o.cleanup_visits += slots_examined);
+         let finished = self.table.first_group_retirement_finished();
+         debug_assert!(!finished || self.source_counts.is_empty());
+         finished
+diff --git a/crates/rib/src/manager/update_groups/membership.rs b/crates/rib/src/manager/update_groups/membership.rs
+index 2e698a4f0..952aa78c8 100644
+--- a/crates/rib/src/manager/update_groups/membership.rs
++++ b/crates/rib/src/manager/update_groups/membership.rs
+@@ -3,6 +3,7 @@ use super::{
+     RegroupBaseline, RibManager, VpnRibRouteKey,
+ };
+ use crate::PeerId;
++use crate::manager::registration_probe as probe;
+ 
+ impl RibManager {
+     /// Planning and allocation share one ownership decision without installing
+@@ -787,6 +788,11 @@ impl RibManager {
+         }
+         table.evpn_table_stamp = self.next_evpn_table_stamp().unwrap_or(0);
+         self.group_ribs.insert(gid, table);
++        probe::record(|o| {
++            o.map_insert_ns = probe::now_ns();
++            o.provisional_tables -= 1;
++        });
++        probe::publish();
+         None
+     }
+ 
+@@ -802,6 +808,10 @@ impl RibManager {
+         let readiness = self.replacement_readiness.clone();
+         let checkpoint = || crate::manager::replacement_readiness_checkpoint(&readiness, false);
+         if !self.group_ribs.contains_key(&gid) {
++            let _build = probe::build_span();
++            probe::record(|o| {
++                o.build_start_ns = probe::now_ns();
++            });
+             #[cfg(test)]
+             if let Some(observer) = &self.replacement_readiness_test_hook {
+                 observer(if self.group_ribs.is_empty() {
+@@ -841,15 +851,30 @@ impl RibManager {
+             }
+             group.evpn_table_stamp = self.next_evpn_table_stamp().unwrap_or(0);
+             self.group_ribs.insert(gid, group);
++            probe::record(|o| o.map_insert_ns = probe::now_ns());
+             self.replacement_checkpoint(true);
++            probe::record(|o| o.collect_start_ns = probe::now_ns());
++            let mut collected_rows = 0usize;
+             let mut prefixes = HashSet::with_capacity(self.loc_rib.len());
+             self.replacement_checkpoint(true);
+             prefixes.extend(
+                 self.loc_rib
+                     .iter()
+-                    .inspect(|_| crate::manager::group_build_row_checkpoint(&readiness))
++                    .inspect(|_| {
++                        if collected_rows == 0 {
++                            probe::signal_first_work();
++                        }
++                        collected_rows += 1;
++                        crate::manager::group_build_row_checkpoint(&readiness);
++                    })
+                     .map(|r| r.prefix),
+             );
++            probe::record(|o| {
++                o.collected_rows = collected_rows;
++                o.discovery_visits += collected_rows;
++                o.max_buffer_keys = o.max_buffer_keys.max(prefixes.len());
++                o.collect_end_ns = probe::now_ns();
++            });
+             let mut memo = crate::manager::distribution::ExportMemo::default();
+             // Deltas of the build passes are discarded: there are no
+             // members yet, and the joining member replays the whole
+@@ -859,6 +884,10 @@ impl RibManager {
+                 .cold_build_last_prefix
+                 .and_then(|prefix| prefixes.take(&prefix));
+             let mut staged = self.stage_group_prefixes(gid, &prefixes, &mut memo);
++            probe::record(|o| {
++                o.stage_end_ns = probe::now_ns();
++                o.stage_deltas = staged.deltas.len();
++            });
+             staged.retire_with(&mut |force| self.replacement_checkpoint(force));
+             drop(staged);
+             #[cfg(test)]
+@@ -867,6 +896,7 @@ impl RibManager {
+                     self.stage_group_prefixes(gid, &HashSet::from([last]), &mut memo);
+                 final_row.retire_with(&mut |force| self.replacement_checkpoint(force));
+             }
++            probe::record(|o| o.delta_retire_end_ns = probe::now_ns());
+             self.replacement_checkpoint(true);
+             if self
+                 .group_ribs
+@@ -910,11 +940,19 @@ impl RibManager {
+             memo.record_replacement_capacities(self);
+             memo.retire_with(&mut || checkpoint());
+             self.replacement_checkpoint(true);
++            probe::record(|o| {
++                o.retired_keys = prefixes.len();
++                o.set_retire_start_ns = probe::now_ns();
++            });
+             crate::manager::retire_hash_set(&mut prefixes, &mut || checkpoint());
++            probe::record(|o| o.set_retire_end_ns = probe::now_ns());
+             self.replacement_checkpoint(true);
+             drop(memo);
+             drop(prefixes);
+             self.replacement_checkpoint(true);
++            // The parent inserts an empty slot inside its serial poll. A member
++            // can adopt the complete table only after the synchronous build.
++            probe::publish();
+         }
+     }
+ 
+diff --git a/crates/rib/src/manager/update_groups/staging.rs b/crates/rib/src/manager/update_groups/staging.rs
+index 3ac76242d..7c554cdea 100644
+--- a/crates/rib/src/manager/update_groups/staging.rs
++++ b/crates/rib/src/manager/update_groups/staging.rs
+@@ -194,6 +194,7 @@ impl RibManager {
+             crate::manager::distribution::UnicastDistributionResult::default();
+         let paged_pcb_denials = pcb.is_some();
+         let per_client_best;
++        let mut staged_rows = 0usize;
+         {
+             let Some(group) = self.group_ribs.get(&gid) else {
+                 return out;
+@@ -209,6 +210,7 @@ impl RibManager {
+             // hit counters, exactly like the per-peer path's handle.
+             let chain = group.export_chain.as_ref().map(PolicyChain::share);
+             for prefix in prefixes {
++                staged_rows += 1;
+                 self.replacement_checkpoint(false);
+                 let old_source = group.table.get(prefix, 0).map(|r| r.peer);
+                 if group.per_client_best {
+@@ -686,6 +688,14 @@ impl RibManager {
+             self.replacement_checkpoint(false);
+         });
+         self.replacement_checkpoint(true);
++        crate::manager::registration_probe::record(|o| {
++            if !o.paced || speculative {
++                o.staged_rows += staged_rows;
++                if speculative {
++                    o.stage_deltas += out.deltas.len();
++                }
++            }
++        });
+         out
+     }
+ 
+diff --git a/bench/scale/rrharness/src/first_registration.rs b/bench/scale/rrharness/src/first_registration.rs
+new file mode 100644
+index 000000000..ce4fd4840
+--- /dev/null
++++ b/bench/scale/rrharness/src/first_registration.rs
+@@ -0,0 +1,349 @@
++// Scratch qualification mode. Each invocation owns a fresh RIB and one timed registration.
++use super::*;
++use rustbgpd_rib::manager::registration_probe as probe;
++
++const MARKER: Ipv4Addr = Ipv4Addr::new(198, 18, 0, 1);
++fn marker() -> Ipv4Prefix {
++    Ipv4Prefix::new(MARKER, 32)
++}
++
++fn actor_peak(metrics: &BgpMetrics) -> u64 {
++    metrics.publish_render_window_maxima();
++    metrics
++        .registry()
++        .gather()
++        .into_iter()
++        .find(|f| f.name() == "bgp_rib_actor_slice_max_microseconds")
++        .unwrap()
++        .get_metric()
++        .iter()
++        .find(|m| m.get_label()[0].value() == "actor_poll")
++        .unwrap()
++        .get_gauge()
++        .get_value() as u64
++}
++
++async fn count(tx: &mpsc::Sender<RibUpdate>) -> usize {
++    let (reply, response) = oneshot::channel();
++    tx.send(RibUpdate::QueryLocRibCount { reply })
++        .await
++        .unwrap();
++    response.await.unwrap()
++}
++
++fn target(peer: PeerId, outbound_tx: mpsc::Sender<OutboundRouteUpdate>) -> RibUpdate {
++    RibUpdate::PeerUp {
++        peer,
++        outbound_tx,
++        session_id: 1,
++        supersedes: None,
++        peer_asn: 64512,
++        peer_router_id: Ipv4Addr::new(192, 0, 2, 1),
++        export_policy: None,
++        sendable_families: vec![(Afi::Ipv4, Safi::Unicast)],
++        is_ebgp: false,
++        route_reflector_client: true,
++        orr_vantage: None,
++        per_client_best: false,
++        interpret_rfc1997: true,
++        add_path_send_families: vec![],
++        add_path_send_max: 0,
++        negotiated_orf_recv: vec![],
++        negotiated_llgr_families: vec![],
++    }
++}
++
++struct Receiver {
++    seen: Vec<bool>,
++    base: usize,
++    marker: bool,
++    eor: usize,
++    marker_pref: u32,
++    expect_marker_before_eor: bool,
++    marker_before_eor: bool,
++}
++impl Receiver {
++    fn new(rows: usize, marker_pref: u32, expect_marker_before_eor: bool) -> Self {
++        Self {
++            seen: vec![false; rows],
++            base: 0,
++            marker: false,
++            eor: 0,
++            marker_pref,
++            expect_marker_before_eor,
++            marker_before_eor: false,
++        }
++    }
++    fn fold(&mut self, update: &OutboundRouteUpdate) {
++        assert!(
++            update.unicast_withdrawals().next().is_none(),
++            "unexpected withdrawal"
++        );
++        assert!(
++            update.next_hop_override.iter().all(Option::is_none),
++            "unexpected next-hop override"
++        );
++        for route in update.announce.iter() {
++            assert_ne!(
++                update.announce_source_exclusion,
++                Some(route.peer),
++                "transport would omit this route"
++            );
++            let Prefix::V4(p) = route.prefix else {
++                panic!("unexpected address family")
++            };
++            assert_eq!(route.path_id, 0);
++            if p == marker() {
++                assert!(!self.marker, "duplicate marker");
++                self.marker_before_eor = self.eor == 0;
++                assert_eq!(
++                    self.marker_before_eor, self.expect_marker_before_eor,
++                    "marker on wrong side of initial EoR"
++                );
++                assert_eq!(route.peer.addr(), IpAddr::V4(source_addr(INGRESS_FLOOD)));
++                assert_eq!(route.next_hop, route.peer.addr());
++                assert_eq!(route.local_pref(), self.marker_pref);
++                self.marker = true;
++                continue;
++            }
++            let idx = ((u32::from(p.addr)
++                .checked_sub(u32::from(Ipv4Addr::new(20, 0, 0, 0)))
++                .unwrap())
++                >> 8) as usize;
++            assert!(
++                idx < self.seen.len() && p == flood_prefix(idx as u64),
++                "unexpected base key"
++            );
++            assert_eq!(self.eor, 0, "base row after EoR");
++            assert!(
++                !std::mem::replace(&mut self.seen[idx], true),
++                "duplicate base prefix"
++            );
++            let src =
++                (idx / (self.seen.len() / INGRESS_FLOOD as usize)).min(INGRESS_FLOOD as usize - 1);
++            assert_eq!(route.peer.addr(), IpAddr::V4(source_addr(src as u32)));
++            assert_eq!(route.next_hop, route.peer.addr());
++            assert_eq!(route.local_pref(), 100);
++            self.base += 1;
++        }
++        for &family in &update.end_of_rib {
++            assert_eq!(family, (Afi::Ipv4, Safi::Unicast));
++            assert_eq!(
++                self.base,
++                self.seen.len(),
++                "EoR before complete base inventory"
++            );
++            assert_eq!(
++                self.marker, self.expect_marker_before_eor,
++                "incomplete initial inventory"
++            );
++            self.eor += 1;
++            assert_eq!(self.eor, 1, "duplicate EoR");
++        }
++    }
++}
++
++pub(super) async fn run(args: &[String]) {
++    let [n, mode, arm] = args else {
++        panic!("usage: rrharness first-registration ROWS cold|warm|wrong parent|candidate");
++    };
++    let rows = n.parse::<usize>().unwrap();
++    assert!(rows >= INGRESS_FLOOD as usize);
++    let wrong = mode == "wrong";
++    let marker_pref = if wrong { 118 } else { 117 };
++    let warm = match mode.as_str() {
++        "cold" | "wrong" => false,
++        "warm" => true,
++        _ => panic!("use cold or warm"),
++    };
++    assert!(matches!(arm.as_str(), "parent" | "candidate"));
++    let sliced = arm == "candidate" && !warm;
++    let metrics = BgpMetrics::new();
++    let h = setup_with_metrics(u32::from(warm), INGRESS_FLOOD + 1, Some(metrics.clone())).await;
++    h.inject_flood_block(0, rows as u64).await;
++    h.wait_loc_rib_exact(rows, CONVERGENCE_TIMEOUT).await;
++    if warm {
++        h.wait_staged_exact(rows as u64, CONVERGENCE_TIMEOUT).await;
++        h.wait_drained_exact(rows as u64, CONVERGENCE_TIMEOUT).await;
++    }
++    let peer = PeerId::from_addr(client_addr(u32::from(warm)));
++    h.tx.send(RibUpdate::SetPeerExportEncoder {
++        peer,
++        session_id: 1,
++        encoder: fanout_bench_export_encoder(),
++    })
++    .await
++    .unwrap();
++    assert_eq!(count(&h.tx).await, rows);
++    assert_eq!(
++        RibManager::registration_measure_marker_ns().load(Ordering::Acquire),
++        0
++    );
++    let old_peak = actor_peak(&metrics);
++    let (otx, mut output) = mpsc::channel(CHANNEL_CAP);
++    let (ready_tx, ready_rx) = oneshot::channel();
++    let handle = tokio::runtime::Handle::current();
++    let primary = h.tx.clone();
++    let before_memory = memory();
++    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
++    let sampler_stop = stop.clone();
++    let sampler = std::thread::spawn(move || {
++        let mut max = (0, 0);
++        let mut samples = 0;
++        while !sampler_stop.load(Ordering::Acquire) {
++            if probe::building() {
++                let (rss, scope) = memory();
++                if probe::building() {
++                    max = (max.0.max(rss), max.1.max(scope));
++                    samples += 1;
++                }
++            }
++            std::thread::sleep(Duration::from_millis(2));
++        }
++        (max, samples)
++    });
++    let worker = std::thread::spawn(move || {
++        let source = source_addr(INGRESS_FLOOD);
++        let message = empty_routes_received(
++            IpAddr::V4(source),
++            vec![route(marker(), source, marker_pref)],
++        );
++        ready_tx.send(()).unwrap();
++        let t0 = Instant::now();
++        while !(if warm {
++            probe::started()
++        } else {
++            probe::first_work_started()
++        }) {
++            assert!(
++                t0.elapsed() < CONVERGENCE_TIMEOUT,
++                "registration owner never entered"
++            );
++            std::thread::sleep(Duration::from_micros(20));
++        }
++        let attempt = probe::now_ns();
++        let permit = handle.block_on(primary.reserve()).unwrap();
++        let before = probe::now_ns();
++        permit.send(message);
++        let after = probe::now_ns();
++        (attempt, before, after)
++    });
++    ready_rx.await.unwrap();
++    probe::arm(peer);
++    let join_permit = h.tx.reserve().await.unwrap();
++    let join_before = probe::now_ns();
++    join_permit.send(target(peer, otx));
++    let join_after = probe::now_ns();
++
++    let mut receiver = Receiver::new(rows, marker_pref, sliced);
++    while !receiver.marker || receiver.eor == 0 {
++        let event = tokio::time::timeout(CONVERGENCE_TIMEOUT, output.recv())
++            .await
++            .unwrap()
++            .unwrap();
++        receiver.fold(&event);
++    }
++    assert_eq!(count(&h.tx).await, rows + 1);
++    let (attempt, before, after) = worker.join().unwrap();
++    let handler = RibManager::registration_measure_handler_ns().load(Ordering::Acquire);
++    let installed = RibManager::registration_measure_marker_ns().load(Ordering::Acquire);
++    let measurement = tokio::time::timeout(CONVERGENCE_TIMEOUT, async {
++        loop {
++            if let Some(o) = probe::take() {
++                return o;
++            }
++            tokio::time::sleep(Duration::from_millis(1)).await;
++        }
++    })
++    .await
++    .unwrap();
++    let peak = actor_peak(&metrics);
++    let group = h.peer_update_group(peer.addr()).await;
++    assert!(group.starts_with("group:"));
++    if warm {
++        assert_eq!(group, h.peer_update_group(client_addr(0)).await);
++    }
++    let staged = h.staged_counts().await;
++    assert_eq!(staged[&peer.addr()], (rows + 1) as u64);
++    while let Ok(extra) = output.try_recv() {
++        receiver.fold(&extra);
++    }
++
++    stop.store(true, Ordering::Release);
++    let ((build_rss, build_scope), samples) = sampler.join().unwrap();
++    let settled = memory();
++    println!("registration_memory preload_rss_kib={} preload_scope_bytes={} build_sampled_rss_kib={build_rss} build_sampled_scope_bytes={build_scope} build_samples={samples} settled_rss_kib={} settled_scope_bytes={}", before_memory.0,before_memory.1,settled.0,settled.1);
++    if wrong {
++        assert_eq!(
++            (handler, installed),
++            (0, 0),
++            "wrong marker value matched observer"
++        );
++        assert_eq!(
++            (receiver.base, receiver.eor, receiver.marker),
++            (rows, 1, true)
++        );
++        println!("registration_control mode=wrong rows={rows} base_seen={} eor={} marker_before_eor={} wrong_value_delivered=true handler_ns={handler} installed_ns={installed} result=expected_rejection",receiver.base,receiver.eor,receiver.marker_before_eor);
++        return;
++    }
++    let o = measurement;
++    let enqueue = RibManager::registration_measure_first_enqueue_ns().load(Ordering::Acquire);
++    println!("registration_raw mode={mode} arm={arm} rows={rows} registration_admit_before_ns={join_before} registration_admit_after_ns={join_after} owner_start_ns={} owner_end_ns={} poll_start_ns={} poll_end_ns={} attempt_ns={attempt} admit_before_ns={before} admit_after_ns={after} handler_ns={handler} installed_ns={installed} first_enqueue_ns={enqueue} build_start_ns={} build_end_ns={} map_insert_ns={} published_ns={} replay_start_ns={} replay_end_ns={} install_end_ns={} deferred={} readiness_owned={}",o.owner_start_ns,o.owner_end_ns,o.poll_start_ns,o.poll_end_ns,o.build_start_ns,o.build_end_ns,o.map_insert_ns,o.published_ns,o.replay_start_ns,o.replay_end_ns,o.install_end_ns,o.deferred,o.readiness_owned);
++    assert!(
++        o.poll_start_ns <= o.owner_start_ns
++            && o.owner_start_ns <= attempt
++            && attempt <= before
++            && before <= after
++            && after <= handler
++            && handler <= installed,
++        "INVALID: marker handoff outside registration or after actor receipt"
++    );
++    assert!(join_before <= join_after && join_before <= o.owner_start_ns && join_after <= o.owner_end_ns);
++    assert!(o.readiness_owned && o.owner_end_ns <= o.poll_end_ns);
++    assert_eq!(o.loc_rows, rows);
++    let opening = rows + usize::from(sliced);
++    assert_eq!((o.replay_rows, o.replay_visited), (opening, opening));
++    assert!(o.replay_start_ns > 0 && o.replay_end_ns <= enqueue && enqueue <= o.owner_end_ns);
++    if !warm {
++        assert!(
++            o.build_start_ns <= attempt && after <= o.published_ns && o.published_ns <= enqueue
++        );
++    }
++    if sliced {
++        assert!(installed < o.published_ns && o.published_ns <= o.replay_start_ns);
++        assert!(o.build_only_poll_count > 0);
++    } else {
++        assert!(o.owner_end_ns <= handler);
++        let n = if warm { 0 } else { rows };
++        assert_eq!((o.collected_rows, o.staged_rows, o.retired_keys), (n, n, n));
++    }
++    assert!(
++        peak >= o.max_actor_poll_ns / 1000,
++        "production actor metric missed measured poll"
++    );
++    println!("registration_work loc_keys={} collect_keys={} stage_keys={} retired_keys={} discovery_visits={} repair_keys={} cleanup_visits={} stage_deltas={} build_polls={} build_only_polls={} max_poll_visits={} max_poll_discovery={} max_poll_repairs={} max_poll_staged={} max_poll_retired={} max_buffer_keys={} max_changed_keys={} max_provisional_tables={} replay_visited={} replay_rows={}",o.loc_rows,o.collected_rows,o.staged_rows,o.retired_keys,o.discovery_visits,o.repair_keys,o.cleanup_visits,o.stage_deltas,o.build_poll_count,o.build_only_poll_count,o.max_poll_visits,o.max_poll_discovery,o.max_poll_repairs,o.max_poll_staged,o.max_poll_retired,o.max_buffer_keys,o.max_changed_keys,o.max_provisional_tables,o.replay_visited,o.replay_rows);
++    println!("registration_result mode={mode} arm={arm} rows={rows} build_wall_ns={} build_active_ns={} max_build_only_poll_ns={} replay_poll_ns={} replay_traversal_ns={} initial_replay_ns={} registration_ns={} registration_handoff_lower_ns={} registration_handoff_upper_ns={} max_actor_poll_ns={} actor_max_us={peak} pre_actor_max_us={old_peak} admission_wait_ns={} admit_to_install_lower_ns={} admit_to_install_upper_ns={} admit_to_handler_lower_ns={} admit_to_handler_upper_ns={} handler_to_install_ns={} base_seen={} marker_seen={} marker_before_eor={} eor={} final_loc={} final_staged={} group={group}",
++        o.build_end_ns-o.build_start_ns,o.build_active_ns,o.max_build_only_poll_ns,o.replay_poll_ns,o.replay_end_ns-o.replay_start_ns,o.owner_end_ns-o.install_end_ns,o.owner_end_ns-o.owner_start_ns,o.owner_end_ns-join_after,o.owner_end_ns-join_before,o.max_actor_poll_ns,before-attempt,installed-after,installed-before,handler-after,handler-before,installed-handler,receiver.base,receiver.marker,receiver.marker_before_eor,receiver.eor,rows+1,staged[&peer.addr()]);
++}
++
++fn memory() -> (u64, u64) {
++    // Off-actor snapshots; whole-process high-water and cgroup.peak come from the launcher.
++    let status = std::fs::read_to_string("/proc/self/status").unwrap();
++    let rss = status
++        .lines()
++        .find_map(|line| line.strip_prefix("VmRSS:"))
++        .unwrap()
++        .split_whitespace()
++        .next()
++        .unwrap()
++        .parse()
++        .unwrap();
++    let cg = std::fs::read_to_string("/proc/self/cgroup").unwrap();
++    let dir = cg.lines().find_map(|l| l.strip_prefix("0::")).unwrap();
++    let bytes = std::fs::read_to_string(format!("/sys/fs/cgroup{dir}/memory.current"))
++        .unwrap()
++        .trim()
++        .parse()
++        .unwrap();
++    (rss, bytes)
++}
+diff --git a/crates/rib/src/manager/registration_probe.rs b/crates/rib/src/manager/registration_probe.rs
+new file mode 100644
+index 000000000..69a2e15dd
+--- /dev/null
++++ b/crates/rib/src/manager/registration_probe.rs
+@@ -0,0 +1,260 @@
++//! Scratch observer for one first-member registration per rrharness process.
++use std::sync::atomic::{AtomicBool, Ordering};
++use std::sync::{Mutex, OnceLock};
++use std::time::Instant;
++
++use crate::PeerId;
++
++static ORIGIN: OnceLock<Instant> = OnceLock::new();
++static TARGET: OnceLock<PeerId> = OnceLock::new();
++static STARTED: AtomicBool = AtomicBool::new(false);
++static FIRST_WORK: AtomicBool = AtomicBool::new(false);
++static PUBLISHED: AtomicBool = AtomicBool::new(false);
++static ENDED: AtomicBool = AtomicBool::new(false);
++static RECORDED: AtomicBool = AtomicBool::new(false);
++static OBS: Mutex<Option<RegistrationObservation>> = Mutex::new(None);
++
++#[derive(Debug, Default)]
++pub struct RegistrationObservation {
++    pub deferred: bool,
++    pub readiness_owned: bool,
++    pub owner_start_ns: u64,
++    pub owner_end_ns: u64,
++    pub poll_start_ns: u64,
++    pub poll_end_ns: u64,
++    pub max_actor_poll_ns: u64,
++    pub install_end_ns: u64,
++    pub build_start_ns: u64,
++    pub build_end_ns: u64,
++    pub collect_start_ns: u64,
++    pub collect_end_ns: u64,
++    pub stage_end_ns: u64,
++    pub delta_retire_end_ns: u64,
++    pub set_retire_start_ns: u64,
++    pub set_retire_end_ns: u64,
++    pub replay_start_ns: u64,
++    pub replay_end_ns: u64,
++    pub loc_rows: usize,
++    pub collected_rows: usize,
++    pub staged_rows: usize,
++    pub stage_deltas: usize,
++    pub retired_keys: usize,
++    pub replay_visited: usize,
++    pub replay_rows: usize,
++    pub map_insert_ns: u64,
++    pub published_ns: u64,
++    pub build_active_ns: u64,
++    pub replay_poll_ns: u64,
++    pub max_build_only_poll_ns: u64,
++    pub build_poll_count: usize,
++    pub build_only_poll_count: usize,
++    pub max_poll_visits: usize,
++    pub max_poll_discovery: usize,
++    pub max_poll_repairs: usize,
++    pub max_poll_staged: usize,
++    pub max_poll_retired: usize,
++    pub max_buffer_keys: usize,
++    pub max_changed_keys: usize,
++    pub max_provisional_tables: usize,
++    pub discovery_visits: usize,
++    pub repair_keys: usize,
++    pub cleanup_visits: usize,
++    pub paced: bool,
++    pub provisional_tables: usize,
++    poll_baseline: [usize; 4],
++    total_spans: usize,
++    prior_spans: usize,
++}
++
++fn nanos(at: Instant) -> u64 {
++    u64::try_from(at.duration_since(*ORIGIN.get().unwrap()).as_nanos()).unwrap()
++}
++
++pub fn now_ns() -> u64 {
++    ORIGIN.get_or_init(Instant::now);
++    nanos(Instant::now())
++}
++
++pub fn arm(peer: PeerId) {
++    now_ns();
++    TARGET.set(peer).expect("one registration per process");
++}
++
++pub(super) fn target(peer: PeerId) -> bool {
++    TARGET.get() == Some(&peer)
++}
++
++pub fn started() -> bool {
++    STARTED.load(Ordering::Acquire)
++}
++
++pub fn first_work_started() -> bool {
++    FIRST_WORK.load(Ordering::Acquire)
++}
++
++// Called on the first real key visit, or after the first nonempty candidate page.
++pub(super) fn signal_first_work() {
++    if active() && !first_work_started() {
++        FIRST_WORK.store(true, Ordering::Release);
++    }
++}
++
++pub fn building() -> bool {
++    first_work_started() && !PUBLISHED.load(Ordering::Acquire)
++}
++
++pub(super) fn publish() {
++    record(|o| {
++        o.build_end_ns = now_ns();
++        o.published_ns = o.build_end_ns;
++        PUBLISHED.store(true, Ordering::Release);
++    });
++}
++
++pub fn active() -> bool {
++    started() && !ENDED.load(Ordering::Acquire)
++}
++
++pub(crate) fn changed_backlog(count: usize) {
++    record(|o| o.max_changed_keys = o.max_changed_keys.max(count));
++}
++
++pub(crate) fn scan_page(buckets: usize, repairs: usize, keys: usize) {
++    if buckets + repairs > 0 {
++        signal_first_work();
++    }
++    record(|o| {
++        o.discovery_visits += buckets;
++        o.repair_keys += repairs;
++        o.collected_rows += keys - repairs;
++        o.max_buffer_keys = o.max_buffer_keys.max(keys);
++    });
++}
++
++pub(super) struct RegistrationWindow;
++
++pub(super) fn begin(peer: PeerId, deferred: bool) -> Option<RegistrationWindow> {
++    if !target(peer) {
++        return None;
++    }
++    if started() {
++        return (active() && PUBLISHED.load(Ordering::Acquire)).then(|| RegistrationWindow);
++    }
++    *OBS.lock().unwrap() = Some(RegistrationObservation {
++        deferred,
++        owner_start_ns: now_ns(),
++        ..Default::default()
++    });
++    STARTED.store(true, Ordering::Release);
++    Some(RegistrationWindow)
++}
++
++// A paced registration keeps its window across actor suspensions. Only the
++// real completion after publication may finish the observation.
++pub(super) fn begin_pending(peer: PeerId, loc_rows: usize) {
++    if !target(peer) {
++        return;
++    }
++    let mut guard = OBS.lock().unwrap();
++    let o = guard.get_or_insert_with(|| RegistrationObservation {
++        deferred: true,
++        owner_start_ns: now_ns(),
++        ..Default::default()
++    });
++    assert!(!o.paced && o.build_start_ns == 0, "one clean cold build");
++    o.paced = true;
++    o.loc_rows = loc_rows;
++    o.build_start_ns = now_ns();
++    STARTED.store(true, Ordering::Release);
++}
++
++impl Drop for RegistrationWindow {
++    fn drop(&mut self) {
++        record(|o| {
++            if !o.paced || o.published_ns != 0 {
++                o.owner_end_ns = now_ns();
++                ENDED.store(true, Ordering::Release);
++            }
++        });
++    }
++}
++
++pub(super) fn record(f: impl FnOnce(&mut RegistrationObservation)) {
++    if active() {
++        f(OBS.lock().unwrap().as_mut().unwrap());
++    }
++}
++
++pub(super) fn build_span() -> Option<BuildSpan> {
++    active().then(|| BuildSpan(now_ns()))
++}
++
++pub(super) struct BuildSpan(u64);
++
++impl Drop for BuildSpan {
++    fn drop(&mut self) {
++        let elapsed = now_ns() - self.0;
++        record(|o| {
++            o.build_active_ns += elapsed;
++            o.total_spans += 1;
++        });
++    }
++}
++
++pub(super) fn finished_poll(start: Instant, end: Instant) {
++    if !started() || RECORDED.load(Ordering::Relaxed) {
++        return;
++    }
++    let mut guard = OBS.lock().unwrap();
++    let obs = guard.as_mut().unwrap();
++    let (first, last) = (nanos(start), nanos(end));
++    let elapsed = last - first;
++    if obs.poll_start_ns == 0 {
++        assert!(first <= obs.owner_start_ns && obs.owner_start_ns <= last);
++        obs.poll_start_ns = first;
++    }
++    obs.max_actor_poll_ns = obs.max_actor_poll_ns.max(elapsed);
++    let totals = [
++        obs.discovery_visits,
++        obs.repair_keys,
++        obs.staged_rows,
++        obs.cleanup_visits,
++    ];
++    let work: [usize; 4] = std::array::from_fn(|i| totals[i] - obs.poll_baseline[i]);
++    obs.poll_baseline = totals;
++    obs.max_poll_visits = obs.max_poll_visits.max(work[0] + work[1] + work[3]);
++    obs.max_poll_discovery = obs.max_poll_discovery.max(work[0]);
++    obs.max_poll_repairs = obs.max_poll_repairs.max(work[1]);
++    obs.max_poll_staged = obs.max_poll_staged.max(work[2]);
++    obs.max_poll_retired = obs.max_poll_retired.max(work[3]);
++    // Replay (including payload/commit) has one synchronous owner. A poll
++    // containing both the last page and replay still counts toward the work
++    // limit; exclude its duration only from the build-only stall limit.
++    let replay =
++        obs.replay_start_ns != 0 && obs.replay_start_ns >= first && obs.replay_start_ns <= last;
++    if replay {
++        obs.replay_poll_ns = elapsed;
++    }
++    let worked = obs.total_spans > obs.prior_spans || work.iter().any(|v| *v != 0);
++    obs.prior_spans = obs.total_spans;
++    if worked {
++        obs.build_poll_count += 1;
++        if !replay {
++            obs.build_only_poll_count += 1;
++            obs.max_build_only_poll_ns = obs.max_build_only_poll_ns.max(elapsed);
++        }
++    }
++    if ENDED.load(Ordering::Acquire) {
++        assert!(first <= obs.owner_end_ns && obs.owner_end_ns <= last);
++        obs.poll_end_ns = last;
++        RECORDED.store(true, Ordering::Release);
++    }
++}
++
++pub fn take() -> Option<RegistrationObservation> {
++    if RECORDED.load(Ordering::Acquire) {
++        OBS.lock().unwrap().take()
++    } else {
++        None
++    }
++}
