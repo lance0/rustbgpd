@@ -14406,12 +14406,16 @@ async fn next_dirty_resync_hold(entered: &mut [mpsc::UnboundedReceiver<usize>]) 
 
 #[tokio::test(start_paused = true)]
 async fn dirty_resync_timer_returns_between_slow_member_transactions() {
-    dirty_resync_timer_member_ages(&[Duration::from_secs(20), Duration::from_secs(20)]).await;
+    Box::pin(dirty_resync_timer_member_ages(&[
+        Duration::from_secs(20),
+        Duration::from_secs(20),
+    ]))
+    .await;
 }
 
 #[tokio::test(start_paused = true)]
 async fn dirty_resync_timer_one_stalled_member_still_fails_closed() {
-    dirty_resync_timer_member_ages(&[Duration::from_secs(31)]).await;
+    Box::pin(dirty_resync_timer_member_ages(&[Duration::from_secs(31)])).await;
 }
 
 #[test]

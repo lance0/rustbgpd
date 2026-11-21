@@ -1060,7 +1060,7 @@ async fn signalled_replay(signal_at: Duration) -> SignalRun {
 /// replayed announcements, and the upstream never loses either ban.
 #[tokio::test(start_paused = true)]
 async fn signal_after_replay_releases_end_of_rib_with_no_gap() {
-    let run = signalled_replay(Duration::from_secs(6)).await;
+    let run = Box::pin(signalled_replay(Duration::from_secs(6))).await;
     assert!(
         !run.gap,
         "a re-injected ban was absent at the upstream: {:?}",
@@ -1087,7 +1087,7 @@ async fn signal_after_replay_releases_end_of_rib_with_no_gap() {
 /// so the observer must see the gap.
 #[tokio::test(start_paused = true)]
 async fn control_signal_before_replay_shows_the_gap() {
-    let run = signalled_replay(Duration::from_secs(1)).await;
+    let run = Box::pin(signalled_replay(Duration::from_secs(1))).await;
     assert!(run.gap, "the control must observe the gap: {:?}", run.log);
     assert_eq!(run.eor_at, Some(Duration::from_secs(1)));
     assert!(matches!(
