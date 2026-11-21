@@ -3,6 +3,7 @@
 //! and how full it was then.
 
 use super::*;
+use crate::manager::outbound_owing::PRESIZE_OFF;
 use crate::outbound_credit::CHUNK_ROWS;
 
 /// The table size under which a cursor step may size the table for the
@@ -81,6 +82,38 @@ pub(super) fn assert_fitted(capacity: usize, len: usize, case: &str) {
         "{case}: capacity {capacity} for {len} entries ({}.{:02}x)",
         capacity / len,
         capacity % len * 100 / len
+    );
+}
+
+/// Run `shape` twice on this thread, with the presize and without it (the
+/// control), and return both results in that order.
+pub(super) fn with_control<T>(mut shape: impl FnMut() -> T) -> (T, T) {
+    let head = shape();
+    PRESIZE_OFF.set(true);
+    let control = shape();
+    PRESIZE_OFF.set(false);
+    (head, control)
+}
+
+/// [`with_control`] for a shape on the test's own (current-thread)
+/// runtime, where the actor runs too.
+pub(super) async fn with_control_async<T, F: std::future::Future<Output = T>>(
+    mut shape: impl FnMut() -> F,
+) -> (T, T) {
+    let head = shape().await;
+    PRESIZE_OFF.set(true);
+    let control = shape().await;
+    PRESIZE_OFF.set(false);
+    (head, control)
+}
+
+/// Every capacity of the presized table at or below the control's.
+pub(super) fn assert_at_or_below_control(head: &[usize], control: &[usize], case: &str) {
+    assert!(
+        head.iter()
+            .zip(control)
+            .all(|(head, control)| head <= control),
+        "{case}: capacities {head:?} above the control's {control:?}"
     );
 }
 

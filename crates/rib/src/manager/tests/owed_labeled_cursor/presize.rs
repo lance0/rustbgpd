@@ -3,7 +3,8 @@
 //! rows per prefix read so far and the prefixes still ahead of its cursor.
 
 use super::super::cursor_presize::{
-    Growth, PRESIZE_ROWS, assert_fitted, deny_med_chain, set_med, tenth_med,
+    Growth, PRESIZE_ROWS, assert_at_or_below_control, assert_fitted, deny_med_chain, set_med,
+    tenth_med, with_control,
 };
 use super::*;
 
@@ -230,4 +231,50 @@ fn a_filtered_labeled_walk_with_relabels_ahead_fits() {
         1,
         "one estimate"
     );
+}
+
+/// Add-Path send-all, every row accepted, in arrival order: [`SOURCE`]
+/// sends 600 prefixes, [`SECOND`] the same 600 (a second path; each prefix
+/// moves to the back of the list), then [`SOURCE`] 10,000 more. The walk's
+/// first 512 prefixes read two rows a prefix, the rest one. The estimate
+/// takes one row a prefix for send-all, and the steps grow the route index
+/// past it. Red without that clamp: the route index reserved for two rows
+/// a prefix ahead, one capacity class past the walk without the presize.
+#[test]
+fn a_send_all_labeled_walk_with_arrival_order_skew_fits() {
+    const ROWS: u32 = 10_000;
+    const DOUBLE: u32 = 600;
+    let shape = || {
+        let mut manager = manager(4 * CHUNK_ROWS);
+        sources_up(&mut manager);
+        let mut receivers = vec![Receiver::up(
+            &mut manager,
+            receiver(0),
+            4096,
+            &[L4],
+            u32::MAX,
+        )];
+        let peer = receivers[0].peer;
+        manager.owe_eor(peer, L4);
+        manager.owe_whole_family(peer, F4);
+        send(&mut manager, SOURCE, rows(L4, 0..DOUBLE), vec![]);
+        let second = (0..DOUBLE).map(|index| route_from(SECOND, L4, index, 300, 100));
+        send(&mut manager, SECOND, second.collect(), vec![]);
+        send(
+            &mut manager,
+            SOURCE,
+            rows(L4, DOUBLE..DOUBLE + ROWS),
+            vec![],
+        );
+        walk(&mut manager, &mut receivers, peer);
+        assert_eq!(
+            receivers[0].wire.table.len(),
+            (ROWS + 2 * DOUBLE) as usize,
+            "every path sent"
+        );
+        assert_indexes_fitted(&manager, peer, "send-all, arrival skew");
+        tables(&manager, peer).1
+    };
+    let (head, control) = with_control(shape);
+    assert_at_or_below_control(&head, &control, "send-all, arrival skew");
 }

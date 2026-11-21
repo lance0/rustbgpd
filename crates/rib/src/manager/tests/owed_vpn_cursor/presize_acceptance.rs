@@ -1,15 +1,19 @@
 //! Receiver shapes whose acceptance a walk's first keys misread: an
 //! Add-Path send-all receiver reads one key a step, two AFIs accept
 //! different fractions, a sparse receiver's early samples are noisy, and
-//! paths per key vary. Holes and withdrawals ahead of the cursor, and rows
-//! the table held before the walk, must not count as rows the walk added
-//! for keys it read. The presize estimates once, from each AFI's rows
-//! added per key its walk read, so each table ends within 2.3 times what
-//! it holds, as the steps' own doubling leaves it.
+//! paths per key vary with arrival order. Holes and withdrawals ahead of
+//! the cursor, and rows the table held before the walk, must not count as
+//! rows the walk committed for keys it read. The presize estimates once,
+//! from the rows each AFI's cursor steps committed per key they read, so
+//! each table ends within 2.3 times what it holds, as the steps' own
+//! doubling leaves it.
 
 use std::cell::RefCell;
 
-use super::super::cursor_presize::{Growth, assert_fitted, deny_med_chain, set_med, tenth_med};
+use super::super::cursor_presize::{
+    Growth, assert_at_or_below_control, assert_fitted, deny_med_chain, set_med, tenth_med,
+    with_control, with_control_async,
+};
 use super::*;
 
 /// Row `index` of `family` from `source` with `med`.
@@ -85,8 +89,8 @@ fn a_send_all_vpn_walk_sizes_its_indexes_to_what_it_accepts() {
 }
 
 /// Add-Path send-all, every row accepted, the first 64 keys with two
-/// paths and the rest with one: the route index is sized for the average
-/// paths per key read, not the most an early key had.
+/// paths and the rest with one: the route index is sized for one path a
+/// key, not the most an early key had, and the steps grow it past that.
 #[test]
 fn a_send_all_vpn_walk_with_uneven_paths_sizes_routes_by_the_average() {
     const ROWS: u32 = 20_000;
@@ -565,4 +569,71 @@ async fn a_filtered_vpn_release_with_relabels_ahead_through_the_actor_loop_fits(
     };
     let (receivers, _) = actor_walk(rows, vec![again], 0, Some(deny_med_chain()), 400, false).await;
     assert_eq!(receivers[0].wire.table.len(), (ROWS / 10) as usize);
+}
+
+/// Every key accepted, through `RibManager::run_actor`: a selection
+/// release starts the cursor, and a withdrawal of the last 700 keys
+/// arrives in the same turn, before any step. Red with keys read taken as
+/// the Loc-RIB's keys less the entries ahead: about three times what it
+/// holds (1.49 times without the presize).
+#[tokio::test(start_paused = true)]
+async fn withdrawals_ahead_of_a_vpn_release_through_the_actor_loop_fit() {
+    const ROWS: u32 = 20_000;
+    const GONE: u32 = 700;
+    let shape = || {
+        let rows = (0..ROWS).map(|i| med_row(SOURCE, P4, i, 0)).collect();
+        let withdrawal = RibUpdate::VpnRoutesReceived {
+            peer: peer_v4(SOURCE),
+            session_id: 0,
+            announced: vec![],
+            withdrawn: (ROWS - GONE..ROWS)
+                .map(|i| VpnRibRouteKey {
+                    nlri_key: key(P4, i),
+                    path_id: 0,
+                })
+                .collect(),
+        };
+        actor_walk(rows, vec![withdrawal], 0, None, 400, false)
+    };
+    let ((receivers, head), (_, control)) = with_control_async(shape).await;
+    assert_eq!(receivers[0].wire.table.len(), (ROWS - GONE) as usize);
+    assert_at_or_below_control(&head.capacities, &control.capacities, "withdrawals ahead");
+}
+
+/// Add-Path send-all, every row accepted, in arrival order: [`SOURCE`]
+/// sends 600 keys, [`SECOND`] the same 600 (a second path; each key moves
+/// to the back of the list), then [`SOURCE`] 20,000 more. The walk's first
+/// 512 keys read two rows a key, the rest one. The estimate takes one row
+/// a key for send-all, and the steps grow the route index past it. Red
+/// without that clamp: the route index reserved for two rows a key ahead
+/// (2.7 times what it holds, 1.35 times without the presize).
+#[test]
+fn a_send_all_vpn_walk_with_arrival_order_skew_fits() {
+    const ROWS: u32 = 20_000;
+    const DOUBLE: u32 = 600;
+    let shape = || {
+        let mut manager = manager(4 * CHUNK_ROWS);
+        sources_up(&mut manager);
+        let mut receivers = vec![owing_receiver(&mut manager, &[P4], u32::MAX, None)];
+        let peer = receivers[0].peer;
+        let first = (0..DOUBLE).map(|i| med_row(SOURCE, P4, i, 0)).collect();
+        send(&mut manager, SOURCE, first, vec![]);
+        let second = (0..DOUBLE).map(|i| med_row(SECOND, P4, i, 0)).collect();
+        send(&mut manager, SECOND, second, vec![]);
+        let rest = (DOUBLE..DOUBLE + ROWS)
+            .map(|i| med_row(SOURCE, P4, i, 0))
+            .collect();
+        send(&mut manager, SOURCE, rest, vec![]);
+        drain(&mut manager, &mut receivers);
+        assert_eq!(
+            receivers[0].wire.table.len(),
+            (ROWS + 2 * DOUBLE) as usize,
+            "every path sent"
+        );
+        assert_indexes_fitted(&manager, peer, "send-all, arrival skew");
+        let (routes, keys) = manager.adj_ribs_out[&peer].bench_vpn_capacities();
+        [routes, keys]
+    };
+    let (head, control) = with_control(shape);
+    assert_at_or_below_control(&head, &control, "send-all, arrival skew");
 }

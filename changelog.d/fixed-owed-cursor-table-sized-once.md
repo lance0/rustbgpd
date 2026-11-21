@@ -9,14 +9,16 @@
   The freed tables stayed resident in the allocator while paused receivers
   kept the daemon idle, which raised peak memory when many private VPN
   receivers were rebuilt at once. The size comes from each address
-  family's own sample once the walk has read at least 512 of its keys and
-  added at least 256 of its routes: the routes that family's walk has
-  added per key it has read, at most the receiver's paths per key, times
-  its keys still ahead. Routes the table held before the walk, and keys
-  logged again or withdrawn ahead of the cursor, do not count. A receiver
-  whose export policy or RT-Constrain membership accepts a fraction of the
-  table therefore gets a table sized to that fraction, including an Add-Path
-  receiver that sends every path, and VPNv4 and VPNv6 (or the two labeled
+  family's own sample once the walk's cursor steps have read at least 512
+  of its keys and committed at least 256 of its routes: the routes those
+  steps committed per key they read, at most the receiver's paths per key
+  (one for an Add-Path receiver that sends every path), times its keys
+  still ahead. Routes that reach the table any other way (held before the
+  walk, restaged by an RT-Constrain membership change, or sent from the
+  receiver's own owed keys) do not count, nor do keys logged again or
+  withdrawn ahead of the cursor. A receiver whose export policy or
+  RT-Constrain membership accepts a fraction of the table therefore gets a
+  table sized to that fraction, and VPNv4 and VPNv6 (or the two labeled
   families) sharing one table are each sized by their own acceptance. A
   family without such a sample adds nothing, and its table grows step by
   step as before; a table that already holds more than 2,048 routes is not
