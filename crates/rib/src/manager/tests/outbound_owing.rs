@@ -983,12 +983,23 @@ fn pending_marker_waits_behind_owed_keys() {
     // stays live.
     let dump = held(&mut rx);
     assert!(manager.outbound_operation_live(peer));
+    // A full writer leaves the marker runnable until the next update owes a row.
+    let writer = manager.outbound_peers[&peer].clone();
+    let slots = writer.try_reserve_many(writer.capacity()).unwrap();
+    manager.owe_eor(peer, V4);
+    manager.settle_free_eor(peer);
+    assert!(manager.eor_holds(peer, V4).contains(EorHold::Writer));
+    assert!(manager.marker_retry_pending());
+    drop(slots);
     let filler = manager.outbound_credit_handle(peer);
     let charge = crate::outbound_credit::OutboundCharge::new(&filler, 8);
     received(&mut manager, vec![route(0, 0)], vec![], vec![], vec![]);
     send_all(&mut source);
     assert_eq!(owed(&manager, peer, V4), 1);
-    manager.owe_eor(peer, V4);
+    assert!(
+        !manager.marker_retry_pending(),
+        "the owed row parks the marker"
+    );
     for _ in 0..3 {
         manager.retry_eor_markers_bounded();
         manager.resync_dirty_peers_bounded();

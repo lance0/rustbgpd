@@ -1180,16 +1180,15 @@ impl RibManager {
 
     /// Store `owing` back, dropping it once it owes nothing.
     fn put_owing(&mut self, peer: PeerId, owing: Box<PeerOwing>) {
-        if owing.is_empty() {
-            self.owing_peers.remove(&peer);
-            return;
-        }
-        if let Some(entry) = self.outbound_credit.get_mut(&peer) {
+        if !owing.is_empty()
+            && let Some(entry) = self.outbound_credit.get_mut(&peer)
+        {
             entry.owing = Some(owing);
             self.owing_peers.insert(peer);
         } else {
             self.owing_peers.remove(&peer);
         }
+        self.refresh_eor_retry(peer);
     }
 
     /// Drop everything `peer` owes (a session ended or registered, a
@@ -1204,6 +1203,9 @@ impl RibManager {
             held |= peers.remove(&peer);
         }
         let Some(owing) = self.take_owing(peer) else {
+            if held {
+                self.refresh_eor_retry(peer);
+            }
             return held;
         };
         if OwedFamily::CURSORS
@@ -1212,6 +1214,7 @@ impl RibManager {
         {
             self.trim_owed_rows();
         }
+        self.refresh_eor_retry(peer);
         true
     }
 
@@ -2490,6 +2493,8 @@ impl RibManager {
         })
     }
 
+    /// A skipped family is selection-held; a failed rebuild is restored while
+    /// its peer is still dirty. Either hold already blocks the family's marker.
     pub(super) fn record_held_rebuilds(&mut self, peer: PeerId, owed: HeldRebuilds) {
         for (peers, owed) in self.held_rebuilds.iter_mut().zip(owed) {
             if owed {
@@ -2508,7 +2513,8 @@ impl RibManager {
             })
     }
 
-    /// The unit can discharge only the families that are open when it starts.
+    /// The dirty resync can discharge only families that are open when it starts.
+    /// Its dirty hold keeps their markers blocked until the resync settles them.
     pub(super) fn take_due_held_rebuilds(&mut self, peer: PeerId) -> HeldRebuilds {
         std::array::from_fn(|i| {
             self.held_rebuilds[i].contains(&peer)

@@ -2219,11 +2219,8 @@ fn orf_gated_family_waits_then_withdraws_once_its_hold_arms() {
 }
 
 /// A session that is clean and caught up while its unicast End-of-RIB is
-/// queued but not held: production reaches this for an EVPN receiver
-/// whose feed is current, where a full writer at the End-of-RIB leaves the
-/// peer clean (`send_initial_table_with_readiness`, `settle_eor`).
-/// The test reaches it with a writer that fits the table but not the
-/// End-of-RIB, then clears the dirty mark the plain unicast session gets.
+/// queued but not held: the receiver's mixed initial table fills the writer.
+/// Its current EVPN feed makes the ensuing refusal a marker-only retry.
 /// The carried key must wait for the hold, not retire as if the End-of-RIB
 /// had gone out. Red proof: retiring regardless of a queued End-of-RIB
 /// drops it, and the RTBH stays until release.
@@ -2245,14 +2242,41 @@ fn queued_unheld_end_of_rib_keeps_the_carry_for_the_hold() {
         *stale = true;
     }
     delete(&mut manager, rtbh);
-    // Room for the table only: the End-of-RIB queues behind it.
-    let (_new_tx, mut new_rx) = register_dual_stack(&mut manager, 182, 1);
+    // The new session joins an existing group with a complete EVPN table.
+    // The old session's retained unicast rows still belong to the helper.
+    let keeper = peer_v4(Ipv4Addr::new(192, 0, 2, 84));
+    let (tx, _keeper_rx) = mpsc::channel(8);
+    super::evpn_group_storage::register(&mut manager, keeper, tx);
+    let group = manager.grouped_member_of(keeper).unwrap();
+    manager
+        .group_ribs
+        .get_mut(&group)
+        .unwrap()
+        .set_evpn_ownership_for_test(true);
+    super::evpn_group_storage::stage(
+        &mut manager,
+        group,
+        &super::evpn_group_storage::received(100),
+    );
+    manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
+        peer: observer,
+        session_id: 7,
+        peer_restart_state: false,
+        peer_gr_helper: true,
+        peer_gr_families: vec![FAMILY],
+        peer_enhanced_refresh: true,
+        peer_llgr_families: vec![],
+        local_llgr_stale_time: 0,
+    });
+    let (tx, mut new_rx) = mpsc::channel(1);
+    super::evpn_group_storage::register(&mut manager, observer, tx);
+    assert!(manager.evpn_feed_is_current(observer));
+    assert!(!manager.dirty_peers.contains(&observer));
+    assert!(manager.marker_retry_pending());
     assert!(
         manager.eor_pending(observer).contains(&FAMILY),
         "the IPv4 End-of-RIB is queued"
     );
-    // An EVPN receiver with a current feed stays clean here.
-    manager.dirty_peers.remove(&observer);
     manager.flush_helper_stale_exempt(&HashSet::new());
     let key = (Prefix::V4(rtbh), 0);
     assert!(
@@ -2644,6 +2668,60 @@ fn unrelated_hold_events_do_not_walk_the_owners() {
     });
     assert_eq!(work.get("helper_stale_retire"), None, "no walk: {work:?}");
     assert_eq!(peer_ledgers(&manager), 16, "nothing retired");
+}
+
+#[test]
+fn missing_evpn_selection_feed_checks_only_its_own_helper_carry() {
+    use super::evpn_complete_feed::{release_staged_evpn, stage_evpn_with_waiter};
+    use super::evpn_group_storage::{fixture, received, stage};
+    const EVPN: (Afi, Safi) = (Afi::L2Vpn, Safi::Evpn);
+    let (manager, peer, gid, mut output) = fixture();
+    let route = received(100);
+    let mut manager = stage_evpn_with_waiter(manager, route.peer, true);
+
+    // End these helpers' sessions after they have received a local RTBH.
+    // The sibling selection gate keeps their carried keys through EVPN release.
+    let helpers: Vec<_> = (1..=16)
+        .map(|index| {
+            let address = Ipv4Addr::new(192, 0, 4, index);
+            let id = u64::from(index);
+            let (_, rx, _) = register_peer(&mut manager, address, id, false, false, false);
+            (address, id, rx)
+        })
+        .collect();
+    let rtbh = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32);
+    inject_rtbh(&mut manager, rtbh);
+    for (address, id, mut rx) in helpers {
+        let mut rib = PeerRib::new();
+        apply(&mut rx, &mut rib, None);
+        assert!(rib.contains_key(&(Prefix::V4(rtbh), 0)));
+        clean_end_of(&mut manager, address, id);
+    }
+    assert_eq!(manager.helper_stale_exempt.len(), 16);
+    while output.try_recv().map(delivered).is_ok() {}
+
+    assert!(manager.capture_private_evpn_admitted(peer));
+    stage(&mut manager, gid, &route);
+    manager.owe_eor(peer, EVPN);
+    assert!(!manager.evpn_feed_is_current(peer));
+    let builds = manager.evpn_complete_feed_builds;
+    let work =
+        super::work_scaling::checkpoints_in(|| release_staged_evpn(&mut manager, route.peer));
+    assert_eq!(manager.evpn_complete_feed_builds, builds + 1);
+    assert_eq!(work.get("helper_stale_candidate"), Some(&1));
+    assert_eq!(manager.helper_stale_exempt.len(), 16);
+
+    let mut announcements = Vec::new();
+    let mut markers = 0;
+    while let Ok(update) = output.try_recv().map(delivered) {
+        announcements.extend(update.evpn_announce.iter().map(EvpnRibRoute::key));
+        if update.end_of_rib.contains(&EVPN) {
+            assert_eq!(announcements, [route.key()]);
+            markers += 1;
+        }
+    }
+    assert_eq!(announcements, [route.key()]);
+    assert_eq!(markers, 1);
 }
 
 /// Registers OBSERVER as a GR-helper per-client-best route-server client of

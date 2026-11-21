@@ -1793,3 +1793,96 @@ fn refresh_answer_settles_owed_withdrawals_of_every_family() {
         assert!(!manager.dirty_peers.contains(&receiver));
     }
 }
+
+#[test]
+fn selection_ending_before_registration_preserves_plain_unicast_refresh() {
+    use super::lifecycle::{test_peer_up, test_session_routes_received};
+    use rustbgpd_wire::RouteRefreshSubtype::{BoRR, EoRR};
+
+    let family = (Afi::Ipv4, Safi::Unicast);
+    let source_addr = Ipv4Addr::new(192, 0, 2, 1);
+    let source = peer_v4(source_addr);
+    let peer = peer_v4(Ipv4Addr::new(192, 0, 2, 2));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let (tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_selection_deferral(SelectionDeferralConfig {
+            timeout: Duration::from_secs(60),
+            waiters: vec![SelectionDeferralWaiterConfig {
+                peer: source.into(),
+                families: vec![family],
+            }],
+        });
+    let _source_rx =
+        super::selection_deferral_dirty_rtbh::connect(&mut manager, source_addr, 8, true, false);
+    manager.handle_update(test_session_routes_received(
+        source,
+        1,
+        vec![make_route(prefix, source_addr)],
+    ));
+    drain_route_chunks(&mut manager);
+
+    let request = || RibUpdate::RouteRefreshRequest {
+        peer,
+        session_id: 7,
+        afi: family.0,
+        safi: family.1,
+        queued: Arc::default(),
+    };
+    tx.try_send(request()).unwrap();
+    tx.try_send(RibUpdate::EndOfRib {
+        peer: source,
+        session_id: 1,
+        afi: family.0,
+        safi: family.1,
+    })
+    .unwrap();
+
+    // Pending primary messages defer an expensive registration. Lower only the
+    // route threshold so one prefix exercises the same production scheduling.
+    manager.initial_dump_defer_min_routes = 0;
+    let (sender, mut output) = mpsc::channel(8);
+    manager.handle_update(test_peer_up(peer, 7, sender));
+    assert!(manager.pending_initial_registrations.contains(&peer));
+    assert!(manager.selection_peer_convergence_held(peer, family));
+    for _ in 0..2 {
+        let next = manager.rx.try_recv().unwrap();
+        manager.handle_update(next);
+    }
+    drain_unicast_release(&mut manager);
+    assert!(!manager.selection_peer_convergence_held(peer, family));
+    assert!(!manager.outbound_peers.contains_key(&peer));
+
+    manager.advance_pending_initial_registration();
+    let initial = delivered(output.try_recv().expect("initial table"));
+    assert_eq!(initial.refresh_markers, []);
+    assert_eq!(initial.announce.len(), 1);
+    assert_eq!(initial.announce[0].prefix, Prefix::V4(prefix));
+    let initial_eor = delivered(output.try_recv().expect("initial EoR"));
+    assert_eq!(initial_eor.end_of_rib, [family]);
+    assert_eq!(initial_eor.refresh_markers, []);
+
+    let mut responses = || {
+        let mut count = 0;
+        while let Ok(response) = output.try_recv().map(delivered) {
+            assert_eq!(
+                response.refresh_markers,
+                [(family.0, family.1, BoRR), (family.0, family.1, EoRR)]
+            );
+            assert_eq!(response.announce.len(), 1);
+            assert_eq!(response.announce[0].prefix, Prefix::V4(prefix));
+            assert_eq!(response.end_of_rib, [family]);
+            count += 1;
+        }
+        count
+    };
+    manager.resync_dirty_peers_bounded();
+    let queued = responses();
+    manager.handle_update(request());
+    let subsequent = responses();
+    assert_eq!(
+        (queued, subsequent),
+        (1, 1),
+        "queued and subsequent refresh answers"
+    );
+}

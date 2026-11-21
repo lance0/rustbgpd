@@ -341,6 +341,7 @@ enum DistributionPass {
     Ordinary,
     Ingest,
     EvictionRecovery(PeerId),
+    SelectionMarker(PeerId),
 }
 
 /// How the commit ladder admitted its envelope (`crate::outbound_credit`).
@@ -8013,6 +8014,7 @@ impl RibManager {
         }
         self.set_selection_partial_caught_up(peer, false);
         self.force_outbound_peers.insert(peer);
+        self.refresh_eor_retry(peer);
         self.distribute_changes(&HashSet::new(), &HashSet::new());
         let _ = reply.send(Ok(()));
     }
@@ -8227,6 +8229,7 @@ impl RibManager {
             }
             self.set_selection_partial_caught_up(peer, false);
             self.force_outbound_peers.insert(peer);
+            self.refresh_eor_retry(peer);
             if gated_flood {
                 // The forced resync is now owed, so it holds the marker.
                 self.release_eor_orf_table(peer, [family], EorTrigger::Release);
@@ -8811,6 +8814,7 @@ impl RibManager {
         if self.dirty_peers.insert(peer) {
             self.dirty_since.insert(peer, tokio::time::Instant::now());
         }
+        self.refresh_eor_retry(peer);
         if let Some(gid) = self.grouped_member_of(peer)
             && let Some(group) = self.group_ribs.get_mut(&gid)
         {
@@ -9274,6 +9278,25 @@ impl RibManager {
         self.flush_helper_stale_exempt(all_affected);
     }
 
+    /// Rebuild only this release owner's missing EVPN coverage. Other
+    /// receivers retain their own release visits and dirty resyncs.
+    pub(super) fn distribute_selection_marker_feed(
+        &mut self,
+        peer: PeerId,
+        feed: Option<super::evpn_recovery::EvpnCompleteFeed>,
+    ) {
+        let empty = HashSet::new();
+        self.distribute_changes_inner(
+            &empty,
+            &empty,
+            DistributionPass::SelectionMarker(peer),
+            false,
+            feed.into_iter().map(|feed| (peer, feed)).collect(),
+            None,
+        );
+        self.flush_peer_helper_stale_exempt(peer);
+    }
+
     pub(in crate::manager) fn distribute_changes_with_evpn_feeds(
         &mut self,
         feeds: HashMap<PeerId, super::evpn_recovery::EvpnCompleteFeed>,
@@ -9522,7 +9545,9 @@ impl RibManager {
         let all_affected = owned_affected.as_ref().unwrap_or(all_affected);
         // Receivers that owe a unicast family whole stage and mark nothing
         // below: the pass logs its keys for their cursors once, here.
-        if !draining && !RELEASING {
+        // An EVPN marker visit rebuilds one receiver from existing state.
+        // It has no changed prefixes and must not trim every other peer's cursor.
+        if !draining && !RELEASING && !matches!(pass_kind, DistributionPass::SelectionMarker(_)) {
             self.log_owed_rows(best_changed, all_affected);
         }
         // FIB install-candidate wake. Route events fire only when the
@@ -9559,9 +9584,10 @@ impl RibManager {
             self.advance_advertised_pages();
         }
 
-        let peers: Vec<PeerId> = match (release.as_ref(), drain.as_deref()) {
-            (Some(page), _) => page.peers.to_vec(),
-            (_, Some(drain)) => vec![drain.peer],
+        let peers: Vec<PeerId> = match (release.as_ref(), drain.as_deref(), pass_kind) {
+            (Some(page), _, _) => page.peers.to_vec(),
+            (_, Some(drain), _) => vec![drain.peer],
+            (_, _, DistributionPass::SelectionMarker(peer)) => vec![peer],
             _ => self
                 .outbound_peers
                 .keys()
@@ -10682,7 +10708,9 @@ impl RibManager {
                         }
                         if is_force && !self.selection_resync_held(peer) {
                             self.force_outbound_peers.remove(&peer);
-                            if !is_dirty {
+                            if is_dirty {
+                                self.refresh_eor_retry(peer);
+                            } else {
                                 self.resync_settles_eor(peer, resync_operation.as_mut());
                             }
                         }
@@ -12001,7 +12029,9 @@ impl RibManager {
                                     self.force_outbound_peers.remove(&peer);
                                     // A forced resync alone held the markers
                                     // a release found behind it.
-                                    if !is_dirty {
+                                    if is_dirty {
+                                        self.refresh_eor_retry(peer);
+                                    } else {
                                         self.resync_settles_eor(peer, resync_operation.as_mut());
                                     }
                                 }
@@ -12088,7 +12118,9 @@ impl RibManager {
                             }
                             if is_force && evpn_covered && !self.selection_resync_held(peer) {
                                 self.force_outbound_peers.remove(&peer);
-                                if !is_dirty {
+                                if is_dirty {
+                                    self.refresh_eor_retry(peer);
+                                } else {
                                     self.resync_settles_eor(peer, resync_operation.as_mut());
                                 }
                             }

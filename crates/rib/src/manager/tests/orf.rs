@@ -2191,14 +2191,19 @@ async fn live_collision_survivor_keeps_its_orf_deadline_and_held_refresh() {
                 afi: family.0,
                 safi: family.1,
             });
-            assert!(manager.selection_deferred_refresh[&peer].contains(&family));
+            assert!(manager.selection_deferred_refresh[&family].contains(&peer));
         }
         assert!(manager.peer_orf_pending[&peer].contains(&family));
         assert!(survivor.try_recv().is_err());
 
         let mut other = register_orf_session(&mut manager, peer, 8, false, 0);
         assert!(manager.peer_orf_pending[&peer].contains(&family));
-        assert!(!manager.selection_deferred_refresh.contains_key(&peer));
+        assert!(
+            !manager
+                .selection_deferred_refresh
+                .values()
+                .any(|peers| peers.contains(&peer))
+        );
         tokio::time::advance(crate::manager::ORF_EOR_HOLD_CAP).await;
         manager.expire_eor_holds(tokio::time::Instant::now());
         manager.handle_update(RibUpdate::EndOfRib {

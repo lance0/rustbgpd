@@ -144,11 +144,7 @@ impl RibManager {
 
     fn handoff_late_refresh(&mut self, peer: PeerId, family: (Afi, Safi)) {
         if !self.selection_peer_convergence_held(peer, family)
-            && crate::manager::route_refresh::remove_family_drop_empty(
-                &mut self.selection_deferred_refresh,
-                peer,
-                family,
-            )
+            && self.take_selection_refresh(peer, family)
         {
             self.defer_refresh_answer(peer, family, self.eor.owes(peer, family));
         }

@@ -3007,8 +3007,10 @@ impl RibManager {
     pub(super) fn set_selection_partial_caught_up(&mut self, peer: PeerId, caught_up: bool) {
         if let Some(session) = self.outbound_session_ids.get(&peer).copied()
             && let Some(record) = self.newest_live_session_mut(peer, session)
+            && record.selection_partial_caught_up != caught_up
         {
             record.selection_partial_caught_up = caught_up;
+            self.refresh_eor_retry(peer);
         }
     }
 
@@ -3166,7 +3168,7 @@ impl RibManager {
             matches!(
                 family,
                 (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast | Safi::MplsVpn)
-            ) && self.selection_convergence_held(family)
+            ) && self.selection_peer_convergence_held(peer, family)
         });
         // A session that sent its marker before the startup hold still needs
         // its actual admitted rows until both release frontiers have passed.
@@ -3326,6 +3328,7 @@ impl RibManager {
     /// `PeerDown` path; this only stops the retry.
     pub(in crate::manager) fn drop_gone_dirty_peer(&mut self, peer: PeerId) {
         self.dirty_peers.remove(&peer);
+        self.refresh_eor_retry(peer);
         // An evicted receiver's kept debt has a dead position: it goes
         // with the eviction mark.
         if self.owed_row_evicted.contains(&peer)
@@ -3876,6 +3879,7 @@ impl RibManager {
         }
         if self.dirty_peers.insert(peer) {
             self.dirty_since.insert(peer, tokio::time::Instant::now());
+            self.refresh_eor_retry(peer);
         }
         if let Some(gid) = self.grouped_member_of(peer)
             && let Some(group) = self.group_ribs.get_mut(&gid)

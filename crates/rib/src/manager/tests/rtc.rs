@@ -2253,6 +2253,87 @@ fn eor_set(update: &OutboundRouteUpdate) -> HashSet<(Afi, Safi)> {
     update.end_of_rib.iter().copied().collect()
 }
 
+#[test]
+fn rebuilt_rt_memberships_release_only_completed_epochs_within_budget() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let (_, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let visits = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&visits);
+    manager.marker_retry_test_hook = Some(Arc::new(move |stage| {
+        if stage == "evpn_marker_candidate" {
+            counted.fetch_add(1, Ordering::Relaxed);
+        }
+    }));
+    let cap = tokio::time::Instant::now() + Duration::from_secs(60);
+    let peer = |n| peer_v4(Ipv4Addr::new(192, 0, 2, n));
+    for n in 2..=12 {
+        manager.hold_eor_for_rt_membership(peer(n), cap);
+        manager.rt_membership_completed_while_deferred(peer(n));
+    }
+    assert!(!manager.released_rt_membership_pending());
+    manager.publish_rebuilt_rt_memberships();
+    assert_eq!(visits.load(Ordering::Relaxed), 0);
+    assert_eq!(manager.service_released_rt_membership(3), 3);
+    assert_eq!(visits.swap(0, Ordering::Relaxed), 3);
+
+    // A new deferred completion sorts before every member of the old cohort.
+    manager.hold_eor_for_rt_membership(peer(1), cap);
+    manager.rt_membership_completed_while_deferred(peer(1));
+    assert_eq!(manager.service_released_rt_membership(1), 1);
+    assert!(manager.eor.rt_membership_held(peer(1)));
+    assert!(!manager.eor.rt_membership_held(peer(5)));
+    manager.publish_rebuilt_rt_memberships();
+    // A fresh hold on the same peer must survive both published rebuilds.
+    manager.hold_eor_for_rt_membership(peer(12), cap);
+    assert_eq!(manager.service_released_rt_membership(20), 7);
+    assert_eq!(visits.swap(0, Ordering::Relaxed), 8);
+    assert!(!manager.released_rt_membership_pending());
+    assert_eq!(manager.eor.rt_membership_caps_due(cap), vec![peer(12)]);
+    assert_eq!(manager.eor.next_rt_membership_cap(), Some(cap));
+    assert_eq!(manager.service_released_rt_membership(8), 0);
+    assert_eq!(visits.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn same_id_replacement_keeps_its_own_rt_membership_hold_after_rebuild() {
+    let (_, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let (registrations, mut inbox) = mpsc::channel(1);
+    let peer = peer_v4(Ipv4Addr::new(192, 0, 2, 1));
+    let mut old = vpn_rtc_peer_up(&registrations, peer).await;
+    manager.handle_update(inbox.try_recv().unwrap());
+    drain_strict_vpn_rtc_initial_dump(&mut old).await;
+    manager.rt_membership_completed_while_deferred(peer);
+    manager.publish_rebuilt_rt_memberships();
+    assert!(manager.released_rt_membership_pending());
+
+    // Same session ID, new channel, before the preceding completion is served.
+    let mut new = vpn_rtc_peer_up(&registrations, peer).await;
+    manager.handle_update(inbox.try_recv().unwrap());
+    drain_strict_vpn_rtc_initial_dump(&mut new).await;
+    assert_eq!(manager.service_released_rt_membership(1), 0);
+    assert!(manager.eor.rt_membership_held(peer));
+    assert_no_outbound(
+        &mut new,
+        "the predecessor cannot release the new VPN markers",
+    );
+    let (afi, safi) = crate::route::RtcRibRouteKey::afi_safi();
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer,
+        session_id: 0,
+        afi,
+        safi,
+    });
+    let released = new.try_recv().map(delivered).unwrap();
+    assert_eq!(
+        eor_set(&released),
+        HashSet::from([(Afi::Ipv4, Safi::MplsVpn), (Afi::Ipv6, Safi::MplsVpn)])
+    );
+    assert!(old.try_recv().is_err());
+}
+
 async fn send_rtc_eor(tx: &mpsc::Sender<RibUpdate>, peer: Ipv4Addr) {
     tx.send(RibUpdate::EndOfRib {
         session_id: 0,

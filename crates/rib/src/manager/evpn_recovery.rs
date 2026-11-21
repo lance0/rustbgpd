@@ -238,6 +238,10 @@ impl RibManager {
             (true, false) => self.evpn_feed_receipt_count -= 1,
             _ => {}
         }
+        if had || has {
+            // Completing a feed can release ordinary EoR or leave only EoRR.
+            self.refresh_eor_retry(peer);
+        }
         true
     }
 
@@ -255,6 +259,9 @@ impl RibManager {
                 .sum::<usize>()
         });
         self.evpn_feed_receipt_count -= removed;
+        if removed != 0 {
+            self.refresh_eor_retry(peer);
+        }
     }
 
     fn ensure_evpn_feed_receipt(&mut self, peer: PeerId, target: EvpnFeedTarget) -> Option<u64> {
@@ -292,8 +299,12 @@ impl RibManager {
             .evpn_completion_record_mut(peer)
             .and_then(|record| record.evpn_feed_completion.as_mut())
         {
+            let was_complete = completion.complete;
             completion.complete = false;
             completion.revision = revision;
+            if was_complete {
+                self.refresh_eor_retry(peer);
+            }
         }
     }
 
@@ -1057,16 +1068,20 @@ impl RibManager {
         {
             return;
         }
-        if let Some(completion) = self
+        let markers_changed = self
             .evpn_completion_record_mut(peer)
             .and_then(|record| record.evpn_feed_completion.as_mut())
-        {
-            completion.owed_markers &= !bits;
-        }
+            .is_some_and(|completion| {
+                let changed = completion.owed_markers & bits != 0;
+                completion.owed_markers &= !bits;
+                changed
+            });
         if bits & EVPN_EOR != 0 {
             self.eor_discharged(peer, &[EVPN_FAMILY]);
         }
-        self.try_settle_evpn_feed(peer);
+        if !self.try_settle_evpn_feed(peer) && markers_changed {
+            self.refresh_eor_retry(peer);
+        }
     }
 
     fn try_settle_evpn_feed(&mut self, peer: PeerId) -> bool {
@@ -1135,43 +1150,6 @@ impl RibManager {
             0
         };
         (owed & EVPN_EOR != 0, owed & EVPN_EORR != 0)
-    }
-
-    /// The resync tick's marker lane: retry the markers a refused send left
-    /// owed, and the terminal markers current complete feeds owe, for a
-    /// bounded slice of peers per tick.
-    pub(in crate::manager) fn retry_eor_markers_bounded(&mut self) {
-        if self.evpn_feed_receipt_count == 0 && self.eor.is_empty() {
-            return;
-        }
-        let mut peers = Vec::with_capacity(super::RESYNC_PEERS_PER_TICK);
-        let completion_peers = (self.evpn_feed_receipt_count != 0)
-            .then_some(&self.live_sessions)
-            .into_iter()
-            .flat_map(|sessions| sessions.keys().copied());
-        for peer in completion_peers.chain(self.eor.peers()) {
-            self.replacement_checkpoint(false);
-            if peers.contains(&peer) || !self.eor_retry_runnable(peer) {
-                continue;
-            }
-            let order = |peer: PeerId| {
-                (
-                    self.evpn_marker_cursor.is_some_and(|cursor| peer <= cursor),
-                    peer,
-                )
-            };
-            let position = peers.partition_point(|&existing| order(existing) < order(peer));
-            if position < super::RESYNC_PEERS_PER_TICK {
-                if peers.len() == super::RESYNC_PEERS_PER_TICK {
-                    peers.pop();
-                }
-                peers.insert(position, peer);
-            }
-        }
-        for peer in peers {
-            self.evpn_marker_cursor = Some(peer);
-            self.retry_eor_markers(peer, true);
-        }
     }
 
     /// A refresh replay strips the EVPN markers its complete feed owes from
@@ -2075,6 +2053,9 @@ impl RibManager {
     /// Queue admission retains one receipt; only actual guarded execution
     /// suppresses retries. Polling never waits on the lifecycle/session actor.
     pub(in crate::manager) fn retry_evpn_recovery_reset(&mut self, peer: PeerId) {
+        // A pending reset blocks every family's marker, including a receipt-only
+        // EoRR. All reset producers pass here, even with no reset handler.
+        self.refresh_eor_retry(peer);
         let handle = self.evpn_recovery_handle(peer);
         let (Some(owner), Some(outbound)) = (
             self.evpn_recovery_owner(peer),
@@ -2405,7 +2386,8 @@ impl RibManager {
     }
 
     pub(in crate::manager) fn retire_evpn_recovery(&mut self, peer: PeerId) {
-        if let Some(handle) = self.evpn_recovery_handle(peer) {
+        let handle = self.evpn_recovery_handle(peer);
+        if let Some(handle) = handle {
             // The release walks every slot the member's ledger holds, so it
             // takes the readiness lane (with the executor handoff).
             self.with_ingest_readiness(|manager| {
@@ -2420,6 +2402,7 @@ impl RibManager {
                     });
             });
         }
+        let mut changed = handle.is_some();
         if let Some(owner) = self.evpn_recovery_owner(peer)
             && let Some(outbound) = self.outbound_peers.get(&peer)
             && let Some(record) = self.live_sessions.get_mut(&peer).and_then(|sessions| {
@@ -2429,11 +2412,16 @@ impl RibManager {
                 })
             })
         {
+            changed |=
+                record.evpn_recovery_reset.is_some() || record.evpn_feed_completion.is_some();
             record.evpn_recovery_reset = None;
             record.evpn_recovery_reset_receipt = None;
             record.evpn_recovery_reset_retry_reported = false;
             self.evpn_feed_receipt_count -=
                 usize::from(record.evpn_feed_completion.take().is_some());
+        }
+        if changed {
+            self.refresh_eor_retry(peer);
         }
     }
 }
