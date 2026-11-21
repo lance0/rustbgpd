@@ -587,6 +587,18 @@ cannot take a group update is marked dirty, and the group keeps what the
 member missed. The resync tick then resends the member its table as a diff
 against what it holds: one whole-table operation outside the credit.
 
+A route-change event (UPDATE ingest, a source going down, route injection,
+graceful-restart and LLGR sweeps, an End-of-RIB stale purge) does not
+rebuild a dirty member inline: its pass leaves the member dirty, adds the
+pass's withdrawals to what the group keeps for it, and the resync tick
+rebuilds it. Passes that must heal before they continue or reply still
+rebuild every dirty member in the pass: a policy cohort commit, a refresh
+replay, and the RT-Constrain and ORR heals. The cost is latency: the first
+tick comes about 1 s after the member goes dirty, and a slow member whose
+channel is still full at its tick waits for the next one, about 1 s later,
+where the next route change used to retry it as soon as its channel had
+room.
+
 **The resync tick.** Owed-key drains, deferred refresh answers and dirty
 receivers share one 25 ms poll budget per tick, and each lane takes at
 least one unit before it checks the budget. Dirty receivers are taken one
