@@ -6,7 +6,7 @@
 //! capture there would be released unused at the end of the pass, and the
 //! resync tick runs such a pass for every slice while any peer is dirty.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::attr_set::AttrSet;
 
@@ -264,7 +264,7 @@ fn assert_missed_with_proof(fleet: &Fleet, missed: &[PeerId]) {
     let fallbacks = counter_metric_value(
         &manager.metrics,
         "bgp_update_group_recovery_fallback_total",
-        &[],
+        &[("cause", "missing_proof")],
     );
     assert_eq!(fallbacks, 0.0, "no member fell back for a missing proof");
     for peer in &fleet.writers {
@@ -396,6 +396,89 @@ fn candidate_change_still_captures_per_client_best_writers() {
             .any(|attr| matches!(attr, PathAttribute::Communities(tags) if tags == &[TAG]));
         assert!(tagged, "writer 0 admitted the changed runner-up");
     }
+}
+
+/// Apply every queued envelope to a receiver's unicast and EVPN tables.
+fn apply_output(
+    admitted: &mut Admitted,
+    evpn: &mut BTreeSet<rustbgpd_wire::EvpnRouteKey>,
+    rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
+) {
+    while let Ok(update) = rx.try_recv() {
+        apply(admitted, &update);
+        for key in &update.evpn_withdraw {
+            evpn.remove(key);
+        }
+        evpn.extend(update.evpn_announce.iter().map(EvpnRibRoute::key));
+    }
+}
+
+/// A clean grouped writer with a full channel still owes the EVPN End-of-RIB
+/// of an EVPN-owned group and has no complete feed. A collision waiter's
+/// refresh stages the EVPN selection, which builds that writer a complete
+/// feed: no unicast or VPN capture, no dirty mark. The feed's pass changes
+/// no prefix, so only the fed-peer clause captures the common proof before
+/// the full channel refuses the send. The writer then misses with its proof
+/// (no missing-proof fallback) and heals to the exact table.
+#[test]
+fn complete_evpn_feed_to_a_clean_full_writer_captures_its_proof() {
+    const EVPN: (Afi, Safi) = (Afi::L2Vpn, Safi::Evpn);
+    use super::super::evpn_complete_feed::stage_evpn_with_waiter;
+    use super::super::evpn_group_storage::{fixture, received, stage};
+    let (mut manager, writer, gid, mut output) = fixture();
+    register_test_peer(&mut manager, external(), 0);
+    manager.handle_update(routes_from(external(), 0, 1, 16));
+    drain_route_chunks(&mut manager);
+    let mut admitted = Admitted::new();
+    let mut evpn = BTreeSet::new();
+    apply_output(&mut admitted, &mut evpn, &mut output);
+    assert_eq!(sources(&admitted), loc_rib_sources(&manager));
+
+    let route = received(100);
+    stage(&mut manager, gid, &route);
+    manager.owe_eor(writer, EVPN);
+    let sender = manager.outbound_peers[&writer].clone();
+    while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
+    assert!(manager.outbound_channel_full(writer));
+    assert!(!manager.evpn_feed_is_current(writer));
+    assert!(!manager.dirty_peers.contains(&writer));
+    assert!(!manager.pending_group_admitted.contains_key(&writer));
+
+    let mut manager = stage_evpn_with_waiter(manager, route.peer, false);
+    let missing_proof = counter_metric_value(
+        &manager.metrics,
+        "bgp_update_group_recovery_fallback_total",
+        &[("cause", "missing_proof")],
+    );
+    assert_eq!(
+        missing_proof, 0.0,
+        "the writer fell back for a missing proof"
+    );
+    assert!(
+        manager.dirty_peers.contains(&writer),
+        "the feed send missed"
+    );
+    assert!(
+        manager.pending_group_admitted.contains_key(&writer),
+        "the common proof is retained"
+    );
+    assert!(manager.group_recovery_fallback(writer).is_none());
+
+    let mut ticks = 0;
+    while !manager.dirty_peers.is_empty() {
+        apply_output(&mut admitted, &mut evpn, &mut output);
+        manager.resync_dirty_peers_bounded();
+        ticks += 1;
+        assert!(ticks < 100, "the writer never healed");
+    }
+    apply_output(&mut admitted, &mut evpn, &mut output);
+    assert!(!manager.pending_group_admitted.contains_key(&writer));
+    assert_eq!(
+        sources(&admitted),
+        loc_rib_sources(&manager),
+        "unicast table"
+    );
+    assert_eq!(evpn, BTreeSet::from([route.key()]), "EVPN table");
 }
 
 /// The same refused retry through the actor loop: the resync timer fires
