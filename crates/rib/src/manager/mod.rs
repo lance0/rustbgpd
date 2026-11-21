@@ -4643,6 +4643,8 @@ impl RibManager {
             let rebuilds = self.take_due_held_rebuilds(last);
             let recovery = evicted || rebuilds.contains(&true);
             self.take_late_joins_for_resync(last);
+            #[cfg(feature = "bench-internals")]
+            self.bench_group_capture_resync_slice(last);
             let built = self.distribute_changes_without_stale_flush(recovery.then_some(last));
             let still_dirty = self.dirty_peers.contains(&last);
             if evicted && still_dirty {
@@ -4657,6 +4659,8 @@ impl RibManager {
             self.dirty_peers.extend(withheld);
             self.dirty_since.extend(withheld_since);
             self.force_outbound_peers.extend(withheld_force);
+            #[cfg(feature = "bench-internals")]
+            self.bench_group_capture_progress(None);
             // An evicted receiver's resync is a whole table whatever the
             // poll budget says: it is the tick's last unit, so the actor
             // loop takes queued input before the next receiver's. Refused
@@ -5120,9 +5124,7 @@ impl RibManager {
     )]
     fn dispatch_update(&mut self, update: RibUpdate) {
         #[cfg(feature = "bench-internals")]
-        if let Some(observer) = &self.group_capture_observer {
-            observer.on_dispatch(&update);
-        }
+        self.bench_group_capture_progress(Some(&update));
         #[cfg(test)]
         if let Some(hook) = &self.test_primary_update_hook {
             hook(&update);

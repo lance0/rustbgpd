@@ -553,6 +553,11 @@ impl AdmittedRecovery {
             .ok()
     }
 
+    #[cfg(feature = "bench-internals")]
+    pub(in crate::manager) fn bench_peer_charge(&self, peer: PeerId) -> usize {
+        self.index(peer).map_or(0, |index| self.peer_charge(index))
+    }
+
     fn peer_charge(&self, index: usize) -> usize {
         let record = &self.records[index];
         record.charge()
@@ -1127,22 +1132,17 @@ impl AdmittedRecovery {
         C: FnMut(bool),
     {
         #[cfg(feature = "bench-internals")]
-        if crate::manager::bench_support::grouped_walk_observed() {
-            let projections = std::cell::Cell::new(0);
-            let counted_uc = |row: &Route| {
-                projections.set(projections.get() + 1);
-                project_uc(row)
-            };
-            let counted_vpn = |row: &VpnRibRoute| {
-                projections.set(projections.get() + 1);
-                project_vpn(row)
-            };
-            let result =
-                Self::walk_projected_rows(table, &counted_uc, &counted_vpn, checkpoint, visit);
-            crate::manager::bench_support::record_grouped_walk(projections.get(), result.is_ok());
-            return result;
+        let observed = crate::manager::bench_support::grouped_walk_observed();
+        let result = Self::walk_projected_rows(table, project_uc, project_vpn, checkpoint, visit);
+        // A completed walk projected each occupied unicast slot and each VPN
+        // row exactly once, so the observer takes the row count here.
+        #[cfg(feature = "bench-internals")]
+        if observed && result.is_ok() {
+            crate::manager::bench_support::record_completed_grouped_walk(
+                table.len().saturating_add(table.vpn_len()),
+            );
         }
-        Self::walk_projected_rows(table, project_uc, project_vpn, checkpoint, visit)
+        result
     }
 
     fn walk_projected_rows<U, V, C>(
@@ -4305,6 +4305,40 @@ mod tests {
         );
         assert_eq!(ledger.get(&peer(1)).unwrap().len(), 100_000);
         assert_retained_credit(&ledger);
+    }
+
+    /// The bench observer takes a completed walk's projections from the
+    /// table's row count instead of counting per row; this pins that equality.
+    #[test]
+    fn completed_full_old_walk_projects_each_occupied_row_once() {
+        let mut table = slot_table(16);
+        for n in 0..3 {
+            table.insert_vpn(vpn_route(n));
+        }
+        assert!(table.withdraw(&Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(5), 32)), 0));
+        assert!(table.unicast_slot_count() > table.len(), "one vacant slot");
+        let projections = std::cell::Cell::new(0);
+        let shape = AdmittedRecovery::new()
+            .full_old_shape_with_checkpoint(
+                None,
+                &table,
+                true,
+                |route| {
+                    projections.set(projections.get() + 1);
+                    // Rejected rows are projected too.
+                    (route.prefix != slot_route(0).prefix)
+                        .then_some(Key::Unicast(route.prefix, route.path_id))
+                },
+                |route| {
+                    projections.set(projections.get() + 1);
+                    let key = route.key();
+                    Some(Key::Vpn(key.nlri_key, key.path_id))
+                },
+                &mut |_| {},
+            )
+            .unwrap();
+        assert_eq!(projections.get(), table.len() + table.vpn_len());
+        assert_eq!(shape.count, projections.get() - 1);
     }
 
     #[test]

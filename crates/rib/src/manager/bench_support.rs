@@ -28,13 +28,49 @@ use crate::update::{
     RouteQueryScope,
 };
 
-/// Boundaries of one ordinary distribution pass selected by its changed prefix.
+/// Boundaries of one ordinary distribution pass selected by its changed prefix,
+/// and of the dirty period and recovery that follow it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GroupCaptureBenchEvent {
     /// The selected distribution pass has entered.
-    PassStarted,
+    PassStarted {
+        /// Recovery-ledger bytes charged before any capture of this pass.
+        proof_bytes: usize,
+        /// The ledger's limit for one member.
+        member_limit_bytes: usize,
+        /// The ledger's limit for the daemon.
+        daemon_limit_bytes: usize,
+    },
     /// Its first fresh full grouped proof is about to begin its shape walk.
     CaptureStarted,
+    /// One grouped member's proof sealed in the pre-staging loop.
+    ProofSealed {
+        /// `indexed` (a bitmap over a shared key pool) or `flat` (the member's own keys).
+        strategy: &'static str,
+        /// Whether an indexed proof attached to the pool the group already held.
+        pool_reused: bool,
+        /// Keys the member's projection admitted.
+        keys: usize,
+        /// Unicast slab slots of the walked table, occupied or vacant.
+        slots: usize,
+        /// Full-OLD walks this capture completed.
+        walks: usize,
+        /// Rows those walks projected.
+        projections: usize,
+        /// Bytes charged to this member, including a shared pool it references.
+        member_charge_bytes: usize,
+        /// The daemon-wide charge once this proof sealed.
+        daemon_bytes: usize,
+    },
+    /// The ledger refused a capture of the selected pass.
+    ProofRefused {
+        /// `peer_limit`, `daemon_limit`, `allocation_failure` or `missing_proof`.
+        cause: &'static str,
+        /// Member bytes the refused step would have charged.
+        attempted_member_bytes: usize,
+        /// Daemon bytes the refused step would have charged.
+        attempted_daemon_bytes: usize,
+    },
     /// Pre-staging capture has returned, before the desired group tables advance.
     CaptureCompleted,
     /// The same pass has finished sending and retiring its temporary proofs.
@@ -43,12 +79,29 @@ pub enum GroupCaptureBenchEvent {
         dirty_peers: usize,
         /// Fresh grouped proofs successfully sealed in the pre-staging loop.
         fresh_captures: usize,
-        /// Shape and population walks that reached their end, including walks of empty tables.
+        /// Shape and population walks that reached their end, including walks of empty tables
+        /// and walks outside a sealed grouped capture.
         walks: usize,
-        /// Actual projections of occupied unicast or VPN rows, including rejected rows.
+        /// Occupied unicast and VPN rows those walks projected, including rejected rows.
         projections: usize,
+        /// Recovery-ledger bytes charged when the pass returns.
+        proof_bytes: usize,
+        /// The ledger's high-water mark.
+        proof_peak_bytes: usize,
         /// Whether this RIB build contains the test-only checkpoint tally.
         checkpoint_tally_compiled: bool,
+    },
+    /// After the selected pass, a resync tick is about to run one dirty receiver's slice.
+    ResyncSliceStarted {
+        /// Whether that receiver's outbound queue has a free slot.
+        writable: bool,
+    },
+    /// After the selected pass: a resync slice has returned, or an update is about to dispatch.
+    Progress {
+        /// Peers still dirty.
+        dirty_peers: usize,
+        /// Recovery-ledger bytes charged.
+        proof_bytes: usize,
     },
     /// The actor has entered the healthy source's primary UPDATE handler.
     ProbeDispatched,
@@ -63,8 +116,9 @@ pub(super) struct GroupCaptureObserver {
 }
 
 impl RibManager {
-    /// Observe the first ordinary pass touching `trigger_prefix` and primary
-    /// route update dispatches for `probe_peer` after the pass starts.
+    /// Observe the first ordinary pass touching `trigger_prefix`, then every
+    /// resync slice and dispatched update, with primary route update dispatches
+    /// for `probe_peer` marked.
     pub fn bench_observe_group_capture(
         &mut self,
         trigger_prefix: Prefix,
@@ -77,34 +131,56 @@ impl RibManager {
             callback: Arc::new(observer),
         });
     }
-}
 
-impl GroupCaptureObserver {
-    pub(super) fn on_dispatch(&self, update: &RibUpdate) {
-        if self.trigger.is_some() {
-            return;
-        }
-        let peer = match update {
-            RibUpdate::RoutesReceived { peer, .. } => *peer,
-            RibUpdate::WireRoutesReceived(batch) => batch.peer,
-            _ => return,
-        };
-        if peer == self.probe {
-            (self.callback)(GroupCaptureBenchEvent::ProbeDispatched);
+    pub(super) fn bench_group_capture_resync_slice(&self, peer: PeerId) {
+        if let Some(observer) = &self.group_capture_observer
+            && observer.trigger.is_none()
+        {
+            (observer.callback)(GroupCaptureBenchEvent::ResyncSliceStarted {
+                writable: !self.outbound_channel_gone(peer) && !self.outbound_channel_full(peer),
+            });
         }
     }
 
+    pub(super) fn bench_group_capture_progress(&self, dispatching: Option<&RibUpdate>) {
+        let Some(observer) = &self.group_capture_observer else {
+            return;
+        };
+        if observer.trigger.is_some() {
+            return;
+        }
+        (observer.callback)(GroupCaptureBenchEvent::Progress {
+            dirty_peers: self.dirty_peers.len(),
+            proof_bytes: self.pending_group_admitted.bytes(),
+        });
+        let peer = match dispatching {
+            Some(RibUpdate::RoutesReceived { peer, .. }) => *peer,
+            Some(RibUpdate::WireRoutesReceived(batch)) => batch.peer,
+            _ => return,
+        };
+        if peer == observer.probe {
+            (observer.callback)(GroupCaptureBenchEvent::ProbeDispatched);
+        }
+    }
+}
+
+impl GroupCaptureObserver {
     pub(super) fn begin(
         &mut self,
         changed: &HashSet<Prefix>,
         affected: &HashSet<Prefix>,
+        proof_bytes: usize,
     ) -> Option<GroupCaptureCallback> {
         let trigger = self.trigger?;
         if !changed.contains(&trigger) && !affected.contains(&trigger) {
             return None;
         }
         self.trigger = None;
-        (self.callback)(GroupCaptureBenchEvent::PassStarted);
+        (self.callback)(GroupCaptureBenchEvent::PassStarted {
+            proof_bytes,
+            member_limit_bytes: super::update_groups::admitted_recovery::PEER_LIMIT_BYTES,
+            daemon_limit_bytes: super::update_groups::admitted_recovery::DAEMON_LIMIT_BYTES,
+        });
         Some(Arc::clone(&self.callback))
     }
 }
@@ -135,18 +211,22 @@ impl GroupCapturePhase {
         Self
     }
 
-    pub(super) fn finish(self) -> impl FnOnce(usize) {
+    /// The returned closure takes the dirty peer count and the ledger's
+    /// current and peak bytes when the pass returns.
+    pub(super) fn finish(self) -> impl FnOnce(usize, usize, usize) {
         let (callback, work) = GROUP_CAPTURE
             .with_borrow_mut(Option::take)
             .expect("active capture");
         drop(self);
         (callback)(GroupCaptureBenchEvent::CaptureCompleted);
-        move |dirty_peers| {
+        move |dirty_peers, proof_bytes, proof_peak_bytes| {
             (callback)(GroupCaptureBenchEvent::PassCompleted {
                 dirty_peers,
                 fresh_captures: work.fresh_captures,
                 walks: work.walks,
                 projections: work.projections,
+                proof_bytes,
+                proof_peak_bytes,
                 checkpoint_tally_compiled: cfg!(test),
             });
         }
@@ -159,6 +239,7 @@ impl Drop for GroupCapturePhase {
     }
 }
 
+/// Called at entry to each full-OLD walk; fires the capture handshake once.
 pub(super) fn grouped_walk_observed() -> bool {
     GROUP_CAPTURE.with_borrow_mut(|active| {
         let Some((callback, work)) = active else {
@@ -172,19 +253,76 @@ pub(super) fn grouped_walk_observed() -> bool {
     })
 }
 
-pub(super) fn record_grouped_walk(projections: usize, completed: bool) {
+/// A walk that returned `Ok` projected every occupied row once, so its caller
+/// passes the table's row count: nothing is counted per row.
+pub(super) fn record_completed_grouped_walk(rows: usize) {
     GROUP_CAPTURE.with_borrow_mut(|active| {
         if let Some((_, work)) = active {
-            work.walks += usize::from(completed);
-            work.projections += projections;
+            work.walks += 1;
+            work.projections += rows;
         }
     });
 }
 
-pub(super) fn record_sealed_group_capture() {
-    GROUP_CAPTURE.with_borrow_mut(|active| {
-        if let Some((_, work)) = active {
+/// One grouped member's capture between its first walk and its seal.
+pub(super) struct GroupCaptureDraft {
+    work: (usize, usize),
+    hint: Option<super::update_groups::admitted_recovery::SnapshotHandle>,
+    slots: usize,
+}
+
+impl GroupCaptureDraft {
+    pub(super) fn begin(
+        hint: Option<super::update_groups::admitted_recovery::SnapshotHandle>,
+        slots: usize,
+    ) -> Self {
+        let work = GROUP_CAPTURE.with_borrow(|active| {
+            active
+                .as_ref()
+                .map_or((0, 0), |(_, work)| (work.walks, work.projections))
+        });
+        Self { work, hint, slots }
+    }
+
+    pub(super) fn sealed(
+        self,
+        outcome: super::update_groups::admitted_recovery::FullCaptureOutcome,
+        member_charge_bytes: usize,
+        daemon_bytes: usize,
+    ) {
+        use super::update_groups::admitted_recovery::FullCaptureStrategy;
+        GROUP_CAPTURE.with_borrow_mut(|active| {
+            let Some((callback, work)) = active else {
+                return;
+            };
             work.fresh_captures += 1;
+            callback(GroupCaptureBenchEvent::ProofSealed {
+                strategy: match outcome.strategy {
+                    FullCaptureStrategy::Indexed => "indexed",
+                    FullCaptureStrategy::Flat => "flat",
+                },
+                pool_reused: outcome.handle.is_some() && outcome.handle == self.hint,
+                keys: outcome.keys,
+                slots: self.slots,
+                walks: work.walks - self.work.0,
+                projections: work.projections - self.work.1,
+                member_charge_bytes,
+                daemon_bytes,
+            });
+        });
+    }
+}
+
+pub(super) fn record_group_capture_refusal(
+    error: super::update_groups::admitted_recovery::Failure,
+) {
+    GROUP_CAPTURE.with_borrow(|active| {
+        if let Some((callback, _)) = active {
+            callback(GroupCaptureBenchEvent::ProofRefused {
+                cause: error.cause.as_str(),
+                attempted_member_bytes: error.attempted_peer_bytes,
+                attempted_daemon_bytes: error.attempted_daemon_bytes,
+            });
         }
     });
 }

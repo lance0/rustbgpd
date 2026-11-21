@@ -23,6 +23,11 @@ use crate::grouped_old_wire::{GroupedWire, Phase};
 const REMOTE_AS: u32 = 65_001;
 const FAMILY: (Afi, Safi) = (Afi::Ipv4, Safi::Unicast);
 const SETUP_TIMEOUT: Duration = Duration::from_secs(60);
+/// Keepalives go out every 60 s on both sides. Neither side's timers share a
+/// thread with the RIB actor, so the length of an actor turn does not reach
+/// them; the hold time only has to outlast a scheduling gap on the 12-worker
+/// session runtime, which the receipt records.
+pub(crate) const HOLD_TIME_SECS: u16 = 180;
 // The fence can be behind a full seed at 700 clients. This is a hang guard only.
 const FENCE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
@@ -174,7 +179,7 @@ impl Client {
         let address = listener.local_addr()?;
         let mut config = crate::transport_config(address);
         config.peer.remote_asn = REMOTE_AS;
-        config.peer.hold_time = 180;
+        config.peer.hold_time = HOLD_TIME_SECS;
         config.peer.send_hold_time = 0;
         config.route_server_client = true;
         config.route_reflector_client = false;

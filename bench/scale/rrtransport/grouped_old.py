@@ -19,6 +19,7 @@ SHAPES = {**SMOKES, "150x37000": (150, 37_000), "700x400000": (700, 400_000)}
 LIMIT_BYTES = 64 << 30
 COMPILERS = {"cargo", "rustc", "rustdoc", "clippy-driver"}
 SAMPLE_SECONDS = 0.25
+PHASES = ("setup", "refusal", "dirty", "recovery", "settled")
 
 
 def require(condition, message):
@@ -37,7 +38,8 @@ def memory(scope):
     return values
 
 
-def compiler_sample(watch):
+def compiler_sample(watch, measured):
+    """A compiler stops a measured run. A correctness smoke only records it."""
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit():
             continue
@@ -48,14 +50,18 @@ def compiler_sample(watch):
                 continue
             raise
         if name in COMPILERS:
-            watch["first_compiler"] = f"{entry.name} {name}"
-            raise ValueError(f"concurrent compiler: {entry.name} {name}")
+            watch["observed"] += 1
+            watch["first_compiler"] = watch["first_compiler"] or f"{entry.name} {name}"
+            if measured:
+                raise ValueError(f"concurrent compiler: {entry.name} {name}")
+            break
     watch["samples"] += 1
 
 
 def run(binary, directory, shape, unit):
     peers, rows = SHAPES[shape]
-    watch = {"samples": 0, "first_compiler": None}
+    measured = shape not in SMOKES
+    watch = {"samples": 0, "observed": 0, "first_compiler": None}
     host = {"shape": shape, "unit": unit, "compiler_watch": watch, "exit": None}
     child = None
     try:
@@ -68,21 +74,21 @@ def run(binary, directory, shape, unit):
         require(timeout > 0, "timeout must be positive")
         deadline = time.monotonic() + timeout
         try:
-            compiler_sample(watch)
+            compiler_sample(watch, measured)
             with (directory / "cell.log").open("w") as log:
                 child = subprocess.Popen(
                     [binary, "grouped-old-capture", directory, "--peers", str(peers), "--rows", str(rows)],
                     stdout=log, stderr=subprocess.STDOUT,
                 )
                 while child.poll() is None:
-                    compiler_sample(watch)
+                    compiler_sample(watch, measured)
                     remaining = deadline - time.monotonic()
                     require(remaining > 0, f"cell exceeded its {timeout}s deadline")
                     try:
                         child.wait(timeout=min(SAMPLE_SECONDS, remaining))
                     except subprocess.TimeoutExpired:
                         continue
-            compiler_sample(watch)
+            compiler_sample(watch, measured)
         finally:
             if child is not None:
                 if child.poll() is None:
@@ -102,8 +108,13 @@ def checked_host(host, shape):
     if host.get("error"):
         raise ValueError(host["error"])
     watch = host["compiler_watch"]
-    require(type(watch["samples"]) is int and watch["samples"] >= 2 and watch["first_compiler"] is None,
-            "missing compiler coverage or concurrent compiler")
+    require(type(watch["samples"]) is int and watch["samples"] >= 2 and type(watch["observed"]) is int
+            and 0 <= watch["observed"] <= watch["samples"]
+            and (watch["observed"] == 0) == (watch["first_compiler"] is None),
+            "missing or inconsistent compiler coverage")
+    # Only a measured shape is invalidated by a compiler. A smoke grades wire
+    # correctness and counts, which a busy host does not change.
+    require(shape in SMOKES or watch["observed"] == 0, f"concurrent compiler: {watch['first_compiler']}")
     for point in ("memory_before", "memory_after"):
         values = host[point]
         require(all(type(values[k]) is int and values[k] >= 0 for k in (
@@ -126,16 +137,18 @@ def count(mapping, key):
 
 def wire_failure(raw, peers, rows):
     transport = raw["transport"]
+    # A reset is the daemon's unless the runtime carrying the sessions and
+    # their peers went unscheduled for a keepalive interval (a third of the
+    # hold time): then the harness could not keep its own side of the timer.
+    hold = count(raw, "hold_time_secs")
+    stall = count(raw, "session_runtime_max_stall_ns")
+    require(hold > 0 and stall * 3 < hold * 1_000_000_000,
+            f"session runtime stalled {stall / 1e9:.1f} s against a {hold} s hold time")
     if count(raw, "reset_count") or count(transport, "resets"):
         return "transport reset"
-    if raw["policy_denied_winner_absent_on_receivers"] is not True:
-        return "policy-denied route appeared on a receiver"
     for key in ("sessions", "established", "seed_fences", "final_fences"):
         require(count(transport, key) == peers, f"incomplete transport {key}")
-    for count_source, key in (
-        (raw, "exact_receivers_before_trigger"), (raw, "exact_receivers_after_recovery"),
-        (raw, "wire_exact_receivers"), (transport, "wire_exact_receivers"),
-    ):
+    for count_source, key in ((raw, "wire_exact_receivers"), (transport, "wire_exact_receivers")):
         exact = count(count_source, key)
         require(exact <= peers, "exactness count exceeds receiver count")
         if exact != peers:
@@ -151,12 +164,84 @@ def wire_failure(raw, peers, rows):
                 and member["peer"] == str(base + session - 1), "wrong receiver or session identity")
         sessions.add(session)
         wire = member["wire"]
-        if not (count(wire, "present") == rows + 1 and count(wire, "withdrawals") == 1
-                and count(wire, "empty_initial_eors") == 1 and count(wire, "announcements") >= rows + 4
+        if not (count(wire, "present") == rows + 2 and count(wire, "withdrawals") == 1
+                and count(wire, "empty_initial_eors") == 1
                 and count(wire, "replacement_version") == 3 and wire["intermediate_fill_seen"] is True
-                and wire["trigger_present"] is True and wire["probe_present"] is True):
+                and wire["trigger_present"] is True and wire["probe_present"] is True
+                and wire["recovery_probe_present"] is True):
             return f"{member['peer']}: incomplete or incorrect decoded wire inventory"
     return None
+
+
+def announcements(raw, rows):
+    """Exact: the seed once, the two fills, one whole-table replay (a resync is
+    one envelope and the dirty flag clears only when it is admitted), and the
+    recovery probe once, inside that replay or as an ordinary send after it."""
+    expected = 2 * rows + 4
+    for member in raw["transport"]["receivers"]:
+        seen = count(member["wire"], "announcements")
+        require(seen == expected,
+                f"{member['peer']}: {seen} announcements, expected exactly {expected} "
+                "(seed, two fills, one recovery replay, recovery probe)")
+    return expected
+
+
+def proofs(raw, peers, rows):
+    """Strategy and ledger charge of each capture; walks and rows are exact."""
+    ledger = raw["proof_ledger"]
+    before, after, peak, member_limit, daemon_limit = (count(ledger, key) for key in (
+        "before_bytes", "after_bytes", "peak_bytes", "member_limit_bytes", "daemon_limit_bytes"))
+    require(0 < member_limit and before < after <= peak <= daemon_limit, "inconsistent recovery ledger charge")
+    entries = raw["proofs"]
+    require(isinstance(entries, list) and len(entries) == peers,
+            f"{len(entries)} capture records for {peers} fresh captures")
+    kinds = {}
+    for proof in entries:
+        kind = (proof["strategy"], proof["pool"])
+        require(kind in (("indexed", "built"), ("indexed", "reused"), ("flat", "none")),
+                f"unknown proof strategy {kind}")
+        kinds[kind] = kinds.get(kind, 0) + 1
+        # Both strategies size the proof in one walk and populate it in a second.
+        require(count(proof, "walks") == 2 and count(proof, "projections") == 2 * rows
+                and count(proof, "keys") == rows,
+                f"capture made {proof['walks']} walks, {proof['projections']} projections and {proof['keys']} keys; "
+                f"expected 2, {2 * rows} and {rows}")
+        # Vacant slab slots depend on the table's reuse order, not on this fixture.
+        require(count(proof, "slots") >= rows, "fewer slab slots than occupied rows")
+        require(0 < count(proof, "member_charge_bytes") <= member_limit
+                and before < count(proof, "daemon_bytes") <= peak, "capture charge outside the ledger's record")
+    largest = max(proof["member_charge_bytes"] for proof in entries)
+    split = ", ".join(f"{n} {strategy}/{pool}" for (strategy, pool), n in sorted(kinds.items()))
+    return (f"proofs {split}; largest member charge {largest} of {member_limit} bytes, "
+            f"daemon charge {after} (peak {peak}) of {daemon_limit} bytes")
+
+
+def polls(raw):
+    """Every poll carries one phase label; the whole-run maximum names its own."""
+    phases = raw["phases"]
+    require(isinstance(phases, dict) and set(phases) == set(PHASES), "missing or unknown poll phases")
+    longest = {name: count(phases[name], "longest_poll_ns") for name in PHASES}
+    counts = {name: count(phases[name], "polls") for name in PHASES}
+    require(all((counts[name] == 0) == (longest[name] == 0) for name in PHASES), "phase polls disagree with their longest")
+    # One trigger pass in one poll; later phases take as many polls and resync
+    # slices as the harness's draining and the 10 ms resync tick interleave to.
+    require(counts["refusal"] == 1 and longest["refusal"] == raw["capture_turn_poll_ns"],
+            "refusal phase is not the single capture poll")
+    require(counts["setup"] > 0 and counts["dirty"] > 0 and counts["recovery"] > 0, "a phase has no physical RIB poll")
+    require(count(phases["dirty"], "refused_resync_slices") > 0, "no resync retry against a full receiver in the dirty period")
+    require(count(phases["recovery"], "resync_slices") > 0, "no resync slice in recovery")
+    require(count(raw, "actor_polls") == sum(counts.values()), "phase polls do not sum to the actor's polls")
+    whole, where, touched = count(raw, "longest_actor_poll_ns"), raw["longest_actor_poll_phase"], raw["longest_actor_poll_touched"]
+    require(whole == max(longest.values()) and where in PHASES and longest[where] == whole,
+            "whole-run longest poll disagrees with its phase")
+    require(isinstance(touched, list) and where in touched and set(touched) <= set(PHASES), "invalid phases for the longest poll")
+    retirement = raw["retirement"]
+    retired = retirement["longest_poll_ns"]
+    # Every member recovers, so the last one releases the shared proof.
+    require(retirement["reached"] is True and type(retired) is int and 0 < retired <= whole,
+            "last-owner retirement of the proof was not observed")
+    return (", ".join(f"{name} {longest[name] / 1e6:.3f}" for name in PHASES)
+            + f" ms; whole run {whole / 1e6:.3f} ms in {where}; retirement within {retired / 1e6:.3f} ms")
 
 
 def grade(raw, host, shape, peak):
@@ -167,6 +252,10 @@ def grade(raw, host, shape, peak):
         require(isinstance(raw["wire_failure"], str) and raw["wire_failure"].strip()
                 and type(host["exit"]) is int and host["exit"] != 0, "unconfirmed wire failure")
         return "FAIL", raw["wire_failure"]
+    if "harness_invalid" in raw:
+        require(isinstance(raw["harness_invalid"], str) and raw["harness_invalid"].strip()
+                and type(host["exit"]) is int and host["exit"] != 0, "unconfirmed harness refusal")
+        raise ValueError(raw["harness_invalid"])
     require(raw["debug_assertions"] is False and raw["checkpoint_tally_compiled_in"] is False,
             "need an optimized binary with the checkpoint tally compiled out")
     require(raw["probe_winner_boundary"] == "first_matching_query_reply", "unknown winner observation boundary")
@@ -180,42 +269,57 @@ def grade(raw, host, shape, peak):
         require(value == expected, f"{key}: observed {value}, expected {expected}")
     walks = count(raw, "walks")
     projections = count(raw, "projections")
-    require(walks >= peers, f"{walks} completed walks for {peers} fresh captures")
+    require(walks == 2 * peers, f"{walks} completed walks for {peers} fresh captures, expected exactly {2 * peers}")
+    require(count(raw, "group_capture_walks") == walks,
+            f"{walks - raw['group_capture_walks']} walks outside a sealed grouped capture")
     require(projections == walks * rows,
             f"{projections} projections disagree with {walks} completed walks of {rows} occupied rows")
+    proof_summary = proofs(raw, peers, rows)
+    sent = announcements(raw, rows)
     ns = raw["clocks_ns"]
     ts = {k: count(ns, k) for k in (
         "trigger_admission", "poll_start", "pass_start", "capture_start", "probe_admission",
         "capture_end", "pass_end", "poll_end", "probe_dispatch", "probe_winner",
+        "recovery_start", "recovery_probe_admission", "recovery_probe_dispatch",
+        "recovery_probe_winner", "recovery_end",
     )}
     require(ts["trigger_admission"] <= ts["pass_start"], "trigger admitted after capture pass start")
     require(ts["poll_start"] <= ts["pass_start"] <= ts["capture_start"] <= ts["probe_admission"]
             < ts["capture_end"] <= ts["pass_end"] <= ts["poll_end"],
             "missing probe admission during capture or capture outside physical poll")
-    require(raw["probe_overlapped_capture"] is True and ts["pass_end"] <= ts["probe_dispatch"] <= ts["probe_winner"],
-            "probe service outside expected order")
+    require(ts["pass_end"] <= ts["probe_dispatch"] <= ts["probe_winner"], "probe service outside expected order")
+    require(ts["probe_winner"] <= ts["recovery_start"] <= ts["recovery_probe_admission"]
+            <= ts["recovery_probe_dispatch"] <= ts["recovery_probe_winner"]
+            and ts["recovery_start"] <= ts["recovery_end"], "recovery probe outside recovery")
+    require(raw["recovery_probe_slice_recovered"] is True,
+            "the recovery probe's resync slice did not recover a receiver")
     for key, start, end in (
         ("capture_turn_poll_ns", "poll_start", "poll_end"),
         ("capture_pass_ns", "pass_start", "pass_end"),
         ("capture_loop_ns", "capture_start", "capture_end"),
         ("probe_admission_to_dispatch_ns", "probe_admission", "probe_dispatch"),
         ("probe_admission_to_winner_ns", "probe_admission", "probe_winner"),
+        ("recovery_probe_admission_to_dispatch_ns", "recovery_probe_admission", "recovery_probe_dispatch"),
+        ("recovery_probe_admission_to_winner_ns", "recovery_probe_admission", "recovery_probe_winner"),
     ):
         elapsed = count(raw, key)
         require(elapsed > 0 and elapsed == ts[end] - ts[start], f"{key} inconsistent with timestamps")
     require(count(raw, "actor_polls") > 0, "no physical RIB polls observed")
-    longest = count(raw, "longest_actor_poll_ns")
-    require(longest >= raw["capture_turn_poll_ns"], "longest actor poll shorter than capture poll")
+    poll_summary = polls(raw)
     require(type(host["exit"]) is int and host["exit"] == 0, f'unexplained workload exit {host["exit"]}')
     mode = "correctness smoke" if shape in SMOKES else "report-only measurement"
+    sighting = host["compiler_watch"]["first_compiler"]
     return "PASS", (
         f"{mode}, {peers} peers × {rows} rows, {raw['fresh_captures']} fresh captures, "
-        f"{raw['walks']} walks, {raw['projections']} projections; "
-        f"longest actor poll {longest/1e6:.3f} ms, capture poll {raw['capture_turn_poll_ns']/1e6:.3f} ms, "
-        f"pass {raw['capture_pass_ns']/1e6:.3f} ms, capture loop {raw['capture_loop_ns']/1e6:.3f} ms, "
-        f"unrelated admission to dispatch {raw['probe_admission_to_dispatch_ns']/1e6:.3f} ms "
-        f"and to first matching winner query reply {raw['probe_admission_to_winner_ns']/1e6:.3f} ms; "
+        f"{raw['walks']} walks, {raw['projections']} projections, {sent} announcements per receiver; "
+        f"{proof_summary}; longest poll by phase: {poll_summary}; "
+        f"capture pass {raw['capture_pass_ns']/1e6:.3f} ms, capture loop {raw['capture_loop_ns']/1e6:.3f} ms; "
+        f"unrelated admission to dispatch {raw['probe_admission_to_dispatch_ns']/1e6:.3f} ms in the capture walk "
+        f"and {raw['recovery_probe_admission_to_dispatch_ns']/1e6:.3f} ms in recovery "
+        f"(to first matching winner query reply {raw['probe_admission_to_winner_ns']/1e6:.3f} "
+        f"and {raw['recovery_probe_admission_to_winner_ns']/1e6:.3f} ms); "
         f"cgroup memory.peak {peak} bytes (includes harness), swap 0"
+        + (f"; compiler seen during the smoke ({sighting}), timings not usable" if sighting else "")
     )
 
 

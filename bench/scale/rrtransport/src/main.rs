@@ -593,10 +593,8 @@ fn main() -> Result<()> {
             let rows = rows.parse().context("parse grouped table rows")?;
             ensure!((1..=700).contains(&peers), "grouped clients must be in 1..=700");
             ensure!((3..=400_000).contains(&rows), "grouped rows must be in 3..=400000");
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?
-                .block_on(grouped_old::run(Path::new(output), peers, rows))
+            // Sessions, peers and harness; the cell gives the RIB actor its own thread.
+            rr1000_support::runtime(12)?.block_on(grouped_old::run(Path::new(output), peers, rows))
         }
         [mode, rest @ ..] if mode.starts_with("credit-") => credit_main(mode, rest),
         _ => bail!(

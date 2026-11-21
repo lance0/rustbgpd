@@ -1,12 +1,16 @@
-//! First-refusal capture on established grouped IPv4 route-server clients.
+//! First-refusal capture on established grouped IPv4 route-server clients,
+//! followed through the dirty period, recovery and last-owner retirement.
 //! Each RIB sender has exactly two real slots. The fixture gates forwarding
 //! to real transport writers only after independently verifying the seed.
+//! The RIB actor has its own thread; sessions, peers and harness share a
+//! multi-thread runtime, so a long actor turn does not stop their timers.
 mod clocks;
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{ensure, Context, Result};
 use rustbgpd_rib::route::{Route, RouteOrigin};
@@ -17,13 +21,17 @@ use rustbgpd_wire::{AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute, Pr
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::grouped_old_sessions::SessionFleet;
+use crate::grouped_old_sessions::{SessionFleet, HOLD_TIME_SECS};
 use crate::grouped_old_wire::{GroupedWire, Phase};
 
 const SOURCE: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 1);
 const PROBE_SOURCE: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 2);
 const TRIGGER: Ipv4Addr = Ipv4Addr::new(203, 0, 113, 253);
 const PROBE: Ipv4Addr = Ipv4Addr::new(203, 0, 113, 254);
+const RECOVERY_PROBE: Ipv4Addr = Ipv4Addr::new(203, 0, 113, 252);
+// The resync tick retries dirty peers once a second while none can progress.
+const DIRTY_RETRY_TIMEOUT: Duration = Duration::from_secs(30);
+const STALL_TICK: Duration = Duration::from_millis(100);
 const DENIED: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 199);
 const CHUNK: usize = 1024;
 
@@ -175,6 +183,24 @@ fn check(clients: &[Client], phase: Phase) -> Result<()> {
     Ok(())
 }
 
+/// Longest wait, beyond its 100 ms period, between two wakes of a ticker on
+/// the runtime that carries the sessions and their peers.
+fn stall_watch() -> Arc<AtomicU64> {
+    let longest = Arc::new(AtomicU64::new(0));
+    let seen = Arc::clone(&longest);
+    tokio::spawn(async move {
+        let mut last = Instant::now();
+        loop {
+            tokio::time::sleep(STALL_TICK).await;
+            let now = Instant::now();
+            let late = (now - last).saturating_sub(STALL_TICK);
+            seen.fetch_max(u64::try_from(late.as_nanos()).unwrap(), Ordering::Relaxed);
+            last = now;
+        }
+    });
+    longest
+}
+
 #[derive(Debug)]
 pub(crate) struct WireFailure;
 
@@ -187,28 +213,48 @@ impl std::fmt::Display for WireFailure {
 pub async fn run(output: &Path, peers: usize, rows: usize) -> Result<()> {
     std::fs::create_dir_all(output)?;
     let path = output.join("grouped-old.json");
-    let receipt = match cell(peers, rows).await {
+    let stall = stall_watch();
+    let receipt = match cell(peers, rows, &stall).await {
         Ok(receipt) => receipt,
-        Err(error) if error.is::<WireFailure>() => {
+        Err(error) => {
+            // Only a receiver correctness failure is a verdict on the daemon
+            // (FAIL); anything else leaves the run unmeasured (INVALID), with
+            // its reason kept. A session reset is the daemon's unless the
+            // runtime that carries the sessions went unscheduled for a
+            // keepalive interval: then this harness could not keep its side
+            // of the hold timer.
+            let stalled = Duration::from_nanos(stall.load(Ordering::Relaxed));
+            let keepalive = Duration::from_secs(u64::from(HOLD_TIME_SECS / 3));
+            let reason = if stalled >= keepalive {
+                Some(format!(
+                    "session runtime stalled {:.1} s against a {HOLD_TIME_SECS} s hold time: {error:#}",
+                    stalled.as_secs_f64()
+                ))
+            } else if error.is::<WireFailure>() {
+                None
+            } else {
+                Some(format!("{error:#}"))
+            };
+            let key = if reason.is_some() {
+                "harness_invalid"
+            } else {
+                "wire_failure"
+            };
             let evidence = json!({"cell":"grouped-old-capture","peers":peers,"rows":rows,
-                "wire_failure":format!("{error:#}")});
+                key: reason.unwrap_or_else(|| format!("{error:#}"))});
             std::fs::write(path, serde_json::to_vec_pretty(&evidence)?)?;
             return Err(error);
         }
-        Err(error) => return Err(error),
     };
     std::fs::write(path, serde_json::to_vec_pretty(&receipt)?)?;
     Ok(())
 }
 
-async fn cell(peers: usize, rows: usize) -> Result<Value> {
-    ensure!(
-        matches!(
-            tokio::runtime::Handle::current().runtime_flavor(),
-            tokio::runtime::RuntimeFlavor::CurrentThread
-        ),
-        "grouped capture requires a current-thread actor runtime"
-    );
+#[expect(
+    clippy::too_many_lines,
+    reason = "one ordered scenario: seed, fill, refusal, dirty period, recovery"
+)]
+async fn cell(peers: usize, rows: usize, stall: &AtomicU64) -> Result<Value> {
     ensure!(
         (1..=65_535).contains(&peers) && (2..=0x0100_0000).contains(&rows),
         "unsupported grouped capture shape"
@@ -224,12 +270,18 @@ async fn cell(peers: usize, rows: usize) -> Result<Value> {
     let (_qtx, qrx) = mpsc::channel(16);
     let manager = RibManager::new(rx, qrx, None, None, BgpMetrics::new());
     let clocks = clocks::Clocks::default();
-    let probe = update(
-        PROBE_SOURCE,
-        vec![row(PROBE, PROBE_SOURCE, &attributes(PROBE_SOURCE, 4))],
-        vec![],
-    );
-    let actor = clocks.observe(manager, tx.clone().reserve_owned().await?, probe);
+    let probe = |ip, version| {
+        update(
+            PROBE_SOURCE,
+            vec![row(ip, PROBE_SOURCE, &attributes(PROBE_SOURCE, version))],
+            vec![],
+        )
+    };
+    let actor = clocks.observe(
+        manager,
+        (tx.clone().reserve_owned().await?, probe(PROBE, 4)),
+        (tx.clone().reserve_owned().await?, probe(RECOVERY_PROBE, 5)),
+    )?;
     let mut sources = Vec::new();
     for (ip, asn) in [(SOURCE, 65_000), (PROBE_SOURCE, 65_002)] {
         let (sender, rx) = mpsc::channel(8);
@@ -305,21 +357,39 @@ async fn cell(peers: usize, rows: usize) -> Result<Value> {
         vec![row(TRIGGER, SOURCE, &attributes(SOURCE, 3))],
         vec![(host(seed_ip(0)), 0)],
     );
-    tx.try_send(trigger)?;
+    // The actor runs on its own thread and may enter the pass at once.
     clocks.trigger();
+    tx.try_send(trigger)?;
     // This scalar FIFO fence closes the trigger window before the probe.
     // The pass observer samples the dirty count at completion inside the
     // actor; no receiver scan is interposed before the probe dispatches.
     barrier(&tx).await?;
     let refused = clocks.first_refused()?;
+    let refusals = clocks.refusals();
+    if let Some(first) = refusals.first() {
+        anyhow::bail!(
+            "{} of {peers} captures refused by the recovery ledger; first: {first}",
+            refusals.len()
+        );
+    }
     ensure!(
         refused == peers,
         "first refusal left {refused}/{peers} dirty"
     );
     verify_winner(&tx, PROBE, PROBE_SOURCE).await?;
-    clocks.winner();
-    // All fixture receivers share this thread with the actor: take both
-    // preexisting envelopes before an await permits any recovery send.
+    clocks.winner(0);
+    // Hold the dirty period until the actor's own retry has run against a
+    // still-full receiver, so that work is in the dirty phase's polls.
+    let deadline = tokio::time::Instant::now() + DIRTY_RETRY_TIMEOUT;
+    while clocks.refused_slices() == 0 {
+        ensure!(
+            tokio::time::Instant::now() < deadline,
+            "no resync tick retried a full receiver during the dirty period"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // Each queue is FIFO: both preexisting envelopes precede any recovery
+    // send the actor makes once the first slot is free.
     let mut filled = Vec::with_capacity(peers);
     for client in &mut clients {
         let a = client.rx.try_recv()?;
@@ -333,9 +403,18 @@ async fn cell(peers: usize, rows: usize) -> Result<Value> {
         client.session.send(a).await?;
         client.session.send(b).await?;
     }
+    let mut recovery_winner = false;
     loop {
         forward(&mut clients).await?;
-        if dirty(&tx).await? == 0 {
+        // The query is behind the probe on the primary FIFO.
+        if !recovery_winner && clocks.recovery_probe_admitted() {
+            verify_winner(&tx, RECOVERY_PROBE, PROBE_SOURCE).await?;
+            clocks.winner(1);
+            recovery_winner = true;
+        }
+        if recovery_winner && dirty(&tx).await? == 0 {
+            // The barrier is behind the probe's own pass and its sends.
+            barrier(&tx).await?;
             forward(&mut clients).await?;
             break;
         }
@@ -348,9 +427,9 @@ async fn cell(peers: usize, rows: usize) -> Result<Value> {
     let fields = json!({
         "cell":"grouped-old-capture","peers":peers,"rows":rows,"established_group_members":peers,
         "full_receivers_before_trigger":full,"first_refused_receivers":refused,
-        "exact_receivers_before_trigger":peers,"exact_receivers_after_recovery":peers,
         "reset_count":transport["resets"],"wire_exact_receivers":transport["wire_exact_receivers"],"transport":transport,
-        "policy_denied_winner_absent_on_receivers":true
+        "hold_time_secs":HOLD_TIME_SECS,
+        "session_runtime_max_stall_ns":stall.load(Ordering::Relaxed)
     });
     receipt
         .as_object_mut()
@@ -358,6 +437,8 @@ async fn cell(peers: usize, rows: usize) -> Result<Value> {
         .extend(fields.as_object().unwrap().clone());
     drop(tx);
     drop(sources);
-    actor.await?;
+    actor
+        .await
+        .context("RIB actor thread ended without returning")?;
     Ok(receipt)
 }

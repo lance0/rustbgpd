@@ -15,6 +15,7 @@ const SOURCE: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 1);
 const PROBE_SOURCE: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 2);
 const TRIGGER: Ipv4Addr = Ipv4Addr::new(203, 0, 113, 253);
 const PROBE: Ipv4Addr = Ipv4Addr::new(203, 0, 113, 254);
+const RECOVERY_PROBE: Ipv4Addr = Ipv4Addr::new(203, 0, 113, 252);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Phase {
@@ -74,6 +75,7 @@ pub(crate) struct GroupedWire {
     saw_fill: bool,
     trigger: bool,
     probe: bool,
+    recovery_probe: bool,
     eors: usize,
     announcements: u64,
     withdrawals: u64,
@@ -89,6 +91,7 @@ impl GroupedWire {
             saw_fill: false,
             trigger: false,
             probe: false,
+            recovery_probe: false,
             eors: 0,
             announcements: 0,
             withdrawals: 0,
@@ -104,6 +107,12 @@ impl GroupedWire {
         if p.addr == PROBE {
             ensure!(source == PROBE_SOURCE && tag == 4, "wrong probe payload");
             self.probe = true;
+        } else if p.addr == RECOVERY_PROBE {
+            ensure!(
+                source == PROBE_SOURCE && tag == 5,
+                "wrong recovery probe payload"
+            );
+            self.recovery_probe = true;
         } else if p.addr == TRIGGER {
             ensure!(source == SOURCE && tag == 3, "wrong trigger payload");
             self.trigger = true;
@@ -202,7 +211,7 @@ impl GroupedWire {
                 family == (Afi::Ipv4, Safi::Unicast),
                 "foreign EoR {family:?}"
             );
-            self.eors += 1;
+            self.end_of_rib()?;
         }
         Ok(())
     }
@@ -219,8 +228,7 @@ impl GroupedWire {
             && update.path_attributes.is_empty()
             && update.nlri.is_empty()
         {
-            self.eors += 1;
-            return Ok(());
+            return self.end_of_rib();
         }
         let parsed = update.parse(true, false, &[])?;
         for row in &parsed.withdrawn {
@@ -238,6 +246,16 @@ impl GroupedWire {
                 self.announce(row.prefix, source, tag)?;
             }
         }
+        Ok(())
+    }
+
+    fn end_of_rib(&mut self) -> Result<()> {
+        self.eors += 1;
+        ensure!(
+            self.eors == 1,
+            "duplicated End-of-RIB: marker {} on a session that sends one",
+            self.eors
+        );
         Ok(())
     }
 
@@ -265,17 +283,21 @@ impl GroupedWire {
         ensure!(
             self.trigger == final_table
                 && self.probe == final_table
+                && self.recovery_probe == final_table
                 && self.withdrawals == u64::from(final_table),
-            "{phase:?}: trigger {}, probe {}, withdrawals {}",
+            "{phase:?}: trigger {}, probe {}, recovery probe {}, withdrawals {}",
             self.trigger,
             self.probe,
+            self.recovery_probe,
             self.withdrawals
         );
         Ok(())
     }
 
     pub(crate) fn receipt(&self) -> Value {
-        json!({"present": self.seed_present + usize::from(self.trigger) + usize::from(self.probe),
+        json!({"present": self.seed_present + usize::from(self.trigger) + usize::from(self.probe)
+                + usize::from(self.recovery_probe),
+            "recovery_probe_present": self.recovery_probe,
             "announcements": self.announcements, "withdrawals": self.withdrawals, "empty_initial_eors": self.eors,
             "replacement_version": self.mutable_version, "intermediate_fill_seen": self.saw_fill,
             "trigger_present": self.trigger, "probe_present": self.probe})
@@ -328,6 +350,10 @@ mod tests {
             frame(keys, removed, SOURCE, 65_000, stage)
         };
         peer.apply_message(&send(&[], &[], 1)).unwrap();
+        let mut twice = GroupedWire::new(3);
+        twice.apply_message(&send(&[], &[], 1)).unwrap();
+        let duplicate = twice.apply_message(&send(&[], &[], 1)).unwrap_err();
+        assert!(duplicate.to_string().contains("duplicated End-of-RIB"));
         // Same number of announcements, different actual inventory.
         peer.apply_message(&send(&[keys[0], keys[1], keys[1]], &[], 1))
             .unwrap();
@@ -348,6 +374,11 @@ mod tests {
             .apply_message(&frame(&[PROBE], &[], SOURCE, 65_000, 4))
             .is_err());
         peer.apply_message(&frame(&[PROBE], &[], PROBE_SOURCE, 65_002, 4))
+            .unwrap();
+        assert!(peer
+            .apply_message(&frame(&[RECOVERY_PROBE], &[], PROBE_SOURCE, 65_002, 4))
+            .is_err());
+        peer.apply_message(&frame(&[RECOVERY_PROBE], &[], PROBE_SOURCE, 65_002, 5))
             .unwrap();
         assert!(peer.verify(Phase::Final).is_err(), "dropped withdrawal");
         assert!(

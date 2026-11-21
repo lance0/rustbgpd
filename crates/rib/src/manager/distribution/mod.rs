@@ -9452,9 +9452,10 @@ impl RibManager {
                 pass_kind,
                 DistributionPass::Ordinary | DistributionPass::Ingest
             ) {
+            let proof_bytes = self.pending_group_admitted.bytes();
             self.group_capture_observer
                 .as_mut()
-                .and_then(|observer| observer.begin(best_changed, all_affected))
+                .and_then(|observer| observer.begin(best_changed, all_affected, proof_bytes))
         } else {
             None
         };
@@ -12218,7 +12219,11 @@ impl RibManager {
         }
         #[cfg(feature = "bench-internals")]
         if let Some(done) = capture_pass_done {
-            done(self.dirty_peers.len());
+            done(
+                self.dirty_peers.len(),
+                self.pending_group_admitted.bytes(),
+                self.pending_group_admitted.peak_bytes(),
+            );
         }
         resync_built
     }

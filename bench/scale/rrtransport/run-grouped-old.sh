@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # run-grouped-old.sh BINARY NEW_OUTPUT_DIR smoke|smoke-chunked|150x37000|700x400000
-# Full shapes are report-only measurements. Both smokes exercise correctness.
+# Full shapes are report-only measurements: they need the shared host lock,
+# the quiet gate and a host with no compiler. Both smokes exercise correctness
+# only, so a compiler seen during one is recorded and does not stop it.
 set -euo pipefail
 if [[ $# != 3 || ! -x $1 ]]; then
     echo "usage: $0 BINARY NEW_OUTPUT_DIR smoke|smoke-chunked|150x37000|700x400000" >&2
