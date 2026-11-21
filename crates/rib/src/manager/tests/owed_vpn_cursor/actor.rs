@@ -235,3 +235,144 @@ async fn a_vpn_release_and_resume_through_the_actor_loop_keep_the_owed_index_exa
     assert!(lists_freed(&manager));
     assert!(manager.owing_peers.is_empty());
 }
+
+/// Through `run_actor` on a paused clock with the per-turn check: two
+/// receivers stop reading behind a `VPNv4` release cursor while `VPNv6`
+/// stays held; rotation evicts them by the cap; each then requests a
+/// ROUTE-REFRESH (one `VPNv4`, one the held `VPNv6`) while dirty; `VPNv6`
+/// is released; everyone reads. Exact tables, one End-of-RIB per AFI,
+/// one answer each, nothing owed or dirty.
+#[tokio::test(start_paused = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one actor scenario: hold, release apart, evict, refresh while dirty and resume in order"
+)]
+async fn a_vpn_eviction_then_refresh_while_dirty_through_the_actor_loop_settles_both_afis() {
+    const ROWS: u32 = 120;
+    let mut manager = deferral_manager(CREDIT, &[P4, P6]);
+    manager.actor_turn_check = Some(check);
+    let (tx, rx) = mpsc::channel(256);
+    manager.rx = rx;
+    let actor = tokio::spawn(manager.run_actor());
+    let mut sources = Vec::new();
+    for source in [SOURCE, SECOND] {
+        let (update, rx) = peer_up(peer_v4(source), 0, 4096, &[V4]);
+        tx.send(update).await.unwrap();
+        sources.push(rx);
+    }
+    let mut models = [Model::new(P4, &all(ROWS)), Model::new(P6, &all(ROWS))];
+    for model in &models {
+        tx.send(vpn_update(model.family, &all(ROWS), &[]))
+            .await
+            .unwrap();
+    }
+    let mut receivers = Vec::new();
+    for index in 0..3 {
+        let (update, rx) = peer_up(receiver(index), 0, 64, &[P4, P6]);
+        tx.send(update).await.unwrap();
+        receivers.push(Receiver {
+            peer: receiver(index),
+            rx,
+            wire: Wire::default(),
+        });
+    }
+    run_for(&tx, &mut receivers, &[true; 3], 200).await;
+    for receiver in &mut receivers {
+        assert_eq!(receiver.wire.markers, [1, 1]);
+        (receiver.wire.uncharged, receiver.wire.latched) = (0, 0);
+    }
+    tx.send(gr_context(&[P4, P6])).await.unwrap();
+    let (update, waiter_rx) = peer_up(peer_v4(WAITER), 7, 4096, &[P4, P6]);
+    tx.send(update).await.unwrap();
+    receivers.push(Receiver {
+        peer: peer_v4(WAITER),
+        rx: waiter_rx,
+        wire: Wire::default(),
+    });
+    models[0].rows.insert(3, 300);
+    tx.send(vpn_update(P4, &[(3, 300)], &[])).await.unwrap();
+    models[1].rows.remove(&5);
+    tx.send(vpn_update(P6, &[], &[5])).await.unwrap();
+    let mut reading = [true; 4];
+    run_for(&tx, &mut receivers, &reading, 20).await;
+    reading[1] = false;
+    reading[2] = false;
+    tx.send(RibUpdate::EndOfRib {
+        peer: peer_v4(WAITER),
+        session_id: 7,
+        afi: P4.0,
+        safi: P4.1,
+    })
+    .await
+    .unwrap();
+    run_for(&tx, &mut receivers, &reading, 3).await;
+    // Rotate fresh VPNv4 keys past the two stalled cursors.
+    for round in 0..80u32 {
+        let base = 1000 + round * 64;
+        let fresh: Vec<_> = (base..base + 64).map(|index| (index, 100)).collect();
+        let gone: Vec<u32> = if round == 0 {
+            vec![]
+        } else {
+            (base - 64..base).collect()
+        };
+        models[0].rows.extend(fresh.iter().copied());
+        for index in &gone {
+            models[0].rows.remove(index);
+        }
+        tx.send(vpn_update(P4, &fresh, &gone)).await.unwrap();
+        run_for(&tx, &mut receivers, &reading, 2).await;
+    }
+    // Both refresh while still not reading (dirty, evicted).
+    for (index, family) in [(1usize, P4), (2usize, P6)] {
+        tx.send(RibUpdate::RouteRefreshRequest {
+            peer: receivers[index].peer,
+            session_id: 0,
+            afi: family.0,
+            safi: family.1,
+            queued: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        })
+        .await
+        .unwrap();
+    }
+    run_for(&tx, &mut receivers, &reading, 20).await;
+    tx.send(RibUpdate::EndOfRib {
+        peer: peer_v4(WAITER),
+        session_id: 7,
+        afi: P6.0,
+        safi: P6.1,
+    })
+    .await
+    .unwrap();
+    run_for(&tx, &mut receivers, &reading, 20).await;
+    run_for(&tx, &mut receivers, &[true; 4], 1500).await;
+    drop(tx);
+    let manager = actor.await.unwrap();
+    drop(sources);
+    assert!(
+        fallbacks(&manager) >= 2.0,
+        "evicted: {}",
+        fallbacks(&manager)
+    );
+    let mut expected = models[0].table();
+    expected.extend(models[1].table());
+    for (index, receiver) in receivers.iter().enumerate() {
+        let wire = &receiver.wire;
+        assert_eq!(wire.table, expected, "{index}: exact table");
+        assert_eq!(wire.markers, [1, 1], "{index}: one End-of-RIB per AFI");
+        assert!(manager.owing(receiver.peer).is_none(), "{index}");
+        assert!(!manager.dirty_peers.contains(&receiver.peer), "{index}");
+        let answers = wire
+            .sent
+            .iter()
+            .filter(|s| matches!(s, Sent::Answer(_)))
+            .count();
+        assert_eq!(
+            answers,
+            usize::from(index == 1 || index == 2),
+            "{index}: answers"
+        );
+    }
+    assert!(manager.owed_row_evicted.is_empty());
+    assert!(lists_freed(&manager));
+    assert!(manager.owing_peers.is_empty());
+}
