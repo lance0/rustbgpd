@@ -3895,3 +3895,4 @@ fn held_bulk_promotion_work_is_linear() {
 }
 
 mod cold_cohort_ownership;
+mod idle_pass_capture;
