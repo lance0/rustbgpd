@@ -1703,6 +1703,7 @@ mod bmp;
 mod bounded_selection;
 mod conditional_advertisement;
 mod conditional_advertisement_export;
+mod cursor_presize;
 mod dataplane_paging;
 mod deferred_session_ingress;
 mod distribution_window;

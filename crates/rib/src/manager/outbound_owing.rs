@@ -262,6 +262,12 @@ const TRIM_ROWS: usize = 4 * CHUNK_ROWS;
 /// cursor is resynced instead ([`RibManager::cap_owed_rows`]).
 const OWED_ROWS_SLACK: usize = 4 * CHUNK_ROWS;
 
+/// Most rows a receiver's VPN, labeled or EVPN table may hold for a cursor
+/// step to size it for the rest of the walk
+/// ([`RibManager::presize_walk_table`]): that one rebuild moves at most
+/// these rows.
+const PRESIZE_ROWS: usize = 2 * CHUNK_ROWS;
+
 /// The keys of one cursor family (a unicast or labeled AFI, or EVPN) that passes
 /// carried while some receiver owed
 /// the family whole, in the order they last changed: a key that changes
@@ -2112,6 +2118,8 @@ impl RibManager {
             keys.retain(|key| self.owed_key_exempt(peer, key));
         }
         let mut unstaged = Vec::new();
+        let read = keys.len();
+        let before = self.walk_table_lens(peer, family);
         if !keys.is_empty() {
             let budget = Self::owing_step_budget(family, keys.len(), budget);
             let mut drain = OwingDrain::keyed(peer, family, budget, keys);
@@ -2134,10 +2142,104 @@ impl RibManager {
             }
             self.put_owing(peer, owing);
         }
+        if let Some(before) = before {
+            self.presize_walk_table(peer, family, before, read - unstaged.len());
+        }
         // A key the envelope left out stays owed in the peer's own set.
         self.reinsert_owed(peer, unstaged);
         self.owing_family_settled(peer, family);
         true
+    }
+
+    /// The receiver's own tables a cursor walk of `family` fills, as
+    /// (routes, distinct keys): VPN, labeled and EVPN. Unicast has none
+    /// here: its route slab is sized from the Loc-RIB when the table is
+    /// created.
+    fn walk_table_lens(&self, peer: PeerId, family: OwedFamily) -> Option<(usize, usize)> {
+        use crate::adj_rib_out::AdjRibOut;
+        let lens: fn(&AdjRibOut) -> (usize, usize) = match family {
+            OwedFamily::VPNV4 | OwedFamily::VPNV6 => |out| (out.vpn_len(), out.vpn_key_len()),
+            OwedFamily::IPV4_LABELED | OwedFamily::IPV6_LABELED => {
+                |out| (out.labeled_len(), out.labeled_key_len())
+            }
+            OwedFamily::EVPN => |out| (out.evpn_len(), out.evpn_len()),
+            _ => return None,
+        };
+        Some(self.adj_ribs_out.get(&peer).map_or((0, 0), lens))
+    }
+
+    /// After a cursor step of `family` that committed into a table still
+    /// at most [`PRESIZE_ROWS`] rows, reserve it once for the rest of the
+    /// walk: the routes and keys this step added per key it staged, times
+    /// the keys still ahead of every live cursor filling the same table
+    /// (each list's entries after its position, at most the family's
+    /// Loc-RIB). Per-step reserves of a nearly empty table otherwise double
+    /// it again and again in the same steps for every receiver walking the
+    /// same list. A step that added nothing reserves nothing, and the next
+    /// step under the limit estimates again. Past the limit the table
+    /// grows by those per-step reserves, so no presize moves more than
+    /// [`PRESIZE_ROWS`] rows.
+    fn presize_walk_table(
+        &mut self,
+        peer: PeerId,
+        family: OwedFamily,
+        before: (usize, usize),
+        staged: usize,
+    ) {
+        let Some(after) = self.walk_table_lens(peer, family) else {
+            return;
+        };
+        let added = (
+            after.0.saturating_sub(before.0),
+            after.1.saturating_sub(before.1),
+        );
+        if after.0 > PRESIZE_ROWS || added.0 == 0 || staged == 0 {
+            return;
+        }
+        let lens = self.loc_rib.family_lens();
+        let siblings: &[(OwedFamily, usize)] = match family {
+            OwedFamily::VPNV4 | OwedFamily::VPNV6 => &[
+                (OwedFamily::VPNV4, lens.vpn[0]),
+                (OwedFamily::VPNV6, lens.vpn[1]),
+            ],
+            OwedFamily::IPV4_LABELED | OwedFamily::IPV6_LABELED => &[
+                (OwedFamily::IPV4_LABELED, lens.labeled[0]),
+                (OwedFamily::IPV6_LABELED, lens.labeled[1]),
+            ],
+            _ => &[(OwedFamily::EVPN, self.loc_rib.evpn_len())],
+        };
+        let Some(owing) = self.owing(peer) else {
+            return;
+        };
+        let ahead: usize = siblings
+            .iter()
+            .filter_map(|&(sibling, table)| {
+                let list = sibling.row_cursor()?;
+                let position = self.live_cursor(peer, owing, list as usize)?;
+                let entries = self.owed_rows_head(list).saturating_sub(position);
+                Some(usize::try_from(entries).map_or(table, |entries| entries.min(table)))
+            })
+            .sum();
+        let scale = |added: usize| added.saturating_mul(ahead) / staged;
+        let (rows, keys) = (scale(added.0), scale(added.1));
+        #[cfg(test)]
+        {
+            self.adj_rib_out_commit_stats.walk_presizes += 1;
+        }
+        let readiness = &self.replacement_readiness;
+        let mut checkpoint = || super::replacement_readiness_checkpoint(readiness, false);
+        let Some(out) = self.adj_ribs_out.get_mut(&peer) else {
+            return;
+        };
+        match family {
+            OwedFamily::VPNV4 | OwedFamily::VPNV6 => {
+                out.reserve_vpn_count_with(rows, keys, &mut checkpoint);
+            }
+            OwedFamily::IPV4_LABELED | OwedFamily::IPV6_LABELED => {
+                out.reserve_labeled_count_with(rows, keys, &mut checkpoint);
+            }
+            _ => out.reserve_evpn_with(rows, &mut checkpoint),
+        }
     }
 
     /// One step of `family`'s owed-key set.

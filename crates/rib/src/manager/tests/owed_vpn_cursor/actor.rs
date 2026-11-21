@@ -8,7 +8,7 @@ fn check(manager: &RibManager) {
     manager.assert_owed_vpn_index();
 }
 
-fn peer_up(
+pub(super) fn peer_up(
     peer: PeerId,
     session_id: u64,
     channel: usize,
@@ -37,7 +37,11 @@ fn peer_up(
     (update, output)
 }
 
-fn vpn_update(family: (Afi, Safi), announce: &[(u32, u32)], withdraw: &[u32]) -> RibUpdate {
+pub(super) fn vpn_update(
+    family: (Afi, Safi),
+    announce: &[(u32, u32)],
+    withdraw: &[u32],
+) -> RibUpdate {
     RibUpdate::VpnRoutesReceived {
         peer: peer_v4(SOURCE),
         session_id: 0,
@@ -68,7 +72,7 @@ async fn barrier(tx: &mpsc::Sender<RibUpdate>) {
 
 /// Advance the clock `ticks` times by 10 ms; `reading` receivers write
 /// after each.
-async fn run_for(
+pub(super) async fn run_for(
     tx: &mpsc::Sender<RibUpdate>,
     receivers: &mut [Receiver],
     reading: &[bool],
