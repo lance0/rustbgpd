@@ -1017,7 +1017,15 @@ impl RibManager {
                     .is_some_and(|vantage| self.orr.spf.contains_key(vantage))
                     || self.peer_vpn_add_path_send(*peer)
             });
+        // Receivers that owe a VPN family whole stage and mark nothing in
+        // the loop below: the pass logs its keys for their cursors once,
+        // here, before the unchanged winners are left out. Every affected
+        // key, not only the changed winners: a release of unchanged
+        // winners, a non-best change and a dataset re-evaluation change
+        // what such a receiver may be sent.
+        self.log_owed_vpn_rows(affected_nlri);
         if changed_keys.is_empty() && !any_widened_peer {
+            self.cap_owed_vpn_rows();
             return;
         }
 
@@ -1449,6 +1457,9 @@ impl RibManager {
             }
         }
         self.release_speculative_group_admitted_keys(&speculative_group_admitted);
+        // After the receiver loop, as for unicast: an evicted receiver's
+        // resync is a unit of the dirty ring, never part of this pass.
+        self.cap_owed_vpn_rows();
         #[cfg(feature = "bench-internals")]
         let retirement = super::super::bench_support::retirement_begin(|| {
             (

@@ -2948,27 +2948,37 @@ fn only_eligible_whole_debt_waits_on_a_live_latch() {
         (true, true, true),
         (true, false, true),
     ] {
-        // Unicast, labeled unicast and EVPN owed whole read a cursor and
-        // need no latch (`owed_row_cursor`, `owed_labeled_cursor`,
-        // `owed_evpn_cursor`): VPN stands for the families that do.
-        let family = (Afi::Ipv4, Safi::MplsVpn);
-        let owed_family = OwedFamily::of(family).unwrap();
-        let mut manager = deferral_manager(vec![family], 8).with_owing_theta_floor(if whole {
-            0
+        // Unicast, labeled unicast, VPN and EVPN owed whole read a cursor
+        // and need no latch (`owed_row_cursor`, `owed_labeled_cursor`,
+        // `owed_vpn_cursor`, `owed_evpn_cursor`): BGP-LS stands for the
+        // families that do, and VPN for keyed debt.
+        let family = if whole {
+            (Afi::BgpLs, Safi::BgpLs)
         } else {
-            1 << 30
-        });
+            (Afi::Ipv4, Safi::MplsVpn)
+        };
+        let owed_family = OwedFamily::of(family).unwrap();
+        let mut manager = deferral_manager(vec![family], 8).with_owing_theta_floor(1 << 30);
         let mut source = up(&mut manager, peer_v4(SOURCE), vec![V4, family]);
         let peer = peer_v4(Ipv4Addr::new(10, 0, 25, 2));
         let mut rx = up(&mut manager, peer, vec![V4, family]);
         send_all(&mut rx);
         let credit = manager.outbound_credit_handle(peer);
         let charge = crate::outbound_credit::OutboundCharge::new(&credit, 8);
-        manager.handle_update(RibUpdate::VpnRoutesReceived {
-            peer: peer_v4(SOURCE),
-            session_id: 0,
-            announced: vec![typed_vpn_route(Afi::Ipv4, 0)],
-            withdrawn: vec![],
+        manager.handle_update(if whole {
+            RibUpdate::BgpLsRoutesReceived {
+                peer: peer_v4(SOURCE),
+                session_id: 0,
+                announced: vec![make_bgpls_route(SOURCE, 1, 100)],
+                withdrawn: vec![],
+            }
+        } else {
+            RibUpdate::VpnRoutesReceived {
+                peer: peer_v4(SOURCE),
+                session_id: 0,
+                announced: vec![typed_vpn_route(Afi::Ipv4, 0)],
+                withdrawn: vec![],
+            }
         });
         drain_route_chunks(&mut manager);
         send_all(&mut source);
@@ -3190,9 +3200,9 @@ fn labeled_add_path_pass_budgets_with_the_family_cap() {
 
 /// Whole-family debt that waits only for the receiver's live operation
 /// latch keeps the resync timer armed, so the latch release drains it
-/// with no other activity. VPN stands for the families whose whole debt
-/// is one operation; unicast, labeled unicast and EVPN read a cursor and
-/// need no latch. Red when
+/// with no other activity. BGP-LS stands for the families whose whole
+/// debt is one operation; unicast, labeled unicast, VPN and EVPN read a
+/// cursor and need no latch. Red when
 /// such debt does not keep the timer: the timer disarms and the latch
 /// release wakes nothing.
 #[tokio::test(start_paused = true)]
@@ -3210,8 +3220,8 @@ async fn whole_family_debt_behind_a_latch_drains_when_it_releases() {
     manager.test_force_ungrouped = true;
     let handle = tokio::spawn(manager.run());
     let (source_tx, mut source_rx) = mpsc::channel(64);
-    let vpn = (Afi::Ipv4, Safi::MplsVpn);
-    tx.send(peer_up_message(peer_v4(SOURCE), vec![V4, vpn], source_tx))
+    let bgpls = (Afi::BgpLs, Safi::BgpLs);
+    tx.send(peer_up_message(peer_v4(SOURCE), vec![V4, bgpls], source_tx))
         .await
         .unwrap();
     let announce = |routes: Vec<Route>| RibUpdate::RoutesReceived {
@@ -3229,7 +3239,7 @@ async fn whole_family_debt_behind_a_latch_drains_when_it_releases() {
     actor_barrier(&tx).await;
     let peer = peer_v4(Ipv4Addr::new(10, 0, 29, 1));
     let (peer_tx, mut peer_rx) = mpsc::channel(64);
-    tx.send(peer_up_message(peer, vec![V4, vpn], peer_tx))
+    tx.send(peer_up_message(peer, vec![V4, bgpls], peer_tx))
         .await
         .unwrap();
     actor_barrier(&tx).await;
@@ -3243,9 +3253,9 @@ async fn whole_family_debt_behind_a_latch_drains_when_it_releases() {
     actor_barrier(&tx).await;
     let spent = held(&mut peer_rx);
     assert_eq!(rows(&spent), 4);
-    // A VPN route is owed now, and whole at a zero byte cap.
-    let owed = typed_vpn_route(Afi::Ipv4, 9);
-    tx.send(RibUpdate::VpnRoutesReceived {
+    // A BGP-LS route is owed now, whole.
+    let owed = make_bgpls_route(SOURCE, 9, 100);
+    tx.send(RibUpdate::BgpLsRoutesReceived {
         peer: peer_v4(SOURCE),
         session_id: 0,
         announced: vec![owed.clone()],
@@ -3266,14 +3276,14 @@ async fn whole_family_debt_behind_a_latch_drains_when_it_releases() {
     );
     drop(dump);
     // No query may wake the actor after the latch release.
-    let owed = owed.nlri.key();
+    let owed = owed.key();
     tokio::time::timeout(Duration::from_millis(50), async {
         loop {
             let update = peer_rx.recv().await.expect("the actor keeps its sender");
             if update
-                .vpn_announce
+                .bgpls_announce
                 .iter()
-                .any(|route| route.nlri.key() == owed)
+                .any(|route| route.key() == owed)
             {
                 break;
             }

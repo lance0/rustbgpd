@@ -21,6 +21,6 @@
   alone, and counted in `bgp_rib_outbound_owing_fallback_total`, as for
   unicast. A live RT-Constrain membership change toward a receiver that is
   still being sent its EVPN table is applied to the routes already sent
-  as well. EVPN owned by an update group is unchanged. VPN, FlowSpec,
+  as well. EVPN owned by an update group is unchanged. FlowSpec,
   BGP-LS and RT-Constrain keep the whole-family send; see
   [known issues](../docs/reference/known-issues.md).

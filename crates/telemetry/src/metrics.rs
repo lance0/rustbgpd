@@ -1924,8 +1924,8 @@ impl BgpMetrics {
             "Peers that owed private-family keys and fell back to a whole-peer \
              resync instead: a drain refused for a reason other than capacity \
              or credit, a gated batch refused for credit, or a receiver that \
-             fell behind the cap of its unicast, labeled-unicast or EVPN \
-             owed-row list.",
+             fell behind the cap of its unicast, labeled-unicast, VPN or \
+             EVPN owed-row list.",
         )
         .expect("valid metric definition");
         let rib_outbound_owing_flips = IntCounter::new(
@@ -1933,7 +1933,7 @@ impl BgpMetrics {
             "Private families a peer began to owe whole: its owed-key set \
              outgrew its byte cap, a FlowSpec, BGP-LS or RT-Constrain \
              pass found the peer without credit, or a selection release \
-             owed it the family. Unicast, labeled unicast and EVPN then \
+             owed it the family. Unicast, labeled unicast, VPN and EVPN then \
              drain in bounded steps.",
         )
         .expect("valid metric definition");
@@ -1955,7 +1955,7 @@ impl BgpMetrics {
         let rib_outbound_owed_drain_step_seconds = HistogramVec::new(
             HistogramOpts::new(
                 "bgp_rib_outbound_owed_drain_step_seconds",
-                "Wall-clock duration of one owed-route drain step toward one receiver on the RIB actor, by scope: cursor (up to 1,024 keys of a unicast, labeled-unicast or EVPN family owed whole, a charged ordinary envelope), keyed (up to 1,024 keys of an owed-key set), whole (one whole-family pass of a VPN, FlowSpec, BGP-LS or RT-Constrain family, including one absorbed for a waiting End-of-RIB).",
+                "Wall-clock duration of one owed-route drain step toward one receiver on the RIB actor, by scope: cursor (up to 1,024 keys of a unicast, labeled-unicast, VPN or EVPN family owed whole, a charged ordinary envelope), keyed (up to 1,024 keys of an owed-key set), whole (one whole-family pass of a FlowSpec, BGP-LS or RT-Constrain family, including one absorbed for a waiting End-of-RIB).",
             )
             .buckets(actor_buckets_with_250ms()),
             &["scope"],

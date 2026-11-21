@@ -175,7 +175,18 @@ resolved.
     it is sent, with a capture of its group's table for a group member),
     one receiver per tick. The evidence is work counts and wire content in
     unit-level tests; no timed run has been made.
-  - Whole-family sends of the other families, still on main: VPN,
+  - VPN whole-family sends, fixed on main after v0.83.0: VPNv4 and VPNv6
+    owed whole are sent as unicast is, from one shared list per address
+    family of route distinguisher and prefix keys, at most 1,024 per step,
+    each step charged against the receiver's credit, with the End-of-RIB
+    after the last step. A receiver that is sent every Add-Path path of a
+    key takes one key per step. A receiver holds VPN outside every update
+    group, so the fallback for a receiver that falls behind is unicast's,
+    with no group table to walk. A receiver whose RT-Constrain
+    membership changes is still resynced as a whole peer. The evidence is
+    work counts and wire content in unit-level tests; no timed run has
+    been made.
+  - Whole-family sends of the other families, still on main:
     FlowSpec, BGP-LS and RT-Constrain owed whole still go
     out as one operation per receiver that is not charged against the
     outbound credit, in one RIB turn that grows with the family's table.

@@ -10322,10 +10322,9 @@ impl RibManager {
                                         })
                                     })
                         });
-                    let vpn_whole = whole(super::outbound_owing::OwedFamily::VPNV4)
-                        || whole(super::outbound_owing::OwedFamily::VPNV6);
-                    let mut effective_l3vpn_keys: FastSet<rustbgpd_wire::VpnRouteKey> = if (resync
-                        || vpn_whole)
+                    // VPN is never drained whole: owed whole it is a row
+                    // cursor, whose steps bring their keys.
+                    let mut effective_l3vpn_keys: FastSet<rustbgpd_wire::VpnRouteKey> = if resync
                         && vpn_grouped.is_none()
                     {
                         self.replacement_checkpoint(true);
@@ -10397,12 +10396,13 @@ impl RibManager {
                                 rustbgpd_wire::VpnAddressFamily::V6 => (Afi::Ipv6, Safi::MplsVpn),
                             };
                             !self.selection_deferred(family)
-                                && (resync
-                                    || drain_whole
-                                        == Some(super::outbound_owing::OwedFamily::vpn_of(key)))
                         });
                         all
                     } else if let Some(drain) = drain.as_deref_mut() {
+                        #[cfg(test)]
+                        {
+                            self.adj_rib_out_commit_stats.owed_drain_rows_read += drain.vpn.len();
+                        }
                         std::mem::take(&mut drain.vpn)
                     } else {
                         FastSet::default()

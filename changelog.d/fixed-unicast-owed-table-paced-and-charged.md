@@ -35,6 +35,6 @@
   in its own operation, as before: the owed routes, the initial End-of-RIB
   that waited for them, then the answer between its BoRR and EoRR. A
   ROUTE-REFRESH from a receiver waiting for the resync above is answered
-  after it, in the same order. VPN, FlowSpec, BGP-LS and RT-Constrain
+  after it, in the same order. FlowSpec, BGP-LS and RT-Constrain
   keep the whole-family send; see
   [known issues](../docs/reference/known-issues.md).
