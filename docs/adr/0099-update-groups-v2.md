@@ -788,6 +788,23 @@ resyncs the receiver as a whole peer, which ends its cursor, so no
 unlogged mark is needed either. VPN, FlowSpec, BGP-LS and RT-Constrain
 still drain whole.
 
+VPN (VPNv4 and VPNv6) has since moved as well: each AFI has its own list
+of route distinguisher and prefix keys, and every VPN pass logs the keys it
+distributes, not only the changed winners, at its entry and before it
+returns, so a release of unchanged winners, a non-best change toward an
+Add-Path or ORR receiver and a policy dataset re-evaluation (which forces
+its keys with every winner unchanged) each reach a receiver's cursor. A
+receiver holds VPN privately only outside every update group, so VPN
+follows unicast rather than EVPN: the cap marks an evicted receiver dirty
+in the pass with no table walk, no waiting state occurs, and a dirty
+resync inside a VPN selection hold stays dirty for the held family by the
+selection-partial rule, so no held VPN rebuild is recorded and an evicted
+receiver's unit does not wait for a VPN hold. The two other inputs that
+change one receiver's VPN export with every winner unchanged, an
+RT-Constrain membership change and an ORR topology change, resync the
+receiver as a whole peer, which ends its cursor. FlowSpec, BGP-LS and
+RT-Constrain still drain whole.
+
 Each owed key carries a *logged deferral*: a test-build record of (session,
 receiver, AFI/SAFI, key). It opens when the key becomes owed. It closes when the
 key is drained, absorbed or cancelled, or when a resync covers it.

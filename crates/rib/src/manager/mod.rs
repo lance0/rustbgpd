@@ -327,6 +327,9 @@ struct AdjRibOutCommitStats {
     /// Labeled passes that logged their prefixes for the cursors.
     #[cfg(test)]
     owed_labeled_logs: usize,
+    /// VPN passes that logged their RD/prefix keys for the cursors.
+    #[cfg(test)]
+    owed_vpn_logs: usize,
     /// Distinct keys collected into per-peer VPN resync enumerations.
     #[cfg(test)]
     vpn_resync_key_inserts: usize,
@@ -714,11 +717,15 @@ pub struct RibManager {
     owing_peers: BTreeSet<PeerId>,
     /// Ring position of the owed-key drain: the last peer it visited.
     owing_cursor: Option<PeerId>,
-    /// Per unicast AFI: the keys passes carried while a receiver owed the
-    /// family whole, read by those receivers' cursors (`outbound_owing`).
+    /// Per unicast and labeled-unicast AFI: the keys passes carried while a
+    /// receiver owed the family whole, read by those receivers' cursors
+    /// (`outbound_owing`).
     owed_rows: [outbound_owing::OwedRows<Prefix>; 4],
     /// The same list for EVPN, keyed by route key.
     owed_evpn_rows: outbound_owing::OwedRows<rustbgpd_wire::EvpnRouteKey>,
+    /// The same lists for `VPNv4` and `VPNv6`, keyed by RD and prefix,
+    /// boxed: they are idle unless a VPN receiver owes its family whole.
+    owed_vpn_rows: Box<[outbound_owing::OwedRows<rustbgpd_wire::VpnRouteKey>; 2]>,
     /// Receivers the owed-row cap evicted ([`Self::cap_owed_rows`]): dirty,
     /// except a group member, which the resync tick makes dirty one a tick
     /// and which keeps its debt (and a cursor no drain reads) until its
@@ -1164,6 +1171,9 @@ pub struct RibManager {
     replacement_readiness: Option<Arc<ReplacementReadinessContext>>,
     #[cfg(test)]
     replacement_readiness_test_hook: Option<Arc<dyn Fn(&'static str) + Send + Sync>>,
+    /// A check the actor loop runs after every turn (tests only).
+    #[cfg(test)]
+    actor_turn_check: Option<fn(&RibManager)>,
     #[cfg(test)]
     marker_retry_test_hook: Option<Arc<dyn Fn(&'static str) + Send + Sync>>,
     #[cfg(feature = "bench-internals")]
@@ -3014,6 +3024,7 @@ impl RibManager {
             owing_cursor: None,
             owed_rows: Default::default(),
             owed_evpn_rows: outbound_owing::OwedRows::default(),
+            owed_vpn_rows: Box::default(),
             owed_row_evicted: HashSet::new(),
             held_rebuilds: Default::default(),
             owing_theta_floor: None,
@@ -3201,6 +3212,8 @@ impl RibManager {
             replacement_readiness: None,
             #[cfg(test)]
             replacement_readiness_test_hook: None,
+            #[cfg(test)]
+            actor_turn_check: None,
             #[cfg(test)]
             marker_retry_test_hook: None,
             #[cfg(test)]
@@ -8022,6 +8035,10 @@ impl RibManager {
             self.settle_eor_after_pass();
             #[cfg(test)]
             self.assert_eor_settled();
+            #[cfg(test)]
+            if let Some(check) = self.actor_turn_check {
+                check(&self);
+            }
             if self.dampening_history.notice_failed() {
                 tracing::error!(
                     "dampening capacity disable owner unavailable; terminating RIB actor"

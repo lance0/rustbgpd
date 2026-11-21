@@ -1763,6 +1763,7 @@ mod owed_cancellation;
 mod owed_evpn_cursor;
 mod owed_labeled_cursor;
 mod owed_row_cursor;
+mod owed_vpn_cursor;
 mod paced_selection_release;
 mod paged_query;
 mod peer_identity;

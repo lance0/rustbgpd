@@ -12,8 +12,8 @@
 //!   mark its keys; the drain stages them.
 //! - A family whose set outgrows its byte cap θ, and every `FlowSpec`,
 //!   BGP-LS or RT-Constrain family, owes the whole family instead.
-//! - A unicast, labeled-unicast or EVPN family owed whole is a row cursor
-//!   ([`OwedRows`]):
+//! - A unicast, labeled-unicast, VPN or EVPN family owed whole is a row
+//!   cursor ([`OwedRows`]):
 //!   one list per family, shared by every receiver, of the keys passes
 //!   carried since the oldest debt began, in the order they last changed.
 //!   The receiver holds a sequence number; a drain step sends the next keys
@@ -82,6 +82,16 @@
 //! The replay and limit-recovery row does not occur for labeled debt: an
 //! operator replay and the outbound prefix limits cover IPv4 and IPv6
 //! unicast only.
+//!
+//! VPN debt follows unicast instead: a receiver holds VPN privately only
+//! while it is outside every update group, so the cap marks it dirty in
+//! the pass (`D`, no table walk) and `W` does not occur. A dirty resync
+//! inside a VPN selection hold is kept dirty by the selection-partial rule
+//! (`selection_resync_held`), as for unicast, so no held VPN rebuild is
+//! recorded and an evicted receiver's unit does not wait for a VPN hold.
+//! Its export can change with every winner unchanged: an RT-Constrain
+//! membership change and an ORR topology change make it dirty, and a
+//! policy dataset swap runs a targeted pass whose keys the pass logs.
 //!
 //! A unit that builds an evicted receiver is the only exit from `W`/`D`
 //! besides a session end, and it runs only when EVPN is enumerated
@@ -432,6 +442,8 @@ enum RowCursor {
     Ipv4Labeled,
     Ipv6Labeled,
     Evpn,
+    Vpnv4,
+    Vpnv6,
 }
 
 /// Which projection can own the receiver's advertised rows when it is grouped.
@@ -553,8 +565,8 @@ impl OwedFamily {
         (KeyedOwner::UnicastGroup, Some(RowCursor::Ipv6Unicast)),
         (KeyedOwner::Peer, Some(RowCursor::Ipv4Labeled)),
         (KeyedOwner::Peer, Some(RowCursor::Ipv6Labeled)),
-        (KeyedOwner::VpnGroup, None), // VPNv4
-        (KeyedOwner::VpnGroup, None), // VPNv6
+        (KeyedOwner::VpnGroup, Some(RowCursor::Vpnv4)),
+        (KeyedOwner::VpnGroup, Some(RowCursor::Vpnv6)),
         (KeyedOwner::EvpnGroup, Some(RowCursor::Evpn)),
     ];
 
@@ -568,7 +580,7 @@ impl OwedFamily {
     }
 
     /// Active families in physical slot order. Unicast slots retain their AFI index.
-    const CURSORS: [Self; 5] = Self::cursor_families(false);
+    const CURSORS: [Self; 7] = Self::cursor_families(false);
 
     /// Active cursor families that may owe private rows as group members.
     pub(super) const GROUPED_CURSORS: [Self; 3] = Self::cursor_families(true);
@@ -598,6 +610,9 @@ impl OwedFamily {
     const EVPN_CURSOR: usize = RowCursor::Evpn as usize;
     /// The first of the two labeled lists, which follow by AFI index.
     const LABELED_CURSOR: usize = RowCursor::Ipv4Labeled as usize;
+    /// The first of the two VPN lists ([`RibManager::owed_vpn_rows`]),
+    /// which follow by AFI index.
+    const VPN_CURSOR: usize = RowCursor::Vpnv4 as usize;
 
     fn row_cursor(self) -> Option<RowCursor> {
         Self::KEYED.get(usize::from(self.0))?.1
@@ -725,6 +740,11 @@ fn afi_index(prefix: &Prefix) -> usize {
     usize::from(matches!(prefix, Prefix::V6(_)))
 }
 
+/// The AFI index of a VPN list within [`RibManager::owed_vpn_rows`].
+fn vpn_list(list: RowCursor) -> usize {
+    list as usize - OwedFamily::VPN_CURSOR
+}
+
 impl PeerOwing {
     fn new(session_id: u64) -> Self {
         Self {
@@ -830,8 +850,14 @@ impl PeerOwing {
             }
             OwedKey::Labeled(prefix) => self.labeled[afi_index(prefix)].remove(prefix),
             OwedKey::Vpn(key) => {
-                let index = usize::from(OwedFamily::vpn_of(key) == OwedFamily::VPNV6);
-                self.vpn[index].remove(key);
+                let family = OwedFamily::vpn_of(key);
+                let index = usize::from(family == OwedFamily::VPNV6);
+                if self.is_whole(family) {
+                    // Kept under a cursor, the set only drains.
+                    self.vpn[index].remove_draining(key);
+                } else {
+                    self.vpn[index].remove(key);
+                }
             }
             // Kept under a cursor, the set only drains.
             OwedKey::Evpn(key) if self.is_whole(OwedFamily::EVPN) => {
@@ -1234,6 +1260,7 @@ impl RibManager {
     fn owed_rows_head(&self, list: RowCursor) -> u64 {
         match list {
             RowCursor::Evpn => self.owed_evpn_rows.head(),
+            RowCursor::Vpnv4 | RowCursor::Vpnv6 => self.owed_vpn_rows[vpn_list(list)].head(),
             _ => self.owed_rows[list as usize].head(),
         }
     }
@@ -1244,6 +1271,10 @@ impl RibManager {
             RowCursor::Evpn => {
                 let (keys, position) = self.owed_evpn_rows.after(cursor, count);
                 return (keys.into_iter().map(OwedKey::Evpn).collect(), position);
+            }
+            RowCursor::Vpnv4 | RowCursor::Vpnv6 => {
+                let (keys, position) = self.owed_vpn_rows[vpn_list(list)].after(cursor, count);
+                return (keys.into_iter().map(OwedKey::Vpn).collect(), position);
             }
             RowCursor::Ipv4Unicast | RowCursor::Ipv6Unicast => OwedKey::Unicast,
             RowCursor::Ipv4Labeled | RowCursor::Ipv6Labeled => OwedKey::Labeled,
@@ -1819,7 +1850,9 @@ impl RibManager {
     /// Whether a list still holds entries behind every cursor: the resync
     /// tick drops them a bounded number at a time.
     pub(super) fn owed_rows_trimming(&self) -> bool {
-        self.owed_rows.iter().any(OwedRows::trimming) || self.owed_evpn_rows.trimming()
+        self.owed_rows.iter().any(OwedRows::trimming)
+            || self.owed_vpn_rows.iter().any(OwedRows::trimming)
+            || self.owed_evpn_rows.trimming()
     }
 
     /// Whether any peer has owed work the resync tick can run.
@@ -2193,6 +2226,9 @@ impl RibManager {
             let index = list as usize;
             match list {
                 RowCursor::Evpn => self.owed_evpn_rows.trim(floors[index]),
+                RowCursor::Vpnv4 | RowCursor::Vpnv6 => {
+                    self.owed_vpn_rows[vpn_list(list)].trim(floors[index]);
+                }
                 _ => self.owed_rows[index].trim(floors[index]),
             }
         }
@@ -2203,6 +2239,7 @@ impl RibManager {
     fn owed_rows_idle(&self) -> bool {
         self.owing_peers.is_empty()
             && self.owed_rows.iter().all(|rows| rows.len() == 0)
+            && self.owed_vpn_rows.iter().all(|rows| rows.len() == 0)
             && self.owed_evpn_rows.len() == 0
     }
 
@@ -2276,6 +2313,48 @@ impl RibManager {
         self.log_prefix_keys(OwedFamily::LABELED_CURSOR, affected.iter().copied(), floors);
     }
 
+    /// A VPN pass is about to distribute `affected` (every RD/prefix an
+    /// input changed for, a selection release's whole inventory, or the
+    /// keys a policy dataset re-evaluation forces): log them once for the
+    /// receivers that owe their VPN family whole, whose gate stages and
+    /// marks nothing. Not only the changed winners: an Add-Path or ORR
+    /// receiver stages a non-best change, a receiver that joined during a
+    /// hold has none of the unchanged winners, and a re-evaluation changes
+    /// what a receiver may be sent with every winner unchanged. With no
+    /// such receiver nothing is logged.
+    pub(super) fn log_owed_vpn_rows(&mut self, affected: &HashSet<VpnRouteKey>) {
+        if self.owed_rows_idle() {
+            return;
+        }
+        let floors = self.trim_owed_rows();
+        let floors = [
+            floors[OwedFamily::VPN_CURSOR],
+            floors[OwedFamily::VPN_CURSOR + 1],
+        ];
+        if floors == [None, None] {
+            return;
+        }
+        #[cfg(test)]
+        {
+            self.adj_rib_out_commit_stats.owed_vpn_logs += 1;
+        }
+        let mut carried = [0usize; 2];
+        for key in affected {
+            self.replacement_checkpoint(false);
+            let index = usize::from(OwedFamily::vpn_of(key) == OwedFamily::VPNV6);
+            if floors[index].is_some() {
+                self.owed_vpn_rows[index].touch(*key);
+                carried[index] += 1;
+            }
+        }
+        let table = self.loc_rib.family_lens().vpn;
+        for (index, rows) in self.owed_vpn_rows.iter_mut().enumerate() {
+            if floors[index].is_some() {
+                rows.peak = rows.peak.max(table[index] + carried[index]);
+            }
+        }
+    }
+
     /// Log `changed` in the two prefix lists that start at slot `first`
     /// (unicast or labeled), each prefix in its AFI's list.
     fn log_prefix_keys(
@@ -2337,6 +2416,14 @@ impl RibManager {
         }
     }
 
+    /// [`Self::cap_owed_rows`] for the VPN lists, after a VPN pass's
+    /// receiver loop.
+    pub(super) fn cap_owed_vpn_rows(&mut self) {
+        for list in [RowCursor::Vpnv4, RowCursor::Vpnv6] {
+            self.cap_owed_rows_of(list);
+        }
+    }
+
     /// [`Self::cap_owed_rows`] for the EVPN list, after an EVPN pass's
     /// receiver loop.
     pub(super) fn cap_owed_evpn_rows(&mut self) {
@@ -2384,6 +2471,7 @@ impl RibManager {
         let family = OwedFamily::CURSORS[index];
         let cutoff = match list {
             RowCursor::Evpn => self.owed_evpn_rows.cutoff(),
+            RowCursor::Vpnv4 | RowCursor::Vpnv6 => self.owed_vpn_rows[vpn_list(list)].cutoff(),
             _ => self.owed_rows[index].cutoff(),
         };
         let Some((cap, over)) = cutoff else {
@@ -2410,6 +2498,9 @@ impl RibManager {
         self.trim_owed_rows();
         match list {
             RowCursor::Evpn => self.owed_evpn_rows.drop_over(cap),
+            RowCursor::Vpnv4 | RowCursor::Vpnv6 => {
+                self.owed_vpn_rows[vpn_list(list)].drop_over(cap);
+            }
             _ => self.owed_rows[index].drop_over(cap),
         }
     }
@@ -2438,16 +2529,18 @@ impl RibManager {
             .any(|&pair| self.selection_deferred(pair))
     }
 
-    /// Paced unicast waits for the producer. A cap eviction also needs
-    /// every other sendable cursor family's selection to be open.
+    /// Paced unicast waits for the producer. A cap eviction also needs the
+    /// selection of every sendable cursor family that a group member can
+    /// hold privately to be open. Unicast and VPN are not among them: a
+    /// unit inside their hold stays dirty for the held family by the
+    /// selection-partial rule.
     pub(super) fn resync_unit_held(&self, peer: PeerId) -> bool {
         if self.release_resync_waits(peer) {
             return true;
         }
         self.owed_row_evicted.contains(&peer)
-            && OwedFamily::CURSORS
+            && OwedFamily::GROUPED_CURSORS
                 .into_iter()
-                .filter(|family| !family.is_unicast())
                 .flat_map(OwedFamily::afi_safis)
                 .any(|pair| {
                     self.selection_deferred(*pair)
@@ -2821,6 +2914,142 @@ impl RibManager {
     #[cfg(test)]
     pub(super) fn owes_whole(&self, peer: PeerId, family: OwedFamily) -> bool {
         self.owing(peer).is_some_and(|owing| owing.is_whole(family))
+    }
+
+    /// The VPN cursor state against full scans, for tests that run the
+    /// actor loop: the owing index names exactly the receivers with a
+    /// record; each VPN list is one entry per key, of its own AFI, at or
+    /// before its head, with every live position at or before it; an
+    /// evicted VPN receiver is dirty (it is outside every group); and every
+    /// row in which a clean, single-path receiver with no export policy
+    /// differs from the Loc-RIB, in a VPN family it is sent and no hold or
+    /// ORF gate withholds, is named by its debt: its kept set, or the list
+    /// after its live position.
+    #[cfg(test)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one full-scan check of the index, the lists and every receiver's debt"
+    )]
+    pub(super) fn assert_owed_vpn_index(&self) {
+        use crate::route::VpnRibRouteKey;
+        let recorded: std::collections::BTreeSet<PeerId> = self
+            .outbound_credit
+            .iter()
+            .filter(|(_, entry)| entry.owing.is_some())
+            .map(|(&peer, _)| peer)
+            .collect();
+        assert_eq!(
+            self.owing_peers
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+            recorded,
+            "the owing index names exactly the receivers with a record"
+        );
+        let families = [OwedFamily::VPNV4, OwedFamily::VPNV6];
+        for (index, rows) in self.owed_vpn_rows.iter().enumerate() {
+            assert_eq!(rows.order.len(), rows.live.len(), "one entry per key");
+            for (sequence, key) in &rows.order {
+                assert_eq!(rows.live.get(key), Some(sequence));
+                assert!(*sequence <= rows.head);
+                assert_eq!(OwedFamily::vpn_of(key), families[index], "its own AFI");
+            }
+            for &peer in &self.owing_peers {
+                if let Some(owing) = self.owing(peer)
+                    && let Some(at) = self.live_cursor(peer, owing, OwedFamily::VPN_CURSOR + index)
+                {
+                    assert!(at <= rows.head, "{peer}: a position past the head");
+                }
+            }
+        }
+        for &peer in &self.owed_row_evicted {
+            if self.vpn_grouped_member_of(peer).is_none() && !self.outbound_channel_gone(peer) {
+                assert!(
+                    self.dirty_peers.contains(&peer),
+                    "{peer}: evicted, not dirty"
+                );
+            }
+        }
+        for &peer in self.outbound_peers.keys() {
+            if self.outbound_closing
+                || self.dirty_peers.contains(&peer)
+                || self.force_outbound_peers.contains(&peer)
+                || self.owed_row_evicted.contains(&peer)
+                || self.peer_vpn_add_path_send(peer)
+                || self.peer_orr_vantage.contains_key(&peer)
+                || self.export_policy_for(peer).is_some()
+                || self.vpn_grouped_member_of(peer).is_some()
+            {
+                continue;
+            }
+            for (index, family) in families.into_iter().enumerate() {
+                let pair = family.afi_safis()[0];
+                let sendable = self
+                    .peer_sendable_families
+                    .get(&peer)
+                    .is_some_and(|families| families.contains(&pair));
+                let gated = self
+                    .peer_orf_pending
+                    .get(&peer)
+                    .is_some_and(|gated| gated.contains(&pair));
+                if !sendable || gated || self.selection_deferred(pair) {
+                    continue;
+                }
+                let mut debt: FastSet<VpnRouteKey> = FastSet::default();
+                if let Some(owing) = self.owing(peer) {
+                    debt.extend(
+                        owing
+                            .copy_keys(family, DrainScope::All, usize::MAX)
+                            .into_iter()
+                            .filter_map(|key| match key {
+                                OwedKey::Vpn(key) => Some(key),
+                                _ => None,
+                            }),
+                    );
+                    if let Some(at) = self.live_cursor(peer, owing, OwedFamily::VPN_CURSOR + index)
+                    {
+                        debt.extend(self.owed_vpn_rows[index].after(at, usize::MAX).0);
+                    }
+                }
+                let out = self.adj_ribs_out.get(&peer);
+                let keys: FastSet<VpnRouteKey> = self
+                    .loc_rib
+                    .iter_vpn()
+                    .map(|route| route.nlri.key())
+                    .chain(
+                        out.into_iter()
+                            .flat_map(|out| out.iter_vpn().map(|route| route.nlri.key())),
+                    )
+                    .filter(|key| OwedFamily::vpn_of(key) == family)
+                    .collect();
+                for key in keys {
+                    let want = self
+                        .loc_rib
+                        .get_vpn(&key)
+                        .filter(|route| route.peer != peer);
+                    let have = out.and_then(|out| {
+                        out.get_vpn(&VpnRibRouteKey {
+                            nlri_key: key,
+                            path_id: 0,
+                        })
+                    });
+                    let same = match (want, have) {
+                        (None, None) => true,
+                        (Some(want), Some(have)) => {
+                            want.nlri == have.nlri
+                                && want.peer == have.peer
+                                && want.next_hop == have.next_hop
+                                && want.attributes == have.attributes
+                        }
+                        _ => false,
+                    };
+                    assert!(
+                        same || debt.contains(&key),
+                        "{peer}: {key:?} differs from the Loc-RIB and no debt names it"
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -3198,7 +3427,7 @@ mod fifo_tests {
             owing.insert(key, true);
             owing.start_cursor(0, 5);
             owing.start_cursor(1, 6);
-            owing.hold_cursor = [7, 8, 0, 0, 0];
+            owing.hold_cursor = [7, 8, 0, 0, 0, 0, 0];
             assert_eq!(owing.keyed_len(v4), 1, "the set survives the flip");
             assert_eq!(owing.exempt_len(v4), 1);
             assert_eq!(owing.cursor_from(0, false), 5);
@@ -3604,6 +3833,58 @@ mod fifo_tests {
         }
     }
 
+    /// As above for a VPN set, whose removal has its own arm, in each AFI.
+    #[test]
+    fn a_vpn_set_kept_under_a_cursor_drains_without_rebuilding() {
+        const KEYS: u32 = 50_000;
+        let vpn = |afi: usize, index: u32| VpnRouteKey {
+            route_distinguisher: rustbgpd_wire::RouteDistinguisher([0, 0, 0, 0, 0, 0, 0, 1]),
+            prefix: if afi == 0 {
+                rustbgpd_wire::VpnPrefix::v4(std::net::Ipv4Addr::from(0x0a00_0000 + index), 32)
+                    .unwrap()
+            } else {
+                let address = (0x2001_0db8_u128 << 96) | u128::from(index);
+                rustbgpd_wire::VpnPrefix::v6(address.into(), 128).unwrap()
+            },
+        };
+        let families = [OwedFamily::VPNV4, OwedFamily::VPNV6];
+        for (afi, family) in families.into_iter().enumerate() {
+            let mut owing = PeerOwing::new(1);
+            for index in 0..KEYS {
+                owing.insert(OwedKey::Vpn(vpn(afi, index)), false);
+            }
+            owing.start_cursor(OwedFamily::VPN_CURSOR + afi, 0);
+            let shape = |owing: &PeerOwing| {
+                let set = &owing.vpn[afi];
+                (set.order.capacity(), set.live.capacity(), set.order.len())
+            };
+            let mut left = KEYS as usize;
+            while left != 0 {
+                for key in owing.copy_keys(family, DrainScope::All, CHUNK_ROWS) {
+                    let before = shape(&owing);
+                    owing.remove(&key);
+                    left -= 1;
+                    if left == 0 {
+                        assert_eq!(owing.set_bytes(family), 0, "an empty set is freed");
+                        continue;
+                    }
+                    let after = shape(&owing);
+                    assert!(
+                        after.0 == before.0 && before.1 - after.1 <= 1,
+                        "a capacity changed with {left} keys left: {before:?} to {after:?}"
+                    );
+                    assert!(
+                        before.2 - after.2 <= 1,
+                        "{} entries moved",
+                        before.2 - after.2
+                    );
+                }
+                assert_eq!(owing.keyed_len(family), left);
+            }
+            assert!(owing.is_whole(family), "the cursor is ended by its step");
+        }
+    }
+
     #[test]
     fn canceled_tail_compaction_has_linear_hash_work() {
         #[derive(Clone)]
@@ -3782,7 +4063,9 @@ mod family_tests {
                 F::IPV6_UNICAST,
                 F::IPV4_LABELED,
                 F::IPV6_LABELED,
-                F::EVPN
+                F::EVPN,
+                F::VPNV4,
+                F::VPNV6
             ]
         );
         assert_eq!(
