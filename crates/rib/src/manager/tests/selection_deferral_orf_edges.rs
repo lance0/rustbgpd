@@ -280,7 +280,7 @@ fn dirty_ipv6_retry_does_not_piggyback_an_orf_held_ipv4_initial_eor() {
     assert_eq!(seen, BTreeSet::from([ordinary_v6(0x100)]));
 
     let commits = manager.dirty_resync_commits;
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     assert!(observe(&mut target_rx, false, &mut seen, &mut eors) > 0);
     assert!(manager.dirty_resync_commits > commits);
     assert!(
@@ -332,7 +332,7 @@ fn non_restarting_orf_peer_keeps_backpressured_honest_empty_initial_eor() {
         [ordinary_v6(0x100)]
     );
     assert_eq!(initial.end_of_rib, [] as [(Afi, Safi); 0]);
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     let completed = target_rx.try_recv().map(delivered).unwrap();
     assert_eq!(completed.announce.len(), 0);
     assert_eq!(
@@ -381,7 +381,7 @@ fn dirty_ipv6_recovery_does_not_piggyback_an_orf_held_ipv4_initial_eor() {
     let commits = manager.dirty_resync_commits;
     release_v4(&mut manager);
     // Retry dirty recovery after selection release.
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     assert!(observe(&mut target_rx, false, &mut seen, &mut eors) > 0);
     assert!(manager.dirty_resync_commits > commits);
     assert!(
@@ -428,7 +428,7 @@ fn non_restarting_dirty_peer_keeps_orf_initial_eor_held_during_selection_release
     let commits = manager.dirty_resync_commits;
     release_v4(&mut manager);
     // Retry dirty recovery after selection release.
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     assert!(observe(&mut target_rx, false, &mut seen, &mut eors) > 0);
     assert!(manager.dirty_resync_commits > commits);
     assert!(
@@ -557,7 +557,7 @@ fn withheld_family_unlock_keeps_orf_initial_eor_held_during_selection_release() 
     });
     assert!(!manager.selection_convergence_held(V6));
     assert!(manager.loc_rib.get(&ordinary_v6(0x100)).is_some());
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     while let Ok(update) = target_rx.try_recv().map(delivered) {
         assert_eq!(
             update.unicast_withdrawals().copied().collect::<Vec<_>>(),
@@ -616,7 +616,7 @@ fn still_withheld_orf_family_keeps_fresh_empty_completion_on_selection_release()
         afi: V6.0,
         safi: V6.1,
     });
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     while let Ok(update) = target_rx.try_recv().map(delivered) {
         assert_eq!(
             update.unicast_withdrawals().copied().collect::<Vec<_>>(),
@@ -828,7 +828,7 @@ fn pump(
         if !manager.dirty_peers.contains(&peer_v4(TARGET_ADDR)) {
             return;
         }
-        manager.distribute_changes(&HashSet::new(), &HashSet::new());
+        manager.distribute_resync_request();
     }
     panic!("target never settled");
 }
@@ -951,7 +951,7 @@ fn deferred_orf_update_keeps_the_initial_gate_through_selection_release() {
 
     // Release must not send the IPv4 table or EoR the peer has not asked for.
     release_v4(&mut manager);
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     observe(&mut target_rx, false, &mut seen, &mut eors);
     assert_eq!(seen, BTreeSet::from([ordinary_v6(0x100)]));
     assert!(manager.eor_behind_orf_table(target).contains(&V4));

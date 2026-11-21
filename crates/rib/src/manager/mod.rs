@@ -7531,7 +7531,7 @@ impl RibManager {
             }
         } else {
             self.mark_outbound_dirty(peer);
-            self.distribute_changes(&HashSet::new(), &HashSet::new());
+            self.distribute_resync_request();
         }
         if captured_prior
             && !self.dirty_peers.contains(&peer)
@@ -7744,7 +7744,7 @@ impl RibManager {
         for peer in bound {
             self.mark_outbound_dirty(peer);
         }
-        self.distribute_changes(&HashSet::new(), &HashSet::new());
+        self.distribute_resync_request();
     }
 
     /// The ORR topology input: every peer's BGP-LS Adj-RIB-In, excluding

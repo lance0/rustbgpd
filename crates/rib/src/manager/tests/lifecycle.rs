@@ -166,19 +166,28 @@ async fn channel_full_marks_dirty_and_resyncs() {
 }
 
 #[tokio::test]
+async fn dirty_resync_not_starved_by_query_traffic() {
+    dirty_resync_starvation(false).await;
+}
+
+/// A dirty grouped member's resync is the tick's alone: no UPDATE pass
+/// retries it, so the timer is its only way back.
+#[tokio::test]
+async fn grouped_dirty_resync_not_starved_by_query_traffic() {
+    dirty_resync_starvation(true).await;
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "one scenario proves resync progress under sustained query load"
 )]
-async fn dirty_resync_not_starved_by_query_traffic() {
+async fn dirty_resync_starvation(grouped: bool) {
     tokio::time::pause();
+    let started = tokio::time::Instant::now();
 
     let (tx, rx) = mpsc::channel(64);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    // The timer contract is the run loop's. Pin it on the per-peer path,
-    // whose UPDATE passes still retry a dirty peer: a dirty grouped
-    // member's resync is the tick's alone.
-    manager.test_force_ungrouped = true;
+    manager.test_force_ungrouped = !grouped;
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
@@ -289,8 +298,10 @@ async fn dirty_resync_not_starved_by_query_traffic() {
     .unwrap();
     let _ = reply_rx.await;
 
-    // Drain the outbound channel to allow resync
-    let _ = fixture_delivery(out_rx.recv()).await.unwrap();
+    // Drain the outbound channel to allow resync. Never wait on an empty
+    // channel here: the paused clock would run ahead to the timer before
+    // the churn below.
+    let _ = out_rx.try_recv();
 
     // Advance 500ms — not enough for the 1s timer
     tokio::time::advance(Duration::from_millis(500)).await;
@@ -313,10 +324,18 @@ async fn dirty_resync_not_starved_by_query_traffic() {
     // that was set before the query churn.
     tokio::time::advance(Duration::from_millis(600)).await;
 
-    // The resync should fire despite the intervening queries.
+    // The resync should fire despite the intervening queries, at the
+    // deadline set before them. A peer's resync sends the route it missed;
+    // a grouped member's re-announces its whole table.
     let resync = fixture_delivery(out_rx.recv()).await.unwrap();
-    assert!(
-        !resync.announce.is_empty() || resync.unicast_withdrawals().next().is_some(),
+    assert_eq!(started.elapsed(), Duration::from_millis(1100));
+    let announced: HashSet<_> = resync.announce.iter().map(|route| route.prefix).collect();
+    let mut expected = HashSet::from([Prefix::V4(prefix3)]);
+    if grouped {
+        expected.insert(Prefix::V4(prefix2));
+    }
+    assert_eq!(
+        announced, expected,
         "resync should produce updates despite query churn"
     );
 

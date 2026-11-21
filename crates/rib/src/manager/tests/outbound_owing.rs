@@ -2175,7 +2175,7 @@ fn a_targeted_pass_still_serves_other_dirty_and_forced_peers() {
     }
     manager.mark_outbound_dirty(peers[1]);
     manager.force_outbound_peers.insert(peers[2]);
-    manager.distribute_changes_to_targets(&HashSet::new(), &HashSet::from([peers[0]]));
+    manager.distribute_resync_request_to_targets(&HashSet::from([peers[0]]));
     assert!(!manager.dirty_peers.contains(&peers[1]));
     assert!(!manager.force_outbound_peers.contains(&peers[2]));
     assert!(send_all(&mut receivers[0]).is_empty());

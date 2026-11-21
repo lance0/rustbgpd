@@ -1683,7 +1683,7 @@ fn injected_flowspec_is_exported_during_selection_deferral() {
     };
     assert_window_sends_rule(&mut late_rx, "the initial table");
     manager.mark_outbound_dirty(late);
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     assert_window_sends_rule(&mut late_rx, "the dirty resync");
     let page = query_rule(&mut manager, &key, None, None, 10).unwrap();
     assert_eq!(
@@ -3088,7 +3088,7 @@ fn injected_unicast_policy_deny_does_not_reveal_received_during_deferral() {
         let mut late_rx = deferred_unicast_peer(&mut manager, late, mode, true);
         assert!(deferred_unicast_drain(&mut late_rx).is_empty());
         manager.mark_outbound_dirty(late);
-        manager.distribute_changes(&HashSet::new(), &HashSet::new());
+        manager.distribute_resync_request();
         assert!(deferred_unicast_drain(&mut late_rx).is_empty());
     }
 }
