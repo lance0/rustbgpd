@@ -3311,7 +3311,11 @@ impl RibManager {
         };
         // Tombstones are retired only when the group has no dirty member, so
         // they still hold this pass's withdrawals while the member that
-        // copied them stays dirty: a pass visits each member once.
+        // copied them stays dirty: a pass visits each member once. That
+        // member can leave the dirty set mid-pass: a closed channel drops it
+        // (`drop_gone_dirty_peer`), and a later inline resync of the last
+        // dirty member then retires the tombstones. The next deferral copies
+        // them again.
         let copied = deferred_groups.get(&gid).is_some_and(|anchor| {
             self.group_ribs
                 .get(&gid)

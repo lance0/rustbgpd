@@ -4105,4 +4105,57 @@ fn held_bulk_promotion_work_is_linear() {
     );
 }
 
+/// A pass copies its withdrawals into a group's tombstones once, while the
+/// member whose deferral copied them stays dirty. A member whose session
+/// closed its receiver mid-pass is dropped from the group's dirty set, so a
+/// later inline resync in the same pass can retire the tombstones. The next
+/// deferred member without a proof must copy them again, or its resync
+/// never withdraws the key.
+#[test]
+fn a_deferral_after_the_tombstones_retire_copies_the_withdrawals_again() {
+    use crate::manager::update_groups::{GroupDelta, GroupStageOutput};
+    let (_tx, mut manager) = manager();
+    let mut receivers = members(&mut manager, 3, false, None);
+    manager.handle_update(routes_from(external(), 0, 1, 4));
+    drain_route_chunks(&mut manager);
+    let _ = drain(&mut receivers);
+    let (a, c, b) = (member(0), member(1), member(2));
+    let gid = manager.grouped_member_of(a).unwrap();
+    assert_eq!(manager.grouped_member_of(b), Some(gid));
+    assert_eq!(manager.grouped_member_of(c), Some(gid));
+    let key = (Prefix::V4(prefix(1, 0)), 0);
+    let mut stage = GroupStageOutput::default();
+    stage.deltas.push(GroupDelta {
+        local_source: None,
+        prefix: key.0,
+        path_id: 0,
+        new: None,
+        old_source: Some(external()),
+        prior_source_attrs: None,
+        prior: None,
+        policy_label: None,
+        source_attrs: None,
+        lane: None,
+    });
+    let stages = HashMap::from([(gid, stage)]);
+    let mut deferred = HashMap::new();
+    // A's session closed its receiver mid-pass.
+    drop(receivers.remove(0));
+    assert!(manager.outbound_channel_gone(a));
+    manager.defer_unsent_outbound_pass(a, Some(gid), &stages, &mut deferred, &|| {});
+    assert!(!manager.group_ribs[&gid].dirty_members.contains(&a));
+    assert!(manager.group_ribs[&gid].tombstones.contains(&key));
+    // C's inline resync settles with no dirty member left.
+    manager.clear_grouped_member_synced(c);
+    assert!(manager.group_ribs[&gid].tombstones.is_empty(), "retired");
+    // B, clean with no proof, then misses the pass's send.
+    assert!(!manager.pending_group_admitted.contains_key(&b));
+    manager.defer_unsent_outbound_pass(b, Some(gid), &stages, &mut deferred, &|| {});
+    assert!(manager.group_ribs[&gid].dirty_members.contains(&b));
+    assert!(
+        manager.group_ribs[&gid].tombstones.contains(&key),
+        "B is dirty without a proof and its tombstone for the pass's withdrawal is gone"
+    );
+}
+
 mod cold_cohort_ownership;
