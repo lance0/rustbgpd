@@ -170,8 +170,9 @@ The witness counts fresh grouped proofs that sealed and completed table walks
 in the pre-staging loop of the triggering pass. A completed walk projects
 every occupied row once, so its projections are the table's row count at the
 end of the walk: nothing is counted per row, and the measured walk is the
-function a daemon build runs. The only additions inside the capture loop are
-two thread-local reads per walk and one callback per capture.
+function a daemon build runs. The additions inside the capture loop are two
+thread-local accesses per walk, and one more plus one callback per capture,
+which stores that capture's record.
 
 For each capture the receipt records the proof strategy (`indexed` over a
 shared key pool, `built` or `reused`, or `flat`), its keys, the slab slots of

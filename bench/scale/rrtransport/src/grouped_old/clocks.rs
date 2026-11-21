@@ -50,7 +50,8 @@ struct Times {
     longest: (Duration, usize, u8),
     work: Option<(usize, usize, usize, bool)>,
     first_refused: Option<usize>,
-    proofs: Vec<Value>,
+    /// Each `ProofSealed` as raised; turned into the receipt's records afterwards.
+    proofs: Vec<GroupCaptureBenchEvent>,
     refusals: Vec<String>,
     /// Ledger bytes before the pass, after it, its peak, and both limits.
     ledger: [usize; 5],
@@ -117,26 +118,8 @@ impl Clocks {
                         t.capture = Some(now);
                         admit(&mut t, 0);
                     }
-                    GroupCaptureBenchEvent::ProofSealed {
-                        strategy,
-                        pool_reused,
-                        keys,
-                        slots,
-                        walks,
-                        projections,
-                        member_charge_bytes,
-                        daemon_bytes,
-                    } => t.proofs.push(json!({
-                        "strategy": strategy,
-                        "pool": match (strategy, pool_reused) {
-                            ("indexed", true) => "reused",
-                            ("indexed", false) => "built",
-                            _ => "none",
-                        },
-                        "keys": keys, "slots": slots, "walks": walks, "projections": projections,
-                        "member_charge_bytes": member_charge_bytes,
-                        "daemon_bytes": daemon_bytes,
-                    })),
+                    // Inside the timed capture loop: store it and nothing else.
+                    GroupCaptureBenchEvent::ProofSealed { .. } => t.proofs.push(event),
                     GroupCaptureBenchEvent::ProofRefused {
                         cause,
                         attempted_member_bytes,
@@ -364,6 +347,38 @@ impl Clocks {
             phases.insert((*name).into(), phase);
         }
         let [before, after, peak, member_limit, daemon_limit] = t.ledger;
+        let mut group_capture_walks = 0;
+        let proofs: Vec<Value> = t
+            .proofs
+            .iter()
+            .map(|proof| {
+                let GroupCaptureBenchEvent::ProofSealed {
+                    strategy,
+                    pool_reused,
+                    keys,
+                    slots,
+                    walks,
+                    projections,
+                    member_charge_bytes,
+                    daemon_bytes,
+                } = *proof
+                else {
+                    unreachable!("only sealed proofs are stored");
+                };
+                group_capture_walks += walks;
+                json!({
+                    "strategy": strategy,
+                    "pool": match (strategy, pool_reused) {
+                        ("indexed", true) => "reused",
+                        ("indexed", false) => "built",
+                        _ => "none",
+                    },
+                    "keys": keys, "slots": slots, "walks": walks, "projections": projections,
+                    "member_charge_bytes": member_charge_bytes,
+                    "daemon_bytes": daemon_bytes,
+                })
+            })
+            .collect();
         Ok(json!({
             "actor_polls": t.polls.iter().map(|(count, _)| count).sum::<u64>(),
             "longest_actor_poll_ns": nanos(t.longest.0), "longest_actor_poll_phase": PHASES[t.longest.1],
@@ -382,8 +397,8 @@ impl Clocks {
             "recovery_probe_admission_to_winner_ns":ns(winner2)-ns(admitted2),
             "recovery_probe_slice_recovered": t.probe_slice_recovered,
             "fresh_captures":fresh, "walks":walks, "projections":projections,
-            "group_capture_walks": t.proofs.iter().map(|proof| proof["walks"].as_u64().unwrap()).sum::<u64>(),
-            "proofs": t.proofs,
+            "group_capture_walks": group_capture_walks,
+            "proofs": proofs,
             "proof_ledger": {"before_bytes": before, "after_bytes": after, "peak_bytes": peak,
                 "member_limit_bytes": member_limit, "daemon_limit_bytes": daemon_limit},
             "checkpoint_tally_compiled_in":tally, "debug_assertions":cfg!(debug_assertions)
