@@ -164,10 +164,10 @@ fn a_populated_evpn_table_is_never_presized() {
 
 /// A release walk at one row in ten with 8,000 of 50,000 keys logged
 /// again (a route target added) after the release and before the first
-/// step: the holes ahead leave the rate, counted from the keys the walk
-/// read, alone. Red with keys read taken as the Loc-RIB's keys less the
-/// entries ahead: the step that completes the sample has read far more
-/// keys than it counts.
+/// step. They are logged after the starting log, so neither walk makes an
+/// estimate and the index fits as without the presize. Red when the
+/// estimate ignores keys logged after the starting log: an estimate for
+/// the joiner and the waiter.
 #[test]
 fn a_filtered_evpn_walk_with_keys_logged_again_ahead_fits() {
     const ROWS: u32 = 50_000;
@@ -185,8 +185,8 @@ fn a_filtered_evpn_walk_with_keys_logged_again_ahead_fits() {
     assert_index_fitted(&manager, peer, "one in ten, logged again ahead");
     assert_eq!(
         manager.adj_rib_out_commit_stats.walk_presizes - presizes,
-        2,
-        "one estimate each for the joiner and the waiter"
+        0,
+        "no estimate for the joiner or the waiter"
     );
 }
 

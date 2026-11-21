@@ -363,10 +363,11 @@ fn labeled_row(index: u32, label: u32, med: u32) -> VpnRibRoute {
 
 /// Every key accepted; the source withdraws its last 700 keys after the
 /// pass logs them and before the receiver's first step. A withdrawn key
-/// stays a list entry ahead of the cursor and leaves the Loc-RIB. Red
-/// with keys read taken as the Loc-RIB's keys less the entries ahead:
-/// they count twice, the rate reads about three, and the table ends near
-/// three times what it holds (1.49 times without the presize).
+/// stays a list entry ahead of the cursor and leaves the Loc-RIB. The
+/// withdrawals are logged after the starting log, so the walk makes no
+/// estimate and the table fits as without the presize (1.49 times what it
+/// holds). Red when the estimate ignores keys logged after the starting
+/// log: one estimate.
 #[test]
 fn withdrawals_ahead_of_a_vpn_cursor_do_not_inflate_the_rate() {
     const ROWS: u32 = 20_000;
@@ -385,8 +386,8 @@ fn withdrawals_ahead_of_a_vpn_cursor_do_not_inflate_the_rate() {
     assert_indexes_fitted(&manager, peer, "withdrawals ahead");
     assert_eq!(
         manager.adj_rib_out_commit_stats.walk_presizes - presizes,
-        1,
-        "one estimate"
+        0,
+        "no estimate"
     );
 }
 
@@ -413,10 +414,10 @@ fn relabels_ahead_of_a_vpn_cursor_do_not_inflate_the_rate() {
 }
 
 /// A restart walk at one row in ten with 8,000 of 50,000 keys relabeled
-/// after the pass and before the first step: the holes ahead keep the
-/// derived sample unread for several steps, and the step that completes
-/// it has read many more keys than it counts. Red with the derived count:
-/// about 5.7 times what it holds (1.43 times without the presize).
+/// after the pass and before the first step. The relabels are logged
+/// after the starting log, so the walk makes no estimate and the table
+/// fits as without the presize (1.43 times what it holds). Red when the
+/// estimate ignores keys logged after the starting log: one estimate.
 #[test]
 fn a_filtered_vpn_walk_with_relabels_ahead_fits() {
     const ROWS: u32 = 50_000;
@@ -440,8 +441,8 @@ fn a_filtered_vpn_walk_with_relabels_ahead_fits() {
     assert_indexes_fitted(&manager, peer, "one in ten, relabels ahead");
     assert_eq!(
         manager.adj_rib_out_commit_stats.walk_presizes - presizes,
-        1,
-        "one estimate"
+        0,
+        "no estimate"
     );
 }
 

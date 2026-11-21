@@ -217,13 +217,12 @@ fn a_populated_vpn_table_is_never_presized() {
 /// where it was, so the sequence numbers ahead of a cursor can count many
 /// more entries than the list holds there: half the rows relabeled six
 /// times before the receiver reads put four sequence numbers ahead of it
-/// per live key. The rate counts the keys the walk read, step by step,
-/// so the holes leave it alone: one estimate, and the table fits. Red
-/// with keys read taken as the Loc-RIB's keys less the entries ahead: the
-/// holes read as no sample, and the table grows by the steps' own
-/// reserves instead.
+/// per live key. Those relabels are logged after the walk's starting
+/// log, so its sample is not quiet: the walk makes no estimate, and the
+/// table grows by the steps' own reserves and fits. Red when the estimate
+/// ignores keys logged after the starting log: one estimate.
 #[test]
-fn holes_ahead_of_a_vpn_cursor_leave_the_rate_alone() {
+fn holes_ahead_of_a_vpn_cursor_make_no_estimate() {
     const ROWS: u32 = 8_192;
     let (mut manager, mut receivers) = owing(manager(4 * CHUNK_ROWS), P4, &[P4], 1, ROWS, 4096);
     for label in 101..107 {
@@ -246,8 +245,8 @@ fn holes_ahead_of_a_vpn_cursor_leave_the_rate_alone() {
     walk(&mut manager, &mut receivers, peer);
     assert_eq!(
         manager.adj_rib_out_commit_stats.walk_presizes - presizes,
-        1,
-        "one estimate, holes ahead or not"
+        0,
+        "no estimate once keys are logged after the starting log"
     );
     let label = |index| if index < ROWS / 2 { 100 } else { 106 };
     let expected = table_of(

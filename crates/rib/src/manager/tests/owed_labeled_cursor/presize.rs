@@ -200,10 +200,10 @@ fn an_add_path_labeled_walk_sizes_each_index_by_its_own_count() {
 }
 
 /// A restart walk at one row in ten with 8,000 of 50,000 prefixes
-/// relabeled after the pass and before the first step: the holes ahead
-/// leave the rate, counted from the prefixes the walk read, alone. Red
-/// with prefixes read taken as the Loc-RIB's prefixes less the entries
-/// ahead: about 23 times what it holds.
+/// relabeled after the pass and before the first step. The relabels are
+/// logged after the starting log, so the walk makes no estimate and the
+/// table fits as without the presize. Red when the estimate ignores
+/// prefixes logged after the starting log: one estimate.
 #[test]
 fn a_filtered_labeled_walk_with_relabels_ahead_fits() {
     const ROWS: u32 = 50_000;
@@ -237,8 +237,8 @@ fn a_filtered_labeled_walk_with_relabels_ahead_fits() {
     assert_indexes_fitted(&manager, peer, "one in ten, relabels ahead");
     assert_eq!(
         manager.adj_rib_out_commit_stats.walk_presizes - presizes,
-        1,
-        "one estimate"
+        0,
+        "no estimate"
     );
 }
 
@@ -354,4 +354,46 @@ fn denied_labeled_prefixes_logged_again_ahead_fit() {
     };
     let (head, control) = with_control(shape);
     assert_at_or_below_control(&head, &control, "denied prefixes logged again");
+}
+
+/// The default step (credit 4,096, 1,024 prefixes): one in five of
+/// 100,000 accepted, so the first step commits about 205 rows, under the
+/// sample's 256. After it the source re-marks nine in ten accepted
+/// prefixes so the receiver denies them, and the walk drains. The change
+/// is logged after the starting log, so the walk makes no estimate. Red
+/// when the estimate ignores prefixes logged after the starting log: 3.6
+/// times what the table holds, against 1.8.
+#[test]
+fn accepted_labeled_prefixes_denied_after_a_default_step_fit() {
+    const TOTAL: u32 = 100_000;
+    let accepted = |i: u32| i % 5 == 0;
+    let kept = |i: u32| i % 50 == 0;
+    let row = |index: u32, med: u32| {
+        let mut route = route_from(SOURCE, L4, index, 100, 200);
+        set_med(&mut route.attributes, med);
+        route
+    };
+    let shape = || {
+        let mut manager = manager(4 * CHUNK_ROWS);
+        sources_up(&mut manager);
+        let mut receivers = vec![filtered_receiver(&mut manager, 0)];
+        let peer = receivers[0].peer;
+        let rows = (0..TOTAL).map(|i| row(i, u32::from(!accepted(i))));
+        send(&mut manager, SOURCE, rows.collect(), vec![]);
+        tick(&mut manager, &mut receivers);
+        assert_eq!(
+            manager.adj_rib_out_commit_stats.walk_presizes, 0,
+            "the change lands before the estimate"
+        );
+        let again = (0..TOTAL)
+            .filter(|&i| accepted(i) && !kept(i))
+            .map(|i| row(i, 1));
+        send(&mut manager, SOURCE, again.collect(), vec![]);
+        drain(&mut manager, &mut receivers);
+        assert_eq!(receivers[0].wire.table.len(), (TOTAL / 50) as usize);
+        assert_indexes_fitted(&manager, peer, "denied after a default step");
+        tables(&manager, peer).1
+    };
+    let (head, control) = with_control(shape);
+    assert_at_or_below_control(&head, &control, "denied after a default step");
 }

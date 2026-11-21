@@ -654,3 +654,210 @@ fn an_imported_evpn_block_ahead_of_an_unimported_one_fits() {
     let (head, control) = with_control(shape);
     assert_at_or_below_control(&head, &control, "imported, then not");
 }
+
+// ---- What R accepts changes between the release and the estimate.
+
+/// [`assert_at_or_below_control`] within the spread of the index's 16
+/// shards: each run hashes its keys with its own seed, so with no presize
+/// at all the shards' capacities differ by a few percent.
+fn assert_within_control(head: &[usize; 2], control: &[usize; 2], case: &str) {
+    let spread = control.map(|capacity| capacity + capacity / 20);
+    assert_at_or_below_control(head, &spread, case);
+}
+
+const MIXED_ROWS: u32 = 20_000;
+
+/// 15 in 20 keys carry RT 100, 1 in 20 RT 200 (R imports both), the rest
+/// RT 300: R's first steps commit their sample's rows before they have
+/// read its keys.
+fn mixed_rt(index: u32) -> u16 {
+    match index % 20 {
+        0 => 200,
+        1..=15 => 100,
+        _ => 300,
+    }
+}
+
+/// A change in what R accepts.
+#[derive(Debug, Clone, Copy)]
+enum Change {
+    /// R's membership drops RT 100: no key is logged, R's set restages.
+    DropRt100,
+    /// R's membership adds RT 300: no key is logged, R's set restages.
+    AddRt300,
+    /// The source moves the RT 100 keys of 2,000 from `from` to RT 300:
+    /// logged, and R denies them.
+    Deny(u32),
+    /// The source moves the RT 300 keys of 2,000 from `from` to RT 100:
+    /// logged, and R accepts them.
+    Accept(u32),
+}
+
+fn apply(manager: &mut RibManager, change: Change) {
+    let moved = |from: u32, was: u16, now: u16| {
+        (from..from + 2_000)
+            .filter(|&i| mixed_rt(i) == was)
+            .map(|i| route_rt(i, 1, &[now]))
+            .collect()
+    };
+    match change {
+        Change::DropRt100 => manager.handle_update(membership_update(0, 999, Some(100))),
+        Change::AddRt300 => manager.handle_update(membership_update(0, 300, None)),
+        Change::Deny(from) => received_routes(manager, moved(from, 100, 300), &[]),
+        Change::Accept(from) => received_routes(manager, moved(from, 300, 100), &[]),
+    }
+}
+
+/// [`MIXED_ROWS`] keys released to R and receiver 1 (EVPN private, both
+/// importing RT 100 and RT 200) at 128 keys a step. Each change of
+/// `changes` lands once R's cursor steps have read its keys. Returns R's table
+/// as sent, its rows, its capacities, the presizes made, and R's keys
+/// read and rows at the first change.
+fn mixed_walk(
+    changes: &[(usize, Change)],
+) -> (
+    BTreeMap<EvpnRouteKey, String>,
+    usize,
+    [usize; 2],
+    usize,
+    (usize, usize),
+) {
+    let mut manager = rtc_manager(256).with_selection_deferral(SelectionDeferralConfig {
+        timeout: Duration::from_secs(60),
+        waiters: vec![SelectionDeferralWaiterConfig {
+            peer: peer_v4(WAITER).into(),
+            families: vec![EVPN],
+        }],
+    });
+    std::mem::forget(up_sized(&mut manager, peer_v4(SOURCE), 0, 4096, &[V4]));
+    let routes = (0..MIXED_ROWS)
+        .map(|i| route_rt(i, 0, &[mixed_rt(i)]))
+        .collect();
+    received_routes(&mut manager, routes, &[]);
+    let waiter = hold(&mut manager);
+    let mut families = vpn_rtc_sendable();
+    families.push(EVPN);
+    let mut receivers: Vec<Receiver> = (0..2)
+        .map(|index| {
+            let peer = receiver(index);
+            let mut rx = up_sized(&mut manager, peer, 0, 4096, &families);
+            manager.handle_update(membership_update(index, 100, None));
+            manager.handle_update(membership_update(index, 200, None));
+            manager.handle_update(rtc_eor(index));
+            Wire::default().write(&mut rx);
+            assert!(manager.evpn_grouped_member_of(peer).is_none(), "private");
+            Receiver {
+                peer,
+                rx,
+                wire: Wire::default(),
+            }
+        })
+        .collect();
+    release(&mut manager);
+    receivers.push(waiter);
+    let r = receivers[0].peer;
+    assert!(manager.owes_whole(r, FAMILY), "R walks");
+    let mut pending = changes.to_vec();
+    pending.sort_by_key(|(at, _)| *at);
+    let mut first = None;
+    // Keys R's cursor has read, across a dropped sample (which zeroes the
+    // count).
+    let (mut base, mut last) = (0, 0);
+    // A restage drains R's own set (every key) before the cursor steps on.
+    for _ in 0..4_000 {
+        let now = manager.walk_keys_read(r, FAMILY);
+        if now < last {
+            base += last;
+        }
+        last = now;
+        let read = base + now;
+        while let Some(&(at, change)) = pending.first()
+            && at <= read
+        {
+            let rows = manager.adj_ribs_out[&r].evpn_len();
+            first.get_or_insert((read, rows));
+            apply(&mut manager, change);
+            pending.remove(0);
+        }
+        if pending.is_empty() {
+            break;
+        }
+        tick(&mut manager, &mut receivers);
+    }
+    assert!(pending.is_empty(), "every change landed: {pending:?}");
+    assert!(!manager.dirty_peers.contains(&r), "no resync");
+    drain(&mut manager, &mut receivers);
+    assert!(!manager.owes(r, EVPN), "R settled");
+    let (rows, capacities) = evpn_table(&manager, r);
+    assert_eq!(receivers[0].wire.table.len(), rows, "R's table as sent");
+    let presizes = manager.adj_rib_out_commit_stats.walk_presizes;
+    (
+        receivers[0].wire.table.clone(),
+        rows,
+        capacities,
+        presizes,
+        first.unwrap_or_default(),
+    )
+}
+
+/// After R's walk has read 384 keys (under the sample's 512, past its 256
+/// rows), its membership drops RT 100: R now denies most keys ahead, which
+/// stay where they are in the starting log. The unlogged change drops the
+/// walk's sample, so it makes no estimate. Red without that: the index 14
+/// times what it holds and the slab's first segment 65,536 slots, against
+/// 1.8 times and 1,024.
+#[test]
+fn an_rtc_drop_mid_sample_under_an_evpn_cursor_fits() {
+    let shape = || mixed_walk(&[(384, Change::DropRt100)]);
+    let ((table, rows, head, _, (read, sampled)), (control_table, _, control, _, _)) =
+        with_control(shape);
+    assert!(
+        read < 512 && sampled >= 256,
+        "under the sample's keys, past its rows: {read} keys, {sampled} rows"
+    );
+    assert_eq!(table, control_table, "same table");
+    let expected = (0..MIXED_ROWS).filter(|&i| mixed_rt(i) == 200).count();
+    assert_eq!(rows, expected, "R's table");
+    assert_within_control(&head, &control, "RTC drop mid-sample");
+    assert_fitted(head[0], rows, "RTC drop mid-sample");
+}
+
+/// The changes of `seed`: one or two, each logged or not, raising or
+/// lowering what R accepts, at a step boundary among R's first four.
+fn mixed_schedule(seed: u64) -> Vec<(usize, Change)> {
+    let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    let mut draw = |range: u64| next(&mut state) % range;
+    (0..1 + draw(2))
+        .map(|_| {
+            let at = 128 * usize::try_from(draw(4)).unwrap();
+            let from = u32::try_from(draw(u64::from(MIXED_ROWS - 2_000))).unwrap();
+            let change = match draw(4) {
+                0 => Change::DropRt100,
+                1 => Change::AddRt300,
+                2 => Change::Deny(from),
+                _ => Change::Accept(from),
+            };
+            (at, change)
+        })
+        .collect()
+}
+
+/// Every seed's walk, with what R accepts changed at random points
+/// between the release's starting log and the estimate (by a logged pass
+/// or an unlogged membership change, up or down), ends with the same
+/// table as the control and capacities at or below its. Red when the
+/// estimate trusts a sample taken before such a change.
+#[test]
+fn acceptance_changes_before_the_estimate_never_size_past_the_control() {
+    for seed in 0..16 {
+        let plan = mixed_schedule(seed);
+        let ((table, rows, head, _, _), (control_table, _, control, _, _)) =
+            with_control(|| mixed_walk(&plan));
+        let case = format!("seed {seed} {plan:?}");
+        assert_eq!(table, control_table, "{case}: same table");
+        assert_within_control(&head, &control, &case);
+        if rows != 0 {
+            assert_fitted(head[0], rows, &case);
+        }
+    }
+}

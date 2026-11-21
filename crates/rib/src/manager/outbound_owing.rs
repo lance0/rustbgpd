@@ -321,13 +321,12 @@ impl WalkSample {
     /// before the walk, staged from the receiver's own set, withdrawn)
     /// never count as rows the walk read keys for. The rate is per
     /// position, holes included, because the positions ahead are what it
-    /// multiplies: a key logged again after the starting log leaves a
-    /// hole there, and when the keys logged again are the ones the
-    /// receiver denies, the keys left in place are its accepted ones, so a
-    /// rate per key read would apply their acceptance to every hole. Per
-    /// position, the holes passed dilute the rate as the holes ahead
-    /// inflate the count. The positions ahead are also at most the
-    /// Loc-RIB's keys not yet read (a key read twice understates them).
+    /// multiplies. A key logged again after the starting log leaves a hole
+    /// there, but it also moves the list head, and the walk then makes no
+    /// estimate (`entries` is zero): the keys it moved may be the ones the
+    /// receiver now denies, or now accepts, after the rows were counted.
+    /// The positions ahead are also at most the Loc-RIB's keys not yet read
+    /// (a key read twice understates them).
     /// `slots` is at least `read` (each key read holds its own position),
     /// so this estimate is never above one per key read. Keys logged after
     /// the starting log are not counted: the list is in arrival order
@@ -861,8 +860,12 @@ pub(super) struct PeerOwing {
     /// logs its keys from a hash set; across passes the list is in arrival
     /// order). The presize extrapolates its rate over no entry past it.
     /// Zero (no estimate) until [`RibManager::seal_walk_starts`] sets it,
-    /// and for a cursor started by an owed set's byte cap, whose keys ahead
-    /// are all later arrivals. Reset with [`Self::walk_read`].
+    /// for a cursor started by an owed set's byte cap, whose keys ahead
+    /// are all later arrivals, and once a change no pass logged (an
+    /// unlogged mark, a resync the walk outlives) reaches the receiver.
+    /// The estimate also needs the list head still here: a key logged
+    /// after it may have changed what the receiver accepts ahead. Reset
+    /// with [`Self::walk_read`].
     walk_head: [u64; OwedFamily::CURSORS.len()],
     /// Per cursor family: list positions those same cursor steps passed,
     /// holes included (each step's position after it less its position
@@ -1091,9 +1094,17 @@ impl PeerOwing {
     fn start_cursor(&mut self, index: usize, head: u64) {
         self.whole |= OwedFamily::CURSORS[index].bit();
         (self.cursor[index], self.hold_cursor[index]) = (head, 0);
+        self.forget_walk_sample(index);
+        self.walk_starting[index] = false;
+    }
+
+    /// Drop the presize sample of cursor family `index`'s walk: with no
+    /// starting log ([`Self::walk_head`] zero) its walk makes no estimate.
+    /// A start keeps waiting for its starting log
+    /// ([`Self::walk_starting`] is left as it is).
+    fn forget_walk_sample(&mut self, index: usize) {
         (self.walk_read[index], self.walk_rows[index]) = (0, 0);
         (self.walk_head[index], self.walk_slots[index]) = (0, 0);
-        self.walk_starting[index] = false;
     }
 
     /// The cursor of `index` caught up with its list.
@@ -1660,9 +1671,15 @@ impl RibManager {
             if !sendable.is_some_and(|families| families.contains(&family.afi_safis()[0])) {
                 continue;
             }
-            if owing.is_whole(family) && !(unlogged && family.has_cursor()) {
-                owing.hold_drained &= !family.bit();
-                continue;
+            if owing.is_whole(family) {
+                let Some(index) = family.cursor_index().filter(|_| unlogged) else {
+                    owing.hold_drained &= !family.bit();
+                    continue;
+                };
+                // What this receiver accepts changed with no key logged, so
+                // the rows its walk committed before now are no sample of
+                // the keys ahead: the walk makes no estimate.
+                owing.forget_walk_sample(index);
             }
             touched |= family.bit();
             if self.owed_key_kept(peer, &key, &mut rejected, &mut pending_otc) {
@@ -1799,6 +1816,11 @@ impl RibManager {
                 self.selection_deferred(afi_safi) || self.owed_release_open(afi_safi)
             }) {
                 owing.clear_family(family);
+            } else if let Some(index) = family.cursor_index() {
+                // The resync restaged the table under what the receiver
+                // accepts now (the change that made it dirty included): a
+                // walk kept past it makes no estimate from rows before it.
+                owing.forget_walk_sample(index);
             }
         }
         let ended = OwedFamily::CURSORS.map(|family| owing.is_whole(family)) != cursors;
@@ -2415,7 +2437,11 @@ impl RibManager {
     /// position, times its positions still ahead in the walk's starting
     /// log ([`PeerOwing::walk_head`]): keys logged after it are
     /// in arrival order, so the sample says nothing of them, and they grow
-    /// the table by the steps' reserves. An AFI without a rate adds
+    /// the table by the steps' reserves. The sample must be quiet: an AFI
+    /// whose list has had a key logged since its starting log adds
+    /// nothing, as does one whose receiver's acceptance changed without a
+    /// log (its sample is dropped), since rows counted before such a change
+    /// say nothing of the keys ahead after it. An AFI without a rate adds
     /// nothing, so a table can fall short and grow by the steps' reserves
     /// as before, but is not sized past what one estimate from each AFI's
     /// cumulative rate reads. The key index is sized by the unclamped rate
@@ -2462,11 +2488,21 @@ impl RibManager {
         };
         // Entries of the walk's starting log ([`PeerOwing::walk_head`])
         // ahead of `sibling`'s live cursor, or of `start` when given (the
-        // stepping AFI's position before the step).
+        // stepping AFI's position before the step). None are counted once
+        // a key has been logged in the list since the starting log: the
+        // entry it moved, or the key it added, may have changed what the
+        // receiver accepts among the keys ahead after the rows were
+        // counted, so the AFI adds nothing (the estimate trusts only a
+        // quiet sample).
         let entries = |sibling: OwedFamily, start: Option<u64>| {
-            let list = sibling.row_cursor()? as usize;
-            let position = self.live_cursor(peer, owing, list)?;
-            Some(owing.walk_head[list].saturating_sub(start.unwrap_or(position)))
+            let list = sibling.row_cursor()?;
+            let position = self.live_cursor(peer, owing, list as usize)?;
+            let sealed = owing.walk_head[list as usize];
+            Some(if self.owed_rows_head(list) > sealed {
+                0
+            } else {
+                sealed.saturating_sub(start.unwrap_or(position))
+            })
         };
         let stepped = Self::walk_afi(family);
         let mut after = [WalkSample::Done; 2];
@@ -3313,6 +3349,14 @@ impl RibManager {
                     .get(key)
                     .is_some_and(|logged| *logged <= owing.cursor[OwedFamily::EVPN_CURSOR])
         })
+    }
+
+    /// Keys `peer`'s cursor steps of `family` have read for the presize
+    /// sample ([`PeerOwing::walk_read`]).
+    #[cfg(test)]
+    pub(super) fn walk_keys_read(&self, peer: PeerId, family: OwedFamily) -> usize {
+        let index = family.cursor_index().expect("a cursor family");
+        self.owing(peer).map_or(0, |owing| owing.walk_read[index])
     }
 
     /// Whether `family` is owed whole to `peer`.
