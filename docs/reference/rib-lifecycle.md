@@ -41,16 +41,16 @@ finishes the unit it is in, and one unit can be a whole table.
 
 | Shape | [Session comes up](#session-comes-up) | [Steady state](#steady-state) | [Receiver falls behind](#receiver-falls-behind) | [Refresh, ORF, RTC](#refresh-orf-and-rt-constrain) | [Policy change](#policy-or-config-change) | [Restart](#restart) | [Session ends](#session-ends) |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Plain unicast, grouped | Table build **paced**; initial table **one turn** (both in the [receipt](../perf/first-group-build-registration-2026-11.md)) | **paced** by read gate and window | Resync **one turn** per member | **one turn** per request; queued requests share it | **bounded turns**: updates held until commit; two snapshot turns | **paced** between batches; input held inside a batch | **one turn** |
+| Plain unicast, grouped | Table build **paced**; initial table **one turn** (both in the [receipt](../perf/first-group-build-registration-2026-11.md)) | **paced** by read gate and window | Resync **one turn** per member | **one turn** per request; queued requests share it | Nothing filtered: **bounded turns**, updates held until commit. Otherwise one shared turn | **paced** between batches; input held inside a batch | **one turn** |
 | Export policy | Table build and initial table together in **one turn**; not measured | As plain | As plain | As plain | As plain | As plain; not measured with policy | One turn |
-| Configured role | As export policy; not measured | As plain; not measured | As plain; not measured | As plain; not measured | As export policy; not measured | As plain; not measured | One turn; not measured |
+| Configured role | As export policy; not measured | As plain; not measured | As plain; not measured | As plain; not measured | As plain if nothing is OTC-blocked; not measured | As plain; not measured | One turn; not measured |
 | Route-server per-client best | Table build and own initial table together in **one turn**; not measured | Window; per-client ranking not measured | As plain; not measured | One turn per request, never shared | Shared cohort **one turn**; other members **paced** by command; not measured | **paced** between batches, as plain; a crowded prefix alone | One turn; not measured |
 | Kept private: ORF, ORR, conditional advertisement, peer-context policy, slow-peer isolation | Initial table **one turn** per receiver; not measured | Window; work grows with receivers | **paced** row cursor; fallback resync one turn | One turn per request | Members **paced** by command, a whole-table resync each; not measured | **paced** row cursor | One turn |
 | Add-Path send | As kept private; not measured | As kept private | As kept private; not measured with several paths | One turn per request | As kept private | As kept private; not measured with several paths | One turn |
 | Dual-stack (IPv4 and IPv6 unicast) | As its row above; one table holds both families | As its row above | As above, per family | Per family | As its row above | Each family released separately | One turn covers both |
-| Unicast plus EVPN or VPN | Table build and initial table together in **one turn**; not measured | EVPN fanout in **bounded turns**; later input waits for it | EVPN **paced** cursor; VPN whole family, one turn | One turn; RT change walks the group VPN table | Members **paced** by command; not measured | Unicast as plain; VPN and EVPN selection one turn | One turn |
-| Labeled unicast | Initial table one turn; not measured | One message at a time; not measured | Whole family, **one turn**, outside credit | One turn; not measured | Members **paced** by command; not measured | Whole family, one turn per receiver; not measured | One turn; not measured |
-| Group member holding a private family | Private family built in the initial-table turn | Private family staged per receiver | EVPN cursor; far behind: two walks of the group table | As the family's row | Members **paced** by command; not measured | Private family follows from the resync ticks | One turn |
+| Unicast plus EVPN or VPN | Table build and initial table together in **one turn**; not measured | EVPN fanout in **bounded turns**; later input waits for it | EVPN and private VPN **paced** cursor; grouped VPN: member resync one turn | One turn; RT change walks the group VPN table | Members **paced** by command; not measured | Unicast as plain; VPN and EVPN selection one turn, private rows by cursor | One turn |
+| Labeled unicast | Initial table one turn; not measured | One message at a time; not measured | **paced** cursor per AFI; fallback resync one turn | One turn; not measured | Members **paced** by command; not measured | Selection one turn; rows by cursor; not timed | One turn; not measured |
+| Group member holding a private family | Private family built in the initial-table turn | Private family staged per receiver | EVPN or labeled cursor; far behind: a capture of the group table | As the family's row | Members **paced** by command; not measured | Private family follows from the resync ticks | One turn |
 
 How to read the rows:
 
@@ -82,9 +82,10 @@ How to read the rows:
   RIB never shares. EVPN, labeled unicast, FlowSpec, BGP-LS and
   RT-Constrain rows are always held per receiver, even for a group member.
   Groups share IPv4 and IPv6 unicast and VPN.
-- The row-cursor tests use single-path private receivers. An Add-Path
-  receiver takes the same cursor, keyed by prefix, and has not been
-  measured on its own.
+- Most row-cursor tests use single-path private receivers. An Add-Path
+  receiver takes the same cursor, keyed by prefix; one that is sent every
+  path of a prefix takes one prefix (VPN: one key) a step in the labeled
+  and VPN tests. No Add-Path cursor has been timed.
 - Rows combine. A dual-stack route-server client with export policy reads
   the export-policy row (and the per-client-best row if that is set), with
   the dual-stack row for what is per family.
@@ -108,13 +109,20 @@ What backs each **paced** and **bounded turns** mark:
   `a_cursor_drain_is_charged_and_takes_no_operation` in
   [`tests/owed_row_cursor.rs`](../../crates/rib/src/manager/tests/owed_row_cursor.rs);
   for EVPN, `an_evpn_debt_drains_in_bounded_steps` in
-  [`tests/owed_evpn_cursor.rs`](../../crates/rib/src/manager/tests/owed_evpn_cursor.rs).
+  [`tests/owed_evpn_cursor.rs`](../../crates/rib/src/manager/tests/owed_evpn_cursor.rs);
+  for labeled unicast,
+  `a_labeled_release_drains_in_steps_of_one_chunk_charged_and_unlatched` in
+  [`tests/owed_labeled_cursor.rs`](../../crates/rib/src/manager/tests/owed_labeled_cursor.rs);
+  for VPN, `a_vpn_release_drains_in_steps_of_one_chunk_charged_and_unlatched`
+  in [`tests/owed_vpn_cursor.rs`](../../crates/rib/src/manager/tests/owed_vpn_cursor.rs).
   Work counts, not timings. The cursor runs from the resync tick, and route
   input is served between ticks.
 - *Policy change, clean cohort: bounded turns.*
   [ADR-0105](../adr/0105-grouped-export-policy-transition.md) and its
   [receipt](../perf/prestaged-transition-inventory-2026-10.md): 700 peers
-  with export policy, 400,400 prefixes. While the transition is pending
+  with export policy, 400,400 prefixes. The path takes only a change that
+  filters no route in either the old or the new group (an attribute-only
+  change). While the transition is pending
   the actor serves readiness at every poll and a bounded number of reads
   between the polls before commit; route input, timers and resync work
   stay queued until the commit finishes or the transition falls back
@@ -216,7 +224,9 @@ table, and hands updates to each session over a bounded channel.
   rows the tick can run, including when a slower one-second deadline was
   already armed, and every 10 ms while such a backlog remains. That is how
   the RIB notices returned credit, which arrives without a message. Other
-  retry work waits one second. A tick checks a 25 ms budget between units of work. That is a
+  retry work waits one second; an End-of-RIB a full writer refused is
+  offered again one second after the first outstanding refusal, on its own
+  timer ([Restart](#restart)). A tick checks a 25 ms budget between units of work. That is a
   budget, not a bound: each kind of work takes at least one unit per tick,
   and one unit can be a whole-table resync of one receiver. Test:
   `owed_keys_follow_returned_credit_within_one_backlog_tick` in
@@ -293,15 +303,29 @@ if needed. Any other session keeps its own Adj-RIB-Out.
   then builds the table privately. Each turn visits at most 1,024 Loc-RIB
   hash buckets or repairs at most 1,024 keys that changed behind the walk,
   and route input takes the turns in between. The table is published only
-  when complete, so no joiner sees part of it. If more than 4,096 distinct
-  keys change before the walk can repair them, the partial table is
-  retired, 1,024 slots a turn, and the build starts again.
+  when complete, so no joiner sees part of it.
+  - *Keys changed behind the walk.* They wait in a repair log of 4,096
+    keys. While the log is more than half full, every build turn repairs
+    instead of walking (`take_registration_page` in
+    [`loc_rib.rs`](../../crates/rib/src/loc_rib.rs)). A build turn follows
+    at most one route chunk of 1,024 keys, so route messages of any size
+    that replace best paths of prefixes the table already holds no longer
+    fill the log; the walk slows instead. One unit that changes more than
+    4,096 best routes at once (a peer going down, a graceful-restart or
+    refresh sweep, End-of-RIB, an RPKI table update) still overflows it:
+    the partial table is retired, 1,024 slots a turn, and the build starts
+    again.
   - Tests: `registration_finishes_discovery_and_repairs_under_continuing_changes`
     and `registration_coalesces_repairs_and_invalidates_on_the_first_excess_key`
     in [`loc_rib.rs`](../../crates/rib/src/loc_rib.rs) bound a turn's work;
     `imports_during_unpublished_build_reach_both_joiners_before_eor` in
     [`tests/first_group_build.rs`](../../crates/rib/src/manager/tests/first_group_build.rs)
-    shows updates installing during a build.
+    shows updates installing during a build;
+    `multi_chunk_messages_never_restart_the_cold_build` and
+    `joiner_registers_during_a_multi_chunk_stream_of_any_length` in
+    [`tests/first_group_build/sustained_feed.rs`](../../crates/rib/src/manager/tests/first_group_build/sustained_feed.rs)
+    count turns and restarts under streams of 2,048-, 4,096- and
+    16,378-route messages on 16,384 routes.
   - Measured: at 1M routes, during the first policy-free plain-unicast
     group build, unrelated UPDATE latency fell from 2,209 ms to 0.60 ms.
     Sessions with export policy, a configured role, per-client-best, or
@@ -309,8 +333,10 @@ if needed. Any other session keeps its own Adj-RIB-Out.
     ([receipt](../perf/first-group-build-registration-2026-11.md): one
     iBGP route-reflector client, IPv4 unicast, in-process harness, one
     concurrent UPDATE).
-  - Not measured: a build under sustained input above the repair rate,
-    which can restart repeatedly.
+  - Not measured in time: a build under a sustained stream. A stream that
+    keeps announcing new prefixes or withdrawing faster than the build
+    turns cover still postpones the join until it ends; the build no
+    longer discards its work while it waits.
 - *One-turn build.* Every other grouped session takes `ensure_group_table`:
   a walk of the whole Loc-RIB that stages every family the group owns.
   That includes every session with export policy, a role, route-server
@@ -446,40 +472,200 @@ untimed harness runs and say so.
 
 ## Receiver falls behind
 
-When a receiver's channel is full or its credit is spent, the RIB records
-which rows it is owed and the resync tick delivers them later; this
-section, with the row cursor, eviction and resync in full, is the next
-addition to this page. Until then see the
-[Falls behind column](#shape-by-stage), the module doc of
-[`outbound_owing.rs`](../../crates/rib/src/manager/outbound_owing.rs) and
-[known issues](known-issues.md).
+```mermaid
+flowchart TD
+    A["Update for a receiver"] --> B{"Family shared with its group?"}
+    B -->|"yes, channel full"| D["Receiver dirty"]
+    B -->|"no, credit or channel spent"| F["Owe the keys, stay clean"]
+    F -->|"set past a quarter of the table"| G["Row cursor, 1,024 keys a step"]
+    G -->|"too far behind the list"| D
+    D --> H["Resync tick: whole table, one receiver a unit"]
+```
+
+A family the receiver holds privately is recorded as owed and sent later
+in charged steps; a family it shares with its group, or a receiver too far
+behind, is resynced whole by the resync tick.
+
+**Shared or private.** What happens depends on whether the receiver holds
+the family in its own Adj-RIB-Out (`owing_family_in_scope` in
+[`outbound_owing.rs`](../../crates/rib/src/manager/outbound_owing.rs)).
+IPv4 and IPv6 unicast and VPN are private for a receiver outside every
+update group and shared for a group member. Labeled unicast, EVPN,
+FlowSpec, BGP-LS and RT-Constrain are private for every receiver.
+
+**Owed keys.** Before a pass stages a private family toward a receiver it
+reads the receiver's row credit and channel (`owing_gate`). When either is
+spent the pass records which keys the receiver is owed and stages nothing;
+the receiver stays clean, with no resync and no group capture. The resync
+tick drains the set once credit returns, staging each key from current
+state by diff against what the receiver holds, so a key that changed
+twice is sent once, at its newest state. While a family owes anything,
+later passes only add its keys to the set. Test:
+`owed_keys_follow_returned_credit_within_one_backlog_tick` in
+[`tests/outbound_owing.rs`](../../crates/rib/src/manager/tests/outbound_owing.rs).
+
+**Row cursor.** A family whose owed set outgrows a quarter of the family's
+Loc-RIB plus the receiver's advertised table (at least 64 keys), or that a
+selection release owes whole, moves to a row cursor. Seven families have
+one: IPv4 and IPv6 unicast, IPv4 and IPv6 labeled unicast, VPNv4, VPNv6
+and EVPN. Each has one list, shared by every receiver, of the keys passes
+carried since the oldest debt began, in the order they last changed. A
+receiver holds a position in it. A step sends the next keys after the
+position, at most 1,024 and no more than its free credit, as an ordinary
+update charged against the credit, and the family's End-of-RIB leaves
+after the step that catches up. A key changed behind a position is
+visited again; one changed ahead of it is visited once. Tests are named
+under [what backs each paced mark](#shape-by-stage); they count work and
+check wire content, and none is timed.
+
+**Whole-family drain.** FlowSpec, BGP-LS and RT-Constrain owed whole still
+drain as one family-scoped resync per receiver under an operation latch,
+not charged against the credit: one RIB turn that grows with the family's
+table ([known issues](known-issues.md)).
+
+**Eviction.** A receiver whose list holds more than twice the family's
+peak plus 4,096 keys after its position is evicted from the cursor
+(`cap_owed_rows`). That takes fresh keys rotating through the table past a
+receiver that has stopped reading or reads more slowly than the table
+turns over; one large withdrawal, a peer loss or a selection release does
+not cause it. An evicted receiver is resynced as a whole peer and counted
+in `bgp_rib_outbound_owing_fallback_total`.
+
+- An ungrouped receiver is marked dirty in the pass, with no table walk
+  (`a_stalled_vpn_receiver_is_evicted_in_the_pass_and_rebuilt_one_a_tick`
+  in [`tests/owed_vpn_cursor.rs`](../../crates/rib/src/manager/tests/owed_vpn_cursor.rs)).
+- A group member evicted from an EVPN or labeled cursor waits clean; the
+  resync tick makes it dirty and captures what its group sent it, for one
+  such receiver per tick and never in the pass
+  (`a_labeled_eviction_of_group_members_walks_no_group_table_in_its_turn`
+  in [`tests/owed_labeled_cursor.rs`](../../crates/rib/src/manager/tests/owed_labeled_cursor.rs)).
+- Neither is rebuilt inside a selection hold of an EVPN or labeled family
+  it is sent; its resync follows the release.
+
+**Group member.** A shared family has no owed set. A member whose channel
+cannot take a group update is marked dirty, and the group keeps what the
+member missed. The resync tick then resends the member its table as a diff
+against what it holds: one whole-table operation outside the credit.
+
+**The resync tick.** Owed-key drains, deferred refresh answers and dirty
+receivers share one 25 ms poll budget per tick, and each lane takes at
+least one unit before it checks the budget. Dirty receivers are taken one
+per unit, round-robin from where the last tick stopped, and a unit always
+finishes, so one unit can be a whole table (`resync_dirty_peers` in
+[`manager/mod.rs`](../../crates/rib/src/manager/mod.rs)). An evicted
+receiver's unit ends the tick, so queued input runs before the next one.
+A receiver whose channel has closed is dropped without a resync.
+
+- Measured before the cursor: on v0.83.0 a whole unicast send to one
+  receiver was one turn of 278–632 ms at 150,000 rows, and recovery after
+  credit ran out was 54.9 s at 150 receivers × 190,000 rows in a single
+  untimed run ([known issues](known-issues.md)).
+- Not measured on main: recovery time at any receiver count, for any
+  family, and the length of one group member's resync.
 
 ## Refresh, ORF and RT-Constrain
 
 A ROUTE-REFRESH answer, an ORF change and a route-target membership change
-each resend part of a table to one receiver; each answer is one
-whole-table operation today, and compatible queued refreshes of one plain
-group share a replay
-([receipt](../perf/shared-route-refresh-2026-10-11.md), 200-peer IPv4 route
-reflector, 400,000 prefixes). The full section is still to be written; see
-the [Refresh, ORF, RTC column](#shape-by-stage).
+each resend part of a table to one receiver. Each is one whole-family or
+whole-table operation in one turn, and compatible queued refreshes of one
+plain group share a replay.
+
+**ROUTE-REFRESH.** A request for one family (RFC 2918, or RFC 7313
+enhanced refresh) is answered in the turn that takes it
+(`handle_route_refresh_request` in
+[`route_refresh.rs`](../../crates/rib/src/manager/route_refresh.rs)):
+
+- The answer replays the family, from the group table for a member that
+  shares it and from the Loc-RIB for a private receiver. It first absorbs
+  the family's owed keys and the rest of its cursor into the same
+  operation, so nothing owed is left behind its markers, and it carries
+  the withdrawals the receiver is still owed for the family. With
+  enhanced refresh it sits between BoRR and EoRR, and the receiver purges
+  at EoRR what the answer did not repeat. It is one operation, not
+  charged against the credit.
+- Queued IPv4 or IPv6 unicast requests from members of one plain group,
+  next to each other in the primary queue, share one replay: up to 64
+  answers from one payload (`take_refresh_cohort`). A per-client-best
+  group, a different family or anything else in the queue between them
+  ends the cohort. Measured: 200-peer IPv4 route reflector, 400,000
+  prefixes ([receipt](../perf/shared-route-refresh-2026-10-11.md)); a
+  one-family replay held the actor for 211–246 ms at 700 route-server
+  peers and 400,400 IPv4 prefixes
+  ([receipt](../perf/route-refresh-readiness-2026-10.md)).
+- The answer waits, and is sent later by the resync tick or the release,
+  in these cases: the family is inside a selection hold for this peer
+  (after release); registration is still deferred (after the initial
+  End-of-RIB); the receiver was evicted from a cursor or owes a held
+  rebuild (after its resync); or it is a dirty receiver with no record of
+  what it was admitted whose resync would withdraw routes of the
+  requested unicast or VPN family. In the last case the withdrawals go
+  out first, then BoRR and EoRR, so no withdrawal names a route the
+  receiver already purged (`grouped_refused_proof_refresh_settles_withdrawal_before_eorr`
+  in [`tests/update_groups.rs`](../../crates/rib/src/manager/tests/update_groups.rs),
+  `grouped_vpn_refresh_settles_refused_proof_withdrawal_before_eorr` in
+  [`tests/vpn.rs`](../../crates/rib/src/manager/tests/vpn.rs)). Any other
+  dirty or clean receiver is answered in the request's own turn.
+
+**ORF.** A session with an installed Address-Prefix ORF is kept private
+(RFC 5291, RFC 5292). A pushed ORF update is applied in one turn
+(`handle_peer_orf_update` in
+[`distribution/mod.rs`](../../crates/rib/src/manager/distribution/mod.rs)).
+With When-to-refresh `IMMEDIATE`, or when a malformed entry resets the
+list, the RIB resyncs that receiver as a whole peer in the same turn.
+`DEFER` installs the filter for later changes and sends nothing. A family
+for which the peer negotiated sending ORFs is withheld at session start
+until its first plain or `IMMEDIATE` refresh (RFC 5291 §6), and that
+family's End-of-RIB follows the table the refresh sends.
+
+**RT-Constrain.** RT-Constrain routes from a peer set its route-target
+membership. After the route input that changed them, outside an
+RT-Constrain selection hold, the RIB rebuilds the membership
+(`rebuild_rtc_membership_and_restage_vpn` in
+[`manager/mod.rs`](../../crates/rib/src/manager/mod.rs)); an unchanged
+membership does nothing. A changed one is applied in the same turn:
+
+- A member of a group that stages VPN gets one walk of its group's VPN
+  table, which sends it only the difference between the old and new
+  filter, with no policy evaluation
+  (`apply_rtc_membership_delta_to_grouped_member` in
+  [`update_groups.rs`](../../crates/rib/src/manager/update_groups.rs)).
+  Its EVPN rows, which stay private, are restaged in the same turn.
+- Any other receiver is marked dirty and resynced as a whole peer
+  (`an_rt_constrain_change_mid_walk_resyncs_the_private_receiver` in
+  [`tests/owed_vpn_cursor.rs`](../../crates/rib/src/manager/tests/owed_vpn_cursor.rs)).
+
+Not measured: a refresh, ORF or membership change at one million routes,
+for any shape.
 
 ## Policy or config change
 
-An export-policy change moves sessions between update groups, by one of
-three paths.
+An export-policy change moves sessions between update groups, because the
+export chain is part of a group's identity. The peer manager hands the
+changed sessions to the RIB, which moves them by one of three paths.
 
 - **Clean cohort: bounded turns.** A clean, unicast-only, single-best
   cohort moves as one transaction split into actor polls
   ([ADR-0105](../adr/0105-grouped-export-policy-transition.md);
   [receipt](../perf/prestaged-transition-inventory-2026-10.md), 700 peers,
-  400,400 prefixes). A poll works in strides of 1,024 routes or eight
+  400,400 prefixes). Clean means grouped to grouped across one pair of
+  groups, with no dirty member, Add-Path, per-client best, ORF,
+  RT-Constrain, VPN or other private family, and no route filtered by
+  policy or blocked by a role's OTC check in either group. So the path
+  covers changes that alter attributes only; a policy that filters even
+  one route takes one of the paths below. A poll works in strides of
+  1,024 routes or eight
   members and keeps taking strides until a nominal 25 ms budget is spent,
   so several strides can run in one poll
   (`commit_flush_uses_full_poll_budget_before_parking` in
   [`tests/update_groups.rs`](../../crates/rib/src/manager/tests/update_groups.rs)).
   The strides are not caps on a poll. Whole-table work remains in three
-  places: two snapshot turns, and the last commit poll, which also runs
+  places: two snapshot steps, each one walk of a table in one poll (the
+  Loc-RIB's prefixes when the destination group is new, and the
+  destination table's keys when no pre-staged inventory can be used:
+  `begin_policy_transition_group` and
+  `begin_clean_policy_transition_inventory` in
+  [`policy_transition.rs`](../../crates/rib/src/manager/update_groups/policy_transition.rs)),
+  and the last commit poll, which also runs
   one distribution pass that retries every peer still owed updates for
   any other reason. From the first poll to the commit or the fallback,
   route input, timers and resync work stay queued; readiness is answered
@@ -508,9 +694,8 @@ three paths.
   [`tests/evpn_policy_pacing.rs`](../../crates/rib/src/manager/tests/evpn_policy_pacing.rs)).
   Not measured at any stated scale.
 
-The full section is still to be written; see the
-[Policy change column](#shape-by-stage) and the
-[reload matrix](reload-matrix.md).
+The [reload matrix](reload-matrix.md) says which configuration changes
+reach this path and which reset sessions instead.
 
 ## Restart
 
@@ -548,8 +733,43 @@ receipt:
   `crowded_fallback_and_denial_lists_release_exact_tables` in
   [`tests/paced_selection_release/per_client_best_release.rs`](../../crates/rib/src/manager/tests/paced_selection_release/per_client_best_release.rs).
 
-The full section is still to be written; see the
-[Restart column](#shape-by-stage).
+**Private receivers.** A receiver that holds a released family in its own
+Adj-RIB-Out is owed the family whole instead of being staged in the
+release, so its rows go out from the resync tick: by row cursor for
+unicast, labeled unicast, VPN and EVPN, and as one operation per receiver
+for FlowSpec, BGP-LS and RT-Constrain
+([Receiver falls behind](#receiver-falls-behind)). Measured for unicast:
+150 private receivers, 150,000 rows, in the transport harness (the
+selection-release entry in [known issues](known-issues.md)).
+
+**Other families.** Labeled unicast, VPN, EVPN, FlowSpec, BGP-LS and
+RT-Constrain release in one turn per family: the release recomputes the
+family's held routes and stages a group-owned VPN table in that turn
+(`recompute_released_selection_family` in
+[`selection_deferral.rs`](../../crates/rib/src/manager/selection_deferral.rs)).
+That turn still grows with receivers × rows for a dirty or forced
+receiver's pending resync, the candidate scan of an Add-Path, ORR or
+per-client-best receiver, and a deferred ROUTE-REFRESH answer. Not
+measured.
+
+**End-of-RIB after a release.** A released family other than unicast
+sends its markers across turns, in peer order: the release turn makes the
+first offers, then each 10 ms tick visits eight receivers of the family,
+and the markers held for rebuilt RT-Constrain memberships go out two
+receivers a tick. So the last of N receivers gets its marker about
+N/8 × 10 ms after the release. A marker that a full writer refuses is
+offered again one second after the first outstanding refusal, in a pass
+that visits eight receivers a tick and offers each session once. Unicast
+markers follow the paced unicast release above. Tests, in which every
+receiver gets one marker per family and none before its rows: `vpn_release_448`,
+`rebuilt_rtc_memberships_448` and
+`refused_release_markers_448_drain_at_the_backlog_cadence_once_due` in
+[`tests/eor_hold/marker_cadence.rs`](../../crates/rib/src/manager/tests/eor_hold/marker_cadence.rs),
+on a paused clock: they pin cadence and order, not wall-clock time. One
+visit can still replay a whole family.
+
+Not measured: a restart release with export policy, with Add-Path, or of
+any family other than unicast, at any stated scale.
 
 ## Session ends
 
@@ -621,8 +841,17 @@ first-member build with a claimed export-policy change:
   other session changes and the same peer's later messages all wait for
   the rest of the build.
 - The queue is held completely, as before, when a ninth command or end
-  arrives, when a stale-route or refresh timer falls due, or when passing
-  input overflows the build's repair log.
+  arrives or when a stale-route or refresh timer falls due. It is also
+  held from the moment passing input has kept the build's repair log more
+  than half full on 64 build turns of one attempt, until the build
+  commits (`BEHIND_TURNS_BEFORE_SEAL` in
+  [`first_group_build.rs`](../../crates/rib/src/manager/first_group_build.rs)),
+  and after an overflow restarts the build. One UPDATE of any size does
+  not spend that budget. Under input that does not stop, a test on 16,384
+  routes pins the hold to start within 256 turns
+  (`input_outrunning_the_build_behind_a_retained_session_end_seals_the_lane`
+  in
+  [`tests/first_group_build.rs`](../../crates/rib/src/manager/tests/first_group_build.rs)).
 - While the end waits the peer's routes stay selected and advertised.
 - Tests: `unrelated_update_passes_a_session_end_that_waits_for_the_cold_build`,
   `only_plain_route_input_from_another_peer_passes_a_retained_session_end`
@@ -635,7 +864,49 @@ first-member build with a claimed export-policy change:
 
 ## Invariants
 
-The invariants the RIB keeps across these stages, and the tests that pin
-each, will be listed here with the remaining stages. Two are already
-stated above: a group table is never visible while partly built, and a
-family's End-of-RIB never precedes the routes it covers.
+The RIB keeps these across every stage. Each is pinned by tests; none of
+them bounds how long a turn takes.
+
+- **A group table is never visible while partly built.** A paced build
+  publishes its table only when complete
+  (`imports_during_unpublished_build_reach_both_joiners_before_eor` in
+  [`tests/first_group_build.rs`](../../crates/rib/src/manager/tests/first_group_build.rs)).
+- **End-of-RIB follows its routes.** A family's marker never leaves
+  before the rows it covers, owed rows and cursor steps included, and is
+  never left ready but unsent: test builds check that after every actor
+  turn (`assert_eor_settled` in
+  [`eor_hold.rs`](../../crates/rib/src/manager/eor_hold.rs)), and every
+  cursor contract test ends with one End-of-RIB after the last row.
+- **A receiver never blocks the RIB.** A full channel or spent credit
+  becomes owed keys, a cursor position or a dirty mark; delivery resumes
+  from the resync tick
+  (`owed_keys_follow_returned_credit_within_one_backlog_tick` in
+  [`tests/outbound_owing.rs`](../../crates/rib/src/manager/tests/outbound_owing.rs)).
+- **Every receiver converges to the table a fresh session would get.**
+  Three differential oracles drive real managers with random operations:
+  grouped against private distribution
+  ([`tests/update_groups_oracle.rs`](../../crates/rib/src/manager/tests/update_groups_oracle.rs)),
+  finite stalled channels against unbounded ones
+  ([`tests/stalled_receiver_oracle.rs`](../../crates/rib/src/manager/tests/stalled_receiver_oracle.rs)),
+  and a selection hold against a reference model
+  ([`tests/selection_deferral_oracle.rs`](../../crates/rib/src/manager/tests/selection_deferral_oracle.rs)).
+- **A withdrawal names a route the receiver holds.** The update-group
+  oracle checks it in every interval, and the refresh tests named under
+  [Refresh, ORF and RT-Constrain](#refresh-orf-and-rt-constrain) check it
+  across a refresh.
+- **Owed state is exact.** With VPN rows owed through a release and a
+  resume, a test checks the owing index, both VPN lists and every clean
+  receiver's debt against full scans after every actor turn
+  (`a_vpn_release_and_resume_through_the_actor_loop_keep_the_owed_index_exact`
+  in [`tests/owed_vpn_cursor/actor.rs`](../../crates/rib/src/manager/tests/owed_vpn_cursor/actor.rs)).
+- **Shared work is not repeated per member.** A burst of session ends
+  does work linear in the group's size
+  (`peer_down_burst_work_is_linear` in
+  [`tests/work_scaling.rs`](../../crates/rib/src/manager/tests/work_scaling.rs)),
+  and a per-client-best release batch is not paged by prefix times member
+  (`a_per_client_best_release_batch_is_not_paged_by_prefix_times_member`
+  in [`tests/paced_selection_release.rs`](../../crates/rib/src/manager/tests/paced_selection_release.rs)).
+- **One peer's burst puts a bounded amount ahead of another's update.**
+  About two full UPDATEs per bursting source
+  (`unpaced_burst_leaves_at_most_two_messages_ahead_of_another_source` in
+  [`tests/ingest_budget.rs`](../../crates/transport/src/session/tests/ingest_budget.rs)).
