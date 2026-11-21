@@ -48,18 +48,42 @@ fn drain_vpn_delta(
     (announced, withdrawn)
 }
 
-#[test]
-fn grouped_vpn_refresh_settles_refused_proof_withdrawal_before_eorr() {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VpnRefresh {
+    /// Grouped, proof refused: the group's VPN tombstone.
+    RefusedProof,
+    /// The same member after it left its group: its extra withdrawals.
+    RefusedProofLeaver,
+    /// A private peer that joined a group owing the key: its regroup baseline.
+    PrivateJoiner,
+}
+
+/// A dirty peer without a proof owes one VPN withdrawal that only its resync
+/// can send. Its VPN refresh answer waits for that resync, which answers in
+/// its own turn: the receiver sees the withdrawal, then `BoRR` and `EoRR`.
+/// Red proof: with the shape's candidate left out of the deferral, the
+/// answer goes out first and the resync withdraws a purged route.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one transcript per shape refuses a VPN withdrawal, then refreshes and resyncs"
+)]
+fn vpn_refresh_follows_the_owed_withdrawal(shape: VpnRefresh) {
     use super::super::update_groups::RecoveryFallbackCause::AllocationFailure;
+    use super::update_groups::peer_context_chain;
     use rustbgpd_wire::RouteRefreshSubtype::{BoRR, EoRR};
     use std::collections::HashMap;
+    let joiner = shape == VpnRefresh::PrivateJoiner;
     let (afi, safi) = (Afi::Ipv4, Safi::MplsVpn);
     let family = (afi, safi);
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let peer = peer_v4(Ipv4Addr::new(192, 0, 2, 30));
     let (writer, mut receiver) = mpsc::channel(4096);
-    let mut up = super::update_groups_recovery::peer_up(peer, writer.clone(), None);
+    let mut up = super::update_groups_recovery::peer_up(
+        peer,
+        writer.clone(),
+        joiner.then(peer_context_chain),
+    );
     if let RibUpdate::PeerUp {
         sendable_families,
         is_ebgp,
@@ -70,7 +94,7 @@ fn grouped_vpn_refresh_settles_refused_proof_withdrawal_before_eorr() {
         *is_ebgp = true;
     }
     manager.handle_update(up);
-    assert!(manager.vpn_grouped_member_of(peer).is_some());
+    assert_eq!(manager.vpn_grouped_member_of(peer).is_some(), !joiner);
     assert!(receiver.try_recv().unwrap().end_of_rib.contains(&family));
     let src = Ipv4Addr::new(192, 0, 2, 1);
     let rows = [1, 2].map(|n| make_vpn_rib_route(src, n, 100, 100));
@@ -87,47 +111,91 @@ fn grouped_vpn_refresh_settles_refused_proof_withdrawal_before_eorr() {
     );
     // Hold every production writer slot and fail the speculative proof allocation.
     let permits = writer.try_reserve_many(writer.max_capacity()).unwrap();
-    manager
-        .pending_group_admitted
-        .fail_next_allocation_for_test();
+    if !joiner {
+        manager
+            .pending_group_admitted
+            .fail_next_allocation_for_test();
+    }
     manager.handle_vpn_routes_received(peer_v4(src), vec![], vec![owed.clone()]);
+    if joiner {
+        manager
+            .replace_peer_export_policy_synchronously(peer, None)
+            .unwrap();
+        assert!(manager.vpn_grouped_member_of(peer).is_some());
+        assert!(
+            manager.pending_regroup_baseline[&peer]
+                .vpn
+                .contains_key(&owed.nlri_key)
+        );
+        assert!(!manager.pending_extra_withdraws.contains_key(&peer));
+        let group = &manager.group_ribs[&manager.grouped_member_of(peer).unwrap()];
+        assert!(group.vpn_tombstones.is_empty());
+    } else {
+        assert_eq!(
+            manager.group_recovery_fallback(peer),
+            Some(AllocationFailure)
+        );
+    }
+    if shape == VpnRefresh::RefusedProofLeaver {
+        manager
+            .replace_peer_export_policy_synchronously(peer, Some(peer_context_chain()))
+            .unwrap();
+        assert!(manager.grouped_member_of(peer).is_none());
+        assert!(!manager.pending_regroup_baseline.contains_key(&peer));
+        assert!(
+            manager.pending_extra_withdraws[&peer]
+                .vpn
+                .contains(&owed.nlri_key)
+        );
+    }
     assert!(manager.dirty_peers.contains(&peer));
     assert!(manager.pending_group_admitted.get(&peer).is_none());
-    assert_eq!(
-        manager.group_recovery_fallback(peer),
-        Some(AllocationFailure)
-    );
     drop(permits);
     manager.send_route_refresh_response(peer, afi, safi);
-    let mut markers = Vec::new();
-    let mut withdrawals = Vec::new();
-    for _ in 0..4 {
-        while let Ok(update) = receiver.try_recv().map(delivered) {
-            if update.refresh_markers.contains(&(afi, safi, BoRR)) {
-                markers.push(BoRR);
-                for stale in held.values_mut() {
-                    *stale = true;
-                }
-            }
-            for key in update.vpn_withdraw {
-                held.remove(&key);
-                withdrawals.push((key, markers.contains(&EoRR)));
-            }
-            held.extend(update.vpn_announce.iter().map(|row| (row.key(), false)));
-            if update.refresh_markers.contains(&(afi, safi, EoRR)) {
-                markers.push(EoRR);
-                held.retain(|_, stale| !*stale);
+    assert!(manager.pending_refresh[&peer].contains(&family));
+    assert!(receiver.try_recv().is_err(), "answered ahead of the resync");
+    // One tick: the resync answers in its own turn. The tick's refresh-retry
+    // lane runs ahead of the resync and skips a dirty peer.
+    manager.resync_dirty_peers_bounded();
+    let mut order = Vec::new();
+    while let Ok(update) = receiver.try_recv().map(delivered) {
+        if update.refresh_markers.contains(&(afi, safi, BoRR)) {
+            order.push("BoRR");
+            for stale in held.values_mut() {
+                *stale = true;
             }
         }
-        if !manager.resync_tick_pending() {
-            break;
+        for key in update.vpn_withdraw {
+            assert_eq!(key, owed);
+            assert!(held.remove(&key).is_some(), "withdrawal of a purged route");
+            order.push("W");
         }
-        manager.resync_dirty_peers_bounded();
+        held.extend(update.vpn_announce.iter().map(|row| (row.key(), false)));
+        if update.refresh_markers.contains(&(afi, safi, EoRR)) {
+            order.push("EoRR");
+            held.retain(|_, stale| !*stale);
+        }
     }
-    assert_eq!(markers, [BoRR, EoRR]);
+    assert_eq!(order, ["W", "BoRR", "EoRR"]);
     assert_eq!(held, HashMap::from([(kept, false)]));
-    assert_eq!(withdrawals, [(owed, false)], "VPN withdrawal followed EoRR");
+    assert!(!manager.pending_refresh.contains_key(&peer));
+    assert!(!manager.dirty_peers.contains(&peer));
     assert!(!manager.resync_tick_pending());
+}
+
+#[test]
+fn grouped_vpn_refresh_settles_refused_proof_withdrawal_before_eorr() {
+    vpn_refresh_follows_the_owed_withdrawal(VpnRefresh::RefusedProof);
+}
+
+#[test]
+fn vpn_refused_proof_leaver_refresh_settles_withdrawal_before_borr() {
+    vpn_refresh_follows_the_owed_withdrawal(VpnRefresh::RefusedProofLeaver);
+}
+
+#[test]
+fn vpn_private_joiner_refresh_settles_the_regroup_baseline_withdrawal() {
+    vpn_refresh_follows_the_owed_withdrawal(VpnRefresh::PrivateJoiner);
 }
 
 /// RFC 9252 section 7 distinguishes semantic SID ineligibility from malformed

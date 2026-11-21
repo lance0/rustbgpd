@@ -4129,6 +4129,50 @@ fn pcb_route_refresh_rs_member_suppresses_tagged_lane() {
     assert_eq!(withdrawn.len(), 0);
 }
 
+/// A dirty rs-control member without a proof owes the withdrawal of a slot
+/// its control communities suppress. No tombstone, baseline or extra key
+/// records that slot, so the member's refresh answer waits for the resync
+/// that withdraws it. Red proof: without the rs-control candidate the answer
+/// goes out first and the resync withdraws the slot after `EoRR`.
+#[test]
+fn pcb_dirty_rs_member_refresh_follows_its_suppressed_slot_withdrawal() {
+    use rustbgpd_wire::RouteRefreshSubtype::{BoRR, EoRR};
+    let mut m = staging_manager();
+    let mut rx = register_pcb_member(&mut m, MEMBER, replay_group(Some(TARGET_ASN)));
+    m.peer_rs_control.insert(MEMBER, RS_ASN);
+    m.pending_group_admitted.fail_next_allocation_for_test();
+    m.mark_outbound_dirty(MEMBER);
+    assert!(m.dirty_peers.contains(&MEMBER));
+    assert!(m.group_ribs[&PCB_GID].tombstones.is_empty());
+    assert!(!m.pending_group_admitted.contains_key(&MEMBER));
+    assert!(!m.pending_regroup_baseline.contains_key(&MEMBER));
+    assert!(!m.pending_extra_withdraws.contains_key(&MEMBER));
+    m.send_route_refresh_response(MEMBER, Afi::Ipv4, Safi::Unicast);
+    assert!(rx.try_recv().is_err(), "answered ahead of the resync");
+    m.resync_dirty_peers_bounded();
+    let mut order = Vec::new();
+    while let Ok(update) = rx.try_recv() {
+        let marker = |kind| {
+            update
+                .refresh_markers
+                .contains(&(Afi::Ipv4, Safi::Unicast, kind))
+        };
+        if marker(BoRR) {
+            order.push("BoRR".to_string());
+        }
+        order.extend(
+            update
+                .unicast_withdrawals()
+                .map(|(prefix, _)| format!("W {prefix}")),
+        );
+        if marker(EoRR) {
+            order.push("EoRR".to_string());
+        }
+    }
+    assert_eq!(order, [&format!("W {}", prefix(2)), "BoRR", "EoRR"]);
+    assert!(!m.pending_refresh.contains_key(&MEMBER));
+}
+
 /// Join / initial-dump replay substitution matrix, plus the
 /// Decision 4 agreement the counters replay must keep: the
 /// replayed announce set and `apply_group_join_counters`'s permit
