@@ -215,14 +215,13 @@ fn a_populated_vpn_table_is_never_presized() {
 /// where it was, so the sequence numbers ahead of a cursor can count many
 /// more entries than the list holds there: half the rows relabeled six
 /// times before the receiver reads put four sequence numbers ahead of it
-/// per live key. The keys read are the Loc-RIB's keys less the entries
-/// ahead (capped at the Loc-RIB), so the holes read as no sample: the
-/// table grows by the steps' own reserves and still fits. The holes can
-/// only understate the keys read, never inflate the estimate. Red without
-/// the limit: the sample completes only after the table passed it, and
-/// that step rebuilds the populated table.
+/// per live key. The rate counts the keys the walk read, step by step,
+/// so the holes leave it alone: one estimate, and the table fits. Red
+/// with keys read taken as the Loc-RIB's keys less the entries ahead: the
+/// holes read as no sample, and the table grows by the steps' own
+/// reserves instead.
 #[test]
-fn holes_ahead_of_a_vpn_cursor_read_as_no_sample() {
+fn holes_ahead_of_a_vpn_cursor_leave_the_rate_alone() {
     const ROWS: u32 = 8_192;
     let (mut manager, mut receivers) = owing(manager(4 * CHUNK_ROWS), P4, &[P4], 1, ROWS, 4096);
     for label in 101..107 {
@@ -244,8 +243,9 @@ fn holes_ahead_of_a_vpn_cursor_read_as_no_sample() {
     let presizes = manager.adj_rib_out_commit_stats.walk_presizes;
     walk(&mut manager, &mut receivers, peer);
     assert_eq!(
-        manager.adj_rib_out_commit_stats.walk_presizes, presizes,
-        "no sample while the holes overstate the keys ahead"
+        manager.adj_rib_out_commit_stats.walk_presizes - presizes,
+        1,
+        "one estimate, holes ahead or not"
     );
     let label = |index| if index < ROWS / 2 { 100 } else { 106 };
     let expected = table_of(
@@ -256,6 +256,81 @@ fn holes_ahead_of_a_vpn_cursor_read_as_no_sample() {
     );
     assert_eq!(receivers[0].wire.table, expected);
     assert_indexes_fitted(&manager, peer, "relabeled");
+}
+
+/// A `VPNv4` walk reads 2,000 keys, accepts none and ends while the
+/// receiver's `VPNv6` walk goes on, so its owed record (and the `VPNv4`
+/// counts in it) stays. The receiver is then owed `VPNv4` whole again and
+/// 20,000 accepted keys arrive. The second walk counts only its own keys
+/// read, so it sizes the table in one step. Red when a cursor start keeps
+/// the last walk's counts: the 2,000 keys read before dilute the rate,
+/// and the table grows by the steps' own reserves.
+#[test]
+fn a_second_vpn_walk_counts_only_its_own_keys() {
+    const DENIED: u32 = 2_000;
+    const ROWS: u32 = 20_000;
+    let denied = |family, range: std::ops::Range<u32>| -> Vec<VpnRibRoute> {
+        range
+            .map(|index| {
+                let mut route = route_from(SOURCE, family, index, 100, 200);
+                set_med(&mut route.attributes, 1);
+                route
+            })
+            .collect()
+    };
+    let mut manager = manager(4 * CHUNK_ROWS);
+    sources_up(&mut manager);
+    let peer = receiver(0);
+    let mut rx = up_with(
+        &mut manager,
+        peer,
+        0,
+        4096,
+        &[P4, P6],
+        0,
+        Some(deny_med_chain()),
+    );
+    Wire::default().write(&mut rx);
+    let mut receivers = vec![Receiver {
+        peer,
+        rx,
+        wire: Wire::default(),
+    }];
+    for (family, owed) in [(P4, F4), (P6, F6)] {
+        manager.owe_eor(peer, family);
+        manager.owe_whole_family(peer, owed);
+    }
+    send(&mut manager, SOURCE, denied(P4, 0..DENIED), vec![]);
+    send(&mut manager, SOURCE, denied(P6, 0..10 * DENIED), vec![]);
+    let owing = |manager: &RibManager, family| {
+        manager
+            .owing(peer)
+            .is_some_and(|owing| owing.is_whole(family))
+    };
+    for _ in 0..1_000 {
+        if !owing(&manager, F4) {
+            break;
+        }
+        receivers[0].write();
+        tick(&mut manager, &mut receivers);
+    }
+    assert!(!owing(&manager, F4), "the first VPNv4 walk ended");
+    assert!(owing(&manager, F6), "the VPNv6 walk goes on");
+    assert_eq!(manager.adj_ribs_out[&peer].vpn_len(), 0);
+    manager.owe_whole_family(peer, F4);
+    send(
+        &mut manager,
+        SOURCE,
+        rows(P4, DENIED..DENIED + ROWS, 100),
+        vec![],
+    );
+    let presizes = manager.adj_rib_out_commit_stats.walk_presizes;
+    let growth = walk(&mut manager, &mut receivers, peer);
+    growth.assert_sized_once("second walk");
+    assert_eq!(manager.adj_rib_out_commit_stats.walk_presizes - presizes, 1);
+    assert_eq!(manager.adj_ribs_out[&peer].vpn_len(), ROWS as usize);
+    assert!(manager.owing(peer).is_none());
+    assert_indexes_fitted(&manager, peer, "second walk");
 }
 
 /// An Add-Path receiver sent two paths of every key: the route index is

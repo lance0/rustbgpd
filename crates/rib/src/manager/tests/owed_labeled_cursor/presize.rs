@@ -188,3 +188,46 @@ fn an_add_path_labeled_walk_sizes_each_index_by_its_own_count() {
     assert_eq!(receivers[0].wire.table.len(), 2 * PREFIXES as usize);
     assert_indexes_fitted(&manager, peer, "two paths a prefix");
 }
+
+/// A restart walk at one row in ten with 8,000 of 50,000 prefixes
+/// relabeled after the pass and before the first step: the holes ahead
+/// leave the rate, counted from the prefixes the walk read, alone. Red
+/// with prefixes read taken as the Loc-RIB's prefixes less the entries
+/// ahead: about 23 times what it holds.
+#[test]
+fn a_filtered_labeled_walk_with_relabels_ahead_fits() {
+    const ROWS: u32 = 50_000;
+    const AGAIN: u32 = 8_000;
+    let relabeled = |index| {
+        let mut route = route_from(SOURCE, L4, index, 101, 200);
+        set_med(&mut route.attributes, tenth_med(index));
+        route
+    };
+    let mut manager = manager(4 * CHUNK_ROWS);
+    sources_up(&mut manager);
+    let mut receivers = vec![filtered_receiver(&mut manager, 0)];
+    let peer = receivers[0].peer;
+    send(&mut manager, SOURCE, (0..ROWS).map(tenth).collect(), vec![]);
+    let again = (ROWS - AGAIN..ROWS).map(relabeled).collect();
+    send(&mut manager, SOURCE, again, vec![]);
+    let presizes = manager.adj_rib_out_commit_stats.walk_presizes;
+    walk(&mut manager, &mut receivers, peer);
+    let expected: Table = (0..ROWS)
+        .filter(|index| index.is_multiple_of(10))
+        .map(|index| {
+            let route = if index < ROWS - AGAIN {
+                tenth(index)
+            } else {
+                relabeled(index)
+            };
+            entry(&route, 0)
+        })
+        .collect();
+    assert_eq!(receivers[0].wire.table, expected);
+    assert_indexes_fitted(&manager, peer, "one in ten, relabels ahead");
+    assert_eq!(
+        manager.adj_rib_out_commit_stats.walk_presizes - presizes,
+        1,
+        "one estimate"
+    );
+}

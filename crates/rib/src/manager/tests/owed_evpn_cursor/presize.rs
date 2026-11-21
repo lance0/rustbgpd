@@ -151,6 +151,46 @@ fn a_populated_evpn_table_is_never_presized() {
     assert_eq!(receivers[0].wire.table, table(&all(3 * HELD)));
 }
 
+/// A restart walk at one row in ten with 8,000 of 50,000 keys logged
+/// again (a route target added) after the pass and before the first
+/// step: the holes ahead leave the rate, counted from the keys the walk
+/// read, alone. Red with keys read taken as the Loc-RIB's keys less the
+/// entries ahead: the step that completes the sample has read far more
+/// keys than it counts.
+#[test]
+fn a_filtered_evpn_walk_with_keys_logged_again_ahead_fits() {
+    const ROWS: u32 = 50_000;
+    const AGAIN: u32 = 8_000;
+    let mut manager = manager(4 * CHUNK_ROWS);
+    std::mem::forget(up_sized(&mut manager, peer_v4(SOURCE), 0, 4096, &[V4]));
+    let peer = receiver(0);
+    let (outbound_tx, mut rx) = mpsc::channel(4096);
+    manager.handle_update(evpn_peer_up(peer, 0, outbound_tx, Some(deny_med_chain())));
+    Wire::default().write(&mut rx);
+    let mut receivers = vec![Receiver {
+        peer,
+        rx,
+        wire: Wire::default(),
+    }];
+    manager.owe_eor(peer, EVPN);
+    manager.owe_whole_family(peer, FAMILY);
+    let rows: Vec<(u32, u32)> = (0..ROWS).map(|index| (index, tenth_med(index))).collect();
+    received(&mut manager, &rows, &[]);
+    let again: Vec<_> = (ROWS - AGAIN..ROWS)
+        .map(|index| route_rt(index, tenth_med(index), &[1]))
+        .collect();
+    received_routes(&mut manager, again, &[]);
+    let presizes = manager.adj_rib_out_commit_stats.walk_presizes;
+    walk(&mut manager, &mut receivers, peer);
+    assert_eq!(receivers[0].wire.table.len(), (ROWS / 10) as usize);
+    assert_index_fitted(&manager, peer, "one in ten, logged again ahead");
+    assert_eq!(
+        manager.adj_rib_out_commit_stats.walk_presizes - presizes,
+        1,
+        "one estimate"
+    );
+}
+
 fn evpn_peer_up(
     peer: PeerId,
     session_id: u64,
