@@ -9,7 +9,8 @@
 use std::cell::RefCell;
 
 use super::super::cursor_presize::{
-    assert_at_or_below_control, assert_fitted, with_control, with_control_async,
+    Growth, assert_at_or_below_control, assert_fitted, deny_med_chain, tenth_med, with_control,
+    with_control_async,
 };
 use super::*;
 
@@ -67,13 +68,39 @@ fn passed(manager: &RibManager, peer: PeerId, rows: u32) -> usize {
         .count()
 }
 
+/// The source installs `routes`, EVPN selection is held while receivers 0
+/// (R) and 1 join (VPN in one update group, EVPN privately, importing
+/// Route Target 100), and the waiter's End-of-RIB releases it: the release
+/// owes both EVPN whole and logs its whole inventory once, the walks'
+/// starting log. The waiter, last, walks too.
+fn released_rtc_walk(credit: usize, routes: Vec<EvpnRibRoute>) -> (RibManager, Vec<Receiver>) {
+    let mut manager = rtc_manager(credit).with_selection_deferral(SelectionDeferralConfig {
+        timeout: Duration::from_secs(60),
+        waiters: vec![SelectionDeferralWaiterConfig {
+            peer: peer_v4(WAITER).into(),
+            families: vec![EVPN],
+        }],
+    });
+    std::mem::forget(up_sized(&mut manager, peer_v4(SOURCE), 0, 4096, &[V4]));
+    received_routes(&mut manager, routes, &[]);
+    let waiter = hold(&mut manager);
+    let mut receivers = rtc_receivers_up(&mut manager);
+    for receiver in &mut receivers {
+        receiver.write();
+        assert!(receiver.wire.table.is_empty(), "held");
+    }
+    release(&mut manager);
+    assert!(manager.owes_whole(receivers[0].peer, FAMILY), "R walks");
+    receivers.push(waiter);
+    (manager, receivers)
+}
+
 /// Receivers 0 (R) and 1 hold VPN in one update group and EVPN privately,
-/// and import Route Target 100. R owes EVPN whole.
-fn rtc_receivers(manager: &mut RibManager) -> Vec<Receiver> {
+/// and import Route Target 100.
+fn rtc_receivers_up(manager: &mut RibManager) -> Vec<Receiver> {
     let mut families = vpn_rtc_sendable();
     families.push(EVPN);
-    std::mem::forget(up_sized(manager, peer_v4(SOURCE), 0, 4096, &[V4]));
-    let receivers: Vec<Receiver> = (0..2)
+    (0..2)
         .map(|index| {
             let peer = receiver(index);
             let mut rx = up_sized(manager, peer, 0, 4096, &families);
@@ -91,11 +118,7 @@ fn rtc_receivers(manager: &mut RibManager) -> Vec<Receiver> {
                 wire: Wire::default(),
             }
         })
-        .collect();
-    let r = receivers[0].peer;
-    manager.owe_eor(r, EVPN);
-    manager.owe_whole_family(r, FAMILY);
-    receivers
+        .collect()
 }
 
 // ---- A membership change under a live cursor.
@@ -118,19 +141,17 @@ fn restaged_rows() -> usize {
     (0..RESTAGE_ROWS).filter(|&i| rt_of(i) != 300).count()
 }
 
-/// R walks a 20,000-key EVPN debt at 128 keys a step, importing 1% of
-/// them. After its first step its membership adds RT 200 (7.6% of keys,
-/// no winner changed): the restage joins R's own set, which drains ahead
-/// of the cursor, so about 1,540 rows land in the table outside the
+/// R walks a released 20,000-key EVPN debt at 128 keys a step, importing
+/// 1% of them. After its first step its membership adds RT 200 (7.6% of
+/// keys, no winner changed): the restage joins R's own set, which drains
+/// ahead of the cursor, so about 1,540 rows land in the table outside the
 /// cursor steps.
 fn restage_under_a_cursor() -> (usize, [usize; 2]) {
-    let mut manager = rtc_manager(256);
-    let mut receivers = rtc_receivers(&mut manager);
-    let r = receivers[0].peer;
     let routes = (0..RESTAGE_ROWS)
         .map(|i| route_rt(i, 0, &[rt_of(i)]))
         .collect();
-    received_routes(&mut manager, routes, &[]);
+    let (mut manager, mut receivers) = released_rtc_walk(256, routes);
+    let r = receivers[0].peer;
     let mut walked = 0;
     for _ in 0..50 {
         tick(&mut manager, &mut receivers);
@@ -263,7 +284,8 @@ async fn run_ticks(
 /// No direct call: R and a sibling come up, R stops reading, 150 RT 100
 /// rows spend R's credit and overflow its owed set past the byte cap (a
 /// cursor at the list head, the set kept), and 20,000 rows are logged
-/// ahead of it. R reads until its kept set has drained and its cursor has
+/// ahead of it. A byte-cap cursor has no starting log, so its walk makes
+/// no estimate. R reads until its kept set has drained and its cursor has
 /// stepped, and its membership then adds RT 200; then it reads to the end.
 async fn actor_restage_under_a_cursor() -> (usize, [usize; 2]) {
     const EARLY: u32 = 150;
@@ -331,8 +353,10 @@ async fn actor_restage_under_a_cursor() -> (usize, [usize; 2]) {
     evpn_table(&manager, r)
 }
 
-/// Red with the rate taken from the table's growth since the walk began:
-/// about 15 times what it holds, against 1.9 times without the presize.
+/// The byte-cap cursor makes no estimate, so the table grows as with the
+/// presize off. Red with the rate taken from the table's growth since the
+/// walk began and the list read past any starting log: about 15 times
+/// what it holds, against 1.9 times without the presize.
 #[tokio::test(start_paused = true)]
 async fn an_rtc_restage_under_an_evpn_cursor_through_the_actor_loop_fits() {
     let ((rows, head), (_, control)) = with_control_async(actor_restage_under_a_cursor).await;
@@ -342,8 +366,10 @@ async fn an_rtc_restage_under_an_evpn_cursor_through_the_actor_loop_fits() {
 
 // ---- Injection at random points of a walk.
 
-/// Keys of the injected walk; its cursor reads 128 a step, so about 160
-/// ticks.
+/// Keys of the injected walk, and the ticks injections fall in: R's cursor
+/// reads 128 keys a step, and R, receiver 1 and the waiter each walk the
+/// release, so the injections fall in the first part of R's walk, while
+/// its sample is still forming.
 const WALK_ROWS: u32 = 20_000;
 const WALK_TICKS: u64 = 160;
 
@@ -443,13 +469,11 @@ fn inject(manager: &mut RibManager, r: PeerId, inject: Inject, from: u32) {
 fn injected_walk(
     plan: &[(u64, Inject, u32)],
 ) -> (BTreeMap<EvpnRouteKey, String>, usize, [usize; 2], usize) {
-    let mut manager = rtc_manager(256);
-    let mut receivers = rtc_receivers(&mut manager);
-    let r = receivers[0].peer;
     let routes = (0..WALK_ROWS)
         .map(|i| route_rt(i, 0, &[walk_rt(i)]))
         .collect();
-    received_routes(&mut manager, routes, &[]);
+    let (mut manager, mut receivers) = released_rtc_walk(256, routes);
+    let r = receivers[0].peer;
     for at in 0..WALK_TICKS {
         for &(_, path, from) in plan.iter().filter(|(when, _, _)| *when == at) {
             inject(&mut manager, r, path, from);
@@ -483,4 +507,150 @@ fn rows_injected_outside_the_cursor_never_size_past_the_control() {
         seeds_presized += usize::from(presizes != 0);
     }
     assert!(seeds_presized > 0, "no seed presized");
+}
+
+// ---- Acceptance in blocks after a release.
+
+/// What a block passes: every key, none, or one in ten.
+#[derive(Debug, Clone, Copy)]
+enum Block {
+    Accepted,
+    Rejected,
+    Tenth,
+}
+
+impl Block {
+    fn med(self, index: u32) -> u32 {
+        match self {
+            Self::Accepted => 0,
+            Self::Rejected => 1,
+            Self::Tenth => tenth_med(index),
+        }
+    }
+}
+
+/// Seed `seed`'s shape: a release of 600 to 2,600 keys the receiver all
+/// accepts, then two to six blocks of 300 to 6,300 fresh keys, each in its
+/// own pass at a tick among the walk's first four (most in the first,
+/// before the walk's first step), half of them rejected.
+fn clustered_schedule(seed: u64) -> (u32, Vec<(u64, Block, u32)>) {
+    let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    let mut draw = |range: u64| next(&mut state) % range;
+    let released = 600 + u32::try_from(draw(2_000)).unwrap();
+    let blocks = (0..2 + draw(5))
+        .map(|_| {
+            let at = if draw(3) == 0 { draw(4) } else { 0 };
+            let block = match draw(4) {
+                0 => Block::Accepted,
+                1 => Block::Tenth,
+                _ => Block::Rejected,
+            };
+            (at, block, 300 + u32::try_from(draw(6_000)).unwrap())
+        })
+        .collect();
+    (released, blocks)
+}
+
+/// The receiver behind [`deny_med_chain`] is released `released` keys,
+/// then `blocks` arrive, each its own pass at its tick. Returns its table
+/// as sent, its capacities, and the steps in which its index changed
+/// capacity.
+fn clustered_walk(
+    released: u32,
+    blocks: &[(u64, Block, u32)],
+) -> (BTreeMap<EvpnRouteKey, String>, [usize; 2], usize) {
+    let rows: Vec<(u32, u32)> = (0..released).map(|index| (index, 0)).collect();
+    let (mut manager, mut receivers) = super::presize::released(&rows, Some(deny_med_chain()));
+    let r = receivers[0].peer;
+    let mut growth = Growth::default();
+    let mut observe = |manager: &RibManager| {
+        let (rows, capacities) = manager
+            .adj_ribs_out
+            .get(&r)
+            .map_or((0, [0, 0]), |_| evpn_table(manager, r));
+        growth.observe(rows, capacities);
+    };
+    let mut fresh = released;
+    for at in 0.. {
+        for &(_, block, keys) in blocks.iter().filter(|(when, _, _)| *when == at) {
+            let rows: Vec<(u32, u32)> = (fresh..fresh + keys)
+                .map(|index| (index, block.med(index)))
+                .collect();
+            received(&mut manager, &rows, &[]);
+            fresh += keys;
+        }
+        for receiver in &mut receivers {
+            receiver.write();
+        }
+        if at >= 4 && !manager.resync_tick_pending() {
+            break;
+        }
+        tick(&mut manager, &mut receivers);
+        observe(&manager);
+    }
+    assert!(!manager.owes(r, EVPN), "R settled");
+    let (rows, capacities) = evpn_table(&manager, r);
+    assert_eq!(receivers[0].wire.table.len(), rows, "R's table as sent");
+    (
+        receivers[0].wire.table.clone(),
+        capacities,
+        growth.rebuilds[0],
+    )
+}
+
+/// Every seed's walk, with acceptance arriving in blocks after the release
+/// (another source, VRF or Route Target), ends with the same table as the
+/// control and capacities at or below its, and the release still sizes
+/// R's index in fewer steps than the control for some seeds. Red when the
+/// estimate extrapolates the release's rate over keys logged after it: an
+/// accepted release ahead of rejected blocks reserves the index for every
+/// key of every block.
+#[test]
+fn acceptance_in_blocks_after_a_release_never_sizes_past_the_control() {
+    let mut seeds_presized = 0;
+    for seed in 0..12 {
+        let (released, blocks) = clustered_schedule(seed);
+        let ((table, head, rebuilds), (control_table, control, control_rebuilds)) =
+            with_control(|| clustered_walk(released, &blocks));
+        let case = format!("seed {seed}: release {released}, blocks {blocks:?}");
+        assert_eq!(table, control_table, "{case}: same table");
+        assert_at_or_below_control(&head, &control, &case);
+        seeds_presized += usize::from(rebuilds < control_rebuilds);
+    }
+    assert!(seeds_presized > 0, "no seed presized");
+}
+
+/// R imports RT 100 and owes EVPN whole; 1,024 RT 100 routes arrive, then
+/// 20,000 RT 300 routes in later passes. Only the first pass after the
+/// cursor starts (its starting log) is a sample of its own keys. Red when
+/// the estimate extrapolates past it: the index 28 times what it holds and
+/// the slab's first segment 65,536 slots, against 1.75 times and 1,024.
+#[test]
+fn an_imported_evpn_block_ahead_of_an_unimported_one_fits() {
+    const ACCEPTED: u32 = 1_024;
+    let shape = || {
+        let mut manager = rtc_manager(4096);
+        std::mem::forget(up_sized(&mut manager, peer_v4(SOURCE), 0, 4096, &[V4]));
+        let mut receivers = rtc_receivers_up(&mut manager);
+        let r = receivers[0].peer;
+        manager.owe_eor(r, EVPN);
+        manager.owe_whole_family(r, FAMILY);
+        let imported = (0..ACCEPTED).map(|i| route_rt(i, 0, &[100])).collect();
+        received_routes(&mut manager, imported, &[]);
+        let other = (ACCEPTED..ACCEPTED + 20_000)
+            .map(|i| route_rt(i, 0, &[300]))
+            .collect();
+        received_routes(&mut manager, other, &[]);
+        drain(&mut manager, &mut receivers);
+        assert_eq!(
+            receivers[0].wire.table.len(),
+            ACCEPTED as usize,
+            "R's table"
+        );
+        let (rows, capacities) = evpn_table(&manager, r);
+        assert_fitted(capacities[0], rows, "imported, then not");
+        capacities
+    };
+    let (head, control) = with_control(shape);
+    assert_at_or_below_control(&head, &control, "imported, then not");
 }

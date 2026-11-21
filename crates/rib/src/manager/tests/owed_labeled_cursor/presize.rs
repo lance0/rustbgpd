@@ -165,29 +165,38 @@ fn a_send_all_labeled_walk_sizes_its_indexes_to_what_it_accepts() {
     filtered_walk(20_000, u32::MAX, "send-all, one in ten");
 }
 
-/// An Add-Path receiver sent two paths of every prefix: the route index is
-/// sized for two rows a prefix and the prefix index for one, each once.
-/// Red when both are sized from the rows (the batch reserve's single
-/// count): the prefix index ends past 2.3 times its prefixes.
+/// An Add-Path receiver joins a hold and is released two paths of every
+/// prefix. The prefix index is sized once, from the prefixes accepted per
+/// prefix read; the route index for one row a prefix, since paths per
+/// prefix vary with arrival order, and the steps grow it past that. Both
+/// end at or below the walk with the presize off. Red when the prefix
+/// index is sized from the clamped rows: it changes capacity in three
+/// steps.
 #[test]
 fn an_add_path_labeled_walk_sizes_each_index_by_its_own_count() {
     const PREFIXES: u32 = 8_000;
-    let mut manager = manager(4 * CHUNK_ROWS);
-    sources_up(&mut manager);
-    let mut receivers = vec![Receiver::up(&mut manager, receiver(0), 4096, &[L4], 2)];
-    let peer = receivers[0].peer;
-    manager.owe_eor(peer, L4);
-    manager.owe_whole_family(peer, F4);
-    let second = (0..PREFIXES).map(|index| route_from(SECOND, L4, index, 300, 100));
-    send(&mut manager, SECOND, second.collect(), vec![]);
-    send(&mut manager, SOURCE, rows(L4, 0..PREFIXES), vec![]);
-    let growth = walk(&mut manager, &mut receivers, peer);
-    growth.assert_sized_once("two paths a prefix");
-    let out = &manager.adj_ribs_out[&peer];
-    assert_eq!(out.labeled_len(), 2 * PREFIXES as usize);
-    assert_eq!(out.labeled_key_len(), PREFIXES as usize);
-    assert_eq!(receivers[0].wire.table.len(), 2 * PREFIXES as usize);
-    assert_indexes_fitted(&manager, peer, "two paths a prefix");
+    let shape = || {
+        let mut manager = deferral_manager(4 * CHUNK_ROWS, &[L4]);
+        sources_up(&mut manager);
+        let second = (0..PREFIXES).map(|index| route_from(SECOND, L4, index, 300, 100));
+        send(&mut manager, SECOND, second.collect(), vec![]);
+        send(&mut manager, SOURCE, rows(L4, 0..PREFIXES), vec![]);
+        let waiter = hold(&mut manager, &[L4]);
+        let joiner = Receiver::up(&mut manager, receiver(0), 4096, &[L4], 2);
+        let mut receivers = vec![joiner, waiter];
+        release(&mut manager, L4);
+        let peer = receivers[0].peer;
+        let growth = walk(&mut manager, &mut receivers, peer);
+        let out = &manager.adj_ribs_out[&peer];
+        assert_eq!(out.labeled_len(), 2 * PREFIXES as usize);
+        assert_eq!(out.labeled_key_len(), PREFIXES as usize);
+        assert_eq!(receivers[0].wire.table.len(), 2 * PREFIXES as usize);
+        assert_indexes_fitted(&manager, peer, "two paths a prefix");
+        (growth.rebuilds[1], tables(&manager, peer).1)
+    };
+    let ((prefix_rebuilds, head), (_, control)) = with_control(shape);
+    assert_eq!(prefix_rebuilds, 1, "the prefix index changes capacity once");
+    assert_at_or_below_control(&head, &control, "two paths a prefix");
 }
 
 /// A restart walk at one row in ten with 8,000 of 50,000 prefixes
@@ -235,11 +244,12 @@ fn a_filtered_labeled_walk_with_relabels_ahead_fits() {
 
 /// Add-Path send-all, every row accepted, in arrival order: [`SOURCE`]
 /// sends 600 prefixes, [`SECOND`] the same 600 (a second path; each prefix
-/// moves to the back of the list), then [`SOURCE`] 10,000 more. The walk's
-/// first 512 prefixes read two rows a prefix, the rest one. The estimate
-/// takes one row a prefix for send-all, and the steps grow the route index
-/// past it. Red without that clamp: the route index reserved for two rows
-/// a prefix ahead, one capacity class past the walk without the presize.
+/// moves to the back of the list), then [`SOURCE`] 10,000 more. The second
+/// path moves the 600 prefixes out of the walk's starting log, so nothing
+/// is extrapolated over the later passes. Red when the estimate reads the
+/// whole list ahead without the one-row clamp: the route index reserved
+/// for two rows a prefix ahead, one capacity class past the walk without
+/// the presize.
 #[test]
 fn a_send_all_labeled_walk_with_arrival_order_skew_fits() {
     const ROWS: u32 = 10_000;
@@ -277,4 +287,39 @@ fn a_send_all_labeled_walk_with_arrival_order_skew_fits() {
     };
     let (head, control) = with_control(shape);
     assert_at_or_below_control(&head, &control, "send-all, arrival skew");
+}
+
+/// 1,024 accepted prefixes, then 20,000 rejected in a later pass: only the
+/// first pass after the cursor starts (its starting log) is a sample of
+/// its own keys, so nothing is extrapolated over the rejected ones. Red
+/// when the estimate extrapolates past the starting log: 28 times what the
+/// table holds, against 1.75 times without the presize.
+#[test]
+fn an_accepted_labeled_block_ahead_of_a_rejected_one_fits() {
+    const ACCEPTED: u32 = 1_024;
+    let shape = || {
+        let mut manager = manager(4 * CHUNK_ROWS);
+        sources_up(&mut manager);
+        let mut receivers = vec![filtered_receiver(&mut manager, 0)];
+        let peer = receivers[0].peer;
+        let row = |index: u32, med: u32| {
+            let mut route = route_from(SOURCE, L4, index, 100, 200);
+            set_med(&mut route.attributes, med);
+            route
+        };
+        send(
+            &mut manager,
+            SOURCE,
+            (0..ACCEPTED).map(|index| row(index, 0)).collect(),
+            vec![],
+        );
+        let rejected = (ACCEPTED..ACCEPTED + 20_000).map(|index| row(index, 1));
+        send(&mut manager, SOURCE, rejected.collect(), vec![]);
+        drain(&mut manager, &mut receivers);
+        assert_eq!(receivers[0].wire.table.len(), ACCEPTED as usize);
+        assert_indexes_fitted(&manager, peer, "accepted, then rejected");
+        tables(&manager, peer).1
+    };
+    let (head, control) = with_control(shape);
+    assert_at_or_below_control(&head, &control, "accepted, then rejected");
 }

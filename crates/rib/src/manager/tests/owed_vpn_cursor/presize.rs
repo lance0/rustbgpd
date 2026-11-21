@@ -1,13 +1,14 @@
 //! A private receiver's VPN cursor walk sizes its two VPN indexes once,
 //! while the table is nearly empty, from each AFI's rows per key read so
 //! far and its keys still ahead: the indexes do not double step after
-//! step, and a receiver that accepts a fraction of the table gets a table
-//! sized to that fraction.
+//! step, and a receiver that accepts a fraction of the walk's starting
+//! log gets a table sized to that fraction of it.
 
 use std::cell::RefCell;
 
 use super::super::cursor_presize::{
-    Growth, PRESIZE_ROWS, assert_fitted, deny_med_chain, set_med, tenth_med,
+    Growth, PRESIZE_ROWS, assert_at_or_below_control, assert_fitted, deny_med_chain, set_med,
+    tenth_med, with_control,
 };
 use super::*;
 
@@ -130,58 +131,59 @@ fn a_filtered_vpn_walk_sizes_its_indexes_to_what_it_accepts() {
 }
 
 /// A first step whose keys the receiver's policy all rejects reserves
-/// nothing; the next step, which adds rows, sizes the table once from the
-/// rate over both steps. The list puts every rejected key first, so that
-/// rate reads half the true one: the table falls short and grows by the
-/// steps' own reserves, and still fits. Red when a step that added
-/// nothing still counts as a presize.
+/// nothing. Those keys are the walk's starting log (the first pass after
+/// the cursor starts); the accepted keys come in a later pass, so the
+/// walk's sample says nothing of them: no estimate, and the table grows by
+/// the steps' own reserves, as with the presize off. Red when the estimate
+/// extrapolates past the starting log (one estimate, from a rate the
+/// rejected block halves).
 #[test]
-fn a_vpn_step_that_accepts_nothing_reserves_nothing_and_the_next_one_estimates() {
+fn a_vpn_walk_whose_starting_log_is_rejected_makes_no_estimate() {
     const ACCEPTED: u32 = 8_192;
     let rejected = u32::try_from(CHUNK_ROWS).unwrap();
-    let mut manager = manager(4 * CHUNK_ROWS);
-    sources_up(&mut manager);
-    let mut receivers = vec![filtered_receiver(&mut manager)];
-    let peer = receivers[0].peer;
     let denied = |index| {
         let mut route = route_from(SOURCE, P4, index, 100, 200);
         set_med(&mut route.attributes, 1);
         route
     };
-    // The list holds the rejected keys first, a step's worth exactly.
-    send(
-        &mut manager,
-        SOURCE,
-        (0..rejected).map(denied).collect(),
-        vec![],
-    );
-    let accepted = rows(P4, rejected..rejected + ACCEPTED, 100);
-    send(&mut manager, SOURCE, accepted, vec![]);
-    let presizes = manager.adj_rib_out_commit_stats.walk_presizes;
-    tick(&mut manager, &mut receivers);
-    assert!(
-        receivers[0].wire.table.is_empty(),
-        "the first step is rejected"
-    );
-    assert_eq!(tables(&manager, peer), (0, [0, 0]), "nothing reserved");
-    assert_eq!(
-        manager.adj_rib_out_commit_stats.walk_presizes, presizes,
-        "no estimate from a step that added nothing"
-    );
-    walk(&mut manager, &mut receivers, peer);
-    assert_eq!(
-        manager.adj_rib_out_commit_stats.walk_presizes,
-        presizes + 1,
-        "one estimate, after the rows"
-    );
-    let expected = table_of(
-        P4,
-        &(rejected..rejected + ACCEPTED)
-            .map(|index| (index, 100))
-            .collect::<Vec<_>>(),
-    );
-    assert_eq!(receivers[0].wire.table, expected);
-    assert_indexes_fitted(&manager, peer, "after a rejected step");
+    let shape = || {
+        let mut manager = manager(4 * CHUNK_ROWS);
+        sources_up(&mut manager);
+        let mut receivers = vec![filtered_receiver(&mut manager)];
+        let peer = receivers[0].peer;
+        // The list holds the rejected keys first, a step's worth exactly.
+        send(
+            &mut manager,
+            SOURCE,
+            (0..rejected).map(denied).collect(),
+            vec![],
+        );
+        let accepted = rows(P4, rejected..rejected + ACCEPTED, 100);
+        send(&mut manager, SOURCE, accepted, vec![]);
+        let presizes = manager.adj_rib_out_commit_stats.walk_presizes;
+        tick(&mut manager, &mut receivers);
+        assert!(
+            receivers[0].wire.table.is_empty(),
+            "the first step is rejected"
+        );
+        assert_eq!(tables(&manager, peer), (0, [0, 0]), "nothing reserved");
+        walk(&mut manager, &mut receivers, peer);
+        assert_eq!(
+            manager.adj_rib_out_commit_stats.walk_presizes, presizes,
+            "no estimate past the starting log"
+        );
+        let expected = table_of(
+            P4,
+            &(rejected..rejected + ACCEPTED)
+                .map(|index| (index, 100))
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(receivers[0].wire.table, expected);
+        assert_indexes_fitted(&manager, peer, "after a rejected step");
+        tables(&manager, peer).1
+    };
+    let (head, control) = with_control(shape);
+    assert_at_or_below_control(&head, &control, "rejected starting log");
 }
 
 /// A receiver already holding more than the presize limit is owed the
@@ -333,29 +335,37 @@ fn a_second_vpn_walk_counts_only_its_own_keys() {
     assert_indexes_fitted(&manager, peer, "second walk");
 }
 
-/// An Add-Path receiver sent two paths of every key: the route index is
-/// sized for two rows a key and the key index for one, each once. Red
-/// when both are sized from the rows: the key index ends past 2.3 times
-/// its keys.
+/// An Add-Path receiver joins a hold and is released two paths of every
+/// key. The key index is sized once, from the keys accepted per key read;
+/// the route index for one row a key, since paths per key vary with
+/// arrival order, and the steps grow it past that. Both end at or below
+/// the walk with the presize off. Red when the key index is sized from the
+/// clamped rows: half the keys, so it changes capacity in three steps.
 #[test]
 fn an_add_path_vpn_walk_sizes_each_index_by_its_own_count() {
     const KEYS: u32 = 8_000;
-    let mut manager = manager(4 * CHUNK_ROWS);
-    sources_up(&mut manager);
-    let mut receivers = vec![Receiver::up(&mut manager, receiver(0), 4096, &[P4], 2)];
-    let peer = receivers[0].peer;
-    manager.owe_eor(peer, P4);
-    manager.owe_whole_family(peer, F4);
-    let second = (0..KEYS).map(|index| route_from(SECOND, P4, index, 300, 100));
-    send(&mut manager, SECOND, second.collect(), vec![]);
-    send(&mut manager, SOURCE, rows(P4, 0..KEYS, 100), vec![]);
-    let growth = walk(&mut manager, &mut receivers, peer);
-    growth.assert_sized_once("two paths a key");
-    let out = &manager.adj_ribs_out[&peer];
-    assert_eq!(out.vpn_len(), 2 * KEYS as usize);
-    assert_eq!(out.vpn_key_len(), KEYS as usize);
-    assert_eq!(receivers[0].wire.table.len(), 2 * KEYS as usize);
-    assert_indexes_fitted(&manager, peer, "two paths a key");
+    let shape = || {
+        let mut manager = deferral_manager(4 * CHUNK_ROWS, &[P4]);
+        sources_up(&mut manager);
+        let second = (0..KEYS).map(|index| route_from(SECOND, P4, index, 300, 100));
+        send(&mut manager, SECOND, second.collect(), vec![]);
+        send(&mut manager, SOURCE, rows(P4, 0..KEYS, 100), vec![]);
+        let waiter = hold(&mut manager, &[P4]);
+        let joiner = Receiver::up(&mut manager, receiver(0), 4096, &[P4], 2);
+        let mut receivers = vec![joiner, waiter];
+        release(&mut manager, P4);
+        let peer = receivers[0].peer;
+        let growth = walk(&mut manager, &mut receivers, peer);
+        let out = &manager.adj_ribs_out[&peer];
+        assert_eq!(out.vpn_len(), 2 * KEYS as usize);
+        assert_eq!(out.vpn_key_len(), KEYS as usize);
+        assert_eq!(receivers[0].wire.table.len(), 2 * KEYS as usize);
+        assert_indexes_fitted(&manager, peer, "two paths a key");
+        (growth.rebuilds[1], tables(&manager, peer).1)
+    };
+    let ((key_rebuilds, head), (_, control)) = with_control(shape);
+    assert_eq!(key_rebuilds, 1, "the key index changes capacity once");
+    assert_at_or_below_control(&head, &control, "two paths a key");
 }
 
 /// A receiver whose session ends mid-walk, after a step sized its table:

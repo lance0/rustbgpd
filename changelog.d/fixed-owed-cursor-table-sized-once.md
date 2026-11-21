@@ -11,16 +11,23 @@
   receivers were rebuilt at once. The size comes from each address
   family's own sample once the walk's cursor steps have read at least 512
   of its keys and committed at least 256 of its routes: the routes those
-  steps committed per key they read, at most the receiver's paths per key
-  (one for an Add-Path receiver that sends every path), times its keys
-  still ahead. Routes that reach the table any other way (held before the
-  walk, restaged by an RT-Constrain membership change, or sent from the
+  steps committed per key they read, at most one route a key, times the
+  keys still ahead of the cursor in the release's inventory. That
+  inventory is logged in one pass in hash order, so the keys read first are
+  a fair sample of the rest of it; keys that arrive in later passes come
+  in arrival order (a source, VRF or Route Target at a time), so none of
+  them is counted, and the table grows step by step for them as before.
+  Routes that reach the table any other way (held before the walk,
+  restaged by an RT-Constrain membership change, or sent from the
   receiver's own owed keys) do not count, nor do keys logged again or
   withdrawn ahead of the cursor. A receiver whose export policy or
-  RT-Constrain membership accepts a fraction of the table therefore gets a
-  table sized to that fraction, and VPNv4 and VPNv6 (or the two labeled
-  families) sharing one table are each sized by their own acceptance. A
-  family without such a sample adds nothing, and its table grows step by
-  step as before; a table that already holds more than 2,048 routes is not
-  resized this way. Unicast, whose table is sized from the Loc-RIB when it
-  is created, and VPN owned by an update group are unchanged.
+  RT-Constrain membership accepts a fraction of the release's inventory
+  therefore gets a table sized to that fraction of it, and VPNv4 and VPNv6
+  (or the two labeled families) sharing one table are each sized by their
+  own acceptance. An Add-Path receiver's route index is sized for one path
+  a key and grows past it step by step; its key index is sized for the
+  keys it accepts. A family without such a sample adds nothing, and a
+  cursor that starts because a receiver's owed keys passed their byte cap
+  makes no estimate. A table that already holds more than 2,048 routes is
+  not resized this way. Unicast, whose table is sized from the Loc-RIB
+  when it is created, and VPN owned by an update group are unchanged.

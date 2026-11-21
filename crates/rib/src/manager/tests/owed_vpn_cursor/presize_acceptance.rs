@@ -602,11 +602,12 @@ async fn withdrawals_ahead_of_a_vpn_release_through_the_actor_loop_fit() {
 
 /// Add-Path send-all, every row accepted, in arrival order: [`SOURCE`]
 /// sends 600 keys, [`SECOND`] the same 600 (a second path; each key moves
-/// to the back of the list), then [`SOURCE`] 20,000 more. The walk's first
-/// 512 keys read two rows a key, the rest one. The estimate takes one row
-/// a key for send-all, and the steps grow the route index past it. Red
-/// without that clamp: the route index reserved for two rows a key ahead
-/// (2.7 times what it holds, 1.35 times without the presize).
+/// to the back of the list), then [`SOURCE`] 20,000 more. The second path
+/// moves the 600 keys out of the walk's starting log, so nothing is
+/// extrapolated over the later passes. Red when the estimate reads the
+/// whole list ahead without the one-row clamp: the route index reserved
+/// for two rows a key ahead (2.7 times what it holds, 1.35 times without
+/// the presize).
 #[test]
 fn a_send_all_vpn_walk_with_arrival_order_skew_fits() {
     const ROWS: u32 = 20_000;
@@ -636,4 +637,242 @@ fn a_send_all_vpn_walk_with_arrival_order_skew_fits() {
     };
     let (head, control) = with_control(shape);
     assert_at_or_below_control(&head, &control, "send-all, arrival skew");
+}
+
+// Acceptance in blocks: the list is in arrival order across passes, so
+// only the walk's starting log (one pass, logged from a hash set) is a
+// random order of its keys. The first pass after the cursor starts is
+// that log here, as a release's inventory is in the daemon.
+
+/// What [`deny_med_chain`] passes: every row, none, or one in ten.
+const ACCEPTED: fn(u32) -> u32 = |_| 0;
+const REJECTED: fn(u32) -> u32 = |_| 1;
+const TENTH: fn(u32) -> u32 = tenth_med;
+
+/// One pass: its source, its keys and each key's MED.
+type Pass = (Ipv4Addr, std::ops::Range<u32>, fn(u32) -> u32);
+
+/// A `VPNv4` receiver sending `add_path` paths a key behind
+/// [`deny_med_chain`] owes it whole, then each of `passes` (source, keys,
+/// MED by key) arrives as one pass. Returns the rows sent and the index
+/// capacities after the walk.
+fn passes_walk(add_path: u32, passes: &[Pass], case: &str) -> (usize, [usize; 2]) {
+    let mut manager = manager(4 * CHUNK_ROWS);
+    sources_up(&mut manager);
+    let mut receivers = vec![owing_receiver(
+        &mut manager,
+        &[P4],
+        add_path,
+        Some(deny_med_chain()),
+    )];
+    let peer = receivers[0].peer;
+    for (source, keys, med) in passes {
+        let rows = keys
+            .clone()
+            .map(|index| med_row(*source, P4, index, med(index)))
+            .collect();
+        send(&mut manager, *source, rows, vec![]);
+    }
+    drain(&mut manager, &mut receivers);
+    assert_indexes_fitted(&manager, peer, case);
+    let (routes, keys) = manager.adj_ribs_out[&peer].bench_vpn_capacities();
+    (receivers[0].wire.table.len(), [routes, keys])
+}
+
+/// [`passes_walk`] with the presize and without: `rows` sent, and every
+/// index at or below the control's.
+fn assert_passes_fit(add_path: u32, passes: &[Pass], rows: u32, case: &str) {
+    let ((sent, head), (_, control)) = with_control(|| passes_walk(add_path, passes, case));
+    assert_eq!(sent, rows as usize, "{case}: rows sent");
+    assert_at_or_below_control(&head, &control, case);
+}
+
+/// 1,024 accepted keys, then 20,000 rejected in a later pass. Red when the
+/// estimate extrapolates past the starting log: both indexes 28 times what
+/// they hold, against 1.75 times without the presize.
+#[test]
+fn an_accepted_block_ahead_of_a_rejected_one_fits() {
+    assert_passes_fit(
+        0,
+        &[
+            (SOURCE, 0..1_024, ACCEPTED),
+            (SOURCE, 1_024..21_024, REJECTED),
+        ],
+        1_024,
+        "accepted, then rejected",
+    );
+}
+
+/// 2,000 accepted keys, then 50,000 at one in ten in a later pass (7,000
+/// rows). Red when the estimate extrapolates past the starting log: 8.2
+/// times what the table holds, against 1.02 times.
+#[test]
+fn an_accepted_block_ahead_of_a_tenth_fits() {
+    assert_passes_fit(
+        0,
+        &[(SOURCE, 0..2_000, ACCEPTED), (SOURCE, 2_000..52_000, TENTH)],
+        7_000,
+        "accepted, then one in ten",
+    );
+}
+
+/// A bounded Add-Path receiver (`send_max` 8), every row accepted, in
+/// arrival order: [`SOURCE`] sends 600 keys, [`SECOND`] the same 600, then
+/// [`SOURCE`] 20,000 more. The second path moves each of the 600 keys out
+/// of the starting log, so nothing is extrapolated. Red when the estimate
+/// reads the whole list ahead with only send-all clamped: the route index
+/// 2.7 times what it holds, against 1.35 times.
+#[test]
+fn a_bounded_add_path_vpn_walk_with_arrival_order_skew_fits() {
+    assert_passes_fit(
+        8,
+        &[
+            (SOURCE, 0..600, ACCEPTED),
+            (SECOND, 0..600, ACCEPTED),
+            (SOURCE, 600..20_600, ACCEPTED),
+        ],
+        21_200,
+        "send_max 8, arrival skew",
+    );
+}
+
+/// A bounded Add-Path receiver (`send_max` 8) joins a hold and is released
+/// 9,000 keys with two paths each; then [`SECOND`] withdraws its path of
+/// 6,000 of them before the first step, which logs those keys again past
+/// the release's inventory. The walk reads two-path keys, while the keys
+/// ahead also count the holes the withdrawals left in the inventory, whose
+/// keys now carry one path. Clamped at one row a key, those holes cost at
+/// most a row each; at two rows a key the route index is reserved past
+/// 14,336 for 12,000 rows. Red when a bounded Add-Path receiver is clamped
+/// at its `send_max` rather than one row a key.
+#[test]
+fn a_bounded_add_path_release_with_second_paths_withdrawn_ahead_fits() {
+    const KEYS: u32 = 9_000;
+    const WITHDRAWN: u32 = 6_000;
+    let shape = || {
+        let mut manager = deferral_manager(4 * CHUNK_ROWS, &[P4]);
+        sources_up(&mut manager);
+        for source in [SECOND, SOURCE] {
+            let rows = (0..KEYS).map(|i| med_row(source, P4, i, 0)).collect();
+            send(&mut manager, source, rows, vec![]);
+        }
+        let waiter = hold(&mut manager, &[P4]);
+        let joiner = Receiver::up(&mut manager, receiver(0), 4096, &[P4], 8);
+        let mut receivers = vec![joiner, waiter];
+        release(&mut manager, P4);
+        let withdrawn = (KEYS - WITHDRAWN..KEYS)
+            .map(|i| med_row(SECOND, P4, i, 0).key().nlri_key)
+            .collect();
+        send(&mut manager, SECOND, vec![], withdrawn);
+        let peer = receivers[0].peer;
+        drain(&mut manager, &mut receivers);
+        assert_eq!(
+            receivers[0].wire.table.len(),
+            (2 * KEYS - WITHDRAWN) as usize
+        );
+        assert_indexes_fitted(&manager, peer, "second paths withdrawn ahead");
+        let (routes, keys) = manager.adj_ribs_out[&peer].bench_vpn_capacities();
+        [routes, keys]
+    };
+    let (head, control) = with_control(shape);
+    assert_at_or_below_control(&head, &control, "second paths withdrawn ahead");
+}
+
+/// Through `RibManager::run` on a paused clock, no direct call: 1,024
+/// accepted keys are held by a selection deferral while the receiver
+/// joins, the release starts its cursor and logs them, and 20,000 rejected
+/// keys arrive in the same turn, before any cursor step. Red when the
+/// estimate extrapolates past the release's inventory: 28 times what the
+/// table holds, in one rebuild, against 1.75 times.
+#[tokio::test(start_paused = true)]
+async fn a_clustered_vpn_release_through_the_run_loop_fits() {
+    const ACCEPTED_KEYS: u32 = 1_024;
+    let shape = || async {
+        let rows = (0..ACCEPTED_KEYS)
+            .map(|i| med_row(SOURCE, P4, i, 0))
+            .collect();
+        let rejected = RibUpdate::VpnRoutesReceived {
+            peer: peer_v4(SOURCE),
+            session_id: 0,
+            announced: (ACCEPTED_KEYS..ACCEPTED_KEYS + 20_000)
+                .map(|i| med_row(SOURCE, P4, i, 1))
+                .collect(),
+            withdrawn: vec![],
+        };
+        let (receivers, last) =
+            actor_walk(rows, vec![rejected], 0, Some(deny_med_chain()), 600, true).await;
+        assert_eq!(receivers[0].wire.table.len(), ACCEPTED_KEYS as usize);
+        assert_eq!(last.rows, ACCEPTED_KEYS as usize, "{last:?}");
+        assert_fitted(last.capacities[0], last.rows, "run loop: route index");
+        assert_fitted(last.capacities[1], last.keys, "run loop: key index");
+        last.capacities
+    };
+    let (head, control) = with_control_async(shape).await;
+    assert_at_or_below_control(&head, &control, "clustered release, run loop");
+}
+
+/// The byte-cap shape above, with acceptance in blocks ahead of the
+/// cursor: after the relabel pass starts it, 1,024 fresh accepted keys
+/// arrive, then 20,000 fresh rejected keys, while the receiver is paused.
+/// A byte-cap cursor has no starting log (every key ahead of it is a later
+/// arrival), so its walk makes no estimate and the table grows as with the
+/// presize off. Red when a byte-cap cursor extrapolates over the list
+/// ahead: the accepted block's rate reserves the indexes for every
+/// rejected key.
+#[tokio::test(start_paused = true)]
+async fn a_byte_cap_cursor_ahead_of_acceptance_in_blocks_makes_no_estimate() {
+    const ROWS: u32 = 15_000;
+    const FRESH: u32 = 1_024;
+    let shape = || async {
+        let mut manager = deferral_manager(256, &[]);
+        manager.actor_turn_check = Some(watch);
+        let (tx, rx) = mpsc::channel(256);
+        manager.rx = rx;
+        let actor = tokio::spawn(manager.run_actor());
+        let mut sources = Vec::new();
+        for source in [SOURCE, SECOND] {
+            let (update, rx) = actor::peer_up(peer_v4(source), 0, 4096, &[V4]);
+            tx.send(update).await.unwrap();
+            sources.push(rx);
+        }
+        let pass =
+            |keys: std::ops::Range<u32>, label, med: fn(u32) -> u32| RibUpdate::VpnRoutesReceived {
+                peer: peer_v4(SOURCE),
+                session_id: 0,
+                announced: keys.map(|i| labeled_row(i, label, med(i))).collect(),
+                withdrawn: vec![],
+            };
+        tx.send(pass(0..ROWS, 100, TENTH)).await.unwrap();
+        let peer = receiver(0);
+        let (update, rx) = peer_up_with(peer, &[P4], 0, Some(deny_med_chain()));
+        tx.send(update).await.unwrap();
+        let mut receivers = vec![Receiver {
+            peer,
+            rx,
+            wire: Wire::default(),
+        }];
+        actor::run_for(&tx, &mut receivers, &[true], 200).await;
+        assert_eq!(receivers[0].wire.table.len(), (ROWS / 10) as usize);
+        tx.send(pass(0..ROWS, 101, TENTH)).await.unwrap();
+        actor::run_for(&tx, &mut receivers, &[false], 5).await;
+        tx.send(pass(ROWS..ROWS + FRESH, 100, ACCEPTED))
+            .await
+            .unwrap();
+        actor::run_for(&tx, &mut receivers, &[false], 5).await;
+        let rejected = ROWS + FRESH..ROWS + FRESH + 20_000;
+        tx.send(pass(rejected, 100, REJECTED)).await.unwrap();
+        actor::run_for(&tx, &mut receivers, &[false], 5).await;
+        actor::run_for(&tx, &mut receivers, &[true], 2_000).await;
+        drop(tx);
+        let manager = actor.await.unwrap();
+        drop(sources);
+        assert!(manager.owing(peer).is_none(), "settled");
+        assert_eq!(receivers[0].wire.table.len(), (ROWS / 10 + FRESH) as usize);
+        let (routes, keys) = manager.adj_ribs_out[&peer].bench_vpn_capacities();
+        let presizes = manager.adj_rib_out_commit_stats.walk_presizes;
+        ([routes, keys], presizes)
+    };
+    let ((head, presizes), (control, _)) = with_control_async(shape).await;
+    assert_at_or_below_control(&head, &control, "byte-cap cursor, blocks ahead");
+    assert_eq!(presizes, 0, "no estimate");
 }
