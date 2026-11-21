@@ -23,6 +23,21 @@ binary, and the two arms must use different ones.
 family the candidate must drain by cursor to the default (unicast): a cell
 7 release run that recorded no cursor owed-drain step for it FAILs.
 
+``check-labeled`` and ``check-vpn`` grade one arm's graceful-restart cells
+for the drain it must show: ``whole`` (one whole-family step per receiver,
+the parent) or ``cursor``. A measured whole-family run is INVALID unless
+every receiver's step ran while the readers were paused; a cursor run needs
+only one step while paused, because a cursor stops on credit and finishes
+after resume. A run where no receiver's decoded queue held a message is
+INVALID at any shape, and a measured run where every receiver's queue was
+full is INVALID: the cgroup peak includes those queues. ``labeled`` and
+``vpn`` pair a whole-family parent with a cursor candidate built from a
+different binary and print REPORT ratios of the arms' means. They apply no
+bar and cannot grade an A/A, since identical binaries are INVALID. Where a
+campaign has no A/A block, it forms the bar itself from three parent runs
+per cell: a reading fails when candidate mean / parent mean exceeds
+max(1.02, parent max / parent mean + 0.01).
+
 Each gated cell gets one ``PASS``, ``FAIL`` or ``INVALID`` line; the analyzer
 never stops at the first failing cell. Exit status: 1 when any cell FAILs,
 else 2 when any is INVALID, else 0. Optional release cells print REPORT
@@ -2145,6 +2160,14 @@ def restart_drain(run: dict, cell: str, expected: str | None) -> str:
         raise Invalid(f"{cell}: too few cursor steps for the advertised inventory")
     if run["mode"] == "measured" and paused == 0:
         raise Invalid(f"{cell}: no {scope} steps observed while paused")
+    # A whole-family send is one step per receiver. One still to run when the
+    # readers return makes the peak and the recovery readings of the pause.
+    # A cursor stops on credit while readers are paused, so its arm finishes
+    # after resume by design and keeps the weaker rule above.
+    if run["mode"] == "measured" and scope == "whole" and paused != n:
+        raise Invalid(
+            f"{cell}: production not finished before resume ({paused} of {n} whole steps while paused)"
+        )
     lo, hi = total[scope]["above_ms"], total[scope]["at_most_ms"]
     bracket = f">{lo:g} ms" if hi is None else f"({lo:g}, {hi:g}] ms"
     return f"{count} {scope} steps ({paused} while paused), longest {bracket}"
@@ -2294,6 +2317,13 @@ def mpls_restart(run: dict, cell: str, expected_scope: str | None = None) -> tup
         or need(run, "memory.cgroup_oom_kill", cell) != "0"
     ):
         raise Invalid("missing swap-fenced memory scope")
+    # The decoded queues are harness memory inside the cgroup peak, recorded
+    # in messages only. The depth is sampled after a dequeue, so a full queue
+    # reads one below capacity.
+    if not any(backlogs):
+        raise Invalid("no decoded-queue backlog on any receiver; the pause did not load the daemon")
+    if mode == "measured" and all(backlog >= capacity - 1 for backlog in backlogs):
+        raise Invalid("harness queue saturated; memory not comparable")
     drain = restart_drain(run, cell, expected_scope)
     return "PASS", (
         f"{mode}, {n:g} exact receivers; longest RIB poll {poll_us / 1000:.3f} ms, "

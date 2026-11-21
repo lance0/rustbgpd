@@ -378,7 +378,17 @@ must record one whole step per receiver. A cursor run must record at least
 `receivers × ceil(rows/1024)` cursor steps. Other scopes must record zero
 steps. Each receipt shows the counts while reads were paused and through
 the last End-of-RIB, along with the longest step's histogram bucket.
-The campaign sets the performance thresholds.
+A measured whole-family run is INVALID unless every receiver's step ran
+while reads were paused: otherwise its peak and recovery measure the pause.
+A cursor stops on credit and finishes after resume, so a measured cursor run
+needs only one step while paused. A run in which no receiver's decoded queue
+held a message is INVALID, and so is a measured run in which every
+receiver's queue was full, because the cgroup peak includes those queues.
+
+The comparisons apply no bar and reject identical binaries, so they cannot
+grade an A/A. The campaign sets the performance thresholds. Without an A/A
+block it runs the parent three times per cell and fails a reading when
+candidate mean / parent mean exceeds max(1.02, parent max / parent mean + 0.01).
 
 Recovery has two clocks, release to last decoded End-of-RIB and reader
 resume to that marker. After the final receiver decodes its marker, the

@@ -191,7 +191,8 @@ class LabeledRestart(unittest.TestCase):
             run["timing"].update(resume_issued_ms=90010.0, last_eor_ms=90022.25, release_to_last_eor_ms=90020.25)
             run["actor"]["to_ms"] += 90000.0
             run["host"] = {"compiler_watch": {"samples": 100, "observed": 0}}
-            self.set_steps(run, scope, 150 if scope == "whole" else 22050, 100)
+            # A cursor stops on credit; whole-family sends all finish paused.
+            self.set_steps(run, scope, *((150, 150) if scope == "whole" else (22050, 100)))
             if scope == "cursor":
                 run["actor"]["slice_max_us"]["actor_poll"] *= 0.5
                 run["unaffected"]["release_update_wait_ms"] *= 2
@@ -244,6 +245,58 @@ class LabeledRestart(unittest.TestCase):
         result.unlink()
         self.assertTrue(any(v == "INVALID" and "attempted, no result" in detail for _, v, detail in
                             credit_bars.compare_restart_family(parent, candidate, self.family)))
+
+
+    def regrade(self, directory, scope, change):
+        """The first cell's verdict after `change` edits its measured receipt."""
+        result = directory / f"{credit_bars.RESTART_CELLS[self.family][0]}.json"
+        raw = result.read_bytes()
+        run = json.loads(raw)
+        change(run)
+        result.write_text(json.dumps(run))
+        line = credit_bars.check_restart_family(directory, scope, self.family)[0]
+        result.write_bytes(raw)
+        return line[1:]
+
+    def test_measured_whole_run_must_finish_production_while_paused(self):
+        # A correctness run is not held to the pause.
+        short = copy.deepcopy(self.run_data)
+        self.set_steps(short, "whole", 2, 1)
+        self.path.write_text(json.dumps(short))
+        self.assertEqual(self.grade()[0], "PASS")
+        parent = self.measured_arm("parent", "whole")
+        verdict, detail = self.regrade(parent, "whole", lambda run: self.set_steps(run, "whole", 150, 86))
+        self.assertEqual(verdict, "INVALID", detail)
+        self.assertIn("production not finished before resume (86 of 150", detail)
+        self.assertEqual(self.regrade(parent, "whole", lambda run: None)[0], "PASS")
+
+    def test_decoded_queue_depth_is_an_instrument(self):
+        def depth(*values):
+            def change(run):
+                for peer, value in zip(run["receivers"], values * 150):
+                    peer["max_observed_stub_backlog_messages"] = value
+            return change
+
+        # A reduced correctness run cannot fill the queue but must still load it.
+        empty = copy.deepcopy(self.run_data)
+        for peer in empty["receivers"]:
+            peer["max_observed_stub_backlog_messages"] = 0
+        self.path.write_text(json.dumps(empty))
+        verdict, detail = self.grade()
+        self.assertEqual(verdict, "INVALID", detail)
+        self.assertIn("no decoded-queue backlog", detail)
+        parent = self.measured_arm("parent", "whole")
+        for values, expected, reason in (
+            ((65536,), "INVALID", "harness queue saturated; memory not comparable"),
+            ((65535,), "INVALID", "harness queue saturated"),  # full, sampled after a dequeue
+            ((65535, 65534), "PASS", "65535 of 65536"),
+            ((0,), "INVALID", "no decoded-queue backlog on any receiver"),
+            ((0, 1), "PASS", "1 of 65536"),
+        ):
+            with self.subTest(values=values):
+                verdict, detail = self.regrade(parent, "whole", depth(*values))
+                self.assertEqual(verdict, expected, detail)
+                self.assertIn(reason, detail)
 
 
 class VpnRestart(LabeledRestart):
