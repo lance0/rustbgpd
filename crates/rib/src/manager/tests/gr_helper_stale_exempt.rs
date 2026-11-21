@@ -265,7 +265,7 @@ fn assert_deleted_exempt_leaves_helper_within_hold(
     });
     let mut markers = apply(&mut new_rx, &mut peer_rib, Some(kept_key));
     for _ in 0..4 {
-        manager.distribute_changes(&HashSet::new(), &HashSet::new());
+        manager.distribute_resync_request();
         manager.resync_dirty_peers_bounded();
         markers += apply(&mut new_rx, &mut peer_rib, Some(kept_key));
     }
@@ -2889,7 +2889,7 @@ fn assert_stale_ordinary_row_kept_then_replaced(
         safi: FAMILY.1,
     });
     for _ in 0..4 {
-        manager.distribute_changes(&HashSet::new(), &HashSet::new());
+        manager.distribute_resync_request();
         manager.resync_dirty_peers_bounded();
         apply(rx, rib, Some(key));
     }

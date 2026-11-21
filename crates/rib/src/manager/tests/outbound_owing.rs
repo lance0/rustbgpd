@@ -2173,6 +2173,8 @@ fn a_targeted_pass_still_serves_other_dirty_and_forced_peers() {
     for rx in &mut receivers {
         send_all(rx);
     }
+    // Ungrouped peers: a change event's targeted pass still resyncs them.
+    assert!(manager.grouped_member_of(peers[1]).is_none());
     manager.mark_outbound_dirty(peers[1]);
     manager.force_outbound_peers.insert(peers[2]);
     manager.distribute_changes_to_targets(&HashSet::new(), &HashSet::from([peers[0]]));

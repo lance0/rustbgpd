@@ -11824,9 +11824,339 @@ async fn dirty_resync_timer_services_interior_readiness(ungrouped: bool) {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ingest_dirty_replay_services_interior_readiness() {
-    Box::pin(ingest_dirty_replay_readiness(false)).await;
+/// A dirty member's whole-table replay is a unit of the resync tick, not of
+/// an unrelated UPDATE's ingest pass: the pass leaves the member dirty with
+/// the withdrawal it missed, and the next tick heals it exactly, End-of-RIB
+/// last. The tick's interior readiness is
+/// `grouped_dirty_resync_timer_services_interior_readiness`.
+#[test]
+fn ingest_pass_leaves_a_grouped_dirty_replay_to_the_tick() {
+    let (mut manager, stuck, _live, mut outbound, _live_outbound) = full_channel_manager(false);
+    for _ in 0..FULL_CHANNEL_CAPACITY {
+        outbound.try_recv().map(delivered).unwrap();
+    }
+    let family = (Afi::Ipv4, Safi::Unicast);
+    manager.owe_eor(stuck, family);
+    let builds = manager.adj_rib_out_commit_stats.resync_builds;
+    full_channel_pass(&mut manager, &[20], &[]);
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
+    assert!(manager.dirty_peers.contains(&stuck));
+    assert!(outbound.try_recv().map(delivered).is_err());
+
+    assert!(manager.resync_tick_pending());
+    manager.resync_dirty_peers_bounded();
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds + 1);
+    let recovered = outbound.try_recv().map(delivered).unwrap();
+    assert!(outbound.try_recv().map(delivered).is_err());
+    let announced: HashSet<_> = recovered
+        .announce
+        .iter()
+        .map(|route| route.prefix)
+        .collect();
+    let expected: HashSet<_> = [1, 2, 10, 11, 12, 13, 20]
+        .into_iter()
+        .map(full_channel_prefix)
+        .collect();
+    assert_eq!(announced, expected);
+    assert_eq!(
+        recovered.unicast_withdrawals().copied().collect::<Vec<_>>(),
+        vec![(full_channel_prefix(0), 0)]
+    );
+    assert_eq!(recovered.end_of_rib, vec![family]);
+    assert!(manager.eor_pending(stuck).is_empty());
+    assert!(!manager.dirty_peers.contains(&stuck));
+    assert!(manager.pending_group_admitted.is_empty());
+}
+
+/// Through the real actor loop: grouped members go dirty on full channels,
+/// then an UPDATE, a withdrawal and a second source's whole session come
+/// and go while they stay dirty. No ordinary pass heals them; the run
+/// loop's own resync tick does, so each member's wire converges to the
+/// exact table with no withdrawal of a key it never held, its initial
+/// End-of-RIB last.
+#[tokio::test(start_paused = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one actor-loop transcript keeps the dirtying, the passes met while dirty and each member's exact wire check together"
+)]
+async fn dirty_members_converge_on_the_resync_tick_through_the_actor_loop() {
+    let RunningManager { tx, handle } = spawn_running_manager(64, BgpMetrics::new());
+    let source = Ipv4Addr::new(192, 0, 2, 51);
+    let other = Ipv4Addr::new(192, 0, 2, 52);
+    tx.send(registering_peer_up(peer_v4(source), 0))
+        .await
+        .unwrap();
+    tx.send(registering_peer_up(peer_v4(other), 0))
+        .await
+        .unwrap();
+    let prefix = |third| Ipv4Prefix::new(Ipv4Addr::new(203, 0, third, 0), 24);
+    let send = async |from: Ipv4Addr, announced: Vec<u8>, withdrawn: Vec<u8>| {
+        tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: peer_v4(from),
+            announced: announced
+                .into_iter()
+                .map(|third| crate::test_support::make_route(prefix(third), from))
+                .collect(),
+            withdrawn: withdrawn
+                .into_iter()
+                .map(|third| (Prefix::V4(prefix(third)), 0))
+                .collect(),
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        })
+        .await
+        .unwrap();
+        // Separate passes: queued messages would share one window.
+        let _ = query_best_routes(&tx).await;
+    };
+    send(source, vec![1], vec![]).await;
+    let members: Vec<_> = (1..=3)
+        .map(|host| peer_v4(Ipv4Addr::new(10, 44, 0, host)))
+        .collect();
+    let mut receivers = Vec::new();
+    for &peer in &members {
+        let (out_tx, out_rx) = mpsc::channel(1);
+        tx.send(RibUpdate::PeerUp {
+            supersedes: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            session_id: 0,
+            peer,
+            peer_asn: 65000,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx: out_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: false,
+            route_reflector_client: true,
+            orr_vantage: None,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        })
+        .await
+        .unwrap();
+        receivers.push(out_rx);
+    }
+    let group = query_update_group(&tx, members[0]).await;
+    for &peer in &members[1..] {
+        assert_eq!(query_update_group(&tx, peer).await, group);
+    }
+    send(source, vec![2], vec![]).await;
+    send(source, vec![3], vec![1]).await;
+    send(other, vec![4], vec![]).await;
+    tx.send(RibUpdate::PeerDown {
+        peer: peer_v4(other),
+        session_id: 0,
+    })
+    .await
+    .unwrap();
+    let health = async || {
+        let (reply, response) = oneshot::channel();
+        tx.send(RibUpdate::TestQueryOutboundHealth { reply })
+            .await
+            .unwrap();
+        response.await.unwrap()
+    };
+    let (dirty, _, group_dirty, _, _, _) = health().await;
+    assert_eq!((dirty, group_dirty), (3, 3), "every member is still dirty");
+
+    let expected: HashSet<Prefix> = [2, 3].map(|third| Prefix::V4(prefix(third))).into();
+    for (peer, receiver) in members.iter().zip(&mut receivers) {
+        let mut wire: HashSet<Prefix> = HashSet::new();
+        let mut end_of_rib = 0;
+        // The paused clock advances to the run loop's own resync tick.
+        while end_of_rib == 0 || wire != expected {
+            let update = fixture_update(receiver.recv()).await;
+            assert_eq!(end_of_rib, 0, "{peer}: nothing follows the End-of-RIB");
+            for (key, _) in update.unicast_withdrawals() {
+                assert!(wire.remove(key), "{peer}: withdrew {key} it never held");
+            }
+            wire.extend(update.announce.iter().map(|route| route.prefix));
+            if !update.end_of_rib.is_empty() {
+                assert_eq!(wire, expected, "{peer}: End-of-RIB before the exact table");
+                end_of_rib += 1;
+            }
+        }
+    }
+    assert_eq!(health().await, (0, 0, 0, 0, 0, 0));
+    for (peer, receiver) in members.iter().zip(&mut receivers) {
+        assert!(
+            receiver.try_recv().map(delivered).is_err(),
+            "{peer}: no envelope after convergence"
+        );
+    }
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Through the real actor loop: a graceful-restart source re-sends every
+/// route and then sends End-of-RIB while grouped members are dirty with
+/// room in their channels. The restart's passes, the End-of-RIB stale purge
+/// included, are route change events even when their unicast sets are
+/// empty: none heals a member, and the run loop's resync tick then brings
+/// each member to the exact table.
+#[tokio::test(start_paused = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one actor-loop transcript keeps the dirtying, the restart and each member's exact wire check together"
+)]
+async fn graceful_restart_end_of_rib_leaves_dirty_members_to_the_resync_tick() {
+    let RunningManager { tx, handle } = spawn_running_manager(64, BgpMetrics::new());
+    let source = Ipv4Addr::new(192, 0, 2, 61);
+    tx.send(registering_peer_up(peer_v4(source), 0))
+        .await
+        .unwrap();
+    let prefix = |third| Ipv4Prefix::new(Ipv4Addr::new(203, 0, third, 0), 24);
+    let send = async |announced: Vec<u8>| {
+        tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: peer_v4(source),
+            announced: announced
+                .into_iter()
+                .map(|third| crate::test_support::make_route(prefix(third), source))
+                .collect(),
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        })
+        .await
+        .unwrap();
+        // Separate passes: queued messages would share one window.
+        let _ = query_best_routes(&tx).await;
+    };
+    send(vec![1]).await;
+    let members: Vec<_> = (1..=3)
+        .map(|host| peer_v4(Ipv4Addr::new(10, 45, 0, host)))
+        .collect();
+    let mut receivers = Vec::new();
+    for &peer in &members {
+        let (out_tx, out_rx) = mpsc::channel(1);
+        tx.send(RibUpdate::PeerUp {
+            supersedes: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            session_id: 0,
+            peer,
+            peer_asn: 65000,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx: out_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: false,
+            route_reflector_client: true,
+            orr_vantage: None,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        })
+        .await
+        .unwrap();
+        receivers.push(out_rx);
+    }
+    let group = query_update_group(&tx, members[0]).await;
+    for &peer in &members[1..] {
+        assert_eq!(query_update_group(&tx, peer).await, group);
+    }
+    // The members' channels are full: this UPDATE dirties them.
+    send(vec![2]).await;
+    let health = async || {
+        let (reply, response) = oneshot::channel();
+        tx.send(RibUpdate::TestQueryOutboundHealth { reply })
+            .await
+            .unwrap();
+        response.await.unwrap()
+    };
+    let (dirty, _, group_dirty, _, _, _) = health().await;
+    assert_eq!((dirty, group_dirty), (3, 3), "every member is dirty");
+    // Room in every channel, taken without awaiting: an await on an empty
+    // channel would let the paused clock run to the resync tick.
+    let mut wires: Vec<HashSet<Prefix>> = vec![HashSet::new(); members.len()];
+    let mut end_of_ribs = vec![0; members.len()];
+    let apply =
+        |wire: &mut HashSet<Prefix>, end_of_rib: &mut usize, update: OutboundRouteUpdate| {
+            for (key, _) in update.unicast_withdrawals() {
+                assert!(wire.remove(key), "withdrew {key} it never held");
+            }
+            wire.extend(update.announce.iter().map(|route| route.prefix));
+            *end_of_rib += update.end_of_rib.len();
+        };
+    for (index, receiver) in receivers.iter_mut().enumerate() {
+        while let Ok(update) = receiver.try_recv().map(delivered) {
+            apply(&mut wires[index], &mut end_of_ribs[index], update);
+        }
+    }
+
+    tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer: peer_v4(source),
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+    tx.send(registering_peer_up(peer_v4(source), 0))
+        .await
+        .unwrap();
+    send(vec![1, 2]).await;
+    tx.send(RibUpdate::EndOfRib {
+        session_id: 0,
+        peer: peer_v4(source),
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    })
+    .await
+    .unwrap();
+    let best = query_best_routes(&tx).await;
+    assert_eq!(best.len(), 2);
+    assert!(
+        best.iter().all(|route| !route.is_stale),
+        "nothing is stale at End-of-RIB"
+    );
+    let (dirty, _, group_dirty, _, _, _) = health().await;
+    assert_eq!(
+        (dirty, group_dirty),
+        (3, 3),
+        "no restart pass, End-of-RIB included, resyncs a member inline"
+    );
+    for (index, receiver) in receivers.iter_mut().enumerate() {
+        assert!(
+            receiver.try_recv().is_err(),
+            "member {index}: nothing is sent before the resync tick"
+        );
+    }
+
+    let expected: HashSet<Prefix> = [1, 2].map(|third| Prefix::V4(prefix(third))).into();
+    for (index, receiver) in receivers.iter_mut().enumerate() {
+        // The paused clock advances to the run loop's own resync tick.
+        while wires[index] != expected {
+            let update = fixture_update(receiver.recv()).await;
+            apply(&mut wires[index], &mut end_of_ribs[index], update);
+        }
+        assert_eq!(end_of_ribs[index], 1, "member {index}: one End-of-RIB");
+    }
+    assert_eq!(health().await, (0, 0, 0, 0, 0, 0));
+    for (index, receiver) in receivers.iter_mut().enumerate() {
+        assert!(
+            receiver.try_recv().is_err(),
+            "member {index}: no envelope after convergence"
+        );
+    }
+    drop(tx);
+    handle.await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -14254,7 +14584,7 @@ async fn replay_readiness_member_ages(ages: &[u64], owner: ReplayReadinessOwner)
     let actor = tokio::task::spawn_blocking(move || {
         runtime.block_on(async move {
             let replay = |manager: &mut RibManager| {
-                manager.distribute_changes(&HashSet::new(), &HashSet::new());
+                manager.distribute_resync_request();
             };
             if matches!(
                 owner,
@@ -14376,7 +14706,7 @@ fn replay_readiness_restores_empty_and_force_scopes_without_wrapping_clean_fanou
     }
     manager.force_outbound_peers.insert(peers[0]);
     let mut response = queue_replacement_readiness(&tx);
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     assert_eq!(response.try_recv().unwrap(), Ok(2));
     assert_eq!(outbound[0].try_recv().unwrap().announce.len(), 2);
     assert!(manager.force_outbound_peers.is_empty());
@@ -14385,7 +14715,7 @@ fn replay_readiness_restores_empty_and_force_scopes_without_wrapping_clean_fanou
     full_channel_pass(&mut manager, &[], &[20, 21]);
     manager.mark_outbound_dirty(peers[0]);
     let mut response = queue_replacement_readiness(&tx);
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     assert_eq!(response.try_recv().unwrap(), Ok(0));
     assert!(manager.dirty_peers.is_empty());
     assert!(manager.pending_group_admitted.is_empty());

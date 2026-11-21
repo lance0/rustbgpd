@@ -300,7 +300,7 @@ fn stale_holding_helper_gets_its_orf_table_before_the_initial_eor() {
         "the helper still holds it stale"
     );
     permit_all_orf(&mut manager, 182);
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     assert_eq!(apply(&mut rx, &mut rib), vec!["table", "eor"]);
     assert_eq!(
         rib.get(&host().1),
@@ -370,7 +370,7 @@ async fn assert_eor_at_the_cap(old: Open) {
     assert!(rib.is_empty(), "the peer deletes what we never re-sent");
     assert_eq!(manager.next_eor_hold_deadline(), None);
     permit_all_orf(&mut manager, 182);
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     assert_eq!(apply(&mut rx, &mut rib).first(), Some(&"table"));
     assert_eq!(rib.get(&host().1), Some(&false));
 }
@@ -479,7 +479,7 @@ fn retired_binding_rebound_to_its_endpoint_keeps_the_held_eor() {
     manager.handle_update(on(peer_up(182, tx)));
     assert_eq!(apply(&mut rx, &mut rib), Vec::<&str>::new());
     permit_all_orf_to(&mut manager, peer, 182);
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     assert_eq!(apply(&mut rx, &mut rib), vec!["table", "eor"]);
     assert_eq!(
         rib.get(&host().1),
@@ -596,7 +596,7 @@ async fn replacement_of_a_deferred_registration_keeps_the_hold() {
     let mut rib = PeerRib::new();
     assert_eq!(apply(&mut new_rx, &mut rib), Vec::<&str>::new());
     permit_all_orf(&mut manager, 182);
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     assert_eq!(apply(&mut new_rx, &mut rib), vec!["table", "eor"]);
 }
 
@@ -674,7 +674,7 @@ async fn dirty_at_release_then_cap_keeps_table_first() {
     tokio::time::advance(ORF_EOR_HOLD_CAP).await;
     manager.expire_eor_holds(tokio::time::Instant::now());
     let mut seen = apply(&mut rx, &mut rib);
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     seen.extend(apply(&mut rx, &mut rib));
     assert_eq!(seen, vec!["table", "eor"]);
     assert_eq!(rib.get(&host().1), Some(&false));
@@ -770,7 +770,7 @@ fn release_hold(manager: &mut RibManager) {
         safi: FAMILY.1,
     });
     assert!(!manager.selection_convergence_held(FAMILY));
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
 }
 
 /// An ORF peer with no stale retention whose initial dump falls inside our

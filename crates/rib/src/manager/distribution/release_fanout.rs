@@ -396,7 +396,7 @@ impl RibManager {
                     self.distribute_changes_with_readiness::<false, true>(
                         scope,
                         scope,
-                        DistributionPass::Ordinary,
+                        DistributionPass::Change,
                         true,
                         HashMap::new(),
                         None,
