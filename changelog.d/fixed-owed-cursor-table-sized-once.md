@@ -11,18 +11,24 @@
   receivers were rebuilt at once. The size comes from each address
   family's own sample once the walk's cursor steps have read at least 512
   of its keys and committed at least 256 of its routes: the routes those
-  steps committed per key they read, at most one route a key, times the
-  keys still ahead of the cursor in the release's inventory. That
+  steps committed per entry of the shared key list they passed (a key
+  logged again since leaves a hole there, which counts), at most one
+  route a key, times the entries still ahead of the cursor in the
+  release's inventory. That
   inventory is logged in one pass in hash order, so the keys read first are
   a fair sample of the rest of it; keys that arrive in later passes come
   in arrival order (a source, VRF or Route Target at a time), so none of
   them is counted, and the table grows step by step for them as before.
   Routes that reach the table any other way (held before the walk,
   restaged by an RT-Constrain membership change, or sent from the
-  receiver's own owed keys) do not count, nor do keys logged again or
-  withdrawn ahead of the cursor. A receiver whose export policy or
-  RT-Constrain membership accepts a fraction of the release's inventory
-  therefore gets a table sized to that fraction of it, and VPNv4 and VPNv6
+  receiver's own owed keys) do not count. Keys logged again or withdrawn
+  ahead of the cursor before the estimate do not size the table past
+  what it grows to without it, including when the keys logged again are
+  the ones the receiver rejects; a withdrawal after the estimate leaves
+  the reservation in place, as the whole-family send did. A receiver
+  whose export policy or RT-Constrain membership accepts a fraction of
+  the release's inventory therefore gets a table sized to that fraction
+  of it, and VPNv4 and VPNv6
   (or the two labeled families) sharing one table are each sized by their
   own acceptance. An Add-Path receiver's route index is sized for one path
   a key and grows past it step by step; its key index is sized for the

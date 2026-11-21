@@ -877,6 +877,96 @@ async fn a_byte_cap_cursor_ahead_of_acceptance_in_blocks_makes_no_estimate() {
     assert_eq!(presizes, 0, "no estimate");
 }
 
+// Holes correlated with rejection: the keys a receiver denies are logged
+// again after the starting log (a MED, label or RT change that still
+// denies them, a policy re-evaluation, a source re-sending part of its
+// table), so the keys left in the starting log are the ones it accepts.
+// The rate is per list position the walk passed, holes included, so the
+// holes ahead cost what the holes passed dilute.
+
+/// [`deny_med_chain`] passes the first 4,096 keys, denies the rest.
+const FIRST_4K: fn(u32) -> u32 = |index| u32::from(index >= 4_096);
+/// The first 2,048.
+const FIRST_2K: fn(u32) -> u32 = |index| u32::from(index >= 2_048);
+/// Denied at a new MED, so the key is logged again.
+const DENIED_AGAIN: fn(u32) -> u32 = |_| 2;
+
+/// One pass of 4,096 accepted and 20,000 denied keys (the starting log),
+/// then the denied keys again, before the first step. Red with a rate per
+/// key read: 7 times what the table holds, against 1.75 times.
+#[test]
+fn denied_keys_logged_again_ahead_of_a_vpn_cursor_fit() {
+    assert_passes_fit(
+        0,
+        &[
+            (SOURCE, 0..24_096, FIRST_4K),
+            (SOURCE, 4_096..24_096, DENIED_AGAIN),
+        ],
+        4_096,
+        "denied keys logged again",
+    );
+}
+
+/// The same at 2,048 accepted and 50,000 denied. Red with a rate per key
+/// read: 14 times, against 1.75 times.
+#[test]
+fn many_denied_keys_logged_again_ahead_of_a_vpn_cursor_fit() {
+    assert_passes_fit(
+        0,
+        &[
+            (SOURCE, 0..52_048, FIRST_2K),
+            (SOURCE, 2_048..52_048, DENIED_AGAIN),
+        ],
+        2_048,
+        "many denied keys logged again",
+    );
+}
+
+fn vpn_pass(rows: impl Iterator<Item = VpnRibRoute>) -> RibUpdate {
+    RibUpdate::VpnRoutesReceived {
+        peer: peer_v4(SOURCE),
+        session_id: 0,
+        announced: rows.collect(),
+        withdrawn: vec![],
+    }
+}
+
+/// Through `RibManager::run` on a paused clock: the release logs 4,096
+/// accepted and 20,000 denied keys (its inventory, the starting log), and
+/// the denied keys arrive again in the same turn. With `held` empty the
+/// release has no inventory, and the mixed pass arriving after it is the
+/// starting log. Returns the joiner's last index capacities.
+async fn denied_again_after_a_release(held: bool) -> [usize; 2] {
+    let mixed = || (0..24_096).map(|i| med_row(SOURCE, P4, i, FIRST_4K(i)));
+    let again = vpn_pass((4_096..24_096).map(|i| med_row(SOURCE, P4, i, 2)));
+    let (rows, after) = if held {
+        (mixed().collect(), vec![again])
+    } else {
+        (vec![], vec![vpn_pass(mixed()), again])
+    };
+    let (receivers, last) = actor_walk(rows, after, 0, Some(deny_med_chain()), 800, true).await;
+    assert_eq!(receivers[0].wire.table.len(), 4_096);
+    assert_fitted(last.capacities[0], last.rows, "run loop: route index");
+    assert_fitted(last.capacities[1], last.keys, "run loop: key index");
+    last.capacities
+}
+
+/// Red with a rate per key read: 7 times what the table holds, in one
+/// rebuild, against 1.75 times.
+#[tokio::test(start_paused = true)]
+async fn denied_keys_logged_again_after_a_vpn_release_through_the_run_loop_fit() {
+    let (head, control) = with_control_async(|| denied_again_after_a_release(true)).await;
+    assert_at_or_below_control(&head, &control, "denied again after a release");
+}
+
+/// The empty-inventory release: the next pass seals the start. Red with a
+/// rate per key read: 7 times, against 1.75 times.
+#[tokio::test(start_paused = true)]
+async fn denied_keys_logged_again_after_an_empty_vpn_release_through_the_run_loop_fit() {
+    let (head, control) = with_control_async(|| denied_again_after_a_release(false)).await;
+    assert_at_or_below_control(&head, &control, "denied again after an empty release");
+}
+
 /// A start queued by a release-style owe whose walk ended on an empty list
 /// stays queued with no log to seal it. The receiver then stops reading,
 /// a 15,000-key pass overfills its owed keys past the byte cap and starts

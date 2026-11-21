@@ -301,30 +301,38 @@ enum WalkSample {
     Unread,
     /// Enough keys read, too few rows committed for a rate: adds nothing.
     Sparse,
-    /// `rows` committed by `read` keys read, `ahead` keys still to read.
+    /// `rows` committed over `slots` list positions passed, `ahead`
+    /// positions still to pass.
     Sampled {
         rows: usize,
-        read: usize,
+        slots: usize,
         ahead: usize,
     },
 }
 
 impl WalkSample {
     /// The AFI's walk has committed `rows` to the table in its own cursor
-    /// steps ([`PeerOwing::walk_rows`]) for the `read` keys those steps
-    /// read ([`PeerOwing::walk_read`]); its Loc-RIB holds `keys`; `entries`
-    /// entries of its starting log are ahead of its live cursor, if any
-    /// (none for a cursor without one). Both counts come from the cursor
+    /// steps ([`PeerOwing::walk_rows`]), which read `read` keys
+    /// ([`PeerOwing::walk_read`]) over `slots` list positions
+    /// ([`PeerOwing::walk_slots`]); its Loc-RIB holds `keys`; `entries`
+    /// positions of its starting log are ahead of its live cursor, if any
+    /// (none for a cursor without one). The counts come from the cursor
     /// steps alone, so rows that reach the table any other way (held
     /// before the walk, staged from the receiver's own set, withdrawn)
-    /// never count as rows the walk read keys for. The keys
-    /// ahead are the fewer of the starting log's entries ahead (a key
-    /// logged again leaves a hole, so they can overstate) and the
+    /// never count as rows the walk read keys for. The rate is per
+    /// position, holes included, because the positions ahead are what it
+    /// multiplies: a key logged again after the starting log leaves a
+    /// hole there, and when the keys logged again are the ones the
+    /// receiver denies, the keys left in place are its accepted ones, so a
+    /// rate per key read would apply their acceptance to every hole. Per
+    /// position, the holes passed dilute the rate as the holes ahead
+    /// inflate the count. The positions ahead are also at most the
     /// Loc-RIB's keys not yet read (a key read twice understates them).
-    /// Keys logged after the starting log are not counted: the list is in
-    /// arrival order across passes, so its first keys are a sample of no
-    /// later pass.
-    fn of(rows: usize, read: usize, keys: usize, entries: Option<u64>) -> Self {
+    /// `slots` is at least `read` (each key read holds its own position),
+    /// so this estimate is never above one per key read. Keys logged after
+    /// the starting log are not counted: the list is in arrival order
+    /// across passes, so its first keys are a sample of no later pass.
+    fn of(rows: usize, read: usize, slots: usize, keys: usize, entries: Option<u64>) -> Self {
         let Some(entries) = entries else {
             return Self::Done;
         };
@@ -337,7 +345,11 @@ impl WalkSample {
         } else if rows < PRESIZE_SAMPLE_ROWS {
             Self::Sparse
         } else {
-            Self::Sampled { rows, read, ahead }
+            Self::Sampled {
+                rows,
+                slots: slots.max(read),
+                ahead,
+            }
         }
     }
 
@@ -345,10 +357,10 @@ impl WalkSample {
         matches!(self, Self::Sampled { .. })
     }
 
-    /// This AFI's rows per key read, times its keys ahead.
+    /// This AFI's rows per list position passed, times its positions ahead.
     fn rate_ahead(self) -> usize {
         match self {
-            Self::Sampled { rows, read, ahead } => rows.saturating_mul(ahead) / read,
+            Self::Sampled { rows, slots, ahead } => rows.saturating_mul(ahead) / slots,
             _ => 0,
         }
     }
@@ -852,6 +864,11 @@ pub(super) struct PeerOwing {
     /// and for a cursor started by an owed set's byte cap, whose keys ahead
     /// are all later arrivals. Reset with [`Self::walk_read`].
     walk_head: [u64; OwedFamily::CURSORS.len()],
+    /// Per cursor family: list positions those same cursor steps passed,
+    /// holes included (each step's position after it less its position
+    /// before), the presize rate's denominator. Reset with
+    /// [`Self::walk_read`].
+    walk_slots: [usize; OwedFamily::CURSORS.len()],
     /// Per cursor family: the cursor was started by
     /// [`RibManager::owe_whole_family`] and waits for its starting log
     /// ([`RibManager::seal_walk_starts`] seals only such a cursor, once).
@@ -899,6 +916,7 @@ impl PeerOwing {
             walk_read: Default::default(),
             walk_rows: Default::default(),
             walk_head: Default::default(),
+            walk_slots: Default::default(),
             walk_starting: Default::default(),
             hold_drained: 0,
             next_family: 0,
@@ -1074,7 +1092,7 @@ impl PeerOwing {
         self.whole |= OwedFamily::CURSORS[index].bit();
         (self.cursor[index], self.hold_cursor[index]) = (head, 0);
         (self.walk_read[index], self.walk_rows[index]) = (0, 0);
-        self.walk_head[index] = 0;
+        (self.walk_head[index], self.walk_slots[index]) = (0, 0);
         self.walk_starting[index] = false;
     }
 
@@ -2333,6 +2351,8 @@ impl RibManager {
         let committed = afi_rows(self)
             .zip(before)
             .map(|(after, before)| after.saturating_sub(before));
+        // List positions this step passed, holes included.
+        let passed = usize::try_from(position.saturating_sub(from)).unwrap_or(usize::MAX);
         if let Some(mut owing) = self.take_owing(peer) {
             if held {
                 owing.hold_cursor[index] = position;
@@ -2341,13 +2361,14 @@ impl RibManager {
                 owing.walk_read[index] = owing.walk_read[index].saturating_add(read);
                 owing.walk_rows[index] =
                     owing.walk_rows[index].saturating_add(committed.unwrap_or(0));
+                owing.walk_slots[index] = owing.walk_slots[index].saturating_add(passed);
             }
             self.put_owing(peer, owing);
         }
         if let Some(committed) = committed
             && !held
         {
-            self.presize_walk_table(peer, family, from, read, committed);
+            self.presize_walk_table(peer, family, from, [read, passed], committed);
         }
         // A key the envelope left out stays owed in the peer's own set.
         self.reinsert_owed(peer, unstaged);
@@ -2388,10 +2409,11 @@ impl RibManager {
     /// every AFI filling the table has read [`PRESIZE_SAMPLE_KEYS`] keys or
     /// finished, and one has committed [`PRESIZE_SAMPLE_ROWS`] rows), or
     /// that gives another AFI its rate after that. This step started at
-    /// `from`, read `read` keys and committed `committed` rows. Each
-    /// sampled AFI adds the rows its cursor steps committed per key they
-    /// read, at most one a key, times its keys still ahead in the walk's
-    /// starting log ([`PeerOwing::walk_head`]): keys logged after it are
+    /// `from`, read `read` keys over `passed` list positions and
+    /// committed `committed` rows. Each sampled AFI adds the rows its
+    /// cursor steps committed per list position they passed, at most one a
+    /// position, times its positions still ahead in the walk's starting
+    /// log ([`PeerOwing::walk_head`]): keys logged after it are
     /// in arrival order, so the sample says nothing of them, and they grow
     /// the table by the steps' reserves. An AFI without a rate adds
     /// nothing, so a table can fall short and grow by the steps' reserves
@@ -2409,7 +2431,7 @@ impl RibManager {
         peer: PeerId,
         family: OwedFamily,
         from: u64,
-        read: usize,
+        [read, passed]: [usize; 2],
         committed: usize,
     ) {
         #[cfg(test)]
@@ -2456,12 +2478,19 @@ impl RibManager {
             let Some(cursor) = sibling.cursor_index() else {
                 continue;
             };
-            let (walked, added) = (owing.walk_read[cursor], owing.walk_rows[cursor]);
-            after[index] = WalkSample::of(added, walked, table, entries(sibling, None));
+            let (walked, added, slots) = (
+                owing.walk_read[cursor],
+                owing.walk_rows[cursor],
+                owing.walk_slots[cursor],
+            );
+            after[index] = WalkSample::of(added, walked, slots, table, entries(sibling, None));
             prior[index] = if index == stepped {
-                let (walked, added) =
-                    (walked.saturating_sub(read), added.saturating_sub(committed));
-                WalkSample::of(added, walked, table, entries(sibling, Some(from)))
+                let (walked, added, slots) = (
+                    walked.saturating_sub(read),
+                    added.saturating_sub(committed),
+                    slots.saturating_sub(passed),
+                );
+                WalkSample::of(added, walked, slots, table, entries(sibling, Some(from)))
             } else {
                 after[index]
             };
@@ -3704,29 +3733,93 @@ mod fifo_tests {
     /// sample rows has no rate. Red without the clamp.
     #[test]
     fn walk_rows_ahead_stay_within_one_a_key() {
-        let sample = WalkSample::of(4 * CHUNK_ROWS, CHUNK_ROWS, 100_000, Some(50_000));
+        let sample = WalkSample::of(
+            4 * CHUNK_ROWS,
+            CHUNK_ROWS,
+            CHUNK_ROWS,
+            100_000,
+            Some(50_000),
+        );
         assert_eq!(
             sample,
             WalkSample::Sampled {
                 rows: 4 * CHUNK_ROWS,
-                read: CHUNK_ROWS,
+                slots: CHUNK_ROWS,
                 ahead: 50_000
             }
         );
         assert_eq!(sample.rate_ahead(), 200_000, "the rate itself");
         assert_eq!(sample.rows_ahead(), 50_000, "four rows a key read as one");
-        let quarter = WalkSample::of(CHUNK_ROWS / 4, CHUNK_ROWS, 100_000, Some(50_000));
+        let quarter = WalkSample::of(
+            CHUNK_ROWS / 4,
+            CHUNK_ROWS,
+            CHUNK_ROWS,
+            100_000,
+            Some(50_000),
+        );
         assert_eq!(quarter.rows_ahead(), 12_500, "the rate below one a key");
         assert_eq!(
-            WalkSample::of(PRESIZE_SAMPLE_ROWS - 1, CHUNK_ROWS, 100_000, Some(50_000)),
+            WalkSample::of(
+                PRESIZE_SAMPLE_ROWS - 1,
+                CHUNK_ROWS,
+                CHUNK_ROWS,
+                100_000,
+                Some(50_000)
+            ),
             WalkSample::Sparse,
             "too few rows committed"
         );
         assert_eq!(
-            WalkSample::of(CHUNK_ROWS, PRESIZE_SAMPLE_KEYS - 1, 100_000, Some(50_000)),
+            WalkSample::of(
+                CHUNK_ROWS,
+                PRESIZE_SAMPLE_KEYS - 1,
+                CHUNK_ROWS,
+                100_000,
+                Some(50_000)
+            ),
             WalkSample::Unread,
             "too few keys read"
         );
+    }
+
+    /// The rate is per list position passed, not per key read. Positions
+    /// passed are at least the keys read, so the estimate is never above
+    /// the per-key one (`slots == read`) for the same counts. When the
+    /// keys logged again after the starting log are the ones the receiver
+    /// denies, the keys left in place are its accepted ones: 1,024 read
+    /// and accepted over 6,000 positions, 18,000 positions ahead, is about
+    /// 3,072 rows, not 18,000. Red with a per-key denominator.
+    #[test]
+    fn walk_rate_is_per_position_and_never_above_per_key() {
+        let holed = WalkSample::of(CHUNK_ROWS, CHUNK_ROWS, 6_000, 24_096, Some(18_000));
+        assert_eq!(holed.rows_ahead(), 3_072, "holes passed dilute the rate");
+        assert_eq!(
+            WalkSample::of(CHUNK_ROWS, CHUNK_ROWS, CHUNK_ROWS, 24_096, Some(18_000)).rows_ahead(),
+            18_000,
+            "per key, every hole ahead takes the accepted rate"
+        );
+        for rows in [
+            PRESIZE_SAMPLE_ROWS,
+            CHUNK_ROWS,
+            2 * CHUNK_ROWS,
+            4 * CHUNK_ROWS,
+        ] {
+            for read in [PRESIZE_SAMPLE_KEYS, CHUNK_ROWS, 3 * CHUNK_ROWS] {
+                for extra in [0, 1, read / 3, read, 10 * read] {
+                    for ahead in [1, 700, 18_000, 200_000] {
+                        let per_key = WalkSample::of(rows, read, read, 100_000, Some(ahead));
+                        let per_slot =
+                            WalkSample::of(rows, read, read + extra, 100_000, Some(ahead));
+                        assert!(
+                            per_slot.rate_ahead() <= per_key.rate_ahead()
+                                && per_slot.rows_ahead() <= per_key.rows_ahead(),
+                            "rows {rows} read {read} slots {} ahead {ahead}: {per_slot:?} over {per_key:?}",
+                            read + extra
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

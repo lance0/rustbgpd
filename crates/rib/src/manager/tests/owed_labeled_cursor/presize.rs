@@ -323,3 +323,35 @@ fn an_accepted_labeled_block_ahead_of_a_rejected_one_fits() {
     let (head, control) = with_control(shape);
     assert_at_or_below_control(&head, &control, "accepted, then rejected");
 }
+
+/// One pass of 4,096 accepted and 20,000 denied prefixes (the starting
+/// log), then the denied prefixes again at a new MED, before the first
+/// step: the prefixes left in the starting log are the accepted ones. Red
+/// with a rate per prefix read rather than per list position passed: 7
+/// times what the table holds, against 1.75 times.
+#[test]
+fn denied_labeled_prefixes_logged_again_ahead_fit() {
+    const ACCEPTED: u32 = 4_096;
+    const TOTAL: u32 = ACCEPTED + 20_000;
+    let shape = || {
+        let mut manager = manager(4 * CHUNK_ROWS);
+        sources_up(&mut manager);
+        let mut receivers = vec![filtered_receiver(&mut manager, 0)];
+        let peer = receivers[0].peer;
+        let row = |index: u32, med: u32| {
+            let mut route = route_from(SOURCE, L4, index, 100, 200);
+            set_med(&mut route.attributes, med);
+            route
+        };
+        let mixed = (0..TOTAL).map(|index| row(index, u32::from(index >= ACCEPTED)));
+        send(&mut manager, SOURCE, mixed.collect(), vec![]);
+        let again = (ACCEPTED..TOTAL).map(|index| row(index, 2));
+        send(&mut manager, SOURCE, again.collect(), vec![]);
+        drain(&mut manager, &mut receivers);
+        assert_eq!(receivers[0].wire.table.len(), ACCEPTED as usize);
+        assert_indexes_fitted(&manager, peer, "denied prefixes logged again");
+        tables(&manager, peer).1
+    };
+    let (head, control) = with_control(shape);
+    assert_at_or_below_control(&head, &control, "denied prefixes logged again");
+}

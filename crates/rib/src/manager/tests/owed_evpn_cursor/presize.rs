@@ -5,7 +5,8 @@
 use std::cell::RefCell;
 
 use super::super::cursor_presize::{
-    Growth, PRESIZE_ROWS, assert_fitted, deny_med_chain, tenth_med,
+    Growth, PRESIZE_ROWS, assert_at_or_below_control, assert_fitted, deny_med_chain, tenth_med,
+    with_control,
 };
 use super::*;
 
@@ -349,4 +350,32 @@ async fn an_evpn_release_through_the_actor_loop_sizes_the_joiner_table_once() {
     assert_eq!(receivers[0].wire.markers, 1);
     assert!(manager.owing(joiner).is_none());
     assert_index_fitted(&manager, joiner, "actor loop");
+}
+
+/// A release of 3,000 accepted and 20,000 denied keys (the starting log);
+/// the denied keys are logged again (a Route Target added, still denied)
+/// before the first step, so the keys left in the starting log are the
+/// accepted ones. 3,000 rows keep the estimate's sampling spread clear of
+/// the slab segment's 4,096-slot step. Red with a rate per key read rather
+/// than per list position passed: the index 9.5 times what it holds,
+/// against 1.19 times.
+#[test]
+fn denied_evpn_keys_logged_again_after_a_release_fit() {
+    const ACCEPTED: u32 = 3_000;
+    const TOTAL: u32 = ACCEPTED + 20_000;
+    let shape = || {
+        let rows: Vec<(u32, u32)> = (0..TOTAL)
+            .map(|index| (index, u32::from(index >= ACCEPTED)))
+            .collect();
+        let (mut manager, mut receivers) = released(&rows, Some(deny_med_chain()));
+        let peer = receivers[0].peer;
+        let again = (ACCEPTED..TOTAL).map(|index| route_rt(index, 1, &[1]));
+        received_routes(&mut manager, again.collect(), &[]);
+        walk(&mut manager, &mut receivers, peer);
+        assert_eq!(receivers[0].wire.table.len(), ACCEPTED as usize);
+        assert_index_fitted(&manager, peer, "denied keys logged again");
+        tables(&manager, peer).1
+    };
+    let (head, control) = with_control(shape);
+    assert_at_or_below_control(&head, &control, "denied keys logged again");
 }
