@@ -234,7 +234,7 @@ fn frozen_group_release_marker_backpressure_recaptures_exact_admission_before_ch
         assert!(wire.contains_key(&(Prefix::V4(first), 0)));
         assert!(wire.contains_key(&(Prefix::V4(second), 0)));
 
-        manager.distribute_changes(&HashSet::new(), &HashSet::new());
+        manager.distribute_resync_request();
         let recovered = late_rx
             .try_recv()
             .expect("available capacity must admit recovery");
@@ -259,7 +259,7 @@ fn frozen_group_release_marker_backpressure_recaptures_exact_admission_before_ch
         assert!(manager.group_ribs[&gid].tombstones.is_empty());
         assert!(late_rx.try_recv().is_err());
         manager.settle_eor_now(late);
-        manager.distribute_changes(&HashSet::new(), &HashSet::new());
+        manager.distribute_resync_request();
         assert!(
             late_rx.try_recv().is_err(),
             "completed recovery must not repeat its terminal"
@@ -267,7 +267,7 @@ fn frozen_group_release_marker_backpressure_recaptures_exact_admission_before_ch
 
         drop(late_rx);
         manager.mark_outbound_dirty(late);
-        manager.distribute_changes(&HashSet::new(), &HashSet::new());
+        manager.distribute_resync_request();
         assert!(
             !manager.dirty_peers.contains(&late),
             "a closed receiver cannot arm retries"

@@ -489,6 +489,15 @@ async fn actor_retry_ticks_capture_no_clean_full_sibling() {
     let mut fleet = fleet(SMALL, 1, CAP, 256, false);
     assert!(fleet.manager.mark_outbound_dirty(private(0)));
     let before = captures(&fleet.manager);
+    let metrics = fleet.manager.metrics.clone();
+    let still_dirty = || {
+        counter_metric_value(
+            &metrics,
+            "bgp_rib_dirty_resync_total",
+            &[("outcome", "still_dirty")],
+        )
+    };
+    let refused_before = still_dirty();
     let Fleet {
         manager,
         tx,
@@ -500,6 +509,10 @@ async fn actor_retry_ticks_capture_no_clean_full_sibling() {
     let actor = tokio::spawn(manager.run_actor());
     // Several 1 s retries while the private's channel stays full.
     tokio::time::sleep(Duration::from_millis(3500)).await;
+    assert!(
+        still_dirty() - refused_before >= 2.0,
+        "at least two refused retries before the drain"
+    );
     assert!(
         private_rx[0].try_recv().is_ok(),
         "the private still holds its fill"

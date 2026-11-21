@@ -338,8 +338,16 @@ pub(in crate::manager) struct OutboundCommitBatch {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DistributionPass {
+    /// A pass that is not a route change event: a resync request (a tick
+    /// slice, an explicit heal) or a feed. It builds every dirty receiver.
     Ordinary,
+    /// The ingest window's route change event.
     Ingest,
+    /// Any other route change event, even one whose unicast sets are empty
+    /// (an End-of-RIB with nothing stale, a source with no routes going
+    /// down). Like [`Self::Ingest`], it leaves a dirty grouped member's
+    /// whole table to the resync tick.
+    Change,
     EvictionRecovery(PeerId),
     SelectionMarker(PeerId),
 }
@@ -3109,7 +3117,7 @@ impl RibManager {
                 // opportunity for dirty peers. Without this pass, unrelated
                 // withdrawal residue can remain queued until the timer even
                 // though the caller has already observed a successful commit.
-                manager.distribute_changes(&HashSet::new(), &HashSet::new());
+                manager.distribute_resync_request();
                 debug!(
                     source_group = source,
                     destination_group = destination,
@@ -8015,7 +8023,7 @@ impl RibManager {
         self.set_selection_partial_caught_up(peer, false);
         self.force_outbound_peers.insert(peer);
         self.refresh_eor_retry(peer);
-        self.distribute_changes(&HashSet::new(), &HashSet::new());
+        self.distribute_resync_request();
         let _ = reply.send(Ok(()));
     }
 
@@ -9226,6 +9234,8 @@ impl RibManager {
         )
     }
 
+    /// Distribute a route change event. A dirty grouped member is left to
+    /// the resync tick, even when the event's sets are empty.
     pub(super) fn distribute_changes(
         &mut self,
         best_changed: &HashSet<Prefix>,
@@ -9234,7 +9244,7 @@ impl RibManager {
         self.distribute_changes_inner(
             best_changed,
             all_affected,
-            DistributionPass::Ordinary,
+            DistributionPass::Change,
             false,
             HashMap::new(),
             None,
@@ -9242,9 +9252,26 @@ impl RibManager {
         self.flush_helper_stale_exempt(all_affected);
     }
 
+    /// An explicit resync request: a pass with no route change that builds
+    /// every dirty peer's whole table, grouped members included, before the
+    /// caller continues.
+    pub(super) fn distribute_resync_request(&mut self) {
+        let empty = HashSet::new();
+        self.distribute_changes_inner(
+            &empty,
+            &empty,
+            DistributionPass::Ordinary,
+            false,
+            HashMap::new(),
+            None,
+        );
+        self.flush_helper_stale_exempt(&empty);
+    }
+
     /// [`Self::distribute_changes`] restricted to `targets`: other clean
     /// peers and groups without a target member are neither evaluated nor
-    /// staged. Dirty and forced peers still resync. Exact only when no
+    /// staged. A route change event: dirty grouped members are left to the
+    /// resync tick, as in [`Self::distribute_changes`]. Exact only when no
     /// other peer's export verdict can have changed.
     pub(in crate::manager) fn distribute_changes_to_targets(
         &mut self,
@@ -9254,12 +9281,31 @@ impl RibManager {
         self.distribute_changes_inner(
             changed,
             changed,
-            DistributionPass::Ordinary,
+            DistributionPass::Change,
             false,
             HashMap::new(),
             Some(targets),
         );
         self.flush_helper_stale_exempt(changed);
+    }
+
+    /// [`Self::distribute_resync_request`] restricted to `targets`, as
+    /// [`Self::distribute_changes_to_targets`] restricts a change event.
+    #[cfg(test)]
+    pub(in crate::manager) fn distribute_resync_request_to_targets(
+        &mut self,
+        targets: &HashSet<PeerId>,
+    ) {
+        let empty = HashSet::new();
+        self.distribute_changes_inner(
+            &empty,
+            &empty,
+            DistributionPass::Ordinary,
+            false,
+            HashMap::new(),
+            Some(targets),
+        );
+        self.flush_helper_stale_exempt(&empty);
     }
 
     pub(super) fn distribute_changes_after_advertised_page_advance(
@@ -9473,7 +9519,7 @@ impl RibManager {
             && !DRAINING
             && matches!(
                 pass_kind,
-                DistributionPass::Ordinary | DistributionPass::Ingest
+                DistributionPass::Ordinary | DistributionPass::Ingest | DistributionPass::Change
             ) {
             let proof_bytes = self.pending_group_admitted.bytes();
             self.group_capture_observer
@@ -9504,6 +9550,12 @@ impl RibManager {
         // An owed-key drain carries no route change: none of a pass's
         // preamble side effects apply to it.
         let draining = DRAINING;
+        // Set by the caller, not read from the sets: a change event may
+        // carry no unicast prefix, and a resync request carries none.
+        let change_event = matches!(
+            pass_kind,
+            DistributionPass::Ingest | DistributionPass::Change
+        );
         if !draining && !RELEASING {
             self.record_deferred_unicast(best_changed);
             self.record_deferred_unicast(all_affected);
@@ -9675,6 +9727,9 @@ impl RibManager {
         // Whether a member's whole-table resync was built: past every
         // preflight refusal, whatever its commit then meets.
         let mut resync_built = false;
+        // Groups whose members this pass deferred, each with the member
+        // whose deferral copied the pass's withdrawals into its tombstones.
+        let mut deferred_groups = HashMap::new();
         let distribute_peers = || {
             // The unicast AFIs this pass carries, read once for the first
             // peer that owes one of them whole.
@@ -9732,6 +9787,7 @@ impl RibManager {
                                 peer,
                                 member_of,
                                 group_stage,
+                                &mut deferred_groups,
                                 &checkpoint,
                             );
                         }
@@ -9790,10 +9846,22 @@ impl RibManager {
                     // A receiver the owed-row cap evicted is built by the
                     // resync tick alone, one receiver per unit: any other
                     // pass leaves it dirty, as when its channel has no room.
+                    // So is a dirty grouped member's whole table in a route
+                    // change event's pass, so that one event never pays for
+                    // every dirty member in one turn. Any other pass is a
+                    // resync request (a tick slice, a marker visit, a
+                    // complete EVPN feed, a caller's heal) and still builds it.
                     if (is_dirty && self.owed_row_evicted.contains(&peer))
                         || ((is_dirty || is_force) && self.held_rebuild_due(peer))
+                        || (is_dirty && change_event && member_of.is_some())
                     {
-                        self.defer_unsent_outbound_pass(peer, member_of, group_stage, &checkpoint);
+                        self.defer_unsent_outbound_pass(
+                            peer,
+                            member_of,
+                            group_stage,
+                            &mut deferred_groups,
+                            &checkpoint,
+                        );
                         break 'member;
                     }
                     if is_dirty || is_force || drain_whole_operation {
@@ -9810,6 +9878,7 @@ impl RibManager {
                                     peer,
                                     member_of,
                                     group_stage,
+                                    &mut deferred_groups,
                                     &checkpoint,
                                 );
                                 break 'member;
@@ -9848,7 +9917,13 @@ impl RibManager {
                         && self.unicast_pass_reaches(peer, best_changed, all_affected)
                     {
                         self.refuse_outbound_for_credit(peer);
-                        self.defer_unsent_outbound_pass(peer, member_of, group_stage, &checkpoint);
+                        self.defer_unsent_outbound_pass(
+                            peer,
+                            member_of,
+                            group_stage,
+                            &mut deferred_groups,
+                            &checkpoint,
+                        );
                         break 'member;
                     }
                     if resync_operation.is_none() && member_of.is_none() && !owing_unicast {
@@ -12073,6 +12148,7 @@ impl RibManager {
                                     peer,
                                     member_of,
                                     group_stage,
+                                    &mut deferred_groups,
                                     &checkpoint,
                                 );
                             }
@@ -12185,6 +12261,11 @@ impl RibManager {
             super::with_executor_handoff(distribute_peers);
         } else {
             distribute_peers();
+        }
+        // Once per pass, not per deferred member: each refresh scans every
+        // member's residue.
+        if !deferred_groups.is_empty() {
+            self.refresh_group_residue_gauge();
         }
         // After the member loop, so an evicted receiver's resync is a unit
         // of the dirty ring and never part of this pass.

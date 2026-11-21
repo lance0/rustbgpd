@@ -1746,6 +1746,217 @@ fn refused_batch_keeps_matching_prepare_owned_until_cold_contention() {
     assert!(!manager.optional_destination_retirement_active());
 }
 
+/// Member resyncs the event's pass built.
+const RESYNCS: &str = "member resyncs";
+
+/// A route change event that reaches every dirty member.
+#[derive(Clone, Copy, Debug)]
+enum DirtyMemberEvent {
+    /// An unrelated one-prefix UPDATE: an ingest pass.
+    Update,
+    /// A one-route source goes down: an ordinary pass of one withdrawal.
+    SourceDown,
+    /// A source whose only route was withdrawn goes down. It keeps an
+    /// Adj-RIB-In, so its pass runs with empty unicast sets.
+    EmptiedSourceDown,
+    /// A source that never sent a route goes down: no pass runs at all.
+    RoutelessSourceDown,
+    /// A graceful-restart source that re-sent every route sends
+    /// End-of-RIB: its stale purge is a pass with empty unicast sets.
+    EndOfRib,
+}
+
+/// Every member of a group holding `ROUTES * size` prefixes is dirty when
+/// `event` arrives. Its pass defers each member: a dirty member's whole
+/// table is a unit of the paced resync tick, so the pass costs the members,
+/// not members x table. The tick then resyncs each member exactly once to
+/// the current table, withdrawals included. Each event changes at most one
+/// route, so the deferral's walk of the pass's group deltas stays out of the
+/// measured growth. With `residue`, each member also holds withdrawal
+/// residue from before, so a per-member scan of every member's residue
+/// would grow quadratically.
+fn dirty_members_meet(size: usize, event: DirtyMemberEvent, residue: bool) -> Work {
+    use DirtyMemberEvent::{EmptiedSourceDown, EndOfRib, RoutelessSourceDown, SourceDown, Update};
+    let (_tx, mut manager) = manager();
+    let second = peer_v4(Ipv4Addr::new(198, 51, 100, 2));
+    register_test_peer(&mut manager, second, 0);
+    let mut receivers = members(&mut manager, size, false, None);
+    let routes = ROUTES * size;
+    manager.handle_update(routes_from(external(), 0, 1, routes));
+    drain_route_chunks(&mut manager);
+    let second_routes = match event {
+        RoutelessSourceDown => 0,
+        _ => 1,
+    };
+    if second_routes > 0 {
+        manager.handle_update(routes_from(second, 0, 3, 1));
+        drain_route_chunks(&mut manager);
+    }
+    let emptied = matches!(event, EmptiedSourceDown);
+    if emptied {
+        let mut withdrawal = test_routes_received(second, vec![]);
+        if let RibUpdate::RoutesReceived { withdrawn, .. } = &mut withdrawal {
+            *withdrawn = vec![(Prefix::V4(prefix(3, 0)), 0)];
+        }
+        manager.handle_update(withdrawal);
+        drain_route_chunks(&mut manager);
+        assert!(
+            manager.ribs.contains_key(&second),
+            "an emptied source keeps its Adj-RIB-In"
+        );
+    }
+    assert_eq!(
+        drain(&mut receivers),
+        (size * (routes + second_routes), size * usize::from(emptied)),
+        "setup, {event:?}, size {size}"
+    );
+    if matches!(event, EndOfRib) {
+        manager
+            .gr_peers
+            .insert(external(), HashSet::from([(Afi::Ipv4, Safi::Unicast)]));
+    }
+    for index in 0..size {
+        assert!(manager.mark_outbound_dirty(member(index)));
+        if residue {
+            // A key no member holds: the resync's proof drops it.
+            manager
+                .pending_extra_withdraws
+                .entry(member(index))
+                .or_default()
+                .unicast
+                .insert((Prefix::V4(prefix(9, index)), 0));
+        }
+    }
+    let builds = manager.adj_rib_out_commit_stats.resync_builds;
+    let mut work = checkpoints_in(|| {
+        manager.handle_update(match event {
+            Update => routes_from(external(), 0, 2, 1),
+            SourceDown | EmptiedSourceDown | RoutelessSourceDown => RibUpdate::PeerDown {
+                peer: second,
+                session_id: 0,
+            },
+            EndOfRib => RibUpdate::EndOfRib {
+                peer: external(),
+                session_id: 0,
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+            },
+        });
+        drain_route_chunks(&mut manager);
+    });
+    work.insert(
+        RESYNCS,
+        manager.adj_rib_out_commit_stats.resync_builds - builds,
+    );
+    assert_eq!(
+        work[RESYNCS], 0,
+        "{event:?}: the pass resyncs no member, size {size}"
+    );
+    assert_eq!(manager.dirty_peers.len(), size, "{event:?}, size {size}");
+    assert_eq!(drain(&mut receivers), (0, 0), "{event:?}, size {size}");
+    while manager.resync_tick_pending() {
+        manager.resync_dirty_peers_bounded();
+    }
+    assert!(manager.dirty_peers.is_empty(), "{event:?}, size {size}");
+    assert_eq!(
+        manager.adj_rib_out_commit_stats.resync_builds - builds,
+        size,
+        "{event:?}: the tick resyncs each member once, size {size}"
+    );
+    let healed = match event {
+        Update => (size * (routes + 2), 0),
+        SourceDown => (size * routes, size),
+        EmptiedSourceDown | RoutelessSourceDown => (size * routes, 0),
+        EndOfRib => (size * (routes + 1), 0),
+    };
+    assert_eq!(drain(&mut receivers), healed, "{event:?}, size {size}");
+    assert!(
+        manager.pending_extra_withdraws.is_empty(),
+        "{event:?}, size {size}"
+    );
+    work
+}
+
+#[test]
+fn route_changes_defer_dirty_member_resyncs_to_the_tick() {
+    use DirtyMemberEvent::{EmptiedSourceDown, EndOfRib, RoutelessSourceDown, SourceDown, Update};
+    for event in [
+        Update,
+        SourceDown,
+        EmptiedSourceDown,
+        RoutelessSourceDown,
+        EndOfRib,
+    ] {
+        assert_linear(&format!("{event:?} with dirty members"), &[ALL], |size| {
+            dirty_members_meet(size, event, false)
+        });
+    }
+}
+
+/// The pass refreshes the withdrawal-residue gauge once, not once per
+/// deferred member: each refresh scans every member's residue. The work the
+/// members' residue adds to the pass is linear in the members.
+#[test]
+fn deferring_dirty_members_with_residue_stays_linear() {
+    for event in [DirtyMemberEvent::Update, DirtyMemberEvent::SourceDown] {
+        let residue_cost = |size| {
+            dirty_members_meet(size, event, true)[ALL]
+                .saturating_sub(dirty_members_meet(size, event, false)[ALL])
+        };
+        let (small, large) = (residue_cost(SMALL), residue_cost(LARGE));
+        assert!(small > 0, "{event:?}: residue adds no work at size {SMALL}");
+        assert!(
+            large <= small * (LARGE / SMALL) * 2,
+            "{event:?}: residue work grew {small} -> {large} from size {SMALL} to {LARGE}"
+        );
+    }
+}
+
+/// Checkpoints of one pass that withdraws `withdrawn` routes (a source
+/// going down) while every one of `size` grouped members is dirty.
+fn dirty_members_meet_withdrawals(size: usize, withdrawn: usize) -> usize {
+    let (_tx, mut manager) = manager();
+    let second = peer_v4(Ipv4Addr::new(198, 51, 100, 2));
+    register_test_peer(&mut manager, second, 0);
+    let mut receivers = members(&mut manager, size, false, None);
+    manager.handle_update(routes_from(external(), 0, 1, 64));
+    drain_route_chunks(&mut manager);
+    manager.handle_update(routes_from(second, 0, 3, withdrawn));
+    drain_route_chunks(&mut manager);
+    let _ = drain(&mut receivers);
+    for index in 0..size {
+        assert!(manager.mark_outbound_dirty(member(index)));
+    }
+    let builds = manager.adj_rib_out_commit_stats.resync_builds;
+    let work = checkpoints_in(|| {
+        manager.handle_update(RibUpdate::PeerDown {
+            peer: second,
+            session_id: 0,
+        });
+        drain_route_chunks(&mut manager);
+    });
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
+    work[ALL]
+}
+
+/// Deferring a dirty member walks the pass's group deltas for the member's
+/// own source-flip withdrawals, and staging walks them once per dirty
+/// member too. The group's tombstones take the pass's withdrawals once per
+/// pass, not once per member, so each further member costs about two
+/// walks of the withdrawals, not three.
+#[test]
+fn deferral_copies_pass_withdrawals_once_per_group() {
+    const WITHDRAWN: usize = 256;
+    let small = dirty_members_meet_withdrawals(SMALL, WITHDRAWN);
+    let large = dirty_members_meet_withdrawals(LARGE, WITHDRAWN);
+    let per_member = (large - small) / (LARGE - SMALL);
+    assert!(
+        per_member <= 2 * WITHDRAWN + WITHDRAWN / 4,
+        "each dirty member costs {per_member} checkpoints for {WITHDRAWN} withdrawals \
+         ({small} at {SMALL} members, {large} at {LARGE})"
+    );
+}
+
 #[test]
 fn inbound_update_distribution_work_is_linear() {
     assert_linear(
@@ -2901,7 +3112,7 @@ fn deferred_post_miss_rtbh_replay(size: usize) -> Work {
     assert!(manager.dirty_peers.contains(&observer));
     assert_eq!(post_miss_drain(&mut receivers, &mut wires), [0; 4]);
     assert!(!wires[1].contains_key(&Prefix::V4(prefix(200, count + 1))));
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     assert_eq!(post_miss_drain(&mut receivers, &mut wires), [0; 4]);
     assert!(wires[1].contains_key(&Prefix::V4(prefix(200, count + 1))));
     assert!(manager.dirty_peers.contains(&observer));
@@ -2980,7 +3191,7 @@ fn deferred_post_miss_rtbh_replay(size: usize) -> Work {
         }
     }
     manager.resync_dirty_peers_bounded();
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     for (total, markers) in release_markers
         .iter_mut()
         .zip(post_miss_drain(&mut receivers, &mut wires))
@@ -3229,7 +3440,7 @@ fn resync_retires_stale_rejection_history(
     let target = member(1);
     assert!(manager.dirty_peers.contains(&target));
     drain(&mut receivers);
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     assert!(!manager.dirty_peers.contains(&target), "resync committed");
     assert!(
         retained_policy_rejection_keys(&manager, target).is_empty(),
@@ -3402,7 +3613,7 @@ fn owned_distribution_runs_under_handoff(ungrouped: bool) {
     assert_eq!(policy_rejection_events(&manager, target), 1);
     let owners = owned(&mut manager, "replay", &|manager| {
         manager.mark_outbound_dirty(target);
-        manager.distribute_changes(&HashSet::new(), &HashSet::new());
+        manager.distribute_resync_request();
     });
     // Preparation, the dirty member and retirement, after a grouped
     // member's own dirty-marking capture.
@@ -3632,7 +3843,7 @@ fn late_private_arm(size: usize) -> Work {
     drain_unicast_release(&mut manager);
     manager.resync_dirty_peers_bounded();
     apply(&mut receivers, &mut wires, true);
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     apply(&mut receivers, &mut wires, true);
     for (index, wire) in wires.iter().enumerate() {
         assert_eq!(wire.len(), count + 2);
@@ -3862,7 +4073,7 @@ fn held_bulk_promotion(size: usize) -> Work {
     }
     drop(occupied);
     let work = checkpoints_in(|| {
-        manager.distribute_changes_to_targets(&HashSet::new(), &HashSet::from([target]));
+        manager.distribute_resync_request_to_targets(&HashSet::from([target]));
     });
     let withdrawn = apply(&mut receiver, &mut wire);
     assert_eq!(
@@ -3891,6 +4102,59 @@ fn held_bulk_promotion_work_is_linear() {
         "held Add-Path promotion freezing own rows below received ones",
         &[ALL],
         held_bulk_promotion,
+    );
+}
+
+/// A pass copies its withdrawals into a group's tombstones once, while the
+/// member whose deferral copied them stays dirty. A member whose session
+/// closed its receiver mid-pass is dropped from the group's dirty set, so a
+/// later inline resync in the same pass can retire the tombstones. The next
+/// deferred member without a proof must copy them again, or its resync
+/// never withdraws the key.
+#[test]
+fn a_deferral_after_the_tombstones_retire_copies_the_withdrawals_again() {
+    use crate::manager::update_groups::{GroupDelta, GroupStageOutput};
+    let (_tx, mut manager) = manager();
+    let mut receivers = members(&mut manager, 3, false, None);
+    manager.handle_update(routes_from(external(), 0, 1, 4));
+    drain_route_chunks(&mut manager);
+    let _ = drain(&mut receivers);
+    let (a, c, b) = (member(0), member(1), member(2));
+    let gid = manager.grouped_member_of(a).unwrap();
+    assert_eq!(manager.grouped_member_of(b), Some(gid));
+    assert_eq!(manager.grouped_member_of(c), Some(gid));
+    let key = (Prefix::V4(prefix(1, 0)), 0);
+    let mut stage = GroupStageOutput::default();
+    stage.deltas.push(GroupDelta {
+        local_source: None,
+        prefix: key.0,
+        path_id: 0,
+        new: None,
+        old_source: Some(external()),
+        prior_source_attrs: None,
+        prior: None,
+        policy_label: None,
+        source_attrs: None,
+        lane: None,
+    });
+    let stages = HashMap::from([(gid, stage)]);
+    let mut deferred = HashMap::new();
+    // A's session closed its receiver mid-pass.
+    drop(receivers.remove(0));
+    assert!(manager.outbound_channel_gone(a));
+    manager.defer_unsent_outbound_pass(a, Some(gid), &stages, &mut deferred, &|| {});
+    assert!(!manager.group_ribs[&gid].dirty_members.contains(&a));
+    assert!(manager.group_ribs[&gid].tombstones.contains(&key));
+    // C's inline resync settles with no dirty member left.
+    manager.clear_grouped_member_synced(c);
+    assert!(manager.group_ribs[&gid].tombstones.is_empty(), "retired");
+    // B, clean with no proof, then misses the pass's send.
+    assert!(!manager.pending_group_admitted.contains_key(&b));
+    manager.defer_unsent_outbound_pass(b, Some(gid), &stages, &mut deferred, &|| {});
+    assert!(manager.group_ribs[&gid].dirty_members.contains(&b));
+    assert!(
+        manager.group_ribs[&gid].tombstones.contains(&key),
+        "B is dirty without a proof and its tombstone for the pass's withdrawal is gone"
     );
 }
 

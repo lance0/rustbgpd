@@ -3281,11 +3281,17 @@ impl RibManager {
     /// also records the pass's withdrawals as tombstones, and its
     /// member-scoped withdraws as candidate withdrawal residue, so its resync
     /// can heal only candidates covered by its actual admitted-key proof.
+    ///
+    /// `deferred_groups` is the pass's record of deferred groups, each with
+    /// the member whose deferral copied the withdrawals: a group's tombstones
+    /// take them once per pass, and the pass refreshes the residue gauge
+    /// once after its member loop when the record is not empty.
     pub(in crate::manager) fn defer_unsent_outbound_pass(
         &mut self,
         peer: PeerId,
         member_of: Option<usize>,
         group_stage: &HashMap<usize, GroupStageOutput>,
+        deferred_groups: &mut HashMap<usize, PeerId>,
         checkpoint: &impl Fn(),
     ) {
         // Common-family staging has not advanced EVPN. Preserve its actual
@@ -3303,9 +3309,24 @@ impl RibManager {
         let Some(stage) = group_stage.get(&gid) else {
             return;
         };
-        if let Some(group) = self.group_ribs.get_mut(&gid) {
-            let withdrawn: Vec<(Prefix, u32)> = stage.withdrawn_keys(checkpoint).collect();
-            group.tombstones.extend(withdrawn);
+        // Tombstones are retired only when the group has no dirty member, so
+        // they still hold this pass's withdrawals while the member that
+        // copied them stays dirty: a pass visits each member once. That
+        // member can leave the dirty set mid-pass: a closed channel drops it
+        // (`drop_gone_dirty_peer`), and a later inline resync of the last
+        // dirty member then retires the tombstones. The next deferral copies
+        // them again.
+        let copied = deferred_groups.get(&gid).is_some_and(|anchor| {
+            self.group_ribs
+                .get(&gid)
+                .is_some_and(|group| group.dirty_members.contains(anchor))
+        });
+        if !copied {
+            if let Some(group) = self.group_ribs.get_mut(&gid) {
+                let withdrawn: Vec<(Prefix, u32)> = stage.withdrawn_keys(checkpoint).collect();
+                group.tombstones.extend(withdrawn);
+            }
+            deferred_groups.insert(gid, peer);
         }
         // A source-flip member-scoped withdraw (this member is the delta's
         // new source) keeps the key IN the table, invisible to tombstones.
@@ -3317,7 +3338,6 @@ impl RibManager {
                 .unicast
                 .extend(lost);
         }
-        self.refresh_group_residue_gauge();
     }
 
     /// Drop a peer's dirty-resync state because its outbound channel is

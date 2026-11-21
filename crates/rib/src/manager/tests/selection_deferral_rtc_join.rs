@@ -144,7 +144,7 @@ fn rtc_interest_added_during_vpn_hold_survives_an_empty_dirty_resync() {
         "the selection-held membership delta must not count as admission"
     );
     assert_vpn_still_held(&mut late_rx);
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     assert!(manager.selection_deferred(VPN));
     assert_vpn_still_held(&mut late_rx);
     eprintln!(
@@ -162,7 +162,7 @@ fn rtc_interest_added_during_vpn_hold_survives_an_empty_dirty_resync() {
     assert!(!manager.selection_convergence_held(VPN));
     // A still-dirty member may finish on its ordinary retry after release.
     // Drive that retry rather than requiring synchronous clean admission.
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     let mut announced = vec![];
     let mut vpn_eors = 0;
     while let Ok(update) = late_rx.try_recv() {

@@ -325,7 +325,7 @@ fn forced_resync_with_marker(
     manager.settle_eor_now(TARGET);
     assert!(output.try_recv().is_err(), "the forced resync comes first");
     assert!(manager.eor_holds(TARGET, V4).contains(EorHold::Resync));
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     assert!(!manager.force_outbound_peers.contains(&TARGET));
     assert!(!manager.eor.owes(TARGET, V4));
     assert!(!manager.resync_tick_pending());
@@ -528,7 +528,7 @@ async fn a_forced_resync_that_catches_up_under_the_gate_sends_the_marker_it_held
             "{exit:?}"
         );
 
-        manager.distribute_changes(&HashSet::new(), &HashSet::new());
+        manager.distribute_resync_request();
         assert!(manager.selection_partial_caught_up(TARGET), "{exit:?}");
         assert!(
             manager.force_outbound_peers.contains(&TARGET),
