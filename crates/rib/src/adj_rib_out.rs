@@ -1140,6 +1140,23 @@ impl AdjRibOut {
         self.vpn_key_path_ids.reserve_with(nlri_keys, checkpoint);
     }
 
+    /// Reserve both VPN indexes for `rows` more routes under `keys` more
+    /// RD/prefix keys, none of them known yet.
+    pub(crate) fn reserve_vpn_count_with(
+        &mut self,
+        rows: usize,
+        keys: usize,
+        checkpoint: &mut impl FnMut(),
+    ) {
+        self.vpn_routes.reserve_count_with(rows, checkpoint);
+        self.vpn_key_path_ids.reserve_count_with(keys, checkpoint);
+    }
+
+    /// Distinct RD/prefix keys advertised to this peer.
+    pub(crate) fn vpn_key_len(&self) -> usize {
+        self.vpn_key_path_ids.len()
+    }
+
     #[cfg(test)]
     pub(crate) fn vpn_shard_count(&self) -> usize {
         self.vpn_routes.shards().len()
@@ -1411,6 +1428,17 @@ impl AdjRibOut {
         self.evpn_bodies.len()
     }
 
+    /// Capacity of the EVPN index and of the slab's first segment, the
+    /// one whose growth copies routes.
+    #[cfg(test)]
+    pub(crate) fn evpn_capacities(&self) -> (usize, usize) {
+        let segments = self.evpn_bodies.segment_capacities();
+        (
+            self.evpn_index.capacity(),
+            segments.first().copied().unwrap_or(0),
+        )
+    }
+
     /// What one EVPN insert can move: each index table's capacity, the
     /// bytes of an index entry, and each slab segment's capacity.
     #[cfg(test)]
@@ -1539,10 +1567,34 @@ impl AdjRibOut {
         additional: usize,
         checkpoint: &mut impl FnMut(),
     ) {
-        self.labeled_routes
-            .reserve_count_with(additional, checkpoint);
+        self.reserve_labeled_count_with(additional, additional, checkpoint);
+    }
+
+    /// Reserve the labeled-unicast indexes for `rows` more routes under
+    /// `keys` more prefixes.
+    pub(crate) fn reserve_labeled_count_with(
+        &mut self,
+        rows: usize,
+        keys: usize,
+        checkpoint: &mut impl FnMut(),
+    ) {
+        self.labeled_routes.reserve_count_with(rows, checkpoint);
         self.labeled_key_path_ids
-            .reserve_count_with(additional, checkpoint);
+            .reserve_count_with(keys, checkpoint);
+    }
+
+    /// Distinct prefixes advertised to this peer as labeled unicast.
+    pub(crate) fn labeled_key_len(&self) -> usize {
+        self.labeled_key_path_ids.len()
+    }
+
+    /// Capacity of the labeled route index and the prefix index.
+    #[cfg(test)]
+    pub(crate) fn labeled_capacities(&self) -> (usize, usize) {
+        (
+            self.labeled_routes.capacity(),
+            self.labeled_key_path_ids.capacity(),
+        )
     }
 
     /// Insert or replace an advertised labeled route.
