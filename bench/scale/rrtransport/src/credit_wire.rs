@@ -487,13 +487,18 @@ impl WireState {
     }
 
     /// Arm the post-marker withdrawal without copying the reference shared by all receivers.
+    /// A defect on another row does not stop it: the withdrawal of an intact
+    /// row is still the expected one, not a second missing row and a route
+    /// after the marker. A row that did not arrive intact is left unarmed.
     pub fn expect_restart_withdrawal(&mut self, index: usize) {
         assert!(matches!(
             self.family,
             WireFamily::Labeled4 | WireFamily::Labeled6 | WireFamily::Vpn4 | WireFamily::Vpn6
         ));
-        assert!(self.exact() && self.eors == 1 && self.table[index] != 0);
-        assert!(self.restart_withdrawal.is_none());
+        assert!(self.eors == 1 && self.restart_withdrawal.is_none());
+        if self.table[index] == 0 || self.table[index] != self.reference.meds[index] {
+            return;
+        }
         self.restart_withdrawal = Some(index);
         self.mismatch += 1;
         self.settled_at = None;
@@ -1090,13 +1095,25 @@ mod tests {
                 let mut state =
                     WireState::with_restart_reference(family, Arc::new(Reference::uniform(2, 7)));
                 for message in messages {
+                    let first_marker = state.eors == 0;
                     state.apply(message, Instant::now());
-                    if state.exact() && state.eors == 1 && state.restart_withdrawal.is_none() {
+                    if first_marker && state.eors == 1 {
                         state.expect_restart_withdrawal(0);
                     }
                 }
                 state
             };
+            // One bad row reads as one missing row: the intact first row's
+            // withdrawal is still the expected one.
+            let one_bad = fold(&[&announce(1, 0x11, Some(100)), &marker, &gone]);
+            assert_eq!(
+                (
+                    one_bad.missing(),
+                    one_bad.routes_after_eor,
+                    one_bad.churned_after_eor
+                ),
+                (1, 0, 1)
+            );
             let clean = fold(&[&good, &marker, &gone]);
             assert!(clean.exact() && clean.restart_rd_sibling_present());
             assert_eq!((clean.vpn_announced, clean.vpn_withdrawn), (2, 1));

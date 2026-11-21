@@ -268,7 +268,7 @@ async fn collect(
                 state.apply(&msg, Instant::now());
                 if first_eor && state.eors == 1 {
                     initial_exact = state.exact() && !state.eor_premature && state.duplicates_before_eor == 0;
-                    if initial_exact { state.expect_restart_withdrawal(0); }
+                    state.expect_restart_withdrawal(0);
                     let _ = progress.send(Progress::Eor).await;
                 }
                 if first_withdrawal && state.withdrawals > 0 {
