@@ -253,3 +253,279 @@ async fn release_preempts_an_armed_slow_tick_without_retrying_a_refused_writer_e
     drop(input);
     actor.await.unwrap();
 }
+
+fn count_ring_visits(manager: &mut RibManager) -> Arc<std::sync::atomic::AtomicUsize> {
+    let visits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    manager.marker_retry_test_hook = Some(Arc::new({
+        let visits = Arc::clone(&visits);
+        move |seam| {
+            if seam == "evpn_marker_candidate" {
+                visits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }));
+    visits
+}
+
+/// Receivers whose unicast release marker a full writer refused, on a
+/// manager with nothing else to do: the retry deadline is the only wake.
+/// The refusing helper reads its writer empty again; `full` refills it.
+fn refused_ring(size: u16, full: bool) -> (RibManager, mpsc::Sender<RibUpdate>, Vec<Output>) {
+    let Cohort {
+        mut manager,
+        input,
+        outputs: _,
+        _waiter_output,
+    } = held_cohort(0, FAMILY);
+    let mut refused = Vec::new();
+    for n in 0..size {
+        let [hi, lo] = n.to_be_bytes();
+        let peer = peer_v4(Ipv4Addr::new(203, 1, hi, lo));
+        let mut output = connect(&mut manager, peer, 3, V4);
+        assert_eq!(markers_of(&mut output, V4), 1);
+        refuse_final_marker(&mut manager, peer, &mut output);
+        let sender = &manager.outbound_peers[&peer];
+        while full && sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
+        refused.push(output);
+    }
+    (manager, input, refused)
+}
+
+/// Empty every writer now and return when each retried marker arrived.
+async fn drain_and_time(refused: Vec<Output>) -> (Vec<Duration>, Vec<Output>) {
+    let drained = Instant::now();
+    let mut collectors = tokio::task::JoinSet::new();
+    for mut output in refused {
+        collectors.spawn(async move {
+            while let Some(update) = output.recv().await {
+                if update.end_of_rib.contains(&V4) {
+                    assert_eq!(update.end_of_rib, [V4]);
+                    return (Instant::now(), output);
+                }
+            }
+            panic!("receiver closed before its retried marker");
+        });
+    }
+    let mut times = Vec::new();
+    let mut outputs = Vec::new();
+    let deadline = drained + Duration::from_secs(65);
+    while let Some(result) = timeout_at(deadline, collectors.join_next())
+        .await
+        .expect("a refused marker was never retried")
+    {
+        let (at, output) = result.unwrap();
+        times.push(at - drained);
+        outputs.push(output);
+    }
+    times.sort();
+    (times, outputs)
+}
+
+// No refused marker is retried before its deadline. Once retries are due the
+// ring drains eight peers per backlog tick, not eight per retry interval.
+async fn check_retry_ring(size: u16) {
+    let (manager, input, refused) = refused_ring(size, false);
+    let actor = tokio::spawn(manager.run());
+    barrier(&input).await;
+    let (times, outputs) = drain_and_time(refused).await;
+    assert_eq!(times.len(), usize::from(size));
+    eprintln!(
+        "{size} refused markers after their writers drained: first retry {:?}, last {:?}",
+        times[0],
+        times[times.len() - 1]
+    );
+    for (slice, at) in (0_u32..).zip(times.chunks(8)) {
+        let expected = Duration::from_secs(1) + Duration::from_millis(10) * slice;
+        let window = expected..=expected + Duration::from_millis(1);
+        assert!(
+            at.iter().all(|at| window.contains(at)),
+            "slice {slice} of {size} retried at {at:?}, expected {window:?}"
+        );
+    }
+    sleep(Duration::from_secs(3)).await;
+    barrier(&input).await;
+    for mut output in outputs {
+        assert_eq!(markers_of(&mut output, V4), 0, "duplicate retried marker");
+    }
+    drop(input);
+    actor.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn refused_release_markers_64_drain_at_the_backlog_cadence_once_due() {
+    check_retry_ring(64).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn refused_release_markers_448_drain_at_the_backlog_cadence_once_due() {
+    check_retry_ring(448).await;
+}
+
+// A writer that stays full costs one offer per pass, and a pass starts one
+// retry interval after the last one ended: never a backlog-cadence loop.
+#[tokio::test(start_paused = true)]
+async fn writers_full_for_30_s_cost_one_offer_per_peer_per_pass() {
+    const SIZE: u16 = 64;
+    let (mut manager, input, refused) = refused_ring(SIZE, true);
+    let visits = count_ring_visits(&mut manager);
+    let start = Instant::now();
+    let actor = tokio::spawn(manager.run());
+    barrier(&input).await;
+    sleep_until(start + Duration::from_secs(30)).await;
+    barrier(&input).await;
+    // Each pass takes eight slices 10 ms apart and the next begins 1 s after
+    // it ends: passes start at 1.00 s, 2.07 s, ... and 28 fit in 30 s.
+    let offers = visits.load(std::sync::atomic::Ordering::Relaxed);
+    eprintln!("{SIZE} writers full for 30 s: {offers} retry offers");
+    assert_eq!(offers, 28 * usize::from(SIZE));
+    let (times, outputs) = drain_and_time(refused).await;
+    let bound = Duration::from_secs(1) + Duration::from_millis(10) * u32::from(SIZE / 8);
+    eprintln!(
+        "writers drained at 30 s: first retry {:?}, last {:?}",
+        times[0],
+        times[times.len() - 1]
+    );
+    assert_eq!(times.len(), usize::from(SIZE));
+    assert!(
+        times[times.len() - 1] <= bound,
+        "last retry at {:?}",
+        times.last()
+    );
+    drop(outputs);
+    drop(input);
+    actor.await.unwrap();
+}
+
+// A resync tick pulled forward by a drained whole-table operation runs the
+// data lanes only. `busy` keeps route chunks queued, so the loop finds the
+// tick due between work units instead of in its timer select.
+async fn check_resync_tick_leaves_a_refused_marker_to_its_deadline(busy: bool) {
+    let (input, rx) = mpsc::channel(16);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let _source = connect(&mut manager, SOURCE, 1, V4);
+    // The refusing helper reads this writer empty: an early retry would land.
+    let mut refused = connect(&mut manager, RETRY_PEER, 3, V4);
+    assert_eq!(markers_of(&mut refused, V4), 1);
+    refuse_final_marker(&mut manager, RETRY_PEER, &mut refused);
+    // A dirty peer behind a full writer keeps the resync timer armed.
+    let _dirty = connect(&mut manager, OTHER, 4, V4);
+    let sender = &manager.outbound_peers[&OTHER];
+    while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
+    manager.mark_outbound_dirty(OTHER);
+    let latch = Arc::clone(&manager.outbound_latch_released);
+
+    let start = Instant::now();
+    let actor = tokio::spawn(manager.run());
+    barrier(&input).await;
+    if busy {
+        // Routes from an iBGP source reach no iBGP receiver: Loc-RIB work only.
+        let announced = (0..16 * 1024_u32)
+            .map(|n| {
+                let [_, b, c, d] = n.to_be_bytes();
+                let mut route = make_route(
+                    Ipv4Prefix::new(Ipv4Addr::new(100, b, c, d), 32),
+                    Ipv4Addr::new(10, 0, 0, 1),
+                );
+                route.peer = SOURCE;
+                route
+            })
+            .collect();
+        input
+            .send(RibUpdate::RoutesReceived {
+                session_id: 1,
+                peer: SOURCE,
+                announced,
+                withdrawn: vec![],
+                flowspec_announced: vec![],
+                flowspec_withdrawn: vec![],
+                evpn_announced: vec![],
+                evpn_withdrawn: vec![],
+                validated_with: None,
+            })
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+    }
+    latch.notify_one();
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(10)).await;
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        markers_of(&mut refused, V4),
+        0,
+        "the resync tick retried a refused marker {:?} after its refusal",
+        start.elapsed()
+    );
+    assert!(start.elapsed() < Duration::from_millis(20));
+    sleep_until(start + Duration::from_millis(999)).await;
+    barrier(&input).await;
+    assert_eq!(markers_of(&mut refused, V4), 0);
+    sleep_until(start + Duration::from_millis(1_001)).await;
+    barrier(&input).await;
+    assert_eq!(markers_of(&mut refused, V4), 1);
+    drop(input);
+    actor.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_resync_tick_from_the_timer_select_leaves_a_refused_marker_to_its_deadline() {
+    check_resync_tick_leaves_a_refused_marker_to_its_deadline(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_resync_tick_between_route_chunks_leaves_a_refused_marker_to_its_deadline() {
+    check_resync_tick_leaves_a_refused_marker_to_its_deadline(true).await;
+}
+
+// A pass whose remaining peers all went away never reaches its end. The
+// next armed deadline must start a new pass at the lowest peer, not after
+// the abandoned cursor, or a lower peer waits a second retry interval.
+#[tokio::test(start_paused = true)]
+async fn a_retry_pass_armed_after_an_abandoned_one_starts_at_the_lowest_peer() {
+    let (input, rx) = mpsc::channel(16);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let mut abandoned = Vec::new();
+    for host in 10..=18 {
+        let peer = peer_v4(Ipv4Addr::new(203, 0, 113, host));
+        let mut output = connect(&mut manager, peer, 3, V4);
+        assert_eq!(markers_of(&mut output, V4), 1);
+        refuse_final_marker(&mut manager, peer, &mut output);
+        let sender = &manager.outbound_peers[&peer];
+        while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
+        abandoned.push((peer, output));
+    }
+    assert!(
+        manager.retry_eor_markers_bounded(),
+        "one peer left in the pass"
+    );
+    for (peer, _) in &abandoned {
+        manager.handle_update(RibUpdate::PeerDown {
+            peer: *peer,
+            session_id: 3,
+        });
+    }
+    assert!(!manager.marker_retry_pending());
+    assert!(
+        manager
+            .evpn_marker_cursor
+            .is_some_and(|cursor| RETRY_PEER < cursor)
+    );
+    let mut refused = connect(&mut manager, RETRY_PEER, 3, V4);
+    assert_eq!(markers_of(&mut refused, V4), 1);
+    refuse_final_marker(&mut manager, RETRY_PEER, &mut refused);
+
+    let start = Instant::now();
+    let actor = tokio::spawn(manager.run());
+    barrier(&input).await;
+    sleep_until(start + Duration::from_millis(999)).await;
+    assert_eq!(markers_of(&mut refused, V4), 0);
+    let update = timeout_at(start + Duration::from_millis(1_001), refused.recv())
+        .await
+        .expect("the new pass skipped a peer below the abandoned cursor")
+        .unwrap();
+    assert_eq!(update.end_of_rib, [V4]);
+    drop(input);
+    actor.await.unwrap();
+}

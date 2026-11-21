@@ -1597,7 +1597,7 @@ fn peer_down_disarms_refused_marker_before_same_id_same_family_reconnect() {
 }
 
 #[test]
-fn a_new_refused_marker_behind_the_live_cursor_gets_a_turn() {
+fn a_new_refused_marker_behind_the_pass_cursor_waits_for_the_next_pass() {
     let mut manager = plain_manager();
     let mut blocked = Vec::new();
     for host in 10..=18 {
@@ -1609,14 +1609,32 @@ fn a_new_refused_marker_behind_the_live_cursor_gets_a_turn() {
         while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
         blocked.push((peer, output));
     }
-    manager.retry_eor_markers_bounded();
+    assert!(manager.retry_eor_markers_bounded(), "nine peers, one slice");
     let cursor = manager.evpn_marker_cursor.expect("retry cursor advanced");
     let newcomer = peer_v4(Ipv4Addr::new(192, 0, 2, 1));
     assert!(newcomer < cursor);
     let mut ready = connect(&mut manager, newcomer, 2, V4);
     assert_eq!(markers_of(&mut ready, V4), 1);
     refuse_final_marker(&mut manager, newcomer, &mut ready);
-    manager.retry_eor_markers_bounded();
+    // The open pass finishes with the ninth peer and does not wrap: a
+    // wrap would offer the first eight full writers twice in one pass.
+    let visits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    manager.marker_retry_test_hook = Some(Arc::new({
+        let visits = Arc::clone(&visits);
+        move |seam| {
+            if seam == "evpn_marker_candidate" {
+                visits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }));
+    assert!(!manager.retry_eor_markers_bounded());
+    assert_eq!(visits.swap(0, std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(manager.evpn_marker_cursor, None);
+    assert_eq!(markers_of(&mut ready, V4), 0);
+    assert!(manager.marker_retry_pending());
+    // The next pass starts at the lowest peer.
+    assert!(manager.retry_eor_markers_bounded());
+    assert_eq!(visits.load(std::sync::atomic::Ordering::Relaxed), 8);
     assert_eq!(markers_of(&mut ready, V4), 1);
     assert!(!manager.eor.owes(newcomer, V4));
     for (peer, mut output) in blocked {

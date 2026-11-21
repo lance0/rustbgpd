@@ -1359,7 +1359,8 @@ pub struct RibManager {
     evpn_recovery_reset: Option<crate::update::EvpnRecoveryResetFn>,
     /// Unique across group recreation and paired EVPN route/input writes.
     evpn_table_stamp: u64,
-    /// Fairness position for marker-only completion retries on the resync timer.
+    /// Last peer offered by the current pass over the marker retry ring.
+    /// `None` between passes.
     evpn_marker_cursor: Option<PeerId>,
     /// Set only for the distribution pass of one paced export-policy command:
     /// keyed by the command's applied members, each one's own time in that
@@ -8178,6 +8179,8 @@ impl RibManager {
                     marker_retry_sleep
                         .as_mut()
                         .reset(tokio::time::Instant::now() + DIRTY_RESYNC_INTERVAL);
+                    // A pass the ring emptied under leaves its cursor behind.
+                    self.evpn_marker_cursor = None;
                 }
                 marker_retry_armed = retry_pending;
 
@@ -8423,18 +8426,26 @@ impl RibManager {
             }
             let retry_due = marker_retry_armed && marker_retry_sleep.deadline() <= now;
             if retry_due || (marker_release_armed && marker_release_sleep.deadline() <= now) {
-                self.traced(PostCommitWork::ResyncTick, |manager| {
+                let pass_open = self.traced(PostCommitWork::ResyncTick, |manager| {
                     manager.with_resync_readiness(|manager| {
                         if retry_due {
                             // Split the peer budget if both kinds of markers wait.
-                            manager.retry_eor_markers_bounded();
+                            manager.retry_eor_markers_bounded()
                         } else {
                             manager.service_marker_release_backlog(RESYNC_PEERS_PER_TICK);
+                            false
                         }
-                    });
+                    })
                 });
                 marker_release_armed = false;
-                if retry_due {
+                if pass_open {
+                    // Due retries drain at the backlog cadence until the pass
+                    // has offered every peer once.
+                    marker_retry_sleep
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + DIRTY_RESYNC_BACKLOG_INTERVAL);
+                } else if retry_due {
+                    // The next pass waits the ordinary retry interval again.
                     marker_retry_armed = false;
                 }
                 continue;
