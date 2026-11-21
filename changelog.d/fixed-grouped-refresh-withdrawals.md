@@ -7,6 +7,5 @@
   the refresh can purge those routes; before, it received one redundant
   withdrawal after End-of-Route-Refresh.
   **Operator-visible:** while another unicast or VPN family holds the peer's
-  resync under selection deferral, the refresh answer waits for that hold to
-  release, at most until the selection-deferral timeout. Before, it was
-  answered at once.
+  resync under selection deferral, the refresh answer follows that hold's
+  release, at most at the selection-deferral timeout.

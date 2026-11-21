@@ -3708,8 +3708,9 @@ fn held_join_counts_only_eligible_policy_evaluations_and_denials() {
 /// the VPN hold begins, so the hold owns its whole resync: nothing goes out
 /// for unicast until the release, and then the withdrawal, `BoRR` and `EoRR`
 /// in that order, once. The wait ends at the selection-deferral timeout at
-/// the latest. Red proof: without the deferral the answer goes out inside
-/// the hold and the release withdraws a route the receiver already purged.
+/// the latest. Without the group-withdrawal deferral the answer path still
+/// keeps this request pending (the answer is not admitted inside the hold),
+/// so the test pins the release's retry, not that deferral.
 #[test]
 #[expect(
     clippy::too_many_lines,

@@ -1889,8 +1889,11 @@ fn selection_ending_before_registration_preserves_plain_unicast_refresh() {
 
 /// A plain unicast refresh queued during deferred registration comes due
 /// after the initial End-of-RIB. If the peer by then owes a group withdrawal
-/// without a proof, the answer waits for its resync again: one withdrawal,
-/// then one `BoRR`/table/`EoRR`, and nothing more on later ticks.
+/// without a proof, that answer and a second request the deferral holds
+/// beside it wait for the resync: one withdrawal, then one `BoRR`/table/
+/// `EoRR`, and nothing more on later ticks. Red proof: without the deferral
+/// the second request is answered at once and the resync then withdraws a
+/// purged route.
 #[test]
 #[expect(
     clippy::too_many_lines,
@@ -1999,6 +2002,21 @@ fn registration_refresh_behind_group_withdrawal_is_answered_once_in_order() {
     assert!(manager.dirty_peers.contains(&peer));
     assert!(manager.pending_group_admitted.get(&peer).is_none());
     drop(permits);
+    // A second request reaches the answer path directly; the group
+    // withdrawal defers it beside the queued one.
+    manager.handle_update(RibUpdate::RouteRefreshRequest {
+        peer,
+        session_id: 7,
+        afi: family.0,
+        safi: family.1,
+        queued: Arc::default(),
+    });
+    assert_eq!(
+        apply(&mut output).0,
+        [""; 0],
+        "answered ahead of the resync"
+    );
+    assert!(manager.pending_refresh[&peer].contains(&family));
 
     drain_resync_ticks(&mut manager);
     let (markers, routes) = apply(&mut output);
