@@ -163,14 +163,27 @@ def instrument(files, here):
          "                if !initial {\n"
          "                    self.bench_terminal_event(peer, \"terminal_admitted\", 0);\n                }\n"
          "            }\n            if !initial {")
-    edit(path, "        if !self.send_eor_markers(peer, &tx, &families, refresh_markers, None) {\n            return;\n        }",
+    # The refused path puts the receipt on the retry ring. A comparison's parent
+    # input may predate that call, so exactly one of the two forms must match,
+    # once, and the instrumented branch keeps whatever its input had.
+    offer = "        if !self.send_eor_markers(peer, &tx, &families, refresh_markers, None) {\n"
+    retry = "            self.refresh_eor_retry(peer);\n"
+    leave = "            return;\n        }"
+    forms = ((offer + "            // The consumed wake leaves the refused receipt in no index until\n"
+              "            // this puts it on the retry ring, whichever lane made the offer.\n" + retry + leave, retry),
+             (offer + leave, ""))
+    text = files[path].decode()
+    if sorted(text.count(old) for old, _ in forms) != [0, 1]:
+        raise ValueError(f"private derivation anchor drift: {forms[0][0]!r}")
+    old, kept = next(form for form in forms if form[0] in text)
+    edit(path, old,
          "        let terminal_sent = self.send_eor_markers(peer, &tx, &families, refresh_markers, None);\n"
          "        if evpn_bits != 0 {\n"
          "            super::terminal_debt::marker(peer, if obligations { \"retry\" } else { \"refresh\" }, !terminal_sent);\n"
          "            if !terminal_sent {\n"
          "                self.bench_terminal_event(peer, if obligations { \"retry_refused\" } else { \"refresh_refused\" }, 0);\n"
          "            }\n        }\n"
-         "        if !terminal_sent {\n            return;\n        }")
+         "        if !terminal_sent {\n" + kept + leave)
     edit(path, "            self.evpn_feed_markers_admitted(peer, &tx, evpn_bits);\n",
          "            self.evpn_feed_markers_admitted(peer, &tx, evpn_bits);\n"
          "            if evpn_bits != 0 {\n"

@@ -91,3 +91,63 @@ fn registration_repairs_over_one_page_of_hot_changes_finish_when_arrivals_stop()
         RegistrationScanStatus::Ready
     );
 }
+
+/// A route message of sixteen chunks changes a full page of keys on every
+/// turn but the one that receives it. Alternating with discovery serves half
+/// of that and overflows the log within a dozen turns.
+#[test]
+fn registration_keeps_up_with_a_full_page_of_changes_on_sixteen_turns_in_seventeen() {
+    const ROUTES: usize = 8 * REGISTRATION_PAGE_SIZE;
+    let mut loc = LocRib::with_capacity(ROUTES);
+    let mut routes: Vec<_> = (0..u32::try_from(ROUTES).unwrap())
+        .map(registration_route)
+        .collect();
+    for route in &routes {
+        assert!(loc.recompute(route.prefix, [route].into_iter()));
+    }
+    loc.start_registration_scan();
+    let mut built = FastSet::default();
+    let (mut discovery_pages, mut changed) = (0, 0);
+    for turn in 0..4096 {
+        if turn % 17 != 0 {
+            let start = changed % ROUTES;
+            let octet = u8::try_from(1 + changed / ROUTES % 2).unwrap();
+            change_next_hops(
+                &mut loc,
+                &mut routes[start..start + REGISTRATION_PAGE_SIZE],
+                octet,
+            );
+            changed += REGISTRATION_PAGE_SIZE;
+        }
+        assert_eq!(
+            loc.registration_scan_status(),
+            RegistrationScanStatus::Scanning,
+            "turn {turn}"
+        );
+        let page = loc.take_registration_page();
+        assert!(page.bucket_visits + page.repairs <= REGISTRATION_PAGE_SIZE);
+        discovery_pages += usize::from(page.bucket_visits > 0);
+        let discovery_done = page.bucket_visits > 0 && {
+            built.extend(page.keys);
+            built.len() == ROUTES
+        };
+        if discovery_done {
+            // Every route was discovered while the changes continued, on the
+            // turns the log left free: about one per message.
+            assert!(changed > 4 * ROUTES, "changes outlasted the repair log");
+            assert!(
+                discovery_pages <= turn / 17 + 3,
+                "{discovery_pages} of {turn}"
+            );
+            while loc.registration_scan_status() == RegistrationScanStatus::Scanning {
+                loc.take_registration_page();
+            }
+            assert_eq!(
+                loc.registration_scan_status(),
+                RegistrationScanStatus::Ready
+            );
+            return;
+        }
+    }
+    panic!("discovery did not finish under sustained changes");
+}

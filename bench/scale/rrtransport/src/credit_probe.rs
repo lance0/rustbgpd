@@ -165,8 +165,13 @@ fn manager(metrics: BgpMetrics) -> (RibManager, mpsc::Sender<RibUpdate>, mpsc::S
 fn rows(envelope: &OutboundRouteUpdate) -> usize {
     envelope.announce.len()
         + envelope.withdraw.len()
+        + envelope.shared_withdraw.len()
         + envelope.evpn_announce.len()
         + envelope.evpn_withdraw.len()
+        + envelope.vpn_announce.len()
+        + envelope.vpn_withdraw.len()
+        + envelope.labeled_announce.len()
+        + envelope.labeled_withdraw.len()
 }
 
 /// Rows queued per receiver, draining every receiver.
@@ -442,4 +447,52 @@ pub fn run(
         serde_json::to_string_pretty(&result)? + "\n",
     )?;
     Ok(clean)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::credit::{release_source_update, Family};
+
+    #[test]
+    fn queued_rows_count_both_vpn_payload_fields() {
+        for family in [Family::Vpn, Family::Vpn6] {
+            let RibUpdate::VpnRoutesReceived { announced, .. } =
+                release_source_update(family, 0..3)
+            else {
+                panic!("expected a VPN source update")
+            };
+            let mut envelope = OutboundRouteUpdate {
+                vpn_announce: Arc::new(announced),
+                ..Default::default()
+            };
+            assert_eq!(rows(&envelope), 3);
+            envelope.vpn_withdraw.push(envelope.vpn_announce[0].key());
+            assert_eq!(rows(&envelope), 4);
+            Arc::make_mut(&mut envelope.vpn_announce).clear();
+            assert_eq!(rows(&envelope), 1);
+        }
+    }
+
+    #[test]
+    fn queued_rows_count_both_labeled_payload_fields() {
+        for family in [Family::Labeled4, Family::Labeled6] {
+            let RibUpdate::LabeledRoutesReceived { announced, .. } =
+                release_source_update(family, 0..3)
+            else {
+                panic!("expected a labeled source update")
+            };
+            let mut envelope = OutboundRouteUpdate {
+                labeled_announce: announced,
+                ..Default::default()
+            };
+            assert_eq!(rows(&envelope), 3);
+            envelope
+                .labeled_withdraw
+                .push(envelope.labeled_announce[0].key());
+            assert_eq!(rows(&envelope), 4);
+            envelope.labeled_announce.clear();
+            assert_eq!(rows(&envelope), 1);
+        }
+    }
 }

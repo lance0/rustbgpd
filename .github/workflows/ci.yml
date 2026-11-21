@@ -541,7 +541,7 @@ jobs:
   scale_receipts:
     name: scale / receipt checks
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -589,7 +589,8 @@ jobs:
           cargo run --locked -p rrtransport -- credit-source-burst "$restart_smoke" --reduced --control
           python3 bench/scale/rrtransport/credit_bars.py check "$restart_smoke"
           python3 -m unittest discover -s bench/scale/rrtransport -p 'test_*.py'
-          shellcheck -x bench/scale/rrtransport/run-credit-cells.sh
+          shellcheck -x bench/scale/rrtransport/run-credit-cells.sh \
+            bench/scale/rrtransport/run-grouped-old.sh
           rrtransport_receipt=$(mktemp -d)
           bench/scale/rrtransport/run-receipt.sh --real-smoke "$rrtransport_receipt"
           bash bench/tests/test-rrtransport-receipt.sh

@@ -1,6 +1,6 @@
 # GoBGP 4.11.0 source plus M122-only connection FSM instrumentation.
 # These are instrumented binaries, not official GoBGP release artifacts.
-FROM golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS builder
+FROM golang:1.27.4-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea AS builder
 ARG TARGETARCH
 ARG GOBGP_SOURCE_VERSION=53ceb78fe284018ce83a92f3039198f0a86dc823
 ARG GOBGP_SOURCE_SHA256=9706526b6fb76b8d6c4de379755819bed41be312e155f59e85baf55f9f3259a8

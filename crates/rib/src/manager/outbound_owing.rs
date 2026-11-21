@@ -2493,15 +2493,13 @@ impl RibManager {
         })
     }
 
+    /// A skipped family is selection-held; a failed rebuild is restored while
+    /// its peer is still dirty. Either hold already blocks the family's marker.
     pub(super) fn record_held_rebuilds(&mut self, peer: PeerId, owed: HeldRebuilds) {
-        let mut changed = false;
         for (peers, owed) in self.held_rebuilds.iter_mut().zip(owed) {
             if owed {
-                changed |= peers.insert(peer);
+                peers.insert(peer);
             }
-        }
-        if changed {
-            self.refresh_eor_retry(peer);
         }
     }
 
@@ -2515,17 +2513,14 @@ impl RibManager {
             })
     }
 
-    /// The unit can discharge only the families that are open when it starts.
+    /// The dirty resync can discharge only families that are open when it starts.
+    /// Its dirty hold keeps their markers blocked until the resync settles them.
     pub(super) fn take_due_held_rebuilds(&mut self, peer: PeerId) -> HeldRebuilds {
-        let removed: HeldRebuilds = std::array::from_fn(|i| {
+        std::array::from_fn(|i| {
             self.held_rebuilds[i].contains(&peer)
                 && !self.cursor_selection_deferred(OwedFamily::GROUPED_CURSORS[i])
                 && self.held_rebuilds[i].remove(&peer)
-        });
-        if removed.contains(&true) {
-            self.refresh_eor_retry(peer);
-        }
-        removed
+        })
     }
 
     fn rebuild_candidates(&self) -> impl Iterator<Item = &PeerId> {

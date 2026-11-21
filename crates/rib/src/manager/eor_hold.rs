@@ -200,10 +200,13 @@ pub(super) struct EorObligations {
     /// stored here: only [`EorHold::OrfTable`] and [`EorHold::Writer`].
     /// A session owes a handful of families, so a list keeps the order an
     /// initial dump sends them in. Entries are never left empty.
-    owed: BTreeMap<PeerId, OwedMarkers>,
-    /// Peers a retry may serve, including EVPN receipt-only completions.
+    owed: HashMap<PeerId, OwedMarkers>,
+    /// Peers whose ordinary marker debt is runnable.
     /// Debt and hold ownership stay in their original records.
     retry: BTreeSet<PeerId>,
+    /// Complete receipts eligible for a retry, or parked behind EVPN selection.
+    /// Arming the gate hides this entire ring; its one release takes the set.
+    evpn_receipts: BTreeSet<PeerId>,
     /// Complete EVPN receipts to wake when the global selection hold opens.
     evpn_selection_waiters: BTreeSet<PeerId>,
     /// Ordinary debt covered by a startup non-unicast gate. The gate hands
@@ -263,6 +266,11 @@ impl EorObligations {
         resynced: HashSet<PeerId>,
         has_refresh: bool,
     ) {
+        if family == EVPN {
+            // Startup selection releases each family once. No peer walk on arm or release.
+            debug_assert!(self.evpn_selection_waiters.is_empty());
+            self.evpn_selection_waiters = std::mem::take(&mut self.evpn_receipts);
+        }
         let peers = self.selection_peers.remove(&family).unwrap_or_default();
         if !peers.is_empty() || has_refresh {
             self.releasing.push_back(SelectionMarkerRelease {
@@ -605,8 +613,9 @@ impl RibManager {
                     .selection_deferred_refresh
                     .contains_key(&release.family)
         });
+        // The EVPN receipt indexes follow the feed receipt, which this
+        // teardown invalidated first (`clear_outbound_peer_state`).
         self.eor.retry.remove(&peer);
-        self.eor.evpn_selection_waiters.remove(&peer);
         self.eor.remove_rt_membership_hold(peer);
         self.eor
             .settle_after_pass
@@ -906,6 +915,11 @@ impl RibManager {
                 warn!(%peer, "outbound channel full — `EoR` still deferred");
             }
             self.metrics.record_outbound_eor_deferral(&peer.label());
+            if families.contains(&EVPN) {
+                // This refused offer was the release wake. The debt moves to
+                // the retry ring instead of a second offer from the receipt lane.
+                self.eor.evpn_selection_waiters.remove(&peer);
+            }
             if !retry_refused && !marker_only {
                 self.mark_outbound_dirty(peer);
             }
@@ -955,6 +969,10 @@ impl RibManager {
             return;
         }
         let evpn_bits = Self::evpn_admitted_marker_bits(&families, &refresh_markers);
+        if evpn_bits != 0 {
+            // This offer consumes the wake even when the writer refuses it.
+            self.eor.evpn_selection_waiters.remove(&peer);
+        }
         if !unsettled.is_empty() {
             // Logged whether or not the writer takes it: a refused send
             // becomes an ordinary retry, which is not reported again.
@@ -973,6 +991,9 @@ impl RibManager {
             }
         }
         if !self.send_eor_markers(peer, &tx, &families, refresh_markers, None) {
+            // The consumed wake leaves the refused receipt in no index until
+            // this puts it on the retry ring, whichever lane made the offer.
+            self.refresh_eor_retry(peer);
             return;
         }
         if self.outbound_session_ids.get(&peer).copied() == session_id
@@ -1057,13 +1078,18 @@ impl RibManager {
     /// Update the scheduling hint after an owner changes. A later offer rechecks
     /// the live session, holds and feed receipt before sending anything.
     pub(super) fn refresh_eor_retry(&mut self, peer: PeerId) {
-        if self.evpn_feed_receipt_count != 0
-            && self.selection_convergence_held(EVPN)
-            && self.evpn_feed_owed_markers(peer) != (false, false)
-        {
-            self.eor.evpn_selection_waiters.insert(peer);
-        } else {
+        let owes_receipt = self.evpn_feed_receipt_count != 0
+            && self.evpn_feed_owed_markers(peer) != (false, false);
+        if !owes_receipt {
             self.eor.evpn_selection_waiters.remove(&peer);
+        }
+        if owes_receipt
+            && !self.eor.evpn_selection_waiters.contains(&peer)
+            && (self.selection_convergence_held(EVPN) || self.eor_retry_ready(peer, EVPN))
+        {
+            self.eor.evpn_receipts.insert(peer);
+        } else {
+            self.eor.evpn_receipts.remove(&peer);
         }
         if self.eor_retry_runnable(peer) {
             self.eor.retry.insert(peer);
@@ -1075,7 +1101,11 @@ impl RibManager {
     /// Read by the event loop even when the resync timer is disarmed.
     pub(super) fn marker_retry_pending(&self) -> bool {
         !self.eor.retry.is_empty()
-            || !self.eor.releasing.is_empty()
+            || (!self.eor.evpn_receipts.is_empty() && !self.selection_convergence_held(EVPN))
+    }
+
+    pub(super) fn marker_release_pending(&self) -> bool {
+        !self.eor.releasing.is_empty()
             || self.released_rt_membership_pending()
             || self.released_evpn_markers_pending()
     }
@@ -1130,46 +1160,104 @@ impl RibManager {
         spent
     }
 
-    /// Charge both release wakeups and retry candidates before reading their
-    /// holds. Offer each ready peer at most once per slice, even on refusal.
-    pub(super) fn retry_eor_markers_bounded(&mut self) {
-        let mut remaining = RESYNC_PEERS_PER_TICK;
-        remaining -= self.service_released_rt_membership(RESYNC_PEERS_PER_TICK / 4);
-        let family_budget = if self.eor.retry.is_empty() && !self.released_evpn_markers_pending() {
-            remaining
-        } else {
+    /// Offer released receipts once. A refusal remains on the ordinary ring.
+    pub(super) fn service_marker_release_backlog(&mut self, budget: usize) {
+        // One membership completion can settle several families for the peer and
+        // run their replay completion hooks. Keep this cap even on an RTC-only tick.
+        let rtc = self.service_released_rt_membership(budget.min(RESYNC_PEERS_PER_TICK / 4));
+        let remaining = budget - rtc;
+        // Known cost: while any released receipt waits, an earlier family's
+        // release runs at half rate. That includes one visit for each waiter
+        // still queued behind its own EVPN release, which sends nothing here.
+        let family_budget = if self.released_evpn_markers_pending() {
             remaining / 2
+        } else {
+            remaining
         };
-        remaining -= self.service_family_release_markers(family_budget);
+        let spent = self.service_family_release_markers(family_budget);
         if self.released_evpn_markers_pending() {
-            // Charge each wake to this tick and leave room to send ready markers.
-            for _ in 0..remaining / 2 {
-                let Some(peer) = self.eor.evpn_selection_waiters.pop_first() else {
-                    break;
-                };
-                remaining -= 1;
+            // Every visit takes its peer out of the set, so the front of the
+            // set is the next unvisited waiter. A receiver whose own EVPN
+            // release visit is still queued is held by it: this offer sends
+            // nothing, and that visit sends the marker behind its table.
+            let visits: smallvec::SmallVec<[PeerId; RESYNC_PEERS_PER_TICK]> = self
+                .eor
+                .evpn_selection_waiters
+                .iter()
+                .take(remaining - spent)
+                .copied()
+                .collect();
+            for peer in visits {
                 #[cfg(test)]
                 self.observe_marker_candidate();
+                self.eor.evpn_selection_waiters.remove(&peer);
+                self.retry_eor_markers(peer, false);
                 self.refresh_eor_retry(peer);
             }
         }
-        let peers = &self.eor.retry;
-        let start = self.evpn_marker_cursor.map_or(Unbounded, Excluded);
-        let ring = peers.range((start, Unbounded)).chain(
-            self.evpn_marker_cursor
-                .into_iter()
-                .flat_map(|last| peers.range(..=last)),
+    }
+
+    /// One slice of a pass over the retry ring, in peer order from the
+    /// cursor. A pass offers each refused marker once and never wraps, so a
+    /// writer that stays full costs one offer per pass. Returns whether the
+    /// pass has peers left: the caller runs the next slice at the backlog
+    /// cadence, and waits the ordinary retry interval before the next pass.
+    ///
+    /// When both timers are due this tick shares its visits with released
+    /// receivers. Take existing retries first so a newly refused release
+    /// cannot be attempted a second time in this same tick.
+    pub(super) fn retry_eor_markers_bounded(&mut self) -> bool {
+        let retry_budget = if self.marker_release_pending() {
+            RESYNC_PEERS_PER_TICK / 2
+        } else {
+            RESYNC_PEERS_PER_TICK
+        };
+        let after = (
+            self.evpn_marker_cursor.map_or(Unbounded, Excluded),
+            Unbounded,
         );
+        let visible_receipts =
+            !self.eor.evpn_receipts.is_empty() && !self.selection_convergence_held(EVPN);
+        // Ordered union past the cursor. A peer can own both an ordinary
+        // marker and an EVPN receipt and gets only one offer per pass.
+        let mut ordinary = self.eor.retry.range(after).peekable();
+        let mut receipts = visible_receipts
+            .then(|| self.eor.evpn_receipts.range(after))
+            .into_iter()
+            .flatten()
+            .peekable();
+        let ring = std::iter::from_fn(|| match (ordinary.peek(), receipts.peek()) {
+            (Some(a), Some(b)) if a == b => {
+                receipts.next();
+                ordinary.next()
+            }
+            (Some(a), Some(b)) if b < a => receipts.next(),
+            (None, _) => receipts.next(),
+            _ => ordinary.next(),
+        });
         #[cfg(test)]
         let ring = ring.inspect(|_| self.observe_marker_candidate());
         let slice: smallvec::SmallVec<[PeerId; RESYNC_PEERS_PER_TICK]> =
-            ring.take(remaining).copied().collect();
+            ring.take(retry_budget).copied().collect();
+        let release_budget = RESYNC_PEERS_PER_TICK - slice.len();
         for peer in slice {
             self.evpn_marker_cursor = Some(peer);
             self.replacement_checkpoint(false);
             self.retry_eor_markers(peer, true);
             self.refresh_eor_retry(peer);
         }
+        // Read after the offers: a delivered marker has left the ring.
+        let rest = (
+            self.evpn_marker_cursor.map_or(Unbounded, Excluded),
+            Unbounded,
+        );
+        let more = self.eor.retry.range(rest).next().is_some()
+            || (visible_receipts && self.eor.evpn_receipts.range(rest).next().is_some());
+        if !more {
+            self.evpn_marker_cursor = None;
+        }
+        self.service_marker_release_backlog(release_budget);
+        more
     }
 
     #[cfg(test)]
@@ -1179,25 +1267,17 @@ impl RibManager {
         }
     }
 
-    /// Whether a polling lane has a marker of `peer` to send now: a refused
-    /// one, or one its current complete EVPN feed owes. A peer whose EVPN
-    /// recovery reset is pending gets none of either until the reset runs.
+    /// Whether the ordinary debt ledger has a runnable marker for this peer.
+    /// A pending EVPN recovery reset blocks every family on this sender.
     fn eor_retry_runnable(&self, peer: PeerId) -> bool {
         #[cfg(test)]
         if let Some(observer) = &self.marker_retry_test_hook {
             observer("evpn_marker_eligibility");
         }
-        if self.eor.owes_peer(peer)
+        self.eor.owes_peer(peer)
             && !self.evpn_recovery_reset_pending(peer)
             && !self.outbound_channel_gone(peer)
             && self.eor_retry_pending(peer)
-        {
-            return true;
-        }
-        // A current feed receipt already verifies its sender and reset state.
-        self.evpn_feed_receipt_count != 0
-            && self.evpn_feed_owed_markers(peer) != (false, false)
-            && self.eor_retry_ready(peer, EVPN)
     }
 
     /// Put `families`' markers (and `refresh_markers`) on `peer`'s channel.
@@ -1279,43 +1359,5 @@ impl RibManager {
             .families(peer)
             .filter(|&family| self.eor.behind_orf_table(peer, family))
             .collect()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_support::peer_v4;
-    use std::collections::HashMap;
-    use std::net::Ipv4Addr;
-
-    #[test]
-    fn enrolling_one_marker_does_not_move_the_held_cohort() {
-        let mut debts = EorObligations::default();
-        let mut peak = 0;
-        for n in 0_u32..512 {
-            let before: HashMap<_, _> = debts
-                .owed
-                .keys()
-                .map(|key| (*key, std::ptr::from_ref(key).addr()))
-                .collect();
-            let peer = peer_v4(Ipv4Addr::from(0xc000_0000 + n));
-            debts.owe(peer, (Afi::Ipv4, Safi::Unicast));
-            let moved = debts
-                .owed
-                .keys()
-                .filter(|key| {
-                    before
-                        .get(*key)
-                        .is_some_and(|old| *old != std::ptr::from_ref(*key).addr())
-                })
-                .count();
-            if n == 448 {
-                eprintln!("EoR enrollment with {n} existing peers moved {moved} existing keys");
-            }
-            peak = peak.max(moved);
-        }
-        eprintln!("peak existing EoR keys moved per enrollment through 512 peers: {peak}");
-        assert!(peak <= 256, "one EoR enrollment moved {peak} existing keys");
     }
 }

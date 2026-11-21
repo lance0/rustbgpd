@@ -525,20 +525,30 @@ impl RibManager {
         }
     }
 
-    /// Resume the negotiated families' pending responses once this session has a sender.
-    pub(super) fn resume_registration_orf_refresh(&mut self, peer: PeerId, orf_refresh: [bool; 2]) {
+    /// Transfer requests once registration publishes a sender. A plain refresh
+    /// can outlive the selection sweep if that sweep ran before registration.
+    pub(super) fn resume_registration_unicast_refresh(
+        &mut self,
+        peer: PeerId,
+        orf_refresh: [bool; 2],
+    ) {
         for (afi, requested) in [Afi::Ipv4, Afi::Ipv6].into_iter().zip(orf_refresh) {
-            if requested {
-                let family = (afi, Safi::Unicast);
-                if self.selection_peer_convergence_held(peer, family) {
+            let family = (afi, Safi::Unicast);
+            if !requested && !self.selection_deferred_refresh.contains_key(&family) {
+                continue;
+            }
+            if self.selection_peer_convergence_held(peer, family) {
+                if requested {
                     self.selection_deferred_refresh
                         .entry(family)
                         .or_default()
                         .insert(peer);
-                } else {
-                    self.lift_orf_gate(peer, family);
-                    self.defer_refresh_answer(peer, family, false);
                 }
+            } else if self.take_selection_refresh(peer, family) || requested {
+                if requested {
+                    self.lift_orf_gate(peer, family);
+                }
+                self.defer_refresh_answer(peer, family, false);
             }
         }
     }

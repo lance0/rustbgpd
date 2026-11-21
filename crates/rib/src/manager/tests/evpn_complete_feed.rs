@@ -2405,6 +2405,57 @@ fn selection_release_wakes_a_receipt_only_evpn_end_of_refresh() {
     }
 }
 
+#[test]
+fn released_evpn_receipt_survives_other_family_debt_until_its_first_offer() {
+    for resync_due in [false, true] {
+        let (manager, peer, gid, mut output) = fixture();
+        let route = received(100);
+        let mut manager = stage_evpn_until_refresh(manager, route.peer);
+        admit_waiting_for_marker(&mut manager, peer, gid, &route, true);
+        let data = output.try_recv().map(delivered).unwrap();
+        assert_eq!(data.evpn_announce[0].key(), route.key());
+        release_staged_evpn(&mut manager, route.peer);
+
+        // This unrelated family's table still waits for its first refresh.
+        let v4 = (Afi::Ipv4, Safi::Unicast);
+        manager.owe_eor_behind_orf_table(peer, v4);
+        assert!(
+            manager.marker_release_pending(),
+            "lost the EVPN release wake"
+        );
+        let sender = manager.outbound_peers[&peer].clone();
+        while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
+        let visits = count_marker_work(&mut manager, "evpn_marker_candidate");
+        if resync_due {
+            manager.retry_eor_markers_bounded();
+        } else {
+            manager.service_marker_release_backlog(crate::manager::RESYNC_PEERS_PER_TICK);
+        }
+        assert_eq!(visits.load(Ordering::SeqCst), 1, "one refused offer");
+        assert!(!manager.marker_release_pending());
+        assert!(manager.marker_retry_pending());
+        while let Ok(update) = output.try_recv().map(delivered) {
+            assert!(update.end_of_rib.is_empty() && update.refresh_markers.is_empty());
+        }
+
+        manager.service_marker_release_backlog(crate::manager::RESYNC_PEERS_PER_TICK);
+        assert!(
+            output.try_recv().is_err(),
+            "release tick retried the refusal"
+        );
+        manager.retry_eor_markers_bounded();
+        let marker = output.try_recv().map(delivered).unwrap();
+        assert_eq!(
+            marker.refresh_markers,
+            [(EVPN.0, EVPN.1, RouteRefreshSubtype::EoRR)]
+        );
+        assert_eq!(marker.end_of_rib, []);
+        assert!(output.try_recv().is_err());
+        assert!(manager.eor.behind_orf_table(peer, v4));
+        assert!(!manager.resync_tick_pending());
+    }
+}
+
 fn assert_review2_selection_release(nonempty: bool, staged: bool) {
     use crate::manager::selection_deferral::SelectionDeferralTransition;
     let (manager, peer, gid, mut output) = fixture();
@@ -3617,7 +3668,9 @@ fn refused_refresh_marker_captures_the_proof_in_the_refresh_turn() {
     assert!(!manager.dirty_peers.contains(&peer));
     assert!(!manager.evpn_recovery_reset_pending(peer));
 
-    let refused = super::work_scaling::checkpoints_in(|| manager.retry_eor_markers_bounded());
+    let refused = super::work_scaling::checkpoints_in(|| {
+        manager.retry_eor_markers_bounded();
+    });
     assert_eq!(refused.get("capture_evpn"), None);
     assert_eq!(proof_keys(&manager, peer), Some(sorted_keys(&routes)));
     let data = drain_all(&mut output).pop().unwrap();
@@ -3627,7 +3680,9 @@ fn refused_refresh_marker_captures_the_proof_in_the_refresh_turn() {
         [(EVPN.0, EVPN.1, RouteRefreshSubtype::BoRR)]
     );
 
-    let sent = super::work_scaling::checkpoints_in(|| manager.retry_eor_markers_bounded());
+    let sent = super::work_scaling::checkpoints_in(|| {
+        manager.retry_eor_markers_bounded();
+    });
     assert_eq!(sent.get("capture_evpn"), None);
     let marker = output.try_recv().map(delivered).unwrap();
     assert_eq!(marker.end_of_rib, [EVPN]);
@@ -3650,7 +3705,9 @@ fn held_refresh_marker_captures_the_proof_in_the_refresh_turn() {
     assert_eq!(proof_keys(&manager, peer), Some(sorted_keys(&routes)));
     assert_eq!(manager.evpn_feed_owed_markers(peer), (true, true));
     for _ in 0..2 {
-        let poll = super::work_scaling::checkpoints_in(|| manager.retry_eor_markers_bounded());
+        let poll = super::work_scaling::checkpoints_in(|| {
+            manager.retry_eor_markers_bounded();
+        });
         assert_eq!(poll.get("capture_evpn"), None);
         assert!(output.try_recv().map(delivered).is_err());
         assert!(!manager.dirty_peers.contains(&peer));
@@ -4262,6 +4319,62 @@ fn receipt_only_release_work(unrelated: u16) -> super::work_scaling::Work {
 }
 
 #[test]
+fn staged_evpn_feeds_do_not_scan_unrelated_owing_peers() {
+    use crate::manager::outbound_owing::OwedFamily;
+    let (manager, gid, mut outputs) = evpn_marker_receivers();
+    let route = received(100);
+    let mut manager = stage_evpn_until_refresh(manager, route.peer);
+    for (peer, output) in &mut outputs {
+        admit_waiting_for_marker(&mut manager, *peer, gid, &route, false);
+        assert_eq!(
+            output
+                .try_recv()
+                .map(delivered)
+                .unwrap()
+                .evpn_announce
+                .len(),
+            1
+        );
+        manager.invalidate_evpn_feed_completion(*peer);
+        assert!(manager.eor_waits_for_evpn_feed(*peer, EVPN));
+    }
+    let mut debtors = Vec::new();
+    for host in 1..=8 {
+        let peer = peer_v4(Ipv4Addr::new(198, 51, 100, host));
+        let (tx, rx) = mpsc::channel(8);
+        let mut up = super::lifecycle::test_peer_up(peer, 1, tx);
+        if let RibUpdate::PeerUp {
+            sendable_families, ..
+        } = &mut up
+        {
+            *sendable_families = vec![(Afi::Ipv4, Safi::LabeledUnicast)];
+        }
+        manager.handle_update(up);
+        manager.owe_whole_family(peer, OwedFamily::IPV4_LABELED);
+        debtors.push((peer, rx));
+    }
+    let before = manager.adj_rib_out_commit_stats.owed_peer_scans;
+    release_staged_evpn(&mut manager, route.peer);
+    let visits = crate::manager::RESYNC_PEERS_PER_TICK;
+    for _ in 0..outputs.len().div_ceil(visits) {
+        manager.service_marker_release_backlog(visits);
+    }
+    assert!(!manager.marker_release_pending());
+    let scans = manager.adj_rib_out_commit_stats.owed_peer_scans - before;
+    for (peer, mut output) in outputs {
+        let markers = std::iter::from_fn(|| output.try_recv().map(delivered).ok())
+            .flat_map(|update| update.end_of_rib)
+            .filter(|family| *family == EVPN)
+            .count();
+        assert_eq!(markers, 1, "missing or duplicate marker at {peer}");
+    }
+    for (peer, _) in debtors {
+        assert!(manager.owes_whole(peer, OwedFamily::IPV4_LABELED));
+    }
+    assert_eq!(scans, 0, "EVPN release visited unrelated owing peers");
+}
+
+#[test]
 fn staged_evpn_release_work_is_independent_of_unrelated_held_markers() {
     let control = receipt_only_release_work(0);
     let populated = receipt_only_release_work(448);
@@ -4301,18 +4414,35 @@ fn staged_evpn_release_resumes_ordinary_markers_on_their_own_channels() {
     assert!((1..=LIMIT).contains(&visits.swap(0, Ordering::SeqCst)));
 
     // Replace one receiver whose marker has not yet been offered. The
-    // new channel reuses its numeric ID and negotiates only IPv4.
+    // new channel negotiates the released family and reuses the numeric ID.
     let (peer, mut old) = outputs.swap_remove(
         outputs
             .iter()
-            .rposition(|(peer, _)| manager.eor.owes(*peer, EVPN))
+            .rposition(|(peer, _)| manager.eor.release_pending(*peer, EVPN))
             .unwrap(),
     );
     assert!(old.try_recv().is_err());
     let (sender, mut replacement) = mpsc::channel(8);
-    manager.handle_update(super::lifecycle::test_peer_up(peer, 7, sender));
-    let fresh = replacement.try_recv().map(delivered).unwrap();
-    assert_eq!(fresh.end_of_rib, [(Afi::Ipv4, Safi::Unicast)]);
+    let mut up = super::lifecycle::test_peer_up(peer, 7, sender);
+    if let RibUpdate::PeerUp {
+        sendable_families, ..
+    } = &mut up
+    {
+        *sendable_families = vec![EVPN];
+    }
+    manager.handle_update(up);
+    assert!(
+        !manager.eor.release_pending(peer, EVPN),
+        "the old release visit must not hold the new session's EVPN marker"
+    );
+    let fresh: Vec<_> = std::iter::from_fn(|| replacement.try_recv().map(delivered).ok())
+        .flat_map(|update| update.end_of_rib)
+        .collect();
+    assert_eq!(
+        fresh,
+        [EVPN],
+        "the replacement sends its own initial marker"
+    );
     visits.store(0, Ordering::SeqCst);
     let mut answers = HashMap::new();
     for _ in 0..2 * outputs.len() {
@@ -4339,4 +4469,326 @@ fn staged_evpn_release_resumes_ordinary_markers_on_their_own_channels() {
         );
         assert!(!manager.eor.owes(peer, EVPN));
     }
+}
+
+const RECEIPT_WAITER: PeerId = peer_v4(Ipv4Addr::new(203, 0, 113, 7));
+const VPN_FAMILY: (Afi, Safi) = (Afi::Ipv4, Safi::MplsVpn);
+
+fn configured_receipt_waiter(manager: RibManager, families: Vec<(Afi, Safi)>) -> RibManager {
+    manager.with_selection_deferral(crate::SelectionDeferralConfig {
+        timeout: Duration::from_secs(60),
+        waiters: vec![crate::SelectionDeferralWaiterConfig {
+            peer: RECEIPT_WAITER.into(),
+            families,
+        }],
+    })
+}
+
+fn register_receipt_waiter(
+    manager: &mut RibManager,
+    families: Vec<(Afi, Safi)>,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
+        peer: RECEIPT_WAITER,
+        session_id: 12,
+        peer_restart_state: false,
+        peer_gr_helper: true,
+        peer_gr_families: families.clone(),
+        peer_enhanced_refresh: false,
+        peer_llgr_families: vec![],
+        local_llgr_stale_time: 0,
+    });
+    let (tx, rx) = mpsc::channel(16);
+    let mut up = super::lifecycle::test_peer_up(RECEIPT_WAITER, 12, tx);
+    if let RibUpdate::PeerUp {
+        sendable_families, ..
+    } = &mut up
+    {
+        *sendable_families = families;
+    }
+    manager.handle_update(up);
+    assert!(manager.selection_convergence_held(EVPN));
+    rx
+}
+
+fn release_receipt_waiter(manager: &mut RibManager, (afi, safi): (Afi, Safi)) {
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: RECEIPT_WAITER,
+        session_id: 12,
+        afi,
+        safi,
+    });
+    assert!(!manager.selection_convergence_held((afi, safi)));
+}
+
+fn refuse_refresh_tail(
+    manager: &mut RibManager,
+    peer: PeerId,
+    output: &mut mpsc::Receiver<OutboundRouteUpdate>,
+) {
+    leave_one_slot(manager, peer);
+    manager.handle_update(RibUpdate::RouteRefreshRequest {
+        peer,
+        session_id: 7,
+        afi: EVPN.0,
+        safi: EVPN.1,
+        queued: Arc::default(),
+    });
+    let sent = drain_all(output);
+    assert_eq!(
+        sent.last().unwrap().refresh_markers,
+        [(EVPN.0, EVPN.1, RouteRefreshSubtype::BoRR)]
+    );
+    assert_eq!(manager.evpn_feed_owed_markers(peer), (true, true));
+    assert!(manager.eor_pending(peer).is_empty());
+}
+
+#[test]
+fn arming_evpn_selection_parks_existing_receipts_until_an_immediate_release() {
+    let (manager, peer, _, mut output, _) = clean_owned_member(1);
+    let mut manager = configured_receipt_waiter(manager, vec![EVPN]);
+    refuse_refresh_tail(&mut manager, peer, &mut output);
+    assert!(manager.marker_retry_pending());
+    let _waiter = register_receipt_waiter(&mut manager, vec![EVPN]);
+    assert!(
+        !manager.marker_retry_pending(),
+        "receipt-only retry stayed runnable under selection"
+    );
+    assert!(output.try_recv().is_err());
+    // Release without an intervening retry or any change on the receiver.
+    release_receipt_waiter(&mut manager, EVPN);
+    manager.service_marker_release_backlog(crate::manager::RESYNC_PEERS_PER_TICK);
+    let marker = output.try_recv().map(delivered).unwrap();
+    assert_eq!(marker.refresh_markers, EVPN_TERMINAL);
+    assert_eq!(marker.end_of_rib, [EVPN]);
+    assert!(output.try_recv().is_err());
+}
+
+#[test]
+fn an_earlier_family_release_cannot_block_an_independent_evpn_receipt() {
+    const LIMIT: usize = crate::manager::RESYNC_PEERS_PER_TICK;
+    let (manager, ready, _, mut output, _) = clean_owned_member(1);
+    let mut manager = configured_receipt_waiter(manager, vec![VPN_FAMILY, EVPN]);
+    refuse_refresh_tail(&mut manager, ready, &mut output);
+
+    // More lower-ID members than one receipt slice. Each one-slot channel
+    // admits the initial table but refuses its terminal envelope.
+    let mut blocked = Vec::new();
+    for host in 1..=5 {
+        let peer = peer_v4(Ipv4Addr::new(192, 0, 2, host));
+        assert!(peer < ready);
+        let (tx, mut rx) = mpsc::channel(1);
+        register(&mut manager, peer, tx);
+        let table = rx.try_recv().map(delivered).unwrap();
+        assert!(!table.evpn_announce.is_empty());
+        assert!(!table.end_of_rib.contains(&EVPN));
+        assert!(manager.eor.owes(peer, EVPN));
+        assert!(manager.evpn_feed_owed_markers(peer).0);
+        blocked.push((peer, rx, 0_usize));
+    }
+
+    let _waiter = register_receipt_waiter(&mut manager, vec![VPN_FAMILY, EVPN]);
+    let mut vpn_outputs = Vec::new();
+    for host in 1..=40 {
+        let peer = peer_v4(Ipv4Addr::new(10, 0, 0, host));
+        let (tx, rx) = mpsc::channel(4);
+        let mut up = super::lifecycle::test_peer_up(peer, 9, tx);
+        if let RibUpdate::PeerUp {
+            sendable_families, ..
+        } = &mut up
+        {
+            *sendable_families = vec![VPN_FAMILY];
+        }
+        manager.handle_update(up);
+        assert!(manager.eor.owes(peer, VPN_FAMILY));
+        vpn_outputs.push(rx);
+    }
+    // Let the ordinary timer see the held receipts before either gate opens.
+    manager.retry_eor_markers_bounded();
+    release_receipt_waiter(&mut manager, VPN_FAMILY);
+    release_receipt_waiter(&mut manager, EVPN);
+    assert!(
+        blocked
+            .iter()
+            .all(|(peer, _, _)| manager.eor.release_pending(*peer, EVPN))
+    );
+    assert!(!manager.eor.release_pending(ready, EVPN));
+    let visits = count_marker_work(&mut manager, "evpn_marker_candidate");
+    // The first receipt share sees four blocked IDs. The second share
+    // continues past them while the VPN release still owns the family lane.
+    for _ in 0..2 {
+        manager.service_marker_release_backlog(LIMIT);
+        assert!(visits.swap(0, Ordering::SeqCst) <= LIMIT);
+    }
+    let marker = output
+        .try_recv()
+        .map(delivered)
+        .expect("independent EVPN receipt blocked behind the VPN release");
+    assert_eq!(marker.refresh_markers, EVPN_TERMINAL);
+    assert!(
+        blocked
+            .iter()
+            .all(|(peer, _, _)| manager.eor.release_pending(*peer, EVPN))
+    );
+    for (_, rx, _) in &mut blocked {
+        assert!(
+            !drain_all(rx)
+                .iter()
+                .any(|packet| packet.end_of_rib.contains(&EVPN))
+        );
+    }
+    // Each one-slot writer can refuse again when its two families release.
+    // Drain between ticks like a reading transport.
+    for _ in 0..40 {
+        for (_, rx, count) in &mut blocked {
+            *count += drain_all(rx)
+                .iter()
+                .filter(|packet| packet.end_of_rib.contains(&EVPN))
+                .count();
+        }
+        if !manager.resync_tick_pending() {
+            break;
+        }
+        manager.resync_dirty_peers_bounded();
+    }
+    assert!(blocked.iter().all(|(_, _, count)| *count == 1));
+    assert!(output.try_recv().is_err());
+}
+
+// The answer to a refresh deferred under the gate offers the parked receipt
+// itself. That offer consumes the release wake, so a full writer must leave
+// the terminal on the retry ring: one EoRR at the retry deadline, not one
+// from the receipt lane 10 ms later and not none at all.
+#[tokio::test(start_paused = true)]
+async fn a_refused_refresh_answer_terminal_after_release_is_retried_once() {
+    let (manager, peer, _, mut output, _) = clean_owned_member(1);
+    let mut manager = configured_receipt_waiter(manager, vec![EVPN]);
+    refuse_refresh_tail(&mut manager, peer, &mut output);
+    let _waiter = register_receipt_waiter(&mut manager, vec![EVPN]);
+    // A second refresh arrives under the hold and waits for the release.
+    manager.handle_update(RibUpdate::RouteRefreshRequest {
+        peer,
+        session_id: 7,
+        afi: EVPN.0,
+        safi: EVPN.1,
+        queued: Arc::default(),
+    });
+    assert!(manager.orf_refresh_queued(peer, EVPN));
+    assert!(drain_all(&mut output).is_empty());
+    // Room for the deferred answer's data, none for its terminal.
+    leave_one_slot(&manager, peer);
+    let (input, rx) = mpsc::channel(16);
+    manager.rx = rx;
+    let barrier = async |input: &mpsc::Sender<RibUpdate>| {
+        let (reply, response) = oneshot::channel();
+        input
+            .send(RibUpdate::QueryLocRibCount { reply })
+            .await
+            .unwrap();
+        response.await.unwrap();
+    };
+    let actor = tokio::spawn(manager.run_actor());
+    barrier(&input).await;
+    let released = tokio::time::Instant::now();
+    input
+        .send(RibUpdate::EndOfRib {
+            peer: RECEIPT_WAITER,
+            session_id: 12,
+            afi: EVPN.0,
+            safi: EVPN.1,
+        })
+        .await
+        .unwrap();
+    barrier(&input).await;
+    // The transport reads everything; the writer is empty from here on.
+    let answer = drain_all(&mut output);
+    let count = |sent: &[OutboundRouteUpdate], subtype| {
+        sent.iter()
+            .filter(|update| update.refresh_markers.contains(&(EVPN.0, EVPN.1, subtype)))
+            .count()
+    };
+    assert_eq!(count(&answer, RouteRefreshSubtype::BoRR), 1);
+    assert_eq!(count(&answer, RouteRefreshSubtype::EoRR), 0);
+    tokio::time::sleep_until(released + Duration::from_millis(999)).await;
+    barrier(&input).await;
+    assert!(
+        drain_all(&mut output).is_empty(),
+        "the consumed release wake offered the refused terminal again"
+    );
+    tokio::time::sleep_until(released + Duration::from_millis(1_001)).await;
+    barrier(&input).await;
+    let retried = drain_all(&mut output);
+    assert_eq!(
+        count(&retried, RouteRefreshSubtype::EoRR),
+        1,
+        "the refused terminal left every retry index"
+    );
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    barrier(&input).await;
+    assert!(drain_all(&mut output).is_empty());
+    drop(input);
+    let manager = actor.await.unwrap();
+    assert_eq!(manager.evpn_feed_owed_markers(peer), (false, false));
+    assert!(!manager.marker_retry_pending());
+    assert!(!manager.marker_release_pending());
+}
+
+// A full writer that refuses the EVPN End-of-RIB of its family-release visit
+// has had its one release offer. The receipt lane must not offer it again;
+// the debt waits on the retry ring.
+#[test]
+fn a_refused_evpn_release_marker_gets_no_second_offer_from_the_receipt_lane() {
+    let (manager, _ready, _, _output, _) = clean_owned_member(1);
+    let mut manager = configured_receipt_waiter(manager, vec![EVPN]);
+    let peer = peer_v4(Ipv4Addr::new(192, 0, 2, 1));
+    let (tx, mut rx) = mpsc::channel(1);
+    register(&mut manager, peer, tx);
+    let table = rx.try_recv().map(delivered).unwrap();
+    assert!(!table.evpn_announce.is_empty());
+    assert!(manager.eor.owes(peer, EVPN));
+    assert!(manager.evpn_feed_owed_markers(peer).0);
+    let _waiter = register_receipt_waiter(&mut manager, vec![EVPN]);
+    // The one slot is full for the release turn only.
+    manager.outbound_peers[&peer]
+        .try_send(OutboundRouteUpdate::default())
+        .unwrap();
+    release_receipt_waiter(&mut manager, EVPN);
+    let eors = |rx: &mut mpsc::Receiver<OutboundRouteUpdate>| {
+        drain_all(rx)
+            .iter()
+            .filter(|update| update.end_of_rib.contains(&EVPN))
+            .count()
+    };
+    assert_eq!(eors(&mut rx), 0);
+    assert!(
+        manager.eor.owes(peer, EVPN),
+        "the release offer was refused"
+    );
+    // The writer is empty now, so any further release-lane offer would land.
+    for _ in 0..3 {
+        manager.service_marker_release_backlog(crate::manager::RESYNC_PEERS_PER_TICK);
+    }
+    assert_eq!(
+        eors(&mut rx),
+        0,
+        "the receipt lane offered a refused marker again"
+    );
+    assert!(manager.marker_retry_pending());
+    manager.retry_eor_markers_bounded();
+    assert_eq!(eors(&mut rx), 1);
+    assert!(!manager.eor.owes(peer, EVPN));
+    assert!(!manager.marker_retry_pending());
+}
+
+#[test]
+fn peer_down_takes_a_ready_receipt_off_the_retry_ring() {
+    let (mut manager, peer, _, mut output, _) = clean_owned_member(1);
+    refuse_refresh_tail(&mut manager, peer, &mut output);
+    assert!(manager.marker_retry_pending());
+    let session_id = manager.outbound_session_ids[&peer];
+    manager.handle_update(RibUpdate::PeerDown { peer, session_id });
+    assert!(
+        !manager.marker_retry_pending(),
+        "teardown left the ended session's receipt on the retry ring"
+    );
 }

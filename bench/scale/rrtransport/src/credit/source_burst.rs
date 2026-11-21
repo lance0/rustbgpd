@@ -57,8 +57,10 @@ const STALL_SEQUENCE: u32 = 5;
 /// Next hop of every route the sources send: a session rejects a loopback
 /// next hop, so the sources' own addresses cannot serve.
 const NEXT_HOP: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
-const COMPILERS: [&str; 4] = ["cargo", "rustc", "rustdoc", "clippy-driver"];
-const COMPILER_WATCH_EVERY: Duration = Duration::from_secs(1);
+/// The quiet gate's compilers and linkers, one process name per line, shared
+/// with the grouped capture cell's watch.
+const COMPILERS: &str = include_str!("../../compiler-names.txt");
+pub(super) const COMPILER_WATCH_EVERY: Duration = Duration::from_secs(1);
 
 /// The cell's own flags, taken out of `args` before [`Options::parse`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -501,11 +503,11 @@ fn marked(burst: &[&[usize]], per_update: usize) -> Vec<bool> {
 }
 
 #[derive(Debug, Default)]
-struct CompilerWatch {
-    samples: usize,
-    observed: usize,
-    first: Option<String>,
-    unavailable: Option<String>,
+pub(super) struct CompilerWatch {
+    pub(super) samples: usize,
+    pub(super) observed: usize,
+    pub(super) first: Option<String>,
+    pub(super) unavailable: Option<String>,
 }
 
 fn compilers_running() -> std::io::Result<Option<String>> {
@@ -525,7 +527,7 @@ fn compilers_running() -> std::io::Result<Option<String>> {
             // Any other failure leaves the process unchecked.
             Err(error) => return Err(error),
         };
-        if COMPILERS.contains(&name.trim()) {
+        if COMPILERS.lines().any(|compiler| compiler == name.trim()) {
             return Ok(Some(name.trim().to_string()));
         }
     }
@@ -541,7 +543,7 @@ fn process_gone(error: &std::io::Error) -> bool {
 
 /// Sample the process table for a compiler until `stop`, as the timed
 /// EVPN qualification cells do.
-fn watch_compilers(stop: Arc<AtomicBool>) -> thread::JoinHandle<CompilerWatch> {
+pub(super) fn watch_compilers(stop: Arc<AtomicBool>) -> thread::JoinHandle<CompilerWatch> {
     thread::spawn(move || {
         let mut watch = CompilerWatch::default();
         loop {
@@ -1152,6 +1154,18 @@ mod tests {
     use super::*;
 
     const HELD: Duration = Duration::from_millis(150);
+
+    /// The watch compares whole lines, so each must be one bare process name.
+    #[test]
+    fn compiler_watch_names_are_bare_and_cover_c_toolchains() {
+        let names: Vec<_> = COMPILERS.lines().collect();
+        assert!(names
+            .iter()
+            .all(|name| !name.is_empty() && !name.contains(char::is_whitespace)));
+        for expected in ["rustc", "clippy-driver", "gcc", "cc1plus", "ld.lld"] {
+            assert!(names.contains(&expected), "{expected} is not watched");
+        }
+    }
 
     struct Reading {
         wait: Duration,

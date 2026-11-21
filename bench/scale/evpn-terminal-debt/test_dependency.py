@@ -38,7 +38,10 @@ class DependencyChecks(unittest.TestCase):
             cls.files = {row.name: archive.extractfile(row).read() for row in archive if row.isfile()}
 
     def derived(self, arm):
-        files = dict(self.files)
+        return self.derived_from(self.files, arm)
+
+    def derived_from(self, files, arm):
+        files = dict(files)
         paths = ("src/main.rs", "crates/rib/src/manager/mod.rs")
         result = self.q.derived_texts(*(files[name].decode() for name in paths),
                                     files["bench/scale/evpn-qualification/observer.rs"].decode(), arm,
@@ -64,6 +67,29 @@ class DependencyChecks(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "anchor drift"):
                 patches.split_once(text, "anchor")
         self.assertEqual(patches.split_once("before anchor after", "anchor"), ["before ", " after"])
+
+    def test_refused_marker_branch_keeps_its_input_form(self):
+        path = "crates/rib/src/manager/eor_hold.rs"
+        retry = b"            self.refresh_eor_retry(peer);\n"
+        kept = b"        if !terminal_sent {\n" + retry + b"            return;\n        }"
+        self.assertEqual(self.derived("candidate")[path].count(kept), 1)
+        # A comparison's parent input: the same branch without the retry call.
+        files = dict(self.files)
+        current = files[path].decode()
+        start = current.index("        if !self.send_eor_markers(peer, &tx, &families, refresh_markers, None) {\n")
+        end = current.index("            return;\n", start)
+        self.assertIn(retry.decode(), current[start:end])
+        opening = current[start:current.index("\n", start) + 1]
+        older = current[:start] + opening + current[end:]
+        files[path] = older.encode()
+        derived = self.derived_from(files, "candidate")[path]
+        self.assertEqual(derived.count(b"        if !terminal_sent {\n            return;\n        }"), 1)
+        self.assertEqual(derived.count(kept), 0)
+        both = older[:start] + current[start:end] + "            return;\n        }\n" + older[start:]
+        for text in (both, current[:start] + current[end:]):
+            files[path] = text.encode()
+            with self.assertRaisesRegex(ValueError, "anchor drift"):
+                self.derived_from(files, "candidate")
 
     def test_actual_run_cell_leaves_capture_directory_creation_to_the_driver(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -28,6 +28,7 @@
 //! - `source_burst`: an unpaced burst and a healthy source's steady
 //!   updates, both through real sessions; see the module.
 
+pub mod family_restart;
 pub mod release;
 pub mod source_burst;
 
@@ -409,6 +410,18 @@ fn release_destination(afi: Afi, index: usize) -> (Prefix, IpAddr) {
     }
 }
 
+fn indexed_destination(afi: Afi, index: usize) -> (Prefix, IpAddr) {
+    if afi == Afi::Ipv6 && index > usize::from(u16::MAX) {
+        let high = u16::try_from(index >> 16).expect("IPv6 fixture index fits u32");
+        let low = u16::try_from(index & 0xffff).expect("lower subnet word");
+        let prefix = Ipv6Addr::new(0x2001, 0xdb8, high, low, 0, 0, 0, 0);
+        let (_, next_hop) = release_destination(afi, 0);
+        (Prefix::V6(Ipv6Prefix::new(prefix, 64)), next_hop)
+    } else {
+        release_destination(afi, index)
+    }
+}
+
 fn route_label(index: usize) -> MplsLabelEntry {
     MplsLabelEntry {
         label: 16 + u32::try_from(index % 1_000).expect("label fits"),
@@ -453,8 +466,24 @@ fn vpn_route(
     }
 }
 
+fn paired_vpn_route(afi: Afi, index: usize, attrs: Arc<AttrSet>) -> VpnRibRoute {
+    let rd = RouteDistinguisher([0, 0, 0xfc, 0, 0, 0, 0, 1 + u8::from(index % 2 == 1)]);
+    vpn_route(index, attrs, rd, indexed_destination(afi, index / 2))
+}
+
+// Two-octet-AS transitive route target 64512:100, shared by both RDs.
+fn restart_vpn_route(afi: Afi, index: usize, med: u32) -> VpnRibRoute {
+    let mut attrs = attributes(index, med, 100);
+    AttrSet::edit(&mut attrs, |attrs| {
+        attrs.push(PathAttribute::ExtendedCommunities(vec![
+            rustbgpd_wire::ExtendedCommunity::new(0x0002_fc00_0000_0064),
+        ]));
+    });
+    paired_vpn_route(afi, index, attrs)
+}
+
 /// VPN release rows come in pairs with the same prefix and different RDs.
-fn release_source_update(family: Family, indices: std::ops::Range<usize>) -> RibUpdate {
+pub(super) fn release_source_update(family: Family, indices: std::ops::Range<usize>) -> RibUpdate {
     let afi = family.afi_safi().0;
     let peer = PeerId::from_ipv4(SOURCE);
     match family {
@@ -462,47 +491,51 @@ fn release_source_update(family: Family, indices: std::ops::Range<usize>) -> Rib
             peer,
             session_id: 1,
             announced: indices
-                .map(|index| {
-                    let rd =
-                        RouteDistinguisher([0, 0, 0xfc, 0, 0, 0, 0, 1 + u8::from(index % 2 == 1)]);
-                    vpn_route(
-                        index,
-                        attributes(index, BURST_VERSION, 100),
-                        rd,
-                        release_destination(afi, index / 2),
-                    )
-                })
+                .map(|index| paired_vpn_route(afi, index, attributes(index, BURST_VERSION, 100)))
                 .collect(),
             withdrawn: Vec::new(),
         },
-        Family::Labeled4 | Family::Labeled6 => RibUpdate::LabeledRoutesReceived {
-            peer,
-            session_id: 1,
-            announced: indices
-                .map(|index| {
-                    let (prefix, next_hop) = release_destination(afi, index);
-                    LabeledRibRoute {
-                        nlri: LabeledNlri {
-                            labels: vec![route_label(index)],
-                            prefix,
-                        },
-                        next_hop,
-                        link_local_next_hop: None,
-                        next_hop_scope: None,
-                        peer,
-                        attributes: attributes(index, BURST_VERSION, 100),
-                        received_at: Instant::now(),
-                        origin_type: RouteOrigin::Ibgp,
-                        peer_router_id: SOURCE,
-                        is_stale: false,
-                        is_llgr_stale: false,
-                        path_id: 0,
-                    }
-                })
-                .collect(),
-            withdrawn: Vec::new(),
-        },
+        Family::Labeled4 | Family::Labeled6 => {
+            labeled_source_update(family, indices, 1, BURST_VERSION)
+        }
         _ => source_update(family, indices, BURST_VERSION, 100),
+    }
+}
+
+fn labeled_source_update(
+    family: Family,
+    indices: std::ops::Range<usize>,
+    session_id: u64,
+    med: u32,
+) -> RibUpdate {
+    let afi = family.afi_safi().0;
+    let peer = PeerId::from_ipv4(SOURCE);
+    RibUpdate::LabeledRoutesReceived {
+        peer,
+        session_id,
+        announced: indices
+            .map(|index| {
+                let (prefix, next_hop) = indexed_destination(afi, index);
+                LabeledRibRoute {
+                    nlri: LabeledNlri {
+                        labels: vec![route_label(index)],
+                        prefix,
+                    },
+                    next_hop,
+                    link_local_next_hop: None,
+                    next_hop_scope: None,
+                    peer,
+                    attributes: attributes(index, med, 100),
+                    received_at: Instant::now(),
+                    origin_type: RouteOrigin::Ibgp,
+                    peer_router_id: SOURCE,
+                    is_stale: false,
+                    is_llgr_stale: false,
+                    path_id: 0,
+                }
+            })
+            .collect(),
+        withdrawn: Vec::new(),
     }
 }
 
@@ -679,12 +712,22 @@ async fn source_up(
     source: Ipv4Addr,
     gr_families: Vec<(Afi, Safi)>,
 ) -> Result<mpsc::Receiver<rustbgpd_rib::update::OutboundRouteUpdate>> {
+    source_session_up(rib, source, 1, false, gr_families).await
+}
+
+async fn source_session_up(
+    rib: &mpsc::Sender<RibUpdate>,
+    source: Ipv4Addr,
+    session_id: u64,
+    peer_restart_state: bool,
+    gr_families: Vec<(Afi, Safi)>,
+) -> Result<mpsc::Receiver<rustbgpd_rib::update::OutboundRouteUpdate>> {
     let peer = PeerId::from_ipv4(source);
     if !gr_families.is_empty() {
         rib.send(RibUpdate::SetPeerGracefulRestartContext {
             peer,
-            session_id: 1,
-            peer_restart_state: false,
+            session_id,
+            peer_restart_state,
             peer_gr_helper: true,
             peer_gr_families: gr_families,
             peer_enhanced_refresh: true,
@@ -697,7 +740,7 @@ async fn source_up(
     rib.send(RibUpdate::PeerUp {
         supersedes: None,
         peer,
-        session_id: 1,
+        session_id,
         peer_asn: LOCAL_AS,
         peer_router_id: source,
         outbound_tx,
@@ -726,7 +769,10 @@ fn receiver_ip(index: usize) -> Ipv4Addr {
     )
 }
 
-fn statement(prefix: Option<Prefix>, neighbor: Option<NeighborSetMatch>) -> PolicyStatement {
+pub(super) fn statement(
+    prefix: Option<Prefix>,
+    neighbor: Option<NeighborSetMatch>,
+) -> PolicyStatement {
     PolicyStatement {
         prefix,
         ge: None,
@@ -750,7 +796,7 @@ fn statement(prefix: Option<Prefix>, neighbor: Option<NeighborSetMatch>) -> Poli
     }
 }
 
-fn permit_all_but(entry: PolicyStatement) -> PolicyChain {
+pub(super) fn permit_all_but(entry: PolicyStatement) -> PolicyChain {
     PolicyChain::new(vec![Policy {
         entries: vec![entry],
         default_action: PolicyAction::Permit,
@@ -827,6 +873,14 @@ struct Fixture {
 
 impl Fixture {
     fn start(options: &Options, deferral: Option<SelectionDeferralConfig>) -> Self {
+        Self::start_with_probe(options, deferral, None)
+    }
+
+    fn start_with_probe(
+        options: &Options,
+        deferral: Option<SelectionDeferralConfig>,
+        probe: Option<family_restart::ReleaseProbe>,
+    ) -> Self {
         let daemon = options
             .daemon
             .clone()
@@ -838,11 +892,15 @@ impl Fixture {
         if let Some(deferral) = deferral {
             manager = manager.with_selection_deferral(deferral);
         }
+        let manager = match probe {
+            Some(probe) => daemon.spawn(probe.run(manager, rib.clone())),
+            None => daemon.spawn(manager.run()),
+        };
         Self {
             metrics,
             rib,
             _query: query,
-            manager: daemon.spawn(manager.run()),
+            manager,
             daemon,
             receivers: Vec::new(),
             sources: Vec::new(),
@@ -1415,18 +1473,26 @@ fn sampler(
     })
 }
 
+fn cgroup_peak_bytes() -> Option<u64> {
+    cgroup_value("memory.peak")?.parse().ok()
+}
+
+fn cgroup_oom_kill() -> Option<String> {
+    cgroup_value("memory.events")?
+        .lines()
+        .find_map(|line| line.strip_prefix("oom_kill ").map(str::to_string))
+}
+
 fn memory_json(instruments: &Instruments) -> Value {
     let (rss, hwm) = rss_kib().unwrap_or((0, 0));
     let peak = instruments.peak_jemalloc;
     let at = instruments.at_peak_rss.unwrap_or_default();
     json!({
         "cgroup": cgroup().map(|path| path.display().to_string()),
-        "cgroup_memory_peak_bytes": cgroup_value("memory.peak").and_then(|value| value.parse::<u64>().ok()),
+        "cgroup_memory_peak_bytes": cgroup_peak_bytes(),
         "cgroup_memory_max": cgroup_value("memory.max"),
         "cgroup_swap_max": cgroup_value("memory.swap.max"),
-        "cgroup_oom_kill": cgroup_value("memory.events").and_then(|events| {
-            events.lines().find_map(|line| line.strip_prefix("oom_kill ").map(str::to_string))
-        }),
+        "cgroup_oom_kill": cgroup_oom_kill(),
         "vmrss_kib": rss,
         "vmhwm_kib": hwm,
         "peak_sampled_rss_kib": at.rss_kib,
@@ -3301,6 +3367,29 @@ mod tests {
             release[0].nlri.route_distinguisher
         );
         assert_eq!(release[1].nlri.labels, fill[1].nlri.labels);
+    }
+
+    #[test]
+    fn vpn_restart_full_shape_has_distinct_rds_even_past_the_ipv6_subnet_boundary() {
+        for afi in [super::Afi::Ipv4, super::Afi::Ipv6] {
+            let mut keys = std::collections::HashSet::new();
+            for index in [0, 1, 131_070, 131_071, 131_072, 131_073, 149_998, 149_999] {
+                let row = super::restart_vpn_route(afi, index, super::BURST_VERSION);
+                assert!(keys.insert(row.key()));
+                assert_eq!(row.extended_communities().len(), 1);
+                assert_eq!(
+                    row.extended_communities()[0].route_target(),
+                    Some((64_512, 100))
+                );
+                assert_eq!(row.nlri.labels, [super::route_label(index)]);
+                let sibling = super::restart_vpn_route(afi, index ^ 1, super::BURST_VERSION);
+                assert_eq!(row.nlri.prefix, sibling.nlri.prefix);
+                assert_ne!(
+                    row.nlri.route_distinguisher,
+                    sibling.nlri.route_distinguisher
+                );
+            }
+        }
     }
 
     #[test]

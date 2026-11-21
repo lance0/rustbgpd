@@ -93,6 +93,145 @@ CI never runs the scale shape. It runs the original smoke, a 4×100 real-TCP
 fixture through the same scale collector/verifier/RSS seams, and destructive
 parser/mechanics fixtures.
 
+## Established route-server clients at first refusal
+
+The `grouped-old-capture` cell measures the ordinary RIB turn that saves an
+established group member’s previously admitted unicast keys (OLD), and then
+follows the same receivers through the dirty period, recovery and the release
+of the proof by its last owner. Use the supervised runner to collect cgroup
+and compiler evidence alongside the actor receipt. It accepts a prebuilt
+scale-profile binary and a fresh output directory.
+
+```sh
+CARGO_INCREMENTAL=0 cargo build --locked --profile scale -p rrtransport
+bench/scale/rrtransport/run-grouped-old.sh target/scale/rrtransport /tmp/grouped-old-smoke smoke
+```
+
+| Runner shape | Established group clients | Routes before the trigger |
+| --- | ---: | ---: |
+| `smoke` (correctness only) | 4 | 64 |
+| `smoke-chunked` (multiple seed batches, correctness only) | 12 | 2,049 |
+| `150x37000` | 150 | 37,000 |
+| `700x400000` | 700 | 400,000 |
+
+Each client is a real IPv4 loopback eBGP route-server session. The clients share
+one remote ASN and a prefix-deny/default-permit export policy. A denied route
+must win locally and remain absent from every receiver. The two sources submit
+session-scoped route batches at the RIB boundary. The harness controls
+each member's outbound channel so every target can start the measured turn
+with a full writer and a previously clean view. The controlled quantity is
+backpressure at the physical sender's RIB queue, not the time for a TCP socket
+to fill.
+
+The RIB actor runs on its own thread and runtime. The sessions, their peers
+and the harness share a separate 12-worker runtime, so the length of an actor
+turn does not reach a keepalive or hold timer. The hold time is 180 s with
+keepalives every 60 s. The receipt records the longest scheduling gap of that
+runtime. A run in which it reaches a keepalive interval is INVALID, and so is
+a session reset that follows such a gap; any other reset is a FAIL.
+
+### Phases
+
+The receipt labels every physical poll of the RIB future with one phase. The
+actor reports each boundary itself, on its own thread; no boundary is a
+harness clock.
+
+| Phase | From | What it contains |
+| --- | --- | --- |
+| `setup` | start | registration, seed and the two fills |
+| `refusal` | entry to the triggering pass | the capture of every member and the refused sends |
+| `dirty` | return of that pass | the first probe's own pass, and resync retries against full receivers |
+| `recovery` | the first resync slice that finds a free slot | one whole-table replay per receiver |
+| `settled` | no receiver dirty | final fences and shutdown |
+
+A poll that contains any part of the triggering pass is `refusal`. Otherwise
+one that contains any recovery work is `recovery`. Any other poll takes the
+phase in force when it began. `phases` gives each phase's poll count and
+longest poll. `longest_actor_poll_ns` is the whole-run maximum, with the
+phase it was labeled and every phase that poll touched. `retirement` is the
+longest poll between the last observation of a charged recovery ledger and
+the first observation of its pre-capture charge; those polls also belong to
+`recovery`. A limit on one phase cannot be met by moving a pause into another:
+the pause appears under the other phase and in the whole-run maximum. The
+receipt is taken after the actor has returned, so `settled` and the whole-run
+maximum include its last poll, which drops the RIB; every phase has at least
+one poll.
+
+Two unrelated ordinary UPDATEs from a second source measure the wait on the
+primary lane. Each is published from a slot reserved in advance, by the actor's
+own callback: the first at entry to the first OLD walk, the second at entry to
+the first resync slice that finds a free slot, before that slice builds
+anything. Each clock ends when the actor enters that UPDATE’s handler. The
+subsequent observation of its matching Loc-RIB winner is an upper bound on
+application. The harness holds the dirty period until one resync tick has
+retried a full receiver, so the dirty phase includes that retry. The dirty
+period and the settled phase have no probe.
+
+### Work counts and proofs
+
+The witness counts fresh grouped proofs that sealed and completed table walks
+in the pre-staging loop of the triggering pass. A completed walk projects
+every occupied row once, so its projections are the table's row count at the
+end of the walk: nothing is counted per row, and the measured walk is the
+function a daemon build runs. The additions inside the capture loop are two
+thread-local accesses per walk, and one more plus one callback per capture,
+which stores that capture's record.
+
+For each capture the receipt records the proof strategy (`indexed` over a
+shared key pool, `built` or `reused`, or `flat`), its keys, the slab slots of
+the walked table, its walks and projections, the bytes charged to that member
+and the daemon-wide charge after it. `proof_ledger` holds the charge before
+and after the pass, the peak and both limits. A capture the ledger refuses
+ends the run INVALID with the cause and the attempted bytes.
+
+These counts are exact and a mismatch is INVALID: two walks per capture, no
+walk outside a sealed grouped capture, projections equal to walks times rows,
+keys equal to rows, and `2 × rows + 4` announcements per receiver (the seed,
+two fills, one recovery replay and the recovery probe). Slab slots have a
+lower bound only, since vacant slots depend on reuse order. Polls and resync
+slices per phase have a lower bound of one, since they depend on how the
+harness's draining meets the resync tick.
+
+Independent checks fold both accepted RIB envelopes and decoded TCP UPDATEs.
+After recovery each client must have the correct keys, origin, next hop, AS path
+and communities, including the replacements and the final withdrawal. Each
+stream is checked at a decoded IPv4 ROUTE-REFRESH fence. A wrong table fails
+the run.
+
+### Grading
+
+The counters and probe hooks require `bench-internals`; the normal daemon
+exports no metric for them. Optimized runs require the test checkpoint tally
+to be compiled out. The elapsed times include the bench observation itself.
+
+Grade a saved directory with
+`python3 bench/scale/rrtransport/grouped_old.py check OUTPUT_DIR SHAPE`. The files `grouped-old.json` and `host.json` retain
+per-receiver wire evidence, actor clocks and work counts, and the cgroup and
+compiler observations. The runner records the executable SHA-256 and uses the
+quiet-host gate for the two full shapes. It samples for compilers every 250 ms
+and at the process boundaries, by the process names in `compiler-names.txt`:
+the compilers and linkers the quiet gate rejects, and `clippy-driver`. One of
+them stops a full shape and makes it INVALID. A smoke records the sighting and is still graded on its tables and
+counts; its timings are not results.
+
+Every shape uses a dedicated 64 GiB cgroup with swap disabled. The receipt
+records kernel memory peak and swap peak. The limit is a fence, not a
+prediction of memory use. An OOM or incomplete capture leaves that size
+unqualified. The full shapes report measurements without a predeclared latency
+pass/fail threshold.
+
+### What the cell does not measure
+
+- A capture made at send time, outside the pre-staging loop, or for a member
+  that is not grouped.
+- IPv6, VPN, Add-Path, per-client-best groups, members with different export
+  views, more than one group, or a mix of full and healthy clients: every
+  client is blocked at once and recovers through a two-slot queue.
+- The wait of an ordinary UPDATE in the dirty period or after recovery.
+- The daemon's memory alone, or memory with production's 4,096-envelope
+  queues full. The cgroup peak includes the harness and every receiver.
+- How often a route server reaches the measured state.
+
 ## Outbound-credit cells
 
 `rrtransport credit-*` runs the cells that qualify a change to the RIB's
@@ -318,6 +457,93 @@ release owes each private receiver its family whole. Readers resume after
 30 s. Checks, per burst receiver: the final decoded table equals the
 reference, exactly one End-of-RIB arrives, every route of the table
 precedes it, and no session ends.
+
+The opt-in `restart-labeled4` and `restart-labeled6` cells run SAFI 4
+separately for IPv4 and IPv6. Each measured cell has 150 ungrouped,
+labeled-only, single-best receivers with identical private export policy,
+150,000 rows and a 90 s reader pause. Every prefix has one label.
+The fixture loads the source's table, checks
+that graceful restart retained it, and replays it on the replacement session.
+A second GR peer keeps selection held until replay is complete. Its
+End-of-RIB releases the family while the labeled readers are paused.
+Each receiver must decode the expected prefixes, MPLS labels, next hops and
+MEDs before its single family End-of-RIB. Once every receiver has the table, the source withdraws
+one advertised prefix. Each receiver must decode that withdrawal and
+retain every other row. The withdrawal check is outside the recovery clock.
+
+Run both reduced correctness cells and check the expected drain mechanism for
+the binary under test. Use `whole` for the whole-family implementation and
+`cursor` for the row cursor.
+
+```sh
+bench/scale/rrtransport/run-credit-cells.sh --reduced --correctness-only \
+    target/scale/rrtransport /tmp/labeled-smoke restart-labeled4 restart-labeled6
+python3 bench/scale/rrtransport/credit_bars.py check-labeled whole /tmp/labeled-smoke
+```
+
+The opt-in `restart-vpn4` and `restart-vpn6` cells use the same restart,
+pause and release sequence for VPN-IPv4 and VPN-IPv6 (SAFI 128). Each
+prefix appears under two route distinguishers, `64512:1` and `64512:2`.
+Every row carries RT `64512:100`. Each receiver has a private, single-best
+export policy that permits this RT and defaults to deny. The stub decodes
+the VPN table directly and has no VRF import stage. The cell checks that
+each receiver negotiated its VPN family and that none negotiated
+RT-Constrain. Each must receive the full inventory with the expected RDs,
+labels, RT, next hops and MEDs before its single End-of-RIB. Withdrawing
+one RD must leave the other copy of the prefix present.
+
+```sh
+bench/scale/rrtransport/run-credit-cells.sh --reduced --correctness-only \
+    target/scale/rrtransport /tmp/vpn-smoke restart-vpn4 restart-vpn6
+python3 bench/scale/rrtransport/credit_bars.py check-vpn whole /tmp/vpn-smoke
+```
+
+For A/B, compare the integrated cursor revision with the same main revision
+it was based on. Overlay the same `bench/scale/rrtransport` sources on both
+trees, check their directories with `diff -qr`, and build each with a
+separate Cargo target directory. Save both product revisions and the harness
+revision with the campaign. The runner records the binary SHA-256 in
+`provenance.jsonl`. Omit both smoke flags for a measured run. Use the
+same repetition directory names under each arm.
+
+```sh
+python3 bench/scale/rrtransport/credit_bars.py labeled PARENT_DIR CANDIDATE_DIR
+```
+
+Use `credit_bars.py vpn PARENT_DIR CANDIDATE_DIR` for the VPN comparison.
+Both comparisons check both AFIs in each arm and report the ratio
+of candidate to parent arithmetic means for each AFI. A whole-family run
+must record one whole step per receiver. A cursor run must record at least
+`receivers × ceil(rows/1024)` cursor steps. Other scopes must record zero
+steps. Each receipt shows the counts while reads were paused and through
+the last End-of-RIB, along with the longest step's histogram bucket.
+A measured whole-family run is INVALID unless every receiver's step ran
+while reads were paused: otherwise its peak and recovery measure the pause.
+A cursor stops on credit and finishes after resume, so a measured cursor run
+needs only one step while paused. A run in which no receiver's decoded queue
+held a message is INVALID, and so is a measured run in which every
+receiver's queue was full, because the cgroup peak includes those queues.
+
+The comparisons apply no bar and reject identical binaries, so they cannot
+grade an A/A. The campaign sets the performance thresholds. Without an A/A
+block it runs the parent three times per cell and fails a reading when
+candidate mean / parent mean exceeds max(1.02, parent max / parent mean + 0.01).
+
+Recovery has two clocks, release to last decoded End-of-RIB and reader
+resume to that marker. After the final receiver decodes its marker, the
+harness reads the poll maximum between RIB polls. This includes the whole
+poll that offered the marker, even when the receiver decoded it before
+that poll returned. The single unrelated IPv4 UPDATE samples the
+release turn. It is queued behind the releasing marker between actor polls.
+The receipt timestamps the first lookup returning its matching winner
+(an upper bound on installation) and delivery to a separate TCP receiver.
+
+Every cell runs in a fresh cgroup with `memory.swap.max=0`. Its
+`memory.peak` includes the harness and its decoded-message queues. The
+receipt records each stub's maximum observed queue depth in messages,
+sampled just after dequeue. These samples can miss a transient maximum,
+occur at different times across stubs, and cannot bound the queue's bytes.
+The relative peak memory reading is report-only.
 
 `credit-restart-churn` adds churn while the release drains. Halfway to the
 churn-free window (14.85 s into the pause on the full shape), with the
@@ -715,8 +941,8 @@ seen a healthy update queued behind the burst, or its timing is unusable:
 - fewer than three healthy updates were admitted while the burst was
   unfinished;
 - the run carried a seeded stall;
-- a measured run is not the fixed shape, saw a compiler (`cargo`, `rustc`,
-  `rustdoc`, `clippy-driver`, sampled every second during the cell), or
+- a measured run is not the fixed shape, saw a compiler or linker (a process
+  named in `compiler-names.txt`, sampled every second during the cell), or
   could not read the process table.
 
 A run is also INVALID when the tap did not recognize every burst message
