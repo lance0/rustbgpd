@@ -1746,6 +1746,90 @@ fn refused_batch_keeps_matching_prepare_owned_until_cold_contention() {
     assert!(!manager.optional_destination_retirement_active());
 }
 
+/// Member resyncs the event's pass built.
+const RESYNCS: &str = "member resyncs";
+
+/// A route change that reaches every dirty member.
+#[derive(Clone, Copy, Debug)]
+enum DirtyMemberEvent {
+    /// An unrelated one-prefix UPDATE: an ingest pass.
+    Update,
+    /// A one-route source goes down: an ordinary pass of one withdrawal.
+    SourceDown,
+}
+
+/// Every member of a group holding `ROUTES * size` prefixes is dirty when
+/// `event` arrives. Its pass defers each member: a dirty member's whole
+/// table is a unit of the paced resync tick, so the pass costs the members,
+/// not members x table. The tick then resyncs each member exactly once to
+/// the current table, withdrawals included. Each event changes one route,
+/// so the deferral's own per-member cost, a walk of the pass's group deltas,
+/// stays out of the measured growth.
+fn dirty_members_meet(size: usize, event: DirtyMemberEvent) -> Work {
+    let (_tx, mut manager) = manager();
+    let second = peer_v4(Ipv4Addr::new(198, 51, 100, 2));
+    register_test_peer(&mut manager, second, 0);
+    let mut receivers = members(&mut manager, size, false, None);
+    let routes = ROUTES * size;
+    manager.handle_update(routes_from(external(), 0, 1, routes));
+    drain_route_chunks(&mut manager);
+    manager.handle_update(routes_from(second, 0, 3, 1));
+    drain_route_chunks(&mut manager);
+    assert_eq!(
+        drain(&mut receivers),
+        (size * (routes + 1), 0),
+        "setup, size {size}"
+    );
+    for index in 0..size {
+        assert!(manager.mark_outbound_dirty(member(index)));
+    }
+    let builds = manager.adj_rib_out_commit_stats.resync_builds;
+    let mut work = checkpoints_in(|| {
+        manager.handle_update(match event {
+            DirtyMemberEvent::Update => routes_from(external(), 0, 2, 1),
+            DirtyMemberEvent::SourceDown => RibUpdate::PeerDown {
+                peer: second,
+                session_id: 0,
+            },
+        });
+        drain_route_chunks(&mut manager);
+    });
+    work.insert(
+        RESYNCS,
+        manager.adj_rib_out_commit_stats.resync_builds - builds,
+    );
+    assert_eq!(
+        work[RESYNCS], 0,
+        "{event:?}: the pass resyncs no member, size {size}"
+    );
+    assert_eq!(manager.dirty_peers.len(), size, "{event:?}, size {size}");
+    assert_eq!(drain(&mut receivers), (0, 0), "{event:?}, size {size}");
+    while manager.resync_tick_pending() {
+        manager.resync_dirty_peers_bounded();
+    }
+    assert!(manager.dirty_peers.is_empty(), "{event:?}, size {size}");
+    assert_eq!(
+        manager.adj_rib_out_commit_stats.resync_builds - builds,
+        size,
+        "{event:?}: the tick resyncs each member once, size {size}"
+    );
+    let healed = match event {
+        DirtyMemberEvent::Update => (size * (routes + 2), 0),
+        DirtyMemberEvent::SourceDown => (size * routes, size),
+    };
+    assert_eq!(drain(&mut receivers), healed, "{event:?}, size {size}");
+    work
+}
+
+#[test]
+fn route_changes_defer_dirty_member_resyncs_to_the_tick() {
+    for event in [DirtyMemberEvent::Update, DirtyMemberEvent::SourceDown] {
+        assert_linear(&format!("{event:?} with dirty members"), &[ALL], |size| {
+            dirty_members_meet(size, event)
+        });
+    }
+}
+
 #[test]
 fn inbound_update_distribution_work_is_linear() {
     assert_linear(

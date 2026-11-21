@@ -9504,6 +9504,8 @@ impl RibManager {
         // An owed-key drain carries no route change: none of a pass's
         // preamble side effects apply to it.
         let draining = DRAINING;
+        // Read before selection deferral filters the sets below.
+        let carries_changes = !best_changed.is_empty() || !all_affected.is_empty();
         if !draining && !RELEASING {
             self.record_deferred_unicast(best_changed);
             self.record_deferred_unicast(all_affected);
@@ -9784,8 +9786,15 @@ impl RibManager {
                     // A receiver the owed-row cap evicted is built by the
                     // resync tick alone, one receiver per unit: any other
                     // pass leaves it dirty, as when its channel has no room.
+                    // So is a dirty grouped member's whole table in a pass
+                    // that carries route changes, so that one UPDATE never
+                    // pays for every dirty member in one turn. A pass with
+                    // no changes is a resync request (a tick slice, a marker
+                    // visit, a complete EVPN feed, a caller's heal) and
+                    // still builds it.
                     if (is_dirty && self.owed_row_evicted.contains(&peer))
                         || ((is_dirty || is_force) && self.held_rebuild_due(peer))
+                        || (is_dirty && carries_changes && member_of.is_some())
                     {
                         self.defer_unsent_outbound_pass(peer, member_of, group_stage, &checkpoint);
                         break 'member;

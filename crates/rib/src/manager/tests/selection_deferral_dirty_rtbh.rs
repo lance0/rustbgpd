@@ -635,6 +635,9 @@ fn dirty_recovery_preserves_target_ordinary_choice_when_global_rtbh_is_denied() 
                     reply,
                 });
                 result.try_recv().unwrap().unwrap();
+                // A local source change reopens the caught-up member's
+                // resync; the withdrawal's pass leaves it to the tick.
+                drain_resync_ticks(&mut manager);
                 let removed = apply_wire(&mut rx, &mut wire);
                 assert!(
                     removed
@@ -2058,6 +2061,9 @@ async fn assert_removed_rtbh_after_proof_refusal(
         assert!(apply_wire(&mut rx, &mut wire).is_empty());
         drop(occupied);
         manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    } else {
+        // The removal's pass leaves the dirty member to the resync tick.
+        drain_resync_ticks(&mut manager);
     }
     let updates = apply_wire(&mut rx, &mut wire);
     assert!(manager.selection_deferred(family));

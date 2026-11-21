@@ -174,7 +174,11 @@ async fn dirty_resync_not_starved_by_query_traffic() {
     tokio::time::pause();
 
     let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    // The timer contract is the run loop's. Pin it on the per-peer path,
+    // whose UPDATE passes still retry a dirty peer: a dirty grouped
+    // member's resync is the tick's alone.
+    manager.test_force_ungrouped = true;
     let handle = tokio::spawn(manager.run());
 
     let source = peer_v4(Ipv4Addr::new(10, 0, 0, 1));
