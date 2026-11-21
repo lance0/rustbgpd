@@ -316,7 +316,7 @@ of taking its default process action. The ordering is a contract, asserted by
 2. FSM drives OPEN exchange. Transport encodes/decodes, feeds FSM events.
 3. On `Established`, FSM produces `NegotiatedSession` with capabilities.
 4. Transport sends `RibUpdate::PeerUp` to RIB with negotiated families and outbound channel.
-5. RIB registers the peer: at once on a small or quiet RIB, after queued route input on a large busy one. A groupable session joins its update group; the group's first member has the group table built first, in paced turns for a plain unicast session and inside the registration turn otherwise. The RIB then sends the group table (or, for a private session, its own export of the Loc-RIB) and End-of-RIB per family. See [Session comes up](../reference/rib-lifecycle.md#session-comes-up).
+5. RIB registers the peer: at once on a small or quiet RIB, after queued route input on a large busy one (a plain unicast first member of its group is deferred on any large RIB). A groupable session joins its update group; the group's first member has the group table built first, in paced turns for a plain unicast session and inside the registration turn otherwise. The RIB then sends the group table (or, for a private session, its own export of the Loc-RIB) and End-of-RIB per family, unless a hold (for ORF, graceful restart or RT-Constrain, among others) delays a family's marker. See [Session comes up](../reference/rib-lifecycle.md#session-comes-up).
 6. Inbound UPDATEs flow through the normal data path.
 
 ### Config Reload (SIGHUP)
@@ -439,7 +439,7 @@ Inter-task channels are bounded `tokio::mpsc` channels (capacity 4096 by default
 | Channel | Producer | Consumer | On full |
 |---------|----------|----------|---------|
 | RIB inbound | PeerSession, API | RibManager | Producer's `send().await` blocks. Session stalls but does not lose data. |
-| Adj-RIB-Out | RibManager | PeerSession | `try_send()` never blocks the RIB: a private family records owed rows, a group member is marked dirty for resync (see below). |
+| Adj-RIB-Out | RibManager | PeerSession | `try_send()` never blocks the RIB: a family the receiver holds privately records owed rows, and a group member that misses a shared-family update is marked dirty for resync (see below). |
 | PeerManager commands | API | PeerManager | `send().await` blocks. gRPC call waits. |
 | BMP events | Transport | BmpManager | `try_send()` — event dropped, warning logged. |
 | RA discovery events | Discovery actor | PeerManager | Never full: coalesced per interface and served round-robin. The latest binding wins; conflicts keep their count. |
@@ -453,7 +453,7 @@ long configuration settlement instead of queueing them behind it.
 
 ### Dirty-peer resync
 
-When a receiver cannot take an update (its channel is full or its row credit is spent), the RIB does not wait. For a family the receiver holds in its own Adj-RIB-Out, the RIB records which rows it is owed and the receiver stays clean; a resync timer sends them later in steps charged against its credit, by row cursor once the debt grows large. FlowSpec, BGP-LS and RT-Constrain have no row cursor: a family of theirs owed whole goes out as one family-scoped resync per receiver, outside the row credit, and that can be one whole-table turn (the whole-family drain on the lifecycle page). Only a group member that missed a group update, and a receiver that falls too far behind its cursor, are marked "dirty" and get a whole-table resync from that timer, one receiver at a time. This keeps every receiver eventually consistent without blocking the RIB task. See [Receiver falls behind](../reference/rib-lifecycle.md#receiver-falls-behind), including its "Whole-family drain" paragraph.
+When a receiver cannot take an update (its channel is full or its row credit is spent), the RIB does not wait. For a unicast, labeled-unicast, VPN or EVPN family the receiver holds in its own Adj-RIB-Out, the RIB records which keys it is owed and the receiver stays clean; a resync timer sends them later in steps charged against its credit, by row cursor once the debt grows large. FlowSpec, BGP-LS and RT-Constrain have no row cursor: they are only ever owed whole, and go out as one family-scoped resync per receiver, outside the row credit, which can be one whole-table turn (the whole-family drain on the lifecycle page). In ordinary backpressure recovery two cases mark a receiver "dirty" for a whole-table resync from that timer, one receiver at a time: a group member that missed a group update, and a receiver that falls too far behind its cursor. Other events mark receivers dirty too, among them an RT-Constrain membership change toward a receiver outside a VPN-staging group, and owed rows that cannot drain for a reason other than credit or channel space (a missing encoder, EVPN recovery, a selection gate). This keeps every receiver eventually consistent without blocking the RIB task. See [Receiver falls behind](../reference/rib-lifecycle.md#receiver-falls-behind), including its "Whole-family drain" paragraph.
 
 ### Prefix limits
 
