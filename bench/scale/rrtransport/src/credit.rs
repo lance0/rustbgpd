@@ -769,7 +769,10 @@ fn receiver_ip(index: usize) -> Ipv4Addr {
     )
 }
 
-fn statement(prefix: Option<Prefix>, neighbor: Option<NeighborSetMatch>) -> PolicyStatement {
+pub(super) fn statement(
+    prefix: Option<Prefix>,
+    neighbor: Option<NeighborSetMatch>,
+) -> PolicyStatement {
     PolicyStatement {
         prefix,
         ge: None,
@@ -793,7 +796,7 @@ fn statement(prefix: Option<Prefix>, neighbor: Option<NeighborSetMatch>) -> Poli
     }
 }
 
-fn permit_all_but(entry: PolicyStatement) -> PolicyChain {
+pub(super) fn permit_all_but(entry: PolicyStatement) -> PolicyChain {
     PolicyChain::new(vec![Policy {
         entries: vec![entry],
         default_action: PolicyAction::Permit,

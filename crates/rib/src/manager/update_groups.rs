@@ -2485,6 +2485,8 @@ impl RibManager {
         error: admitted_recovery::Failure,
         mark_dirty_on_refusal: bool,
     ) {
+        #[cfg(feature = "bench-internals")]
+        super::bench_support::record_group_capture_refusal(error);
         self.set_group_recovery_fallback(peer, RecoveryFallbackCause::from(error.cause));
         warn!(%peer, limiting_peer = ?error.limiting_peer,
             cause = error.cause.as_str(), attempted_peer_bytes = error.attempted_peer_bytes,
@@ -2579,6 +2581,8 @@ impl RibManager {
             self.record_group_recovery_refusal(peer, error, mark_dirty_on_refusal);
             return false;
         }
+        #[cfg(feature = "bench-internals")]
+        let mut bench_capture = None;
         let result = if self.pending_regroup_baseline.contains_key(&peer) || gid.is_none() {
             let count = self.pending_regroup_baseline.get(&peer).map_or_else(
                 || {
@@ -2634,6 +2638,11 @@ impl RibManager {
             {
                 self.adj_rib_out_commit_stats.group_table_captures += 1;
             }
+            #[cfg(feature = "bench-internals")]
+            let bench_draft = super::bench_support::GroupCaptureDraft::begin(
+                group.recovery_snapshot,
+                group.table.unicast_slot_count(),
+            );
             let rejected = self.peer_unexportable.get(&peer);
             let limits = self.outbound_prefix_limits.get(&peer);
             let projected: &GroupRibOut = group;
@@ -2678,6 +2687,10 @@ impl RibManager {
             {
                 group.recovery_snapshot = Some(handle);
             }
+            #[cfg(feature = "bench-internals")]
+            if let Ok(outcome) = &result {
+                bench_capture = Some((bench_draft, *outcome));
+            }
             result.map(|_| ())
         } else {
             Ok(())
@@ -2692,6 +2705,14 @@ impl RibManager {
         {
             self.record_group_recovery_refusal(peer, error, mark_dirty_on_refusal);
             return false;
+        }
+        #[cfg(feature = "bench-internals")]
+        if let Some((draft, outcome)) = bench_capture {
+            draft.sealed(
+                outcome,
+                self.pending_group_admitted.bench_peer_charge(peer),
+                self.pending_group_admitted.bytes(),
+            );
         }
         self.refresh_group_recovery_gauges();
         true

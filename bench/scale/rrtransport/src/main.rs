@@ -30,6 +30,9 @@ use tokio::sync::{mpsc, oneshot};
 mod credit;
 mod credit_probe;
 mod credit_wire;
+mod grouped_old;
+mod grouped_old_sessions;
+mod grouped_old_wire;
 mod rr1000;
 mod rr1000_support;
 
@@ -583,9 +586,20 @@ fn main() -> Result<()> {
             startup_gate_from_env()?;
             rr1000_support::runtime(12)?.block_on(rr1000::run(output, true))
         }
+        [mode, output, peers_flag, peers, rows_flag, rows]
+            if mode == "grouped-old-capture" && peers_flag == "--peers" && rows_flag == "--rows" =>
+        {
+            let peers = peers.parse().context("parse grouped client count")?;
+            let rows = rows.parse().context("parse grouped table rows")?;
+            ensure!((1..=700).contains(&peers), "grouped clients must be in 1..=700");
+            ensure!((3..=400_000).contains(&rows), "grouped rows must be in 3..=400000");
+            // Sessions, peers and harness; the cell gives the RIB actor its own thread.
+            rr1000_support::runtime(12)?.block_on(grouped_old::run(Path::new(output), peers, rows))
+        }
         [mode, rest @ ..] if mode.starts_with("credit-") => credit_main(mode, rest),
         _ => bail!(
             "usage: rrtransport smoke | rrtransport rr1000 <output-dir> | rrtransport rrtiny <output-dir>\n\
+             \x20      rrtransport grouped-old-capture <output-dir> --peers N --rows N\n\
              \x20      rrtransport credit-exhaust|credit-restart|credit-restart-churn <unicast|evpn> <output-dir> [--reduced] [--correctness-only] [--pause-ms N]\n\
              \x20      rrtransport credit-restart <labeled4|labeled6|vpn4|vpn6> <output-dir> [--reduced] [--correctness-only] [--pause-ms N]\n\
              \x20      rrtransport credit-release-<mixed|timer|vpn4|vpn6|labeled4|labeled6> <output-dir> [--reduced] [--correctness-only]\n\

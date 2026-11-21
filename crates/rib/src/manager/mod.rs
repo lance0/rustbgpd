@@ -9,8 +9,9 @@ mod bench_support;
 #[cfg(feature = "bench-internals")]
 pub use bench_support::{
     AdjRibOutFanoutBenchReceipt, DataplanePrefixIndexBenchReceipt, EvpnDataplaneQueryBenchReceipt,
-    EvpnGroupBenchReceipt, EvpnPeerBenchReceipt, PolicyTransitionBenchReceipt, RecoveryScanReceipt,
-    RecoveryScanSpec, UnicastPrefixPeersMemoryReceipt, bench_evpn_dataplane_generation_query,
+    EvpnGroupBenchReceipt, EvpnPeerBenchReceipt, GroupCaptureBenchEvent,
+    PolicyTransitionBenchReceipt, RecoveryScanReceipt, RecoveryScanSpec,
+    UnicastPrefixPeersMemoryReceipt, bench_evpn_dataplane_generation_query,
     bench_evpn_dataplane_generation_snapshot, bench_evpn_dataplane_legacy_snapshot,
     bench_recovery_capture_scan,
 };
@@ -1163,6 +1164,8 @@ pub struct RibManager {
     replacement_readiness: Option<Arc<ReplacementReadinessContext>>,
     #[cfg(test)]
     replacement_readiness_test_hook: Option<Arc<dyn Fn(&'static str) + Send + Sync>>,
+    #[cfg(feature = "bench-internals")]
+    group_capture_observer: Option<bench_support::GroupCaptureObserver>,
     /// Runs synchronously at the start of every applied primary update.
     #[cfg(test)]
     test_primary_update_hook: Option<PrimaryUpdateHook>,
@@ -3198,6 +3201,8 @@ impl RibManager {
             replacement_readiness_test_hook: None,
             #[cfg(test)]
             test_primary_update_hook: None,
+            #[cfg(feature = "bench-internals")]
+            group_capture_observer: None,
             slow_actor_turn_log: actor_turn::SlowActorTurnLog::default(),
             #[cfg(test)]
             replacement_readiness_receipts: Vec::new(),
@@ -4638,6 +4643,8 @@ impl RibManager {
             let rebuilds = self.take_due_held_rebuilds(last);
             let recovery = evicted || rebuilds.contains(&true);
             self.take_late_joins_for_resync(last);
+            #[cfg(feature = "bench-internals")]
+            self.bench_group_capture_resync_slice(last);
             let built = self.distribute_changes_without_stale_flush(recovery.then_some(last));
             let still_dirty = self.dirty_peers.contains(&last);
             if evicted && still_dirty {
@@ -4652,6 +4659,8 @@ impl RibManager {
             self.dirty_peers.extend(withheld);
             self.dirty_since.extend(withheld_since);
             self.force_outbound_peers.extend(withheld_force);
+            #[cfg(feature = "bench-internals")]
+            self.bench_group_capture_progress(None);
             // An evicted receiver's resync is a whole table whatever the
             // poll budget says: it is the tick's last unit, so the actor
             // loop takes queued input before the next receiver's. Refused
@@ -5114,6 +5123,8 @@ impl RibManager {
         reason = "dispatcher needs one arm per RibUpdate variant"
     )]
     fn dispatch_update(&mut self, update: RibUpdate) {
+        #[cfg(feature = "bench-internals")]
+        self.bench_group_capture_progress(Some(&update));
         #[cfg(test)]
         if let Some(hook) = &self.test_primary_update_hook {
             hook(&update);
