@@ -1886,3 +1886,147 @@ fn selection_ending_before_registration_preserves_plain_unicast_refresh() {
         "queued and subsequent refresh answers"
     );
 }
+
+/// A plain unicast refresh queued during deferred registration comes due
+/// after the initial End-of-RIB. If the peer by then owes a group withdrawal
+/// without a proof, that answer and a second request the deferral holds
+/// beside it wait for the resync: one withdrawal, then one `BoRR`/table/
+/// `EoRR`, and nothing more on later ticks. Red proof: without the deferral
+/// the second request is answered at once and the resync then withdraws a
+/// purged route.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one transcript defers registration, refuses a withdrawal, then answers"
+)]
+fn registration_refresh_behind_group_withdrawal_is_answered_once_in_order() {
+    use super::lifecycle::{test_peer_up, test_session_routes_received};
+    use rustbgpd_wire::RouteRefreshSubtype::{BoRR, EoRR};
+
+    let family = (Afi::Ipv4, Safi::Unicast);
+    let source_addr = Ipv4Addr::new(192, 0, 2, 1);
+    let source = peer_v4(source_addr);
+    let peer = peer_v4(Ipv4Addr::new(192, 0, 2, 2));
+    let kept = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let owed = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 1), 32);
+    let (tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_selection_deferral(SelectionDeferralConfig {
+            timeout: Duration::from_secs(60),
+            waiters: vec![SelectionDeferralWaiterConfig {
+                peer: source.into(),
+                families: vec![family],
+            }],
+        });
+    let _source_rx =
+        super::selection_deferral_dirty_rtbh::connect(&mut manager, source_addr, 8, true, false);
+    manager.handle_update(test_session_routes_received(
+        source,
+        1,
+        vec![make_route(kept, source_addr), make_route(owed, source_addr)],
+    ));
+    drain_route_chunks(&mut manager);
+    tx.try_send(RibUpdate::RouteRefreshRequest {
+        peer,
+        session_id: 7,
+        afi: family.0,
+        safi: family.1,
+        queued: Arc::default(),
+    })
+    .unwrap();
+    tx.try_send(RibUpdate::EndOfRib {
+        peer: source,
+        session_id: 1,
+        afi: family.0,
+        safi: family.1,
+    })
+    .unwrap();
+    manager.initial_dump_defer_min_routes = 0;
+    let (sender, mut output) = mpsc::channel(8);
+    let writer = sender.clone();
+    manager.handle_update(test_peer_up(peer, 7, sender));
+    assert!(manager.pending_initial_registrations.contains(&peer));
+    for _ in 0..2 {
+        let next = manager.rx.try_recv().unwrap();
+        manager.handle_update(next);
+    }
+    drain_unicast_release(&mut manager);
+    manager.advance_pending_initial_registration();
+    assert!(manager.grouped_member_of(peer).is_some());
+    let mut held = BTreeMap::new();
+    let mut order = Vec::new();
+    let mut apply = |output: &mut mpsc::Receiver<OutboundRouteUpdate>| {
+        while let Ok(update) = output.try_recv().map(delivered) {
+            if update.refresh_markers.contains(&(family.0, family.1, BoRR)) {
+                order.push("BoRR");
+                for stale in held.values_mut() {
+                    *stale = true;
+                }
+            }
+            for key in update.unicast_withdrawals() {
+                assert!(held.remove(key).is_some(), "withdrawal of a purged route");
+                order.push("W");
+            }
+            for route in update.announce.iter() {
+                held.insert((route.prefix, route.path_id), false);
+            }
+            if update.refresh_markers.contains(&(family.0, family.1, EoRR)) {
+                order.push("EoRR");
+                held.retain(|_, stale| !*stale);
+            }
+        }
+        (order.clone(), held.keys().copied().collect::<Vec<_>>())
+    };
+    let (markers, routes) = apply(&mut output);
+    assert_eq!(markers, [""; 0], "the queued answer waits for the tick");
+    assert_eq!(routes.len(), 2);
+    assert!(manager.pending_refresh[&peer].contains(&family));
+
+    // Before the tick answers, a full writer refuses a withdrawal and its proof.
+    let permits = writer.try_reserve_many(writer.capacity()).unwrap();
+    manager
+        .pending_group_admitted
+        .fail_next_allocation_for_test();
+    manager.handle_update(RibUpdate::RoutesReceived {
+        session_id: 1,
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![(Prefix::V4(owed), 0)],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    });
+    drain_route_chunks(&mut manager);
+    assert!(manager.dirty_peers.contains(&peer));
+    assert!(manager.pending_group_admitted.get(&peer).is_none());
+    drop(permits);
+    // A second request reaches the answer path directly; the group
+    // withdrawal defers it beside the queued one.
+    manager.handle_update(RibUpdate::RouteRefreshRequest {
+        peer,
+        session_id: 7,
+        afi: family.0,
+        safi: family.1,
+        queued: Arc::default(),
+    });
+    assert_eq!(
+        apply(&mut output).0,
+        [""; 0],
+        "answered ahead of the resync"
+    );
+    assert!(manager.pending_refresh[&peer].contains(&family));
+
+    drain_resync_ticks(&mut manager);
+    let (markers, routes) = apply(&mut output);
+    assert_eq!(markers, ["W", "BoRR", "EoRR"]);
+    assert_eq!(routes, [(Prefix::V4(kept), 0)]);
+    assert!(!manager.pending_refresh.contains_key(&peer));
+    manager.resync_dirty_peers_bounded();
+    assert_eq!(
+        apply(&mut output).0,
+        ["W", "BoRR", "EoRR"],
+        "answered twice"
+    );
+}

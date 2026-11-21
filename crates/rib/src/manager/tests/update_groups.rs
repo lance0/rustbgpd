@@ -476,7 +476,7 @@ pub(super) fn community_chain(community: u32) -> PolicyChain {
 }
 
 /// A chain with a peer-set criterion (matches on peer ASN).
-fn peer_context_chain() -> PolicyChain {
+pub(super) fn peer_context_chain() -> PolicyChain {
     let mut statement = deny_statement(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8));
     statement.match_neighbor_set = Some(NeighborSetMatch {
         addresses: vec![],
@@ -7809,57 +7809,84 @@ fn ungrouped_dirty_peer_with_full_channel_defers_resync_until_drained() {
     dirty_member_with_full_channel_defers_resync(true);
 }
 
-/// Applies queued updates as an RFC 7313 receiver does: `BoRR` marks every
-/// held route stale, announcements refresh them, and `EoRR` purges what is
-/// still stale. A withdrawal must name a route the receiver holds.
-fn apply_enhanced_refresh(
-    rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
-    held: &mut BTreeMap<(Prefix, u32), bool>,
-) {
-    use rustbgpd_wire::RouteRefreshSubtype;
-    while let Ok(update) = rx.try_recv() {
-        let marker = |subtype| {
-            update
-                .refresh_markers
-                .iter()
-                .any(|&(_, _, kind)| kind == subtype)
-        };
-        if marker(RouteRefreshSubtype::BoRR) {
-            for stale in held.values_mut() {
-                *stale = true;
+/// Apply envelopes in transport order and record withdrawals before and after
+/// the receiver purges its stale paths at `EoRR`. A withdrawal must name a
+/// route the receiver holds.
+#[derive(Default)]
+struct RefreshReceiver {
+    held: BTreeMap<(Prefix, u32), bool>,
+    markers: Vec<(Afi, Safi, rustbgpd_wire::RouteRefreshSubtype)>,
+    withdrawals: Vec<((Prefix, u32), bool)>,
+    /// Markers and withdrawals in wire order.
+    order: Vec<&'static str>,
+}
+
+impl RefreshReceiver {
+    fn drain(&mut self, rx: &mut mpsc::Receiver<OutboundRouteUpdate>) {
+        use rustbgpd_wire::RouteRefreshSubtype::{BoRR, EoRR};
+        while let Ok(update) = rx.try_recv() {
+            for &marker in &update.refresh_markers {
+                if marker.2 == BoRR {
+                    self.order.push("BoRR");
+                    self.markers.push(marker);
+                    for stale in self.held.values_mut() {
+                        *stale = true;
+                    }
+                }
+            }
+            for key in update.unicast_withdrawals() {
+                let after_eorr = self.markers.iter().any(|&(_, _, kind)| kind == EoRR);
+                self.withdrawals.push((*key, after_eorr));
+                self.order.push("W");
+                assert!(
+                    self.held.remove(key).is_some(),
+                    "withdrawal of {key:?}, which the receiver does not hold"
+                );
+            }
+            for route in update.announce.iter() {
+                self.held.insert((route.prefix, route.path_id), false);
+            }
+            for &marker in &update.refresh_markers {
+                if marker.2 == EoRR {
+                    self.order.push("EoRR");
+                    self.markers.push(marker);
+                    self.held.retain(|_, stale| !*stale);
+                }
             }
         }
-        for key in update.unicast_withdrawals() {
-            assert!(
-                held.remove(key).is_some(),
-                "withdrawal of {key:?}, which the receiver does not hold"
-            );
-        }
-        for route in update.announce.iter() {
-            held.insert((route.prefix, route.path_id), false);
-        }
-        if marker(RouteRefreshSubtype::EoRR) {
-            held.retain(|_, stale| !*stale);
-        }
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RefreshPeer {
+    Grouped,
+    RefusedProof,
+    MissingProof,
+    Private,
+    GroupLeaver,
+    PrivateJoiner,
+    RefusedProofLeaver,
 }
 
 /// Two members on the transport's outbound channel capacity hold a route.
 /// One stops reading while the source announces until its channel is full;
 /// the route's withdrawal is then refused, so the member goes dirty owing it.
-/// The member drains and sends a ROUTE-REFRESH before the resync tick: the
-/// answer (`BoRR`, the current table, `EoRR`) settles the owed withdrawal,
-/// and the resync must not withdraw the route again. Red proof: without the
-/// answer's owed withdrawals the grouped member's `EoRR` purges the route
-/// and the resync then withdraws a route the receiver no longer holds.
-/// `leave`: the dirty member's export policy turns peer-context dependent
-/// first, so it leaves its group still owing, with its admitted proof and no
-/// seeded Adj-RIB-Out.
+/// The member drains and sends a ROUTE-REFRESH before the resync tick. With
+/// a proof (or privately), the answer (`BoRR`, the current table, `EoRR`)
+/// settles the owed withdrawal, and the resync must not withdraw the route
+/// again. Without a proof (the joiner, missing-proof and refused-proof
+/// shapes) only the resync knows the withdrawal: the answer waits for it and
+/// the resync sends it in its own turn, ahead of `BoRR`. Red proof: without
+/// either, the member's `EoRR` purges the route and the resync then
+/// withdraws a route the receiver no longer holds.
 #[expect(
     clippy::too_many_lines,
     reason = "one transcript fills a real session channel, then refreshes and resyncs"
 )]
-fn refresh_answer_settles_the_owed_withdrawal(ungrouped: bool, leave: bool) {
+fn refresh_answer_settles_the_owed_withdrawal(shape: RefreshPeer) {
+    use super::super::update_groups::RecoveryFallbackCause;
+    use rustbgpd_wire::RouteRefreshSubtype::{BoRR, EoRR};
+
     const SESSION_CHANNEL: usize = 4096;
     let prefix = |index: u32| {
         Prefix::V4(Ipv4Prefix::new(
@@ -7898,7 +7925,15 @@ fn refresh_answer_settles_the_owed_withdrawal(ungrouped: bool, leave: bool) {
     // A full channel is the refusal under test: the default row credit,
     // whatever a credit sweep sets.
     manager.outbound_row_credit_override = None;
-    manager.test_force_ungrouped = ungrouped;
+    manager.test_force_ungrouped = shape == RefreshPeer::Private;
+    let joiner = matches!(
+        shape,
+        RefreshPeer::PrivateJoiner | RefreshPeer::MissingProof
+    );
+    let refused = matches!(
+        shape,
+        RefreshPeer::RefusedProof | RefreshPeer::RefusedProofLeaver
+    );
     let stuck = peer_v4(Ipv4Addr::new(10, 44, 0, 1));
     let live = peer_v4(Ipv4Addr::new(10, 44, 0, 2));
     let mut receivers = Vec::new();
@@ -7911,7 +7946,7 @@ fn refresh_answer_settles_the_owed_withdrawal(ungrouped: bool, leave: bool) {
             peer_asn: 65_000,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             outbound_tx,
-            export_policy: None,
+            export_policy: (joiner && peer == stuck).then(peer_context_chain),
             sendable_families: ipv4_sendable(),
             is_ebgp: false,
             route_reflector_client: true,
@@ -7928,24 +7963,25 @@ fn refresh_answer_settles_the_owed_withdrawal(ungrouped: bool, leave: bool) {
     }
     let mut live_rx = receivers.pop().unwrap();
     let mut stuck_rx = receivers.pop().unwrap();
-    assert_eq!(manager.grouped_member_of(stuck).is_none(), ungrouped);
-    let mut held = BTreeMap::new();
+    let starts_private = shape == RefreshPeer::Private || joiner;
+    assert_eq!(manager.grouped_member_of(stuck).is_none(), starts_private);
+    let mut receiver = RefreshReceiver::default();
     pass(&mut manager, Some(0), None);
-    apply_enhanced_refresh(&mut stuck_rx, &mut held);
-    assert!(held.contains_key(&(prefix(0), 0)));
+    receiver.drain(&mut stuck_rx);
+    assert!(receiver.held.contains_key(&(prefix(0), 0)));
     for index in 1..=u32::try_from(SESSION_CHANNEL).unwrap() {
         pass(&mut manager, Some(index), None);
         while live_rx.try_recv().is_ok() {}
     }
     assert!(manager.outbound_channel_full(stuck));
-    let fill = if ungrouped {
+    let fill = if shape == RefreshPeer::Private {
         // Deliver one queued row without changing the final route inventory,
         // then refill its slot only after the withdrawal's preflight.
         let first = stuck_rx.try_recv().unwrap();
         assert_eq!(first.announce.len(), 1);
         assert_eq!(first.unicast_withdrawals().count(), 0);
         let route = &first.announce[0];
-        held.insert((route.prefix, route.path_id), false);
+        receiver.held.insert((route.prefix, route.path_id), false);
         drop(first);
         assert_eq!(manager.outbound_peers[&stuck].capacity(), 1);
         let fill = FillChannelOnSnapshot::install(&mut manager, stuck);
@@ -7955,15 +7991,82 @@ fn refresh_answer_settles_the_owed_withdrawal(ungrouped: bool, leave: bool) {
         None
     };
     assert!(!manager.dirty_peers.contains(&stuck));
+    if refused {
+        // The full writer triggers speculative OLD capture. Refuse its next
+        // allocation under the normal ledger limits.
+        manager
+            .pending_group_admitted
+            .fail_next_allocation_for_test();
+    }
     pass(&mut manager, None, Some(0));
     if let Some(fill) = &fill {
         fill.assert_full();
     }
-    assert!(
-        manager.dirty_peers.contains(&stuck),
-        "the refused withdrawal"
-    );
-    if leave {
+    if joiner {
+        assert!(!manager.dirty_peers.contains(&stuck));
+        assert_eq!(
+            manager.owing(stuck).unwrap().rendered(),
+            [(
+                (Afi::Ipv4 as u16, Safi::Unicast as u8),
+                Some(prefix(0).to_string())
+            )]
+        );
+    } else {
+        assert!(
+            manager.dirty_peers.contains(&stuck),
+            "the refused withdrawal"
+        );
+    }
+    if refused {
+        let group = &manager.group_ribs[&manager.grouped_member_of(stuck).unwrap()];
+        assert!(group.tombstones.contains(&(prefix(0), 0)));
+        assert!(manager.pending_group_admitted.get(&stuck).is_none());
+        assert_eq!(
+            manager.group_recovery_fallback(stuck),
+            Some(RecoveryFallbackCause::AllocationFailure)
+        );
+    }
+    if shape == RefreshPeer::RefusedProof {
+        // The deferral is the dirty member's alone: its clean sibling in the
+        // same group, beside the same tombstone, is answered in the request's
+        // own turn.
+        assert_eq!(
+            manager.grouped_member_of(live),
+            manager.grouped_member_of(stuck)
+        );
+        assert!(!manager.dirty_peers.contains(&live));
+        assert!(!manager.pending_group_admitted.contains_key(&live));
+        while live_rx.try_recv().is_ok() {}
+        manager.handle_update(RibUpdate::RouteRefreshRequest {
+            queued: Arc::default(),
+            peer: live,
+            session_id: 0,
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+        });
+        let mut sibling = RefreshReceiver::default();
+        sibling.drain(&mut live_rx);
+        assert_eq!(sibling.order, ["BoRR", "EoRR"]);
+        assert_eq!(sibling.held.len(), SESSION_CHANNEL);
+        assert!(!manager.pending_refresh.contains_key(&live));
+    }
+    if shape == RefreshPeer::RefusedProofLeaver {
+        // The leave carries the group's tombstones out as the leaver's extra
+        // withdrawals; it stays dirty with no proof and no group.
+        manager
+            .replace_peer_export_policy_synchronously(stuck, Some(peer_context_chain()))
+            .unwrap();
+        assert!(manager.grouped_member_of(stuck).is_none(), "left dirty");
+        assert!(manager.dirty_peers.contains(&stuck));
+        assert!(!manager.pending_group_admitted.contains_key(&stuck));
+        assert!(!manager.pending_regroup_baseline.contains_key(&stuck));
+        assert!(
+            manager.pending_extra_withdraws[&stuck]
+                .unicast
+                .contains(&(prefix(0), 0))
+        );
+    }
+    if shape == RefreshPeer::GroupLeaver {
         assert!(manager.pending_group_admitted.contains_key(&stuck));
         manager
             .replace_peer_export_policy_synchronously(stuck, Some(peer_context_chain()))
@@ -7978,43 +8081,170 @@ fn refresh_answer_settles_the_owed_withdrawal(ungrouped: bool, leave: bool) {
         );
     }
 
+    let refresh = |manager: &mut RibManager| {
+        manager.handle_update(RibUpdate::RouteRefreshRequest {
+            queued: Arc::default(),
+            peer: stuck,
+            session_id: 0,
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+        });
+    };
+    if joiner {
+        manager
+            .replace_peer_export_policy_synchronously(stuck, None)
+            .unwrap();
+        assert_eq!(
+            manager.grouped_member_of(stuck),
+            manager.grouped_member_of(live)
+        );
+        assert!(manager.grouped_member_of(stuck).is_some());
+        assert!(manager.dirty_peers.contains(&stuck));
+        assert!(manager.owing(stuck).is_none());
+        assert!(!manager.pending_group_admitted.contains_key(&stuck));
+        assert!(!manager.pending_extra_withdraws.contains_key(&stuck));
+        assert!(manager.adj_ribs_out[&stuck].is_empty());
+    }
+    if shape == RefreshPeer::MissingProof {
+        // The second regroup hands the unfinished baseline to the new
+        // group's withdrawal candidates. No member proof was captured.
+        let unrelated = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 1), 32);
+        manager
+            .replace_peer_export_policy_synchronously(stuck, Some(deny_chain(unrelated)))
+            .unwrap();
+        let group = manager.grouped_member_of(stuck).unwrap();
+        assert_ne!(Some(group), manager.grouped_member_of(live));
+        assert_eq!(
+            manager.group_recovery_fallback(stuck),
+            Some(RecoveryFallbackCause::MissingProof)
+        );
+        assert!(manager.pending_group_admitted.get(&stuck).is_none());
+        assert!(!manager.pending_regroup_baseline.contains_key(&stuck));
+        assert!(
+            !manager.group_ribs[&group]
+                .tombstones
+                .contains(&(prefix(0), 0))
+        );
+    }
+    let fallback = joiner || refused;
+    if fallback {
+        refresh(&mut manager);
+        assert!(manager.pending_refresh[&stuck].contains(&(Afi::Ipv4, Safi::Unicast)));
+        assert!(manager.dirty_peers.contains(&stuck));
+    }
+    if shape == RefreshPeer::PrivateJoiner {
+        assert!(
+            manager.pending_regroup_baseline[&stuck]
+                .unicast
+                .contains_key(&(prefix(0), 0))
+        );
+    } else if shape == RefreshPeer::MissingProof {
+        assert!(
+            manager.pending_extra_withdraws[&stuck]
+                .unicast
+                .contains(&(prefix(0), 0))
+        );
+    }
+
     if let Some(fill) = &fill {
         fill.release();
     }
-    apply_enhanced_refresh(&mut stuck_rx, &mut held);
-    manager.handle_update(RibUpdate::RouteRefreshRequest {
-        queued: Arc::default(),
-        peer: stuck,
-        session_id: 0,
-        afi: Afi::Ipv4,
-        safi: Safi::Unicast,
-    });
-    apply_enhanced_refresh(&mut stuck_rx, &mut held);
-    assert!(!held.contains_key(&(prefix(0), 0)));
-    manager.resync_dirty_peers_bounded();
-    apply_enhanced_refresh(&mut stuck_rx, &mut held);
+    receiver.drain(&mut stuck_rx);
+    refresh(&mut manager);
+    receiver.drain(&mut stuck_rx);
+    if fallback {
+        // Deferred with room in the writer: the resync answers in its own
+        // turn. The tick's refresh-retry lane runs ahead of the resync and
+        // skips a dirty peer, so without the resync's retry the answer would
+        // need a second tick.
+        assert_eq!(receiver.order, [""; 0]);
+        assert!(manager.pending_refresh.contains_key(&stuck));
+        manager.resync_dirty_peers_bounded();
+        receiver.drain(&mut stuck_rx);
+        assert_eq!(receiver.order, ["W", "BoRR", "EoRR"]);
+        assert!(!manager.pending_refresh.contains_key(&stuck));
+    } else {
+        assert!(!receiver.held.contains_key(&(prefix(0), 0)));
+    }
+    for _ in 0..8 {
+        if !manager.resync_tick_pending() {
+            break;
+        }
+        manager.resync_dirty_peers_bounded();
+        receiver.drain(&mut stuck_rx);
+    }
     assert!(!manager.dirty_peers.contains(&stuck));
+    assert!(!manager.pending_refresh.contains_key(&stuck));
+    assert_eq!(
+        receiver.markers,
+        [
+            (Afi::Ipv4, Safi::Unicast, BoRR),
+            (Afi::Ipv4, Safi::Unicast, EoRR)
+        ]
+    );
+    assert_eq!(
+        receiver
+            .withdrawals
+            .iter()
+            .filter(|(_, after_eorr)| *after_eorr)
+            .count(),
+        0,
+        "resync withdrew a key purged at EoRR: {:?}",
+        receiver.withdrawals
+    );
+    assert_eq!(receiver.withdrawals, [((prefix(0), 0), false)]);
+    let order = if fallback {
+        ["W", "BoRR", "EoRR"]
+    } else {
+        ["BoRR", "W", "EoRR"]
+    };
+    assert_eq!(receiver.order, order);
     let expected: BTreeSet<_> = (1..=u32::try_from(SESSION_CHANNEL).unwrap())
         .map(|index| (prefix(index), 0))
         .collect();
-    assert_eq!(held.keys().copied().collect::<BTreeSet<_>>(), expected);
+    assert_eq!(
+        receiver.held.keys().copied().collect::<BTreeSet<_>>(),
+        expected
+    );
 }
 
 #[test]
 fn grouped_refresh_answer_settles_the_owed_withdrawal() {
-    refresh_answer_settles_the_owed_withdrawal(false, false);
+    refresh_answer_settles_the_owed_withdrawal(RefreshPeer::Grouped);
 }
 
 #[test]
 fn ungrouped_refresh_answer_settles_the_owed_withdrawal() {
-    refresh_answer_settles_the_owed_withdrawal(true, false);
+    refresh_answer_settles_the_owed_withdrawal(RefreshPeer::Private);
 }
 
 /// Red proof: without the proof sweep in the per-peer arm, the leaver's
 /// `EoRR` purges the route and its resync withdraws it again.
 #[test]
 fn group_leaver_refresh_answer_settles_the_owed_withdrawal() {
-    refresh_answer_settles_the_owed_withdrawal(false, true);
+    refresh_answer_settles_the_owed_withdrawal(RefreshPeer::GroupLeaver);
+}
+
+#[test]
+fn grouped_refused_proof_refresh_settles_withdrawal_before_eorr() {
+    refresh_answer_settles_the_owed_withdrawal(RefreshPeer::RefusedProof);
+}
+
+#[test]
+fn grouped_missing_proof_refresh_settles_withdrawal_before_eorr() {
+    refresh_answer_settles_the_owed_withdrawal(RefreshPeer::MissingProof);
+}
+
+#[test]
+fn private_joiner_refresh_settles_the_regroup_baseline_withdrawal() {
+    refresh_answer_settles_the_owed_withdrawal(RefreshPeer::PrivateJoiner);
+}
+
+/// Red proof: with the deferral limited to grouped members, the leaver's
+/// answer goes out first and its resync then withdraws a purged route.
+#[test]
+fn refused_proof_leaver_refresh_settles_withdrawal_before_borr() {
+    refresh_answer_settles_the_owed_withdrawal(RefreshPeer::RefusedProofLeaver);
 }
 
 /// A dirty dual-stack member's proof admits IPv4 and IPv6 keys it may hold:

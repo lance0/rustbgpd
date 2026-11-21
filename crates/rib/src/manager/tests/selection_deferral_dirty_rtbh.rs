@@ -3702,3 +3702,173 @@ fn held_join_counts_only_eligible_policy_evaluations_and_denials() {
         assert!(!denials.contains_key(&Prefix::V4(prefixes[1])));
     }
 }
+
+/// A refresh answer deferred behind a proofless member's withdrawals waits
+/// for another family's selection hold. The member's proof is refused when
+/// the VPN hold begins, so the hold owns its whole resync: nothing goes out
+/// for unicast until the release, and then the withdrawal, `BoRR` and `EoRR`
+/// in that order, once. The wait ends at the selection-deferral timeout at
+/// the latest. Without the group-withdrawal deferral the answer path still
+/// keeps this request pending (the answer is not admitted inside the hold),
+/// so the test pins the release's retry, not that deferral.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one transcript holds VPN selection across a unicast refresh and its release"
+)]
+fn refresh_behind_group_withdrawals_waits_for_another_familys_selection_hold() {
+    use rustbgpd_wire::RouteRefreshSubtype::{BoRR, EoRR};
+    let vpn_family = (Afi::Ipv4, Safi::MplsVpn);
+    let (_tx, rx) = mpsc::channel(16);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_selection_deferral(SelectionDeferralConfig {
+            timeout: Duration::from_secs(60),
+            waiters: vec![SelectionDeferralWaiterConfig {
+                peer: peer_v4(WAITER).into(),
+                families: vec![vpn_family],
+            }],
+        });
+    let _source_rx = connect(&mut manager, SOURCE, 64, false, false);
+    let observer = peer_v4(OBSERVER);
+    let (tx, mut rx) = mpsc::channel(4);
+    let both = |up: &mut RibUpdate| {
+        if let RibUpdate::PeerUp {
+            sendable_families, ..
+        } = up
+        {
+            *sendable_families = vec![FAMILY, vpn_family];
+        }
+    };
+    let mut up = super::lifecycle::test_peer_up(observer, 82, tx.clone());
+    both(&mut up);
+    manager.handle_update(up);
+    while rx.try_recv().is_ok() {}
+    let owed = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 1), 32);
+    let kept = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 2), 32);
+    let source_update = |manager: &mut RibManager, announced, withdrawn| {
+        manager.handle_update(RibUpdate::RoutesReceived {
+            peer: peer_v4(SOURCE),
+            session_id: 81,
+            announced,
+            withdrawn,
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        });
+        drain_route_chunks(manager);
+    };
+    source_update(
+        &mut manager,
+        vec![make_route(owed, SOURCE), make_route(kept, SOURCE)],
+        vec![],
+    );
+    let mut held = std::collections::BTreeMap::new();
+    let mut order = Vec::new();
+    let mut apply = |rx: &mut mpsc::Receiver<OutboundRouteUpdate>, order: &mut Vec<&str>| {
+        while let Ok(update) = rx.try_recv().map(delivered) {
+            let marker = |kind| update.refresh_markers.contains(&(FAMILY.0, FAMILY.1, kind));
+            if marker(BoRR) {
+                order.push("BoRR");
+                for stale in held.values_mut() {
+                    *stale = true;
+                }
+            }
+            for key in update.unicast_withdrawals() {
+                assert!(held.remove(key).is_some(), "withdrawal of a purged route");
+                order.push("W");
+            }
+            for route in update.announce.iter() {
+                held.insert((route.prefix, route.path_id), false);
+            }
+            if marker(EoRR) {
+                order.push("EoRR");
+                held.retain(|_, stale| !*stale);
+            }
+        }
+        held.keys().copied().collect::<Vec<_>>()
+    };
+    assert_eq!(
+        apply(&mut rx, &mut order),
+        [(Prefix::V4(owed), 0), (Prefix::V4(kept), 0)]
+    );
+
+    manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
+        peer: peer_v4(WAITER),
+        session_id: 83,
+        peer_restart_state: false,
+        peer_gr_helper: true,
+        peer_gr_families: vec![vpn_family],
+        peer_enhanced_refresh: true,
+        peer_llgr_families: vec![],
+        local_llgr_stale_time: 0,
+    });
+    let (waiter_tx, _waiter) = mpsc::channel(64);
+    let mut up = super::lifecycle::test_peer_up(peer_v4(WAITER), 83, waiter_tx);
+    both(&mut up);
+    manager
+        .pending_group_admitted
+        .fail_next_allocation_for_test();
+    manager.handle_update(up);
+    assert!(manager.selection_deferred(vpn_family));
+    assert!(!manager.selection_deferred(FAMILY));
+
+    assert!(manager.dirty_peers.contains(&observer));
+    assert!(manager.pending_group_admitted.get(&observer).is_none());
+    assert_eq!(
+        manager.group_recovery_fallback(observer),
+        Some(super::super::update_groups::RecoveryFallbackCause::AllocationFailure)
+    );
+    // The dirty member misses the withdrawal; the group keeps its tombstone.
+    source_update(&mut manager, vec![], vec![(Prefix::V4(owed), 0)]);
+    let gid = manager.grouped_member_of(observer).unwrap();
+    assert!(
+        manager.group_ribs[&gid]
+            .tombstones
+            .contains(&(Prefix::V4(owed), 0))
+    );
+
+    let refresh = |manager: &mut RibManager| {
+        manager.handle_update(RibUpdate::RouteRefreshRequest {
+            queued: Arc::default(),
+            peer: observer,
+            session_id: 82,
+            afi: FAMILY.0,
+            safi: FAMILY.1,
+        });
+    };
+    refresh(&mut manager);
+    assert!(manager.pending_refresh[&observer].contains(&FAMILY));
+    apply(&mut rx, &mut order);
+    assert_eq!(order, [""; 0]);
+
+    // The VPN hold owns the member's resync, so the answer waits with it.
+    drain_resync_ticks(&mut manager);
+    apply(&mut rx, &mut order);
+    assert_eq!(order, [""; 0], "answered inside the selection hold");
+    assert!(manager.dirty_peers.contains(&observer));
+    assert!(manager.selection_resync_held(observer));
+    assert!(manager.pending_refresh[&observer].contains(&FAMILY));
+    // A request during the hold joins the one pending answer.
+    refresh(&mut manager);
+    drain_resync_ticks(&mut manager);
+    apply(&mut rx, &mut order);
+    assert_eq!(order, [""; 0], "answered inside the selection hold");
+
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: peer_v4(WAITER),
+        session_id: 83,
+        afi: vpn_family.0,
+        safi: vpn_family.1,
+    });
+    assert!(!manager.selection_deferred(vpn_family));
+    drain_resync_ticks(&mut manager);
+    assert_eq!(apply(&mut rx, &mut order), [(Prefix::V4(kept), 0)]);
+    assert_eq!(order, ["W", "BoRR", "EoRR"]);
+    assert!(!manager.dirty_peers.contains(&observer));
+    assert!(!manager.pending_refresh.contains_key(&observer));
+    drain_resync_ticks(&mut manager);
+    apply(&mut rx, &mut order);
+    assert_eq!(order, ["W", "BoRR", "EoRR"], "answered twice");
+}
