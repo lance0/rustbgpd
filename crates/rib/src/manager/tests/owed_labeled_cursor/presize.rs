@@ -1,7 +1,6 @@
 //! A private receiver's labeled-unicast cursor walk sizes its route and
-//! prefix indexes once, at the first step that adds rows to a nearly empty
-//! table, from what that step accepted per prefix and the prefixes still
-//! ahead of its cursors.
+//! prefix indexes once, while the table is nearly empty, from each AFI's
+//! rows per prefix read so far and the prefixes still ahead of its cursor.
 
 use super::super::cursor_presize::{
     Growth, PRESIZE_ROWS, assert_fitted, deny_med_chain, set_med, tenth_med,
@@ -23,7 +22,7 @@ fn walk(manager: &mut RibManager, receivers: &mut [Receiver], peer: PeerId) -> G
     let mut growth = Growth::default();
     let (rows, capacities) = tables(manager, peer);
     growth.observe(rows, capacities);
-    growth.rebuilds = [0, 0];
+    (growth.rebuilds, growth.resized) = ([0, 0], [0, 0]);
     for _ in 0..100_000 {
         for receiver in receivers.iter_mut() {
             receiver.write();
@@ -73,7 +72,7 @@ fn a_private_labeled_walk_sizes_both_indexes_once() {
     release(&mut manager, L6);
     let peer = receivers[0].peer;
     let growth = walk(&mut manager, &mut receivers, peer);
-    growth.assert_sized_once("both AFIs");
+    growth.assert_sized_once_for_two_afis("both AFIs");
     let mut expected = table_of(L4, &all(ROWS));
     expected.extend(table_of(L6, &all(ROWS)));
     assert_eq!(receivers[0].wire.table, expected);
@@ -81,19 +80,17 @@ fn a_private_labeled_walk_sizes_both_indexes_once() {
     assert_indexes_fitted(&manager, peer, "both AFIs");
 }
 
-/// A receiver whose export policy passes one row in ten: its indexes end
-/// within 2.3 times what it holds. Red when the reserve is sized from the
-/// prefixes ahead alone.
-#[test]
-fn a_filtered_labeled_walk_sizes_its_indexes_to_what_it_accepts() {
-    const ROWS: u32 = 20_000;
-    let tenth = |index| {
-        let mut route = route_from(SOURCE, L4, index, 100, 200);
-        set_med(&mut route.attributes, tenth_med(index));
-        route
-    };
-    let mut manager = manager(4 * CHUNK_ROWS);
-    sources_up(&mut manager);
+/// Row `index` of `IPv4` labeled unicast with the MED [`deny_med_chain`]
+/// passes one row in ten with.
+fn tenth(index: u32) -> LabeledRibRoute {
+    let mut route = route_from(SOURCE, L4, index, 100, 200);
+    set_med(&mut route.attributes, tenth_med(index));
+    route
+}
+
+/// A receiver behind [`deny_med_chain`] sending `add_path` paths a prefix
+/// (`u32::MAX`: every path), owing `IPv4` labeled unicast whole.
+fn filtered_receiver(manager: &mut RibManager, add_path: u32) -> Receiver {
     let peer = receiver(0);
     let (outbound_tx, mut rx) = mpsc::channel(4096);
     manager.handle_update(RibUpdate::PeerUp {
@@ -110,28 +107,61 @@ fn a_filtered_labeled_walk_sizes_its_indexes_to_what_it_accepts() {
         is_ebgp: false,
         route_reflector_client: true,
         orr_vantage: None,
-        add_path_send_families: vec![],
-        add_path_send_max: 0,
+        add_path_send_families: if add_path == 0 { vec![] } else { vec![L4] },
+        add_path_send_max: add_path,
         negotiated_orf_recv: vec![],
         negotiated_llgr_families: Vec::new(),
     });
     Wire::default().write(&mut rx);
-    let mut receivers = vec![Receiver {
+    manager.owe_eor(peer, L4);
+    manager.owe_whole_family(peer, F4);
+    Receiver {
         peer,
         rx,
         wire: Wire::default(),
-    }];
-    manager.owe_eor(peer, L4);
-    manager.owe_whole_family(peer, F4);
-    send(&mut manager, SOURCE, (0..ROWS).map(tenth).collect(), vec![]);
+    }
+}
+
+/// Walk `rows` rows passing one in ten to a receiver sending `add_path`
+/// paths a prefix: its indexes end within 2.3 times what it holds, after
+/// one estimate.
+fn filtered_walk(rows: u32, add_path: u32, case: &str) -> Growth {
+    let mut manager = manager(4 * CHUNK_ROWS);
+    sources_up(&mut manager);
+    let mut receivers = vec![filtered_receiver(&mut manager, add_path)];
+    let peer = receivers[0].peer;
+    send(&mut manager, SOURCE, (0..rows).map(tenth).collect(), vec![]);
+    let presizes = manager.adj_rib_out_commit_stats.walk_presizes;
     let growth = walk(&mut manager, &mut receivers, peer);
-    let expected: Table = (0..ROWS)
+    let expected: Table = (0..rows)
         .filter(|index| index.is_multiple_of(10))
-        .map(|index| entry(&tenth(index), 0))
+        .map(|index| entry(&tenth(index), u32::from(add_path != 0)))
         .collect();
-    assert_eq!(receivers[0].wire.table, expected);
-    assert_indexes_fitted(&manager, peer, "one row in ten");
+    assert_eq!(receivers[0].wire.table, expected, "{case}");
+    assert_indexes_fitted(&manager, peer, case);
+    assert_eq!(
+        manager.adj_rib_out_commit_stats.walk_presizes - presizes,
+        1,
+        "{case}: one estimate"
+    );
+    growth
+}
+
+/// A receiver whose export policy passes one row in ten: its indexes end
+/// within 2.3 times what it holds. Red when the reserve is sized from the
+/// prefixes ahead alone.
+#[test]
+fn a_filtered_labeled_walk_sizes_its_indexes_to_what_it_accepts() {
+    let growth = filtered_walk(20_000, 0, "one row in ten");
     assert!(growth.rows_at_rebuild <= PRESIZE_ROWS, "{growth:?}");
+}
+
+/// An Add-Path send-all receiver (no `send_max`) reads one prefix a step;
+/// its policy passes one row in ten. Red with a one-prefix sample: the
+/// first accepted prefix reads as every prefix accepted.
+#[test]
+fn a_send_all_labeled_walk_sizes_its_indexes_to_what_it_accepts() {
+    filtered_walk(20_000, u32::MAX, "send-all, one in ten");
 }
 
 /// An Add-Path receiver sent two paths of every prefix: the route index is

@@ -1,7 +1,6 @@
 //! A private receiver's EVPN cursor walk sizes its EVPN index (and the
-//! slab's first segment) once, at the first step that adds rows to a
-//! nearly empty table, from what that step accepted and the keys still
-//! ahead of its cursor.
+//! slab's first segment) once, while the table is nearly empty, from the
+//! rows per key read so far and the keys still ahead of its cursor.
 
 use std::cell::RefCell;
 
@@ -29,7 +28,7 @@ fn observe(manager: &RibManager, peer: PeerId, growth: &mut Growth) {
 fn walk(manager: &mut RibManager, receivers: &mut [Receiver], peer: PeerId) -> Growth {
     let mut growth = Growth::default();
     observe(manager, peer, &mut growth);
-    growth.rebuilds = [0, 0];
+    (growth.rebuilds, growth.resized) = ([0, 0], [0, 0]);
     for _ in 0..100_000 {
         for receiver in receivers.iter_mut() {
             receiver.write();
@@ -90,9 +89,46 @@ fn a_filtered_evpn_walk_sizes_its_index_to_what_it_accepts() {
     assert!(growth.rows_at_rebuild <= PRESIZE_ROWS, "{growth:?}");
 }
 
+/// About 1% of 100,000 keys accepted, scattered: the table stays under
+/// the presize limit for most of the walk. One estimate, made once the
+/// sample holds enough accepted rows, and the index fits. Red when every
+/// step under the limit estimates again.
+#[test]
+fn a_sparse_evpn_walk_estimates_once_from_a_full_sample() {
+    const ROWS: u32 = 100_000;
+    let mut manager = manager(4 * CHUNK_ROWS);
+    std::mem::forget(up_sized(&mut manager, peer_v4(SOURCE), 0, 4096, &[V4]));
+    let peer = receiver(0);
+    let (outbound_tx, mut rx) = mpsc::channel(4096);
+    manager.handle_update(evpn_peer_up(peer, 0, outbound_tx, Some(deny_med_chain())));
+    Wire::default().write(&mut rx);
+    let mut receivers = vec![Receiver {
+        peer,
+        rx,
+        wire: Wire::default(),
+    }];
+    manager.owe_eor(peer, EVPN);
+    manager.owe_whole_family(peer, FAMILY);
+    let accept = |index: u32| index.wrapping_mul(2_654_435_761).is_multiple_of(100);
+    let rows: Vec<(u32, u32)> = (0..ROWS)
+        .map(|index| (index, u32::from(!accept(index))))
+        .collect();
+    received(&mut manager, &rows, &[]);
+    let presizes = manager.adj_rib_out_commit_stats.walk_presizes;
+    walk(&mut manager, &mut receivers, peer);
+    let accepted: Vec<(u32, u32)> = rows.iter().copied().filter(|row| row.1 == 0).collect();
+    assert_eq!(receivers[0].wire.table, table(&accepted));
+    assert_index_fitted(&manager, peer, "1% scattered");
+    assert_eq!(
+        manager.adj_rib_out_commit_stats.walk_presizes - presizes,
+        1,
+        "one estimate"
+    );
+}
+
 /// A receiver already holding more than the presize limit is owed EVPN
 /// whole again with twice as many new rows: no step sizes its table. Red
-/// without the limit.
+/// when both the once-only rule and the limit are removed, as for VPN.
 #[test]
 fn a_populated_evpn_table_is_never_presized() {
     const HELD: u32 = 4_096;

@@ -268,6 +268,81 @@ const OWED_ROWS_SLACK: usize = 4 * CHUNK_ROWS;
 /// these rows.
 const PRESIZE_ROWS: usize = 2 * CHUNK_ROWS;
 
+/// Keys of one AFI's list a cursor walk must have read before the rows
+/// that AFI's table holds give its acceptance rate. Read in alternating
+/// steps of at most [`CHUNK_ROWS`] keys, two AFIs that accept every key
+/// both pass this count at no more than [`CHUNK_ROWS`] keys each, so the
+/// table still holds at most [`PRESIZE_ROWS`] rows when both are read.
+const PRESIZE_SAMPLE_KEYS: usize = CHUNK_ROWS / 2;
+
+/// Rows one AFI's table must hold for its rate to count: the rate of a
+/// sample with this many accepted rows is within about 6% (one standard
+/// error), however few keys the receiver accepts. An AFI that has not
+/// reached it adds nothing to the estimate.
+const PRESIZE_SAMPLE_ROWS: usize = CHUNK_ROWS / 4;
+
+/// How far one AFI of a receiver's cursor walk has read, for the presize
+/// estimate ([`RibManager::presize_walk_table`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WalkSample {
+    /// No live cursor, or nothing ahead of it: adds nothing to the
+    /// estimate and does not hold it back.
+    Done,
+    /// Fewer than [`PRESIZE_SAMPLE_KEYS`] keys read: the estimate waits.
+    Unread,
+    /// Enough keys read, too few rows accepted for a rate: adds nothing.
+    Sparse,
+    /// `rows` held for `read` keys read, `ahead` keys still to read.
+    Sampled {
+        rows: usize,
+        read: usize,
+        ahead: usize,
+    },
+}
+
+impl WalkSample {
+    /// The AFI's table holds `rows`; its Loc-RIB holds `keys`; `entries`
+    /// list entries are ahead of its live cursor, if any. The keys read
+    /// are the Loc-RIB's keys less those ahead: cumulative over the walk,
+    /// never one step's sample. The entries ahead can overstate the keys
+    /// ahead (a key logged again leaves a hole), which only understates
+    /// the keys read, down to no sample at all.
+    fn of(rows: usize, keys: usize, entries: Option<u64>) -> Self {
+        let Some(entries) = entries else {
+            return Self::Done;
+        };
+        let ahead = usize::try_from(entries).map_or(keys, |entries| entries.min(keys));
+        let read = keys - ahead;
+        if ahead == 0 {
+            Self::Done
+        } else if read < PRESIZE_SAMPLE_KEYS {
+            Self::Unread
+        } else if rows < PRESIZE_SAMPLE_ROWS {
+            Self::Sparse
+        } else {
+            Self::Sampled { rows, read, ahead }
+        }
+    }
+
+    fn sampled(self) -> bool {
+        matches!(self, Self::Sampled { .. })
+    }
+
+    /// Rows still to come: this AFI's rows per key read, times its keys
+    /// ahead.
+    fn rows_ahead(self) -> usize {
+        match self {
+            Self::Sampled { rows, read, ahead } => rows.saturating_mul(ahead) / read,
+            _ => 0,
+        }
+    }
+
+    /// Every AFI of the table read, and at least one with a rate.
+    fn complete(samples: [Self; 2]) -> bool {
+        !samples.contains(&Self::Unread) && samples.iter().any(|sample| sample.sampled())
+    }
+}
+
 /// The keys of one cursor family (a unicast or labeled AFI, or EVPN) that passes
 /// carried while some receiver owed
 /// the family whole, in the order they last changed: a key that changes
@@ -2118,8 +2193,9 @@ impl RibManager {
             keys.retain(|key| self.owed_key_exempt(peer, key));
         }
         let mut unstaged = Vec::new();
-        let read = keys.len();
-        let before = self.walk_table_lens(peer, family);
+        let before = self
+            .walk_table_lens(peer, family)
+            .map(|(rows, _)| rows[Self::walk_afi(family)]);
         if !keys.is_empty() {
             let budget = Self::owing_step_budget(family, keys.len(), budget);
             let mut drain = OwingDrain::keyed(peer, family, budget, keys);
@@ -2143,7 +2219,7 @@ impl RibManager {
             self.put_owing(peer, owing);
         }
         if let Some(before) = before {
-            self.presize_walk_table(peer, family, before, read - unstaged.len());
+            self.presize_walk_table(peer, family, before, from);
         }
         // A key the envelope left out stays owed in the peer's own set.
         self.reinsert_owed(peer, unstaged);
@@ -2151,77 +2227,102 @@ impl RibManager {
         true
     }
 
-    /// The receiver's own tables a cursor walk of `family` fills, as
-    /// (routes, distinct keys): VPN, labeled and EVPN. Unicast has none
-    /// here: its route slab is sized from the Loc-RIB when the table is
-    /// created.
-    fn walk_table_lens(&self, peer: PeerId, family: OwedFamily) -> Option<(usize, usize)> {
+    /// The receiver's own tables a cursor walk of `family` fills, as rows
+    /// per AFI (`[IPv4, IPv6]`; EVPN's one list is the first) and distinct
+    /// keys: VPN, labeled and EVPN. Unicast has none here: its route slab
+    /// is sized from the Loc-RIB when the table is created.
+    fn walk_table_lens(&self, peer: PeerId, family: OwedFamily) -> Option<([usize; 2], usize)> {
         use crate::adj_rib_out::AdjRibOut;
-        let lens: fn(&AdjRibOut) -> (usize, usize) = match family {
-            OwedFamily::VPNV4 | OwedFamily::VPNV6 => |out| (out.vpn_len(), out.vpn_key_len()),
-            OwedFamily::IPV4_LABELED | OwedFamily::IPV6_LABELED => {
-                |out| (out.labeled_len(), out.labeled_key_len())
+        let lens: fn(&AdjRibOut) -> ([usize; 2], usize) = match family {
+            OwedFamily::VPNV4 | OwedFamily::VPNV6 => {
+                |out| (out.family_lens().vpn, out.vpn_key_len())
             }
-            OwedFamily::EVPN => |out| (out.evpn_len(), out.evpn_len()),
+            OwedFamily::IPV4_LABELED | OwedFamily::IPV6_LABELED => {
+                |out| (out.family_lens().labeled, out.labeled_key_len())
+            }
+            OwedFamily::EVPN => |out| ([out.evpn_len(), 0], out.evpn_len()),
             _ => return None,
         };
-        Some(self.adj_ribs_out.get(&peer).map_or((0, 0), lens))
+        Some(self.adj_ribs_out.get(&peer).map_or(([0, 0], 0), lens))
     }
 
-    /// After a cursor step of `family` that committed into a table still
-    /// at most [`PRESIZE_ROWS`] rows, reserve it once for the rest of the
-    /// walk: the routes and keys this step added per key it staged, times
-    /// the keys still ahead of every live cursor filling the same table
-    /// (each list's entries after its position, at most the family's
-    /// Loc-RIB). Per-step reserves of a nearly empty table otherwise double
-    /// it again and again in the same steps for every receiver walking the
-    /// same list. A step that added nothing reserves nothing, and the next
-    /// step under the limit estimates again. Past the limit the table
-    /// grows by those per-step reserves, so no presize moves more than
-    /// [`PRESIZE_ROWS`] rows.
-    fn presize_walk_table(
-        &mut self,
-        peer: PeerId,
-        family: OwedFamily,
-        before: (usize, usize),
-        staged: usize,
-    ) {
-        let Some(after) = self.walk_table_lens(peer, family) else {
+    /// Index of `family`'s AFI in [`Self::walk_table_lens`]'s rows.
+    fn walk_afi(family: OwedFamily) -> usize {
+        usize::from(matches!(
+            family,
+            OwedFamily::VPNV6 | OwedFamily::IPV6_LABELED
+        ))
+    }
+
+    /// After a cursor step of `family` into a table still at most
+    /// [`PRESIZE_ROWS`] rows, reserve it for the rest of the walk, once:
+    /// at the step that completes the sample ([`WalkSample::complete`]:
+    /// every AFI filling the table has read [`PRESIZE_SAMPLE_KEYS`] keys or
+    /// finished, and one holds [`PRESIZE_SAMPLE_ROWS`] rows), or that gives
+    /// another AFI its rate after that. Each sampled AFI adds its own rows
+    /// per key read times its own keys ahead; an AFI without a rate adds
+    /// nothing, so a table can fall short and grow by the steps' reserves
+    /// as before, but is not sized past what one estimate from each AFI's
+    /// cumulative rate reads. The key index is sized by the table's keys
+    /// per row so far, an average over every key read. Per-step reserves
+    /// of a nearly empty table otherwise double it again and again in the
+    /// same steps for every receiver walking the same list. Past the limit
+    /// the table grows by those per-step reserves, so no presize moves
+    /// more than [`PRESIZE_ROWS`] rows.
+    fn presize_walk_table(&mut self, peer: PeerId, family: OwedFamily, before: usize, from: u64) {
+        let Some((rows, keys)) = self.walk_table_lens(peer, family) else {
             return;
         };
-        let added = (
-            after.0.saturating_sub(before.0),
-            after.1.saturating_sub(before.1),
-        );
-        if after.0 > PRESIZE_ROWS || added.0 == 0 || staged == 0 {
+        let total = rows[0] + rows[1];
+        if total > PRESIZE_ROWS {
             return;
         }
         let lens = self.loc_rib.family_lens();
-        let siblings: &[(OwedFamily, usize)] = match family {
-            OwedFamily::VPNV4 | OwedFamily::VPNV6 => &[
-                (OwedFamily::VPNV4, lens.vpn[0]),
-                (OwedFamily::VPNV6, lens.vpn[1]),
+        let siblings: [Option<(OwedFamily, usize)>; 2] = match family {
+            OwedFamily::VPNV4 | OwedFamily::VPNV6 => [
+                Some((OwedFamily::VPNV4, lens.vpn[0])),
+                Some((OwedFamily::VPNV6, lens.vpn[1])),
             ],
-            OwedFamily::IPV4_LABELED | OwedFamily::IPV6_LABELED => &[
-                (OwedFamily::IPV4_LABELED, lens.labeled[0]),
-                (OwedFamily::IPV6_LABELED, lens.labeled[1]),
+            OwedFamily::IPV4_LABELED | OwedFamily::IPV6_LABELED => [
+                Some((OwedFamily::IPV4_LABELED, lens.labeled[0])),
+                Some((OwedFamily::IPV6_LABELED, lens.labeled[1])),
             ],
-            _ => &[(OwedFamily::EVPN, self.loc_rib.evpn_len())],
+            _ => [Some((OwedFamily::EVPN, self.loc_rib.evpn_len())), None],
         };
         let Some(owing) = self.owing(peer) else {
             return;
         };
-        let ahead: usize = siblings
-            .iter()
-            .filter_map(|&(sibling, table)| {
-                let list = sibling.row_cursor()?;
-                let position = self.live_cursor(peer, owing, list as usize)?;
-                let entries = self.owed_rows_head(list).saturating_sub(position);
-                Some(usize::try_from(entries).map_or(table, |entries| entries.min(table)))
-            })
-            .sum();
-        let scale = |added: usize| added.saturating_mul(ahead) / staged;
-        let (rows, keys) = (scale(added.0), scale(added.1));
+        // List entries ahead of `sibling`'s live cursor, or of `start`
+        // when given (the stepping AFI's position before the step).
+        let entries = |sibling: OwedFamily, start: Option<u64>| {
+            let list = sibling.row_cursor()?;
+            let position = self.live_cursor(peer, owing, list as usize)?;
+            Some(
+                self.owed_rows_head(list)
+                    .saturating_sub(start.unwrap_or(position)),
+            )
+        };
+        let stepped = Self::walk_afi(family);
+        let mut after = [WalkSample::Done; 2];
+        let mut prior = [WalkSample::Done; 2];
+        for (index, sibling) in siblings.iter().enumerate() {
+            let Some((sibling, table)) = *sibling else {
+                continue;
+            };
+            after[index] = WalkSample::of(rows[index], table, entries(sibling, None));
+            prior[index] = if index == stepped {
+                WalkSample::of(before, table, entries(sibling, Some(from)))
+            } else {
+                after[index]
+            };
+        }
+        let completed =
+            !WalkSample::complete(prior) || (!prior[stepped].sampled() && after[stepped].sampled());
+        if !WalkSample::complete(after) || !completed {
+            return;
+        }
+        let rows_ahead: usize = after.iter().map(|sample| sample.rows_ahead()).sum();
+        let keys_ahead = rows_ahead.saturating_mul(keys) / total;
         #[cfg(test)]
         {
             self.adj_rib_out_commit_stats.walk_presizes += 1;
@@ -2233,12 +2334,12 @@ impl RibManager {
         };
         match family {
             OwedFamily::VPNV4 | OwedFamily::VPNV6 => {
-                out.reserve_vpn_count_with(rows, keys, &mut checkpoint);
+                out.reserve_vpn_count_with(rows_ahead, keys_ahead, &mut checkpoint);
             }
             OwedFamily::IPV4_LABELED | OwedFamily::IPV6_LABELED => {
-                out.reserve_labeled_count_with(rows, keys, &mut checkpoint);
+                out.reserve_labeled_count_with(rows_ahead, keys_ahead, &mut checkpoint);
             }
-            _ => out.reserve_evpn_with(rows, &mut checkpoint),
+            _ => out.reserve_evpn_with(rows_ahead, &mut checkpoint),
         }
     }
 

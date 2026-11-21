@@ -1,8 +1,8 @@
-//! A private receiver's VPN cursor walk sizes its two VPN indexes once, at
-//! the first step that adds rows to a nearly empty table, from what that
-//! step accepted per key and the keys still ahead: the indexes do not
-//! double step after step, and a receiver that accepts a fraction of the
-//! table gets a table sized to that fraction.
+//! A private receiver's VPN cursor walk sizes its two VPN indexes once,
+//! while the table is nearly empty, from each AFI's rows per key read so
+//! far and its keys still ahead: the indexes do not double step after
+//! step, and a receiver that accepts a fraction of the table gets a table
+//! sized to that fraction.
 
 use std::cell::RefCell;
 
@@ -30,7 +30,7 @@ fn observe(manager: &RibManager, peer: PeerId, growth: &mut Growth) {
 fn walk(manager: &mut RibManager, receivers: &mut [Receiver], peer: PeerId) -> Growth {
     let mut growth = Growth::default();
     observe(manager, peer, &mut growth);
-    growth.rebuilds = [0, 0];
+    (growth.rebuilds, growth.resized) = ([0, 0], [0, 0]);
     for _ in 0..100_000 {
         for receiver in receivers.iter_mut() {
             receiver.write();
@@ -98,7 +98,7 @@ fn a_private_vpn_walk_sizes_both_indexes_once() {
     release(&mut manager, P6);
     let peer = receivers[0].peer;
     let growth = walk(&mut manager, &mut receivers, peer);
-    growth.assert_sized_once("both AFIs");
+    growth.assert_sized_once_for_two_afis("both AFIs");
     let mut expected = table_of(P4, &all(ROWS));
     expected.extend(table_of(P6, &all(ROWS)));
     assert_eq!(receivers[0].wire.table, expected);
@@ -130,8 +130,11 @@ fn a_filtered_vpn_walk_sizes_its_indexes_to_what_it_accepts() {
 }
 
 /// A first step whose keys the receiver's policy all rejects reserves
-/// nothing; the next step, which adds rows, sizes the table. Red when a
-/// step that added nothing still counts as a presize.
+/// nothing; the next step, which adds rows, sizes the table once from the
+/// rate over both steps. The list puts every rejected key first, so that
+/// rate reads half the true one: the table falls short and grows by the
+/// steps' own reserves, and still fits. Red when a step that added
+/// nothing still counts as a presize.
 #[test]
 fn a_vpn_step_that_accepts_nothing_reserves_nothing_and_the_next_one_estimates() {
     const ACCEPTED: u32 = 8_192;
@@ -165,9 +168,12 @@ fn a_vpn_step_that_accepts_nothing_reserves_nothing_and_the_next_one_estimates()
         manager.adj_rib_out_commit_stats.walk_presizes, presizes,
         "no estimate from a step that added nothing"
     );
-    let growth = walk(&mut manager, &mut receivers, peer);
-    assert!(manager.adj_rib_out_commit_stats.walk_presizes > presizes);
-    growth.assert_sized_once("after a rejected step");
+    walk(&mut manager, &mut receivers, peer);
+    assert_eq!(
+        manager.adj_rib_out_commit_stats.walk_presizes,
+        presizes + 1,
+        "one estimate, after the rows"
+    );
     let expected = table_of(
         P4,
         &(rejected..rejected + ACCEPTED)
@@ -180,8 +186,9 @@ fn a_vpn_step_that_accepts_nothing_reserves_nothing_and_the_next_one_estimates()
 
 /// A receiver already holding more than the presize limit is owed the
 /// family whole again with twice as many new rows: no step sizes its
-/// table, which grows only by the steps' own reserves. Red without the
-/// limit: the first step reserves the whole walk into a populated table.
+/// table, which grows only by the steps' own reserves. The rows it holds
+/// already make a sample before the first step, so no step completes one;
+/// red when both that once-only rule and the limit are removed.
 #[test]
 fn a_populated_vpn_table_is_never_presized() {
     const HELD: u32 = 4_096;
@@ -208,10 +215,14 @@ fn a_populated_vpn_table_is_never_presized() {
 /// where it was, so the sequence numbers ahead of a cursor can count many
 /// more entries than the list holds there: half the rows relabeled six
 /// times before the receiver reads put four sequence numbers ahead of it
-/// per live key. The estimate is capped by the Loc-RIB's keys, so the
-/// indexes still fit. Red without the cap: about four times the table.
+/// per live key. The keys read are the Loc-RIB's keys less the entries
+/// ahead (capped at the Loc-RIB), so the holes read as no sample: the
+/// table grows by the steps' own reserves and still fits. The holes can
+/// only understate the keys read, never inflate the estimate. Red without
+/// the limit: the sample completes only after the table passed it, and
+/// that step rebuilds the populated table.
 #[test]
-fn a_vpn_estimate_is_capped_by_the_loc_rib() {
+fn holes_ahead_of_a_vpn_cursor_read_as_no_sample() {
     const ROWS: u32 = 8_192;
     let (mut manager, mut receivers) = owing(manager(4 * CHUNK_ROWS), P4, &[P4], 1, ROWS, 4096);
     for label in 101..107 {
@@ -230,8 +241,12 @@ fn a_vpn_estimate_is_capped_by_the_loc_rib() {
         "four sequence numbers a key"
     );
     let peer = receivers[0].peer;
-    let growth = walk(&mut manager, &mut receivers, peer);
-    growth.assert_sized_once("relabeled");
+    let presizes = manager.adj_rib_out_commit_stats.walk_presizes;
+    walk(&mut manager, &mut receivers, peer);
+    assert_eq!(
+        manager.adj_rib_out_commit_stats.walk_presizes, presizes,
+        "no sample while the holes overstate the keys ahead"
+    );
     let label = |index| if index < ROWS / 2 { 100 } else { 106 };
     let expected = table_of(
         P4,
@@ -389,7 +404,7 @@ async fn a_vpn_release_through_the_actor_loop_sizes_the_joiner_table_once() {
     let manager = actor.await.unwrap();
     drop(sources);
     let (_, growth) = WATCHED.with(|watched| watched.borrow_mut().take()).unwrap();
-    growth.assert_sized_once("actor loop");
+    growth.assert_sized_once_for_two_afis("actor loop");
     let mut expected = table_of(P4, &all(ROWS));
     expected.extend(table_of(P6, &all(ROWS)));
     assert_eq!(receivers[0].wire.table, expected);

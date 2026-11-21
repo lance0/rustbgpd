@@ -16,6 +16,8 @@ pub(super) struct Growth {
     capacities: [usize; 2],
     /// Steps in which each index changed capacity.
     pub(super) rebuilds: [usize; 2],
+    /// Of those, steps that found the index already allocated.
+    pub(super) resized: [usize; 2],
     /// Most rows the table held after a step that changed a capacity.
     pub(super) rows_at_rebuild: usize,
 }
@@ -27,6 +29,7 @@ impl Growth {
         for (index, &capacity) in capacities.iter().enumerate() {
             if capacity != self.capacities[index] {
                 self.rebuilds[index] += 1;
+                self.resized[index] += usize::from(self.capacities[index] != 0);
                 self.rows_at_rebuild = self.rows_at_rebuild.max(rows);
             }
         }
@@ -36,8 +39,27 @@ impl Growth {
     /// At most one capacity change per index over the walk, and none once
     /// the table was past the presize limit.
     pub(super) fn assert_sized_once(&self, case: &str) {
+        self.assert_sized_per_walk(1, case);
+    }
+
+    /// Two AFIs filling one table: each index is allocated empty, then
+    /// rebuilt at most once, and not once the table was past the presize
+    /// limit. The first AFI's step allocates the table; the step that
+    /// gives the second AFI its own rate sizes it for both. Sizing it at
+    /// the first step would apply the first AFI's acceptance to the
+    /// second's keys.
+    pub(super) fn assert_sized_once_for_two_afis(&self, case: &str) {
         assert!(
-            self.rebuilds.iter().all(|&rebuilds| rebuilds <= 1),
+            self.resized.iter().all(|&resized| resized <= 1),
+            "{case}: a populated index rebuilt in {:?} steps",
+            self.resized
+        );
+        self.assert_sized_per_walk(2, case);
+    }
+
+    fn assert_sized_per_walk(&self, walks: usize, case: &str) {
+        assert!(
+            self.rebuilds.iter().all(|&rebuilds| rebuilds <= walks),
             "{case}: capacity changed in {:?} steps (route index, key index)",
             self.rebuilds
         );
