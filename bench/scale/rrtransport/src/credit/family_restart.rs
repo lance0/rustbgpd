@@ -1,4 +1,4 @@
-//! A GR source replays SAFI 4 while selection and receiver reads are held.
+//! A GR source replays labeled unicast or VPN routes while selection and receiver reads are held.
 use super::*;
 
 const REPLACEMENT: u64 = 2;
@@ -116,23 +116,50 @@ async fn replay(
     med: u32,
 ) -> Result<()> {
     for start in (0..rows).step_by(CHUNK) {
-        rib.send(labeled_source_update(
-            family,
-            start..(start + CHUNK).min(rows),
-            session_id,
-            med,
-        ))
-        .await?;
+        let indices = start..(start + CHUNK).min(rows);
+        let update = if family.afi_safi().1 == Safi::MplsVpn {
+            RibUpdate::VpnRoutesReceived {
+                peer: PeerId::from_ipv4(SOURCE),
+                session_id,
+                announced: indices
+                    .map(|i| restart_vpn_route(family.afi_safi().0, i, med))
+                    .collect(),
+                withdrawn: vec![],
+            }
+        } else {
+            labeled_source_update(family, indices, session_id, med)
+        };
+        rib.send(update).await?;
     }
     Ok(())
 }
 
-async fn received_table(rib: &mpsc::Sender<RibUpdate>) -> Result<(u64, bool)> {
+async fn received_table(rib: &mpsc::Sender<RibUpdate>, family: Family) -> Result<(u64, bool)> {
+    let scope = rustbgpd_rib::update::RouteQueryScope::Received {
+        peer: Some(PeerId::from_ipv4(SOURCE)),
+    };
+    if family.afi_safi().1 == Safi::MplsVpn {
+        let (reply, result) = oneshot::channel();
+        rib.send(RibUpdate::QueryVpnRoutesPage {
+            scope,
+            filter: None,
+            after: None,
+            expected_version: None,
+            page_size: 1,
+            reply,
+        })
+        .await?;
+        let table = result
+            .await?
+            .map_err(|e| anyhow::anyhow!("VPN input table: {e:?}"))?;
+        return Ok((
+            table.total,
+            table.routes.first().is_some_and(|r| r.is_stale),
+        ));
+    }
     let (reply, result) = oneshot::channel();
     rib.send(RibUpdate::QueryLabeledRoutesPage {
-        scope: rustbgpd_rib::update::RouteQueryScope::Received {
-            peer: Some(PeerId::from_ipv4(SOURCE)),
-        },
+        scope,
         filter: None,
         after: None,
         expected_version: None,
@@ -147,6 +174,29 @@ async fn received_table(rib: &mpsc::Sender<RibUpdate>) -> Result<(u64, bool)> {
         table.total,
         table.routes.first().is_some_and(|r| r.is_stale),
     ))
+}
+
+fn private_vpn_policy() -> PolicyChain {
+    let mut rt = statement(None, None);
+    rt.match_community = vec![rustbgpd_policy::CommunityMatch::RouteTarget {
+        global: LOCAL_AS,
+        local: 100,
+    }];
+    rt.action = PolicyAction::Permit;
+    PolicyChain::new(vec![Policy {
+        entries: vec![
+            statement(
+                None,
+                Some(NeighborSetMatch {
+                    addresses: vec![],
+                    remote_asns: vec![65_099],
+                    peer_groups: vec![],
+                }),
+            ),
+            rt,
+        ],
+        default_action: PolicyAction::Deny,
+    }])
 }
 
 // Observe the production lookup on the primary channel. Its reply time is an
@@ -218,7 +268,7 @@ async fn collect(
                 state.apply(&msg, Instant::now());
                 if first_eor && state.eors == 1 {
                     initial_exact = state.exact() && !state.eor_premature && state.duplicates_before_eor == 0;
-                    if initial_exact { state.expect_labeled_withdrawal(0); }
+                    state.expect_restart_withdrawal(0);
                     let _ = progress.send(Progress::Eor).await;
                 }
                 if first_withdrawal && state.withdrawals > 0 {
@@ -271,8 +321,9 @@ fn drain_step_deltas(before: &Buckets, after: &Buckets) -> Value {
 
 pub async fn run(family: Family, output: &Path, options: &Options) -> Result<bool> {
     ensure!(
-        matches!(family, Family::Labeled4 | Family::Labeled6) && options.seconds.is_none(),
-        "labeled restart requires SAFI 4 and a fixed deadline"
+        matches!(family.afi_safi().1, Safi::LabeledUnicast | Safi::MplsVpn)
+            && options.seconds.is_none(),
+        "restart requires labeled unicast or VPN and a fixed deadline"
     );
     let (receivers, rows, pause, cap) = if options.reduced {
         (
@@ -287,6 +338,12 @@ pub async fn run(family: Family, output: &Path, options: &Options) -> Result<boo
     let pause = options.pause.unwrap_or(pause);
     check_read_hold(pause)?;
     let families = vec![family.afi_safi()];
+    let vpn = family.afi_safi().1 == Safi::MplsVpn;
+    let name = if family == Family::Vpn {
+        "vpn4"
+    } else {
+        family.name()
+    };
     // The second waiter keeps the local startup hold active across the actual
     // source departure. The returning speaker sets Restart State, so only the
     // surviving helper can release local selection when it completes.
@@ -325,7 +382,12 @@ pub async fn run(family: Family, output: &Path, options: &Options) -> Result<boo
         fixture
             .sources
             .push(source_up(&fixture.rib, SOURCE, families.clone()).await?);
-        let mut specs = vec![(families.clone(), Some(private_unicast_policy())); receivers];
+        let policy = if vpn {
+            private_vpn_policy()
+        } else {
+            private_unicast_policy()
+        };
+        let mut specs = vec![(families.clone(), Some(policy)); receivers];
         specs.push((vec![(Afi::Ipv4, Safi::Unicast)], Some(healthy_policy())));
         fixture.connect(specs, Duration::from_secs(120)).await?;
         // Established is ahead of RIB registration. Each receiver must already
@@ -354,6 +416,27 @@ pub async fn run(family: Family, output: &Path, options: &Options) -> Result<boo
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         }
+        let mut rtc_negotiated = false;
+        if vpn {
+            for r in &fixture.receivers[..receivers] {
+                let state = r
+                    .session
+                    .query_state_timeout(Duration::from_secs(5))
+                    .await
+                    .context("could not read receiver OPEN capabilities")?;
+                let negotiated = state
+                    .negotiated_session
+                    .context("missing receiver OPEN capabilities")?;
+                ensure!(
+                    negotiated.families.contains(&family.afi_safi()),
+                    "receiver {} did not negotiate VPN",
+                    r.ip
+                );
+                rtc_negotiated |= negotiated
+                    .families
+                    .contains(&(Afi::Ipv4, Safi::RtConstrain));
+            }
+        }
         let reference = Arc::new(Reference::uniform(rows, BURST_VERSION));
         let (stop, stop_rx) = watch::channel(false);
         let (progress, mut events) = mpsc::channel(2 * receivers);
@@ -361,11 +444,11 @@ pub async fn run(family: Family, output: &Path, options: &Options) -> Result<boo
         let stub_capacity = fixture.receivers[0]
             .rx
             .as_ref()
-            .expect("labeled stream")
+            .expect("receiver stream")
             .max_capacity();
         for r in &mut fixture.receivers[..receivers] {
-            let state = WireState::with_reference(family.wire()?, Arc::clone(&reference));
-            let (rx, ip) = (r.rx.take().expect("labeled stream"), r.ip);
+            let state = WireState::with_restart_reference(family.wire()?, Arc::clone(&reference));
+            let (rx, ip) = (r.rx.take().expect("receiver stream"), r.ip);
             let stream = collect(rx, state, progress.clone(), stop_rx.clone());
             collectors.spawn(async move { (ip, stream.await) });
         }
@@ -375,7 +458,7 @@ pub async fn run(family: Family, output: &Path, options: &Options) -> Result<boo
             .take()
             .expect("healthy stream");
         replay(&fixture.rib, family, rows, 1, BURST_VERSION - 1).await?;
-        let old = received_table(&fixture.rib).await?;
+        let old = received_table(&fixture.rib, family).await?;
         fixture
             .rib
             .send(RibUpdate::PeerGracefulRestart {
@@ -389,13 +472,13 @@ pub async fn run(family: Family, output: &Path, options: &Options) -> Result<boo
                 llgr_stale_time: 0,
             })
             .await?;
-        let stale = received_table(&fixture.rib).await?;
+        let stale = received_table(&fixture.rib, family).await?;
         fixture.sources.push(
             source_session_up(&fixture.rib, SOURCE, REPLACEMENT, true, families.clone()).await?,
         );
         replay(&fixture.rib, family, rows, REPLACEMENT, BURST_VERSION).await?;
         fixture.rib.send(eor(SOURCE, REPLACEMENT, family)).await?;
-        let replayed = received_table(&fixture.rib).await?;
+        let replayed = received_table(&fixture.rib, family).await?;
         fixture.set_paused(0..receivers, true).await?;
         let mut setup = BTreeMap::new();
         let before = fold_slice_maxima(&fixture.metrics, &mut setup);
@@ -446,16 +529,25 @@ pub async fn run(family: Family, output: &Path, options: &Options) -> Result<boo
         let winner = tokio::time::timeout_at(until, winner_probe).await???;
         let mut drained = false;
         if all_eors {
-            let (prefix, _) = labeled_destination(family.afi_safi().0, 0);
-            fixture
-                .rib
-                .send(RibUpdate::LabeledRoutesReceived {
-                    peer: PeerId::from_ipv4(SOURCE),
+            let peer = PeerId::from_ipv4(SOURCE);
+            let afi = family.afi_safi().0;
+            let update = if vpn {
+                RibUpdate::VpnRoutesReceived {
+                    peer,
+                    session_id: REPLACEMENT,
+                    announced: vec![],
+                    withdrawn: vec![restart_vpn_route(afi, 0, BURST_VERSION).key()],
+                }
+            } else {
+                let (prefix, _) = indexed_destination(afi, 0);
+                RibUpdate::LabeledRoutesReceived {
+                    peer,
                     session_id: REPLACEMENT,
                     announced: vec![],
                     withdrawn: vec![rustbgpd_rib::LabeledRibRouteKey { prefix, path_id: 0 }],
-                })
-                .await?;
+                }
+            };
+            fixture.rib.send(update).await?;
             drained = wait_for_receivers(&mut events, receivers, Progress::Withdrawal, until).await;
         }
         tokio::time::sleep(QUIET).await;
@@ -488,33 +580,44 @@ pub async fn run(family: Family, output: &Path, options: &Options) -> Result<boo
                 && s.routes_before_eor == rows as u64;
             withdrawals &=
                 s.churned_after_eor == 1 && s.withdrawals == 1 && s.withdrawn_survivors() == 0;
-            payload &= s.labeled_announced == s.announced
-                && s.labeled_announced == rows as u64
-                && s.labeled_withdrawn == s.withdrawals
-                && s.labeled_withdrawn == 1;
+            let (announced, withdrawn) = if vpn {
+                (s.vpn_announced, s.vpn_withdrawn)
+            } else {
+                (s.labeled_announced, s.labeled_withdrawn)
+            };
+            payload &= announced == s.announced
+                && announced == rows as u64
+                && withdrawn == s.withdrawals
+                && withdrawn == 1;
             resets += s.resets;
-            wire.insert(
-                ip.to_string(),
-                json!({
-                    "peer": ip.to_string(),
-                    "eor_ms": at,
-                    "eors": s.eors,
-                    "exact_at_eor": initial,
-                    "exact": s.exact(),
-                    "missing": s.missing(),
-                    "announced": s.announced,
-                    "withdrawals": s.withdrawals,
-                    "labeled_announced": s.labeled_announced,
-                    "labeled_withdrawn": s.labeled_withdrawn,
-                    "routes_before_eor": s.routes_before_eor,
-                    "routes_after_eor": s.routes_after_eor,
-                    "post_eor_sentinel_changes": s.churned_after_eor,
-                    "max_observed_stub_backlog_messages": backlog,
-                    "outside": s.outside,
-                    "decode_failures": s.decode_failures,
-                    "resets": s.resets,
-                }),
-            );
+            let mut receiver = json!({
+                "peer": ip.to_string(),
+                "eor_ms": at,
+                "eors": s.eors,
+                "exact_at_eor": initial,
+                "exact": s.exact(),
+                "missing": s.missing(),
+                "announced": s.announced,
+                "withdrawals": s.withdrawals,
+                "routes_before_eor": s.routes_before_eor,
+                "routes_after_eor": s.routes_after_eor,
+                "post_eor_sentinel_changes": s.churned_after_eor,
+                "max_observed_stub_backlog_messages": backlog,
+                "outside": s.outside,
+                "decode_failures": s.decode_failures,
+                "resets": s.resets,
+            });
+            if vpn {
+                let sibling = s.restart_rd_sibling_present();
+                withdrawals &= sibling;
+                receiver["withdrawal_rd_sibling_present"] = json!(sibling);
+                receiver["vpn_announced"] = json!(announced);
+                receiver["vpn_withdrawn"] = json!(withdrawn);
+            } else {
+                receiver["labeled_announced"] = json!(announced);
+                receiver["labeled_withdrawn"] = json!(withdrawn);
+            }
+            wire.insert(ip.to_string(), receiver);
         }
         let duration_from = |clock: Instant| -> Option<f64> {
             let start_ms = since(clock);
@@ -523,10 +626,10 @@ pub async fn run(family: Family, output: &Path, options: &Options) -> Result<boo
         };
         let resume_to_last_eor = duration_from(resume);
         let down = fixture.not_established().await;
-        Ok::<_, anyhow::Error>(json!({
+        let mut report = json!({
             "schema": "rrtransport-credit/1",
             "cell": "restart",
-            "family": family.name(),
+            "family": name,
             "report_only": true,
             "mode": if options.correctness_only { "correctness" } else { "measured" },
             "shape": {
@@ -593,7 +696,6 @@ pub async fn run(family: Family, output: &Path, options: &Options) -> Result<boo
                 "final_state_exact": all_exact,
                 "eor_after_every_route": all_eors && ordered && resume_to_last_eor.is_some(),
                 "post_release_withdrawal": withdrawals,
-                "labeled_payload_counted": payload,
                 "physical_poll_observed": polls > 0 && slice.get("actor_poll").is_some_and(|&v| v > 0.0),
                 "release_update_delivered": admitted_at >= release_at && winner >= admitted_at
                     && received.is_some_and(|t| t >= admitted_at)
@@ -601,7 +703,17 @@ pub async fn run(family: Family, output: &Path, options: &Options) -> Result<boo
                 "no_session_resets": resets == 0 && healthy.resets == 0 && down.is_empty(),
             },
             "receivers": wire.into_values().collect::<Vec<_>>(),
-        }))
+        });
+        if vpn {
+            report["shape"]["rtc_negotiated"] = json!(rtc_negotiated);
+            report["shape"]["export_policy"] = json!("permit matching RT, default deny");
+            report["shape"]["route_target"] = json!("64512:100");
+            report["checks"]["vpn_payload_counted"] = json!(payload);
+            report["checks"]["no_rtc"] = json!(!rtc_negotiated);
+        } else {
+            report["checks"]["labeled_payload_counted"] = json!(payload);
+        }
+        Ok::<_, anyhow::Error>(report)
     };
     let result = tokio::time::timeout(cap + Duration::from_secs(240), observe).await;
     let closed = fixture.close().await;
@@ -611,7 +723,7 @@ pub async fn run(family: Family, output: &Path, options: &Options) -> Result<boo
         .join()
         .map_err(|_| anyhow::anyhow!("compiler watcher failed"))?;
     closed?;
-    let mut report = result.context("labeled restart timed out")??;
+    let mut report = result.context("family restart timed out")??;
     let memory = json!({
         "cgroup": cgroup().map(|p| p.display().to_string()),
         "cgroup_memory_peak_bytes": cgroup_peak_bytes(),
@@ -636,7 +748,7 @@ pub async fn run(family: Family, output: &Path, options: &Options) -> Result<boo
             "unavailable": c.unavailable,
         },
     });
-    write_result(output, &format!("restart-{}.json", family.name()), &report)?;
+    write_result(output, &format!("restart-{name}.json"), &report)?;
     Ok(recorded_pass(&report))
 }
 

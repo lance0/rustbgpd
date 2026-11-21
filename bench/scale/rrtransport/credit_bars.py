@@ -5,6 +5,8 @@
     credit_bars.py check RESULT_DIR
     credit_bars.py check-labeled whole|cursor RESULT_DIR
     credit_bars.py labeled PARENT_DIR CANDIDATE_DIR
+    credit_bars.py check-vpn whole|cursor RESULT_DIR
+    credit_bars.py vpn PARENT_DIR CANDIDATE_DIR
 
 Each arm directory holds one or more repetitions: every directory under it
 that `run-credit-cells.sh` wrote a ``provenance.jsonl`` into (the arm
@@ -20,6 +22,21 @@ binary, and the two arms must use different ones.
 ``--require-cursor FAMILY`` (repeatable; ``unicast`` or ``evpn``) adds a
 family the candidate must drain by cursor to the default (unicast): a cell
 7 release run that recorded no cursor owed-drain step for it FAILs.
+
+``check-labeled`` and ``check-vpn`` grade one arm's graceful-restart cells
+for the drain it must show: ``whole`` (one whole-family step per receiver,
+the parent) or ``cursor``. A measured whole-family run is INVALID unless
+every receiver's step ran while the readers were paused; a cursor run needs
+only one step while paused, because a cursor stops on credit and finishes
+after resume. A run where no receiver's decoded queue held a message is
+INVALID at any shape, and a measured run where every receiver's queue was
+full is INVALID: the cgroup peak includes those queues. ``labeled`` and
+``vpn`` pair a whole-family parent with a cursor candidate built from a
+different binary and print REPORT ratios of the arms' means. They apply no
+bar and cannot grade an A/A, since identical binaries are INVALID. Where a
+campaign has no A/A block, it forms the bar itself from three parent runs
+per cell: a reading fails when candidate mean / parent mean exceeds
+max(1.02, parent max / parent mean + 0.01).
 
 Each gated cell gets one ``PASS``, ``FAIL`` or ``INVALID`` line; the analyzer
 never stops at the first failing cell. Exit status: 1 when any cell FAILs,
@@ -57,7 +74,11 @@ OPTIONAL_RELEASES = (
     "release-mixed", "release-timer", "release-vpn4", "release-vpn6",
     "release-labeled4", "release-labeled6",
 )
-LABELED_RESTARTS = ("restart-labeled4", "restart-labeled6")
+RESTART_CELLS = {
+    "labeled": ("restart-labeled4", "restart-labeled6"),
+    "vpn": ("restart-vpn4", "restart-vpn6"),
+}
+MPLS_RESTARTS = RESTART_CELLS["labeled"] + RESTART_CELLS["vpn"]
 OPTIONAL_RELEASE_CHECKS = {
     "armed_after_staging",
     "release_reason",
@@ -183,7 +204,7 @@ RELEASE_SHAPE = {
     "trigger": RELEASE_TRIGGER,
     "registered_peers": 153,
 }
-LABELED_RELEASE_SHAPE = {**RELEASE_SHAPE, "pause_ms": 90_000, "registered_peers": PEERS + 4}
+MPLS_RELEASE_SHAPE = {**RELEASE_SHAPE, "pause_ms": 90_000, "registered_peers": PEERS + 4}
 # (cell prefix, line label): the plain release and the release under churn.
 RELEASE_KINDS = (("restart", "selection release"), ("restart-churn", "release under churn"))
 # Cell 2: fewest sampler samples on the exhaustion plateau. The fixed shape
@@ -1515,7 +1536,7 @@ def verdicts(
         for rep, directory in sorted(arm.repetitions.items()):
             results.extend(optional_release_reports(directory, arm, rep))
             expected = "whole" if arm is parent else "cursor"
-            results.extend(optional_cell_reports(directory, arm, rep, labeled_scope=expected))
+            results.extend(optional_cell_reports(directory, arm, rep, restart_scope=expected))
             for cell in sorted(arm.attempted[rep]):
                 try:
                     run = arm.run(rep, cell)
@@ -1731,7 +1752,7 @@ def check(directory: Path) -> list[tuple[str, str, str]]:
         results.extend(optional_release_reports(optional_dir))
     graded_dirs = {
         path.parent
-        for cell in (*SOURCE_BURST, *LABELED_RESTARTS)
+        for cell in (*SOURCE_BURST, *MPLS_RESTARTS)
         for suffix in (".json", "-exit.json")
         for path in directory.rglob(f"{cell}{suffix}")
     }
@@ -2093,7 +2114,7 @@ def source_burst(run: dict, what: str) -> tuple[str, str]:
     return "PASS", "; ".join(parts)
 
 
-def labeled_step_window(run: dict, key: str, cell: str) -> dict:
+def restart_step_window(run: dict, key: str, cell: str) -> dict:
     steps = need(run, f"witness.{key}", cell)
     if not isinstance(steps, dict) or set(steps) != set(STEP_SCOPES):
         raise Invalid(f"{cell}: {key} needs the observed cursor, keyed and whole series")
@@ -2114,9 +2135,9 @@ def labeled_step_window(run: dict, key: str, cell: str) -> dict:
     return steps
 
 
-def labeled_drain(run: dict, cell: str, expected: str | None) -> str:
-    before = labeled_step_window(run, "owed_steps_while_paused", cell)
-    total = labeled_step_window(run, "owed_steps_to_last_eor", cell)
+def restart_drain(run: dict, cell: str, expected: str | None) -> str:
+    before = restart_step_window(run, "owed_steps_while_paused", cell)
+    total = restart_step_window(run, "owed_steps_to_last_eor", cell)
     for scope in STEP_SCOPES:
         if before[scope]["observations"] > total[scope]["observations"] or (
             before[scope]["observations"] and before[scope]["above_ms"] > total[scope]["above_ms"]
@@ -2130,21 +2151,29 @@ def labeled_drain(run: dict, cell: str, expected: str | None) -> str:
     rows = run["shape"]["rows_per_receiver"]
     chunk = need(run, "shape.chunk_rows", cell)
     if chunk != PASS_ROWS:
-        raise Invalid(f"{cell}: unexpected labeled drain unit {chunk!r}")
+        raise Invalid(f"{cell}: unexpected drain unit {chunk!r}")
     count = total[scope]["observations"]
     paused = before[scope]["observations"]
     if scope == "whole" and count != n:
         raise Invalid(f"{cell}: observed {count} whole steps for {n} receivers")
     if scope == "cursor" and count < n * math.ceil(rows / chunk):
-        raise Invalid(f"{cell}: too few cursor steps for the labeled inventory")
+        raise Invalid(f"{cell}: too few cursor steps for the advertised inventory")
     if run["mode"] == "measured" and paused == 0:
         raise Invalid(f"{cell}: no {scope} steps observed while paused")
+    # A whole-family send is one step per receiver. One still to run when the
+    # readers return makes the peak and the recovery readings of the pause.
+    # A cursor stops on credit while readers are paused, so its arm finishes
+    # after resume by design and keeps the weaker rule above.
+    if run["mode"] == "measured" and scope == "whole" and paused != n:
+        raise Invalid(
+            f"{cell}: production not finished before resume ({paused} of {n} whole steps while paused)"
+        )
     lo, hi = total[scope]["above_ms"], total[scope]["at_most_ms"]
     bracket = f">{lo:g} ms" if hi is None else f"({lo:g}, {hi:g}] ms"
     return f"{count} {scope} steps ({paused} while paused), longest {bracket}"
 
 
-def labeled_restart(run: dict, cell: str, expected_scope: str | None = None) -> tuple[str, str]:
+def mpls_restart(run: dict, cell: str, expected_scope: str | None = None) -> tuple[str, str]:
     """Validate the instruments without setting a performance threshold."""
     if (run.get("cell"), run.get("family")) != identity(cell):
         raise Invalid("result belongs to a different cell")
@@ -2155,12 +2184,15 @@ def labeled_restart(run: dict, cell: str, expected_scope: str | None = None) -> 
             raise Invalid(f"invalid {path}: {value}")
         return value
 
+    payload = "vpn" if cell in RESTART_CELLS["vpn"] else "labeled"
     checks = need(run, "checks", cell)
     required = RESTART_WIRE_CHECKS + (
         "selection_held", "selection_released", "owed_at_release",
         "post_release_withdrawal", "physical_poll_observed", "release_update_delivered",
-        "source_restart", "labeled_payload_counted", "memory_fenced",
+        "source_restart", f"{payload}_payload_counted", "memory_fenced",
     )
+    if payload == "vpn":
+        required += ("no_rtc",)
     if set(checks) != set(required) or any(type(value) is not bool for value in checks.values()):
         raise Invalid("malformed restart checks")
     for key in (*RESTART_WIRE_CHECKS, "post_release_withdrawal"):
@@ -2173,12 +2205,21 @@ def labeled_restart(run: dict, cell: str, expected_scope: str | None = None) -> 
     if mode not in ("correctness", "measured") or need(run, "shape.trigger", cell) != RELEASE_TRIGGER:
         raise Invalid("unexpected restart shape or mode")
     if mode == "measured":
-        measured([run], cell, LABELED_RELEASE_SHAPE)
+        measured([run], cell, MPLS_RELEASE_SHAPE)
         check_compiler_watch(run, cell)
     rows = positive("shape.rows_per_receiver")
     n = positive("shape.receivers")
+    if payload == "vpn":
+        if need(run, "shape.rtc_negotiated", cell) is not False:
+            raise Invalid("expected a VPN session without RTC")
+        if need(run, "shape.route_target", cell) != "64512:100":
+            raise Invalid("unexpected VPN route target")
+        if need(run, "shape.export_policy", cell) != "permit matching RT, default deny":
+            raise Invalid("unexpected VPN export policy")
+        if type(rows) is not int or rows < 2:
+            raise Invalid("too few VPN rows to observe two RDs on a shared prefix")
     if positive("shape.registered_peers") != n + 4:
-        raise Invalid("incorrect labeled, healthy, or source peer count")
+        raise Invalid("incorrect receiver, healthy, or source peer count")
     if (
         need(run, "source.old_session", cell) == need(run, "source.new_session", cell)
         or need(run, "source.peer", cell) == need(run, "source.release_helper", cell)
@@ -2191,7 +2232,7 @@ def labeled_restart(run: dict, cell: str, expected_scope: str | None = None) -> 
             for key in ("old_rows", "retained_rows", "replayed_rows")
         )
     ):
-        raise Invalid("source restart did not retain and replay the labeled table")
+        raise Invalid("source restart did not retain and replay the table")
     if any(number(run, f"witness.{key}", cell) != expected for key, expected in (
         ("active_before_release", 1), ("waiters_before_release", 1), ("all_eor_releases", 1),
         ("owing_flip_delta_while_paused", n),
@@ -2200,8 +2241,12 @@ def labeled_restart(run: dict, cell: str, expected_scope: str | None = None) -> 
     peers = need(run, "receivers", cell)
     if not isinstance(peers, list) or len(peers) != n:
         raise Invalid("incomplete receiver records")
-    if len({need(peer, "peer", cell) for peer in peers}) != n:
+    receiver_ids = {need(peer, "peer", cell) for peer in peers}
+    if len(receiver_ids) != n:
         raise Invalid("duplicate receiver records")
+    source_ids = (run["source"]["peer"], run["source"]["release_helper"], need(run, "unaffected.peer", cell))
+    if receiver_ids.intersection(source_ids):
+        raise Invalid("receiver also named as a source or release helper")
     capacity = positive("shape.stub_backlog_capacity_messages")
     backlogs = []
     for peer in peers:
@@ -2215,17 +2260,19 @@ def labeled_restart(run: dict, cell: str, expected_scope: str | None = None) -> 
             if number(peer, key, cell) != 0:
                 return "FAIL", f"{peer['peer']} {key}"
         if number(peer, "eors", cell) != 1:
-            return "FAIL", f"{peer['peer']} expected one labeled EoR"
+            return "FAIL", f"{peer['peer']} expected one {payload} EoR"
         announced = number(peer, "announced", cell)
         withdrawn = number(peer, "withdrawals", cell)
-        if (number(peer, "labeled_announced", cell), number(peer, "labeled_withdrawn", cell)) != (
+        if (number(peer, f"{payload}_announced", cell), number(peer, f"{payload}_withdrawn", cell)) != (
             announced, withdrawn
         ):
-            raise Invalid(f"{peer['peer']} labeled payload counters disagree with folded wire rows")
+            raise Invalid(f"{peer['peer']} {payload} payload counters disagree with folded wire rows")
         if announced != rows or number(peer, "routes_before_eor", cell) != rows:
             return "FAIL", f"{peer['peer']} announcement count before EoR"
         if withdrawn != 1 or number(peer, "post_eor_sentinel_changes", cell) != 1:
             return "FAIL", f"{peer['peer']} incomplete advertisements or sentinel withdrawal"
+        if payload == "vpn" and need(peer, "withdrawal_rd_sibling_present", cell) is not True:
+            return "FAIL", f"{peer['peer']} lost the other RD on sentinel withdrawal"
     positive("actor.poll_count")
     poll_us = positive("actor.slice_max_us.actor_poll")
     if number(run, "unaffected.release_update_sequence", cell) != 1:
@@ -2251,8 +2298,8 @@ def labeled_restart(run: dict, cell: str, expected_scope: str | None = None) -> 
     resumed_recovery = positive("timing.resume_to_last_eor_ms")
     if not math.isclose(resumed_recovery, last - resume, abs_tol=1e-6):
         raise Invalid("recovery does not span resume to last EoR")
-    if mode == "measured" and resume - start < LABELED_RELEASE_SHAPE["pause_ms"]:
-        raise Invalid("readers resumed before the fixed labeled pause elapsed")
+    if mode == "measured" and resume - start < MPLS_RELEASE_SHAPE["pause_ms"]:
+        raise Invalid("readers resumed before the fixed reader pause elapsed")
     if not number(run, "actor.from_ms", cell) <= start <= last <= number(run, "actor.to_ms", cell):
         raise Invalid("physical poll window does not cover release through last EoR")
     if (
@@ -2270,7 +2317,14 @@ def labeled_restart(run: dict, cell: str, expected_scope: str | None = None) -> 
         or need(run, "memory.cgroup_oom_kill", cell) != "0"
     ):
         raise Invalid("missing swap-fenced memory scope")
-    drain = labeled_drain(run, cell, expected_scope)
+    # The decoded queues are harness memory inside the cgroup peak, recorded
+    # in messages only. The depth is sampled after a dequeue, so a full queue
+    # reads one below capacity.
+    if not any(backlogs):
+        raise Invalid("no decoded-queue backlog on any receiver; the pause did not load the daemon")
+    if mode == "measured" and all(backlog >= capacity - 1 for backlog in backlogs):
+        raise Invalid("harness queue saturated; memory not comparable")
+    drain = restart_drain(run, cell, expected_scope)
     return "PASS", (
         f"{mode}, {n:g} exact receivers; longest RIB poll {poll_us / 1000:.3f} ms, "
         f"release-turn UPDATE wait {wait:.3f} ms, release to last EoR {recovery:.3f} ms, "
@@ -2282,7 +2336,7 @@ def labeled_restart(run: dict, cell: str, expected_scope: str | None = None) -> 
 
 def optional_cell_reports(
     directory: Path, arm: Arm | None = None, rep: str = "", *,
-    cells=(*SOURCE_BURST, *LABELED_RESTARTS), labeled_scope: str | None = None,
+    cells=(*SOURCE_BURST, *MPLS_RESTARTS), restart_scope: str | None = None,
 ) -> list[tuple[str, str, str]]:
     """A verdict line per optional graded cell this directory ran or attempted."""
     lines = []
@@ -2300,8 +2354,8 @@ def optional_cell_reports(
                 run = explained(read(result), read(marker) if marker.exists() else None, cell)
             if not run or run.get("cell") != identity(cell)[0]:
                 raise Invalid("result belongs to a different cell")
-            if cell in LABELED_RESTARTS:
-                verdict, reason = labeled_restart(run, cell, labeled_scope)
+            if cell in MPLS_RESTARTS:
+                verdict, reason = mpls_restart(run, cell, restart_scope)
             else:
                 verdict, reason = source_burst(run, cell)
         except Invalid as error:
@@ -2320,7 +2374,7 @@ def mean_readings(readings: list[dict]) -> dict:
     return {key: statistics.fmean(r[key] for r in readings) for key in keys}
 
 
-def labeled_arm(name: str, directory: Path) -> Arm:
+def restart_arm(name: str, directory: Path) -> Arm:
     arm = Arm.load(name, directory)
     if not isinstance(arm.sha256, str) or len(arm.sha256) != 64 or any(
         ch not in "0123456789abcdef" for ch in arm.sha256
@@ -2329,26 +2383,26 @@ def labeled_arm(name: str, directory: Path) -> Arm:
     return arm
 
 
-def check_labeled(directory: Path, expected: str) -> list[tuple[str, str, str]]:
+def check_restart_family(directory: Path, expected: str, family: str) -> list[tuple[str, str, str]]:
     try:
-        arm = labeled_arm(str(directory), directory)
+        arm = restart_arm(str(directory), directory)
         return [
             line for rep, path in sorted(arm.repetitions.items())
-            for line in optional_cell_reports(path, arm, rep, cells=LABELED_RESTARTS, labeled_scope=expected)
-        ] or [(str(directory), "INVALID", "no labeled restart was attempted")]
+            for line in optional_cell_reports(path, arm, rep, cells=RESTART_CELLS[family], restart_scope=expected)
+        ] or [(str(directory), "INVALID", f"no {family} restart was attempted")]
     except (Invalid, OSError, TypeError, ValueError) as error:
         return [(str(directory), "INVALID", str(error))]
 
 
-def compare_labeled(parent_dir: Path, candidate_dir: Path) -> list[tuple[str, str, str]]:
+def compare_restart_family(parent_dir: Path, candidate_dir: Path, family: str) -> list[tuple[str, str, str]]:
     """Ratios of arithmetic means across matched measured runs, by AFI."""
     try:
-        parent = labeled_arm("parent", parent_dir)
-        candidate = labeled_arm("candidate", candidate_dir)
+        parent = restart_arm("parent", parent_dir)
+        candidate = restart_arm("candidate", candidate_dir)
         if parent.sha256 == candidate.sha256:
             raise Invalid("A/B requires distinct parent and candidate binaries")
     except (Invalid, OSError, TypeError, ValueError) as error:
-        return [("labeled A/B", "INVALID", str(error))]
+        return [(f"{family} A/B", "INVALID", str(error))]
     results = []
     readings = (
         ("longest RIB poll (µs)", "actor.slice_max_us.actor_poll"),
@@ -2357,21 +2411,21 @@ def compare_labeled(parent_dir: Path, candidate_dir: Path) -> list[tuple[str, st
         ("resume → last EoR (ms)", "timing.resume_to_last_eor_ms"),
         ("whole-process cgroup peak (bytes, includes harness)", "memory.cgroup_memory_peak_bytes"),
     )
-    for cell in LABELED_RESTARTS:
+    for cell in RESTART_CELLS[family]:
         try:
             old, new = pair(parent, candidate, cell)
             passed = True
             for arm, scope, runs in ((parent, "whole", old), (candidate, "cursor", new)):
                 repetitions = sorted(rep for rep, cells in arm.attempted.items() if cell in cells)
                 for rep, run in zip(repetitions, runs, strict=True):
-                    verdict, reason = labeled_restart(run, cell, scope)
+                    verdict, reason = mpls_restart(run, cell, scope)
                     results.append((f"{arm.name} {rep} {cell}", verdict, reason))
                     passed &= verdict == "PASS"
                     if verdict == "PASS" and arm.measured_cells[rep][cell] != 1:
                         raise Invalid(f"{arm.name}/{rep}: {cell} was not measured by the runner")
             if not passed:
                 continue
-            measured(old + new, cell, LABELED_RELEASE_SHAPE)
+            measured(old + new, cell, MPLS_RELEASE_SHAPE)
             for title, field in readings:
                 p, c = (statistics.fmean(number(run, field, cell) for run in runs) for runs in (old, new))
                 results.append((
@@ -2452,10 +2506,12 @@ def main(argv: list[str]) -> int:
     if len(args) == 2 and args[0] == "check" and not require:
         directory = Path(args[1])
         return report(check(directory), check_allocator_readings(directory))
-    if len(args) == 3 and args[0] == "check-labeled" and args[1] in ("whole", "cursor") and not require:
-        return report(check_labeled(Path(args[2]), args[1]))
-    if len(args) == 3 and args[0] == "labeled" and not require:
-        return report(compare_labeled(Path(args[1]), Path(args[2])))
+    if len(args) == 3 and not require:
+        family = args[0].removeprefix("check-")
+        if args[0].startswith("check-") and family in RESTART_CELLS and args[1] in ("whole", "cursor"):
+            return report(check_restart_family(Path(args[2]), args[1], family))
+        if args[0] in RESTART_CELLS:
+            return report(compare_restart_family(Path(args[1]), Path(args[2]), args[0]))
     print(__doc__, file=sys.stderr)
     return 2
 

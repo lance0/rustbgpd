@@ -14,9 +14,12 @@
   that queue (End-of-RIB, FlowSpec, BGP-LS and RT-Constrain input, reads,
   commands, other session changes, and the same peer's own later messages)
   still waits behind the session end, and the queue is held again, as
-  before, when a timer for stale or refreshed routes falls due, when the
-  passing input overflows the build's repair log, or when eight commands and
-  session ends are already waiting. While the session end waits, a
+  before, when a timer for stale or refreshed routes falls due or when
+  eight commands and session ends are already waiting. It is also held, for
+  the rest of the build, once the passing input has left more than 2,048
+  changed best routes waiting on 64 of the build's turns. UPDATEs of about
+  2,000 or more routes that keep coming do that within about 200 actor
+  turns; one UPDATE of any size does not. While the session end waits, a
   withdrawal from another peer can make the ended session's route best, and
   it is advertised until the build finishes; before, the withdrawn route
   stayed advertised for the same time.

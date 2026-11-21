@@ -90,6 +90,9 @@ impl RibManager {
         if passes { intake } else { Intake::Hold }
     }
 
+    /// Any retained intent or held general head with no pending writer and
+    /// no optional retirement. A due replay precedes new primary work, and
+    /// no cold build starts on a busy turn until it has run.
     pub(super) fn first_group_replay_due(&self) -> bool {
         (!self.first_group_deferred_intents.is_empty() || self.first_group_general_head.is_some())
             && self.first_group_pending_writer().is_none()
