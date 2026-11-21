@@ -12,6 +12,21 @@ use super::{OutboundRouteUpdate, PeerId, RibManager};
 use crate::loc_rib::{REGISTRATION_PAGE_SIZE, RegistrationScanStatus};
 use crate::update::RibUpdate;
 
+/// Build turns in one attempt on which a build that keeps something waiting
+/// may find its repair log more than half full. A claimed build with a
+/// session end retained behind it then takes the actor's turns. A founder's
+/// build whose slot another policy destination waits for gives the slot up,
+/// as it does on overflow, and holds no input. The count is cumulative over
+/// the attempt, because a steady feed of messages near two chunks holds the
+/// log at half and dips under it every few turns. Separate bursts within one
+/// attempt therefore add up. A larger budget lets a longer burst from
+/// another peer pass without holding the other peers' input for the rest of
+/// the build or discarding the founder's pages (the largest UPDATE, 16
+/// chunks, keeps the log past half for 13 turns; four of them back to back
+/// fit the budget, five spend it). A smaller one replays the session end or
+/// the waiting command sooner under input that does not stop.
+pub(super) const BEHIND_TURNS_BEFORE_SEAL: u16 = 64;
+
 struct Waiter {
     session_id: u64,
     sender: mpsc::Sender<OutboundRouteUpdate>,
@@ -27,6 +42,9 @@ pub(super) struct FirstGroupBuild {
     other_destination_waits: bool,
     // Optional prepare belongs to the exact source cohort and session that asked.
     prepare_source: Option<(usize, Waiter)>,
+    // Turns this attempt found the repair log more than half full while its
+    // writer kept a session end retained or another destination waited.
+    behind_turns: u16,
     table: GroupRibOut,
 }
 
@@ -85,6 +103,7 @@ impl RibManager {
             writer: None,
             other_destination_waits: false,
             prepare_source: None,
+            behind_turns: 0,
             table: self.first_group_table(peer, gid),
         }));
     }
@@ -415,6 +434,15 @@ impl RibManager {
     /// overflow, can start under steady ingress without reordering warm joins.
     pub(super) fn advance_busy_first_group(&mut self, search: &mut usize) {
         if self.first_group_build.is_none() {
+            // No cold build starts on a busy turn while any replay is due: a
+            // retained intent or a held general head, with no writer and no
+            // optional retirement pending. That covers a command the last
+            // build made way for, which replays once the message in flight
+            // has run. The founder's retry must not take the slot back
+            // first: the command would wait for the retry again.
+            if self.first_group_replay_due() {
+                return;
+            }
             let queue = &self.pending_initial_registrations;
             if *search >= queue.len() {
                 *search = 0;
@@ -460,9 +488,25 @@ impl RibManager {
                         session == waiter.session_id && waiter.sender.same_channel(&sender)
                     })
             });
+        self.release_abandoned_reservation(&mut job);
+        // Input can keep discovery waiting behind repairs for as long as it
+        // lasts. Count the turns on which it does so while a retained
+        // session end or another destination's command waits for this build.
+        let keeps_waiting =
+            job.other_destination_waits || (job.writer.is_some() && self.session_end_retained());
+        if keeps_waiting && self.loc_rib.registration_scan_behind() {
+            job.behind_turns = job.behind_turns.saturating_add(1);
+        }
+        let outrun = job.behind_turns >= BEHIND_TURNS_BEFORE_SEAL;
+        // Before repairs took every turn past half, such input overflowed
+        // the log and the founder's build made way for the waiting command.
+        // It still does once the attempt's budget is spent. Up to four
+        // back-to-back UPDATEs of the largest size are over before that,
+        // and no other peer's input is held.
         if !current
             || self.group_ribs.contains_key(&job.gid)
             || self.loc_rib.registration_scan_status() == RegistrationScanStatus::Overflow
+            || (outrun && job.other_destination_waits)
         {
             self.clear_first_group_commit_frontier();
             // Input that passed a retained session end can overflow the
@@ -475,6 +519,11 @@ impl RibManager {
             job.phase = FirstGroupPhase::Retiring;
             self.retire_first_group_page(job);
             return;
+        }
+        // A writer that input has outrun for the budget gets every turn, so
+        // that it commits and the session end replays.
+        if outrun {
+            self.seal_first_group_commit_frontier();
         }
         let page = self.loc_rib.take_registration_page();
         debug_assert!(page.bucket_visits + page.repairs <= REGISTRATION_PAGE_SIZE);
@@ -530,10 +579,32 @@ impl RibManager {
         }
     }
 
+    /// An abandoned authoritative batch is skipped whole when it replays.
+    /// Do not spend the budget or the partial table on it: release the
+    /// reservation, as for a writer whose caller has gone. The replay is
+    /// then due at once, in admission order: the batch is skipped, and a
+    /// live command behind it reserves the slot again when it replays.
+    /// A head held while the reservation stood sealed the frontier, and
+    /// the build's exits clear it only for a standing reservation.
+    fn release_abandoned_reservation(&mut self, job: &mut FirstGroupBuild) {
+        if job.other_destination_waits
+            && matches!(
+                self.first_group_deferred_intents.front().map(RibUpdate::unmetered),
+                Some(RibUpdate::ReplacePeerExportPoliciesAuthoritatively { reply, .. })
+                    if reply.is_closed()
+            )
+        {
+            job.other_destination_waits = false;
+            job.behind_turns = 0;
+            self.clear_first_group_commit_frontier();
+        }
+    }
+
     fn release_first_group_writer(&mut self, mut job: Box<FirstGroupBuild>) {
         self.clear_first_group_commit_frontier();
         let writer = job.writer.take().expect("reserved writer");
         job.prepare_source = None;
+        job.behind_turns = 0;
         self.first_group_build = Some(job);
         self.settle_obsolete_first_group_writer(*writer);
     }
@@ -560,12 +631,18 @@ impl RibManager {
         // Retirement can discard slab handles and overflow can omit a
         // withdrawal. Restart with fresh storage even for the same group key.
         job.table = job.table.empty_first_group_table();
+        job.behind_turns = 0;
         self.loc_rib.start_registration_scan();
         let founder = self
             .prospective_first_group(job.peer, Some(job.gid))
             .map(|(_, session_id, sender)| Waiter { session_id, sender });
         job.phase = FirstGroupPhase::Scanning(founder);
         self.first_group_build = Some(job);
+    }
+
+    #[cfg(test)]
+    pub(super) fn first_group_behind_turns(&self) -> Option<u16> {
+        self.first_group_build.as_ref().map(|job| job.behind_turns)
     }
 
     #[cfg(test)]
