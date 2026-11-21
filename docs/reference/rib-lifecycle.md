@@ -58,8 +58,12 @@ How to read the rows:
   is grouped when its export result is the same as its group's for every
   route: same export-chain content, eBGP or iBGP and reflector-client
   status, role, RFC 1997 community handling, per-client best, LLGR
-  families and shared families (IPv4 and IPv6 unicast, VPN, RT-Constrain)
+  families, shared families (IPv4 and IPv6 unicast, VPNv4 and VPNv6) and
+  whether RT-Constrain was negotiated
   ([`GroupKey`](../../crates/rib/src/manager/update_groups.rs)).
+  RT-Constrain is not a shared family: its rows stay private to each
+  session, grouped or not (`owing_family_in_scope` in
+  [`outbound_owing.rs`](../../crates/rib/src/manager/outbound_owing.rs)).
 - **Kept private** sessions hold their own unicast Adj-RIB-Out although
   their families could be shared. The classifier
   ([`classify_update_group`](../../crates/rib/src/update.rs)) keeps a
@@ -412,7 +416,14 @@ message (of any size) ahead of another peer's update, not the whole
 burst. With 1,200-route messages that is two messages, the workload of
 `unpaced_burst_leaves_at_most_two_messages_ahead_of_another_source` in
 [`tests/ingest_budget.rs`](../../crates/transport/src/session/tests/ingest_budget.rs).
-The wait still grows with the number of peers bursting at once, and input
+That bound holds for ordinary reads. Two paths process frames past a
+closed gate, and those frames can be UPDATEs: while the gate stays
+closed, each hold-timer expiry that finds a complete frame admits that one
+frame, for at most eight consecutive expiries (`MAX_GATE_HOLD_ADMISSIONS`);
+and when the peer closes or the connection fails behind unread input,
+every frame already in the read buffer is processed before the TCP
+failure, once per connection (`end_unread_connection` in
+[`fsm.rs`](../../crates/transport/src/session/fsm.rs)). The wait still grows with the number of peers bursting at once, and input
 that does not come from a session is not gated.
 
 **Install and select.** A message's routes enter the peer's Adj-RIB-In in
@@ -911,8 +922,13 @@ first-member build with a claimed export-policy change:
   commits (`BEHIND_TURNS_BEFORE_SEAL` in
   [`first_group_build.rs`](../../crates/rib/src/manager/first_group_build.rs)),
   and after an overflow restarts the build. The count adds up over the
-  attempt; the largest UPDATE (16 route chunks) keeps the log past half
-  for 13 turns, so four back to back fit the budget and five spend it.
+  attempt. In the tested shape, an UPDATE of 16,378 routes (16 route
+  chunks of 1,024) keeps the log past half for 13 turns, so four back to
+  back fit the budget and five spend it. That is not the largest UPDATE:
+  an Extended Message of 65,534 bytes can withdraw 21,837 distinct /16
+  prefixes (three bytes each), which is 22 chunks. Such a message keeps the
+  log past half for longer, so fewer fit the budget; that shape is not
+  measured.
   Under input that does not stop, a test on 16,384 routes pins the hold
   to start within 256 turns
   (`input_outrunning_the_build_behind_a_retained_session_end_seals_the_lane`
@@ -981,3 +997,7 @@ them bounds how long a turn takes.
   test's workload of 1,200-route messages that is two messages
   (`unpaced_burst_leaves_at_most_two_messages_ahead_of_another_source` in
   [`tests/ingest_budget.rs`](../../crates/transport/src/session/tests/ingest_budget.rs)).
+  This is the bound for ordinary reads. Past a closed gate, hold-timer
+  expiries admit at most eight frames, one per expiry, and a connection
+  end processes the frames already in the read buffer once; either can
+  carry UPDATEs (see the read gate under [Steady state](#steady-state)).
