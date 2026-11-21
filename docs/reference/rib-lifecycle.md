@@ -571,8 +571,8 @@ whole-table operation in one turn, and compatible queued refreshes of one
 plain group share a replay.
 
 **ROUTE-REFRESH.** A request for one family (RFC 2918, or RFC 7313
-enhanced refresh) is answered in the turn that takes it
-(`handle_route_refresh_request` in
+enhanced refresh) is answered in the turn that takes it unless one of
+the deferrals below applies (`handle_route_refresh_request` in
 [`route_refresh.rs`](../../crates/rib/src/manager/route_refresh.rs)):
 
 - The answer replays the family, from the group table for a member that
@@ -603,8 +603,14 @@ enhanced refresh) is answered in the turn that takes it
   receiver already purged (`grouped_refused_proof_refresh_settles_withdrawal_before_eorr`
   in [`tests/update_groups.rs`](../../crates/rib/src/manager/tests/update_groups.rs),
   `grouped_vpn_refresh_settles_refused_proof_withdrawal_before_eorr` in
-  [`tests/vpn.rs`](../../crates/rib/src/manager/tests/vpn.rs)). Any other
-  dirty or clean receiver is answered in the request's own turn.
+  [`tests/vpn.rs`](../../crates/rib/src/manager/tests/vpn.rs)).
+- Any other receiver, dirty or clean, is answered in the request's own
+  turn only if the answer can be admitted then: its channel has room, no
+  whole-table operation toward it is still live, and the family's
+  initial End-of-RIB, when one is owed, has been admitted first (RFC 7313
+  §4 allows no BoRR before it). Otherwise the answer is queued, nothing
+  is built for it, and the resync tick retries it once the channel
+  drains or the operation ends (`retry_deferred_refreshes`, same file).
 
 **ORF.** A session with an installed Address-Prefix ORF is kept private
 (RFC 5291, RFC 5292). A pushed ORF update is applied in one turn
@@ -754,12 +760,20 @@ measured.
 
 **End-of-RIB after a release.** A released family other than unicast
 sends its markers across turns, in peer order: the release turn makes the
-first offers, then each 10 ms tick visits eight receivers of the family,
-and the markers held for rebuilt RT-Constrain memberships go out two
-receivers a tick. So the last of N receivers gets its marker about
-N/8 × 10 ms after the release. A marker that a full writer refuses is
-offered again one second after the first outstanding refusal, in a pass
-that visits eight receivers a tick and offers each session once. Unicast
+first offers, then each 10 ms tick has eight receiver visits shared by
+all marker work: refused markers due for retry, rebuilt RT-Constrain
+memberships (at most two visits a tick), released families and EVPN
+waiters (`service_marker_release_backlog` in
+[`eor_hold.rs`](../../crates/rib/src/manager/eor_hold.rs)). With no
+other marker work, the last of N receivers is visited about
+N/8 × 10 ms after the release, or N/2 × 10 ms for rebuilt RT-Constrain
+memberships. Those are scheduling estimates, not delivery deadlines:
+visits taken by other marker work, rows still owed ahead of a marker and
+a writer that refuses it all delay it further. A marker that a full
+writer refuses is offered again one second after the first outstanding
+refusal, in a pass that offers each session once and takes its visits
+from the same eight a tick (half of them while released markers also
+wait). Unicast
 markers follow the paced unicast release above. Tests, in which every
 receiver gets one marker per family and none before its rows: `vpn_release_448`,
 `rebuilt_rtc_memberships_448` and
@@ -801,8 +815,10 @@ remains fails the registration over to the survivor
 **The teardown turn.** `peer_down_teardown` does all of this in one turn:
 
 1. Collects every key the peer announced, in every family.
-2. Recomputes best path for those keys and runs one distribution pass, so
-   withdrawals and replacement routes go out to every other peer.
+2. Recomputes best path for those keys and runs one distribution pass,
+   which stages withdrawals and replacement routes toward every other
+   peer; a receiver that cannot take them yet gets them later from the
+   resync tick ([Receiver falls behind](#receiver-falls-behind)).
 3. Drops the peer's outbound state: its owed rows, its private Adj-RIB-Out,
    its group membership. If it was the last member, the group's table is
    retired in the same turn.
