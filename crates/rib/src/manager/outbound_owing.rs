@@ -852,6 +852,12 @@ pub(super) struct PeerOwing {
     /// and for a cursor started by an owed set's byte cap, whose keys ahead
     /// are all later arrivals. Reset with [`Self::walk_read`].
     walk_head: [u64; OwedFamily::CURSORS.len()],
+    /// Per cursor family: the cursor was started by
+    /// [`RibManager::owe_whole_family`] and waits for its starting log
+    /// ([`RibManager::seal_walk_starts`] seals only such a cursor, once).
+    /// Cleared by every other start, so a byte-cap cursor started later at
+    /// the same position is never sealed by an older queued entry.
+    walk_starting: [bool; OwedFamily::CURSORS.len()],
     /// A bit per whole family (not a cursor) already drained inside the
     /// current selection hold (its exempt rows); it stays owed for the
     /// release.
@@ -893,6 +899,7 @@ impl PeerOwing {
             walk_read: Default::default(),
             walk_rows: Default::default(),
             walk_head: Default::default(),
+            walk_starting: Default::default(),
             hold_drained: 0,
             next_family: 0,
         }
@@ -1068,6 +1075,7 @@ impl PeerOwing {
         (self.cursor[index], self.hold_cursor[index]) = (head, 0);
         (self.walk_read[index], self.walk_rows[index]) = (0, 0);
         self.walk_head[index] = 0;
+        self.walk_starting[index] = false;
     }
 
     /// The cursor of `index` caught up with its list.
@@ -1419,7 +1427,9 @@ impl RibManager {
     /// The walk's estimate may extrapolate up to the head
     /// ([`PeerOwing::walk_head`]), and never past it: later passes append
     /// in arrival order. A receiver whose walk has since ended or
-    /// restarted is skipped.
+    /// restarted is skipped, and so is one whose cursor no longer waits for
+    /// its starting log ([`PeerOwing::walk_starting`]): a later byte-cap
+    /// start at the same position is not this entry's walk.
     fn seal_walk_starts(&mut self, list: RowCursor) {
         let starting = std::mem::take(self.owed_rows_starting(list));
         if starting.is_empty() {
@@ -1434,8 +1444,9 @@ impl RibManager {
                 .and_then(|entry| entry.owing.as_deref_mut())
                 && owing.is_whole(OwedFamily::CURSORS[index])
                 && owing.cursor[index] == start
-                && owing.walk_head[index] == 0
+                && owing.walk_starting[index]
             {
+                owing.walk_starting[index] = false;
                 owing.walk_head[index] = head;
             }
         }
@@ -1728,6 +1739,7 @@ impl RibManager {
                 // inventory, from one hash set. Unicast tables are not
                 // presized.
                 if !family.is_unicast() {
+                    owing.walk_starting[list as usize] = true;
                     self.owed_rows_starting(list).push((peer, head));
                 }
             } else {

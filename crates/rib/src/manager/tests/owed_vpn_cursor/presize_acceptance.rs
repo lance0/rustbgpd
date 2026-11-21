@@ -876,3 +876,45 @@ async fn a_byte_cap_cursor_ahead_of_acceptance_in_blocks_makes_no_estimate() {
     assert_at_or_below_control(&head, &control, "byte-cap cursor, blocks ahead");
     assert_eq!(presizes, 0, "no estimate");
 }
+
+/// A start queued by a release-style owe whose walk ended on an empty list
+/// stays queued with no log to seal it. The receiver then stops reading,
+/// a 15,000-key pass overfills its owed keys past the byte cap and starts
+/// a cursor at the same, unchanged head, and a later pass logs into the
+/// list. That cursor has no starting log, so it makes no estimate. Red
+/// when the queued entry seals any cursor live at its start: one estimate.
+#[test]
+fn a_stale_queued_start_never_seals_a_byte_cap_cursor() {
+    let shape = || {
+        let mut manager = manager(256);
+        sources_up(&mut manager);
+        let mut receivers = vec![owing_receiver(
+            &mut manager,
+            &[P4],
+            0,
+            Some(deny_med_chain()),
+        )];
+        let peer = receivers[0].peer;
+        drain(&mut manager, &mut receivers);
+        assert!(!manager.owes_whole(peer, F4), "the walk ended");
+        let pass = |keys: std::ops::Range<u32>| {
+            keys.map(|i| med_row(SOURCE, P4, i, tenth_med(i))).collect()
+        };
+        send(&mut manager, SOURCE, pass(0..15_000), vec![]);
+        assert!(
+            manager.owes_whole(peer, F4),
+            "the byte cap started a cursor"
+        );
+        send(&mut manager, SOURCE, pass(15_000..35_000), vec![]);
+        drain(&mut manager, &mut receivers);
+        assert_eq!(receivers[0].wire.table.len(), 3_500);
+        let (routes, keys) = manager.adj_ribs_out[&peer].bench_vpn_capacities();
+        (
+            [routes, keys],
+            manager.adj_rib_out_commit_stats.walk_presizes,
+        )
+    };
+    let ((head, presizes), (control, _)) = with_control(shape);
+    assert_eq!(presizes, 0, "a byte-cap cursor makes no estimate");
+    assert_at_or_below_control(&head, &control, "stale start, byte-cap cursor");
+}
