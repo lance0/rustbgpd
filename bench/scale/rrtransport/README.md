@@ -152,7 +152,10 @@ phase it was labeled and every phase that poll touched. `retirement` is the
 longest poll between the last observation of a charged recovery ledger and
 the first observation of its pre-capture charge; those polls also belong to
 `recovery`. A limit on one phase cannot be met by moving a pause into another:
-the pause appears under the other phase and in the whole-run maximum.
+the pause appears under the other phase and in the whole-run maximum. The
+receipt is taken after the actor has returned, so `settled` and the whole-run
+maximum include its last poll, which drops the RIB; every phase has at least
+one poll.
 
 Two unrelated ordinary UPDATEs from a second source measure the wait on the
 primary lane. Each is published from a slot reserved in advance, by the actor's
@@ -206,8 +209,9 @@ Grade a saved directory with
 per-receiver wire evidence, actor clocks and work counts, and the cgroup and
 compiler observations. The runner records the executable SHA-256 and uses the
 quiet-host gate for the two full shapes. It samples for compilers every 250 ms
-and at the process boundaries. A compiler stops a full shape and makes it
-INVALID. A smoke records the sighting and is still graded on its tables and
+and at the process boundaries, by the process names in `compiler-names.txt`:
+the compilers and linkers the quiet gate rejects, and `clippy-driver`. One of
+them stops a full shape and makes it INVALID. A smoke records the sighting and is still graded on its tables and
 counts; its timings are not results.
 
 Every shape uses a dedicated 64 GiB cgroup with swap disabled. The receipt
@@ -909,8 +913,8 @@ seen a healthy update queued behind the burst, or its timing is unusable:
 - fewer than three healthy updates were admitted while the burst was
   unfinished;
 - the run carried a seeded stall;
-- a measured run is not the fixed shape, saw a compiler (`cargo`, `rustc`,
-  `rustdoc`, `clippy-driver`, sampled every second during the cell), or
+- a measured run is not the fixed shape, saw a compiler or linker (a process
+  named in `compiler-names.txt`, sampled every second during the cell), or
   could not read the process table.
 
 A run is also INVALID when the tap did not recognize every burst message

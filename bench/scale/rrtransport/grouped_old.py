@@ -17,7 +17,8 @@ from converged_rejoin import quiet_problem  # noqa: E402
 SMOKES = {"smoke": (4, 64), "smoke-chunked": (12, 2049)}
 SHAPES = {**SMOKES, "150x37000": (150, 37_000), "700x400000": (700, 400_000)}
 LIMIT_BYTES = 64 << 30
-COMPILERS = {"cargo", "rustc", "rustdoc", "clippy-driver"}
+# The quiet gate's compilers and linkers, shared with the credit cells' watch.
+COMPILERS = frozenset(Path(__file__).with_name("compiler-names.txt").read_text().split())
 SAMPLE_SECONDS = 0.25
 PHASES = ("setup", "refusal", "dirty", "recovery", "settled")
 
@@ -227,7 +228,8 @@ def polls(raw):
     # slices as the harness's draining and the 10 ms resync tick interleave to.
     require(counts["refusal"] == 1 and longest["refusal"] == raw["capture_turn_poll_ns"],
             "refusal phase is not the single capture poll")
-    require(counts["setup"] > 0 and counts["dirty"] > 0 and counts["recovery"] > 0, "a phase has no physical RIB poll")
+    # The actor is joined before the receipt, so `settled` holds at least its last poll.
+    require(all(counts[name] > 0 for name in PHASES), "a phase has no physical RIB poll")
     require(count(phases["dirty"], "refused_resync_slices") > 0, "no resync retry against a full receiver in the dirty period")
     require(count(phases["recovery"], "resync_slices") > 0, "no resync slice in recovery")
     require(count(raw, "actor_polls") == sum(counts.values()), "phase polls do not sum to the actor's polls")

@@ -5,6 +5,7 @@ from ipaddress import IPv4Address
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -14,6 +15,9 @@ import grouped_old as cell
 
 
 HERE = Path(__file__).resolve().parent
+# Exact names the quiet gate rejects that are not compilers or linkers.
+OTHER_COMPETITORS = {"perf", "rustbgpd", "rrtransport", "reloadstall", "bird", "bird6", "bgpd",
+                     "openbgpd", "gobgpd", "zebra", "frr", "ospfd", "staticd"}
 
 
 def transport(peers, rows):
@@ -170,6 +174,17 @@ class GroupedOldReceipt(unittest.TestCase):
         missing = copy.deepcopy(self.raw)
         del missing["phases"]["settled"]
         self.assertEqual(self.check(missing)[0], "INVALID")
+        # A phase with no poll at all fails even when the remaining counts still sum.
+        for name in ("setup", "dirty", "recovery", "settled"):
+            with self.subTest(unobserved=name):
+                unobserved = copy.deepcopy(self.raw)
+                unobserved["actor_polls"] -= unobserved["phases"][name]["polls"]
+                unobserved["phases"][name].update(polls=0, longest_poll_ns=0)
+                if name == "recovery":  # Keep the whole-run maximum consistent without it.
+                    unobserved.update(longest_actor_poll_ns=60, longest_actor_poll_phase="refusal",
+                                      longest_actor_poll_touched=["refusal"])
+                    unobserved["retirement"]["longest_poll_ns"] = 60
+                self.assertEqual(self.check(unobserved), ("INVALID", "a phase has no physical RIB poll"))
 
     def test_each_capture_records_its_strategy_and_ledger_charge(self):
         verdict, detail = self.check()
@@ -294,6 +309,20 @@ class GroupedOldReceipt(unittest.TestCase):
         self.assertEqual(self.check(raw, measured, "150x37000")[0], "PASS")
         self.assertEqual(self.check(raw, dict(measured, compiler_watch=seen), "150x37000"),
                          ("INVALID", "concurrent compiler: 123 rustc"))
+
+        # The watch stops on every compiler and linker the quiet gate rejects.
+        gate = (HERE.parent / "host-quiet.sh").read_text()
+        rejected = set(re.findall(r'name == "([^"]+)"', gate)) - OTHER_COMPETITORS
+        self.assertTrue({"cargo", "rustc", "gcc", "cc1", "ld", "ld.lld", "mold"} <= rejected)
+        self.assertEqual(cell.COMPILERS, rejected | {"clippy-driver"})
+        for name in sorted(cell.COMPILERS):
+            with self.subTest(compiler=name):
+                pid = self.out / "77"
+                pid.mkdir(exist_ok=True)
+                (pid / "comm").write_text(name + "\n")
+                with patch.object(cell.Path, "iterdir", return_value=[pid]):
+                    with self.assertRaisesRegex(ValueError, f"concurrent compiler: 77 {re.escape(name)}$"):
+                        cell.compiler_sample({"samples": 0, "observed": 0, "first_compiler": None}, measured=True)
 
         pid = self.out / "123"
         pid.mkdir()

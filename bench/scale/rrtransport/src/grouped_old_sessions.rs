@@ -262,16 +262,18 @@ impl Client {
                 }
                 Ok(_) => {}
                 Err(mpsc::error::TryRecvError::Empty) => break,
-                Err(mpsc::error::TryRecvError::Disconnected) => bail!("{} session ended", self.ip),
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    return Err(anyhow::anyhow!("{} session ended", self.ip)).context(WireFailure)
+                }
             }
         }
-        ensure!(
-            self.session
-                .as_ref()
-                .is_some_and(PeerHandle::is_established),
-            "{} left Established",
-            self.ip
-        );
+        if !self
+            .session
+            .as_ref()
+            .is_some_and(PeerHandle::is_established)
+        {
+            return Err(anyhow::anyhow!("{} left Established", self.ip)).context(WireFailure);
+        }
         Ok(())
     }
 }
@@ -348,7 +350,8 @@ impl SessionFleet {
             };
             tokio::time::timeout_at(deadline, client.writer.send(envelope))
                 .await?
-                .map_err(|_| anyhow::anyhow!("writer {} closed before {phase:?}", client.ip))?;
+                .map_err(|_| anyhow::anyhow!("writer {} closed before {phase:?}", client.ip))
+                .context(WireFailure)?;
             acknowledgements.push(rx);
         }
         let mut receipts = Vec::with_capacity(self.clients.len());

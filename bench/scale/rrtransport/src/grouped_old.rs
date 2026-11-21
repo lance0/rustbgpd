@@ -166,7 +166,8 @@ async fn forward(clients: &mut [Client]) -> Result<()> {
                 .session
                 .send(envelope)
                 .await
-                .context("transport writer closed")?;
+                .context(WireFailure)
+                .with_context(|| format!("transport writer closed at receiver {i}"))?;
         }
     }
     Ok(())
@@ -219,7 +220,8 @@ pub async fn run(output: &Path, peers: usize, rows: usize) -> Result<()> {
         Err(error) => {
             // Only a receiver correctness failure is a verdict on the daemon
             // (FAIL); anything else leaves the run unmeasured (INVALID), with
-            // its reason kept. A session reset is the daemon's unless the
+            // its reason kept. A session reset, which also closes that
+            // session's writer, is the daemon's unless the
             // runtime that carries the sessions went unscheduled for a
             // keepalive interval: then this harness could not keep its side
             // of the hold timer.
@@ -399,9 +401,15 @@ async fn cell(peers: usize, rows: usize, stall: &AtomicU64) -> Result<Value> {
         filled.push((a, b));
     }
     check(&clients, Phase::Fill)?;
-    for (client, (a, b)) in clients.iter().zip(filled) {
-        client.session.send(a).await?;
-        client.session.send(b).await?;
+    for (i, (client, (a, b))) in clients.iter().zip(filled).enumerate() {
+        for envelope in [a, b] {
+            client
+                .session
+                .send(envelope)
+                .await
+                .context(WireFailure)
+                .with_context(|| format!("transport writer closed at receiver {i}"))?;
+        }
     }
     let mut recovery_winner = false;
     loop {
@@ -423,6 +431,13 @@ async fn cell(peers: usize, rows: usize, stall: &AtomicU64) -> Result<Value> {
     check(&clients, Phase::Final)?;
     let transport = fleet.finish().await?;
     barrier(&tx).await?;
+    // The actor returns once its primary lane closes. Its last poll drops the
+    // RIB, and the receipt is read only after that poll has been recorded.
+    drop(tx);
+    drop(sources);
+    actor
+        .await
+        .context("RIB actor thread ended without returning")?;
     let mut receipt = clocks.receipt()?;
     let fields = json!({
         "cell":"grouped-old-capture","peers":peers,"rows":rows,"established_group_members":peers,
@@ -435,10 +450,5 @@ async fn cell(peers: usize, rows: usize, stall: &AtomicU64) -> Result<Value> {
         .as_object_mut()
         .unwrap()
         .extend(fields.as_object().unwrap().clone());
-    drop(tx);
-    drop(sources);
-    actor
-        .await
-        .context("RIB actor thread ended without returning")?;
     Ok(receipt)
 }
