@@ -3,8 +3,8 @@
 //! rows per prefix read so far and the prefixes still ahead of its cursor.
 
 use super::super::cursor_presize::{
-    Growth, PRESIZE_ROWS, assert_at_or_below_control, assert_fitted, dataset_chain, deny_med_chain,
-    prefix_dataset, set_med, tenth_med, with_control,
+    Growth, PRESIZE_ROWS, assert_at_or_below_control, assert_fitted, assert_within_control_spread,
+    dataset_chain, deny_med_chain, prefix_dataset, set_med, tenth_med, with_control,
 };
 use super::*;
 
@@ -404,7 +404,7 @@ fn accepted_labeled_prefixes_denied_after_a_default_step_fit() {
         tables(&manager, peer).1
     };
     let (head, control) = with_control(shape);
-    assert_at_or_below_control(&head, &control, "denied after a default step");
+    assert_within_control_spread(&head, &control, "denied after a default step");
 }
 
 /// One in five labeled prefixes accepted through a policy dataset; after
@@ -459,6 +459,5 @@ fn a_labeled_dataset_swap_published_before_its_re_evaluation_fits() {
         presizes, 0,
         "no estimate (capacities {head:?}, control {control:?})"
     );
-    let spread = control.map(|capacity| capacity + capacity / 4);
-    assert_at_or_below_control(&head, &spread, "dataset swap before its re-evaluation");
+    assert_within_control_spread(&head, &control, "dataset swap before its re-evaluation");
 }

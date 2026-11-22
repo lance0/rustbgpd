@@ -117,6 +117,19 @@ pub(super) fn assert_at_or_below_control(head: &[usize], control: &[usize], case
     );
 }
 
+/// [`assert_at_or_below_control`] within a quarter of each capacity: the
+/// order of the walk's starting log follows each run's `RandomState`, so
+/// with no presize at all a shard of one run can sit a capacity class
+/// above the other's; an estimate from a stale sample moves every shard
+/// one class or more.
+pub(super) fn assert_within_control_spread(head: &[usize], control: &[usize], case: &str) {
+    let spread: Vec<usize> = control
+        .iter()
+        .map(|capacity| capacity + capacity / 4)
+        .collect();
+    assert_at_or_below_control(head, &spread, case);
+}
+
 /// An export chain that denies every route with a MED of 1 or more.
 pub(super) fn deny_med_chain() -> rustbgpd_policy::PolicyChain {
     rustbgpd_policy::PolicyChain::new(vec![rustbgpd_policy::Policy {
