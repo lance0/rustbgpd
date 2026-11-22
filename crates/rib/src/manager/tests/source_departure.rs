@@ -1081,3 +1081,78 @@ async fn grouped_source_departure_rechecks_rs_control_tags_for_each_family_stage
         "{peak} physical receiver-key inspections in one poll, limit {POLL_LIMIT}"
     );
 }
+
+/// Eight private receivers holding the departing table and 2,048 unrelated
+/// rows from another source, each receiver's initial output drained.
+fn private_receivers_with_unrelated_table() -> (RibManager, Vec<mpsc::Receiver<OutboundRouteUpdate>>)
+{
+    let (_tx, rx) = mpsc::channel(16);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.outbound_row_credit_override = None;
+    super::distribution_window::untimed_window(&mut manager);
+    for source in [SOURCE, OTHER] {
+        register_test_peer(&mut manager, peer_v4(source), 0);
+    }
+    let mut receivers: Vec<_> = (0..8)
+        .map(|index| join(&mut manager, index, Shape::Private))
+        .collect();
+    let unrelated = (0..2048)
+        .map(|row| make_route(prefix(ROWS + 10 + row), OTHER))
+        .collect();
+    manager.handle_update(test_routes_received(peer_v4(OTHER), unrelated));
+    drain_route_chunks(&mut manager);
+    seed(&mut manager, Shape::Private, ROWS);
+    for receiver in &mut receivers {
+        while receiver.try_recv().is_ok() {}
+    }
+    (manager, receivers)
+}
+
+/// A receiver owing a whole-table rebuild must leave it to the resync tick.
+/// Building it inside a departure page would put its unrelated table in one poll.
+fn assert_pending_rebuild_waits_for_departure(force: bool) {
+    let (mut manager, mut receivers) = private_receivers_with_unrelated_table();
+    let pending = peer_v4(Ipv4Addr::new(192, 0, 2, 1));
+    if force {
+        manager.force_outbound_peers.insert(pending);
+    } else {
+        manager.mark_outbound_dirty(pending);
+    }
+    assert_ne!(manager.dirty_peers.contains(&pending), force);
+    manager.handle_update(down(SOURCE));
+    assert!(manager.source_departure.is_some());
+    take_receiver_rows();
+    for receiver in &mut receivers {
+        while receiver.try_recv().is_ok() {}
+    }
+    let (mut most, mut most_sent) = (0, 0);
+    while manager.source_departure.is_some() {
+        manager.advance_source_departure();
+        most = most.max(take_receiver_rows());
+        let mut sent = 0;
+        for receiver in &mut receivers {
+            while let Ok(update) = receiver.try_recv().map(delivered) {
+                sent += update.unicast_withdrawals().count() + update.announce.len();
+            }
+        }
+        most_sent = most_sent.max(sent);
+    }
+    assert!(
+        most <= POLL_LIMIT,
+        "force={force}: {most} receiver-keys inspected in one departure poll"
+    );
+    assert!(
+        most_sent <= POLL_LIMIT,
+        "force={force}: {most_sent} rows sent in one departure poll"
+    );
+}
+
+#[test]
+fn dirty_private_receiver_is_not_rebuilt_inside_a_departure_page() {
+    assert_pending_rebuild_waits_for_departure(false);
+}
+
+#[test]
+fn forced_private_receiver_is_not_rebuilt_inside_a_departure_page() {
+    assert_pending_rebuild_waits_for_departure(true);
+}
