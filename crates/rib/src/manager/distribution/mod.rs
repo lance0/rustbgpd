@@ -5579,9 +5579,15 @@ impl RibManager {
                 super::replacement_readiness_checkpoint_at(&readiness, "family_commit", false);
                 rib_out.remove_rtc(key);
             }
-            for &(prefix, path_id) in withdraw.iter() {
-                checkpoint();
-                rib_out.set_local_export_source((prefix, path_id), None);
+            if rib_out.local_export_sources().len() != 0 {
+                for &(prefix, path_id) in withdraw.iter() {
+                    checkpoint();
+                    #[cfg(test)]
+                    {
+                        self.adj_rib_out_commit_stats.local_source_withdraw_visits += 1;
+                    }
+                    rib_out.set_local_export_source((prefix, path_id), None);
+                }
             }
             if !queued_exempt_withdrawals.is_empty() {
                 self.record_hold_exempt_withdrawn(
@@ -9532,6 +9538,7 @@ impl RibManager {
         debug_assert_eq!(RELEASING, release.is_some());
         debug_assert_eq!(DRAINING, drain.is_some());
         let mut denial_receipt = release.as_mut().and_then(|page| page.denial_receipt.take());
+        let stage_rs_verdicts = release.as_mut().and_then(|page| page.rs_verdicts.take());
         let mut drain = if DRAINING { drain } else { None };
         // Clean incremental fanout owns no readiness episode: its work is
         // bounded by the pass. Owned shared preparation and cleanup take one
@@ -9697,7 +9704,8 @@ impl RibManager {
         // one delta scan per group per pass, not per member. Untagged
         // passes (the overwhelming majority) keep every
         // `rs_control_communities` member on the shared Arc emission.
-        let mut rs_tagged_pass: HashMap<(usize, u32), bool> = HashMap::new();
+        let mut local_rs_verdicts = HashMap::new();
+        let rs_tagged_pass = stage_rs_verdicts.unwrap_or(&mut local_rs_verdicts);
         // Benchmark evidence only: clean grouped members of this pass that
         // took the shared payload versus the per-member delta walk.
         #[cfg(feature = "bench-internals")]
@@ -9854,6 +9862,7 @@ impl RibManager {
                     if (is_dirty && self.owed_row_evicted.contains(&peer))
                         || ((is_dirty || is_force) && self.held_rebuild_due(peer))
                         || (is_dirty && change_event && member_of.is_some())
+                        || ((is_dirty || is_force) && self.source_departure.is_some())
                     {
                         self.defer_unsent_outbound_pass(
                             peer,
@@ -11188,6 +11197,8 @@ impl RibManager {
                             staging_prefixes.len();
                     }
                     for prefix in staging_prefixes {
+                        #[cfg(test)]
+                        super::source_departure::inspect_receiver_row();
                         checkpoint();
                         if unicast_budget.is_some_and(|budget| staged_rows >= budget) {
                             unstaged_prefixes.push(*prefix);
@@ -12325,7 +12336,7 @@ impl RibManager {
             #[cfg(feature = "bench-internals")]
             export_memo.record_replacement_capacities(self);
             export_memo.retire_with(&mut || self.replacement_checkpoint_at("retirement", false));
-            crate::adj_rib_out::release_hash_map(&mut rs_tagged_pass, &mut || checkpoint());
+            crate::adj_rib_out::release_hash_map(&mut local_rs_verdicts, &mut || checkpoint());
             self.release_speculative_group_admitted_keys(&speculative_group_admitted);
             self.replacement_checkpoint(true);
             drop(readiness);

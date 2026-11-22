@@ -1315,6 +1315,13 @@ fn drain_route_chunks(manager: &mut RibManager) {
     while manager.process_next_route_chunk() {}
 }
 
+/// Finish any source-loss publication before the next simulated lifecycle event.
+fn drain_source_departure(manager: &mut RibManager) {
+    while manager.source_departure.is_some() {
+        manager.advance_source_departure();
+    }
+}
+
 /// Drive selection through its last marker sweep without spending any receiver's resync credit.
 fn drain_unicast_release(manager: &mut RibManager) {
     while manager.unicast_release_runnable() {
@@ -1793,6 +1800,9 @@ mod selection_deferral_startup_gate_edges;
 mod selection_release_drain;
 mod session_export_policy;
 mod slice_timing;
+mod source_departure;
+mod source_departure_alternates;
+mod source_departure_markers;
 mod stalled_receiver_oracle;
 mod timer_cutoffs;
 mod unicast;

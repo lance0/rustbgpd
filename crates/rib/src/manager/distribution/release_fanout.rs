@@ -22,6 +22,7 @@ pub(super) struct ReleaseMembers<'a> {
     pub(super) afi: Afi,
     pub(super) peers: &'a [PeerId],
     pub(super) stage: &'a HashMap<usize, GroupStageOutput>,
+    pub(super) rs_verdicts: Option<&'a mut HashMap<(usize, u32), bool>>,
     pub(super) denial_receipt: Option<&'a mut MemberVerdicts>,
 }
 
@@ -39,8 +40,17 @@ enum Phase {
     RemoveRsCounts(usize),
     StageGroup(usize),
     Deliver,
+    DeliverAfterRsRestore,
     Cap(Option<PeerId>, [Option<u64>; 2]),
     Finish,
+}
+
+struct DepartureKeys {
+    // Per-ASN verdicts for the current immutable group stage, across member pages.
+    rs_verdicts: HashMap<(usize, u32), bool>,
+    shared: bool,
+    best: HashSet<Prefix>,
+    held: HashSet<Prefix>,
 }
 
 pub(in crate::manager) struct ReleaseDistribution {
@@ -65,11 +75,57 @@ pub(in crate::manager) struct ReleaseDistribution {
     staged: HashMap<usize, GroupStageOutput>,
     lane_entries: usize,
     floors: CursorFloors,
+    // A source departure distinguishes global-best changes from candidate changes.
+    // Selection release revisits every prefix in both roles.
+    departure: Option<Box<DepartureKeys>>,
+    plain_group: bool,
 }
 
 impl ReleaseDistribution {
+    pub(in crate::manager) fn for_departure(
+        afi: Afi,
+        affected: HashSet<Prefix>,
+        best: HashSet<Prefix>,
+        held: HashSet<Prefix>,
+        shared: bool,
+    ) -> Self {
+        Self {
+            departure: Some(Box::new(DepartureKeys {
+                rs_verdicts: HashMap::new(),
+                best,
+                held,
+                shared,
+            })),
+            ..Self::new(afi, affected)
+        }
+    }
+
+    fn member_limit(&self, maximum: usize) -> usize {
+        let Some(keys) = &self.departure else {
+            return maximum;
+        };
+        let key_count = (self.prefixes.len() + keys.held.len()).max(1);
+        maximum.min(super::super::source_departure::RECEIVER_ROWS_PER_POLL / key_count)
+    }
+
+    fn peer_batch(&self, manager: &RibManager, after: Option<PeerId>) -> Vec<PeerId> {
+        if self.departure.is_some() {
+            manager
+                .source_departure
+                .as_ref()
+                .expect("departure owns the roster")
+                .peer_batch(after, self.member_limit(RELEASE_MEMBERS_PER_POLL))
+        } else {
+            manager.release_peer_batch(after, RELEASE_MEMBERS_PER_POLL)
+        }
+    }
+
     fn scope(&self) -> &HashSet<Prefix> {
-        if self.pcb_scope.is_empty() {
+        if self.plain_group
+            && let Some(departure) = &self.departure
+        {
+            &departure.best
+        } else if self.pcb_scope.is_empty() {
             &self.prefixes
         } else {
             &self.pcb_scope
@@ -95,6 +151,8 @@ impl ReleaseDistribution {
             staged: HashMap::new(),
             lane_entries: 0,
             floors: CursorFloors::default(),
+            departure: None,
+            plain_group: false,
         }
     }
 }
@@ -112,17 +170,36 @@ impl RibManager {
     ) -> bool {
         match pass.phase {
             Phase::Publish => {
-                debug_assert!(self.unicast_release_partial());
-                debug_assert!(!pass.prefixes.is_empty());
-                self.invalidate_flowspec_dependencies(&pass.prefixes);
-                self.fib_candidate_changes_tx
-                    .send_modify(|generation| *generation = generation.wrapping_add(1));
+                debug_assert!(pass.departure.is_some() || self.unicast_release_partial());
+                debug_assert!(
+                    !pass.prefixes.is_empty()
+                        || pass
+                            .departure
+                            .as_ref()
+                            .is_some_and(|keys| !keys.held.is_empty())
+                );
+                if pass.departure.is_none() {
+                    self.invalidate_flowspec_dependencies(&pass.prefixes);
+                    self.fib_candidate_changes_tx
+                        .send_modify(|generation| *generation = generation.wrapping_add(1));
+                }
                 self.advance_advertised_pages();
                 pass.phase = Phase::Classify(None);
             }
             Phase::Classify(after) => {
-                let peers = self.release_peer_batch(after, RELEASE_MEMBERS_PER_POLL);
+                let peers = pass.peer_batch(self, after);
                 for &peer in &peers {
+                    if let Some(departure) = &pass.departure {
+                        self.flush_departure_helper_stale(peer, &pass.prefixes);
+                        if !departure.held.is_empty() {
+                            self.flush_departure_helper_stale(peer, &departure.held);
+                        }
+                        if pass.prefixes.is_empty() {
+                            continue;
+                        }
+                    } else {
+                        self.note_release_helper_stale_change(peer, &pass.prefixes);
+                    }
                     let gid = self.grouped_member_of(peer);
                     // A missed admission transfers exactly this stage's withdrawal
                     // residue to resync. Capturing the whole group speculatively
@@ -140,12 +217,13 @@ impl RibManager {
                         );
                         self.mark_outbound_dirty_inner(peer, false);
                     }
-                    self.note_release_helper_stale_change(peer, &pass.prefixes);
                     self.collect_owed_floors(peer, &mut pass.floors);
                     pass.groups.entry(gid).or_default().push(peer);
                 }
-                pass.phase = if peers.len() == RELEASE_MEMBERS_PER_POLL {
+                pass.phase = if peers.len() == pass.member_limit(RELEASE_MEMBERS_PER_POLL) {
                     Phase::Classify(peers.last().copied())
+                } else if pass.prefixes.is_empty() {
+                    Phase::Finish
                 } else {
                     self.log_release_owed_rows(&pass.prefixes, pass.floors);
                     if pass.groups.len() - usize::from(pass.groups.contains_key(&None))
@@ -186,6 +264,11 @@ impl RibManager {
                     };
                     return false;
                 };
+                pass.plain_group = gid.is_some_and(|gid| {
+                    self.group_ribs
+                        .get(&gid)
+                        .is_some_and(|group| !group.per_client_best)
+                });
                 pass.current = peers;
                 pass.next_member = 0;
                 if let Some(gid) = gid {
@@ -204,12 +287,12 @@ impl RibManager {
                 }
             }
             Phase::Cap(after, over) => {
-                let peers = self.release_peer_batch(after, RELEASE_MEMBERS_PER_POLL);
+                let peers = pass.peer_batch(self, after);
                 for &peer in &peers {
                     self.cap_release_owed_peer(peer, over, &mut pass.floors);
                 }
                 self.settle_eor_after_pass();
-                if peers.len() == RELEASE_MEMBERS_PER_POLL {
+                if peers.len() == pass.member_limit(RELEASE_MEMBERS_PER_POLL) {
                     pass.phase = Phase::Cap(peers.last().copied(), over);
                 } else {
                     self.finish_release_owed_cap(over, pass.floors);
@@ -334,7 +417,8 @@ impl RibManager {
                 }
             }
             Phase::RemoveRsCounts(gid) => {
-                let end = (pass.next_member + RELEASE_MEMBERS_PER_POLL).min(pass.current.len());
+                let end = (pass.next_member + pass.member_limit(RELEASE_MEMBERS_PER_POLL))
+                    .min(pass.current.len());
                 if let Some(group) = self.group_ribs.get_mut(&gid) {
                     group.adjust_release_rs_members(
                         &pass.current[pass.next_member..end],
@@ -373,28 +457,45 @@ impl RibManager {
                 pass.staged.insert(gid, stage);
                 pass.phase = Phase::Deliver;
             }
-            Phase::Deliver => {
+            Phase::Deliver | Phase::DeliverAfterRsRestore => {
+                let restored = matches!(pass.phase, Phase::DeliverAfterRsRestore);
                 let members = if pass.denials.is_some() {
                     1
+                } else if pass.departure.as_ref().is_some_and(|keys| !keys.shared) {
+                    super::super::source_departure::MEMBERS_PER_PAGE
                 } else {
-                    RELEASE_MEMBERS_PER_POLL
+                    pass.member_limit(RELEASE_MEMBERS_PER_POLL)
                 };
                 let end = (pass.next_member + members).min(pass.current.len());
                 let peers = &pass.current[pass.next_member..end];
-                let scope = pass.scope();
                 if !peers.is_empty() {
-                    if let Some(group) = pass
-                        .staged
-                        .keys()
-                        .next()
-                        .and_then(|gid| self.group_ribs.get_mut(gid))
+                    if !restored
+                        && let Some(group) = pass
+                            .staged
+                            .keys()
+                            .next()
+                            .and_then(|gid| self.group_ribs.get_mut(gid))
                         && group.has_rs_members()
+                        && group.adjust_release_rs_members(peers, pass.scope(), 1)
+                        && pass.departure.is_some()
                     {
-                        group.adjust_release_rs_members(peers, scope, 1);
+                        // Count correction and divergent emission each visit the
+                        // member's keys. Keep the same stage and member page
+                        // pinned across the yield between those two visits.
+                        pass.phase = Phase::DeliverAfterRsRestore;
+                        return false;
                     }
+                    let mut rs_verdicts = pass
+                        .departure
+                        .as_mut()
+                        .map(|keys| std::mem::take(&mut keys.rs_verdicts));
+                    let scope = pass.scope();
                     let mut receipt = MemberVerdicts::default();
+                    let best = pass.departure.as_ref().map_or(scope, |keys| &keys.best);
+                    let narrowed = (pass.departure.is_some() && !pass.pcb_scope.is_empty())
+                        .then(|| scope.intersection(best).copied().collect::<HashSet<_>>());
                     self.distribute_changes_with_readiness::<false, true>(
-                        scope,
+                        narrowed.as_ref().unwrap_or(best),
                         scope,
                         DistributionPass::Change,
                         true,
@@ -406,15 +507,22 @@ impl RibManager {
                             afi: pass.afi,
                             peers,
                             stage: &pass.staged,
+                            rs_verdicts: rs_verdicts.as_mut(),
                             denial_receipt: pass.denials.is_some().then_some(&mut receipt),
                         }),
                     );
-                    for &peer in peers {
-                        self.admit_missing_release_rows(peer, scope);
+                    if pass.departure.is_none() {
+                        for &peer in peers {
+                            self.admit_missing_release_rows(peer, scope);
+                        }
+                    }
+                    if let (Some(keys), Some(verdicts)) = (&mut pass.departure, rs_verdicts) {
+                        keys.rs_verdicts = verdicts;
                     }
                     self.settle_eor_after_pass();
                     let target = peers[0];
                     pass.next_member = end;
+                    pass.phase = Phase::Deliver;
                     if receipt.counters || receipt.denials {
                         pass.phase = Phase::MemberDenials(target, receipt);
                         return false;
@@ -423,6 +531,9 @@ impl RibManager {
                 if end == pass.current.len() {
                     let staged_gid = pass.staged.keys().next().copied();
                     pass.staged.clear();
+                    if let Some(keys) = &mut pass.departure {
+                        keys.rs_verdicts.clear();
+                    }
                     if pass.denials.is_some() {
                         pass.phase = Phase::RetireVerdicts(
                             staged_gid.expect("staged PCB group"),

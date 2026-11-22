@@ -1006,6 +1006,61 @@ fn a_release_rechecks_touched_helper_carries_after_its_own_family_seals() {
     assert_timer_withdraws(&mut manager, &mut session.1, &mut rib, rtbh, Some(kept));
 }
 
+#[test]
+fn departure_leaves_unsettled_helper_rows_for_the_retry() {
+    let (mut manager, mut rib, mut session, rtbh, kept, _registrations) = settled_waiting_key();
+    let peer = peer_v4(OBSERVER);
+    let changed = HashSet::from([Prefix::V4(rtbh)]);
+    assert!(
+        manager
+            .ribs
+            .get_mut(&peer_v4(SOURCE))
+            .unwrap()
+            .withdraw(&Prefix::V4(rtbh), 0)
+    );
+    // A stale wire row and its carried proof agree for every seeded key.
+    let carried = manager.helper_stale_exempt.get_mut(&peer).unwrap();
+    for n in 0..257 {
+        let key = (Prefix::V4(host(7, n)), 0);
+        assert!(carried.keys.insert(key));
+        assert!(rib.insert(key, true).is_none());
+    }
+    manager.start_source_departure(
+        peer_v4(SOURCE),
+        changed.clone(),
+        changed.clone(),
+        &HashSet::new(),
+    );
+    assert!(manager.source_departure.is_some());
+    manager.flush_departure_helper_stale(peer, &HashSet::from([Prefix::V4(host(8, 0))]));
+    assert!(manager.helper_stale_exempt[&peer].settled);
+
+    manager.helper_stale_exempt.get_mut(&peer).unwrap().settled = false;
+    let work = super::work_scaling::checkpoints_in(|| {
+        manager.flush_departure_helper_stale(peer, &changed);
+        // The ordinary flush used by an interleaved UPDATE must also defer.
+        manager.flush_helper_stale_exempt(&HashSet::from([Prefix::V4(host(8, 1))]));
+    });
+    assert_eq!(work.get("helper_stale_exempt").copied().unwrap_or(0), 0);
+    manager.helper_stale_exempt.get_mut(&peer).unwrap().settled = true;
+    manager.flush_departure_helper_stale(peer, &changed);
+    assert!(!manager.helper_stale_exempt[&peer].settled);
+    assert!(
+        session.1.try_recv().is_err(),
+        "a departure page flushed the carry"
+    );
+    while manager.source_departure.is_some() {
+        manager.advance_source_departure();
+    }
+    assert!(
+        manager.resync_tick_pending(),
+        "the helper retry must be armed"
+    );
+    assert_timer_withdraws(&mut manager, &mut session.1, &mut rib, rtbh, Some(kept));
+    assert_eq!(rib, PeerRib::from([((Prefix::V4(kept), 0), false)]));
+    assert!(!manager.helper_stale_exempt.contains_key(&peer));
+}
+
 fn assert_timer_withdraws_nothing(
     manager: &mut RibManager,
     rx: &mut mpsc::Receiver<OutboundRouteUpdate>,

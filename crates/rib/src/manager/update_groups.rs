@@ -1535,18 +1535,24 @@ impl GroupRibOut {
     }
 
     /// Subtract or restore this page's RS-control count correction around a
-    /// release batch. Grouped unicast owns a single-best slot at path ID zero.
+    /// release batch. Return whether the indexed tags required a page visit.
+    /// Grouped unicast owns a single-best slot at path ID zero.
     pub(in crate::manager) fn adjust_release_rs_members(
         &mut self,
         members: &[PeerId],
         prefixes: &HashSet<Prefix>,
         sign: i64,
-    ) {
+    ) -> bool {
+        if self.rs_tagged.is_empty() {
+            return false;
+        }
         for member in members {
             let Some(&rs) = self.rs_members.get(member) else {
                 continue;
             };
             for &prefix in prefixes {
+                #[cfg(test)]
+                crate::manager::source_departure::inspect_receiver_row();
                 let key = (prefix, 0);
                 if self
                     .rs_tagged
@@ -1561,6 +1567,7 @@ impl GroupRibOut {
                 }
             }
         }
+        true
     }
 
     /// Register an rs-control member and seed its count correction. The

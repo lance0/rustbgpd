@@ -190,6 +190,100 @@ fn missing_encoder_is_a_refusal_not_a_drop() {
     assert!(drops(&manager.metrics).abs() < f64::EPSILON);
 }
 
+/// A grouped withdrawal commits the exact wire key. Local provenance is
+/// sparse, so peers that have only received remote routes skip its cleanup.
+#[test]
+fn grouped_withdrawals_visit_only_populated_local_provenance() {
+    use super::lifecycle::{test_peer_up, test_routes_received};
+
+    let mut manager = manager();
+    let (tx, mut output) = mpsc::channel(16);
+    manager.handle_update(test_peer_up(PEER, 0, tx));
+    assert!(manager.grouped_member_of(PEER).is_some());
+    while output.try_recv().is_ok() {}
+    let source = peer_v4(SOURCE);
+    register_test_peer(&mut manager, source, 0);
+    let remote = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 9), 32);
+    manager.handle_update(test_routes_received(
+        source,
+        vec![make_route(remote, SOURCE)],
+    ));
+    drain_route_chunks(&mut manager);
+    assert_eq!(
+        output.try_recv().unwrap().announce[0].prefix,
+        Prefix::V4(remote)
+    );
+    assert_eq!(manager.adj_ribs_out[&PEER].local_export_sources().len(), 0);
+
+    let remote_key = (Prefix::V4(remote), 0);
+    let mut update = test_routes_received(source, vec![]);
+    let RibUpdate::RoutesReceived { withdrawn, .. } = &mut update else {
+        unreachable!()
+    };
+    withdrawn.push(remote_key);
+    let before = manager
+        .adj_rib_out_commit_stats
+        .local_source_withdraw_visits;
+    manager.handle_update(update);
+    drain_route_chunks(&mut manager);
+    let removed = output.try_recv().unwrap();
+    assert_eq!(removed.shared_withdraw.as_slice(), &[remote_key]);
+    assert_eq!(
+        manager
+            .adj_rib_out_commit_stats
+            .local_source_withdraw_visits
+            - before,
+        0
+    );
+    drop(removed);
+
+    let mut gone = super::eor_grace::local_route(11);
+    let mut kept = super::eor_grace::local_route(12);
+    gone.path_id = 41;
+    kept.path_id = 57;
+    let (gone_prefix, kept_prefix) = (gone.prefix, kept.prefix);
+    for route in [gone, kept] {
+        let prefix = route.prefix;
+        let (reply, mut response) = oneshot::channel();
+        manager.handle_update(RibUpdate::InjectRoute { route, reply });
+        response.try_recv().unwrap().unwrap();
+        assert_eq!(output.try_recv().unwrap().announce[0].prefix, prefix);
+    }
+    let rib = &manager.adj_ribs_out[&PEER];
+    assert_eq!(
+        rib.local_export_source(&gone_prefix, 0).unwrap().path_id,
+        41
+    );
+    let untouched = rib.local_export_source(&kept_prefix, 0).unwrap();
+    assert_eq!(untouched.path_id, 57);
+
+    let before = manager
+        .adj_rib_out_commit_stats
+        .local_source_withdraw_visits;
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::WithdrawInjected {
+        prefix: gone_prefix,
+        path_id: 41,
+        allow_missing: false,
+        owner: String::new(),
+        override_owner: false,
+        reply,
+    });
+    response.try_recv().unwrap().unwrap();
+    let removed = output.try_recv().unwrap();
+    assert_eq!(removed.shared_withdraw.as_slice(), &[(gone_prefix, 0)]);
+    assert_eq!(
+        manager
+            .adj_rib_out_commit_stats
+            .local_source_withdraw_visits
+            - before,
+        1
+    );
+    let rib = &manager.adj_ribs_out[&PEER];
+    assert_eq!(rib.local_export_source(&gone_prefix, 0), None);
+    assert_eq!(rib.local_export_source(&kept_prefix, 0), Some(untouched));
+}
+
 /// An EVPN-owning update-group member with no recovery provenance cannot
 /// admit an EVPN batch; the open writer queue is never charged.
 #[test]

@@ -40,6 +40,7 @@ use peer_lifecycle::{PeerUpRegistration, SessionTeardownDisposition};
 mod route_refresh;
 mod selection_deferral;
 mod slice_timing;
+mod source_departure;
 mod update_groups;
 
 #[cfg(test)]
@@ -286,6 +287,8 @@ struct AdjRibOutCommitStats {
     last_family_gauge_write_mask: u8,
     pristine_otc_reconcile_candidates: usize,
     private_extra_prefix_scans: usize,
+    #[cfg(test)]
+    local_source_withdraw_visits: usize,
     /// Last End-of-RIB unicast pass: prefixes recomputed, best changes,
     /// and the recompute / distribution split in nanoseconds.
     eor_unicast_affected: usize,
@@ -1191,6 +1194,7 @@ pub struct RibManager {
     replacement_readiness_receipts: Vec<ReplacementReadinessReceipt>,
     /// Large route batches that are being processed in chunks.
     pending_route_batches: VecDeque<PendingRoutesReceived>,
+    source_departure: Option<Box<source_departure::SourceDeparture>>,
     /// The ingest permit of the session message being dispatched, for the
     /// batch it queues to take. Empty between dispatches.
     dispatching_ingest_permit: Option<crate::ingest_budget::IngestPermit>,
@@ -3228,6 +3232,7 @@ impl RibManager {
             #[cfg(test)]
             replacement_readiness_receipts: Vec::new(),
             pending_route_batches: VecDeque::new(),
+            source_departure: None,
             dispatching_ingest_permit: None,
             pending_evpn_fanout: None,
             flowspec_validation: flowspec_validation::ValidationState::default(),
@@ -4242,7 +4247,7 @@ impl RibManager {
 
     /// Drain a bounded number of pending queries from the priority channel.
     fn drain_queries(&mut self, limit: usize) {
-        if self.release_delivery_pending() {
+        if self.source_departure.is_some() || self.release_delivery_pending() {
             return;
         }
         self.drain_summary_queries();
@@ -4951,7 +4956,8 @@ impl RibManager {
 
     /// A coalescer must leave the next message for expiry or commit.
     fn primary_read_ahead_cutoff_reached(&self) -> bool {
-        self.expiry_cutoffs.any_exhausted()
+        self.source_departure.is_some()
+            || self.expiry_cutoffs.any_exhausted()
             || self.first_group_commit_remaining == Some(0)
             || self.first_group_replay_due()
     }
@@ -5307,7 +5313,9 @@ impl RibManager {
                     }
                     SessionTeardownDisposition::NoRegistration
                     | SessionTeardownDisposition::TeardownActive => {
-                        self.prune_exact_export_rejections();
+                        if self.source_departure.is_none() {
+                            self.prune_exact_export_rejections();
+                        }
                         self.ensure_all_route_pages_advanced(page_versions);
                     }
                 }
@@ -8026,6 +8034,16 @@ impl RibManager {
         tokio::pin!(registration_wait_sleep);
 
         loop {
+            if self.source_departure.is_some() {
+                self.poll_source_departure_turn();
+                self.drain_readiness_queries(None);
+                #[cfg(test)]
+                if let Some(check) = self.actor_turn_check {
+                    check(&self);
+                }
+                tokio::task::yield_now().await;
+                continue;
+            }
             // A staged group delta must reach its members before another mutation
             // can change the shared table or membership. Yield the executor on
             // every bounded member poll; admit primary traffic at the batch seam.

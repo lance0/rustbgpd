@@ -1054,7 +1054,7 @@ fn a_large_withdrawal_or_source_loss_evicts_no_reading_receiver() {
                 peer: peer_v4(SOURCE),
                 session_id: 0,
             });
-            drain_route_chunks(&mut manager);
+            drain_source_departure(&mut manager);
             vec![]
         } else {
             let gone: Vec<u32> = (0..10_000).collect();

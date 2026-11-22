@@ -520,7 +520,7 @@ fn source_down_member_down_and_a_join_between_batches_end_in_exact_tables() {
             peer: other,
             session_id: 1,
         });
-        drain_route_chunks(&mut lab.manager);
+        drain_source_departure(&mut lab.manager);
         lab.sent
             .0
             .values_mut()
@@ -531,7 +531,7 @@ fn source_down_member_down_and_a_join_between_batches_end_in_exact_tables() {
                 peer: client(2),
                 session_id: 2,
             });
-            drain_route_chunks(&mut lab.manager);
+            drain_source_departure(&mut lab.manager);
             lab.sent
                 .0
                 .values_mut()
