@@ -224,6 +224,8 @@ struct PollCounts {
     inspected: usize,
     emitted: usize,
     envelope: usize,
+    envelopes: usize,
+    polls: usize,
 }
 
 fn register_source_only(manager: &mut RibManager) -> mpsc::Receiver<OutboundRouteUpdate> {
@@ -250,7 +252,50 @@ fn register_source_only(manager: &mut RibManager) -> mpsc::Receiver<OutboundRout
     no_exports
 }
 
-async fn departure(shape: Shape, count: u8, rows: u32) -> PollCounts {
+#[derive(Clone, Copy)]
+enum ProbeArrival {
+    Prequeued,
+    AfterEmpty,
+    AfterYield,
+}
+
+thread_local! {
+    static ON_EMPTY: Cell<Option<Box<dyn FnOnce()>>> = const { Cell::new(None) };
+    static PROBE_SENT: Cell<bool> = const { Cell::new(false) };
+}
+
+pub(in crate::manager) fn after_empty_fifo() {
+    if let Some(send) = ON_EMPTY.take() {
+        send();
+    }
+}
+
+fn send_probe(tx: &mpsc::Sender<RibUpdate>) {
+    tx.try_send(announce(OTHER, probe_prefix())).unwrap();
+    PROBE_SENT.set(true);
+}
+
+fn queue_probe(arrival: ProbeArrival, tx: mpsc::Sender<RibUpdate>) {
+    PROBE_SENT.set(false);
+    match arrival {
+        ProbeArrival::Prequeued => {
+            send_probe(&tx);
+            // Keep a fenced FIFO head waiting through the last withdrawal.
+            tx.try_send(down(SOURCE)).unwrap();
+        }
+        ProbeArrival::AfterEmpty => ON_EMPTY.set(Some(Box::new(move || send_probe(&tx)))),
+        ProbeArrival::AfterYield => {
+            let (signal, ready) = oneshot::channel();
+            ON_EMPTY.set(Some(Box::new(move || signal.send(()).unwrap())));
+            tokio::spawn(async move {
+                ready.await.unwrap();
+                send_probe(&tx);
+            });
+        }
+    }
+}
+
+async fn departure(shape: Shape, count: u8, rows: u32, arrival: ProbeArrival) -> PollCounts {
     let (tx, rx) = mpsc::channel(16);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     manager.outbound_row_credit_override = None;
@@ -276,18 +321,21 @@ async fn departure(shape: Shape, count: u8, rows: u32) -> PollCounts {
     assert!(manager.dirty_peers.is_empty());
     WINNER_DURING_DEPARTURE.set(false);
     manager.actor_turn_check = Some(observe_winner);
-    // Queue both events before the actor starts: no read probe, sleep, or task race.
     tx.try_send(down(SOURCE)).unwrap();
-    tx.try_send(announce(OTHER, probe_prefix())).unwrap();
-    drop(tx);
+    queue_probe(arrival, tx);
     let mut actor = Box::pin(manager.run_actor());
     let mut streams: Vec<Vec<_>> = (0..count).map(|_| Vec::new()).collect();
-    let (mut most, mut total, mut most_sent) = (0, 0, 0);
+    let (mut most, mut total, mut most_sent, mut polls) = (0, 0, 0, 0);
     take_receiver_rows();
     let end = poll_fn(|cx| {
+        polls += 1;
+        let waiting = matches!(arrival, ProbeArrival::Prequeued)
+            || (PROBE_SENT.get() && !WINNER_DURING_DEPARTURE.get());
         let result = actor.as_mut().poll(cx);
         let work = take_receiver_rows();
-        most = most.max(work);
+        if waiting {
+            most = most.max(work);
+        }
         total += work;
         let mut sent = 0;
         for (receiver, stream) in receivers.iter_mut().zip(&mut streams) {
@@ -296,7 +344,9 @@ async fn departure(shape: Shape, count: u8, rows: u32) -> PollCounts {
                 stream.push(update);
             }
         }
-        most_sent = most_sent.max(sent);
+        if waiting {
+            most_sent = most_sent.max(sent);
+        }
         result
     })
     .await;
@@ -339,7 +389,13 @@ async fn departure(shape: Shape, count: u8, rows: u32) -> PollCounts {
         "{shape:?} K={count}: {most_sent} withdrawals delivered in one physical actor poll"
     );
     assert!(end.dirty_peers.is_empty());
-    poll_counts(shape, count, rows, &streams, (most, total, most_sent))
+    poll_counts(
+        shape,
+        count,
+        rows,
+        &streams,
+        (most, total, most_sent, polls),
+    )
 }
 
 fn poll_counts(
@@ -347,32 +403,31 @@ fn poll_counts(
     count: u8,
     rows: u32,
     streams: &[Vec<OutboundRouteUpdate>],
-    counts: (usize, usize, usize),
+    counts: (usize, usize, usize, usize),
 ) -> PollCounts {
-    let (most, total, most_sent) = counts;
+    let (most, total, most_sent, polls) = counts;
+    let withdrawal_sizes = streams
+        .iter()
+        .flatten()
+        .map(|update| update.unicast_withdrawals().count() + update.flowspec_withdraw.len())
+        .filter(|&rows| rows != 0);
+    let envelopes = withdrawal_sizes.clone().count();
     eprintln!(
-        "{shape:?} K={count} rows={rows} max_inspected_per_poll={most} max_withdrawals_per_poll={most_sent} total_inspected={total} total_withdrawals={}",
-        streams
-            .iter()
-            .flatten()
-            .map(|update| update.unicast_withdrawals().count() + update.flowspec_withdraw.len())
-            .sum::<usize>()
+        "{shape:?} K={count} rows={rows} queued_max_inspected_per_poll={most} queued_max_withdrawals_per_poll={most_sent} total_inspected={total} physical_polls={polls} withdrawal_envelopes={envelopes} total_withdrawals={}",
+        withdrawal_sizes.clone().sum::<usize>()
     );
     PollCounts {
         inspected: most,
         emitted: most_sent,
-        envelope: streams
-            .iter()
-            .flatten()
-            .map(|update| update.unicast_withdrawals().count() + update.flowspec_withdraw.len())
-            .max()
-            .unwrap(),
+        envelope: withdrawal_sizes.max().unwrap(),
+        envelopes,
+        polls,
     }
 }
 
 async fn check_sizes(shape: Shape) {
-    let small = Box::pin(departure(shape, 8, ROWS)).await;
-    let large = Box::pin(departure(shape, 32, ROWS)).await;
+    let small = Box::pin(departure(shape, 8, ROWS, ProbeArrival::Prequeued)).await;
+    let large = Box::pin(departure(shape, 32, ROWS, ProbeArrival::Prequeued)).await;
     assert!(
         large.inspected <= small.inspected,
         "{shape:?} maximum inspected rows grew {} -> {}",
@@ -412,9 +467,9 @@ async fn grouped_departure_chunks_an_uneven_member_tail_and_keeps_private_walks_
     // 256 / 109 = 2 receivers per poll, with one receiver on the last page.
     // The extra source-only private registration in both fixtures cannot
     // disqualify the first fixture. A sendable private receiver must.
-    let grouped = Box::pin(departure(Shape::Grouped, 5, 109)).await;
+    let grouped = Box::pin(departure(Shape::Grouped, 5, 109, ProbeArrival::Prequeued)).await;
     assert_eq!((grouped.envelope, grouped.emitted), (109, 218));
-    let mixed = Box::pin(departure(Shape::Mixed, 5, 109)).await;
+    let mixed = Box::pin(departure(Shape::Mixed, 5, 109, ProbeArrival::Prequeued)).await;
     assert!(mixed.envelope <= 16);
     assert!(mixed.inspected <= 16 * 8 && mixed.emitted <= 16 * 8);
 }
@@ -424,7 +479,45 @@ async fn grouped_departure_chunks_an_uneven_member_tail_and_keeps_private_walks_
 /// before the first page starts.
 #[tokio::test(start_paused = true)]
 async fn a_single_key_page_with_many_group_members_admits_the_waiting_update() {
-    Box::pin(departure(Shape::Grouped, 32, 16)).await;
+    Box::pin(departure(Shape::Grouped, 32, 16, ProbeArrival::Prequeued)).await;
+}
+
+// A synchronous sender can arrive inside the quiet poll itself. A producer
+// sharing the current-thread executor also needs a yield before it can enqueue.
+#[tokio::test(start_paused = true)]
+async fn a_late_update_reaches_the_loc_rib_before_the_last_withdrawal() {
+    for shape in [Shape::Private, Shape::FlowSpec, Shape::Grouped] {
+        for (members, arrival) in [
+            (8, ProbeArrival::AfterEmpty),
+            (32, ProbeArrival::AfterYield),
+        ] {
+            // All 64 keys fit in one quiet page, but the departure has enough
+            // work to pace. A first empty observation still needs an admission seam.
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                Box::pin(departure(shape, members, 64, arrival)),
+            )
+            .await
+            .expect("late producer must run during the small departure");
+            let run = Box::pin(departure(shape, members, ROWS, arrival));
+            let counts = tokio::time::timeout(Duration::from_secs(5), run)
+                .await
+                .expect("empty FIFO observation must wake the producer");
+            if shape != Shape::Grouped {
+                // A fixed 16-key page needs one withdrawal envelope per receiver
+                // and at least one delivery poll per eight receivers per page.
+                let narrow_envelopes = usize::from(members) * usize::try_from(ROWS / 16).unwrap();
+                assert!(
+                    counts.envelopes < narrow_envelopes,
+                    "{shape:?} fixed-width withdrawals"
+                );
+                assert!(
+                    counts.polls < narrow_envelopes / 8,
+                    "{shape:?} fixed-width poll count"
+                );
+            }
+        }
+    }
 }
 
 const STABLE: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 3);
@@ -790,15 +883,34 @@ async fn wire_update_checks_the_whole_head_before_dispatching_during_departure()
         assert_eq!(message.announced.len(), 17);
         WINNER_DURING_DEPARTURE.set(false);
         SAW_DEPARTURE.set(false);
-        manager.actor_turn_check = Some(observe_winner);
+        manager.actor_turn_check = Some(if conflicting_tail {
+            |manager| {
+                observe_winner(manager);
+                if manager.source_departure.is_some() {
+                    assert!(
+                        manager
+                            .loc_rib
+                            .get(&Prefix::V4(prefix(DEPARTING + 16)))
+                            .is_none(),
+                        "FIFO follower bypassed the fenced head"
+                    );
+                }
+            }
+        } else {
+            observe_winner
+        });
         tx.try_send(down(SOURCE)).unwrap();
         tx.try_send(RibUpdate::WireRoutesReceived(message)).unwrap();
+        let follower = Prefix::V4(prefix(DEPARTING + 16));
+        tx.try_send(announce(OTHER, prefix(DEPARTING + 16)))
+            .unwrap();
         drop(tx);
         let end = Box::pin(manager.run_actor()).await;
         assert!(SAW_DEPARTURE.get());
         assert_eq!(WINNER_DURING_DEPARTURE.get(), !conflicting_tail);
         let mut remaining = expected_rows(DEPARTING);
-        let expected: BTreeSet<_> = keys.into_iter().map(Prefix::V4).collect();
+        let mut expected: BTreeSet<_> = keys.into_iter().map(Prefix::V4).collect();
+        assert!(expected.insert(follower));
         let mut announced = BTreeSet::new();
         let mut overlapped = false;
         while let Ok(update) = output.try_recv().map(delivered) {
@@ -818,7 +930,7 @@ async fn wire_update_checks_the_whole_head_before_dispatching_during_departure()
             overlapped, !conflicting_tail,
             "wire ordering for a head with conflicting tail={conflicting_tail}"
         );
-        assert_eq!(end.loc_rib.len(), 17);
+        assert_eq!(end.loc_rib.len(), 18);
     }
 }
 
@@ -1050,6 +1162,7 @@ async fn grouped_source_departure_rechecks_rs_control_tags_for_each_family_stage
     }
     SAW_DEPARTURE.set(false);
     manager.actor_turn_check = Some(observe_winner);
+    tx.try_send(down(SOURCE)).unwrap();
     tx.try_send(down(SOURCE)).unwrap();
     drop(tx);
     take_receiver_rows();

@@ -11,12 +11,20 @@ use std::collections::hash_set;
 const KEYS_PER_PAGE: usize = 16;
 pub(super) const MEMBERS_PER_PAGE: usize = 8;
 pub(super) const RECEIVER_ROWS_PER_POLL: usize = 256;
+const QUIET_PAGE_RECEIVER_KEYS: usize = 65_536;
 
 #[derive(Clone, Copy)]
 enum PrimaryTurn {
     AfterBatch,
     CheckFrom(usize),
     Fenced,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Exporters {
+    Private,
+    PlainGroups,
+    Mixed,
 }
 
 enum PrimaryHead {
@@ -42,7 +50,7 @@ pub(super) struct SourceDeparture {
     best: HashSet<Prefix>,
     held: HashSet<Prefix>,
     unicast: [Vec<Prefix>; 2],
-    plain_groups_only: [bool; 2],
+    exporters: [Exporters; 2],
     flowspec: hash_set::IntoIter<FlowSpecKey>,
     families: HashSet<(Afi, Safi)>,
     page: Option<Page>,
@@ -59,15 +67,37 @@ impl SourceDeparture {
         self.peers[at..].iter().take(limit).copied().collect()
     }
 
-    fn next_page(&mut self) -> Option<Page> {
+    fn next_page(&mut self, quiet: bool) -> Option<Page> {
+        // An arrival must wait for the pinned page to reach its entire roster.
+        // A one-key page still has to reach every member of a larger roster.
+        let quiet_width =
+            (QUIET_PAGE_RECEIVER_KEYS / self.peers.len().max(1)).clamp(1, RECEIVER_ROWS_PER_POLL);
+        let page_width = |remaining: usize, queued_width, can_widen| {
+            if quiet {
+                // Leave a seam for an arrival just after the empty observation,
+                // even when the wider page could consume the entire remainder.
+                let limit = if can_widen {
+                    quiet_width
+                } else {
+                    quiet_width.min(queued_width)
+                };
+                limit.min(remaining.saturating_sub(1).max(1))
+            } else {
+                queued_width
+            }
+        };
         for (index, keys) in self.unicast.iter_mut().enumerate() {
             if !keys.is_empty() {
-                let shared = self.plain_groups_only[index];
-                let key_limit = if shared {
-                    RECEIVER_ROWS_PER_POLL
-                } else {
-                    KEYS_PER_PAGE
-                };
+                let shared = self.exporters[index] == Exporters::PlainGroups;
+                let key_limit = page_width(
+                    keys.len(),
+                    if shared {
+                        RECEIVER_ROWS_PER_POLL
+                    } else {
+                        KEYS_PER_PAGE
+                    },
+                    self.exporters[index] != Exporters::Mixed,
+                );
                 let mut page: HashSet<_> =
                     keys.drain(keys.len().saturating_sub(key_limit)..).collect();
                 let held = page
@@ -80,7 +110,8 @@ impl SourceDeparture {
                 ))));
             }
         }
-        let keys: HashSet<_> = self.flowspec.by_ref().take(KEYS_PER_PAGE).collect();
+        let width = page_width(self.flowspec.len(), KEYS_PER_PAGE, true);
+        let keys: HashSet<_> = self.flowspec.by_ref().take(width).collect();
         (!keys.is_empty()).then_some(Page::FlowSpec { keys, next: 0 })
     }
 
@@ -153,6 +184,44 @@ impl RibManager {
             && keys.saturating_mul(self.outbound_peers.len()) > RECEIVER_ROWS_PER_POLL
     }
 
+    // Membership and capabilities are fenced for the departure. Mixed or
+    // multipath exporters retain narrow pages for their exceptional lanes.
+    fn departure_exporters(&self, peers: &[PeerId], afi: Afi) -> Exporters {
+        let family = (afi, Safi::Unicast);
+        let mut kind = None;
+        for &peer in peers {
+            if !self
+                .peer_sendable_families
+                .get(&peer)
+                .is_some_and(|families| families.contains(&family))
+            {
+                continue;
+            }
+            let member = match self.grouped_member_of(peer) {
+                Some(gid)
+                    if self
+                        .group_ribs
+                        .get(&gid)
+                        .is_some_and(|group| !group.per_client_best) =>
+                {
+                    Exporters::PlainGroups
+                }
+                None if !self
+                    .peer_add_path_send_families
+                    .get(&peer)
+                    .is_some_and(|families| families.contains(&family)) =>
+                {
+                    Exporters::Private
+                }
+                _ => return Exporters::Mixed,
+            };
+            if kind.replace(member).is_some_and(|prior| prior != member) {
+                return Exporters::Mixed;
+            }
+        }
+        kind.unwrap_or(Exporters::Mixed)
+    }
+
     pub(super) fn start_source_departure(
         &mut self,
         source: PeerId,
@@ -213,33 +282,12 @@ impl RibManager {
             .filter(|&peer| peer != source)
             .collect();
         peers.sort_unstable();
-        // A group stages these keys once and shares the result. Amortize its
-        // fixed cost across a wider key batch, then narrow each member visit
-        // to the same receiver-row budget. Private and per-client-best
-        // exporters keep narrow pages for their per-member and lane walks.
-        // Receive-only peers do not export.
-        let plain_groups_only = [Afi::Ipv4, Afi::Ipv6].map(|afi| {
-            let mut eligible = peers
-                .iter()
-                .copied()
-                .filter(|peer| {
-                    self.peer_sendable_families
-                        .get(peer)
-                        .is_some_and(|families| families.contains(&(afi, Safi::Unicast)))
-                })
-                .peekable();
-            eligible.peek().is_some()
-                && eligible.all(|peer| {
-                    self.grouped_member_of(peer)
-                        .and_then(|gid| self.group_ribs.get(&gid))
-                        .is_some_and(|group| !group.per_client_best)
-                })
-        });
+        let exporters = [Afi::Ipv4, Afi::Ipv6].map(|afi| self.departure_exporters(&peers, afi));
         let pages = unicast
             .iter()
-            .zip(plain_groups_only)
-            .map(|(keys, shared)| {
-                keys.len().div_ceil(if shared {
+            .zip(exporters)
+            .map(|(keys, kind)| {
+                keys.len().div_ceil(if kind == Exporters::PlainGroups {
                     RECEIVER_ROWS_PER_POLL
                 } else {
                     KEYS_PER_PAGE
@@ -261,7 +309,7 @@ impl RibManager {
             best,
             held,
             unicast,
-            plain_groups_only,
+            exporters,
             flowspec: flowspec.into_iter(),
             families,
             page: None,
@@ -270,11 +318,21 @@ impl RibManager {
     }
 
     pub(super) fn advance_source_departure(&mut self) {
+        // Check again at every physical turn, including inside a pinned page.
+        let quiet = self.primary_backlog() == 0
+            && self.dirty_peers.is_empty()
+            && self.force_outbound_peers.is_empty()
+            && self.owing_peers.is_empty()
+            && self.helper_stale_exempt.is_empty();
+        #[cfg(test)]
+        if quiet {
+            super::tests::source_departure::after_empty_fifo();
+        }
         let work = self
             .source_departure
             .as_mut()
             .expect("departure owns the actor");
-        let Some(mut page) = work.page.take().or_else(|| work.next_page()) else {
+        let Some(mut page) = work.page.take().or_else(|| work.next_page(quiet)) else {
             self.source_departure = None;
             // The last admitted export can release the final strong reference
             // to a departed route's attributes. Use the same retirement owner
@@ -289,9 +347,14 @@ impl RibManager {
             return;
         };
         let done = match &mut page {
-            Page::Unicast(pass) => self.poll_unicast_release_distribution(pass),
+            Page::Unicast(pass) => self.poll_unicast_release_distribution(pass, quiet),
             Page::FlowSpec { keys, next } => {
-                let end = (*next + MEMBERS_PER_PAGE).min(work.peers.len());
+                let members = if quiet {
+                    MEMBERS_PER_PAGE
+                } else {
+                    MEMBERS_PER_PAGE.min(RECEIVER_ROWS_PER_POLL / keys.len())
+                };
+                let end = (*next + members).min(work.peers.len());
                 let peers = work.peers[*next..end].to_vec();
                 let done = end == work.peers.len();
                 *next = end;
