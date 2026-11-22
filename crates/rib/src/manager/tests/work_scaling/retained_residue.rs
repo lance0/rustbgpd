@@ -154,7 +154,7 @@ fn clean_update(members: usize, filter: Filter, history: usize, retained: usize)
     if matches!(filter, Filter::Otc(_)) {
         for route in &mut announced[..retained] {
             AttrSet::edit(&mut route.attributes, |attrs| {
-                attrs.push(PathAttribute::OnlyToCustomer(64_999))
+                attrs.push(PathAttribute::OnlyToCustomer(64_999));
             });
         }
     }
@@ -188,7 +188,7 @@ fn clean_update(members: usize, filter: Filter, history: usize, retained: usize)
     }
     let mut changed = make_route(prefix(3, 0), clean_ip);
     AttrSet::edit(&mut changed.attributes, |attrs| {
-        attrs.push(PathAttribute::Communities(vec![MARKER]))
+        attrs.push(PathAttribute::Communities(vec![MARKER]));
     });
     let work = checkpoints_in(|| {
         manager.handle_update(test_routes_received(source, vec![changed.clone()]));
@@ -200,7 +200,7 @@ fn clean_update(members: usize, filter: Filter, history: usize, retained: usize)
     // Alter a historical row too. The blocking arms keep it withheld;
     // the two controls deliver its new community, preserving the count.
     AttrSet::edit(&mut first.attributes, |attrs| {
-        attrs.push(PathAttribute::Communities(vec![MARKER]))
+        attrs.push(PathAttribute::Communities(vec![MARKER]));
     });
     manager.handle_update(test_routes_received(external(), vec![first.clone()]));
     drain_route_chunks(&mut manager);

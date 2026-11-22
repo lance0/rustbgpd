@@ -37,7 +37,7 @@ impl RibManager {
         &mut self,
         gid: usize,
         members: Option<&[PeerId]>,
-        keys: impl ExactSizeIterator<Item = ExactExportKey> + Clone,
+        keys: &(impl ExactSizeIterator<Item = ExactExportKey> + Clone),
         in_scope: impl Fn(&ExactExportKey) -> bool,
         add: bool,
     ) {
@@ -110,7 +110,7 @@ impl RibManager {
         self.adjust_staged_rejections(
             gid,
             members,
-            prefixes.iter().map(|p| ExactExportKey::Unicast(*p, 0)),
+            &prefixes.iter().map(|p| ExactExportKey::Unicast(*p, 0)),
             |key| matches!(key, ExactExportKey::Unicast(prefix, 0) if prefixes.contains(prefix)),
             add,
         );
@@ -976,7 +976,7 @@ impl RibManager {
         });
         let in_scope = |key: &ExactExportKey| matches!(key, ExactExportKey::Vpn(key) if key.path_id == 0 && keys.contains(&key.nlri_key));
         if adjust_rejections {
-            self.adjust_staged_rejections(gid, None, rejected_keys.clone(), in_scope, false);
+            self.adjust_staged_rejections(gid, None, &rejected_keys, in_scope, false);
         }
         let readiness = &self.replacement_readiness;
         let checkpoint = || replacement_readiness_checkpoint(readiness, false);
@@ -1008,7 +1008,7 @@ impl RibManager {
             self.refresh_group_residue_gauge();
         }
         if adjust_rejections {
-            self.adjust_staged_rejections(gid, None, rejected_keys, in_scope, true);
+            self.adjust_staged_rejections(gid, None, &rejected_keys, in_scope, true);
         }
         self.replacement_checkpoint(true);
         out
