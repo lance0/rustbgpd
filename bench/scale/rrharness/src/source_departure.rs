@@ -171,7 +171,7 @@ fn seed(mode: Mode, indices: std::ops::Range<usize>) -> RibUpdate {
             peer: source(0),
             attributes: Arc::clone(&attrs),
             received_at: Instant::now(),
-            origin_type: RouteOrigin::Ebgp,
+            origin_type: RouteOrigin::Ibgp,
             peer_router_id: src,
             is_stale: false,
             is_llgr_stale: false,
@@ -355,6 +355,37 @@ async fn enqueue(
         .map_err(io::Error::other)?
 }
 
+/// No decoded or published row for this long, with no outbound debt, ends
+/// the producer stream.
+const STREAM_QUIET: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Return once every receiver converged, a reader stopped, or the RIB owes no
+/// outbound work and nothing moved for [`STREAM_QUIET`]. The final table
+/// checks then judge the stream: a row the RIB never sent becomes a
+/// receiver inventory mismatch instead of a timeout.
+async fn wait_for_stream(
+    tx: &mpsc::Sender<RibUpdate>,
+    receivers: &ReceiverGroup,
+    probe: &SourceDepartureProbe,
+) -> io::Result<()> {
+    let mut last = None;
+    let mut since = Instant::now();
+    loop {
+        let (withdrawn, converged, closed) = receivers.snapshot();
+        if converged || closed {
+            return Ok(());
+        }
+        let moved = (withdrawn, probe.snapshot().published_withdrawals);
+        if last != Some(moved) {
+            last = Some(moved);
+            since = Instant::now();
+        } else if since.elapsed() >= STREAM_QUIET && outbound_settled(tx).await? {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
 async fn trial(name: &str, mode: Mode, clients: u32, rows: usize) -> io::Result<()> {
     let peers: Vec<_> = (0..clients)
         .map(|i| PeerId::from_addr(client_addr(i)))
@@ -432,9 +463,8 @@ async fn trial(name: &str, mode: Mode, clients: u32, rows: usize) -> io::Result<
     verify_peers(&tx, mode, &peers).await?;
     RecoveryCounts::read(&metrics).verify_initial()?;
     let (started, queued) = enqueue(&runtime, tx.clone(), Arc::clone(&probe)).await?;
-    // A primary query fences the already-admitted pair. Selection is
-    // certified separately at the exact Loc-RIB write by the probe.
-    receivers.wait_converged().await?;
+    // Selection is certified separately at the exact Loc-RIB write by the probe.
+    wait_for_stream(&tx, &receivers, &probe).await?;
     // A last decoded withdrawal can precede the retry tick which retires
     // an obligation. Keep writers alive until that work has settled and
     // let the TCP readers reject any late duplicates through their EOF.

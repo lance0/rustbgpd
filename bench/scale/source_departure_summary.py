@@ -33,6 +33,7 @@ import statistics
 import sys
 
 from recovery_memory import InvalidReceipt, read_object, require, uint, write_json
+from source_departure import SHAPES
 
 STAGES = ("aa", "abba", "confirmation")
 ORDER = {
@@ -73,10 +74,13 @@ def load(root):
             require(receipt.get("arm") == arm, f"{stage}-{index} must be the {arm} arm")
             require(receipt.get("break_witness") is False, f"{stage}-{index} is a control run")
             shapes.add(receipt.get("shape"))
-            binaries[arm].add(receipt.get("binary_sha256"))
+            digest = receipt.get("binary_sha256")
+            require(isinstance(digest, str) and digest, f"{stage}-{index} lacks a binary digest")
+            binaries[arm].add(digest)
             slot = ("candidate" if index % 2 == 0 else "parent") if stage == "aa" else arm
             loaded.append((stage, index, slot, receipt))
     require(len(shapes) == 1, "runs mix shapes")
+    require(next(iter(shapes)) in SHAPES, "unknown shape")
     require(
         all(len(digests) == 1 for digests in binaries.values()),
         "each arm must use one binary throughout",
@@ -117,8 +121,9 @@ def ratio(samples, stage, measure):
     return means["candidate"] / means["parent"]
 
 
-def grade(mode, loaded):
+def grade(mode, loaded, shape):
     """(verdict, one-line reason, ratios) for one mode."""
+    receivers, rows = SHAPES[shape]
     samples = {(stage, slot): [] for stage in STAGES for slot in ("parent", "candidate")}
     unqualified = []
     for stage, index, slot, receipt in loaded:
@@ -126,6 +131,14 @@ def grade(mode, loaded):
         if not trials:
             unqualified.append(f"{stage}-{index} has no {mode} trial")
         for trial in trials:
+            row = trial.get("observation") if trial.get("verdict") == "PASS" else None
+            if row is not None and (
+                row.get("mode") != mode
+                or row.get("receivers") != receivers
+                or row.get("rows") != rows
+            ):
+                unqualified.append(f"{stage}-{index}: observation is not {shape}/{mode}")
+                continue
             failure = hard_failure(stage, index, slot, receipt, trial)
             if failure:
                 return "FAIL", failure, {}
@@ -181,7 +194,7 @@ def summarize(root):
     cells = {}
     for mode in modes:
         try:
-            verdict, reason, ratios = grade(mode, loaded)
+            verdict, reason, ratios = grade(mode, loaded, shape)
         except (InvalidReceipt, KeyError, TypeError, ValueError) as err:
             verdict, reason, ratios = "INVALID", f"malformed trial: {err}", {}
         cells[f"{shape}/{mode}"] = {"verdict": verdict, "reason": reason, "ratios": ratios}

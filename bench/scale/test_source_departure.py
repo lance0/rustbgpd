@@ -157,6 +157,13 @@ class SourceDepartureTests(unittest.TestCase):
                     set(runner.MODES) if trials == 6 else set(runner.MODES[:2]),
                 )
 
+    def test_driver_setup_errors_exit_invalid_not_fail(self):
+        argv = ["source_departure.py", "--binary", str(self.root / "absent"), "--arm", "parent",
+                "--output", str(self.root / "out")]
+        with mock.patch.object(runner.sys, "argv", argv), self.assertRaises(SystemExit) as exited:
+            runner.entry()
+        self.assertEqual(exited.exception.code, runner.EXIT["INVALID"])
+
     def test_inexact_or_incomplete_publications_fail(self):
         for mutation in ({"exact": False}, {"rib_withdrawal_rows": 8191}):
             self.assertEqual(runner.witness({**self.row, **mutation}, self.spec)[0], "FAIL")

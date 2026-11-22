@@ -19,6 +19,8 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 const WRITER_CAPACITY: usize = 256;
+/// Seeded announcements, decoded withdrawals, converged.
+type Progress = (usize, usize, bool);
 // Mirrors the RIB's crate-private outbound_credit::CHUNK_ROWS.
 const RIB_CHUNK_ROWS: usize = 1_024;
 
@@ -63,7 +65,7 @@ pub(crate) struct ReceiverObservation {
 pub(crate) struct ReceiverGroup {
     senders: Vec<mpsc::Sender<OutboundRouteUpdate>>,
     encoders: Vec<Arc<dyn ExactExportEncoder>>,
-    progress: Vec<watch::Receiver<(usize, bool)>>,
+    progress: Vec<watch::Receiver<Progress>>,
     rows: usize,
     tasks: Vec<JoinHandle<io::Result<ReceiverObservation>>>,
 }
@@ -102,7 +104,7 @@ impl ReceiverGroup {
             )?;
             writer.set_nodelay(true)?;
             let (tx, rx) = mpsc::channel(rib_capacity);
-            let (ready, progress) = watch::channel((0, false));
+            let (ready, progress) = watch::channel((0, 0, false));
             group.senders.push(tx);
             group.progress.push(progress);
             group.tasks.push(tokio::spawn(async move {
@@ -133,14 +135,25 @@ impl ReceiverGroup {
         if rows > self.rows {
             return Err(invalid("seed checkpoint exceeds fixture"));
         }
-        self.wait_for(|&(seeded, _)| seeded >= rows).await
+        self.wait_for(|&(seeded, _, _)| seeded >= rows).await
     }
 
-    pub(crate) async fn wait_converged(&mut self) -> io::Result<()> {
-        self.wait_for(|&(_, complete)| complete).await
+    /// Decoded withdrawals across receivers, whether every receiver has
+    /// converged, and whether any reader has stopped. Never waits.
+    pub(crate) fn snapshot(&self) -> (usize, bool, bool) {
+        self.progress
+            .iter()
+            .fold((0, true, false), |(rows, all, closed), progress| {
+                let (_, withdrawn, complete) = *progress.borrow();
+                (
+                    rows + withdrawn,
+                    all && complete,
+                    closed || progress.has_changed().is_err(),
+                )
+            })
     }
 
-    async fn wait_for(&mut self, ready: impl Fn(&(usize, bool)) -> bool) -> io::Result<()> {
+    async fn wait_for(&mut self, ready: impl Fn(&Progress) -> bool) -> io::Result<()> {
         for (index, progress) in self.progress.iter_mut().enumerate() {
             if progress.wait_for(&ready).await.is_err() {
                 return Err(match (&mut self.tasks[index]).await {
@@ -396,7 +409,7 @@ async fn read_updates(
     peer: PeerId,
     rows: usize,
     flowspec: bool,
-    progress: watch::Sender<(usize, bool)>,
+    progress: watch::Sender<Progress>,
 ) -> io::Result<ReceiverObservation> {
     let mut input = BufReader::new(socket);
     let mut table = Table::new(rows, flowspec);
@@ -417,8 +430,8 @@ async fn read_updates(
                 table.update(&update)?;
                 table.record_application(previous_withdrawn);
                 let converged = table.probe_at.is_some() && table.withdrawn == rows;
-                if table.announced != before || converged {
-                    progress.send_replace((table.announced, converged));
+                if table.announced != before || table.withdrawn != previous_withdrawn || converged {
+                    progress.send_replace((table.announced, table.withdrawn, converged));
                 }
             }
             Message::Keepalive => {
@@ -526,6 +539,24 @@ mod tests {
             .to_string()
             .contains("wrong next hop"));
         assert!(!table.probe_seen);
+    }
+
+    #[test]
+    fn a_missing_withdrawal_is_a_receiver_inventory_failure_at_eof() {
+        let mut table = Table::new(2, false);
+        for i in [0, 1] {
+            table.row(crate::flood_prefix(i), false, false).unwrap();
+        }
+        table.row(probe(), false, false).unwrap();
+        table.row(crate::flood_prefix(1), false, true).unwrap();
+        table.record_application(0);
+        let error = table
+            .finish(peer())
+            .err()
+            .expect("one row was never withdrawn");
+        assert!(error
+            .to_string()
+            .contains("receiver inventory mismatch: incomplete table"));
     }
 
     #[test]

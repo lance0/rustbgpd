@@ -171,6 +171,33 @@ class SummaryTests(unittest.TestCase):
                 cells = self.campaign(edit)
                 self.assertEqual(cells[cell]["verdict"], "INVALID")
 
+    def test_observation_from_another_shape_is_invalid(self):
+        def smoke(stage, index, arm, receipt):
+            if arm == "candidate" and stage == "abba" and index == 2:
+                row = receipt["trials"][1]["observation"]
+                row.update(receivers=8, rows=1_024, rib_withdrawal_rows=8 * 1_024)
+
+        cells = self.campaign(smoke)
+        self.assertEqual(cells["standard/private-unicast"]["verdict"], "INVALID")
+        self.assertIn("not standard/private-unicast", cells["standard/private-unicast"]["reason"])
+        self.assertEqual(cells["standard/grouped-unicast"]["verdict"], "PASS")
+
+    def test_missing_or_empty_binary_digest_is_invalid(self):
+        for digest in (None, "", "drop"):
+            with self.subTest(digest=digest):
+                self.reset()
+
+                def edit(stage, index, arm, receipt, digest=digest):
+                    if stage == "confirmation" and index == 2:
+                        if digest == "drop":
+                            del receipt["binary_sha256"]
+                        else:
+                            receipt["binary_sha256"] = digest
+
+                cells = self.campaign(edit)
+                self.assertEqual(cells["campaign"]["verdict"], "INVALID")
+                self.assertIn("lacks a binary digest", cells["campaign"]["reason"])
+
     def test_incomplete_schedule_is_invalid(self):
         self.campaign()
         for child in (self.root / "abba-4").iterdir():

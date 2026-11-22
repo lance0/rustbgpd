@@ -389,11 +389,17 @@ def main():
     return EXIT["CONTROL" if args.break_witness else "PASS"]
 
 
-if __name__ == "__main__":
+def entry():
+    """An unusable invocation is INVALID (2), never the FAIL status."""
     if sys.argv[1:2] == ["_trial"]:
         scoped_trial(Path(sys.argv[2]))
-    else:
-        try:
-            sys.exit(main())
-        except (InvalidReceipt, OSError, KeyError, ValueError) as err:
-            sys.exit(f"INVALID: {err}")
+        return
+    try:
+        sys.exit(main())
+    except (InvalidReceipt, OSError, KeyError, ValueError) as err:
+        print(f"INVALID: {err}", file=sys.stderr)
+        sys.exit(EXIT["INVALID"])
+
+
+if __name__ == "__main__":
+    entry()
