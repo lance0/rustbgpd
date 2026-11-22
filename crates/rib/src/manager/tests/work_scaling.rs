@@ -25,6 +25,8 @@
 //! Every scenario also pins its exact wire output, so a setup that stops
 //! installing routes cannot pass as flat work.
 
+mod unrelated_resyncs;
+
 use crate::PeerId;
 use crate::test_support::peer_v4;
 
@@ -4078,7 +4080,7 @@ fn held_bulk_promotion(size: usize) -> Work {
     }
     drop(occupied);
     let work = checkpoints_in(|| {
-        manager.distribute_resync_request_to_targets(&HashSet::from([target]));
+        manager.distribute_scoped_resync([target], HashMap::new(), false);
     });
     let withdrawn = apply(&mut receiver, &mut wire);
     assert_eq!(

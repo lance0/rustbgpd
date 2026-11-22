@@ -1006,7 +1006,7 @@ impl Harness {
                     .fail_next_allocation_for_test();
                 self.manager.mark_outbound_dirty(peer_v4(OBSERVER));
                 self.manager
-                    .distribute_resync_request_to_targets(&HashSet::from([peer_v4(OBSERVER)]));
+                    .distribute_scoped_resync([peer_v4(OBSERVER)], HashMap::new(), false);
                 let refused = refusals(&self.manager) > before;
                 self.manager
                     .pending_group_admitted

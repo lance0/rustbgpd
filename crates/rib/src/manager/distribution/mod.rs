@@ -3106,18 +3106,15 @@ impl RibManager {
                     return CleanPolicyTransitionAdvance::Continue(pending);
                 }
 
-                // Terminal batch: the tail below runs exactly once, and the
-                // `Committed` reply stays after the global retry pass — the
-                // peer manager treats it as flush-complete before launching
-                // remainder per-peer applies and rollback restores.
+                // The peer manager may start the remainder or rollback as soon as
+                // it receives the reply. Finish this cohort's output first.
                 let materialized_routes = inventory.announce.len();
                 manager.finish_clean_policy_transition_commit();
-                // Match the authoritative single-peer replacement seam: a
-                // successful policy transaction also owns the global retry
-                // opportunity for dirty peers. Without this pass, unrelated
-                // withdrawal residue can remain queued until the timer even
-                // though the caller has already observed a successful commit.
-                manager.distribute_resync_request();
+                manager.distribute_scoped_resync(
+                    pending.replacements.iter().map(|replacement| replacement.peer),
+                    HashMap::new(),
+                    false,
+                );
                 debug!(
                     source_group = source,
                     destination_group = destination,
@@ -5968,6 +5965,12 @@ impl RibManager {
             // seam itself for any other sender.
             if manager.export_chains.get(&peer) != Some(&export_policy) {
                 manager.export_chains.insert(peer, export_policy);
+            } else {
+                let destination = manager.compute_update_group_membership(peer);
+                if manager.update_groups.membership(peer) == Some(&destination) {
+                    manager.create_installed_export_counters([peer]);
+                    return Ok(());
+                }
             }
             // Update-group membership recompute on the policy replacement
             // seam (per-peer gRPC edits, ADR-0076 live-impact txns, and
@@ -5986,7 +5989,8 @@ impl RibManager {
             if !key_stable {
                 manager.mark_outbound_dirty_with_evpn_feed(peer, &mut evpn_feed);
             }
-            manager.distribute_changes_with_evpn_feeds(
+            manager.distribute_scoped_resync(
+                [peer],
                 evpn_feed.into_iter().map(|feed| (peer, feed)).collect(),
                 false,
             );
@@ -6713,6 +6717,7 @@ impl RibManager {
         receipt.cohort_partition_us =
             u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX);
 
+        let mut retry_peers = Vec::new();
         let mut n_shared_members = 0_usize;
         let mut n_destination_groups = 0_usize;
         for (source, destination, members) in cohorts {
@@ -6736,6 +6741,7 @@ impl RibManager {
             if self.apply_batched_group_transition(source, destination, &members, receipt) {
                 n_shared_members += members.len();
                 n_destination_groups += 1;
+                retry_peers.extend(members);
             } else {
                 residual.extend(members);
             }
@@ -6774,7 +6780,6 @@ impl RibManager {
         } else {
             None
         };
-        let mut applied_peers = Vec::new();
         let phase = std::time::Instant::now();
         let mut evpn_feeds = HashMap::new();
         for peer in residual {
@@ -6823,7 +6828,6 @@ impl RibManager {
             }
             if unchanged {
                 applied += 1;
-                applied_peers.push(peer);
                 continue;
             }
             let member_started = std::time::Instant::now();
@@ -6837,7 +6841,7 @@ impl RibManager {
                 evpn_feeds.insert(peer, feed);
             }
             applied += 1;
-            applied_peers.push(peer);
+            retry_peers.push(peer);
             let took = member_started.elapsed();
             recompute_max = recompute_max.max(took);
             // A later member in this turn is judged on the slowest recompute
@@ -6867,16 +6871,14 @@ impl RibManager {
         // Group tables and memberships moved above without a staging
         // pass; advertised-query continuations must not survive that.
         self.advance_advertised_pages();
-        // ONE distribution pass: drains every fallback/dirty member and
-        // owns the global retry opportunity, exactly like the single-peer
-        // seam's per-call pass.
+        // Shared movers whose emission failed also need their attempt. A
+        // deferred member keeps its old chain until its own paced command.
         let phase = std::time::Instant::now();
         // A paced command measures its applied members' own time in the pass.
         if matches!(mode, ResidualMode::Paced { .. }) {
-            self.paced_member_costs =
-                Some(applied_peers.iter().map(|&peer| (peer, None)).collect());
+            self.paced_member_costs = Some(retry_peers.iter().map(|&peer| (peer, None)).collect());
         }
-        self.distribute_changes_with_evpn_feeds(evpn_feeds, false);
+        self.distribute_scoped_resync(retry_peers, evpn_feeds, false);
         let member_costs = self.paced_member_costs.take();
         receipt.distribution_us = u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX);
         let pass_max = member_costs.and_then(|costs| costs.into_values().flatten().max());
@@ -8043,7 +8045,7 @@ impl RibManager {
         self.set_selection_partial_caught_up(peer, false);
         self.force_outbound_peers.insert(peer);
         self.refresh_eor_retry(peer);
-        self.distribute_resync_request();
+        self.distribute_scoped_resync([peer], HashMap::new(), false);
         let _ = reply.send(Ok(()));
     }
 
@@ -8262,7 +8264,7 @@ impl RibManager {
                 // The forced resync is now owed, so it holds the marker.
                 self.release_eor_orf_table(peer, [family], EorTrigger::Release);
             }
-            self.distribute_changes_after_advertised_page_advance(&HashSet::new(), &HashSet::new());
+            self.distribute_scoped_resync([peer], HashMap::new(), true);
         }
         let _ = reply.send(outcome);
     }
@@ -9275,6 +9277,7 @@ impl RibManager {
     /// An explicit resync request: a pass with no route change that builds
     /// every dirty peer's whole table, grouped members included, before the
     /// caller continues.
+    #[cfg(test)]
     pub(super) fn distribute_resync_request(&mut self) {
         let empty = HashSet::new();
         self.distribute_changes_inner(
@@ -9309,39 +9312,38 @@ impl RibManager {
         self.flush_helper_stale_exempt(changed);
     }
 
-    /// [`Self::distribute_resync_request`] restricted to `targets`, as
-    /// [`Self::distribute_changes_to_targets`] restricts a change event.
-    #[cfg(test)]
-    pub(in crate::manager) fn distribute_resync_request_to_targets(
+    /// An empty pass can retry the affected receivers without visiting other
+    /// dirty or forced peers. Those peers retain their existing obligations.
+    pub(in crate::manager) fn distribute_scoped_resync(
         &mut self,
-        targets: &HashSet<PeerId>,
+        targets: impl IntoIterator<Item = PeerId>,
+        feeds: HashMap<PeerId, super::evpn_recovery::EvpnCompleteFeed>,
+        advertised_generation_already_advanced: bool,
     ) {
+        let targets: HashSet<_> = targets.into_iter().collect();
+        debug_assert!(feeds.keys().all(|peer| targets.contains(peer)));
         let empty = HashSet::new();
-        self.distribute_changes_inner(
-            &empty,
-            &empty,
-            DistributionPass::Ordinary,
-            false,
-            HashMap::new(),
-            Some(targets),
-        );
-        self.flush_helper_stale_exempt(&empty);
-    }
-
-    pub(super) fn distribute_changes_after_advertised_page_advance(
-        &mut self,
-        best_changed: &HashSet<Prefix>,
-        all_affected: &HashSet<Prefix>,
-    ) {
-        self.distribute_changes_inner(
-            best_changed,
-            all_affected,
-            DistributionPass::Ordinary,
-            true,
-            HashMap::new(),
-            None,
-        );
-        self.flush_helper_stale_exempt(all_affected);
+        if feeds.is_empty()
+            && let Some(staged) = &mut self.selection_release_staging
+        {
+            staged.extend(targets.iter().copied());
+        } else {
+            self.distribute_changes_inner(
+                &empty,
+                &empty,
+                DistributionPass::Ordinary,
+                advertised_generation_already_advanced,
+                feeds,
+                Some(&targets),
+            );
+        }
+        if self.helper_stale_exempt.is_empty() {
+            return;
+        }
+        self.retire_helper_stale_exempt();
+        for peer in targets {
+            self.flush_peer_helper_stale_exempt(peer);
+        }
     }
 
     /// Rebuild only this release owner's missing EVPN coverage. Other
@@ -9361,22 +9363,6 @@ impl RibManager {
             None,
         );
         self.flush_peer_helper_stale_exempt(peer);
-    }
-
-    pub(in crate::manager) fn distribute_changes_with_evpn_feeds(
-        &mut self,
-        feeds: HashMap<PeerId, super::evpn_recovery::EvpnCompleteFeed>,
-        advertised_generation_already_advanced: bool,
-    ) {
-        self.distribute_changes_inner(
-            &HashSet::new(),
-            &HashSet::new(),
-            DistributionPass::Ordinary,
-            advertised_generation_already_advanced,
-            feeds,
-            None,
-        );
-        self.flush_helper_stale_exempt(&HashSet::new());
     }
 
     /// Whether a clean member has rejection-inventory work in `scope`:
@@ -9433,7 +9419,7 @@ impl RibManager {
         evpn_feeds: HashMap<PeerId, super::evpn_recovery::EvpnCompleteFeed>,
         targets: Option<&HashSet<PeerId>>,
     ) -> bool {
-        if self.selection_release_staging
+        if self.selection_release_staging.is_some()
             && best_changed.is_empty()
             && all_affected.is_empty()
             && evpn_feeds.is_empty()
@@ -9657,10 +9643,15 @@ impl RibManager {
             self.advance_advertised_pages();
         }
 
-        let peers: Vec<PeerId> = match (release.as_ref(), drain.as_deref(), pass_kind) {
-            (Some(page), _, _) => page.peers.to_vec(),
-            (_, Some(drain), _) => vec![drain.peer],
-            (_, _, DistributionPass::SelectionMarker(peer)) => vec![peer],
+        let peers: Vec<PeerId> = match (release.as_ref(), drain.as_deref(), pass_kind, targets) {
+            (Some(page), _, _, _) => page.peers.to_vec(),
+            (_, Some(drain), _, _) => vec![drain.peer],
+            (_, _, DistributionPass::SelectionMarker(peer), _) => vec![peer],
+            (_, _, DistributionPass::Ordinary, Some(targets)) => targets
+                .iter()
+                .filter(|peer| self.outbound_peers.contains_key(*peer))
+                .copied()
+                .collect(),
             _ => self
                 .outbound_peers
                 .keys()
@@ -9985,6 +9976,12 @@ impl RibManager {
                     resync_built |= resync;
                     #[cfg(test)]
                     if resync {
+                        if let Some((first, last, builds)) =
+                            &mut self.adj_rib_out_commit_stats.watched_resync_builds
+                            && (*first..=*last).contains(&peer)
+                        {
+                            *builds += 1;
+                        }
                         self.adj_rib_out_commit_stats.resync_builds = self
                             .adj_rib_out_commit_stats
                             .resync_builds

@@ -1354,7 +1354,7 @@ fn grouped_peer_non_unicast_first_delta_keeps_private_unicast_unallocated() {
 
 /// Register an IPv4-sendable peer whose session withheld negotiated IPv6
 /// unicast (`SetPeerWithheldFamilies` staged before `PeerUp`).
-fn register_withheld_v6_peer(
+pub(super) fn register_withheld_v6_peer(
     manager: &mut RibManager,
     peer: PeerId,
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
@@ -3549,7 +3549,7 @@ async fn clean_policy_transition_falls_back_for_distinct_runtime_group_edges() {
     clippy::too_many_lines,
     reason = "the residue regression constructs an unrelated saturated member and proves the batch reply boundary"
 )]
-async fn clean_policy_transition_drains_unrelated_dirty_residue_before_reply() {
+async fn clean_policy_transition_replies_for_cohort_and_leaves_unrelated_debt_visible() {
     let metrics = BgpMetrics::new();
     let RunningManager { tx, handle } = spawn_running_manager(64, metrics.clone());
     let probes = Arc::new(AtomicUsize::new(0));
@@ -3667,22 +3667,31 @@ async fn clean_policy_transition_drains_unrelated_dirty_residue_before_reply() {
         crate::update::ExportPolicyCohortOutcome::Committed
     );
 
-    let (health_reply, health_response) = oneshot::channel();
-    tx.send(RibUpdate::TestQueryOutboundHealth {
-        reply: health_reply,
-    })
-    .await
-    .unwrap();
-    assert_eq!(
-        health_response.await.unwrap(),
-        (0, 0, 0, 0, 0, 0),
-        "the success reply must follow the global dirty drain"
-    );
+    for receiver in &mut cohort_receivers {
+        let committed = delivered(receiver.try_recv().expect("cohort output before reply"));
+        assert_eq!(committed.announce.len(), 1);
+        assert_eq!(committed.announce[0].prefix, Prefix::V4(second_prefix));
+        assert!(committed.announce[0].attributes.iter().any(|attribute| {
+            matches!(attribute, PathAttribute::Communities(values) if values.contains(&0xFDE8_1102))
+        }));
+    }
+    assert!(matches!(
+        dirty_receiver.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::QueryOutboundConvergence { reply })
+        .await
+        .unwrap();
+    assert_eq!(response.await.unwrap().pending_peers, 1);
     assert_metric(
-        gauge_metric_value(&metrics, "bgp_update_group_residue_entries", &[]),
-        0.0,
-        "residue after pre-reply dirty drain",
+        gauge_metric_value(&metrics, "bgp_rib_outbound_dirty_peers", &[]),
+        1.0,
+        "unrelated debt remains observable after the reply",
     );
+    assert!(gauge_metric_value(&metrics, "bgp_update_group_residue_entries", &[]) > 0.0);
+
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
     let healed = fixture_update(dirty_receiver.recv()).await;
     assert!(
         healed
@@ -3690,13 +3699,24 @@ async fn clean_policy_transition_drains_unrelated_dirty_residue_before_reply() {
             .copied()
             .collect::<Vec<_>>()
             .contains(&(Prefix::V4(first_prefix), 0)),
-        "the pre-reply drain must emit the unrelated withdrawal residue"
+        "the resync tick must emit the unrelated withdrawal residue"
     );
     assert!(
         healed
             .announce
             .iter()
             .any(|route| route.prefix == Prefix::V4(second_prefix))
+    );
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::QueryOutboundConvergence { reply })
+        .await
+        .unwrap();
+    assert_eq!(response.await.unwrap().pending_peers, 0);
+    assert_metric(
+        gauge_metric_value(&metrics, "bgp_update_group_residue_entries", &[]),
+        0.0,
+        "residue after the tick",
     );
 
     drop(tx);
@@ -6160,7 +6180,7 @@ async fn grouped_and_ungrouped_export_counters_match_after_dirty_resync() {
 /// RR-client members installed on one shared export policy, `route_count`
 /// Loc-RIB routes distributed and drained, no actor task. Tests step the
 /// parked transition through the same seam the run loop polls.
-fn direct_clean_transition_manager(
+pub(super) fn direct_clean_transition_manager(
     member_count: usize,
     route_count: usize,
     readiness_rx: Option<mpsc::Receiver<crate::update::RibReadinessQuery>>,
@@ -6271,7 +6291,7 @@ fn direct_clean_transition_manager_with_policy(
 
 /// One run-loop poll of the parked transition, returning the recorded poll
 /// kind and outcome exactly as the actor seam observes them.
-fn step_parked_transition(manager: &mut RibManager) -> (&'static str, &'static str) {
+pub(super) fn step_parked_transition(manager: &mut RibManager) -> (&'static str, &'static str) {
     use crate::manager::distribution::CleanPolicyTransitionAdvance;
     let pending = manager
         .pending_clean_policy_transition
@@ -6301,7 +6321,7 @@ fn step_parked_transition(manager: &mut RibManager) -> (&'static str, &'static s
     }
 }
 
-fn start_clean_transition(
+pub(super) fn start_clean_transition(
     manager: &mut RibManager,
     peers: &[PeerId],
     next_policy: &PolicyChain,
@@ -18184,14 +18204,14 @@ fn batched_authoritative_rollback_shares_an_occupied_destination() {
     assert!(fleet.manager.dirty_peers.is_empty());
 }
 
-/// The batch keeps its global retry opportunity: an incumbent already owing
-/// a withdrawal may recover, or retain that debt if its channel stays full.
+/// An incumbent keeps its withdrawal debt while other members move. The
+/// next tick retries it when writable and retains its debt when blocked.
 #[test]
 #[expect(
     clippy::too_many_lines,
     reason = "the same real missed withdrawal verifies successful and blocked incumbent retry"
 )]
-fn batched_authoritative_occupied_destination_preserves_incumbent_retry() {
+fn batched_authoritative_occupied_destination_leaves_incumbent_retry_to_tick() {
     for blocked in [false, true] {
         let old_policy = community_chain(0xFDE8_0001);
         let next_policy = community_chain(0xFDE8_0002);
@@ -18269,6 +18289,14 @@ fn batched_authoritative_occupied_destination_preserves_incumbent_retry() {
             let shared = receiver.try_recv().map(delivered).unwrap();
             assert!(shared.shared_group_encode.is_some());
         }
+        assert!(fleet.manager.dirty_peers.contains(&incumbent));
+        assert_eq!(fleet.receivers[3].len(), queued);
+        assert_eq!(
+            fleet.manager.group_ribs[&destination].tombstones,
+            tombstones
+        );
+
+        fleet.manager.resync_dirty_peers_bounded();
         assert_eq!(fleet.manager.dirty_peers.contains(&incumbent), blocked);
         assert_eq!(
             fleet.manager.group_ribs[&destination]

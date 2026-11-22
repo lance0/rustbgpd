@@ -331,6 +331,9 @@ struct AdjRibOutCommitStats {
     /// Per-peer passes that built a full resync (dirty or force).
     #[cfg(test)]
     resync_builds: usize,
+    /// Full resyncs for just the fixture's contiguous range of unrelated peers.
+    #[cfg(test)]
+    watched_resync_builds: Option<(PeerId, PeerId, usize)>,
     /// Owed-drain work: unicast and EVPN keys a drain, absorption or close
     /// flush read, the drain steps that read any, and the most one step
     /// read.
@@ -1124,8 +1127,9 @@ pub struct RibManager {
     eor_replay: eor_grace::ReplayWait,
     /// Process-start RFC 4724 route-selection gates. `None` on cold starts.
     selection_deferral: Option<selection_deferral::SelectionDeferral>,
-    /// Release updates every selected view before pending whole-peer resyncs emit.
-    selection_release_staging: bool,
+    /// While staging, retain explicitly requested retries, including cross-family
+    /// effects such as a BGP-LS change to a unicast receiver's ORR vantage.
+    selection_release_staging: Option<HashSet<PeerId>>,
     unicast_release: selection_deferral::UnicastReleases,
     release_readiness_count: Option<usize>,
     /// Route identities touched while their family's Loc-RIB was frozen.
@@ -3156,7 +3160,7 @@ impl RibManager {
             eor_grace_deadlines: graceful_restart::DeadlineMap::default(),
             eor_replay: eor_grace::ReplayWait::default(),
             selection_deferral: None,
-            selection_release_staging: false,
+            selection_release_staging: None,
             unicast_release: selection_deferral::UnicastReleases::default(),
             release_readiness_count: None,
             deferred_selection_keys: selection_deferral::DeferredSelectionKeys::default(),
@@ -7566,7 +7570,7 @@ impl RibManager {
             }
         } else {
             self.mark_outbound_dirty(peer);
-            self.distribute_resync_request();
+            self.distribute_scoped_resync([peer], HashMap::new(), false);
         }
         if captured_prior
             && !self.dirty_peers.contains(&peer)
@@ -7753,11 +7757,8 @@ impl RibManager {
     /// changed next-hop cost surface (metric shift, lookup change, or
     /// vantage resolution flip) can
     /// move those peers' per-vantage bests without any unicast RIB
-    /// change, so nothing else would re-stage them. Dirty + empty-set
-    /// `distribute_changes` is the `ReplacePeerExportPolicy` precedent —
-    /// the Adj-RIB-Out equality machinery reduces the full restage to
-    /// the minimal announce/withdraw delta per peer (unaffected peers
-    /// see zero messages).
+    /// change. Restage their outbound tables and emit the announce/withdraw
+    /// delta against each peer's admitted routes.
     fn resync_orr_bound_peers(&mut self, changed: &HashSet<IpAddr>) {
         if changed.is_empty() {
             return;
@@ -7776,10 +7777,10 @@ impl RibManager {
         // Preserve the single dirty-marking seam: ORR currently disqualifies
         // grouping, but routing through the helper also marks group state if
         // that eligibility rule changes later.
-        for peer in bound {
+        for &peer in &bound {
             self.mark_outbound_dirty(peer);
         }
-        self.distribute_resync_request();
+        self.distribute_scoped_resync(bound, HashMap::new(), false);
     }
 
     /// The ORR topology input: every peer's BGP-LS Adj-RIB-In, excluding
