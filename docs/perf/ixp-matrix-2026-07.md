@@ -828,3 +828,15 @@ above are unchanged as history.
 The same day, S3 alone was re-measured on the v0.80.1 tag, which fixes the
 withdraw regression: withdraw p50 0.24–0.30 s, three runs on the same host,
 in the [v0.80.1 flap-storm addendum](cross-daemon-v0801-s3-2026-10.md).
+
+## v0.84.0 cross-daemon refresh — 2026-11-22
+
+rustbgpd, BIRD 3.3.3 and OpenBGPD 9.3 were re-measured on 2026-11-22 at the v0.84.0 release
+commit (`5f5ca6a31`), two runs each with the daemon order rotated, on the phased-churner
+`reloadstall` harness. It is the matrix's first BIRD 3.3.3 measurement. Against the v0.80.0 and
+v0.80.1 bands, rustbgpd's S2 completion p50 fell to 0.77–0.83 s, while cold convergence (3.9 s),
+the S2 stall p50 (50.1–69.2 ms) and the S3 withdraw p50 (0.37–0.40 s) rose; both runs agree.
+Results, method and the cross-date context are in the
+[v0.84.0 cross-daemon receipt](cross-daemon-v0840-2026-11.md), with its bundle under
+[`artifacts/ixp-matrix-2026-07/v0840-refresh-2026-11/`](artifacts/ixp-matrix-2026-07/v0840-refresh-2026-11/README.md).
+The sections above are unchanged as history.

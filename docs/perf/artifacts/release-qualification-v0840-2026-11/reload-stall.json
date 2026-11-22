@@ -1,0 +1,1052 @@
+{
+ "schema": 1,
+ "measured_on": "2026-11-22",
+ "control": {
+  "tag": "v0.83.0",
+  "commit": "3686a4b67a555db16fa9a3825867f77d0cedb5b3",
+  "daemon_sha256": "b258ba101fe3523dfbbda3d49fbbb039023e9b329a7fcdf510e826b8f7763847"
+ },
+ "candidate": {
+  "commit": "5f5ca6a312d1bdf7094440ae363495574a6ddecc",
+  "daemon_sha256": "7d9607f42ce7782050d876a1a328a593f3e4da4170652730c866ab6d493cae7f"
+ },
+ "harness": {
+  "package": "reloadstall",
+  "built_from": "candidate tree, unmodified",
+  "sha256": "c6d28898447ab0886f3d120b1eaf68e920994c9f206ca0d7a859d0a794320034",
+  "used_for": "both daemons"
+ },
+ "shape": {
+  "peers": 700,
+  "prefixes": 400400,
+  "reloads_per_point": 2,
+  "control_window_s": 30,
+  "grouped_200_2": "200 changed peers in 2 export-policy groups (GEN_EXPORT_PAIRS=2)",
+  "distinct_150": "150 changed peers, each with its own export policy (GEN_EXPORT_PAIRS=150)"
+ },
+ "protocol": {
+  "order": [
+   "aa-1 ctl",
+   "aa-2 ctl",
+   "abba-1 ctl",
+   "abba-2 cand",
+   "abba-3 cand",
+   "abba-4 ctl",
+   "conf-1 ctl",
+   "conf-2 cand"
+  ],
+  "aa": "max(aa1/aa2, aa2/aa1)",
+  "abba": "sum(cand abba) / sum(ctl abba)",
+  "threshold": "max(1.02, A/A + 0.01)",
+  "fail": "ABBA and conf both above the threshold",
+  "conf": "conf-2 / conf-1",
+  "memory": "cgroup memory.peak of a fresh swap-fenced scope (memory.swap.max=0) per point",
+  "metrics": {
+   "longest_actor_turn_us": "largest RIB actor poll seen by any harness scrape in the run",
+   "completion_max_s": "slowest changed peer's completion, mean over the point's reloads",
+   "cgroup_peak_kib": "memory.peak / 1024"
+  }
+ },
+ "abba_means": {
+  "grouped_200_2": {
+   "ctl": {
+    "longest_actor_turn_us": 850420.5,
+    "completion_max_s": 1.6967017500000001,
+    "cgroup_peak_kib": 815224
+   },
+   "cand": {
+    "longest_actor_turn_us": 762995.5,
+    "completion_max_s": 1.521061,
+    "cgroup_peak_kib": 763886
+   }
+  },
+  "distinct_150": {
+   "ctl": {
+    "longest_actor_turn_us": 885328.5,
+    "completion_max_s": 127.98744250000001,
+    "cgroup_peak_kib": 9641972
+   },
+   "cand": {
+    "longest_actor_turn_us": 779300,
+    "completion_max_s": 113.979661,
+    "cgroup_peak_kib": 7901098
+   }
+  }
+ },
+ "ratios": {
+  "g200:committed": true,
+  "g200:turn": {
+   "aa": 1.0128300708307258,
+   "T": 1.0228300708307259,
+   "abba": 0.8971979156193907,
+   "conf": 0.9238119010642645,
+   "verdict": "PASS"
+  },
+  "g200:comp": {
+   "aa": 1.0001284777939217,
+   "T": 1.02,
+   "abba": 0.8964810698167783,
+   "conf": 0.9085971560561187,
+   "verdict": "PASS"
+  },
+  "g200:cg_peak_kB": {
+   "aa": 1.0122539061520328,
+   "T": 1.0222539061520328,
+   "abba": 0.9370258971767269,
+   "conf": 0.945163958402679,
+   "verdict": "PASS"
+  },
+  "d150:committed": true,
+  "d150:turn": {
+   "aa": 1.0044018870440679,
+   "T": 1.02,
+   "abba": 0.8802382392524357,
+   "conf": 0.8793315979511294,
+   "verdict": "PASS"
+  },
+  "d150:comp": {
+   "aa": 1.0058591981540674,
+   "T": 1.02,
+   "abba": 0.8905534697280945,
+   "conf": 0.8887622421149249,
+   "verdict": "PASS"
+  },
+  "d150:cg_peak_kB": {
+   "aa": 1.003490009872753,
+   "T": 1.02,
+   "abba": 0.8194483452140289,
+   "conf": 0.8249728592047851,
+   "verdict": "PASS"
+  }
+ },
+ "points": [
+  {
+   "point": "g200-aa-1-ctl",
+   "shape": "grouped_200_2",
+   "side": "ctl",
+   "valid": "VALID",
+   "harness_rc": "0",
+   "daemon_exit": "alive_then_sigterm_rc=0",
+   "reload_outcomes": [
+    "complete",
+    "complete"
+   ],
+   "phase_outcomes": [
+    "committed",
+    "committed"
+   ],
+   "longest_actor_turn_us": 862677,
+   "actor_turn_us_per_reload": [
+    817186,
+    862677
+   ],
+   "completion_max_s_per_reload": [
+    1.686184,
+    1.715619
+   ],
+   "observer_max_gap_ms_per_reload": [
+    827.11,
+    872.288
+   ],
+   "cgroup_peak_kib": 807232,
+   "generation_phase": [
+    {
+     "outcome": "committed",
+     "total_targets": 200,
+     "cohort_targets": 100,
+     "remainder_targets": 100,
+     "owned_wait_service_gap_max_us": 821221,
+     "events_served": 0,
+     "event_service_us": 67,
+     "cohort_rib_transition_us": 81917,
+     "authoritative_remainder_apply_us": 822942,
+     "total_us": 1524552
+    },
+    {
+     "outcome": "committed",
+     "total_targets": 200,
+     "cohort_targets": 100,
+     "remainder_targets": 100,
+     "owned_wait_service_gap_max_us": 867895,
+     "events_served": 0,
+     "event_service_us": 70,
+     "cohort_rib_transition_us": 98581,
+     "authoritative_remainder_apply_us": 869361,
+     "total_us": 1555429
+    }
+   ],
+   "rejection": [],
+   "fail_line": null
+  },
+  {
+   "point": "g200-aa-2-ctl",
+   "shape": "grouped_200_2",
+   "side": "ctl",
+   "valid": "VALID",
+   "harness_rc": "0",
+   "daemon_exit": "alive_then_sigterm_rc=0",
+   "reload_outcomes": [
+    "complete",
+    "complete"
+   ],
+   "phase_outcomes": [
+    "committed",
+    "committed"
+   ],
+   "longest_actor_turn_us": 851749,
+   "actor_turn_us_per_reload": [
+    820329,
+    851749
+   ],
+   "completion_max_s_per_reload": [
+    1.713717,
+    1.687649
+   ],
+   "observer_max_gap_ms_per_reload": [
+    831.163,
+    862.572
+   ],
+   "cgroup_peak_kib": 797460,
+   "generation_phase": [
+    {
+     "outcome": "committed",
+     "total_targets": 200,
+     "cohort_targets": 100,
+     "remainder_targets": 100,
+     "owned_wait_service_gap_max_us": 825434,
+     "events_served": 0,
+     "event_service_us": 75,
+     "cohort_rib_transition_us": 98478,
+     "authoritative_remainder_apply_us": 827274,
+     "total_us": 1557584
+    },
+    {
+     "outcome": "committed",
+     "total_targets": 200,
+     "cohort_targets": 100,
+     "remainder_targets": 100,
+     "owned_wait_service_gap_max_us": 857580,
+     "events_served": 0,
+     "event_service_us": 67,
+     "cohort_rib_transition_us": 98915,
+     "authoritative_remainder_apply_us": 858927,
+     "total_us": 1525060
+    }
+   ],
+   "rejection": [],
+   "fail_line": null
+  },
+  {
+   "point": "g200-abba-1-ctl",
+   "shape": "grouped_200_2",
+   "side": "ctl",
+   "valid": "VALID",
+   "harness_rc": "0",
+   "daemon_exit": "alive_then_sigterm_rc=0",
+   "reload_outcomes": [
+    "complete",
+    "complete"
+   ],
+   "phase_outcomes": [
+    "committed",
+    "committed"
+   ],
+   "longest_actor_turn_us": 850884,
+   "actor_turn_us_per_reload": [
+    845163,
+    850884
+   ],
+   "completion_max_s_per_reload": [
+    1.705118,
+    1.657302
+   ],
+   "observer_max_gap_ms_per_reload": [
+    856.617,
+    861.78
+   ],
+   "cgroup_peak_kib": 820624,
+   "generation_phase": [
+    {
+     "outcome": "committed",
+     "total_targets": 200,
+     "cohort_targets": 100,
+     "remainder_targets": 100,
+     "owned_wait_service_gap_max_us": 851297,
+     "events_served": 0,
+     "event_service_us": 71,
+     "cohort_rib_transition_us": 91731,
+     "authoritative_remainder_apply_us": 852663,
+     "total_us": 1537298
+    },
+    {
+     "outcome": "committed",
+     "total_targets": 200,
+     "cohort_targets": 100,
+     "remainder_targets": 100,
+     "owned_wait_service_gap_max_us": 855502,
+     "events_served": 0,
+     "event_service_us": 76,
+     "cohort_rib_transition_us": 94081,
+     "authoritative_remainder_apply_us": 857052,
+     "total_us": 1502233
+    }
+   ],
+   "rejection": [],
+   "fail_line": null
+  },
+  {
+   "point": "g200-abba-2-cand",
+   "shape": "grouped_200_2",
+   "side": "cand",
+   "valid": "VALID",
+   "harness_rc": "0",
+   "daemon_exit": "alive_then_sigterm_rc=0",
+   "reload_outcomes": [
+    "complete",
+    "complete"
+   ],
+   "phase_outcomes": [
+    "committed",
+    "committed"
+   ],
+   "longest_actor_turn_us": 766861,
+   "actor_turn_us_per_reload": [
+    762586,
+    766861
+   ],
+   "completion_max_s_per_reload": [
+    1.546224,
+    1.50949
+   ],
+   "observer_max_gap_ms_per_reload": [
+    773.408,
+    776.339
+   ],
+   "cgroup_peak_kib": 758888,
+   "generation_phase": [
+    {
+     "outcome": "committed",
+     "total_targets": 200,
+     "cohort_targets": 100,
+     "remainder_targets": 100,
+     "owned_wait_service_gap_max_us": 767093,
+     "events_served": 0,
+     "event_service_us": 69,
+     "cohort_rib_transition_us": 74894,
+     "authoritative_remainder_apply_us": 770585,
+     "total_us": 1377773
+    },
+    {
+     "outcome": "committed",
+     "total_targets": 200,
+     "cohort_targets": 100,
+     "remainder_targets": 100,
+     "owned_wait_service_gap_max_us": 771990,
+     "events_served": 0,
+     "event_service_us": 71,
+     "cohort_rib_transition_us": 74287,
+     "authoritative_remainder_apply_us": 773427,
+     "total_us": 1349666
+    }
+   ],
+   "rejection": [],
+   "fail_line": null
+  },
+  {
+   "point": "g200-abba-3-cand",
+   "shape": "grouped_200_2",
+   "side": "cand",
+   "valid": "VALID",
+   "harness_rc": "0",
+   "daemon_exit": "alive_then_sigterm_rc=0",
+   "reload_outcomes": [
+    "complete",
+    "complete"
+   ],
+   "phase_outcomes": [
+    "committed",
+    "committed"
+   ],
+   "longest_actor_turn_us": 759130,
+   "actor_turn_us_per_reload": [
+    756232,
+    759130
+   ],
+   "completion_max_s_per_reload": [
+    1.534647,
+    1.493883
+   ],
+   "observer_max_gap_ms_per_reload": [
+    773.767,
+    778.539
+   ],
+   "cgroup_peak_kib": 768884,
+   "generation_phase": [
+    {
+     "outcome": "committed",
+     "total_targets": 200,
+     "cohort_targets": 100,
+     "remainder_targets": 100,
+     "owned_wait_service_gap_max_us": 760285,
+     "events_served": 0,
+     "event_service_us": 64,
+     "cohort_rib_transition_us": 69226,
+     "authoritative_remainder_apply_us": 762063,
+     "total_us": 1374928
+    },
+    {
+     "outcome": "committed",
+     "total_targets": 200,
+     "cohort_targets": 100,
+     "remainder_targets": 100,
+     "owned_wait_service_gap_max_us": 763617,
+     "events_served": 0,
+     "event_service_us": 73,
+     "cohort_rib_transition_us": 75118,
+     "authoritative_remainder_apply_us": 765196,
+     "total_us": 1331354
+    }
+   ],
+   "rejection": [],
+   "fail_line": null
+  },
+  {
+   "point": "g200-abba-4-ctl",
+   "shape": "grouped_200_2",
+   "side": "ctl",
+   "valid": "VALID",
+   "harness_rc": "0",
+   "daemon_exit": "alive_then_sigterm_rc=0",
+   "reload_outcomes": [
+    "complete",
+    "complete"
+   ],
+   "phase_outcomes": [
+    "committed",
+    "committed"
+   ],
+   "longest_actor_turn_us": 849957,
+   "actor_turn_us_per_reload": [
+    825964,
+    849957
+   ],
+   "completion_max_s_per_reload": [
+    1.74996,
+    1.674427
+   ],
+   "observer_max_gap_ms_per_reload": [
+    836.682,
+    861.275
+   ],
+   "cgroup_peak_kib": 809824,
+   "generation_phase": [
+    {
+     "outcome": "committed",
+     "total_targets": 200,
+     "cohort_targets": 100,
+     "remainder_targets": 100,
+     "owned_wait_service_gap_max_us": 832064,
+     "events_served": 0,
+     "event_service_us": 84,
+     "cohort_rib_transition_us": 106394,
+     "authoritative_remainder_apply_us": 834444,
+     "total_us": 1586860
+    },
+    {
+     "outcome": "committed",
+     "total_targets": 200,
+     "cohort_targets": 100,
+     "remainder_targets": 100,
+     "owned_wait_service_gap_max_us": 856942,
+     "events_served": 0,
+     "event_service_us": 131,
+     "cohort_rib_transition_us": 94374,
+     "authoritative_remainder_apply_us": 858633,
+     "total_us": 1509362
+    }
+   ],
+   "rejection": [],
+   "fail_line": null
+  },
+  {
+   "point": "g200-conf-1-ctl",
+   "shape": "grouped_200_2",
+   "side": "ctl",
+   "valid": "VALID",
+   "harness_rc": "0",
+   "daemon_exit": "alive_then_sigterm_rc=0",
+   "reload_outcomes": [
+    "complete",
+    "complete"
+   ],
+   "phase_outcomes": [
+    "committed",
+    "committed"
+   ],
+   "longest_actor_turn_us": 849319,
+   "actor_turn_us_per_reload": [
+    849319,
+    839787
+   ],
+   "completion_max_s_per_reload": [
+    1.747277,
+    1.661862
+   ],
+   "observer_max_gap_ms_per_reload": [
+    862.902,
+    850.978
+   ],
+   "cgroup_peak_kib": 793128,
+   "generation_phase": [
+    {
+     "outcome": "committed",
+     "total_targets": 200,
+     "cohort_targets": 100,
+     "remainder_targets": 100,
+     "owned_wait_service_gap_max_us": 855790,
+     "events_served": 0,
+     "event_service_us": 86,
+     "cohort_rib_transition_us": 87300,
+     "authoritative_remainder_apply_us": 857909,
+     "total_us": 1581846
+    },
+    {
+     "outcome": "committed",
+     "total_targets": 200,
+     "cohort_targets": 100,
+     "remainder_targets": 100,
+     "owned_wait_service_gap_max_us": 845526,
+     "events_served": 0,
+     "event_service_us": 77,
+     "cohort_rib_transition_us": 91168,
+     "authoritative_remainder_apply_us": 847230,
+     "total_us": 1499414
+    }
+   ],
+   "rejection": [],
+   "fail_line": null
+  },
+  {
+   "point": "g200-conf-2-cand",
+   "shape": "grouped_200_2",
+   "side": "cand",
+   "valid": "VALID",
+   "harness_rc": "0",
+   "daemon_exit": "alive_then_sigterm_rc=0",
+   "reload_outcomes": [
+    "complete",
+    "complete"
+   ],
+   "phase_outcomes": [
+    "committed",
+    "committed"
+   ],
+   "longest_actor_turn_us": 784611,
+   "actor_turn_us_per_reload": [
+    775294,
+    784611
+   ],
+   "completion_max_s_per_reload": [
+    1.583761,
+    1.513773
+   ],
+   "observer_max_gap_ms_per_reload": [
+    786.601,
+    795.747
+   ],
+   "cgroup_peak_kib": 749636,
+   "generation_phase": [
+    {
+     "outcome": "committed",
+     "total_targets": 200,
+     "cohort_targets": 100,
+     "remainder_targets": 100,
+     "owned_wait_service_gap_max_us": 785193,
+     "events_served": 0,
+     "event_service_us": 88,
+     "cohort_rib_transition_us": 74096,
+     "authoritative_remainder_apply_us": 787064,
+     "total_us": 1414828
+    },
+    {
+     "outcome": "committed",
+     "total_targets": 200,
+     "cohort_targets": 100,
+     "remainder_targets": 100,
+     "owned_wait_service_gap_max_us": 789468,
+     "events_served": 0,
+     "event_service_us": 91,
+     "cohort_rib_transition_us": 77192,
+     "authoritative_remainder_apply_us": 791376,
+     "total_us": 1354206
+    }
+   ],
+   "rejection": [],
+   "fail_line": null
+  },
+  {
+   "point": "d150-aa-1-ctl",
+   "shape": "distinct_150",
+   "side": "ctl",
+   "valid": "VALID",
+   "harness_rc": "0",
+   "daemon_exit": "alive_then_sigterm_rc=0",
+   "reload_outcomes": [
+    "complete",
+    "complete"
+   ],
+   "phase_outcomes": [
+    "committed",
+    "committed"
+   ],
+   "longest_actor_turn_us": 877351,
+   "actor_turn_us_per_reload": [
+    877351,
+    862427
+   ],
+   "completion_max_s_per_reload": [
+    128.829795,
+    128.630722
+   ],
+   "observer_max_gap_ms_per_reload": [
+    907.301,
+    900.853
+   ],
+   "cgroup_peak_kib": 9643828,
+   "generation_phase": [
+    {
+     "outcome": "committed",
+     "total_targets": 150,
+     "cohort_targets": 0,
+     "remainder_targets": 150,
+     "owned_wait_service_gap_max_us": 901467,
+     "events_served": 0,
+     "event_service_us": 2226,
+     "cohort_rib_transition_us": 0,
+     "authoritative_remainder_apply_us": 128691154,
+     "total_us": 128692180
+    },
+    {
+     "outcome": "committed",
+     "total_targets": 150,
+     "cohort_targets": 0,
+     "remainder_targets": 150,
+     "owned_wait_service_gap_max_us": 891845,
+     "events_served": 0,
+     "event_service_us": 1200,
+     "cohort_rib_transition_us": 0,
+     "authoritative_remainder_apply_us": 128493928,
+     "total_us": 128495067
+    }
+   ],
+   "rejection": [],
+   "fail_line": null
+  },
+  {
+   "point": "d150-aa-2-ctl",
+   "shape": "distinct_150",
+   "side": "ctl",
+   "valid": "VALID",
+   "harness_rc": "0",
+   "daemon_exit": "alive_then_sigterm_rc=0",
+   "reload_outcomes": [
+    "complete",
+    "complete"
+   ],
+   "phase_outcomes": [
+    "committed",
+    "committed"
+   ],
+   "longest_actor_turn_us": 881213,
+   "actor_turn_us_per_reload": [
+    867040,
+    881213
+   ],
+   "completion_max_s_per_reload": [
+    127.847967,
+    128.112825
+   ],
+   "observer_max_gap_ms_per_reload": [
+    897.124,
+    911.881
+   ],
+   "cgroup_peak_kib": 9610288,
+   "generation_phase": [
+    {
+     "outcome": "committed",
+     "total_targets": 150,
+     "cohort_targets": 0,
+     "remainder_targets": 150,
+     "owned_wait_service_gap_max_us": 888971,
+     "events_served": 0,
+     "event_service_us": 2312,
+     "cohort_rib_transition_us": 0,
+     "authoritative_remainder_apply_us": 127709058,
+     "total_us": 127710179
+    },
+    {
+     "outcome": "committed",
+     "total_targets": 150,
+     "cohort_targets": 0,
+     "remainder_targets": 150,
+     "owned_wait_service_gap_max_us": 905690,
+     "events_served": 0,
+     "event_service_us": 2630,
+     "cohort_rib_transition_us": 0,
+     "authoritative_remainder_apply_us": 127978720,
+     "total_us": 127979856
+    }
+   ],
+   "rejection": [],
+   "fail_line": null
+  },
+  {
+   "point": "d150-abba-1-ctl",
+   "shape": "distinct_150",
+   "side": "ctl",
+   "valid": "VALID",
+   "harness_rc": "0",
+   "daemon_exit": "alive_then_sigterm_rc=0",
+   "reload_outcomes": [
+    "complete",
+    "complete"
+   ],
+   "phase_outcomes": [
+    "committed",
+    "committed"
+   ],
+   "longest_actor_turn_us": 879027,
+   "actor_turn_us_per_reload": [
+    864041,
+    879027
+   ],
+   "completion_max_s_per_reload": [
+    127.67953,
+    128.142017
+   ],
+   "observer_max_gap_ms_per_reload": [
+    929.365,
+    910.137
+   ],
+   "cgroup_peak_kib": 9641984,
+   "generation_phase": [
+    {
+     "outcome": "committed",
+     "total_targets": 150,
+     "cohort_targets": 0,
+     "remainder_targets": 150,
+     "owned_wait_service_gap_max_us": 947395,
+     "events_served": 0,
+     "event_service_us": 5964,
+     "cohort_rib_transition_us": 0,
+     "authoritative_remainder_apply_us": 127543538,
+     "total_us": 127544672
+    },
+    {
+     "outcome": "committed",
+     "total_targets": 150,
+     "cohort_targets": 0,
+     "remainder_targets": 150,
+     "owned_wait_service_gap_max_us": 908768,
+     "events_served": 0,
+     "event_service_us": 3658,
+     "cohort_rib_transition_us": 0,
+     "authoritative_remainder_apply_us": 128010644,
+     "total_us": 128011714
+    }
+   ],
+   "rejection": [],
+   "fail_line": null
+  },
+  {
+   "point": "d150-abba-2-cand",
+   "shape": "distinct_150",
+   "side": "cand",
+   "valid": "VALID",
+   "harness_rc": "0",
+   "daemon_exit": "alive_then_sigterm_rc=0",
+   "reload_outcomes": [
+    "complete",
+    "complete"
+   ],
+   "phase_outcomes": [
+    "committed",
+    "committed"
+   ],
+   "longest_actor_turn_us": 779987,
+   "actor_turn_us_per_reload": [
+    764846,
+    779987
+   ],
+   "completion_max_s_per_reload": [
+    113.70532,
+    113.921061
+   ],
+   "observer_max_gap_ms_per_reload": [
+    9027.228,
+    8281.414
+   ],
+   "cgroup_peak_kib": 7889540,
+   "generation_phase": [
+    {
+     "outcome": "committed",
+     "total_targets": 150,
+     "cohort_targets": 0,
+     "remainder_targets": 150,
+     "owned_wait_service_gap_max_us": 778603,
+     "events_served": 0,
+     "event_service_us": 2146,
+     "cohort_rib_transition_us": 0,
+     "authoritative_remainder_apply_us": 113566430,
+     "total_us": 113567481
+    },
+    {
+     "outcome": "committed",
+     "total_targets": 150,
+     "cohort_targets": 0,
+     "remainder_targets": 150,
+     "owned_wait_service_gap_max_us": 802867,
+     "events_served": 0,
+     "event_service_us": 2395,
+     "cohort_rib_transition_us": 0,
+     "authoritative_remainder_apply_us": 113789194,
+     "total_us": 113790283
+    }
+   ],
+   "rejection": [],
+   "fail_line": null
+  },
+  {
+   "point": "d150-abba-3-cand",
+   "shape": "distinct_150",
+   "side": "cand",
+   "valid": "VALID",
+   "harness_rc": "0",
+   "daemon_exit": "alive_then_sigterm_rc=0",
+   "reload_outcomes": [
+    "complete",
+    "complete"
+   ],
+   "phase_outcomes": [
+    "committed",
+    "committed"
+   ],
+   "longest_actor_turn_us": 778613,
+   "actor_turn_us_per_reload": [
+    778613,
+    778094
+   ],
+   "completion_max_s_per_reload": [
+    113.959737,
+    114.332526
+   ],
+   "observer_max_gap_ms_per_reload": [
+    8299.677,
+    6811.011
+   ],
+   "cgroup_peak_kib": 7912656,
+   "generation_phase": [
+    {
+     "outcome": "committed",
+     "total_targets": 150,
+     "cohort_targets": 0,
+     "remainder_targets": 150,
+     "owned_wait_service_gap_max_us": 802486,
+     "events_served": 0,
+     "event_service_us": 1449,
+     "cohort_rib_transition_us": 0,
+     "authoritative_remainder_apply_us": 113827722,
+     "total_us": 113829010
+    },
+    {
+     "outcome": "committed",
+     "total_targets": 150,
+     "cohort_targets": 0,
+     "remainder_targets": 150,
+     "owned_wait_service_gap_max_us": 799346,
+     "events_served": 0,
+     "event_service_us": 3819,
+     "cohort_rib_transition_us": 0,
+     "authoritative_remainder_apply_us": 114201408,
+     "total_us": 114202505
+    }
+   ],
+   "rejection": [],
+   "fail_line": null
+  },
+  {
+   "point": "d150-abba-4-ctl",
+   "shape": "distinct_150",
+   "side": "ctl",
+   "valid": "VALID",
+   "harness_rc": "0",
+   "daemon_exit": "alive_then_sigterm_rc=0",
+   "reload_outcomes": [
+    "complete",
+    "complete"
+   ],
+   "phase_outcomes": [
+    "committed",
+    "committed"
+   ],
+   "longest_actor_turn_us": 891630,
+   "actor_turn_us_per_reload": [
+    891630,
+    860383
+   ],
+   "completion_max_s_per_reload": [
+    128.056868,
+    128.071355
+   ],
+   "observer_max_gap_ms_per_reload": [
+    912.402,
+    891.125
+   ],
+   "cgroup_peak_kib": 9641960,
+   "generation_phase": [
+    {
+     "outcome": "committed",
+     "total_targets": 150,
+     "cohort_targets": 0,
+     "remainder_targets": 150,
+     "owned_wait_service_gap_max_us": 924211,
+     "events_served": 0,
+     "event_service_us": 1304,
+     "cohort_rib_transition_us": 0,
+     "authoritative_remainder_apply_us": 127920048,
+     "total_us": 127921189
+    },
+    {
+     "outcome": "committed",
+     "total_targets": 150,
+     "cohort_targets": 0,
+     "remainder_targets": 150,
+     "owned_wait_service_gap_max_us": 884267,
+     "events_served": 0,
+     "event_service_us": 2100,
+     "cohort_rib_transition_us": 0,
+     "authoritative_remainder_apply_us": 127936865,
+     "total_us": 127938085
+    }
+   ],
+   "rejection": [],
+   "fail_line": null
+  },
+  {
+   "point": "d150-conf-1-ctl",
+   "shape": "distinct_150",
+   "side": "ctl",
+   "valid": "VALID",
+   "harness_rc": "0",
+   "daemon_exit": "alive_then_sigterm_rc=0",
+   "reload_outcomes": [
+    "complete",
+    "complete"
+   ],
+   "phase_outcomes": [
+    "committed",
+    "committed"
+   ],
+   "longest_actor_turn_us": 893175,
+   "actor_turn_us_per_reload": [
+    893175,
+    860031
+   ],
+   "completion_max_s_per_reload": [
+    127.466589,
+    128.293753
+   ],
+   "observer_max_gap_ms_per_reload": [
+    913.14,
+    887.364
+   ],
+   "cgroup_peak_kib": 9616520,
+   "generation_phase": [
+    {
+     "outcome": "committed",
+     "total_targets": 150,
+     "cohort_targets": 0,
+     "remainder_targets": 150,
+     "owned_wait_service_gap_max_us": 921006,
+     "events_served": 0,
+     "event_service_us": 3158,
+     "cohort_rib_transition_us": 0,
+     "authoritative_remainder_apply_us": 127330107,
+     "total_us": 127331229
+    },
+    {
+     "outcome": "committed",
+     "total_targets": 150,
+     "cohort_targets": 0,
+     "remainder_targets": 150,
+     "owned_wait_service_gap_max_us": 888827,
+     "events_served": 0,
+     "event_service_us": 3679,
+     "cohort_rib_transition_us": 0,
+     "authoritative_remainder_apply_us": 128161851,
+     "total_us": 128162902
+    }
+   ],
+   "rejection": [],
+   "fail_line": null
+  },
+  {
+   "point": "d150-conf-2-cand",
+   "shape": "distinct_150",
+   "side": "cand",
+   "valid": "VALID",
+   "harness_rc": "0",
+   "daemon_exit": "alive_then_sigterm_rc=0",
+   "reload_outcomes": [
+    "complete",
+    "complete"
+   ],
+   "phase_outcomes": [
+    "committed",
+    "committed"
+   ],
+   "longest_actor_turn_us": 785397,
+   "actor_turn_us_per_reload": [
+    785397,
+    775947
+   ],
+   "completion_max_s_per_reload": [
+    113.15858,
+    114.151555
+   ],
+   "observer_max_gap_ms_per_reload": [
+    12018.152,
+    8243.575
+   ],
+   "cgroup_peak_kib": 7933368,
+   "generation_phase": [
+    {
+     "outcome": "committed",
+     "total_targets": 150,
+     "cohort_targets": 0,
+     "remainder_targets": 150,
+     "owned_wait_service_gap_max_us": 795758,
+     "events_served": 0,
+     "event_service_us": 3009,
+     "cohort_rib_transition_us": 0,
+     "authoritative_remainder_apply_us": 113021477,
+     "total_us": 113022645
+    },
+    {
+     "outcome": "committed",
+     "total_targets": 150,
+     "cohort_targets": 0,
+     "remainder_targets": 150,
+     "owned_wait_service_gap_max_us": 794583,
+     "events_served": 0,
+     "event_service_us": 2635,
+     "cohort_rib_transition_us": 0,
+     "authoritative_remainder_apply_us": 114016371,
+     "total_us": 114017549
+    }
+   ],
+   "rejection": [],
+   "fail_line": null
+  }
+ ]
+}

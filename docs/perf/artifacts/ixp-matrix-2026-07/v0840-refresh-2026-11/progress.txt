@@ -1,0 +1,26 @@
+[2026-11-22T13:17:26Z] campaign start mode=timed head=5f5ca6a312d1bdf7094440ae363495574a6ddecc shape='N_PEERS=700 TOTAL_PREFIXES=400400 RELOADS=4 CONTROL_SECS=30' s3_flap=50 runs='1 2' rustbgpd 0.84.0
+[2026-11-22T13:17:37Z] matrix-s2-r1-openbgpd start load=1.08 1.50 2.04
+[2026-11-22T13:46:33Z] matrix-s2-r1-openbgpd rc=0 status=pass secs=1736 load=1.14 1.66 2.03 
+[2026-11-22T13:46:33Z] matrix-s2-r1-rustbgpd start load=1.14 1.66 2.03
+[2026-11-22T13:54:12Z] matrix-s2-r1-rustbgpd rc=0 status=pass secs=459 load=1.10 1.45 1.82 
+[2026-11-22T13:54:12Z] matrix-s2-r1-bird start load=1.10 1.45 1.82
+[2026-11-22T14:10:01Z] matrix-s2-r1-bird rc=0 status=pass secs=949 load=1.27 1.93 2.21 
+[2026-11-22T14:10:01Z] matrix-s3-r1-openbgpd start load=1.27 1.93 2.21
+[2026-11-22T14:25:26Z] matrix-s3-r1-openbgpd rc=0 status=pass secs=925 load=1.10 1.65 1.97 
+[2026-11-22T14:25:26Z] matrix-s3-r1-rustbgpd start load=1.10 1.65 1.97
+[2026-11-22T14:33:15Z] matrix-s3-r1-rustbgpd rc=0 status=pass secs=469 load=1.11 1.45 1.77 
+[2026-11-22T14:33:15Z] matrix-s3-r1-bird start load=1.11 1.45 1.77
+[2026-11-22T14:42:04Z] matrix-s3-r1-bird rc=0 status=pass secs=529 load=1.14 1.36 1.64 
+[2026-11-22T14:42:04Z] matrix-s2-r2-rustbgpd start load=1.14 1.36 1.64
+[2026-11-22T14:49:43Z] matrix-s2-r2-rustbgpd rc=0 status=pass secs=459 load=1.07 1.46 1.65 
+[2026-11-22T14:49:43Z] matrix-s2-r2-bird start load=1.07 1.46 1.65
+[2026-11-22T15:05:37Z] matrix-s2-r2-bird rc=0 status=pass secs=954 load=1.02 1.85 2.10 
+[2026-11-22T15:05:37Z] matrix-s2-r2-openbgpd start load=1.02 1.85 2.10
+[2026-11-22T15:34:42Z] matrix-s2-r2-openbgpd rc=0 status=pass secs=1745 load=1.09 1.57 1.94 
+[2026-11-22T15:34:42Z] matrix-s3-r2-rustbgpd start load=1.09 1.57 1.94
+[2026-11-22T15:42:31Z] matrix-s3-r2-rustbgpd rc=0 status=pass secs=469 load=1.17 1.37 1.73 
+[2026-11-22T15:42:31Z] matrix-s3-r2-bird start load=1.17 1.37 1.73
+[2026-11-22T15:51:20Z] matrix-s3-r2-bird rc=0 status=pass secs=529 load=1.04 1.39 1.66 
+[2026-11-22T15:51:20Z] matrix-s3-r2-openbgpd start load=1.04 1.39 1.66
+[2026-11-22T16:06:10Z] matrix-s3-r2-openbgpd rc=0 status=pass secs=890 load=1.04 1.56 1.73 
+[2026-11-22T16:06:10Z] campaign done

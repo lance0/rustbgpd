@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "cell": "openbgpd",
+  "git": {
+    "commit": "5f5ca6a312d1bdf7094440ae363495574a6ddecc",
+    "tree": "52e212e9708fa6573434699f05a5e4a4e0d97e40",
+    "dirty": false
+  },
+  "toolchain": "rustc 1.100.0 (0ef1bc386 2026-11-09)\nbinary: rustc\ncommit-hash: 0ef1bc386059596dada8fb65b50425aab2ea637a\ncommit-date: 2026-11-09\nhost: x86_64-unknown-linux-gnu\nrelease: 1.100.0\nLLVM version: 23.1.5",
+  "host": "Linux 7.0.0-30-generic #30~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Fri Aug  7 13:27:52 UTC 2 x86_64 GNU/Linux",
+  "sources": {
+    "common": {
+      "bench/scale/provenance.sh": "7db6727dc99ec42515359f674e56c749453bc29c9981b67f30568f0d6cce1991",
+      "bench/scale/cgroup-memory.sh": "64753985d0b8c167daa1d382b70fe6f4369275713ebcaec8e4de677ff281ee3a",
+      "bench/scale/matrix/run-matrix.sh": "32db59f981bf99a17b0e1ba0d934d2efb44ee95e29ab5de6788d39450342fc63",
+      "bench/scale/matrix/verify-provenance.py": "7da2a7088bd2a9669621895c33c60ea6fce6fc62c695be600f63efc4530aedc4",
+      "bench/scale/matrix/rss-sampler.sh": "3ecffb93298c49f8524320ecebe976efc806f9f0b0caf260d6a1431ca402a10d",
+      "bench/scale/host-quiet.sh": "abb3391cd5e0879c29aabd0aa0c316ea33d5f7c72f6d2a7d111b30025de411fd",
+      "tests/soak/host-lock.sh": "f5f419bb439f0b5e22521e9f7fa73d4ef73df159abeec31fafff63548899c658"
+    },
+    "generator": {
+      "bench/scale/reloadstall/gen-obgpd-scenario.py": "042edf4b8c8dd0451232768b3a904e807249264b4178878ef3c315cc7dae3850"
+    },
+    "reloadstall": {
+      "path": "target/scale/reloadstall",
+      "sha256": "40b43006868c240fdf1f8119900dfcb22d76b877495ccfd9fa91c3276332fdca"
+    }
+  },
+  "workload": {
+    "image_ref": "openbgpd/openbgpd@sha256:8f4b44f25796beaecb72ab7f099a3914961ac444a9de094ffca6a4614e741412",
+    "image_id": "sha256:8f4b44f25796beaecb72ab7f099a3914961ac444a9de094ffca6a4614e741412",
+    "inputs": {
+      "N_PEERS": "700",
+      "TOTAL_PREFIXES": "400400",
+      "PORT": "1790",
+      "RELOADS": "4",
+      "CONTROL_SECS": "30",
+      "CHANGED_PEERS": "",
+      "FLAPSTORM": "",
+      "BIRD_THREADS": "8",
+      "PROBE_PREFIXES": ""
+    }
+  }
+}

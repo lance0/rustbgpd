@@ -1,0 +1,640 @@
+{
+ "measured_on": "2026-11-22",
+ "window_utc": [
+  "2026-11-22T16:40:49Z",
+  "2026-11-22T16:55:21Z"
+ ],
+ "rustbgpd_source_commit": "5f5ca6a312d1bdf7094440ae363495574a6ddecc",
+ "bgperf2_revision": "68b74022f73952ba2a112eb87b01ce0487b893bf",
+ "driver": "bgperf2.py batch, monitor gobgp, monitor_version 4.8.0, repetitions 3, order shuffle",
+ "seeds": {
+  "v0840-nx1000": 20261122,
+  "v0840-2xp": 20261123
+ },
+ "images": {
+  "rustbgpd": {
+   "tag": "bgperf/rustbgpd:v0.84.0-5f5ca6a31",
+   "id": "sha256:8f805a5094302e2f0aa534f26cd2515266db3ac2cc5b4af7a48eebaf3d04f565",
+   "version": "rustbgpd 0.84.0"
+  },
+  "bird": {
+   "tag": "bgperf/bird:2.19.2",
+   "id": "sha256:1580522f7f74d51154b0d1ef9d3682ea0923e3184a0e1a674693c59a87a37abd",
+   "version": "2.19.2",
+   "also": "tester image (bgperf/bird:latest)"
+  },
+  "frr_c": {
+   "tag": "bgperf/frr_c:10.7.0",
+   "id": "sha256:e0aa31b33ad90b0e3e9ed14408e4207e9847e3ea4360f5b2b9e64a6baed29737",
+   "version": "FRRouting 10.7.0-my-manual-build"
+  },
+  "gobgp": {
+   "tag": "bgperf/gobgp:4.8.0",
+   "id": "sha256:73bbbbb5ce38849ee393a5756d0f5a0b5f0ed41a9a620f58744c65670532e9c0",
+   "version": "4.8.0",
+   "also": "monitor image"
+  }
+ },
+ "runs": [
+  {
+   "run": "BIRD 2.19.2 #1",
+   "peers": 2,
+   "prefixes_per_peer": 100000,
+   "status": "converged",
+   "target_image_id": "sha256:1580522f7f74d51154b0d1ef9d3682ea0923e3184a0e1a674693c59a87a37abd",
+   "target_version": "2.19.2",
+   "paired_samples": 8,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "BIRD 2.19.2 #1",
+   "peers": 2,
+   "prefixes_per_peer": 10000,
+   "status": "converged",
+   "target_image_id": "sha256:1580522f7f74d51154b0d1ef9d3682ea0923e3184a0e1a674693c59a87a37abd",
+   "target_version": "2.19.2",
+   "paired_samples": 8,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "BIRD 2.19.2 #1",
+   "peers": 10,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:1580522f7f74d51154b0d1ef9d3682ea0923e3184a0e1a674693c59a87a37abd",
+   "target_version": "2.19.2",
+   "paired_samples": 7,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "BIRD 2.19.2 #1",
+   "peers": 100,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:1580522f7f74d51154b0d1ef9d3682ea0923e3184a0e1a674693c59a87a37abd",
+   "target_version": "2.19.2",
+   "paired_samples": 10,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "BIRD 2.19.2 #1",
+   "peers": 30,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:1580522f7f74d51154b0d1ef9d3682ea0923e3184a0e1a674693c59a87a37abd",
+   "target_version": "2.19.2",
+   "paired_samples": 8,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "BIRD 2.19.2 #2",
+   "peers": 2,
+   "prefixes_per_peer": 100000,
+   "status": "converged",
+   "target_image_id": "sha256:1580522f7f74d51154b0d1ef9d3682ea0923e3184a0e1a674693c59a87a37abd",
+   "target_version": "2.19.2",
+   "paired_samples": 8,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "BIRD 2.19.2 #2",
+   "peers": 2,
+   "prefixes_per_peer": 10000,
+   "status": "converged",
+   "target_image_id": "sha256:1580522f7f74d51154b0d1ef9d3682ea0923e3184a0e1a674693c59a87a37abd",
+   "target_version": "2.19.2",
+   "paired_samples": 7,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "BIRD 2.19.2 #2",
+   "peers": 10,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:1580522f7f74d51154b0d1ef9d3682ea0923e3184a0e1a674693c59a87a37abd",
+   "target_version": "2.19.2",
+   "paired_samples": 7,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "BIRD 2.19.2 #2",
+   "peers": 100,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:1580522f7f74d51154b0d1ef9d3682ea0923e3184a0e1a674693c59a87a37abd",
+   "target_version": "2.19.2",
+   "paired_samples": 10,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "BIRD 2.19.2 #2",
+   "peers": 30,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:1580522f7f74d51154b0d1ef9d3682ea0923e3184a0e1a674693c59a87a37abd",
+   "target_version": "2.19.2",
+   "paired_samples": 8,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "BIRD 2.19.2 #3",
+   "peers": 2,
+   "prefixes_per_peer": 100000,
+   "status": "converged",
+   "target_image_id": "sha256:1580522f7f74d51154b0d1ef9d3682ea0923e3184a0e1a674693c59a87a37abd",
+   "target_version": "2.19.2",
+   "paired_samples": 8,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "BIRD 2.19.2 #3",
+   "peers": 2,
+   "prefixes_per_peer": 10000,
+   "status": "converged",
+   "target_image_id": "sha256:1580522f7f74d51154b0d1ef9d3682ea0923e3184a0e1a674693c59a87a37abd",
+   "target_version": "2.19.2",
+   "paired_samples": 7,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "BIRD 2.19.2 #3",
+   "peers": 10,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:1580522f7f74d51154b0d1ef9d3682ea0923e3184a0e1a674693c59a87a37abd",
+   "target_version": "2.19.2",
+   "paired_samples": 7,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "BIRD 2.19.2 #3",
+   "peers": 100,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:1580522f7f74d51154b0d1ef9d3682ea0923e3184a0e1a674693c59a87a37abd",
+   "target_version": "2.19.2",
+   "paired_samples": 10,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "BIRD 2.19.2 #3",
+   "peers": 30,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:1580522f7f74d51154b0d1ef9d3682ea0923e3184a0e1a674693c59a87a37abd",
+   "target_version": "2.19.2",
+   "paired_samples": 8,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "FRR 10.7.0 #1",
+   "peers": 2,
+   "prefixes_per_peer": 100000,
+   "status": "converged",
+   "target_image_id": "sha256:e0aa31b33ad90b0e3e9ed14408e4207e9847e3ea4360f5b2b9e64a6baed29737",
+   "target_version": "FRRouting 10.7.0-my-manual-build",
+   "paired_samples": 5,
+   "unpaired_samples": 4
+  },
+  {
+   "run": "FRR 10.7.0 #1",
+   "peers": 2,
+   "prefixes_per_peer": 10000,
+   "status": "converged",
+   "target_image_id": "sha256:e0aa31b33ad90b0e3e9ed14408e4207e9847e3ea4360f5b2b9e64a6baed29737",
+   "target_version": "FRRouting 10.7.0-my-manual-build",
+   "paired_samples": 8,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "FRR 10.7.0 #1",
+   "peers": 10,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:e0aa31b33ad90b0e3e9ed14408e4207e9847e3ea4360f5b2b9e64a6baed29737",
+   "target_version": "FRRouting 10.7.0-my-manual-build",
+   "paired_samples": 8,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "FRR 10.7.0 #1",
+   "peers": 100,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:e0aa31b33ad90b0e3e9ed14408e4207e9847e3ea4360f5b2b9e64a6baed29737",
+   "target_version": "FRRouting 10.7.0-my-manual-build",
+   "paired_samples": 12,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "FRR 10.7.0 #1",
+   "peers": 30,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:e0aa31b33ad90b0e3e9ed14408e4207e9847e3ea4360f5b2b9e64a6baed29737",
+   "target_version": "FRRouting 10.7.0-my-manual-build",
+   "paired_samples": 8,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "FRR 10.7.0 #2",
+   "peers": 2,
+   "prefixes_per_peer": 100000,
+   "status": "converged",
+   "target_image_id": "sha256:e0aa31b33ad90b0e3e9ed14408e4207e9847e3ea4360f5b2b9e64a6baed29737",
+   "target_version": "FRRouting 10.7.0-my-manual-build",
+   "paired_samples": 7,
+   "unpaired_samples": 2
+  },
+  {
+   "run": "FRR 10.7.0 #2",
+   "peers": 2,
+   "prefixes_per_peer": 10000,
+   "status": "converged",
+   "target_image_id": "sha256:e0aa31b33ad90b0e3e9ed14408e4207e9847e3ea4360f5b2b9e64a6baed29737",
+   "target_version": "FRRouting 10.7.0-my-manual-build",
+   "paired_samples": 8,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "FRR 10.7.0 #2",
+   "peers": 10,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:e0aa31b33ad90b0e3e9ed14408e4207e9847e3ea4360f5b2b9e64a6baed29737",
+   "target_version": "FRRouting 10.7.0-my-manual-build",
+   "paired_samples": 8,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "FRR 10.7.0 #2",
+   "peers": 100,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:e0aa31b33ad90b0e3e9ed14408e4207e9847e3ea4360f5b2b9e64a6baed29737",
+   "target_version": "FRRouting 10.7.0-my-manual-build",
+   "paired_samples": 12,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "FRR 10.7.0 #2",
+   "peers": 30,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:e0aa31b33ad90b0e3e9ed14408e4207e9847e3ea4360f5b2b9e64a6baed29737",
+   "target_version": "FRRouting 10.7.0-my-manual-build",
+   "paired_samples": 9,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "FRR 10.7.0 #3",
+   "peers": 2,
+   "prefixes_per_peer": 100000,
+   "status": "converged",
+   "target_image_id": "sha256:e0aa31b33ad90b0e3e9ed14408e4207e9847e3ea4360f5b2b9e64a6baed29737",
+   "target_version": "FRRouting 10.7.0-my-manual-build",
+   "paired_samples": 7,
+   "unpaired_samples": 2
+  },
+  {
+   "run": "FRR 10.7.0 #3",
+   "peers": 2,
+   "prefixes_per_peer": 10000,
+   "status": "converged",
+   "target_image_id": "sha256:e0aa31b33ad90b0e3e9ed14408e4207e9847e3ea4360f5b2b9e64a6baed29737",
+   "target_version": "FRRouting 10.7.0-my-manual-build",
+   "paired_samples": 8,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "FRR 10.7.0 #3",
+   "peers": 10,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:e0aa31b33ad90b0e3e9ed14408e4207e9847e3ea4360f5b2b9e64a6baed29737",
+   "target_version": "FRRouting 10.7.0-my-manual-build",
+   "paired_samples": 8,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "FRR 10.7.0 #3",
+   "peers": 100,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:e0aa31b33ad90b0e3e9ed14408e4207e9847e3ea4360f5b2b9e64a6baed29737",
+   "target_version": "FRRouting 10.7.0-my-manual-build",
+   "paired_samples": 12,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "FRR 10.7.0 #3",
+   "peers": 30,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:e0aa31b33ad90b0e3e9ed14408e4207e9847e3ea4360f5b2b9e64a6baed29737",
+   "target_version": "FRRouting 10.7.0-my-manual-build",
+   "paired_samples": 9,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "GoBGP 4.8.0 #1",
+   "peers": 2,
+   "prefixes_per_peer": 100000,
+   "status": "converged",
+   "target_image_id": "sha256:73bbbbb5ce38849ee393a5756d0f5a0b5f0ed41a9a620f58744c65670532e9c0",
+   "target_version": "4.8.0",
+   "paired_samples": 9,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "GoBGP 4.8.0 #1",
+   "peers": 2,
+   "prefixes_per_peer": 10000,
+   "status": "converged",
+   "target_image_id": "sha256:73bbbbb5ce38849ee393a5756d0f5a0b5f0ed41a9a620f58744c65670532e9c0",
+   "target_version": "4.8.0",
+   "paired_samples": 8,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "GoBGP 4.8.0 #1",
+   "peers": 10,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:73bbbbb5ce38849ee393a5756d0f5a0b5f0ed41a9a620f58744c65670532e9c0",
+   "target_version": "4.8.0",
+   "paired_samples": 8,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "GoBGP 4.8.0 #1",
+   "peers": 100,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:73bbbbb5ce38849ee393a5756d0f5a0b5f0ed41a9a620f58744c65670532e9c0",
+   "target_version": "4.8.0",
+   "paired_samples": 12,
+   "unpaired_samples": 8
+  },
+  {
+   "run": "GoBGP 4.8.0 #1",
+   "peers": 30,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:73bbbbb5ce38849ee393a5756d0f5a0b5f0ed41a9a620f58744c65670532e9c0",
+   "target_version": "4.8.0",
+   "paired_samples": 2,
+   "unpaired_samples": 7
+  },
+  {
+   "run": "GoBGP 4.8.0 #2",
+   "peers": 2,
+   "prefixes_per_peer": 100000,
+   "status": "converged",
+   "target_image_id": "sha256:73bbbbb5ce38849ee393a5756d0f5a0b5f0ed41a9a620f58744c65670532e9c0",
+   "target_version": "4.8.0",
+   "paired_samples": 9,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "GoBGP 4.8.0 #2",
+   "peers": 2,
+   "prefixes_per_peer": 10000,
+   "status": "converged",
+   "target_image_id": "sha256:73bbbbb5ce38849ee393a5756d0f5a0b5f0ed41a9a620f58744c65670532e9c0",
+   "target_version": "4.8.0",
+   "paired_samples": 8,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "GoBGP 4.8.0 #2",
+   "peers": 10,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:73bbbbb5ce38849ee393a5756d0f5a0b5f0ed41a9a620f58744c65670532e9c0",
+   "target_version": "4.8.0",
+   "paired_samples": 8,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "GoBGP 4.8.0 #2",
+   "peers": 100,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:73bbbbb5ce38849ee393a5756d0f5a0b5f0ed41a9a620f58744c65670532e9c0",
+   "target_version": "4.8.0",
+   "paired_samples": 11,
+   "unpaired_samples": 9
+  },
+  {
+   "run": "GoBGP 4.8.0 #2",
+   "peers": 30,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:73bbbbb5ce38849ee393a5756d0f5a0b5f0ed41a9a620f58744c65670532e9c0",
+   "target_version": "4.8.0",
+   "paired_samples": 2,
+   "unpaired_samples": 7
+  },
+  {
+   "run": "GoBGP 4.8.0 #3",
+   "peers": 2,
+   "prefixes_per_peer": 100000,
+   "status": "converged",
+   "target_image_id": "sha256:73bbbbb5ce38849ee393a5756d0f5a0b5f0ed41a9a620f58744c65670532e9c0",
+   "target_version": "4.8.0",
+   "paired_samples": 9,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "GoBGP 4.8.0 #3",
+   "peers": 2,
+   "prefixes_per_peer": 10000,
+   "status": "converged",
+   "target_image_id": "sha256:73bbbbb5ce38849ee393a5756d0f5a0b5f0ed41a9a620f58744c65670532e9c0",
+   "target_version": "4.8.0",
+   "paired_samples": 8,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "GoBGP 4.8.0 #3",
+   "peers": 10,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:73bbbbb5ce38849ee393a5756d0f5a0b5f0ed41a9a620f58744c65670532e9c0",
+   "target_version": "4.8.0",
+   "paired_samples": 8,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "GoBGP 4.8.0 #3",
+   "peers": 100,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:73bbbbb5ce38849ee393a5756d0f5a0b5f0ed41a9a620f58744c65670532e9c0",
+   "target_version": "4.8.0",
+   "paired_samples": 6,
+   "unpaired_samples": 14
+  },
+  {
+   "run": "GoBGP 4.8.0 #3",
+   "peers": 30,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:73bbbbb5ce38849ee393a5756d0f5a0b5f0ed41a9a620f58744c65670532e9c0",
+   "target_version": "4.8.0",
+   "paired_samples": 2,
+   "unpaired_samples": 8
+  },
+  {
+   "run": "rustbgpd v0.84.0 #1",
+   "peers": 2,
+   "prefixes_per_peer": 100000,
+   "status": "converged",
+   "target_image_id": "sha256:8f805a5094302e2f0aa534f26cd2515266db3ac2cc5b4af7a48eebaf3d04f565",
+   "target_version": "rustbgpd 0.84.0",
+   "paired_samples": 8,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "rustbgpd v0.84.0 #1",
+   "peers": 2,
+   "prefixes_per_peer": 10000,
+   "status": "converged",
+   "target_image_id": "sha256:8f805a5094302e2f0aa534f26cd2515266db3ac2cc5b4af7a48eebaf3d04f565",
+   "target_version": "rustbgpd 0.84.0",
+   "paired_samples": 7,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "rustbgpd v0.84.0 #1",
+   "peers": 10,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:8f805a5094302e2f0aa534f26cd2515266db3ac2cc5b4af7a48eebaf3d04f565",
+   "target_version": "rustbgpd 0.84.0",
+   "paired_samples": 7,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "rustbgpd v0.84.0 #1",
+   "peers": 100,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:8f805a5094302e2f0aa534f26cd2515266db3ac2cc5b4af7a48eebaf3d04f565",
+   "target_version": "rustbgpd 0.84.0",
+   "paired_samples": 7,
+   "unpaired_samples": 3
+  },
+  {
+   "run": "rustbgpd v0.84.0 #1",
+   "peers": 30,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:8f805a5094302e2f0aa534f26cd2515266db3ac2cc5b4af7a48eebaf3d04f565",
+   "target_version": "rustbgpd 0.84.0",
+   "paired_samples": 7,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "rustbgpd v0.84.0 #2",
+   "peers": 2,
+   "prefixes_per_peer": 100000,
+   "status": "converged",
+   "target_image_id": "sha256:8f805a5094302e2f0aa534f26cd2515266db3ac2cc5b4af7a48eebaf3d04f565",
+   "target_version": "rustbgpd 0.84.0",
+   "paired_samples": 8,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "rustbgpd v0.84.0 #2",
+   "peers": 2,
+   "prefixes_per_peer": 10000,
+   "status": "converged",
+   "target_image_id": "sha256:8f805a5094302e2f0aa534f26cd2515266db3ac2cc5b4af7a48eebaf3d04f565",
+   "target_version": "rustbgpd 0.84.0",
+   "paired_samples": 7,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "rustbgpd v0.84.0 #2",
+   "peers": 10,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:8f805a5094302e2f0aa534f26cd2515266db3ac2cc5b4af7a48eebaf3d04f565",
+   "target_version": "rustbgpd 0.84.0",
+   "paired_samples": 7,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "rustbgpd v0.84.0 #2",
+   "peers": 100,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:8f805a5094302e2f0aa534f26cd2515266db3ac2cc5b4af7a48eebaf3d04f565",
+   "target_version": "rustbgpd 0.84.0",
+   "paired_samples": 4,
+   "unpaired_samples": 4
+  },
+  {
+   "run": "rustbgpd v0.84.0 #2",
+   "peers": 30,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:8f805a5094302e2f0aa534f26cd2515266db3ac2cc5b4af7a48eebaf3d04f565",
+   "target_version": "rustbgpd 0.84.0",
+   "paired_samples": 7,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "rustbgpd v0.84.0 #3",
+   "peers": 2,
+   "prefixes_per_peer": 100000,
+   "status": "converged",
+   "target_image_id": "sha256:8f805a5094302e2f0aa534f26cd2515266db3ac2cc5b4af7a48eebaf3d04f565",
+   "target_version": "rustbgpd 0.84.0",
+   "paired_samples": 8,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "rustbgpd v0.84.0 #3",
+   "peers": 2,
+   "prefixes_per_peer": 10000,
+   "status": "converged",
+   "target_image_id": "sha256:8f805a5094302e2f0aa534f26cd2515266db3ac2cc5b4af7a48eebaf3d04f565",
+   "target_version": "rustbgpd 0.84.0",
+   "paired_samples": 7,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "rustbgpd v0.84.0 #3",
+   "peers": 10,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:8f805a5094302e2f0aa534f26cd2515266db3ac2cc5b4af7a48eebaf3d04f565",
+   "target_version": "rustbgpd 0.84.0",
+   "paired_samples": 7,
+   "unpaired_samples": 0
+  },
+  {
+   "run": "rustbgpd v0.84.0 #3",
+   "peers": 100,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:8f805a5094302e2f0aa534f26cd2515266db3ac2cc5b4af7a48eebaf3d04f565",
+   "target_version": "rustbgpd 0.84.0",
+   "paired_samples": 3,
+   "unpaired_samples": 5
+  },
+  {
+   "run": "rustbgpd v0.84.0 #3",
+   "peers": 30,
+   "prefixes_per_peer": 1000,
+   "status": "converged",
+   "target_image_id": "sha256:8f805a5094302e2f0aa534f26cd2515266db3ac2cc5b4af7a48eebaf3d04f565",
+   "target_version": "rustbgpd 0.84.0",
+   "paired_samples": 7,
+   "unpaired_samples": 0
+  }
+ ]
+}

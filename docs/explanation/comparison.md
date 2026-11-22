@@ -591,33 +591,34 @@ member individually.
     multi-path *send* (RFC 7911, route-server mode) and EVPN aliasing ECMP
     (ADR-0059 FDB nexthop groups, default-on) also ship.
 
-## Performance Snapshot (bgperf2 — 2026-08-30)
+## Performance Snapshot (bgperf2 — 2026-11-22)
 
-The freshest published [v0.68.0 cross-stack
-receipt](../perf/competitive-bgperf2-v0680-2026-08.md), measured 2026-08-30,
-is an 80-cell, counterbalanced same-host campaign against fresh pinned builds
-of BIRD 2.19.2, FRR 10.7.0, and GoBGP 4.8.0. A [2026-10-19 paired-read rerun](../benchmarks.md#2026-10-19-paired-read-rerun) measured unreleased rustbgpd `3e3fba0de` against BIRD 2.19.3, released 2026-10-02, BIRD 3.3.3, and GoBGP v4.10.0, released 2026-10-04, on three of the five shapes with three repetitions per cell. rustbgpd had the lowest median total time in all three shapes on that host, at 10 peers × 1k within one sampling step of BIRD 2. BIRD 2.20.0, released 2026-10-12, and FRR 10.7.1, released 2026-08-31, are not yet measured. Values are
-successful-run medians of **convergence seconds / total seconds**.
+The freshest published [v0.84.0 cross-stack
+receipt](../perf/competitive-bgperf2-v0840-2026-11.md), measured 2026-11-22,
+is a 60-run, shuffled same-host campaign of rustbgpd v0.84.0 against fresh
+pinned builds of BIRD 2.19.2, FRR 10.7.0, and GoBGP 4.8.0, the daemon set of
+the [v0.68.0 refresh](../perf/competitive-bgperf2-v0680-2026-08.md), measured 2026-08-30. Values
+are medians of three runs, **convergence seconds / total seconds**.
 
-| Scenario | rustbgpd v0.68.0 | BIRD 2.19.2 | FRR 10.7.0 | GoBGP 4.8.0 |
+| Scenario | rustbgpd v0.84.0 | BIRD 2.19.2 | FRR 10.7.0 | GoBGP 4.8.0 |
 |---|---:|---:|---:|---:|
-| 10 peers × 1k prefixes | 2 / 8.25 | 2 / 9.21 | 3 / 10.30 | 4 / 11.36 |
-| 2 peers × 10k prefixes | 2 / 8.24 | 2.5 / 9.81 | 3 / 9.33 | 3 / 10.39 |
-| 2 peers × 100k prefixes | 3 / 12.45 | 3 / 13.47 | 4 / 13.56 | 4 / 14.59 |
-| 30 peers × 1k prefixes | 2.5 / 9.31 | 3 / 9.75 | 4 / 10.91 | 4 / 10.93 |
-| 100 peers × 1k prefixes | 3 / 11.95 | 5 / 14.02 | 7 / 16.55 | 16 / 24.78 |
+| 10 peers × 1k prefixes | 2 / 8.26 | 2 / 9.24 | 3 / 10.36 | 3 / 9.33 |
+| 2 peers × 10k prefixes | 2 / 8.30 | 2 / 9.31 | 3 / 9.36 | 3 / 10.42 |
+| 2 peers × 100k prefixes | 3 / 12.81 | 3 / 13.79 | 4 / 14.84 | 4 / 14.90 |
+| 30 peers × 1k prefixes | 2 / 8.88 | 3 / 9.89 | 4 / 10.94 | 4 / 11.00 |
+| 100 peers × 1k prefixes | 3 / 12.17 | 5 / 14.18 | 7 / 16.20 | 16 / 32.10 |
 
-In this 2026-08-30 campaign, rustbgpd had the lowest median total time in all
-five shapes and tied or had the lowest median convergence time. In the
-2026-10-19 spot-check (n=2 per cell, three shapes), BIRD 2.19.3 (8.58 s) and
-BIRD 3.3.3 (9.11 s) had a lower median total time than rustbgpd (9.72 s) at
-10 peers × 1k; rustbgpd had the lowest at 2 × 10k and 2 × 100k. That harness
-revision decided each monitor sample on whichever of two free-running polls
-finished first. The paired-read rerun the same day (n=3) measured rustbgpd at
-8.35 s against BIRD 2.19.3's 9.27 s at 10 peers × 1k, with the two trading
-places by repetition. All 80 cells reached their exact expected
-route count. These fixed shapes top out at two peers × 100,000 prefixes; this
-is not a full-table campaign, and no CPU or memory ranking is claimed.
+rustbgpd had the lowest median total time in all five shapes and tied or had
+the lowest median convergence time; at 10 peers × 1k one BIRD repetition
+matched rustbgpd's slowest run. All 60 runs reached their exact expected route
+count. The 2026-08-30 v0.68.0 campaign, on an earlier harness, also had
+rustbgpd lowest by median total time in all five shapes. A [2026-10-19 paired-read rerun](../benchmarks.md#2026-10-19-paired-read-rerun)
+measured unreleased rustbgpd `3e3fba0de` against BIRD 2.19.3, BIRD 3.3.3, and
+GoBGP v4.10.0 on three of the five shapes; rustbgpd had the lowest median total
+time in all three, at 10 peers × 1k within one sampling step of BIRD 2. BIRD
+2.20.0, BIRD 3.4.0 and FRR 10.7.1 are not yet measured. These fixed shapes top
+out at two peers × 100,000 prefixes; this is not a full-table campaign, and no
+CPU or memory ranking is claimed.
 
 ## Historical Performance Snapshot (bgperf2 — 2026-07-26)
 
@@ -672,16 +673,18 @@ OpenBGPD head-to-head at 700 peers × 400k prefixes under live churn
 — policy-reload stall and completion, member-flap propagation,
 convergence, and RSS — with identical wire inputs, config disclosure,
 and the losses published alongside the wins. The current rows are the
-[v0.80.0 cross-daemon receipt](../perf/cross-daemon-v0800-2026-10.md), measured 2026-10-25,
-which ran rustbgpd v0.80.0 and OpenBGPD 9.3 on one host in the same night. Its
-S3 withdraw p50, 3.42–3.56 s, was a regression from v0.75.0's 0.20–0.26 s in the
-[v0.75.0 cross-daemon receipt](../perf/cross-daemon-v0750-2026-10.md), measured 2026-10-04 to 2026-10-05.
-v0.80.1 fixes it: the [v0.80.1 flap-storm addendum](../perf/cross-daemon-v0801-s3-2026-10.md),
-measured 2026-10-25 on the same host, puts the S3 withdraw p50 at 0.24–0.30 s against
-OpenBGPD 9.3's 8.46–9.60 s from the v0.80.0 queue.
-BIRD's current matrix rows are BIRD 3.3.2 in the
-[v0.74.0 cross-daemon receipt](../perf/cross-daemon-v0740-2026-10.md), measured 2026-10-03 to 2026-10-04
-against rustbgpd v0.74.0; BIRD 3.3.3 and BIRD 3.4.0 are not yet measured in the matrix. The matrix's earlier rows are dated, last measured 2026-08-30,
+[v0.84.0 cross-daemon receipt](../perf/cross-daemon-v0840-2026-11.md), measured 2026-11-22,
+which ran rustbgpd v0.84.0, BIRD 3.3.3 and OpenBGPD 9.3 on one host in the same day.
+New policy reached every member in 0.77–0.83 s p50, against 72.40–100.04 s for BIRD
+and 205.71–216.26 s for OpenBGPD, and the S3 withdraw p50 was 0.37–0.40 s against
+0.73–0.97 s and 8.51–9.84 s. That withdraw band is above v0.80.1's 0.24–0.30 s in the
+[v0.80.1 flap-storm addendum](../perf/cross-daemon-v0801-s3-2026-10.md), measured 2026-10-25,
+which fixed the [v0.80.0](../perf/cross-daemon-v0800-2026-10.md) withdraw regression
+(3.42–3.56 s, against v0.75.0's 0.20–0.26 s in the
+[v0.75.0 cross-daemon receipt](../perf/cross-daemon-v0750-2026-10.md), measured 2026-10-04 to 2026-10-05).
+BIRD's previous matrix rows are BIRD 3.3.2 in the
+[v0.74.0 cross-daemon receipt](../perf/cross-daemon-v0740-2026-10.md), measured 2026-10-03 to 2026-10-04;
+BIRD 3.4.0 is not yet measured in the matrix. The matrix's earlier rows are dated, last measured 2026-08-30,
 and their receiver-bound completion rows used the glibc-malloc harness, so
 they are not directly comparable ([why](../perf/headline-refresh-jemalloc-2026-10.md#why-earlier-receiver-bound-rows-are-not-comparable)).
 
@@ -810,16 +813,14 @@ metric this market has actually selected on — and it is exactly what the
 [IXP receipt matrix](../perf/ixp-matrix-2026-07.md) measures head-to-head at
 700 peers × 400k prefixes: rustbgpd is the only daemon of the three tested
 that holds both sub-second median UPDATE stall and single-digit-seconds
-policy-reload completion (rustbgpd v0.80.0 p50 0.84–0.96 s against
-205.91–215.36 s for OpenBGPD 9.3 in the
-[same-night v0.80.0 receipt](../perf/cross-daemon-v0800-2026-10.md), measured 2026-10-25;
-BIRD 3.3.2 read 89.06–103.61 s against rustbgpd v0.74.0's 0.83–0.90 s in the
-[v0.74.0 receipt](../perf/cross-daemon-v0740-2026-10.md), measured 2026-10-03 to 2026-10-04; BIRD
-3.3.3 and BIRD 3.4.0 are not yet measured in the matrix), on the same host and wire
+policy-reload completion (rustbgpd v0.84.0 p50 0.77–0.83 s against
+72.40–100.04 s for BIRD 3.3.3 and 205.71–216.26 s for OpenBGPD 9.3 in the
+[same-day v0.84.0 receipt](../perf/cross-daemon-v0840-2026-11.md), measured 2026-11-22;
+BIRD 3.4.0 is not yet measured in the matrix), on the same host and wire
 inputs, with per-daemon wins and losses published in the receipts. In the
-v0.80.0 campaign rustbgpd's S2 stall p95 was 36.2–82.0 ms against OpenBGPD
-9.3's 199.8–291.0 ms, on a `reloadstall` harness newer than the v0.75.0
-campaign's, in which OpenBGPD held the smaller tail.
+v0.84.0 campaign rustbgpd's S2 stall p95 was 53.9–125.3 ms against OpenBGPD
+9.3's 199.8–250.9 ms and BIRD 3.3.3's 3,107–8,562 ms, on a `reloadstall` harness
+newer than the v0.75.0 campaign's, in which OpenBGPD held the smaller tail.
 
 Reload speed is only half the operator concern; the other half is what an
 invalid config does to a running router. FRR's reload driver

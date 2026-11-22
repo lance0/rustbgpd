@@ -1,0 +1,30 @@
+# bgperf2 four-daemon refresh at rustbgpd v0.84.0 (5f5ca6a31), 2026-11-22.
+# Shapes, daemons and versions of the v0.68.0 campaign; three repetitions,
+# shuffled per pass with a fixed seed, GoBGP 4.8.0 monitor, BIRD 2.19.2 testers.
+tests:
+  - name: v0840-nx1000
+    neighbors: [10, 30, 100]
+    prefixes: [1000]
+    filter_test: [None]
+    repetitions: 3
+    order: shuffle
+    seed: 20261122
+    monitor: gobgp
+    targets:
+      - {name: rustbgpd, image: 'bgperf/rustbgpd:v0.84.0-5f5ca6a31', label: rustbgpd v0.84.0, tester_type: bird, monitor_version: 4.8.0}
+      - {name: bird, version: 2.19.2, label: BIRD 2.19.2, tester_type: bird, monitor_version: 4.8.0}
+      - {name: frr_c, version: 10.7.0, label: FRR 10.7.0, tester_type: bird, monitor_version: 4.8.0}
+      - {name: gobgp, version: 4.8.0, label: GoBGP 4.8.0, tester_type: bird, monitor_version: 4.8.0}
+  - name: v0840-2xp
+    neighbors: [2]
+    prefixes: [10000, 100000]
+    filter_test: [None]
+    repetitions: 3
+    order: shuffle
+    seed: 20261123
+    monitor: gobgp
+    targets:
+      - {name: rustbgpd, image: 'bgperf/rustbgpd:v0.84.0-5f5ca6a31', label: rustbgpd v0.84.0, tester_type: bird, monitor_version: 4.8.0}
+      - {name: bird, version: 2.19.2, label: BIRD 2.19.2, tester_type: bird, monitor_version: 4.8.0}
+      - {name: frr_c, version: 10.7.0, label: FRR 10.7.0, tester_type: bird, monitor_version: 4.8.0}
+      - {name: gobgp, version: 4.8.0, label: GoBGP 4.8.0, tester_type: bird, monitor_version: 4.8.0}
