@@ -1156,3 +1156,19 @@ fn dirty_private_receiver_is_not_rebuilt_inside_a_departure_page() {
 fn forced_private_receiver_is_not_rebuilt_inside_a_departure_page() {
     assert_pending_rebuild_waits_for_departure(true);
 }
+
+#[test]
+fn a_teardown_during_a_live_departure_stays_synchronous() {
+    let (mut manager, _receivers) = private_receivers_with_unrelated_table();
+    manager.handle_update(down(SOURCE));
+    assert!(manager.source_departure.is_some());
+    assert!(!manager.large_source_departure(usize::MAX));
+    // The FIFO fences a second PeerDown. A direct call must neither replace
+    // the live departure nor start a second one.
+    manager.handle_update(down(OTHER));
+    assert!(manager.source_departure.is_some());
+    while manager.source_departure.is_some() {
+        manager.advance_source_departure();
+    }
+    assert!(manager.loc_rib.is_empty());
+}

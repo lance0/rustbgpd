@@ -147,7 +147,10 @@ impl SourceDeparture {
 
 impl RibManager {
     pub(super) fn large_source_departure(&self, keys: usize) -> bool {
-        keys.saturating_mul(self.outbound_peers.len()) > RECEIVER_ROWS_PER_POLL
+        // One departure owns the actor at a time. A teardown reached while
+        // one is live keeps the synchronous path instead of replacing it.
+        self.source_departure.is_none()
+            && keys.saturating_mul(self.outbound_peers.len()) > RECEIVER_ROWS_PER_POLL
     }
 
     pub(super) fn start_source_departure(
