@@ -30,12 +30,13 @@ fn table(manager: &RibManager, peer: PeerId) -> (usize, usize, [usize; 2]) {
     (out.vpn_len(), out.vpn_key_len(), [routes, keys])
 }
 
-/// At or below the control within the spread of its 16 shards (each run
-/// hashes its keys with its own seed, so the shards' capacities differ by
-/// a few percent with no presize at all), and within 2.3 times what the
-/// table holds.
+/// At or below the control within the spread of its 16 shards, and
+/// within 2.3 times what the table holds. Each run hashes its keys with
+/// its own seed, so with no presize at all a few shards of one run sit a
+/// capacity class above the other's (up to about 7% here); an estimate
+/// from a stale sample moves every shard one class or more.
 fn assert_fits(head: (usize, usize, [usize; 2]), control: [usize; 2], case: &str) {
-    let spread = control.map(|capacity| capacity + capacity / 20);
+    let spread = control.map(|capacity| capacity + capacity / 4);
     assert_at_or_below_control(&head.2, &spread, case);
     assert_fitted(head.2[0], head.0, &format!("{case}: route index"));
     assert_fitted(head.2[1], head.1, &format!("{case}: key index"));

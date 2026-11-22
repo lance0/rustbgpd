@@ -659,9 +659,10 @@ fn an_imported_evpn_block_ahead_of_an_unimported_one_fits() {
 
 /// [`assert_at_or_below_control`] within the spread of the index's 16
 /// shards: each run hashes its keys with its own seed, so with no presize
-/// at all the shards' capacities differ by a few percent.
+/// at all a few shards of one run sit a capacity class above the other's;
+/// an estimate from a stale sample moves every shard one class or more.
 fn assert_within_control(head: &[usize; 2], control: &[usize; 2], case: &str) {
-    let spread = control.map(|capacity| capacity + capacity / 20);
+    let spread = control.map(|capacity| capacity + capacity / 4);
     assert_at_or_below_control(head, &spread, case);
 }
 
