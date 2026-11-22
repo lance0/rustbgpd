@@ -637,14 +637,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mode = args.get(1).expect("mode").clone();
     if mode == "source-departure" {
-        if let Err(error) = source_departure::run(&args[2..]) {
-            if error.to_string().contains("receiver inventory mismatch:") {
-                eprintln!("FAIL: source-departure: {error}");
-            } else {
-                eprintln!("source-departure: {error}");
-            }
-            std::process::exit(1);
-        }
+        source_departure::main(&args[2..]);
         return;
     }
     if mode == "recovery-memory" {

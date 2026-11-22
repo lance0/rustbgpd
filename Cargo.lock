@@ -3124,12 +3124,10 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "pprof",
- "rustbgpd-policy",
  "rustbgpd-rib",
  "rustbgpd-telemetry",
  "rustbgpd-transport",
  "rustbgpd-wire",
- "serde_json",
  "tikv-jemallocator",
  "tokio",
 ]

@@ -9,6 +9,9 @@ use std::time::Instant;
 
 use super::RibManager;
 use crate::{OutboundRouteUpdate, PeerId};
+use rustbgpd_policy::{
+    NeighborSetMatch, Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications,
+};
 use rustbgpd_wire::Prefix;
 
 /// Actor observations in nanoseconds from the probe's single monotonic origin.
@@ -28,6 +31,9 @@ pub struct SourceDepartureSnapshot {
     pub published_withdrawals: u64,
     /// Longest physical actor poll beginning in the measured interval.
     pub max_rib_poll_ns: u64,
+    /// Most measured withdrawal rows published within one physical poll: a
+    /// lower bound on the receiver-keys that poll inspected.
+    pub max_withdrawals_per_poll: u64,
 }
 
 /// An opt-in observer for one trial. The harness supplies the source, independent
@@ -116,9 +122,11 @@ impl SourceDepartureProbe {
     pub async fn observe_polls<F: Future>(&self, actor: F) -> F::Output {
         let mut actor = pin!(actor);
         poll_fn(|context| {
+            let published = self.published_withdrawals.load(Ordering::Relaxed);
             let start = Instant::now();
             let result = actor.as_mut().poll(context);
             let end = Instant::now();
+            let rows = self.published_withdrawals.load(Ordering::Relaxed) - published;
             let mut state = self.observations.lock().unwrap();
             if state
                 .armed_ns
@@ -126,6 +134,7 @@ impl SourceDepartureProbe {
             {
                 let elapsed = u64::try_from((end - start).as_nanos()).unwrap_or(u64::MAX);
                 state.max_rib_poll_ns = state.max_rib_poll_ns.max(elapsed);
+                state.max_withdrawals_per_poll = state.max_withdrawals_per_poll.max(rows);
             }
             result
         })
@@ -194,6 +203,43 @@ impl SourceDepartureProbe {
         } else {
             self.published_withdrawals.store(total, Ordering::Relaxed);
         }
+    }
+}
+
+impl SourceDepartureProbe {
+    /// The neighbor-set-private export chain. A real neighbor set excludes it
+    /// from shared unicast export; every fixture receiver (ASN 64512) reaches
+    /// its permit.
+    #[must_use]
+    pub fn private_export_policy() -> PolicyChain {
+        PolicyChain::new(vec![Policy {
+            entries: vec![PolicyStatement {
+                action: PolicyAction::Deny,
+                match_neighbor_set: Some(NeighborSetMatch {
+                    addresses: vec![],
+                    remote_asns: vec![65099],
+                    peer_groups: vec![],
+                }),
+                prefix: None,
+                ge: None,
+                le: None,
+                match_community: vec![],
+                match_as_path: None,
+                match_route_type: None,
+                match_evpn_route_type: None,
+                match_rpki_validation: None,
+                match_aspa_validation: None,
+                match_as_path_length_ge: None,
+                match_as_path_length_le: None,
+                match_local_pref_ge: None,
+                match_local_pref_le: None,
+                match_med_ge: None,
+                match_med_le: None,
+                match_next_hop: None,
+                modifications: RouteModifications::default(),
+            }],
+            default_action: PolicyAction::Permit,
+        }])
     }
 }
 
@@ -287,6 +333,33 @@ mod tests {
                 state.last_withdraw_published_ns
             );
         }
+    }
+
+    #[tokio::test]
+    async fn per_poll_withdrawals_count_only_rows_published_inside_one_poll() {
+        let address = Ipv4Addr::new(192, 0, 2, 1);
+        let peer = peer_v4(address);
+        let prefix = Prefix::V4(Ipv4Prefix::new(address, 32));
+        let probe = SourceDepartureProbe::new(peer, prefix, peer, vec![peer], false, 11);
+        probe.arm();
+        probe.source_detaching(peer);
+        // Outside any observed poll: never part of a per-poll maximum.
+        probe.withdrawals_published(9);
+        let mut polls = 0;
+        probe
+            .observe_polls(poll_fn(|context| {
+                polls += 1;
+                probe.withdrawals_published([1, 4, 2][polls - 1]);
+                if polls == 3 {
+                    return std::task::Poll::Ready(());
+                }
+                context.waker().wake_by_ref();
+                std::task::Poll::Pending
+            }))
+            .await;
+        let state = probe.snapshot();
+        assert_eq!(state.published_withdrawals, 16);
+        assert_eq!(state.max_withdrawals_per_poll, 4);
     }
 
     #[test]

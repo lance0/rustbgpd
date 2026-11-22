@@ -5,9 +5,6 @@ use super::source_departure_receivers::ReceiverGroup;
 use super::{
     client_addr, empty_routes_received, flood_prefix, invalid_stat, route, source_addr, BATCH,
 };
-use rustbgpd_policy::{
-    NeighborSetMatch, Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications,
-};
 use rustbgpd_rib::route::{FlowSpecRoute, RouteOrigin};
 use rustbgpd_rib::update::{OutboundRouteUpdate, RibUpdate};
 use rustbgpd_rib::{AttrSet, PeerId, RibManager, SourceDepartureProbe};
@@ -46,7 +43,20 @@ fn parse_mode(name: &str) -> io::Result<Mode> {
     }
 }
 
-pub(super) fn run(args: &[String]) -> io::Result<()> {
+/// Run one trial. Only a receiver inventory mismatch is a behavioral `FAIL`;
+/// any other error leaves the instrument unqualified.
+pub(super) fn main(args: &[String]) {
+    if let Err(error) = run(args) {
+        if error.to_string().contains("receiver inventory mismatch:") {
+            eprintln!("FAIL: source-departure: {error}");
+        } else {
+            eprintln!("source-departure: {error}");
+        }
+        std::process::exit(1);
+    }
+}
+
+fn run(args: &[String]) -> io::Result<()> {
     let [name, clients, rows] = args else {
         return Err(invalid_stat("usage: rrharness source-departure <grouped-unicast|private-unicast|private-flowspec> <receivers> <rows>"));
     };
@@ -77,39 +87,6 @@ fn sentinel() -> Ipv4Prefix {
     Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 254), 32)
 }
 
-fn neighbor_policy() -> PolicyChain {
-    // A real neighbor set excludes this chain from shared unicast export.
-    // All fixture receivers have ASN 64512 and reach the default permit.
-    PolicyChain::new(vec![Policy {
-        entries: vec![PolicyStatement {
-            action: PolicyAction::Deny,
-            match_neighbor_set: Some(NeighborSetMatch {
-                addresses: vec![],
-                remote_asns: vec![65099],
-                peer_groups: vec![],
-            }),
-            prefix: None,
-            ge: None,
-            le: None,
-            match_community: vec![],
-            match_as_path: None,
-            match_route_type: None,
-            match_evpn_route_type: None,
-            match_rpki_validation: None,
-            match_aspa_validation: None,
-            match_as_path_length_ge: None,
-            match_as_path_length_le: None,
-            match_local_pref_ge: None,
-            match_local_pref_le: None,
-            match_med_ge: None,
-            match_med_le: None,
-            match_next_hop: None,
-            modifications: RouteModifications::default(),
-        }],
-        default_action: PolicyAction::Permit,
-    }])
-}
-
 fn peer_up(
     peer: PeerId,
     outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
@@ -130,7 +107,8 @@ fn peer_up(
         peer_asn: 64512,
         peer_router_id,
         outbound_tx,
-        export_policy: (mode == Some(Mode::Private)).then(neighbor_policy),
+        export_policy: (mode == Some(Mode::Private))
+            .then(SourceDepartureProbe::private_export_policy),
         sendable_families,
         is_ebgp: false,
         route_reflector_client: mode.is_some(),
@@ -332,16 +310,23 @@ impl RecoveryCounts {
         Ok(())
     }
 
-    fn receipt(&self) -> serde_json::Value {
-        serde_json::json!({
-            "route_drops": self.route_drops,
-            "dirty_resync_ticks": self.dirty_resync_ticks,
-            "owing_fallbacks": self.owing_fallbacks,
-            "owing_flips": self.owing_flips,
-            "owed_drain_steps": self.owed_drain_steps,
-            "commit_refusals": self.commit_refusals,
-            "commit_refusals_by_reason": self.refusals_by_reason,
-        })
+    /// One JSON object. Reason keys are fixed snake_case metric labels.
+    fn receipt(&self) -> String {
+        let reasons: Vec<String> = self
+            .refusals_by_reason
+            .iter()
+            .map(|(reason, count)| format!("\"{reason}\":{count}"))
+            .collect();
+        format!(
+            "{{\"route_drops\":{},\"dirty_resync_ticks\":{},\"owing_fallbacks\":{},\"owing_flips\":{},\"owed_drain_steps\":{},\"commit_refusals\":{},\"commit_refusals_by_reason\":{{{}}}}}",
+            self.route_drops,
+            self.dirty_resync_ticks,
+            self.owing_fallbacks,
+            self.owing_flips,
+            self.owed_drain_steps,
+            self.commit_refusals,
+            reasons.join(",")
+        )
     }
 }
 
@@ -539,28 +524,18 @@ async fn trial(name: &str, mode: Mode, clients: u32, rows: usize) -> io::Result<
     {
         return Err(invalid_stat("inconsistent source-departure timestamps"));
     }
-    let receipt = serde_json::json!({
-        "mode": name,
-        "receivers": clients,
-        "rows": rows,
-        "exact": true,
-        "post_departure_recovery": recovery.receipt(),
-        "departure_queued_ns": started,
-        "update_queued_ns": queued,
-        "detach_started_ns": detach,
-        "selection_finished_ns": selected,
-        "loc_rib_applied_ns": applied,
-        "rib_last_withdrawal_ns": last_published,
-        "rib_withdrawal_rows": observation.published_withdrawals,
-        "receiver_last_withdrawal_ns": last_wire,
-        "receiver_last_probe_ns": last_marker,
-        "update_to_applied_ns": applied - queued,
-        "convergence_ns": last_wire.max(last_marker) - started,
-        "source_detach_selection_ns": selected - detach,
-        "max_rib_poll_ns": observation.max_rib_poll_ns,
-        "update_applied_before_departure_complete": applied < last_published,
-    });
-    println!("{receipt}");
+    // `name` is one of the three validated mode names.
+    println!(
+        "{{\"mode\":\"{name}\",\"receivers\":{clients},\"rows\":{rows},\"exact\":true,\"post_departure_recovery\":{},\"departure_queued_ns\":{started},\"update_queued_ns\":{queued},\"detach_started_ns\":{detach},\"selection_finished_ns\":{selected},\"loc_rib_applied_ns\":{applied},\"rib_last_withdrawal_ns\":{last_published},\"rib_withdrawal_rows\":{},\"receiver_last_withdrawal_ns\":{last_wire},\"receiver_last_probe_ns\":{last_marker},\"update_to_applied_ns\":{},\"convergence_ns\":{},\"source_detach_selection_ns\":{},\"max_rib_poll_ns\":{},\"max_withdrawals_per_poll\":{},\"update_applied_before_departure_complete\":{}}}",
+        recovery.receipt(),
+        observation.published_withdrawals,
+        applied - queued,
+        last_wire.max(last_marker) - started,
+        selected - detach,
+        observation.max_rib_poll_ns,
+        observation.max_withdrawals_per_poll,
+        applied < last_published,
+    );
     Ok(())
 }
 
@@ -574,7 +549,7 @@ mod tests {
         let metrics = BgpMetrics::new();
         let initial = RecoveryCounts::read(&metrics);
         initial.verify_initial().unwrap();
-        assert_eq!(initial.receipt()["commit_refusals"], 0);
+        assert!(initial.receipt().contains("\"commit_refusals\":0,"));
         metrics.record_outbound_commit_refusal("192.0.2.1", OutboundCommitRefusal::OutboundCredit);
         metrics.record_outbound_route_drop("192.0.2.2");
         metrics.record_rib_outbound_owing_flip();
@@ -585,15 +560,7 @@ mod tests {
         assert!(after.verify_initial().is_err());
         assert_eq!(
             after.receipt(),
-            serde_json::json!({
-                "route_drops": 1,
-                "dirty_resync_ticks": 1,
-                "owing_fallbacks": 1,
-                "owing_flips": 1,
-                "owed_drain_steps": 1,
-                "commit_refusals": 1,
-                "commit_refusals_by_reason": {"outbound_credit": 1},
-            })
+            "{\"route_drops\":1,\"dirty_resync_ticks\":1,\"owing_fallbacks\":1,\"owing_flips\":1,\"owed_drain_steps\":1,\"commit_refusals\":1,\"commit_refusals_by_reason\":{\"outbound_credit\":1}}"
         );
     }
 }

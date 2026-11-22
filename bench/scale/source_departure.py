@@ -3,6 +3,11 @@
 
 The caller owns the host lock and campaign order. Smoke is untimed qualification.
 Each invocation takes one arm and a new artifact directory, including failed trials.
+`source_departure_summary.py` grades a campaign of these directories.
+
+Exit status: 0 every trial PASS; 1 FAIL; 2 INVALID; 3 SKIP. A --break-witness
+control runs every mode and exits 4 only when each trial reproduced the expected
+missing witness (verdict CONTROL); anything else in a control run is INVALID.
 """
 
 import argparse
@@ -22,6 +27,7 @@ SHAPES = {"smoke": (8, 1_024), "standard": (150, 37_000), "large": (700, 400_000
 CGROUP_ROOT = Path("/sys/fs/cgroup")
 GIB = 1024**3
 MISSING_WITNESS = "missing Loc-RIB application witness"
+EXIT = {"PASS": 0, "FAIL": 1, "INVALID": 2, "SKIP": 3, "CONTROL": 4}
 
 
 def available_memory(scope, root, meminfo):
@@ -104,6 +110,7 @@ def witness(row, spec):
             "update_to_applied_ns",
             "convergence_ns",
             "max_rib_poll_ns",
+            "max_withdrawals_per_poll",
             "source_detach_selection_ns",
         )
     }
@@ -184,7 +191,7 @@ def classify_exit(code, stderr, broken_witness):
     missing = f"source-departure: {MISSING_WITNESS}" in stderr.splitlines()
     if broken_witness:
         if code == 1 and missing and not failures:
-            return "FAIL", MISSING_WITNESS
+            return "CONTROL", MISSING_WITNESS
         return "INVALID", "broken-witness control did not produce the expected missing witness"
     if code == 1 and len(failures) == 1:
         return "FAIL", failures[0]
@@ -376,9 +383,10 @@ def main():
             receipt["trials"].append(trial)
             write_json(out / "receipt.json", receipt)
             print(f"{mode} rep {rep}: {trial['verdict']} — {trial['reason']}", flush=True)
-            if trial["verdict"] != "PASS":
-                return {"FAIL": 1, "INVALID": 2, "SKIP": 3}[trial["verdict"]]
-    return 0
+            expected = "CONTROL" if args.break_witness else "PASS"
+            if trial["verdict"] != expected:
+                return EXIT["INVALID" if args.break_witness else trial["verdict"]]
+    return EXIT["CONTROL" if args.break_witness else "PASS"]
 
 
 if __name__ == "__main__":

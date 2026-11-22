@@ -26,6 +26,7 @@ class SourceDepartureTests(unittest.TestCase):
             "rib_withdrawal_rows": 8192,
             "update_to_applied_ns": 11,
             "max_rib_poll_ns": 6,
+            "max_withdrawals_per_poll": 128,
             "convergence_ns": 21,
             "receiver_last_withdrawal_ns": 24,
             "receiver_last_probe_ns": 20,
@@ -78,6 +79,7 @@ class SourceDepartureTests(unittest.TestCase):
             {"update_to_applied_ns": 0},
             {"receivers": 7},
             {"source_detach_selection_ns": 0},
+            {"max_withdrawals_per_poll": None},
         ):
             with self.subTest(mutation=mutation), self.assertRaises(runner.InvalidReceipt):
                 runner.witness({**self.row, **mutation}, self.spec)
@@ -104,7 +106,11 @@ class SourceDepartureTests(unittest.TestCase):
         wrong = "FAIL: source-departure: receiver inventory mismatch: duplicate withdrawal"
         missing = f"source-departure: {runner.MISSING_WITNESS}\n"
         self.assertEqual(runner.classify_exit(1, wrong, False), ("FAIL", wrong))
-        self.assertEqual(runner.classify_exit(1, missing, True), ("FAIL", runner.MISSING_WITNESS))
+        self.assertEqual(
+            runner.classify_exit(1, missing, True), ("CONTROL", runner.MISSING_WITNESS)
+        )
+        self.assertEqual(len(set(runner.EXIT.values())), len(runner.EXIT))
+        self.assertNotEqual(runner.EXIT["CONTROL"], runner.EXIT["FAIL"])
         for code, stderr, broken in [
             (1, wrong, True),
             (101, wrong, False),
@@ -113,6 +119,43 @@ class SourceDepartureTests(unittest.TestCase):
             (1, "panic", True),
         ]:
             self.assertEqual(runner.classify_exit(code, stderr, broken)[0], "INVALID")
+
+    def test_broken_witness_control_runs_every_mode_with_its_own_exit(self):
+        binary = self.root / "rrharness"
+        binary.write_bytes(b"binary")
+
+        def scope(verdicts):
+            def run(command, **_kwargs):
+                directory = Path(command[-1])
+                spec = runner.read_object(directory / "spec.json")
+                verdict = verdicts.pop(0)
+                runner.write_json(
+                    directory / "trial.json",
+                    {"mode": spec["mode"], "repetition": spec["repetition"],
+                     "verdict": verdict, "reason": "fixture"},
+                )
+                return mock.Mock(returncode=0)
+            return run
+
+        for name, verdicts, code, trials in (
+            ("all", ["CONTROL"] * 6, 4, 6),
+            ("late", ["CONTROL"] * 3 + ["FAIL"], 2, 4),
+        ):
+            with self.subTest(name=name):
+                out = self.root / name
+                argv = ["source_departure.py", "--binary", str(binary), "--arm", "parent",
+                        "--output", str(out), "--break-witness"]
+                with (
+                    mock.patch.object(runner.sys, "argv", argv),
+                    mock.patch.object(runner.subprocess, "run", side_effect=scope(verdicts)),
+                ):
+                    self.assertEqual(runner.main(), code)
+                receipt = runner.read_object(out / "receipt.json")
+                self.assertEqual(len(receipt["trials"]), trials)
+                self.assertEqual(
+                    {trial["mode"] for trial in receipt["trials"]},
+                    set(runner.MODES) if trials == 6 else set(runner.MODES[:2]),
+                )
 
     def test_inexact_or_incomplete_publications_fail(self):
         for mutation in ({"exact": False}, {"rib_withdrawal_rows": 8191}):
