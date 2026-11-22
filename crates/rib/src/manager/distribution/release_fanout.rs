@@ -36,7 +36,7 @@ enum Phase {
     RetireFallback(usize, Prefix),
     MemberDenials(PeerId, MemberVerdicts),
     RetireVerdicts(usize, Prefix),
-    RemoveRsCounts(usize),
+    RemoveMemberCounts(usize),
     StageGroup(usize),
     Deliver,
     Cap(Option<PeerId>, [Option<u64>; 2]),
@@ -333,15 +333,14 @@ impl RibManager {
                     pass.phase = Phase::Deliver;
                 }
             }
-            Phase::RemoveRsCounts(gid) => {
+            Phase::RemoveMemberCounts(gid) => {
                 let end = (pass.next_member + RELEASE_MEMBERS_PER_POLL).min(pass.current.len());
-                if let Some(group) = self.group_ribs.get_mut(&gid) {
-                    group.adjust_release_rs_members(
-                        &pass.current[pass.next_member..end],
-                        pass.scope(),
-                        -1,
-                    );
-                }
+                self.adjust_release_group_counts(
+                    gid,
+                    &pass.current[pass.next_member..end],
+                    pass.scope(),
+                    false,
+                );
                 pass.next_member = end;
                 if end == pass.current.len() {
                     pass.next_member = 0;
@@ -383,14 +382,8 @@ impl RibManager {
                 let peers = &pass.current[pass.next_member..end];
                 let scope = pass.scope();
                 if !peers.is_empty() {
-                    if let Some(group) = pass
-                        .staged
-                        .keys()
-                        .next()
-                        .and_then(|gid| self.group_ribs.get_mut(gid))
-                        && group.has_rs_members()
-                    {
-                        group.adjust_release_rs_members(peers, scope, 1);
+                    if let Some(&gid) = pass.staged.keys().next() {
+                        self.adjust_release_group_counts(gid, peers, scope, true);
                     }
                     let mut receipt = MemberVerdicts::default();
                     self.distribute_changes_with_readiness::<false, true>(
@@ -453,9 +446,9 @@ impl RibManager {
         if self
             .group_ribs
             .get(&gid)
-            .is_some_and(GroupRibOut::has_rs_members)
+            .is_some_and(GroupRibOut::needs_release_count_adjustment)
         {
-            Phase::RemoveRsCounts(gid)
+            Phase::RemoveMemberCounts(gid)
         } else {
             Phase::StageGroup(gid)
         }

@@ -5192,12 +5192,7 @@ impl RibManager {
         }
         for (key, rejected) in overlay_changes {
             checkpoint();
-            self.unicast_release.rejections.record(peer, &key, rejected);
-            if rejected {
-                self.peer_unexportable.entry(peer).or_default().insert(key);
-            } else if let Some(overlay) = self.peer_unexportable.get_mut(&peer) {
-                overlay.remove(&key);
-            }
+            self.set_exact_export_rejection(peer, key, rejected);
         }
         if let Some(snapshot) = &exact_export_snapshot {
             for (key, error) in exact_rejections {
@@ -5224,13 +5219,6 @@ impl RibManager {
             .flat_map(HashMap::values)
             .cloned()
             .collect();
-        if self
-            .peer_unexportable
-            .get(&peer)
-            .is_some_and(HashSet::is_empty)
-        {
-            self.peer_unexportable.remove(&peer);
-        }
         // Recompute grouped projections after the sparse overlay mutation;
         // these counts drive both metrics and query/BMP truth.
         let grouped_unicast_count = self.grouped_advertised_count(peer);

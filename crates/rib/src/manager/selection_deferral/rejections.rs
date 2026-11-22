@@ -155,12 +155,7 @@ impl RibManager {
             let index = &mut self.unicast_release.rejections;
             if let Some(key @ (_, path, peer)) = index.last(prefix) {
                 index.keys[usize::from(matches!(prefix, Prefix::V6(_)))].remove(&key);
-                if let Some(rejected) = self.peer_unexportable.get_mut(&peer) {
-                    rejected.remove(&ExactExportKey::Unicast(prefix, path));
-                    if rejected.is_empty() {
-                        self.peer_unexportable.remove(&peer);
-                    }
-                }
+                self.set_exact_export_rejection(peer, ExactExportKey::Unicast(prefix, path), false);
             } else {
                 retirement.prefixes.pop();
                 retirement.announcer = 0;

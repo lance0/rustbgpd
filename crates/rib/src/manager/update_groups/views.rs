@@ -8,7 +8,105 @@ use super::{
     rt_passes, vpn_routes_equal,
 };
 
+impl GroupRibOut {
+    pub(super) fn visible_rejected_slot(
+        &self,
+        peer: PeerId,
+        key: &ExactExportKey,
+        rs_control: Option<(u32, u32)>,
+        filter: Option<&RtcMembership>,
+    ) -> Option<usize> {
+        match key {
+            ExactExportKey::Unicast(prefix, path_id) => self
+                .adv_entry_post_backstop_for(peer, prefix, *path_id, rs_control)
+                .map(|_| Self::count_slot(prefix)),
+            ExactExportKey::Vpn(key) => self
+                .table
+                .get_vpn(key)
+                .filter(|route| route.peer != peer && rt_passes(filter, route))
+                .map(|_| Self::vpn_count_slot(&key.nlri_key)),
+            _ => None,
+        }
+    }
+
+    fn rejected_counts(&self, peer: PeerId) -> [usize; 4] {
+        self.visible_rejections
+            .get(&peer)
+            .copied()
+            .unwrap_or_default()
+    }
+}
+
 impl RibManager {
+    /// Only the overlay writer changes the refused set. The group tracks its
+    /// intersection with the staged post-backstop view separately.
+    pub(in crate::manager) fn set_exact_export_rejection(
+        &mut self,
+        peer: PeerId,
+        key: ExactExportKey,
+        rejected: bool,
+    ) {
+        if rejected {
+            if self
+                .peer_unexportable
+                .get(&peer)
+                .is_some_and(|keys| keys.contains(&key))
+            {
+                return;
+            }
+            self.adjust_group_rejection(peer, &key, true);
+            self.unicast_release.rejections.record(peer, &key, true);
+            self.peer_unexportable.entry(peer).or_default().insert(key);
+        } else if let Some(keys) = self.peer_unexportable.get_mut(&peer)
+            && keys.remove(&key)
+        {
+            let empty = keys.is_empty();
+            self.adjust_group_rejection(peer, &key, false);
+            self.unicast_release.rejections.record(peer, &key, false);
+            if empty {
+                self.peer_unexportable.remove(&peer);
+                self.clear_group_rejections(peer);
+            }
+        }
+    }
+
+    pub(in crate::manager) fn clear_group_rejections(&mut self, peer: PeerId) {
+        if let Some(group) = self
+            .grouped_member_of(peer)
+            .and_then(|gid| self.group_ribs.get_mut(&gid))
+        {
+            group.visible_rejections.remove(&peer);
+        }
+    }
+
+    pub(in crate::manager) fn adjust_group_rejection(
+        &mut self,
+        peer: PeerId,
+        key: &ExactExportKey,
+        added: bool,
+    ) {
+        let Some(gid) = self.grouped_member_of(peer) else {
+            return;
+        };
+        let rs_control = self.rs_control_context(peer);
+        let Some(group) = self.group_ribs.get_mut(&gid) else {
+            return;
+        };
+        let empty = RtcMembership::default();
+        let filter = group
+            .rtc_negotiated()
+            .then(|| self.peer_rt_membership.get(&peer).unwrap_or(&empty));
+        let slot = group.visible_rejected_slot(peer, key, rs_control, filter);
+        if added {
+            let counts = group.visible_rejections.entry(peer).or_default();
+            if let Some(slot) = slot {
+                counts[slot] += 1;
+            }
+        } else if let (Some(slot), Some(counts)) = (slot, group.visible_rejections.get_mut(&peer)) {
+            counts[slot] -= 1;
+        }
+    }
+
     /// Unicast portion of a grouped member's resync update, assembled
     /// from the group table with NO policy re-evaluation:
     ///
@@ -746,30 +844,8 @@ impl RibManager {
                     .sum(),
             );
         }
-        let rejected = self.peer_unexportable.get(&peer).map_or(0, |keys| {
-            keys.iter()
-                .inspect(|_| self.replacement_checkpoint(false))
-                .filter(|key| match key {
-                    // A rejected key reduces the count only while the
-                    // member's derived view holds a route at that slot
-                    // — staged or lane-substituted — that the RFC 9234
-                    // backstop delivers: a slot the backstop strips was
-                    // already subtracted by the synthesis's OTC term,
-                    // so subtracting its rejection too would count the
-                    // one missing slot twice.
-                    ExactExportKey::Unicast(prefix, path_id) => group
-                        .adv_entry_post_backstop_for(
-                            peer,
-                            prefix,
-                            *path_id,
-                            self.rs_control_context(peer),
-                        )
-                        .is_some(),
-                    _ => false,
-                })
-                .count()
-        });
-        Some(group.advertised_count_for(peer).saturating_sub(rejected))
+        let [v4, v6, _, _] = group.rejected_counts(peer);
+        Some(group.advertised_count_for(peer).saturating_sub(v4 + v6))
     }
 
     /// [`Self::grouped_advertised_count`] split `[IPv4, IPv6]` for the
@@ -794,24 +870,8 @@ impl RibManager {
                 lens[usize::from(afi == Afi::Ipv6)] = usize::try_from(count).unwrap_or(usize::MAX);
             }
         }
-        for key in self.peer_unexportable.get(&peer).into_iter().flatten() {
-            self.replacement_checkpoint(false);
-            // Same double-subtraction rule as `grouped_advertised_count`.
-            if let ExactExportKey::Unicast(prefix, path_id) = key
-                && group
-                    .adv_entry_post_backstop_for(
-                        peer,
-                        prefix,
-                        *path_id,
-                        self.rs_control_context(peer),
-                    )
-                    .is_some()
-            {
-                let slot = &mut lens[usize::from(matches!(prefix, Prefix::V6(_)))];
-                *slot = slot.saturating_sub(1);
-            }
-        }
-        Some(lens)
+        let [v4, v6, _, _] = group.rejected_counts(peer);
+        Some([lens[0].saturating_sub(v4), lens[1].saturating_sub(v6)])
     }
 
     /// [`Self::grouped_vpn_advertised_count`] split `[VPN-IPv4, VPN-IPv6]`
@@ -825,26 +885,14 @@ impl RibManager {
         if let Some(counts) = self.initial_group_admitted_counts(peer) {
             return Some([counts[2], counts[3]]);
         }
-        let filter = self.rtc_export_filter(peer, self.peer_sendable_families.get(&peer));
         let mut lens = [0_usize; 2];
         for ((afi, safi), count) in group.family_counts_for(peer) {
             if safi == Safi::MplsVpn {
                 lens[usize::from(afi == Afi::Ipv6)] = usize::try_from(count).unwrap_or(usize::MAX);
             }
         }
-        for key in self.peer_unexportable.get(&peer).into_iter().flatten() {
-            self.replacement_checkpoint(false);
-            if let ExactExportKey::Vpn(key) = key
-                && group
-                    .table
-                    .get_vpn(key)
-                    .is_some_and(|route| route.peer != peer && rt_passes(filter.as_ref(), route))
-            {
-                let slot = &mut lens[usize::from(key.afi_safi().0 == Afi::Ipv6)];
-                *slot = slot.saturating_sub(1);
-            }
-        }
-        Some(lens)
+        let [_, _, v4, v6] = group.rejected_counts(peer);
+        Some([lens[0].saturating_sub(v4), lens[1].saturating_sub(v6)])
     }
 
     /// Synthesized VPN count for a grouped member after applying its sparse
@@ -857,23 +905,8 @@ impl RibManager {
         if let Some(counts) = self.initial_group_admitted_counts(peer) {
             return Some(counts[2] + counts[3]);
         }
-        let filter = self.rtc_export_filter(peer, self.peer_sendable_families.get(&peer));
-        let rejected = self.peer_unexportable.get(&peer).map_or(0, |keys| {
-            keys.iter()
-                .inspect(|_| self.replacement_checkpoint(false))
-                .filter(|key| match key {
-                    ExactExportKey::Vpn(key) => group.table.get_vpn(key).is_some_and(|route| {
-                        route.peer != peer && rt_passes(filter.as_ref(), route)
-                    }),
-                    _ => false,
-                })
-                .count()
-        });
-        Some(
-            group
-                .vpn_advertised_count_for(peer)
-                .saturating_sub(rejected),
-        )
+        let [_, _, v4, v6] = group.rejected_counts(peer);
+        Some(group.vpn_advertised_count_for(peer).saturating_sub(v4 + v6))
     }
 
     /// Per-family grouped advertised counts after subtracting the member's
@@ -905,47 +938,10 @@ impl RibManager {
             );
         }
         let mut counts = group.family_counts_for(peer);
-        let filter = self.rtc_export_filter(peer, self.peer_sendable_families.get(&peer));
-        if let Some(rejected) = self.peer_unexportable.get(&peer) {
-            for key in rejected {
-                self.replacement_checkpoint_at("grouped_family_count_input", false);
-                let family = match key {
-                    // Subtract only while the member's derived view
-                    // holds a backstop-delivered route at the rejected
-                    // slot — the lane substitution shares the staged
-                    // key's prefix, so the family is identical either
-                    // way, and a backstop-stripped slot was already
-                    // subtracted by the synthesis's OTC term (the
-                    // `grouped_advertised_count` double-subtraction
-                    // rule, per family).
-                    ExactExportKey::Unicast(prefix, path_id)
-                        if group
-                            .adv_entry_post_backstop_for(
-                                peer,
-                                prefix,
-                                *path_id,
-                                self.rs_control_context(peer),
-                            )
-                            .is_some() =>
-                    {
-                        Some(crate::manager::helpers::prefix_family(prefix))
-                    }
-                    ExactExportKey::Vpn(key)
-                        if group.table.get_vpn(key).is_some_and(|route| {
-                            route.peer != peer && rt_passes(filter.as_ref(), route)
-                        }) =>
-                    {
-                        Some(key.afi_safi())
-                    }
-                    _ => None,
-                };
-                let Some(family) = family else {
-                    continue;
-                };
-                if let Some((_, count)) = counts.iter_mut().find(|(entry, _)| *entry == family) {
-                    *count = count.saturating_sub(1);
-                }
-            }
+        let rejected = group.rejected_counts(peer);
+        for ((afi, safi), count) in &mut counts {
+            let slot = usize::from(*afi == Afi::Ipv6) + 2 * usize::from(*safi == Safi::MplsVpn);
+            *count = count.saturating_sub(u64::try_from(rejected[slot]).unwrap_or(u64::MAX));
         }
         counts.retain(|(_, count)| *count != 0);
         Some(counts)

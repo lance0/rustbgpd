@@ -1,5 +1,6 @@
 use crate::PeerId;
 use crate::manager::{replacement_readiness_checkpoint, retire_vec};
+use crate::update::ExactExportKey;
 
 use super::payload::PriorGroupSlots;
 use super::{
@@ -27,6 +28,101 @@ impl RibManager {
         groups
             .get_mut(&gid)
             .expect("group staged above still exists")
+    }
+
+    /// Subtract the prior projection before a stage, then restore the new one.
+    /// A release supplies one member page. Other stages visit only peers with
+    /// an overlay. Neither walk depends on the number of retained refusals.
+    fn adjust_staged_rejections(
+        &mut self,
+        gid: usize,
+        members: Option<&[PeerId]>,
+        keys: impl ExactSizeIterator<Item = ExactExportKey> + Clone,
+        in_scope: impl Fn(&ExactExportKey) -> bool,
+        add: bool,
+    ) {
+        let group = Self::staged_group_mut(&mut self.group_ribs, gid);
+        if group.visible_rejections.is_empty() {
+            return;
+        }
+        // The projection reads the group while its member counters change.
+        let mut counters = std::mem::take(&mut group.visible_rejections);
+        let empty = super::super::RtcMembership::default();
+        let rtc = group.rtc_negotiated();
+        let adjust = |peer: PeerId, counts: &mut [usize; 4]| {
+            let Some(rejected) = self.peer_unexportable.get(&peer) else {
+                return;
+            };
+            let rs = group.rs_members.get(&peer).copied();
+            let filter = rtc.then(|| self.peer_rt_membership.get(&peer).unwrap_or(&empty));
+            let mut adjust_key = |key: &ExactExportKey| {
+                if let Some(slot) = group.visible_rejected_slot(peer, key, rs, filter) {
+                    if add {
+                        counts[slot] += 1;
+                    } else {
+                        counts[slot] -= 1;
+                    }
+                }
+            };
+            // HashSet iteration visits capacity even after withdrawals.
+            if rejected.capacity() < keys.len() {
+                for key in rejected {
+                    replacement_readiness_checkpoint(&self.replacement_readiness, false);
+                    if in_scope(key) {
+                        adjust_key(key);
+                    }
+                }
+            } else {
+                for key in keys.clone() {
+                    replacement_readiness_checkpoint(&self.replacement_readiness, false);
+                    if rejected.contains(&key) {
+                        adjust_key(&key);
+                    }
+                }
+            }
+        };
+        if let Some(members) = members {
+            for peer in members {
+                if let Some(counts) = counters.get_mut(peer) {
+                    adjust(*peer, counts);
+                }
+            }
+        } else {
+            for (peer, counts) in &mut counters {
+                adjust(*peer, counts);
+            }
+        }
+        group.visible_rejections = counters;
+    }
+
+    fn adjust_staged_unicast_rejections<S: std::hash::BuildHasher>(
+        &mut self,
+        gid: usize,
+        members: Option<&[PeerId]>,
+        prefixes: &HashSet<Prefix, S>,
+        add: bool,
+    ) {
+        self.adjust_staged_rejections(
+            gid,
+            members,
+            prefixes.iter().map(|p| ExactExportKey::Unicast(*p, 0)),
+            |key| matches!(key, ExactExportKey::Unicast(prefix, 0) if prefixes.contains(prefix)),
+            add,
+        );
+    }
+
+    pub(in crate::manager) fn adjust_release_group_counts(
+        &mut self,
+        gid: usize,
+        members: &[PeerId],
+        prefixes: &HashSet<Prefix>,
+        add: bool,
+    ) {
+        self.adjust_staged_unicast_rejections(gid, Some(members), prefixes, add);
+        let group = Self::staged_group_mut(&mut self.group_ribs, gid);
+        if group.has_rs_members() {
+            group.adjust_release_rs_members(members, prefixes, if add { 1 } else { -1 });
+        }
     }
 
     /// Run the shared staging pass for every live group over the pass's
@@ -194,11 +290,13 @@ impl RibManager {
             crate::manager::distribution::UnicastDistributionResult::default();
         let paged_pcb_denials = pcb.as_ref().is_some_and(|pcb| pcb.paged_denials);
         let per_client_best;
+        let adjust_rejections;
         {
             let Some(group) = self.group_ribs.get(&gid) else {
                 return out;
             };
             per_client_best = group.per_client_best;
+            adjust_rejections = !paged_members && !group.visible_rejections.is_empty();
             if per_client_best {
                 self.replacement_checkpoint(true);
                 lane_updates.reserve_exact(prefixes.len());
@@ -596,6 +694,9 @@ impl RibManager {
                 "group_commit",
             );
         }
+        if adjust_rejections {
+            self.adjust_staged_unicast_rejections(gid, None, prefixes, false);
+        }
         let readiness = &self.replacement_readiness;
         let mut checkpoint = || replacement_readiness_checkpoint(readiness, false);
         let group = Self::staged_group_mut(&mut self.group_ribs, gid);
@@ -693,6 +794,9 @@ impl RibManager {
             }
             self.refresh_group_residue_gauge();
         }
+        if adjust_rejections {
+            self.adjust_staged_unicast_rejections(gid, None, prefixes, true);
+        }
         self.replacement_checkpoint(true);
         retire_vec(&mut labeled_filtered, &mut || {
             self.replacement_checkpoint(false);
@@ -765,10 +869,12 @@ impl RibManager {
         };
         self.replacement_checkpoint(true);
         let mut denials: Vec<(VpnRouteKey, VpnDenialRecord)> = Vec::new();
+        let adjust_rejections;
         {
             let Some(group) = self.group_ribs.get(&gid) else {
                 return out;
             };
+            adjust_rejections = !group.visible_rejections.is_empty();
             // `share()`, not `clone()` — ADR-0096 term hit counters, as
             // in `stage_group_prefixes`.
             let chain = group.export_chain.as_ref().map(PolicyChain::share);
@@ -871,6 +977,16 @@ impl RibManager {
             self.replacement_checkpoint(true);
         }
         self.replacement_checkpoint(true);
+        let rejected_keys = keys.iter().map(|&nlri_key| {
+            ExactExportKey::Vpn(VpnRibRouteKey {
+                nlri_key,
+                path_id: 0,
+            })
+        });
+        let in_scope = |key: &ExactExportKey| matches!(key, ExactExportKey::Vpn(key) if key.path_id == 0 && keys.contains(&key.nlri_key));
+        if adjust_rejections {
+            self.adjust_staged_rejections(gid, None, rejected_keys.clone(), in_scope, false);
+        }
         let readiness = &self.replacement_readiness;
         let checkpoint = || replacement_readiness_checkpoint(readiness, false);
         let group = Self::staged_group_mut(&mut self.group_ribs, gid);
@@ -900,7 +1016,16 @@ impl RibManager {
             );
             self.refresh_group_residue_gauge();
         }
+        if adjust_rejections {
+            self.adjust_staged_rejections(gid, None, rejected_keys, in_scope, true);
+        }
         self.replacement_checkpoint(true);
         out
+    }
+}
+
+impl GroupRibOut {
+    pub(in crate::manager) fn needs_release_count_adjustment(&self) -> bool {
+        self.has_rs_members() || !self.visible_rejections.is_empty()
     }
 }

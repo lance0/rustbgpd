@@ -76,14 +76,11 @@ fn install_fixture(
     for key in rejected {
         assert!(manager.peer_unexportable[&peer].contains(&key));
     }
-    // Stale rejection residue must be visited even when no group slot matches.
-    manager
-        .peer_unexportable
-        .entry(peer)
-        .or_default()
-        .extend((0..excluded).map(|index| {
-            ExactExportKey::Unicast(install_route(selected, 3000 + index, source).prefix, 0)
-        }));
+    // Absent group slots can still have retained exact-export refusals.
+    for index in 0..excluded {
+        let prefix = install_route(selected, 3000 + index, source).prefix;
+        manager.set_exact_export_rejection(peer, ExactExportKey::Unicast(prefix, 0), true);
+    }
     (manager, peer, expected, output)
 }
 
@@ -251,20 +248,13 @@ fn install_services_excluded_inputs(afi: Afi) {
         let (mut manager, peer, expected, _output) = install_fixture(afi, excluded);
         let gid = manager.grouped_member_of(peer).unwrap();
         let table_count = manager.group_ribs[&gid].table.len();
-        let rejected = manager.peer_unexportable.get(&peer).map_or(0, HashSet::len);
+        assert_eq!(manager.grouped_advertised_count(peer), Some(expected.len()));
         prepare(&mut manager, 1, selected_config(peer, afi, Some(64))).unwrap();
         let stages = observe_apply(&mut manager, 1);
         assert_eq!(
             stages["grouped_advertised_input"], table_count,
             "both AFIs and source/rejected exclusions must checkpoint before filtering"
         );
-        if rejected != 0 {
-            assert_eq!(
-                stages["grouped_family_count_input"],
-                rejected * 2,
-                "preflight and surviving unlimited-family counts visit all rejection residue"
-            );
-        }
         assert_eq!(
             stages["outbound_limit_install_inventory"], 2,
             "materialization must service allocation edges"

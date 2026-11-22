@@ -906,6 +906,47 @@ fn held_client_group(
     (manager, tx, receivers)
 }
 
+#[test]
+fn paged_release_counts_preexisting_refusals_as_slots_become_visible() {
+    use super::exportability::MockExactExportEncoder;
+    use crate::update::ExactExportKey;
+
+    // A 16-member delivery page leaves the last client on a third page.
+    let (mut manager, _tx, mut receivers) = held_client_group(33, 2, false);
+    let prefix = make_indexed_route(0, SOURCE).prefix;
+    let allowed = make_indexed_route(1, SOURCE).prefix;
+    let refused = ExactExportKey::Unicast(prefix, 0);
+    let encoder = MockExactExportEncoder::accepting(1);
+    encoder.set_profile(1, [refused.clone()]);
+    for n in 0..receivers.len() {
+        let peer = client(n);
+        manager.peer_export_encoders.insert(peer, encoder.clone());
+        manager.set_exact_export_rejection(peer, refused.clone(), true);
+    }
+    let gid = manager.grouped_member_of(client(0)).unwrap();
+    assert!(manager.group_ribs[&gid].table.get(&prefix, 0).is_none());
+
+    drive_release(&mut manager);
+
+    assert!(manager.group_ribs[&gid].table.get(&prefix, 0).is_some());
+    for (n, receiver) in receivers.iter_mut().enumerate() {
+        let peer = client(n);
+        let mut wire = BTreeSet::new();
+        while let Ok(update) = receiver.try_recv() {
+            apply(&mut wire, &update);
+        }
+        assert_eq!(wire, BTreeSet::from([allowed]), "client {n}");
+        assert!(manager.peer_unexportable[&peer].contains(&refused));
+        assert!(manager.initial_group_admitted_counts(peer).is_none());
+        assert_eq!(
+            manager.grouped_advertised_count(peer),
+            Some(1),
+            "client {n}"
+        );
+        assert_eq!(manager.grouped_family_counts(peer), Some(vec![(FAMILY, 1)]));
+    }
+}
+
 fn source_end_of_rib() -> RibUpdate {
     RibUpdate::EndOfRib {
         peer: peer_v4(SOURCE),
