@@ -709,20 +709,20 @@ fn apply(manager: &mut RibManager, change: Change) {
     }
 }
 
-/// [`MIXED_ROWS`] keys released to R and receiver 1 (EVPN private, both
-/// importing RT 100 and RT 200) at 128 keys a step. Each change of
-/// `changes` lands once R's cursor steps have read its keys. Returns R's table
-/// as sent, its rows, its capacities, the presizes made, and R's keys
-/// read and rows at the first change.
-fn mixed_walk(
-    changes: &[(usize, Change)],
-) -> (
+/// R's table as sent, its rows, its capacities, the presizes made, and
+/// R's keys read and rows at the first change.
+type MixedWalk = (
     BTreeMap<EvpnRouteKey, String>,
     usize,
     [usize; 2],
     usize,
     (usize, usize),
-) {
+);
+
+/// [`MIXED_ROWS`] keys released to R and receiver 1 (EVPN private, both
+/// importing RT 100 and RT 200) at 128 keys a step. Each change of
+/// `changes` lands once R's cursor steps have read its keys.
+fn mixed_walk(changes: &[(usize, Change)]) -> MixedWalk {
     let mut manager = rtc_manager(256).with_selection_deferral(SelectionDeferralConfig {
         timeout: Duration::from_secs(60),
         waiters: vec![SelectionDeferralWaiterConfig {
@@ -828,7 +828,7 @@ fn an_rtc_drop_mid_sample_under_an_evpn_cursor_fits() {
 fn mixed_schedule(seed: u64) -> Vec<(usize, Change)> {
     let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
     let mut draw = |range: u64| next(&mut state) % range;
-    (0..1 + draw(2))
+    (0..=draw(2))
         .map(|_| {
             let at = 128 * usize::try_from(draw(4)).unwrap();
             let from = u32::try_from(draw(u64::from(MIXED_ROWS - 2_000))).unwrap();

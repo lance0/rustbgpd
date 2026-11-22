@@ -249,7 +249,7 @@ fn vpn_pass(rows: Vec<VpnRibRoute>) -> RibUpdate {
 /// its growth.
 async fn denied_mid_sample_in_the_run_loop() -> ((usize, usize, [usize; 2]), Growth) {
     const TOTAL: u32 = 40_000;
-    let accepted = |i: u32| i % 10 != 0;
+    let accepted = |i: u32| !i.is_multiple_of(10);
     let kept = |i: u32| i % 100 == 1;
     let mut manager = deferral_manager(400, &[P4, P6]);
     manager.actor_turn_check = Some(watch);

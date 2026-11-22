@@ -366,8 +366,8 @@ fn denied_labeled_prefixes_logged_again_ahead_fit() {
 #[test]
 fn accepted_labeled_prefixes_denied_after_a_default_step_fit() {
     const TOTAL: u32 = 100_000;
-    let accepted = |i: u32| i % 5 == 0;
-    let kept = |i: u32| i % 50 == 0;
+    let accepted = |i: u32| i.is_multiple_of(5);
+    let kept = |i: u32| i.is_multiple_of(50);
     let row = |index: u32, med: u32| {
         let mut route = route_from(SOURCE, L4, index, 100, 200);
         set_med(&mut route.attributes, med);
