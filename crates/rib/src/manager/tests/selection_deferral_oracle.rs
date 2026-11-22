@@ -1005,10 +1005,8 @@ impl Harness {
                     .pending_group_admitted
                     .fail_next_allocation_for_test();
                 self.manager.mark_outbound_dirty(peer_v4(OBSERVER));
-                self.manager.distribute_changes_to_targets(
-                    &HashSet::new(),
-                    &HashSet::from([peer_v4(OBSERVER)]),
-                );
+                self.manager
+                    .distribute_resync_request_to_targets(&HashSet::from([peer_v4(OBSERVER)]));
                 let refused = refusals(&self.manager) > before;
                 self.manager
                     .pending_group_admitted

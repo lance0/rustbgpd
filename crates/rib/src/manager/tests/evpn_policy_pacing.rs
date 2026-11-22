@@ -1358,9 +1358,7 @@ fn owned_member_resync_without_a_feed_is_not_an_empty_resync() {
             .get_mut(&gid)
             .unwrap()
             .evpn_table_stamp = 0;
-        fleet
-            .manager
-            .distribute_changes(&HashSet::new(), &HashSet::new());
+        fleet.manager.distribute_resync_request();
         if forced {
             assert!(
                 fleet.manager.force_outbound_peers.contains(&peer),

@@ -165,7 +165,7 @@ fn assert_rtbh_dirty_recovery_preserves_frozen_ordinary(grouped: bool, regroup: 
     assert_eq!(first_admitted.announce[0].prefix, Prefix::V4(first));
     wire.insert((Prefix::V4(first), 0), first_admitted.announce[0].clone());
 
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     let mut recovered_second = false;
     let mut updates = 0;
     while let Ok(update) = observer_rx.try_recv().map(delivered) {
@@ -211,7 +211,7 @@ fn assert_rtbh_dirty_recovery_preserves_frozen_ordinary(grouped: bool, regroup: 
     if grouped {
         assert!(manager.pending_group_admitted.contains_record(observer));
     }
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     let empty_retry = apply_wire(&mut observer_rx, &mut wire);
     assert!(
         empty_retry
@@ -398,7 +398,7 @@ fn assert_rtbh_dirty_recovery_preserves_frozen_ordinary(grouped: bool, regroup: 
         afi: FAMILY.0,
         safi: FAMILY.1,
     });
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     while let Ok(update) = observer_rx.try_recv().map(delivered) {
         assert_eq!(update.end_of_rib, [] as [(Afi, Safi); 0]);
         for key in update.unicast_withdrawals() {
@@ -607,7 +607,7 @@ fn dirty_recovery_preserves_target_ordinary_choice_when_global_rtbh_is_denied() 
             manager.mark_outbound_dirty(peer_v4(OBSERVER));
             assert!(manager.dirty_peers.contains(&peer_v4(OBSERVER)));
             apply_wire(&mut rx, &mut wire);
-            manager.distribute_changes(&HashSet::new(), &HashSet::new());
+            manager.distribute_resync_request();
             let recovery = apply_wire(&mut rx, &mut wire);
             assert!(recovery.iter().all(|update| update.end_of_rib.is_empty()));
             assert_eq!(wire.len(), 3, "mode={mode}, old_local={old_local}");
@@ -635,6 +635,9 @@ fn dirty_recovery_preserves_target_ordinary_choice_when_global_rtbh_is_denied() 
                     reply,
                 });
                 result.try_recv().unwrap().unwrap();
+                // A local source change reopens the caught-up member's
+                // resync; the withdrawal's pass leaves it to the tick.
+                drain_resync_ticks(&mut manager);
                 let removed = apply_wire(&mut rx, &mut wire);
                 assert!(
                     removed
@@ -651,7 +654,7 @@ fn dirty_recovery_preserves_target_ordinary_choice_when_global_rtbh_is_denied() 
                 safi: FAMILY.1,
             });
             apply_wire(&mut rx, &mut wire);
-            manager.distribute_changes(&HashSet::new(), &HashSet::new());
+            manager.distribute_resync_request();
             apply_wire(&mut rx, &mut wire);
             assert!(!manager.dirty_peers.contains(&peer_v4(OBSERVER)));
             assert!(
@@ -825,7 +828,7 @@ fn final_encoder_refusal_keeps_frozen_ordinary_capacity_and_recovery_owned() {
         safi: FAMILY.1,
     });
     apply_wire(&mut rx, &mut wire);
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     apply_wire(&mut rx, &mut wire);
     assert!(!manager.selection_deferred(FAMILY));
     assert!(!manager.selection_resync_held(observer));
@@ -903,7 +906,7 @@ fn clean_group_to_private_preserves_original_local_source_provenance() {
         if rtbh {
             inject_aggregate(&mut manager, prefix, original_id, false);
         } else {
-            manager.distribute_changes(&HashSet::new(), &HashSet::new());
+            manager.distribute_resync_request();
         }
         apply_wire(&mut rx, &mut wire);
         assert_eq!(
@@ -919,7 +922,7 @@ fn clean_group_to_private_preserves_original_local_source_provenance() {
             safi: FAMILY.1,
         });
         apply_wire(&mut rx, &mut wire);
-        manager.distribute_changes(&HashSet::new(), &HashSet::new());
+        manager.distribute_resync_request();
         apply_wire(&mut rx, &mut wire);
         assert!(!manager.dirty_peers.contains(&observer));
         assert_eq!(wire.len(), 2);
@@ -971,7 +974,7 @@ fn ipv6_selection_hold_does_not_keep_ipv4_only_recovery_or_initial_eor_pending()
     assert!(manager.dirty_peers.contains(&peer_v4(OBSERVER)));
     let mut wire = std::collections::HashMap::new();
     apply_wire(&mut rx, &mut wire);
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     apply_wire(&mut rx, &mut wire);
     assert_eq!(wire.len(), 2);
     assert!(!manager.dirty_peers.contains(&peer_v4(OBSERVER)));
@@ -986,7 +989,7 @@ fn ipv6_selection_hold_does_not_keep_ipv4_only_recovery_or_initial_eor_pending()
     let data = late.try_recv().map(delivered).unwrap();
     assert_eq!(data.announce.len(), 2);
     assert_eq!(data.end_of_rib, [] as [(Afi, Safi); 0]);
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     let recovery = late.try_recv().map(delivered).unwrap();
     assert_eq!(recovery.end_of_rib, vec![FAMILY]);
     assert!(!manager.dirty_peers.contains(&peer_v4(late_addr)));
@@ -1126,7 +1129,7 @@ fn held_group_vpn_inventory_does_not_block_unicast_rtbh_recovery() {
     let first_update = rx.try_recv().map(delivered).unwrap();
     assert_eq!(first_update.announce[0].prefix, Prefix::V4(first));
     assert!(first_update.vpn_announce.is_empty() && first_update.vpn_withdraw.is_empty());
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     let updates: Vec<_> = std::iter::from_fn(|| rx.try_recv().map(delivered).ok()).collect();
     assert!(
         updates
@@ -1181,7 +1184,7 @@ fn held_group_vpn_inventory_does_not_block_unicast_rtbh_recovery() {
         1
     );
     while rx.try_recv().map(delivered).is_ok() {}
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     while rx.try_recv().map(delivered).is_ok() {}
     assert!(!manager.dirty_peers.contains(&observer));
     assert!(!manager.pending_group_admitted.contains_record(observer));
@@ -1268,7 +1271,7 @@ fn held_add_path_prefix_keeps_capacity_until_its_last_actual_path_leaves() {
         safi: FAMILY.1,
     });
     apply_wire(&mut rx, &mut wire);
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     apply_wire(&mut rx, &mut wire);
     assert!(!manager.dirty_peers.contains(&observer));
     assert!(!manager.pending_group_admitted.contains_record(observer));
@@ -1354,7 +1357,7 @@ fn partial_family_release_wakes_omitted_data_before_its_initial_eor() {
         Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 2), 32),
     );
     apply_wire(&mut rx, &mut wire);
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     apply_wire(&mut rx, &mut wire);
     assert_eq!(wire.len(), 2);
     assert!(manager.selection_partial_caught_up(observer));
@@ -1365,7 +1368,7 @@ fn partial_family_release_wakes_omitted_data_before_its_initial_eor() {
         safi: FAMILY.1,
     });
     let mut updates = apply_wire(&mut rx, &mut wire);
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     updates.extend(apply_wire(&mut rx, &mut wire));
     assert!(
         wire.contains_key(&(Prefix::V4(ordinary), 0)),
@@ -1487,7 +1490,7 @@ fn refused_partial_admission_proof_keeps_actual_inventory_and_counts_until_relea
     manager
         .pending_group_admitted
         .fail_next_allocation_for_test();
-    manager.distribute_changes_to_targets(&HashSet::new(), &HashSet::from([observer]));
+    manager.distribute_resync_request_to_targets(&HashSet::from([observer]));
     assert!(
         manager.pending_group_admitted.get(&observer).is_none(),
         "the actual proof reservation was refused"
@@ -1512,7 +1515,7 @@ fn refused_partial_admission_proof_keeps_actual_inventory_and_counts_until_relea
         safi: FAMILY.1,
     });
     apply_wire(&mut rx, &mut wire);
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     apply_wire(&mut rx, &mut wire);
     assert_eq!(wire.len(), 3);
     assert_eq!(manager.actual_unicast_advertised_count(observer), 3);
@@ -1633,7 +1636,7 @@ fn private_vpn_only_handoff_refuses_unproved_unicast_admission() {
     manager
         .pending_group_admitted
         .fail_next_allocation_for_test();
-    manager.distribute_changes_to_targets(&HashSet::new(), &HashSet::from([observer]));
+    manager.distribute_resync_request_to_targets(&HashSet::from([observer]));
     assert!(manager.pending_group_admitted.get(&observer).is_none());
     let mut wire = std::collections::HashMap::new();
     apply_wire(&mut rx, &mut wire);
@@ -1663,7 +1666,7 @@ fn private_vpn_only_handoff_refuses_unproved_unicast_admission() {
         safi: vpn.1,
     });
     let mut updates = apply_wire(&mut rx, &mut wire);
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     updates.extend(apply_wire(&mut rx, &mut wire));
     assert_eq!(wire.len(), 1);
     assert!(updates.iter().all(|update| update.vpn_withdraw.is_empty()));
@@ -1766,7 +1769,7 @@ fn refused_private_handoff_withdraws_removed_old_unicast_and_vpn_at_release() {
     manager
         .pending_group_admitted
         .fail_next_allocation_for_test();
-    manager.distribute_changes_to_targets(&HashSet::new(), &HashSet::from([observer]));
+    manager.distribute_resync_request_to_targets(&HashSet::from([observer]));
     assert!(
         manager.pending_group_admitted.get(&observer).is_none(),
         "proof reservation must really refuse"
@@ -1812,7 +1815,7 @@ fn refused_private_handoff_withdraws_removed_old_unicast_and_vpn_at_release() {
             }
         }
     }
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     for update in apply_wire(&mut rx, &mut wire) {
         assert_eq!(update.end_of_rib, [] as [(Afi, Safi); 0]);
         for key in update.vpn_withdraw {
@@ -1997,7 +2000,7 @@ async fn assert_removed_rtbh_after_proof_refusal(
     manager
         .pending_group_admitted
         .fail_next_allocation_for_test();
-    manager.distribute_changes_to_targets(&HashSet::new(), &HashSet::from([observer]));
+    manager.distribute_resync_request_to_targets(&HashSet::from([observer]));
     assert!(manager.pending_group_admitted.get(&observer).is_none());
     assert!(manager.group_recovery_fallback(observer).is_some());
     assert!(apply_wire(&mut rx, &mut wire).is_empty());
@@ -2057,7 +2060,10 @@ async fn assert_removed_rtbh_after_proof_refusal(
         );
         assert!(apply_wire(&mut rx, &mut wire).is_empty());
         drop(occupied);
-        manager.distribute_changes(&HashSet::new(), &HashSet::new());
+        manager.distribute_resync_request();
+    } else {
+        // The removal's pass leaves the dirty member to the resync tick.
+        drain_resync_ticks(&mut manager);
     }
     let updates = apply_wire(&mut rx, &mut wire);
     assert!(manager.selection_deferred(family));
@@ -2096,7 +2102,7 @@ async fn assert_removed_rtbh_after_proof_refusal(
     assert_eq!((row.usage, row.headroom), (1, Some(2)));
     assert!(manager.dirty_peers.contains(&observer));
     assert!(manager.group_recovery_fallback(observer).is_some());
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     assert!(
         apply_wire(&mut rx, &mut wire).is_empty(),
         "held retry must not debit or withdraw twice"
@@ -2108,7 +2114,7 @@ async fn assert_removed_rtbh_after_proof_refusal(
         afi: family.0,
         safi: family.1,
     });
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     while let Ok(update) = rx.try_recv().map(delivered) {
         assert_eq!(update.end_of_rib, []);
         for key in update.unicast_withdrawals().copied().collect::<Vec<_>>() {
@@ -2121,7 +2127,7 @@ async fn assert_removed_rtbh_after_proof_refusal(
             wire.insert((route.prefix, route.path_id), route.clone());
         }
     }
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     apply_wire(&mut rx, &mut wire);
     let expected = if matches!(removal, RefusedRtbhRemoval::Demote) {
         3
@@ -2514,7 +2520,7 @@ fn assert_late_waiter_private_counts(ipv6: bool, refuse_capture: bool, fresh_cha
         safi: family.1,
     });
     apply_wire(&mut rx, &mut wire);
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     drain_resync_ticks(&mut manager);
     apply_wire(&mut rx, &mut wire);
     assert_eq!(wire.len(), if refuse_capture { 2 } else { 1 });
@@ -2872,7 +2878,7 @@ fn late_waiter_private_refused_capture_keeps_known_capacity_and_recovers_intent(
         .flat_map(|update| &update.end_of_rib)
         .filter(|marker| **marker == family)
         .count();
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
     terminals += apply_wire(&mut rx, &mut wire)
         .iter()
         .flat_map(|update| &update.end_of_rib)
@@ -3052,7 +3058,7 @@ fn assert_refused_proof_rtbh_replacement(add_path: bool, held_counts: bool) {
     manager
         .pending_group_admitted
         .fail_next_allocation_for_test();
-    manager.distribute_changes_to_targets(&HashSet::new(), &HashSet::from([observer]));
+    manager.distribute_resync_request_to_targets(&HashSet::from([observer]));
     assert_eq!(
         counter_metric_value(
             &manager.metrics,
@@ -3129,7 +3135,7 @@ fn assert_refused_proof_rtbh_replacement(add_path: bool, held_counts: bool) {
         safi: FAMILY.1,
     });
     for _ in 0..3 {
-        manager.distribute_changes(&HashSet::new(), &HashSet::new());
+        manager.distribute_resync_request();
         apply_wire(&mut rx, &mut wire);
     }
     // An Add-Path survivor keeps its own key 2 through the release.
@@ -3221,7 +3227,7 @@ fn refused_replacement_salvage_visits(prefixes: u8) -> usize {
     manager
         .pending_group_admitted
         .fail_next_allocation_for_test();
-    manager.distribute_changes_to_targets(&HashSet::new(), &HashSet::from([observer]));
+    manager.distribute_resync_request_to_targets(&HashSet::from([observer]));
     assert!(manager.group_recovery_fallback(observer).is_some());
     manager.refused_replacement_salvage_visits
 }
@@ -3398,7 +3404,7 @@ fn held_empty_view_resync_flushes_the_markers_the_hold_does_not_hold() {
 
     assert!(manager.selection_partial_caught_up(observer));
     let empty_stagings = manager.outbound_stagings(observer);
-    manager.distribute_changes_to_targets(&HashSet::new(), &HashSet::from([observer]));
+    manager.distribute_resync_request_to_targets(&HashSet::from([observer]));
     assert_eq!(
         manager.outbound_stagings(observer),
         empty_stagings,
@@ -3598,7 +3604,7 @@ fn assert_limited_dirty_member_counts_its_wire(
         safi: FAMILY.1,
     });
     for _ in 0..4 {
-        manager.distribute_changes(&HashSet::new(), &HashSet::new());
+        manager.distribute_resync_request();
         manager.resync_dirty_peers_bounded();
         apply(&mut rx, &mut wire);
     }

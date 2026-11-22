@@ -1294,7 +1294,7 @@ fn dirty_resync_sends_ready_eor_and_retains_held_family() {
 
     manager.owe_eor(target, READY_FAMILY);
     manager.mark_outbound_dirty(target);
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
 
     let resync = outbound_rx.try_recv().unwrap();
     assert!(
@@ -1533,7 +1533,7 @@ fn dirty_observer_emits_convergence_eor_before_deferred_refresh() {
         Some(&HashSet::from([FAMILY]))
     );
 
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
 
     let convergence = observer_rx.try_recv().unwrap();
     assert_eq!(convergence.end_of_rib, vec![FAMILY]);
@@ -1653,7 +1653,7 @@ fn no_diff_dirty_resync_keeps_refresh_behind_failed_convergence_eor() {
         .try_send(crate::OutboundRouteUpdate::default())
         .unwrap();
     assert_eq!(fill_tx.capacity(), 0);
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
 
     assert_counter_value(&metrics, "bgp_outbound_route_drops_total", 0.0);
     assert!(
@@ -1670,7 +1670,7 @@ fn no_diff_dirty_resync_keeps_refresh_behind_failed_convergence_eor() {
     );
     let _ = observer_rx.try_recv().unwrap();
     let _ = observer_rx.try_recv().unwrap();
-    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    manager.distribute_resync_request();
 
     let convergence = observer_rx.try_recv().unwrap();
     assert_eq!(convergence.end_of_rib, vec![FAMILY]);

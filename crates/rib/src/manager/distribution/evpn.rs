@@ -958,7 +958,7 @@ impl RibManager {
         if owned_pass && !self.dirty_peers.is_empty() {
             // All group OLD consumers have finished before the existing
             // mixed-family recovery pass can settle a missed admission.
-            self.distribute_changes(&HashSet::new(), &HashSet::new());
+            self.distribute_resync_request();
         }
     }
 
@@ -1079,7 +1079,7 @@ impl RibManager {
             // other members still need the displaced actual OLD values.
             self.distribute_owned_evpn_group(gid, keys, checkpoint);
             if !self.dirty_peers.is_empty() {
-                self.distribute_changes(&HashSet::new(), &HashSet::new());
+                self.distribute_resync_request();
             }
             return;
         }
