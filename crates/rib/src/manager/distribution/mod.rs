@@ -7056,6 +7056,9 @@ impl RibManager {
             .destination_build_us
             .saturating_add(u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX));
         let phase = std::time::Instant::now();
+        // A freshly built destination stages only Loc-RIB keys. A retained
+        // destination can contribute other prefixes to the logical denial scope.
+        let mut filtered_scope = HashSet::new();
         let mut inventory = {
             let Some(source_group) = self.group_ribs.get(&source) else {
                 if speculative {
@@ -7089,6 +7092,11 @@ impl RibManager {
                 destination_group,
                 &rs_asns,
                 speculative,
+                |prefix| {
+                    if destination_existed && self.loc_rib.get(&prefix).is_none() {
+                        filtered_scope.insert(prefix);
+                    }
+                },
                 &mut |force| {
                     if force {
                         self.replacement_checkpoint(true);
@@ -7235,53 +7243,57 @@ impl RibManager {
         // The prefix scope of the per-member policy-denial restamp: every
         // prefix whose verdict this transition may have moved.
         let phase = std::time::Instant::now();
-        let capacity = self
-            .loc_rib
-            .len()
-            .saturating_add(
-                self.group_ribs
-                    .get(&destination)
-                    .map_or(0, |group| group.table.len()),
-            )
-            .saturating_add(source_tombstones.len())
-            .saturating_add(inventory.withdraw.len());
-        self.replacement_checkpoint(true);
-        let mut filtered_scope = HashSet::with_capacity(capacity);
-        self.replacement_checkpoint(true);
-        filtered_scope.extend(
-            self.loc_rib
-                .iter()
-                .inspect(|_| checkpoint())
-                .map(|route| route.prefix),
-        );
-        if let Some(group) = self.group_ribs.get(&destination) {
-            filtered_scope.extend(
-                group
-                    .table
-                    .iter()
+        let group = self.group_ribs.get(&destination);
+        let restamp = !prepared.is_empty()
+            && (group.is_some_and(super::update_groups::GroupRibOut::has_policy_filtered_routes)
+                || prepared
+                    .keys()
                     .inspect(|_| checkpoint())
-                    .map(|route| route.prefix),
-            );
+                    .any(|peer| self.policy_filtered_routes.contains_key(peer)));
+        if restamp {
+            let capacity = self
+                .loc_rib
+                .len()
+                .saturating_add(group.map_or(0, |group| group.table.len()))
+                .saturating_add(source_tombstones.len())
+                .saturating_add(inventory.withdraw.len());
+            self.replacement_checkpoint(true);
+            filtered_scope.reserve(capacity - filtered_scope.len());
+            self.replacement_checkpoint(true);
+            filtered_scope.extend(self.loc_rib.iter().map(|route| {
+                #[cfg(test)]
+                super::DENIAL_LOC_VISITS.set(super::DENIAL_LOC_VISITS.get() + 1);
+                checkpoint();
+                route.prefix
+            }));
+            if let Some(group) = group {
+                filtered_scope.extend(group.table.iter().map(|route| {
+                    #[cfg(test)]
+                    super::DENIAL_DEST_VISITS.set(super::DENIAL_DEST_VISITS.get() + 1);
+                    checkpoint();
+                    route.prefix
+                }));
+            }
         }
-        filtered_scope.extend(
-            source_tombstones
-                .iter()
-                .inspect(|_| checkpoint())
-                .map(|(prefix, _)| *prefix),
-        );
-        filtered_scope.extend(
-            inventory
-                .withdraw
-                .iter()
-                .inspect(|_| checkpoint())
-                .map(|(prefix, _)| *prefix),
-        );
+        for &(prefix, _) in source_tombstones.iter().chain(&inventory.withdraw) {
+            checkpoint();
+            if restamp || self.loc_rib.get(&prefix).is_none() {
+                filtered_scope.insert(prefix);
+            }
+        }
+        // The phase receipt counts the logical union even when nobody needs
+        // it materialized. In that case the set holds only prefixes outside Loc-RIB.
+        let scope_len = if restamp {
+            filtered_scope.len()
+        } else {
+            self.loc_rib.len() + filtered_scope.len()
+        };
         self.replacement_capacity(
             "filtered_scope",
             filtered_scope.len(),
             filtered_scope.capacity(),
         );
-        receipt.filtered_scope_prefixes += filtered_scope.len();
+        receipt.filtered_scope_prefixes += scope_len;
         receipt.filtered_scope_build_us = receipt
             .filtered_scope_build_us
             .saturating_add(u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX));
@@ -7297,23 +7309,25 @@ impl RibManager {
             }
             receipt.emits_succeeded += 1;
             self.apply_batched_transition_counters(peer, &inventory);
-            let mut current = HashSet::new();
-            if let Some(group) = self.group_ribs.get(&destination) {
-                super::extend_policy_filtered_routes_with_readiness(
-                    &mut current,
-                    group
-                        .policy_filtered_for_member_with_checkpoint(
-                            peer,
-                            &filtered_scope,
-                            &mut || checkpoint(),
-                        )
-                        .into_iter(),
-                    &readiness,
-                );
+            if restamp {
+                let mut current = HashSet::new();
+                if let Some(group) = self.group_ribs.get(&destination) {
+                    super::extend_policy_filtered_routes_with_readiness(
+                        &mut current,
+                        group
+                            .policy_filtered_for_member_with_checkpoint(
+                                peer,
+                                &filtered_scope,
+                                &mut || checkpoint(),
+                            )
+                            .into_iter(),
+                        &readiness,
+                    );
+                }
+                self.update_policy_filtered_routes_for_prefixes(peer, &filtered_scope, &current);
+                super::retire_policy_filtered_routes_with_readiness(&mut current, &readiness);
             }
-            self.update_policy_filtered_routes_for_prefixes(peer, &filtered_scope, &current);
-            super::retire_policy_filtered_routes_with_readiness(&mut current, &readiness);
-            receipt.filtered_scope_member_visits += filtered_scope.len();
+            receipt.filtered_scope_member_visits += scope_len;
             let advertised = self
                 .grouped_advertised_unicast_lens(peer)
                 .unwrap_or_default();

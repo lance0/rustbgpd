@@ -2259,6 +2259,10 @@ impl GroupRibOut {
                 .is_none_or(|paths| paths.len() <= limit)
     }
 
+    pub(in crate::manager) fn has_policy_filtered_routes(&self) -> bool {
+        !self.policy_filtered.is_empty()
+    }
+
     /// Whether any group denial falls in `prefixes`, walking the smaller side.
     pub(in crate::manager) fn has_policy_filtered_in(&self, prefixes: &HashSet<Prefix>) -> bool {
         if prefixes.len() <= self.policy_filtered.len() {

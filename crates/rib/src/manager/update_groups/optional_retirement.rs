@@ -412,7 +412,7 @@ mod tests {
         let (old, new) = groups_with_late_action_change(winners, rows);
         let label = Arc::downgrade(new.permit_policy_label.as_ref().unwrap());
         let mut scratch =
-            RibManager::batched_transition_inventory(&old, &new, &[], true, &mut |_| {})
+            RibManager::batched_transition_inventory(&old, &new, &[], true, |_| {}, &mut |_| {})
                 .err()
                 .flatten()
                 .expect("the last action-only row refuses");
