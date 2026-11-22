@@ -46,6 +46,16 @@ impl RibManager {
         key: ExactExportKey,
         rejected: bool,
     ) {
+        self.set_exact_export_rejection_with_view(peer, key, rejected, None);
+    }
+
+    pub(in crate::manager) fn set_exact_export_rejection_with_view(
+        &mut self,
+        peer: PeerId,
+        key: ExactExportKey,
+        rejected: bool,
+        staged_unicast: Option<(usize, bool)>,
+    ) {
         if rejected {
             if self
                 .peer_unexportable
@@ -54,14 +64,14 @@ impl RibManager {
             {
                 return;
             }
-            self.adjust_group_rejection(peer, &key, true);
+            self.adjust_group_rejection(peer, &key, true, staged_unicast);
             self.unicast_release.rejections.record(peer, &key, true);
             self.peer_unexportable.entry(peer).or_default().insert(key);
         } else if let Some(keys) = self.peer_unexportable.get_mut(&peer)
             && keys.remove(&key)
         {
             let empty = keys.is_empty();
-            self.adjust_group_rejection(peer, &key, false);
+            self.adjust_group_rejection(peer, &key, false, staged_unicast);
             self.unicast_release.rejections.record(peer, &key, false);
             if empty {
                 self.peer_unexportable.remove(&peer);
@@ -84,19 +94,33 @@ impl RibManager {
         peer: PeerId,
         key: &ExactExportKey,
         added: bool,
+        staged_unicast: Option<(usize, bool)>,
     ) {
-        let Some(gid) = self.grouped_member_of(peer) else {
+        let Some(gid) = staged_unicast
+            .map(|(gid, _)| gid)
+            .or_else(|| self.grouped_member_of(peer))
+        else {
             return;
         };
         let rs_control = self.rs_control_context(peer);
         let Some(group) = self.group_ribs.get_mut(&gid) else {
             return;
         };
-        let empty = RtcMembership::default();
-        let filter = group
-            .rtc_negotiated()
-            .then(|| self.peer_rt_membership.get(&peer).unwrap_or(&empty));
-        let slot = group.visible_rejected_slot(peer, key, rs_control, filter);
+        let slot = if let (Some((_, visible)), ExactExportKey::Unicast(prefix, _)) =
+            (staged_unicast, key)
+        {
+            visible.then(|| GroupRibOut::count_slot(prefix))
+        } else {
+            let empty = RtcMembership::default();
+            let filter = group
+                .rtc_negotiated()
+                .then(|| self.peer_rt_membership.get(&peer).unwrap_or(&empty));
+            #[cfg(test)]
+            if matches!(key, ExactExportKey::Unicast(..)) {
+                crate::manager::source_departure::inspect_receiver_row();
+            }
+            group.visible_rejected_slot(peer, key, rs_control, filter)
+        };
         if added {
             let counts = group.visible_rejections.entry(peer).or_default();
             if let Some(slot) = slot {

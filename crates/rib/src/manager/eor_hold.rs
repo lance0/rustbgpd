@@ -57,12 +57,15 @@ pub(super) enum EorHold {
     Resync,
     /// The family owes keys that must be absorbed ahead of the marker.
     OwedKeys,
+    /// A source departure still owns changes in this family, or this marker
+    /// is queued for its bounded release after the departure.
+    SourceDeparture,
     /// The writer refused the marker; the next offer is a resync or a tick.
     Writer,
 }
 
 impl EorHold {
-    pub(super) const ALL: [Self; 8] = [
+    pub(super) const ALL: [Self; 9] = [
         Self::Selection,
         Self::RtMembership,
         Self::Grace,
@@ -70,26 +73,31 @@ impl EorHold {
         Self::EvpnFeed,
         Self::Resync,
         Self::OwedKeys,
+        Self::SourceDeparture,
         Self::Writer,
     ];
 
-    const fn bit(self) -> u8 {
-        1 << self as u8
+    const fn bit(self) -> u16 {
+        1 << self as u16
     }
 }
 
 /// A set of [`EorHold`] reasons.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
-pub(super) struct HoldSet(u8);
+pub(super) struct HoldSet(u16);
 
 impl HoldSet {
     pub(super) const EMPTY: Self = Self(0);
-    const ALL: Self = Self(u8::MAX);
+    const ALL: Self = Self(u16::MAX);
     /// The holds that withhold a marker until something outside this
     /// peer's own outbound data happens. A helper's stale carry and the
     /// initial dump ask for these only.
-    pub(super) const WITHHELD: Self =
-        Self(EorHold::Selection.bit() | EorHold::RtMembership.bit() | EorHold::Grace.bit());
+    pub(super) const WITHHELD: Self = Self(
+        EorHold::Selection.bit()
+            | EorHold::RtMembership.bit()
+            | EorHold::Grace.bit()
+            | EorHold::SourceDeparture.bit(),
+    );
     /// The reasons an admitted resync envelope satisfies for the markers it
     /// carries: it is the resync, it covers the owed keys, it has a writer
     /// slot, and its own seal settles the EVPN feed.
@@ -204,6 +212,9 @@ pub(super) struct EorObligations {
     /// Peers whose ordinary marker debt is runnable.
     /// Debt and hold ownership stay in their original records.
     retry: BTreeSet<PeerId>,
+    /// Markers whose peer was visited while departure owned its family.
+    /// The terminal and subsequent marker ticks release a bounded page each.
+    departure_waiters: BTreeMap<PeerId, smallvec::SmallVec<[(Afi, Safi); 2]>>,
     /// Complete receipts eligible for a retry, or parked behind EVPN selection.
     /// Arming the gate hides this entire ring; its one release takes the set.
     evpn_receipts: BTreeSet<PeerId>,
@@ -382,6 +393,12 @@ impl EorObligations {
     }
 
     fn discharge(&mut self, peer: PeerId, family: (Afi, Safi)) {
+        if let Some(waiters) = self.departure_waiters.get_mut(&peer) {
+            waiters.retain(|queued| *queued != family);
+            if waiters.is_empty() {
+                self.departure_waiters.remove(&peer);
+            }
+        }
         if let Some(peers) = self.selection_peers.get_mut(&family) {
             peers.remove(&peer);
             if peers.is_empty() {
@@ -403,6 +420,16 @@ impl RibManager {
     fn eor_hold_applies(&self, peer: PeerId, family: (Afi, Safi), hold: EorHold) -> bool {
         match hold {
             EorHold::Selection => self.selection_peer_convergence_held(peer, family),
+            EorHold::SourceDeparture => {
+                self.source_departure
+                    .as_ref()
+                    .is_some_and(|work| work.holds_family(family))
+                    || self
+                        .eor
+                        .departure_waiters
+                        .get(&peer)
+                        .is_some_and(|queued| queued.contains(&family))
+            }
             EorHold::RtMembership => {
                 self.eor.rt_membership_held(peer) && Self::rtc_gated_family(family)
             }
@@ -601,6 +628,7 @@ impl RibManager {
     /// The session of `peer` ended: its markers and holds go with it.
     pub(super) fn forget_eor(&mut self, peer: PeerId) {
         self.eor.owed.remove(&peer);
+        self.eor.departure_waiters.remove(&peer);
         self.eor.selection_peers.retain(|_, peers| {
             peers.remove(&peer);
             !peers.is_empty()
@@ -645,6 +673,7 @@ impl RibManager {
                 );
             }
             EorHold::Selection
+            | EorHold::SourceDeparture
             | EorHold::Grace
             | EorHold::EvpnFeed
             | EorHold::Resync
@@ -1078,6 +1107,18 @@ impl RibManager {
     /// Update the scheduling hint after an owner changes. A later offer rechecks
     /// the live session, holds and feed receipt before sending anything.
     pub(super) fn refresh_eor_retry(&mut self, peer: PeerId) {
+        if let Some(work) = &self.source_departure
+            && let Some(owed) = self.eor.owed.get(&peer)
+        {
+            for &(family, _) in owed {
+                if work.holds_family(family) {
+                    let waiters = self.eor.departure_waiters.entry(peer).or_default();
+                    if !waiters.contains(&family) {
+                        waiters.push(family);
+                    }
+                }
+            }
+        }
         let owes_receipt = self.evpn_feed_receipt_count != 0
             && self.evpn_feed_owed_markers(peer) != (false, false);
         if !owes_receipt {
@@ -1108,6 +1149,31 @@ impl RibManager {
         !self.eor.releasing.is_empty()
             || self.released_rt_membership_pending()
             || self.released_evpn_markers_pending()
+            || (self.source_departure.is_none() && !self.eor.departure_waiters.is_empty())
+    }
+
+    /// The cursor has published its final data page. Reoffer a bounded page
+    /// now, leaving the rest under their hold for the existing release timer.
+    pub(super) fn finish_source_departure_markers(&mut self) {
+        debug_assert!(self.source_departure.is_none());
+        self.service_departure_markers(RESYNC_PEERS_PER_TICK);
+    }
+
+    fn service_departure_markers(&mut self, budget: usize) -> usize {
+        if self.source_departure.is_some() {
+            return 0;
+        }
+        let mut spent = 0;
+        while spent < budget {
+            let Some((peer, families)) = self.eor.departure_waiters.pop_first() else {
+                break;
+            };
+            spent += 1;
+            #[cfg(test)]
+            self.observe_marker_candidate();
+            self.settle_eor_as(peer, Some(&families), Offer::Release, None, true);
+        }
+        spent
     }
 
     fn released_evpn_markers_pending(&self) -> bool {
@@ -1165,7 +1231,9 @@ impl RibManager {
         // One membership completion can settle several families for the peer and
         // run their replay completion hooks. Keep this cap even on an RTC-only tick.
         let rtc = self.service_released_rt_membership(budget.min(RESYNC_PEERS_PER_TICK / 4));
-        let remaining = budget - rtc;
+        // Share the receiver budget with earlier releases while departures drain.
+        let departure = self.service_departure_markers((budget - rtc).div_ceil(2));
+        let remaining = budget - rtc - departure;
         // Known cost: while any released receipt waits, an earlier family's
         // release runs at half rate. That includes one visit for each waiter
         // still queued behind its own EVPN release, which sends nothing here.

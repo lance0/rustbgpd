@@ -9100,6 +9100,7 @@ fn distribution_skips_closed_receivers_before_peer_down() {
                 peer: peer_v4(source),
                 session_id: 0,
             });
+            drain_source_departure(&mut manager);
             let update = healthy_rx.try_recv().map(delivered).unwrap();
             assert_eq!(update.unicast_withdrawals().count(), 4);
             assert_eq!(
@@ -12778,10 +12779,18 @@ async fn peer_retirement_readiness(kind: PeerRetirement, outer_age: Option<Durat
     let live_attrs = if matches!(kind, PeerRetirement::Attributes) {
         let survivor = Ipv4Addr::new(192, 0, 2, 2);
         register_test_peer(&mut manager, peer_v4(survivor), 0);
-        let route = make_route(
+        let mut route = make_route(
             Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 1), 32),
             survivor,
         );
+        // One set also belongs to a departed route. Retain the exact
+        // interned identity while the other 127 sets lose their last owner.
+        route.attributes = manager.ribs[&source_peer]
+            .iter()
+            .next()
+            .unwrap()
+            .attributes
+            .clone();
         manager.handle_update(received(peer_v4(survivor), vec![route]));
         while manager.process_next_route_chunk() {}
         assert_eq!(output.try_recv().map(delivered).unwrap().announce.len(), 1);
@@ -12816,6 +12825,15 @@ async fn peer_retirement_readiness(kind: PeerRetirement, outer_age: Option<Durat
     };
     assert_eq!(attrs.len(), 128);
     let retired_attrs = attrs.clone();
+    if let Some(live) = &live_attrs {
+        assert_eq!(
+            retired_attrs
+                .iter()
+                .filter(|attr| attr.ptr_eq(live))
+                .count(),
+            1
+        );
+    }
     let departing = if matches!(kind, PeerRetirement::PrivateEvpn | PeerRetirement::Regroup) {
         peer
     } else {
@@ -12883,6 +12901,15 @@ async fn peer_retirement_readiness(kind: PeerRetirement, outer_age: Option<Durat
                 peer: departing,
                 session_id: 0,
             });
+            if matches!(kind, PeerRetirement::Attributes) {
+                assert!(
+                    manager.source_departure.is_some(),
+                    "expected deferred export retirement"
+                );
+            }
+            while manager.source_departure.is_some() {
+                manager.advance_source_departure();
+            }
         };
         if let Some(age) = outer_age {
             super::super::with_executor_handoff(|| {
@@ -12955,31 +12982,31 @@ async fn peer_retirement_readiness(kind: PeerRetirement, outer_age: Option<Durat
     };
     let mut manager = actor.await.unwrap();
     if departing == source_peer {
-        let withdrawn = output.try_recv().map(delivered).unwrap();
-        assert_eq!(
-            (
-                withdrawn.unicast_withdrawals().count(),
-                withdrawn.vpn_withdraw.len()
-            ),
-            if vpn { (0, 128) } else { (128, 0) }
-        );
-        assert!(withdrawn.announce.is_empty() && withdrawn.vpn_announce.is_empty());
-        let withdrawn_keys: HashSet<_> = withdrawn
-            .unicast_withdrawals()
-            .map(|&(prefix, path_id)| crate::update::ExactExportKey::Unicast(prefix, path_id))
-            .chain(
-                withdrawn
-                    .vpn_withdraw
-                    .iter()
-                    .cloned()
-                    .map(crate::update::ExactExportKey::Vpn),
-            )
-            .collect();
+        let mut withdrawn_keys = HashSet::new();
+        while let Ok(withdrawn) = output.try_recv().map(delivered) {
+            assert!(withdrawn.announce.is_empty() && withdrawn.vpn_announce.is_empty());
+            assert!(withdrawn.end_of_rib.is_empty() && withdrawn.refresh_markers.is_empty());
+            for key in withdrawn
+                .unicast_withdrawals()
+                .map(|&(prefix, path_id)| crate::update::ExactExportKey::Unicast(prefix, path_id))
+                .chain(
+                    withdrawn
+                        .vpn_withdraw
+                        .iter()
+                        .cloned()
+                        .map(crate::update::ExactExportKey::Vpn),
+                )
+            {
+                assert!(withdrawn_keys.insert(key), "duplicate withdrawal");
+            }
+        }
         assert_eq!(withdrawn_keys, expected_keys);
-        assert!(withdrawn.end_of_rib.is_empty() && withdrawn.refresh_markers.is_empty());
         assert!(!manager.ribs.contains_key(&departing));
         assert!(
-            retired_attrs.iter().all(|attrs| attrs.strong_count() == 0),
+            retired_attrs
+                .iter()
+                .filter(|attrs| live_attrs.as_ref().is_none_or(|live| !attrs.ptr_eq(live)))
+                .all(|attrs| attrs.strong_count() == 0),
             "the detached source and following GC must release every obsolete attribute"
         );
     } else {

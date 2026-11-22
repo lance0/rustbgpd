@@ -218,6 +218,7 @@ fn peer_down_burst(size: usize) -> Work {
                 peer: member(source),
                 session_id: 1,
             });
+            drain_source_departure(&mut manager);
         }
     });
     // The k-th down withdraws from every member still up but the source.
@@ -225,6 +226,10 @@ fn peer_down_burst(size: usize) -> Work {
         .map(|down| ROUTES * size * (size - 1 - down))
         .sum();
     assert_eq!(drain(&mut receivers), (0, expected), "size {size}");
+    eprintln!(
+        "source departure burst: {size} members, {expected} withdrawals, {} checkpoints",
+        work[ALL]
+    );
     work
 }
 

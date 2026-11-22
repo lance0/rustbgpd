@@ -49,6 +49,11 @@ impl RibManager {
         let mut counters = std::mem::take(&mut group.visible_rejections);
         let empty = super::super::RtcMembership::default();
         let rtc = group.rtc_negotiated();
+        let checkpoint = || {
+            #[cfg(test)]
+            crate::manager::source_departure::inspect_receiver_row();
+            replacement_readiness_checkpoint(&self.replacement_readiness, false);
+        };
         let adjust = |peer: PeerId, counts: &mut [usize; 4]| {
             let Some(rejected) = self.peer_unexportable.get(&peer) else {
                 return;
@@ -67,14 +72,14 @@ impl RibManager {
             // HashSet iteration visits capacity even after withdrawals.
             if rejected.capacity() < keys.len() {
                 for key in rejected {
-                    replacement_readiness_checkpoint(&self.replacement_readiness, false);
+                    checkpoint();
                     if in_scope(key) {
                         adjust_key(key);
                     }
                 }
             } else {
                 for key in keys.clone() {
-                    replacement_readiness_checkpoint(&self.replacement_readiness, false);
+                    checkpoint();
                     if rejected.contains(&key) {
                         adjust_key(&key);
                     }
@@ -95,7 +100,7 @@ impl RibManager {
         group.visible_rejections = counters;
     }
 
-    fn adjust_staged_unicast_rejections<S: std::hash::BuildHasher>(
+    pub(in crate::manager) fn adjust_staged_unicast_rejections<S: std::hash::BuildHasher>(
         &mut self,
         gid: usize,
         members: Option<&[PeerId]>,
@@ -109,20 +114,6 @@ impl RibManager {
             |key| matches!(key, ExactExportKey::Unicast(prefix, 0) if prefixes.contains(prefix)),
             add,
         );
-    }
-
-    pub(in crate::manager) fn adjust_release_group_counts(
-        &mut self,
-        gid: usize,
-        members: &[PeerId],
-        prefixes: &HashSet<Prefix>,
-        add: bool,
-    ) {
-        self.adjust_staged_unicast_rejections(gid, Some(members), prefixes, add);
-        let group = Self::staged_group_mut(&mut self.group_ribs, gid);
-        if group.has_rs_members() {
-            group.adjust_release_rs_members(members, prefixes, if add { 1 } else { -1 });
-        }
     }
 
     /// Run the shared staging pass for every live group over the pass's
@@ -1025,7 +1016,7 @@ impl RibManager {
 }
 
 impl GroupRibOut {
-    pub(in crate::manager) fn needs_release_count_adjustment(&self) -> bool {
-        self.has_rs_members() || !self.visible_rejections.is_empty()
+    pub(in crate::manager) fn has_member_rejections(&self) -> bool {
+        !self.visible_rejections.is_empty()
     }
 }

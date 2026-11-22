@@ -247,7 +247,8 @@ impl RibManager {
             }
             SessionTeardownDisposition::NoRegistration
             | SessionTeardownDisposition::TeardownActive => {
-                self.peer_down_teardown(peer);
+                let ordinary = !self.in_graceful_restart(peer);
+                self.peer_down_teardown_inner(peer, ordinary);
             }
         }
         if !matches!(disposition, SessionTeardownDisposition::DiscardStale) {
@@ -649,6 +650,10 @@ impl RibManager {
     /// peer deletion (config removed the neighbor) and GR/LLGR retention
     /// expiry (the peer never came back).
     pub(super) fn peer_down_teardown(&mut self, peer: PeerId) {
+        self.peer_down_teardown_inner(peer, false);
+    }
+
+    fn peer_down_teardown_inner(&mut self, peer: PeerId, pace_departure: bool) {
         // Full teardown drops every live-session record with the
         // registration — any session event arriving for the address
         // afterwards is classified against an empty state (accept-all
@@ -694,7 +699,7 @@ impl RibManager {
             self.publish_gr_stale_routes(successor);
         }
 
-        self.clear_peer_adj_rib_in(peer, successor);
+        self.clear_peer_adj_rib_in_inner(peer, successor, pace_departure);
 
         self.clear_outbound_peer_state(peer);
         self.peer_asn.remove(&peer);
@@ -708,11 +713,20 @@ impl RibManager {
     /// replacement-`PeerUp` session reset (a new session for an address
     /// whose previous session was never torn down must not inherit its
     /// predecessor's received routes).
+    fn clear_peer_adj_rib_in(&mut self, peer: PeerId, successor: Option<PeerId>) {
+        self.clear_peer_adj_rib_in_inner(peer, successor, false);
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "peer teardown keeps recomputation and exact-identity consumers before the detached retirement and following attribute GC"
     )]
-    fn clear_peer_adj_rib_in(&mut self, peer: PeerId, successor: Option<PeerId>) {
+    fn clear_peer_adj_rib_in_inner(
+        &mut self,
+        peer: PeerId,
+        successor: Option<PeerId>,
+        pace_departure: bool,
+    ) {
         // The discarded routes no longer back any session's End-of-RIB; only
         // a later marker on the replayed feed may report it synced again.
         for record in self.live_sessions.get_mut(&peer).into_iter().flatten() {
@@ -810,9 +824,19 @@ impl RibManager {
                 flowspec,
             );
             let mut changed = manager.recompute_best(&affected);
-            manager.distribute_changes(&changed, &affected);
-            if !fs_affected.is_empty() {
-                manager.recompute_and_distribute_flowspec(&fs_affected);
+            if pace_departure && manager.large_source_departure(affected.len() + fs_affected.len())
+            {
+                manager.start_source_departure(
+                    peer,
+                    std::mem::take(&mut affected),
+                    std::mem::take(&mut changed),
+                    &fs_affected,
+                );
+            } else {
+                manager.distribute_changes(&changed, &affected);
+                if !fs_affected.is_empty() {
+                    manager.recompute_and_distribute_flowspec(&fs_affected);
+                }
             }
             if !evpn_affected.is_empty() {
                 manager.recompute_and_distribute_evpn(&evpn_affected);
@@ -848,49 +872,53 @@ impl RibManager {
                     false,
                 );
             };
-            manager.retire_exact_export_rejections(
-                rib.iter_slots()
-                    .inspect(|slot| {
-                        if slot.is_none() {
-                            vacancy();
-                        }
-                    })
-                    .flatten()
-                    .map(|route| ExactExportKey::Unicast(route.prefix, route.path_id))
-                    .chain(
-                        rib.iter_flowspec()
-                            .map(|route| ExactExportKey::FlowSpec(route.selection_key())),
-                    )
-                    .chain(
-                        rib.iter_evpn()
-                            .map(|route| ExactExportKey::Evpn(route.key())),
-                    )
-                    .chain(
-                        rib.iter_bgpls()
-                            .map(|route| ExactExportKey::BgpLs(route.key())),
-                    )
-                    .chain(
-                        rib.iter_vpn_slots()
-                            .inspect(|slot| {
-                                if slot.is_none() {
-                                    vacancy();
-                                }
-                            })
-                            .flatten()
-                            .map(|route| ExactExportKey::Vpn(route.key())),
-                    )
-                    .chain(
-                        rib.iter_labeled_slots()
-                            .inspect(|slot| {
-                                if slot.is_none() {
-                                    vacancy();
-                                }
-                            })
-                            .flatten()
-                            .map(|route| ExactExportKey::Labeled(route.key())),
-                    )
-                    .chain(rib.iter_rtc().map(|route| ExactExportKey::Rtc(route.key()))),
-            );
+            // Until the matching outbound page has compared its old state, a
+            // rejected-only identity still suppresses a wire withdrawal.
+            if manager.source_departure.is_none() {
+                manager.retire_exact_export_rejections(
+                    rib.iter_slots()
+                        .inspect(|slot| {
+                            if slot.is_none() {
+                                vacancy();
+                            }
+                        })
+                        .flatten()
+                        .map(|route| ExactExportKey::Unicast(route.prefix, route.path_id))
+                        .chain(
+                            rib.iter_flowspec()
+                                .map(|route| ExactExportKey::FlowSpec(route.selection_key())),
+                        )
+                        .chain(
+                            rib.iter_evpn()
+                                .map(|route| ExactExportKey::Evpn(route.key())),
+                        )
+                        .chain(
+                            rib.iter_bgpls()
+                                .map(|route| ExactExportKey::BgpLs(route.key())),
+                        )
+                        .chain(
+                            rib.iter_vpn_slots()
+                                .inspect(|slot| {
+                                    if slot.is_none() {
+                                        vacancy();
+                                    }
+                                })
+                                .flatten()
+                                .map(|route| ExactExportKey::Vpn(route.key())),
+                        )
+                        .chain(
+                            rib.iter_labeled_slots()
+                                .inspect(|slot| {
+                                    if slot.is_none() {
+                                        vacancy();
+                                    }
+                                })
+                                .flatten()
+                                .map(|route| ExactExportKey::Labeled(route.key())),
+                        )
+                        .chain(rib.iter_rtc().map(|route| ExactExportKey::Rtc(route.key()))),
+                );
+            }
             let mut retire = || {
                 super::replacement_readiness_checkpoint_at(
                     &readiness,
@@ -907,11 +935,8 @@ impl RibManager {
             super::retire_hash_set(&mut labeled_affected, &mut retire);
             super::retire_hash_set(&mut rtc_affected, &mut retire);
         });
-        // The removed Adj-RIB-In held the peer's route bodies; dropping it
-        // releases their attribute Arcs. Sweep the global intern table now
-        // (after the recomputes above dropped any Loc-RIB selected-route
-        // clones) so a departed peer cannot leave stranded attribute sets —
-        // the reclaim the per-peer tables used to get for free on drop.
+        // Retire the detached inputs now. A paced departure's staged outputs
+        // still own attribute Arcs until its last delivery page completes.
         #[cfg(feature = "bench-internals")]
         let retirement = super::bench_support::retirement_begin(|| {
             (
@@ -947,25 +972,35 @@ impl RibManager {
                 }
                 #[cfg(feature = "bench-internals")]
                 super::bench_support::retirement_end(1, retirement);
-                #[cfg(test)]
-                if let Some(observer) = &observer {
-                    observer("peer_attribute_gc_before");
-                }
-                manager.gc_attr_intern_with_checkpoint(
-                    &mut crate::adj_rib_out::ClassifiedCheckpoint(|progress| {
-                        super::replacement_readiness_cleanup_checkpoint(
-                            &readiness,
-                            "peer_attribute_gc",
-                            progress,
-                        );
-                    }),
-                );
-                #[cfg(test)]
-                if let Some(observer) = &observer {
-                    observer("peer_attribute_gc_after");
+                if manager.source_departure.is_none() {
+                    manager.finish_peer_attribute_gc();
                 }
             });
         });
+    }
+
+    /// Reclaim dead interned sets after the peer's last export stage retires.
+    pub(super) fn finish_peer_attribute_gc(&mut self) {
+        let readiness = self.replacement_readiness.clone();
+        #[cfg(test)]
+        let observer = self.replacement_readiness_test_hook.clone();
+        #[cfg(test)]
+        if let Some(observer) = &observer {
+            observer("peer_attribute_gc_before");
+        }
+        self.gc_attr_intern_with_checkpoint(&mut crate::adj_rib_out::ClassifiedCheckpoint(
+            |progress| {
+                super::replacement_readiness_cleanup_checkpoint(
+                    &readiness,
+                    "peer_attribute_gc",
+                    progress,
+                );
+            },
+        ));
+        #[cfg(test)]
+        if let Some(observer) = &observer {
+            observer("peer_attribute_gc_after");
+        }
     }
 
     /// Handle a peer *deletion* (the neighbor was removed from the
@@ -1426,6 +1461,17 @@ impl RibManager {
         self.flush_ready_helper_stale_exempt(&ready, changed);
     }
 
+    /// Leave the carry for the helper retry. Looking up a changed prefix
+    /// never enumerates the other paths that an Add-Path session retained.
+    pub(super) fn flush_departure_helper_stale(&mut self, peer: PeerId, changed: &HashSet<Prefix>) {
+        if let Some(carried) = self.helper_stale_exempt.get_mut(&peer)
+            && carried.settled
+            && touches_changed(&carried.keys, changed)
+        {
+            carried.settled = false;
+        }
+    }
+
     /// A selection marker feed changes only this receiver's admission state.
     /// Its resync can unblock stale withdrawals before the release continues.
     pub(super) fn flush_peer_helper_stale_exempt(&mut self, peer: PeerId) {
@@ -1436,6 +1482,12 @@ impl RibManager {
 
     fn flush_ready_helper_stale_exempt(&mut self, peers: &[PeerId], changed: &HashSet<Prefix>) {
         for &peer in peers {
+            // An independent UPDATE can apply between departure batches.
+            // It must retain any touched carry for the same retry.
+            if self.source_departure.is_some() {
+                self.flush_departure_helper_stale(peer, changed);
+                continue;
+            }
             if self.helper_stale_flush_refused(peer, changed) {
                 continue;
             }

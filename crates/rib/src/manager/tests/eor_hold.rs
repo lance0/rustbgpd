@@ -178,7 +178,9 @@ fn release(manager: &mut RibManager, reason: EorHold) {
             manager.dirty_peers.remove(&TARGET);
             manager.resync_settles_eor(TARGET, None);
         }
-        EorHold::EvpnFeed | EorHold::OwedKeys | EorHold::Writer => unreachable!(),
+        EorHold::SourceDeparture | EorHold::EvpnFeed | EorHold::OwedKeys | EorHold::Writer => {
+            unreachable!()
+        }
     }
 }
 
