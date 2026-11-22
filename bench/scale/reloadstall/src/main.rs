@@ -5880,6 +5880,15 @@ fn main() {
             // to self-pace the whole window).
             tokio::time::sleep(Duration::from_secs(cycle_quiesce_secs)).await;
             if is_trip_slot(r, trip_every) {
+                // The trip resets survivor trackers. Disarm, then fail on
+                // anything this cycle latched after its last check.
+                let changed = &ctx.obs[..changed_peers as usize];
+                for observer in changed {
+                    observer.expected_community.store(0, Ordering::Release);
+                }
+                if let Some(error) = latched_pair_error(changed, r) {
+                    exit_after_actor_rows(None, run_actor_max_us, Some(error)).await;
+                }
                 // This reload's actor row is already printed; a trip-cycle
                 // failure exits inside `run_trip_cycle` without the run row,
                 // which only the soak (never a sweep) runs.
@@ -7308,6 +7317,12 @@ mod tests {
         assert!(check < source.find(&reset).unwrap());
         let exit = ["exit_on_latched_pair_error(", "&ctx.obs"].concat();
         assert_eq!(source.matches(&exit).count(), 2);
+        // A trip re-arms survivors through `reset`, so its check comes first.
+        let trip = ["latched_pair_error(changed, ", "r)"].concat();
+        let trip = source.find(&trip).unwrap();
+        let call = ["run_trip_", "cycle(\n                    &ctx"].concat();
+        let call = source.find(&call).unwrap();
+        assert!(trip < call && call - trip < 800);
     }
 
     #[test]
