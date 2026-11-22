@@ -330,6 +330,10 @@ struct AdjRibOutCommitStats {
     /// VPN passes that logged their RD/prefix keys for the cursors.
     #[cfg(test)]
     owed_vpn_logs: usize,
+    /// Cursor steps that sized the receiver's table for the rest of the
+    /// walk (an estimate made; the reserve may find room already).
+    #[cfg(test)]
+    walk_presizes: usize,
     /// Distinct keys collected into per-peer VPN resync enumerations.
     #[cfg(test)]
     vpn_resync_key_inserts: usize,

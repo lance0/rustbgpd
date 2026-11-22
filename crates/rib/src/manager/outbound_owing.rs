@@ -262,6 +262,126 @@ const TRIM_ROWS: usize = 4 * CHUNK_ROWS;
 /// cursor is resynced instead ([`RibManager::cap_owed_rows`]).
 const OWED_ROWS_SLACK: usize = 4 * CHUNK_ROWS;
 
+/// Most rows a receiver's VPN, labeled or EVPN table may hold for a cursor
+/// step to size it for the rest of the walk
+/// ([`RibManager::presize_walk_table`]): that one rebuild moves at most
+/// these index entries. An EVPN table's slab may also move its first
+/// segment once, at most 8,192 slots (holes included), as any EVPN insert
+/// that grows that segment does.
+const PRESIZE_ROWS: usize = 2 * CHUNK_ROWS;
+
+/// Keys of one AFI's list a cursor walk must have read before the rows
+/// that AFI's table holds give its acceptance rate. Read in alternating
+/// steps of at most [`CHUNK_ROWS`] keys, two AFIs that accept every key
+/// both pass this count at no more than [`CHUNK_ROWS`] keys each, so the
+/// table still holds at most [`PRESIZE_ROWS`] rows when both are read.
+const PRESIZE_SAMPLE_KEYS: usize = CHUNK_ROWS / 2;
+
+/// Rows one AFI's walk must have added to the table for its rate to
+/// count: the rate of a sample with this many accepted rows is within
+/// about 6% (one standard error), however few keys the receiver accepts.
+/// An AFI that has not reached it adds nothing to the estimate.
+const PRESIZE_SAMPLE_ROWS: usize = CHUNK_ROWS / 4;
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: while set, no cursor step on this thread presizes (the
+    /// control a presized table is compared with).
+    pub(super) static PRESIZE_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// How far one AFI of a receiver's cursor walk has read, for the presize
+/// estimate ([`RibManager::presize_walk_table`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WalkSample {
+    /// No live cursor, or nothing ahead of it: adds nothing to the
+    /// estimate and does not hold it back.
+    Done,
+    /// Fewer than [`PRESIZE_SAMPLE_KEYS`] keys read: the estimate waits.
+    Unread,
+    /// Enough keys read, too few rows committed for a rate: adds nothing.
+    Sparse,
+    /// `rows` committed over `slots` list positions passed, `ahead`
+    /// positions still to pass.
+    Sampled {
+        rows: usize,
+        slots: usize,
+        ahead: usize,
+    },
+}
+
+impl WalkSample {
+    /// The AFI's walk has committed `rows` to the table in its own cursor
+    /// steps ([`PeerOwing::walk_rows`]), which read `read` keys
+    /// ([`PeerOwing::walk_read`]) over `slots` list positions
+    /// ([`PeerOwing::walk_slots`]); its Loc-RIB holds `keys`; `entries`
+    /// positions of its starting log are ahead of its live cursor, if any
+    /// (none for a cursor without one). The counts come from the cursor
+    /// steps alone, so rows that reach the table any other way (held
+    /// before the walk, staged from the receiver's own set, withdrawn)
+    /// never count as rows the walk read keys for. The rate is per
+    /// position, holes included, because the positions ahead are what it
+    /// multiplies. A key logged again after the starting log leaves a hole
+    /// there, but it also moves the list head, and the walk then makes no
+    /// estimate (`entries` is zero): the keys it moved may be the ones the
+    /// receiver now denies, or now accepts, after the rows were counted.
+    /// The positions ahead are also at most the Loc-RIB's keys not yet read
+    /// (a key read twice understates them).
+    /// `slots` is at least `read` (each key read holds its own position),
+    /// so this estimate is never above one per key read. Keys logged after
+    /// the starting log are not counted: the list is in arrival order
+    /// across passes, so its first keys are a sample of no later pass.
+    fn of(rows: usize, read: usize, slots: usize, keys: usize, entries: Option<u64>) -> Self {
+        let Some(entries) = entries else {
+            return Self::Done;
+        };
+        let unread = keys.saturating_sub(read);
+        let ahead = usize::try_from(entries).map_or(unread, |entries| entries.min(unread));
+        if ahead == 0 {
+            Self::Done
+        } else if read < PRESIZE_SAMPLE_KEYS {
+            Self::Unread
+        } else if rows < PRESIZE_SAMPLE_ROWS {
+            Self::Sparse
+        } else {
+            Self::Sampled {
+                rows,
+                slots: slots.max(read),
+                ahead,
+            }
+        }
+    }
+
+    fn sampled(self) -> bool {
+        matches!(self, Self::Sampled { .. })
+    }
+
+    /// This AFI's rows per list position passed, times its positions ahead.
+    fn rate_ahead(self) -> usize {
+        match self {
+            Self::Sampled { rows, slots, ahead } => rows.saturating_mul(ahead) / slots,
+            _ => 0,
+        }
+    }
+
+    /// Rows still to come: [`Self::rate_ahead`], never more than one row a
+    /// key. An Add-Path receiver's paths per key vary along the list: a key
+    /// whose paths change moves to its back, leaving a hole that the keys
+    /// ahead still count. So the estimate takes at most one row a key, and
+    /// the steps grow the table past it.
+    fn rows_ahead(self) -> usize {
+        match self {
+            Self::Sampled { ahead, .. } => self.rate_ahead().min(ahead),
+            _ => 0,
+        }
+    }
+
+    /// Every AFI of the table read, and at least one with a rate.
+    fn complete(samples: [Self; 2]) -> bool {
+        !samples.contains(&Self::Unread) && samples.iter().any(|sample| sample.sampled())
+    }
+}
+
 /// The keys of one cursor family (a unicast or labeled AFI, or EVPN) that passes
 /// carried while some receiver owed
 /// the family whole, in the order they last changed: a key that changes
@@ -296,6 +416,10 @@ pub(super) struct OwedRows<K> {
     /// and only fresh keys rotating past a receiver that falls behind do.
     /// Zero again once the list is freed.
     peak: usize,
+    /// Receivers whose cursor [`RibManager::owe_whole_family`] started at
+    /// this position and whose starting log is still to be written
+    /// ([`RibManager::seal_walk_starts`]).
+    starting: Vec<(PeerId, u64)>,
     /// Most entries one `touch` or `trim` has dropped.
     #[cfg(test)]
     pub(super) dropped_max: usize,
@@ -310,6 +434,7 @@ impl<K> Default for OwedRows<K> {
             release_open: false,
             floor: 0,
             peak: 0,
+            starting: Vec::new(),
             #[cfg(test)]
             dropped_max: 0,
         }
@@ -719,6 +844,40 @@ pub(super) struct PeerOwing {
     /// `cursor` does not move in a hold, so the release reads the held rows
     /// again.
     hold_cursor: [u64; OwedFamily::CURSORS.len()],
+    /// Per cursor family: keys its current walk's cursor steps have read,
+    /// for the presize rate ([`RibManager::presize_walk_table`]).
+    /// [`Self::start_cursor`], the only start, resets it; nothing reads it
+    /// without a live cursor.
+    walk_read: [usize; OwedFamily::CURSORS.len()],
+    /// Per cursor family: rows those same cursor steps committed to the
+    /// receiver's table for its AFI, each step's growth across its own
+    /// commit. Rows staged any other way are not in it. Reset with
+    /// [`Self::walk_read`].
+    walk_rows: [usize; OwedFamily::CURSORS.len()],
+    /// Per cursor family: the list head once the walk's starting log is
+    /// written, the end of the only entries ahead of the cursor that are
+    /// in an order independent of what the receiver accepts (one pass
+    /// logs its keys from a hash set; across passes the list is in arrival
+    /// order). The presize extrapolates its rate over no entry past it.
+    /// Zero (no estimate) until [`RibManager::seal_walk_starts`] sets it,
+    /// for a cursor started by an owed set's byte cap, whose keys ahead
+    /// are all later arrivals, and once a change no pass logged (an
+    /// unlogged mark, a resync the walk outlives) reaches the receiver.
+    /// The estimate also needs the list head still here: a key logged
+    /// after it may have changed what the receiver accepts ahead. Reset
+    /// with [`Self::walk_read`].
+    walk_head: [u64; OwedFamily::CURSORS.len()],
+    /// Per cursor family: list positions those same cursor steps passed,
+    /// holes included (each step's position after it less its position
+    /// before), the presize rate's denominator. Reset with
+    /// [`Self::walk_read`].
+    walk_slots: [usize; OwedFamily::CURSORS.len()],
+    /// Per cursor family: the cursor was started by
+    /// [`RibManager::owe_whole_family`] and waits for its starting log
+    /// ([`RibManager::seal_walk_starts`] seals only such a cursor, once).
+    /// Cleared by every other start, so a byte-cap cursor started later at
+    /// the same position is never sealed by an older queued entry.
+    walk_starting: [bool; OwedFamily::CURSORS.len()],
     /// A bit per whole family (not a cursor) already drained inside the
     /// current selection hold (its exempt rows); it stays owed for the
     /// release.
@@ -757,6 +916,11 @@ impl PeerOwing {
             whole: 0,
             cursor: Default::default(),
             hold_cursor: Default::default(),
+            walk_read: Default::default(),
+            walk_rows: Default::default(),
+            walk_head: Default::default(),
+            walk_slots: Default::default(),
+            walk_starting: Default::default(),
             hold_drained: 0,
             next_family: 0,
         }
@@ -930,6 +1094,17 @@ impl PeerOwing {
     fn start_cursor(&mut self, index: usize, head: u64) {
         self.whole |= OwedFamily::CURSORS[index].bit();
         (self.cursor[index], self.hold_cursor[index]) = (head, 0);
+        self.forget_walk_sample(index);
+        self.walk_starting[index] = false;
+    }
+
+    /// Drop the presize sample of cursor family `index`'s walk: with no
+    /// starting log ([`Self::walk_head`] zero) its walk makes no estimate.
+    /// A start keeps waiting for its starting log
+    /// ([`Self::walk_starting`] is left as it is).
+    fn forget_walk_sample(&mut self, index: usize) {
+        (self.walk_read[index], self.walk_rows[index]) = (0, 0);
+        (self.walk_head[index], self.walk_slots[index]) = (0, 0);
     }
 
     /// The cursor of `index` caught up with its list.
@@ -1265,6 +1440,47 @@ impl RibManager {
         }
     }
 
+    fn owed_rows_starting(&mut self, list: RowCursor) -> &mut Vec<(PeerId, u64)> {
+        match list {
+            RowCursor::Evpn => &mut self.owed_evpn_rows.starting,
+            RowCursor::Vpnv4 | RowCursor::Vpnv6 => &mut self.owed_vpn_rows[vpn_list(list)].starting,
+            _ => &mut self.owed_rows[list as usize].starting,
+        }
+    }
+
+    /// A pass has just logged keys in `list`: for every cursor
+    /// [`Self::owe_whole_family`] started there since the last such log,
+    /// this was its starting log. In production that is a selection
+    /// release, which logs its whole inventory from one hash set right
+    /// after owing the family (`recompute_released_selection_family`).
+    /// The walk's estimate may extrapolate up to the head
+    /// ([`PeerOwing::walk_head`]), and never past it: later passes append
+    /// in arrival order. A receiver whose walk has since ended or
+    /// restarted is skipped, and so is one whose cursor no longer waits for
+    /// its starting log ([`PeerOwing::walk_starting`]): a later byte-cap
+    /// start at the same position is not this entry's walk.
+    fn seal_walk_starts(&mut self, list: RowCursor) {
+        let starting = std::mem::take(self.owed_rows_starting(list));
+        if starting.is_empty() {
+            return;
+        }
+        let (index, head) = (list as usize, self.owed_rows_head(list));
+        for (peer, start) in starting {
+            self.replacement_checkpoint(false);
+            if let Some(owing) = self
+                .outbound_credit
+                .get_mut(&peer)
+                .and_then(|entry| entry.owing.as_deref_mut())
+                && owing.is_whole(OwedFamily::CURSORS[index])
+                && owing.cursor[index] == start
+                && owing.walk_starting[index]
+            {
+                owing.walk_starting[index] = false;
+                owing.walk_head[index] = head;
+            }
+        }
+    }
+
     /// Up to `count` keys after `cursor`, oldest first, and the position past them.
     fn owed_rows_after(&self, list: RowCursor, cursor: u64, count: usize) -> (Vec<OwedKey>, u64) {
         let wrap = match list {
@@ -1455,9 +1671,15 @@ impl RibManager {
             if !sendable.is_some_and(|families| families.contains(&family.afi_safis()[0])) {
                 continue;
             }
-            if owing.is_whole(family) && !(unlogged && family.has_cursor()) {
-                owing.hold_drained &= !family.bit();
-                continue;
+            if owing.is_whole(family) {
+                let Some(index) = family.cursor_index().filter(|_| unlogged) else {
+                    owing.hold_drained &= !family.bit();
+                    continue;
+                };
+                // What this receiver accepts changed with no key logged, so
+                // the rows its walk committed before now are no sample of
+                // the keys ahead: the walk makes no estimate.
+                owing.forget_walk_sample(index);
             }
             touched |= family.bit();
             if self.owed_key_kept(peer, &key, &mut rejected, &mut pending_otc) {
@@ -1546,7 +1768,15 @@ impl RibManager {
         let started = !owing.is_whole(family);
         if started {
             if let Some(list) = family.row_cursor() {
-                owing.start_cursor(list as usize, self.owed_rows_head(list));
+                let head = self.owed_rows_head(list);
+                owing.start_cursor(list as usize, head);
+                // The caller's pass logs the keys next: a release's
+                // inventory, from one hash set. Unicast tables are not
+                // presized.
+                if !family.is_unicast() {
+                    owing.walk_starting[list as usize] = true;
+                    self.owed_rows_starting(list).push((peer, head));
+                }
             } else {
                 owing.flip_whole(family);
             }
@@ -1586,6 +1816,13 @@ impl RibManager {
                 self.selection_deferred(afi_safi) || self.owed_release_open(afi_safi)
             }) {
                 owing.clear_family(family);
+            } else if let Some(index) = family.cursor_index() {
+                // The resync restaged the table under what the receiver
+                // accepts now (the change that made it dirty included): a
+                // walk kept past it makes no estimate from rows before it.
+                // Defense in depth: no VPN, labeled or EVPN step runs while
+                // the family is deferred, and every way out relogs it.
+                owing.forget_walk_sample(index);
             }
         }
         let ended = OwedFamily::CURSORS.map(|family| owing.is_whole(family)) != cursors;
@@ -2111,7 +2348,14 @@ impl RibManager {
         if held {
             keys.retain(|key| self.owed_key_exempt(peer, key));
         }
+        let read = keys.len();
         let mut unstaged = Vec::new();
+        let afi_rows = |manager: &Self| {
+            manager
+                .walk_table_lens(peer, family)
+                .map(|(rows, _)| rows[Self::walk_afi(family)])
+        };
+        let before = afi_rows(self);
         if !keys.is_empty() {
             let budget = Self::owing_step_budget(family, keys.len(), budget);
             let mut drain = OwingDrain::keyed(peer, family, budget, keys);
@@ -2126,18 +2370,205 @@ impl RibManager {
                 _ => return false,
             }
         }
+        // The rows this step's own commit added to its AFI's table: nothing
+        // else stages toward the peer between the two reads.
+        let committed = afi_rows(self)
+            .zip(before)
+            .map(|(after, before)| after.saturating_sub(before));
+        // List positions this step passed, holes included.
+        let passed = usize::try_from(position.saturating_sub(from)).unwrap_or(usize::MAX);
         if let Some(mut owing) = self.take_owing(peer) {
             if held {
                 owing.hold_cursor[index] = position;
             } else {
                 (owing.cursor[index], owing.hold_cursor[index]) = (position, 0);
+                owing.walk_read[index] = owing.walk_read[index].saturating_add(read);
+                owing.walk_rows[index] =
+                    owing.walk_rows[index].saturating_add(committed.unwrap_or(0));
+                owing.walk_slots[index] = owing.walk_slots[index].saturating_add(passed);
             }
             self.put_owing(peer, owing);
+        }
+        if let Some(committed) = committed
+            && !held
+        {
+            self.presize_walk_table(peer, family, from, [read, passed], committed);
         }
         // A key the envelope left out stays owed in the peer's own set.
         self.reinsert_owed(peer, unstaged);
         self.owing_family_settled(peer, family);
         true
+    }
+
+    /// The receiver's own tables a cursor walk of `family` fills, as rows
+    /// per AFI (`[IPv4, IPv6]`; EVPN's one list is the first) and distinct
+    /// keys: VPN, labeled and EVPN. Unicast has none here: its route slab
+    /// is sized from the Loc-RIB when the table is created.
+    fn walk_table_lens(&self, peer: PeerId, family: OwedFamily) -> Option<([usize; 2], usize)> {
+        use crate::adj_rib_out::AdjRibOut;
+        let lens: fn(&AdjRibOut) -> ([usize; 2], usize) = match family {
+            OwedFamily::VPNV4 | OwedFamily::VPNV6 => {
+                |out| (out.family_lens().vpn, out.vpn_key_len())
+            }
+            OwedFamily::IPV4_LABELED | OwedFamily::IPV6_LABELED => {
+                |out| (out.family_lens().labeled, out.labeled_key_len())
+            }
+            OwedFamily::EVPN => |out| ([out.evpn_len(), 0], out.evpn_len()),
+            _ => return None,
+        };
+        Some(self.adj_ribs_out.get(&peer).map_or(([0, 0], 0), lens))
+    }
+
+    /// Index of `family`'s AFI in [`Self::walk_table_lens`]'s rows.
+    fn walk_afi(family: OwedFamily) -> usize {
+        usize::from(matches!(
+            family,
+            OwedFamily::VPNV6 | OwedFamily::IPV6_LABELED
+        ))
+    }
+
+    /// After a cursor step of `family` into a table still at most
+    /// [`PRESIZE_ROWS`] rows, reserve it for the rest of the walk, once:
+    /// at the step that completes the sample ([`WalkSample::complete`]:
+    /// every AFI filling the table has read [`PRESIZE_SAMPLE_KEYS`] keys or
+    /// finished, and one has committed [`PRESIZE_SAMPLE_ROWS`] rows), or
+    /// that gives another AFI its rate after that. This step started at
+    /// `from`, read `read` keys over `passed` list positions and
+    /// committed `committed` rows. Each sampled AFI adds the rows its
+    /// cursor steps committed per list position they passed, at most one a
+    /// position, times its positions still ahead in the walk's starting
+    /// log ([`PeerOwing::walk_head`]): keys logged after it are
+    /// in arrival order, so the sample says nothing of them, and they grow
+    /// the table by the steps' reserves. The sample must be quiet: an AFI
+    /// whose list has had a key logged since its starting log adds
+    /// nothing, as does one whose receiver's acceptance changed without a
+    /// log (its sample is dropped), since rows counted before such a change
+    /// say nothing of the keys ahead after it. A receiver whose export
+    /// chain reads a policy dataset makes no estimate: the peer manager
+    /// publishes a dataset swap on the shared handle before the RIB hears
+    /// of it, so cursor steps in between commit rows at the new contents
+    /// with nothing logged. An AFI without a rate adds
+    /// nothing, so a table can fall short and grow by the steps' reserves
+    /// as before, but is not sized past what one estimate from each AFI's
+    /// cumulative rate reads. The key index is sized by the unclamped rate
+    /// times the table's keys per row so far, at most the rows reserved.
+    /// Per-step reserves of a nearly empty table otherwise double it again
+    /// and again in the same steps for every receiver walking the same
+    /// list. Past the limit the table grows by those per-step reserves, so
+    /// no presize moves more than [`PRESIZE_ROWS`] index entries; an EVPN
+    /// slab may also move its first segment once, at most 8,192 slots, as
+    /// on any insert that grows it.
+    fn presize_walk_table(
+        &mut self,
+        peer: PeerId,
+        family: OwedFamily,
+        from: u64,
+        [read, passed]: [usize; 2],
+        committed: usize,
+    ) {
+        #[cfg(test)]
+        if PRESIZE_OFF.get() {
+            return;
+        }
+        let Some((rows, keys)) = self.walk_table_lens(peer, family) else {
+            return;
+        };
+        let total = rows[0] + rows[1];
+        if total > PRESIZE_ROWS
+            || self
+                .export_policy_for(peer)
+                .is_some_and(|chain| chain.compiled().referenced_datasets().next().is_some())
+        {
+            return;
+        }
+        let lens = self.loc_rib.family_lens();
+        let siblings: [Option<(OwedFamily, usize)>; 2] = match family {
+            OwedFamily::VPNV4 | OwedFamily::VPNV6 => [
+                Some((OwedFamily::VPNV4, lens.vpn[0])),
+                Some((OwedFamily::VPNV6, lens.vpn[1])),
+            ],
+            OwedFamily::IPV4_LABELED | OwedFamily::IPV6_LABELED => [
+                Some((OwedFamily::IPV4_LABELED, lens.labeled[0])),
+                Some((OwedFamily::IPV6_LABELED, lens.labeled[1])),
+            ],
+            _ => [Some((OwedFamily::EVPN, self.loc_rib.evpn_len())), None],
+        };
+        let Some(owing) = self.owing(peer) else {
+            return;
+        };
+        // Entries of the walk's starting log ([`PeerOwing::walk_head`])
+        // ahead of `sibling`'s live cursor, or of `start` when given (the
+        // stepping AFI's position before the step). None are counted once
+        // a key has been logged in the list since the starting log: the
+        // entry it moved, or the key it added, may have changed what the
+        // receiver accepts among the keys ahead after the rows were
+        // counted, so the AFI adds nothing (the estimate trusts only a
+        // quiet sample).
+        let entries = |sibling: OwedFamily, start: Option<u64>| {
+            let list = sibling.row_cursor()?;
+            let position = self.live_cursor(peer, owing, list as usize)?;
+            let sealed = owing.walk_head[list as usize];
+            Some(if self.owed_rows_head(list) > sealed {
+                0
+            } else {
+                sealed.saturating_sub(start.unwrap_or(position))
+            })
+        };
+        let stepped = Self::walk_afi(family);
+        let mut after = [WalkSample::Done; 2];
+        let mut prior = [WalkSample::Done; 2];
+        for (index, sibling) in siblings.iter().enumerate() {
+            let Some((sibling, table)) = *sibling else {
+                continue;
+            };
+            let Some(cursor) = sibling.cursor_index() else {
+                continue;
+            };
+            let (walked, added, slots) = (
+                owing.walk_read[cursor],
+                owing.walk_rows[cursor],
+                owing.walk_slots[cursor],
+            );
+            after[index] = WalkSample::of(added, walked, slots, table, entries(sibling, None));
+            prior[index] = if index == stepped {
+                let (walked, added, slots) = (
+                    walked.saturating_sub(read),
+                    added.saturating_sub(committed),
+                    slots.saturating_sub(passed),
+                );
+                WalkSample::of(added, walked, slots, table, entries(sibling, Some(from)))
+            } else {
+                after[index]
+            };
+        }
+        let completed =
+            !WalkSample::complete(prior) || (!prior[stepped].sampled() && after[stepped].sampled());
+        if !WalkSample::complete(after) || !completed {
+            return;
+        }
+        let rows_ahead: usize = after.iter().map(|sample| sample.rows_ahead()).sum();
+        // Keys accepted per key read: the rate times the table's keys a
+        // row, which no paths-per-key skew moves.
+        let rate_ahead: usize = after.iter().map(|sample| sample.rate_ahead()).sum();
+        let keys_ahead = (rate_ahead.saturating_mul(keys) / total.max(1)).min(rows_ahead);
+        #[cfg(test)]
+        {
+            self.adj_rib_out_commit_stats.walk_presizes += 1;
+        }
+        let readiness = &self.replacement_readiness;
+        let mut checkpoint = || super::replacement_readiness_checkpoint(readiness, false);
+        let Some(out) = self.adj_ribs_out.get_mut(&peer) else {
+            return;
+        };
+        match family {
+            OwedFamily::VPNV4 | OwedFamily::VPNV6 => {
+                out.reserve_vpn_count_with(rows_ahead, keys_ahead, &mut checkpoint);
+            }
+            OwedFamily::IPV4_LABELED | OwedFamily::IPV6_LABELED => {
+                out.reserve_labeled_count_with(rows_ahead, keys_ahead, &mut checkpoint);
+            }
+            _ => out.reserve_evpn_with(rows_ahead, &mut checkpoint),
+        }
     }
 
     /// One step of `family`'s owed-key set.
@@ -2263,6 +2694,9 @@ impl RibManager {
             self.replacement_checkpoint(false);
             self.owed_evpn_rows.touch(*key);
         }
+        if !keys.is_empty() {
+            self.seal_walk_starts(RowCursor::Evpn);
+        }
         let table = self.loc_rib.evpn_len();
         let rows = &mut self.owed_evpn_rows;
         rows.peak = rows.peak.max(table + keys.len());
@@ -2353,6 +2787,14 @@ impl RibManager {
                 rows.peak = rows.peak.max(table[index] + carried[index]);
             }
         }
+        for (list, carried) in [RowCursor::Vpnv4, RowCursor::Vpnv6]
+            .into_iter()
+            .zip(carried)
+        {
+            if carried != 0 {
+                self.seal_walk_starts(list);
+            }
+        }
     }
 
     /// Log `changed` in the two prefix lists that start at slot `first`
@@ -2385,6 +2827,15 @@ impl RibManager {
             if floors[first + index].is_some() {
                 let rows = &mut self.owed_rows[first + index];
                 rows.peak = rows.peak.max(table[index] + carried[index]);
+            }
+            if carried[index] != 0 {
+                let lists = [
+                    RowCursor::Ipv4Unicast,
+                    RowCursor::Ipv6Unicast,
+                    RowCursor::Ipv4Labeled,
+                    RowCursor::Ipv6Labeled,
+                ];
+                self.seal_walk_starts(lists[first + index]);
             }
         }
     }
@@ -2910,6 +3361,14 @@ impl RibManager {
         })
     }
 
+    /// Keys `peer`'s cursor steps of `family` have read for the presize
+    /// sample ([`PeerOwing::walk_read`]).
+    #[cfg(test)]
+    pub(super) fn walk_keys_read(&self, peer: PeerId, family: OwedFamily) -> usize {
+        let index = family.cursor_index().expect("a cursor family");
+        self.owing(peer).map_or(0, |owing| owing.walk_read[index])
+    }
+
     /// Whether `family` is owed whole to `peer`.
     #[cfg(test)]
     pub(super) fn owes_whole(&self, peer: PeerId, family: OwedFamily) -> bool {
@@ -3320,6 +3779,101 @@ mod fifo_tests {
         check::<Prefix>();
         check::<VpnRouteKey>();
         check::<EvpnRouteKey>();
+    }
+
+    /// The rows ahead never pass one a key, whatever the sample's rows per
+    /// key (an Add-Path receiver's paths per key vary with arrival order).
+    /// A walk that has read its sample keys but committed fewer than the
+    /// sample rows has no rate. Red without the clamp.
+    #[test]
+    fn walk_rows_ahead_stay_within_one_a_key() {
+        let sample = WalkSample::of(
+            4 * CHUNK_ROWS,
+            CHUNK_ROWS,
+            CHUNK_ROWS,
+            100_000,
+            Some(50_000),
+        );
+        assert_eq!(
+            sample,
+            WalkSample::Sampled {
+                rows: 4 * CHUNK_ROWS,
+                slots: CHUNK_ROWS,
+                ahead: 50_000
+            }
+        );
+        assert_eq!(sample.rate_ahead(), 200_000, "the rate itself");
+        assert_eq!(sample.rows_ahead(), 50_000, "four rows a key read as one");
+        let quarter = WalkSample::of(
+            CHUNK_ROWS / 4,
+            CHUNK_ROWS,
+            CHUNK_ROWS,
+            100_000,
+            Some(50_000),
+        );
+        assert_eq!(quarter.rows_ahead(), 12_500, "the rate below one a key");
+        assert_eq!(
+            WalkSample::of(
+                PRESIZE_SAMPLE_ROWS - 1,
+                CHUNK_ROWS,
+                CHUNK_ROWS,
+                100_000,
+                Some(50_000)
+            ),
+            WalkSample::Sparse,
+            "too few rows committed"
+        );
+        assert_eq!(
+            WalkSample::of(
+                CHUNK_ROWS,
+                PRESIZE_SAMPLE_KEYS - 1,
+                CHUNK_ROWS,
+                100_000,
+                Some(50_000)
+            ),
+            WalkSample::Unread,
+            "too few keys read"
+        );
+    }
+
+    /// The rate is per list position passed, not per key read. Positions
+    /// passed are at least the keys read, so the estimate is never above
+    /// the per-key one (`slots == read`) for the same counts. When the
+    /// keys logged again after the starting log are the ones the receiver
+    /// denies, the keys left in place are its accepted ones: 1,024 read
+    /// and accepted over 6,000 positions, 18,000 positions ahead, is about
+    /// 3,072 rows, not 18,000. Red with a per-key denominator.
+    #[test]
+    fn walk_rate_is_per_position_and_never_above_per_key() {
+        let holed = WalkSample::of(CHUNK_ROWS, CHUNK_ROWS, 6_000, 24_096, Some(18_000));
+        assert_eq!(holed.rows_ahead(), 3_072, "holes passed dilute the rate");
+        assert_eq!(
+            WalkSample::of(CHUNK_ROWS, CHUNK_ROWS, CHUNK_ROWS, 24_096, Some(18_000)).rows_ahead(),
+            18_000,
+            "per key, every hole ahead takes the accepted rate"
+        );
+        for rows in [
+            PRESIZE_SAMPLE_ROWS,
+            CHUNK_ROWS,
+            2 * CHUNK_ROWS,
+            4 * CHUNK_ROWS,
+        ] {
+            for read in [PRESIZE_SAMPLE_KEYS, CHUNK_ROWS, 3 * CHUNK_ROWS] {
+                for extra in [0, 1, read / 3, read, 10 * read] {
+                    for ahead in [1, 700, 18_000, 200_000] {
+                        let per_key = WalkSample::of(rows, read, read, 100_000, Some(ahead));
+                        let per_slot =
+                            WalkSample::of(rows, read, read + extra, 100_000, Some(ahead));
+                        assert!(
+                            per_slot.rate_ahead() <= per_key.rate_ahead()
+                                && per_slot.rows_ahead() <= per_key.rows_ahead(),
+                            "rows {rows} read {read} slots {} ahead {ahead}: {per_slot:?} over {per_key:?}",
+                            read + extra
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

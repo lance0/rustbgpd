@@ -1,0 +1,381 @@
+//! A private receiver's EVPN cursor walk sizes its EVPN index (and the
+//! slab's first segment) once, while the table is nearly empty, from the
+//! rows per key read so far and the keys still ahead of its cursor.
+
+use std::cell::RefCell;
+
+use super::super::cursor_presize::{
+    Growth, PRESIZE_ROWS, assert_at_or_below_control, assert_fitted, deny_med_chain, tenth_med,
+    with_control,
+};
+use super::*;
+
+/// The receiver's EVPN table: rows, and the capacities of its index and
+/// of the slab's first segment.
+fn tables(manager: &RibManager, peer: PeerId) -> (usize, [usize; 2]) {
+    manager.adj_ribs_out.get(&peer).map_or((0, [0, 0]), |out| {
+        let (index, segment) = out.evpn_capacities();
+        (out.evpn_len(), [index, segment])
+    })
+}
+
+fn observe(manager: &RibManager, peer: PeerId, growth: &mut Growth) {
+    let (rows, capacities) = tables(manager, peer);
+    growth.observe(rows, capacities);
+}
+
+/// Tick until no resync work is left, reading `peer`'s table after every
+/// step.
+fn walk(manager: &mut RibManager, receivers: &mut [Receiver], peer: PeerId) -> Growth {
+    let mut growth = Growth::default();
+    observe(manager, peer, &mut growth);
+    (growth.rebuilds, growth.resized) = ([0, 0], [0, 0]);
+    for _ in 0..100_000 {
+        for receiver in receivers.iter_mut() {
+            receiver.write();
+        }
+        if !manager.resync_tick_pending() {
+            return growth;
+        }
+        tick(manager, receivers);
+        observe(manager, peer, &mut growth);
+    }
+    panic!("the walk does not finish");
+}
+
+fn assert_index_fitted(manager: &RibManager, peer: PeerId, case: &str) {
+    let out = &manager.adj_ribs_out[&peer];
+    assert_fitted(out.evpn_capacities().0, out.evpn_len(), case);
+}
+
+/// The source's `rows` are installed, EVPN selection is held while
+/// receiver 0 (behind `policy`) joins, and the waiter's End-of-RIB
+/// releases it: the release owes receiver 0 EVPN whole and logs its whole
+/// inventory once, from one hash set, as the walk's starting log. Returns
+/// the manager and the receivers (receiver 0, then the waiter, which walks
+/// too).
+pub(super) fn released(
+    rows: &[(u32, u32)],
+    policy: Option<PolicyChain>,
+) -> (RibManager, Vec<Receiver>) {
+    let mut manager = deferral_manager(4 * CHUNK_ROWS);
+    std::mem::forget(up_sized(&mut manager, peer_v4(SOURCE), 0, 4096, &[V4]));
+    received(&mut manager, rows, &[]);
+    let waiter = hold(&mut manager);
+    let peer = receiver(0);
+    let (outbound_tx, mut rx) = mpsc::channel(4096);
+    manager.handle_update(evpn_peer_up(peer, 0, outbound_tx, policy));
+    let mut wire = Wire::default();
+    wire.write(&mut rx);
+    assert!(wire.table.is_empty(), "held");
+    release(&mut manager);
+    assert!(
+        manager.owes_whole(peer, FAMILY),
+        "the release owes the joiner"
+    );
+    (manager, vec![Receiver { peer, rx, wire }, waiter])
+}
+
+/// A release of 20,000 EVPN keys: the joiner's index and slab's first
+/// segment each change capacity in one step, under the presize limit. Red
+/// without the presize: the index grows at every doubling (five steps or
+/// more).
+#[test]
+fn a_private_evpn_walk_sizes_its_index_once() {
+    const ROWS: u32 = 20_000;
+    let (mut manager, mut receivers) = released(&all(ROWS), None);
+    let peer = receivers[0].peer;
+    let growth = walk(&mut manager, &mut receivers, peer);
+    growth.assert_sized_once("EVPN");
+    assert_settled(&manager, &receivers, &all(ROWS), "EVPN");
+    assert_index_fitted(&manager, peer, "EVPN");
+}
+
+/// A receiver whose export policy passes one row in ten: its index ends
+/// within 2.3 times what it holds. Red when the reserve is sized from the
+/// keys ahead alone.
+#[test]
+fn a_filtered_evpn_walk_sizes_its_index_to_what_it_accepts() {
+    const ROWS: u32 = 20_000;
+    let rows: Vec<(u32, u32)> = (0..ROWS).map(|index| (index, tenth_med(index))).collect();
+    let (mut manager, mut receivers) = released(&rows, Some(deny_med_chain()));
+    let peer = receivers[0].peer;
+    let presizes = manager.adj_rib_out_commit_stats.walk_presizes;
+    let growth = walk(&mut manager, &mut receivers, peer);
+    let accepted: Vec<(u32, u32)> = rows.iter().copied().filter(|row| row.1 == 0).collect();
+    assert_eq!(receivers[0].wire.table, table(&accepted));
+    assert_index_fitted(&manager, peer, "one row in ten");
+    assert!(growth.rows_at_rebuild <= PRESIZE_ROWS, "{growth:?}");
+    assert!(
+        manager.adj_rib_out_commit_stats.walk_presizes > presizes,
+        "estimated"
+    );
+}
+
+/// About 1% of 100,000 keys accepted, scattered: the table stays under
+/// the presize limit for most of the walk. One estimate, made once the
+/// sample holds enough accepted rows, and the index fits. Red when every
+/// step under the limit estimates again.
+#[test]
+fn a_sparse_evpn_walk_estimates_once_from_a_full_sample() {
+    const ROWS: u32 = 100_000;
+    let accept = |index: u32| index.wrapping_mul(2_654_435_761).is_multiple_of(100);
+    let rows: Vec<(u32, u32)> = (0..ROWS)
+        .map(|index| (index, u32::from(!accept(index))))
+        .collect();
+    let (mut manager, mut receivers) = released(&rows, Some(deny_med_chain()));
+    let peer = receivers[0].peer;
+    let presizes = manager.adj_rib_out_commit_stats.walk_presizes;
+    walk(&mut manager, &mut receivers, peer);
+    let accepted: Vec<(u32, u32)> = rows.iter().copied().filter(|row| row.1 == 0).collect();
+    assert_eq!(receivers[0].wire.table, table(&accepted));
+    assert_index_fitted(&manager, peer, "1% scattered");
+    assert_eq!(
+        manager.adj_rib_out_commit_stats.walk_presizes - presizes,
+        2,
+        "one estimate each for the joiner and the waiter"
+    );
+}
+
+/// A receiver already holding more than the presize limit is owed EVPN
+/// whole again with twice as many new rows: no step sizes its table. Red
+/// when both the once-only rule and the limit are removed, as for VPN.
+#[test]
+fn a_populated_evpn_table_is_never_presized() {
+    const HELD: u32 = 4_096;
+    let mut manager = manager(4 * CHUNK_ROWS);
+    std::mem::forget(up_sized(&mut manager, peer_v4(SOURCE), 0, 4096, &[V4]));
+    let mut receivers = vec![Receiver::up(&mut manager, receiver(0), 4096, &[EVPN])];
+    let peer = receivers[0].peer;
+    received(&mut manager, &all(HELD), &[]);
+    drain(&mut manager, &mut receivers);
+    assert_eq!(manager.adj_ribs_out[&peer].evpn_len(), HELD as usize);
+    manager.owe_whole_family(peer, FAMILY);
+    let fresh: Vec<_> = (HELD..3 * HELD).map(|index| (index, 0)).collect();
+    received(&mut manager, &fresh, &[]);
+    let presizes = manager.adj_rib_out_commit_stats.walk_presizes;
+    walk(&mut manager, &mut receivers, peer);
+    assert_eq!(
+        manager.adj_rib_out_commit_stats.walk_presizes, presizes,
+        "a populated table is not presized"
+    );
+    assert_eq!(receivers[0].wire.table, table(&all(3 * HELD)));
+}
+
+/// A release walk at one row in ten with 8,000 of 50,000 keys logged
+/// again (a route target added) after the release and before the first
+/// step. They are logged after the starting log, so neither walk makes an
+/// estimate and the index fits as without the presize. Red when the
+/// estimate ignores keys logged after the starting log: an estimate for
+/// the joiner and the waiter.
+#[test]
+fn a_filtered_evpn_walk_with_keys_logged_again_ahead_fits() {
+    const ROWS: u32 = 50_000;
+    const AGAIN: u32 = 8_000;
+    let rows: Vec<(u32, u32)> = (0..ROWS).map(|index| (index, tenth_med(index))).collect();
+    let (mut manager, mut receivers) = released(&rows, Some(deny_med_chain()));
+    let peer = receivers[0].peer;
+    let again: Vec<_> = (ROWS - AGAIN..ROWS)
+        .map(|index| route_rt(index, tenth_med(index), &[1]))
+        .collect();
+    received_routes(&mut manager, again, &[]);
+    let presizes = manager.adj_rib_out_commit_stats.walk_presizes;
+    walk(&mut manager, &mut receivers, peer);
+    assert_eq!(receivers[0].wire.table.len(), (ROWS / 10) as usize);
+    assert_index_fitted(&manager, peer, "one in ten, logged again ahead");
+    assert_eq!(
+        manager.adj_rib_out_commit_stats.walk_presizes - presizes,
+        0,
+        "no estimate for the joiner or the waiter"
+    );
+}
+
+fn evpn_peer_up(
+    peer: PeerId,
+    session_id: u64,
+    outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
+    export_policy: Option<PolicyChain>,
+) -> RibUpdate {
+    RibUpdate::PeerUp {
+        supersedes: None,
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id,
+        peer,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 200),
+        outbound_tx,
+        export_policy,
+        sendable_families: vec![EVPN],
+        is_ebgp: false,
+        route_reflector_client: true,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: Vec::new(),
+    }
+}
+
+thread_local! {
+    /// The receiver whose table the actor-turn check reads, and what it
+    /// saw.
+    static WATCHED: RefCell<Option<(PeerId, Growth)>> = const { RefCell::new(None) };
+}
+
+fn watch(manager: &RibManager) {
+    WATCHED.with(|watched| {
+        if let Some((peer, growth)) = watched.borrow_mut().as_mut() {
+            observe(manager, *peer, growth);
+        }
+    });
+}
+
+/// Two queries in turn: every message queued before them has run.
+async fn barrier(tx: &mpsc::Sender<RibUpdate>) {
+    for _ in 0..2 {
+        let (reply, response) = oneshot::channel();
+        tx.send(RibUpdate::QueryLocRibCount { reply })
+            .await
+            .unwrap();
+        response.await.unwrap();
+    }
+}
+
+/// Advance the clock `ticks` times by 10 ms; every receiver writes after
+/// each.
+async fn run_for(tx: &mpsc::Sender<RibUpdate>, receivers: &mut [Receiver], ticks: usize) {
+    for _ in 0..ticks {
+        tokio::time::advance(Duration::from_millis(10)).await;
+        barrier(tx).await;
+        for receiver in receivers.iter_mut() {
+            receiver.write();
+        }
+    }
+}
+
+/// Through `RibManager::run_actor` on a paused clock: EVPN is held while
+/// a receiver joins, then released by the waiter's End-of-RIB, and the
+/// receiver reads every 10 ms. After every actor turn its table is read:
+/// the index and the slab's first segment each change capacity in one
+/// turn, under the presize limit, and the receiver ends exact with one
+/// End-of-RIB.
+#[tokio::test(start_paused = true)]
+async fn an_evpn_release_through_the_actor_loop_sizes_the_joiner_table_once() {
+    const ROWS: u32 = 12_000;
+    let mut manager = manager(4 * CHUNK_ROWS).with_selection_deferral(SelectionDeferralConfig {
+        timeout: Duration::from_secs(60),
+        waiters: vec![SelectionDeferralWaiterConfig {
+            peer: peer_v4(WAITER).into(),
+            families: vec![EVPN],
+        }],
+    });
+    manager.actor_turn_check = Some(watch);
+    let (tx, rx) = mpsc::channel(256);
+    manager.rx = rx;
+    let actor = tokio::spawn(manager.run_actor());
+    let (source_tx, source_rx) = mpsc::channel(4096);
+    let mut source = evpn_peer_up(peer_v4(SOURCE), 0, source_tx, None);
+    if let RibUpdate::PeerUp {
+        sendable_families, ..
+    } = &mut source
+    {
+        *sendable_families = vec![V4];
+    }
+    tx.send(source).await.unwrap();
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: peer_v4(SOURCE),
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: (0..ROWS).map(|index| route(index, 0)).collect(),
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::SetPeerGracefulRestartContext {
+        peer: peer_v4(WAITER),
+        session_id: 7,
+        peer_restart_state: false,
+        peer_gr_helper: true,
+        peer_gr_families: vec![EVPN],
+        peer_enhanced_refresh: false,
+        peer_llgr_families: vec![],
+        local_llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+    let (waiter_tx, waiter_rx) = mpsc::channel(4096);
+    tx.send(evpn_peer_up(peer_v4(WAITER), 7, waiter_tx, None))
+        .await
+        .unwrap();
+    let joiner = receiver(0);
+    let (joiner_tx, joiner_rx) = mpsc::channel(4096);
+    tx.send(evpn_peer_up(joiner, 0, joiner_tx, None))
+        .await
+        .unwrap();
+    let mut receivers = vec![
+        Receiver {
+            peer: joiner,
+            rx: joiner_rx,
+            wire: Wire::default(),
+        },
+        Receiver {
+            peer: peer_v4(WAITER),
+            rx: waiter_rx,
+            wire: Wire::default(),
+        },
+    ];
+    run_for(&tx, &mut receivers, 5).await;
+    assert!(receivers[0].wire.table.is_empty(), "the joiner waits");
+    WATCHED.with(|watched| *watched.borrow_mut() = Some((joiner, Growth::default())));
+    tx.send(RibUpdate::EndOfRib {
+        peer: peer_v4(WAITER),
+        session_id: 7,
+        afi: EVPN.0,
+        safi: EVPN.1,
+    })
+    .await
+    .unwrap();
+    run_for(&tx, &mut receivers, 400).await;
+    drop(tx);
+    let manager = actor.await.unwrap();
+    drop(source_rx);
+    let (_, growth) = WATCHED.with(|watched| watched.borrow_mut().take()).unwrap();
+    growth.assert_sized_once("actor loop");
+    assert_eq!(receivers[0].wire.table, table(&all(ROWS)));
+    assert_eq!(receivers[0].wire.markers, 1);
+    assert!(manager.owing(joiner).is_none());
+    assert_index_fitted(&manager, joiner, "actor loop");
+}
+
+/// A release of 3,000 accepted and 20,000 denied keys (the starting log);
+/// the denied keys are logged again (a Route Target added, still denied)
+/// before the first step, so the keys left in the starting log are the
+/// accepted ones. 3,000 rows keep the estimate's sampling spread clear of
+/// the slab segment's 4,096-slot step. Red with a rate per key read rather
+/// than per list position passed: the index 9.5 times what it holds,
+/// against 1.19 times.
+#[test]
+fn denied_evpn_keys_logged_again_after_a_release_fit() {
+    const ACCEPTED: u32 = 3_000;
+    const TOTAL: u32 = ACCEPTED + 20_000;
+    let shape = || {
+        let rows: Vec<(u32, u32)> = (0..TOTAL)
+            .map(|index| (index, u32::from(index >= ACCEPTED)))
+            .collect();
+        let (mut manager, mut receivers) = released(&rows, Some(deny_med_chain()));
+        let peer = receivers[0].peer;
+        let again = (ACCEPTED..TOTAL).map(|index| route_rt(index, 1, &[1]));
+        received_routes(&mut manager, again.collect(), &[]);
+        walk(&mut manager, &mut receivers, peer);
+        assert_eq!(receivers[0].wire.table.len(), ACCEPTED as usize);
+        assert_index_fitted(&manager, peer, "denied keys logged again");
+        tables(&manager, peer).1
+    };
+    let (head, control) = with_control(shape);
+    assert_at_or_below_control(&head, &control, "denied keys logged again");
+}
