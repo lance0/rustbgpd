@@ -34,6 +34,11 @@
       "measured_on": "2026-10-25"
     },
     {
+      "path": "docs/perf/cross-daemon-v0840-2026-11.md",
+      "measured_commit": "5f5ca6a312d1bdf7094440ae363495574a6ddecc",
+      "measured_on": "2026-11-22"
+    },
+    {
       "path": "docs/perf/fib-kernel-dump-2026-08.md",
       "measured_commit": "d3e6c3571116261c47039b603ec64db14100ea0e",
       "measured_on": "2026-08-30"
@@ -143,6 +148,11 @@
     {
       "source": "docs/explanation/comparison.md",
       "anchor": "At route-server scale, the [IXP receipt",
+      "receipt": "docs/perf/cross-daemon-v0840-2026-11.md"
+    },
+    {
+      "source": "docs/explanation/comparison.md",
+      "anchor": "At route-server scale, the [IXP receipt",
       "receipt": "docs/perf/headline-refresh-jemalloc-2026-10.md"
     },
     {
@@ -188,32 +198,22 @@
     {
       "source": "docs/perf/README.md",
       "anchor": "- **Member-flap propagation**",
-      "receipt": "docs/perf/cross-daemon-v0740-2026-10.md"
-    },
-    {
-      "source": "docs/perf/README.md",
-      "anchor": "- **Member-flap propagation**",
-      "receipt": "docs/perf/cross-daemon-v0800-2026-10.md"
-    },
-    {
-      "source": "docs/perf/README.md",
-      "anchor": "- **Member-flap propagation**",
       "receipt": "docs/perf/cross-daemon-v0801-s3-2026-10.md"
     },
     {
       "source": "docs/perf/README.md",
-      "anchor": "- **Policy reload at IXP scale**",
-      "receipt": "docs/perf/cross-daemon-v0740-2026-10.md"
-    },
-    {
-      "source": "docs/perf/README.md",
-      "anchor": "- **Policy reload at IXP scale**",
-      "receipt": "docs/perf/cross-daemon-v0750-2026-10.md"
+      "anchor": "- **Member-flap propagation**",
+      "receipt": "docs/perf/cross-daemon-v0840-2026-11.md"
     },
     {
       "source": "docs/perf/README.md",
       "anchor": "- **Policy reload at IXP scale**",
       "receipt": "docs/perf/cross-daemon-v0800-2026-10.md"
+    },
+    {
+      "source": "docs/perf/README.md",
+      "anchor": "- **Policy reload at IXP scale**",
+      "receipt": "docs/perf/cross-daemon-v0840-2026-11.md"
     },
     {
       "source": "docs/perf/README.md",
