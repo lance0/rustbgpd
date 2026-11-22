@@ -9,7 +9,7 @@ This receipt compares the v0.84.0 release candidate with v0.83.0 on policy-reloa
 ## Arms and protocol
 
 - **Control:** tag v0.83.0, `3686a4b67a555db16fa9a3825867f77d0cedb5b3`.
-- **Candidate:** `5f5ca6a312d1bdf7094440ae363495574a6ddecc`, the head of the v0.84.0 release preparation: main at `6ac2530f3` plus version metadata, changelogs and documentation, 102 commits after v0.83.0. The daemons report versions 0.83.0 and 0.84.0.
+- **Candidate:** `5f5ca6a312d1bdf7094440ae363495574a6ddecc`, the head of the v0.84.0 release preparation: main at `6ac2530f3` plus version metadata, changelogs and documentation, 102 commits after v0.83.0. Its tree is identical to the v0.84.0 squash commit `8ac5f59ab`, and the tag at `0d2c9027a` adds only documentation changes. The daemons report versions 0.83.0 and 0.84.0.
 
 Each side was built separately from its own tree with Rust 1.100.0: the daemon with `cargo build --locked --release -p rustbgpd --features rustbgpd/jemalloc`, rrharness with `--profile scale -p rrharness`, and the Criterion benches with `-C llvm-args=-align-all-functions=6`. All are non-test builds, so the `cfg(test)` checkpoint tally is compiled out on both sides. Every control/candidate binary pair differs by SHA-256 ([`SHA256SUMS`](artifacts/release-qualification-v0840-2026-11/SHA256SUMS)). The two control Criterion builds came out byte-identical, so the Criterion A/A compares one binary with itself.
 

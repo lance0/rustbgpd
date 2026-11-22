@@ -54,7 +54,9 @@ sink.
 
 - rustbgpd commit `5f5ca6a312d1bdf7094440ae363495574a6ddecc`, image
   `sha256:8f805a5094302e2f0aa534f26cd2515266db3ac2cc5b4af7a48eebaf3d04f565`,
-  built with no cache and reporting `rustbgpd 0.84.0`.
+  built with no cache and reporting `rustbgpd 0.84.0`. Its tree is identical to the
+  v0.84.0 squash commit `8ac5f59abf2a228dfb5b0611fef6acee9b1a8961`; the tag at
+  `0d2c9027a` adds only documentation changes.
 - bgperf2 fork commit
   [`68b7402`](https://github.com/lance0/bgperf2/commit/68b74022f73952ba2a112eb87b01ce0487b893bf),
   `batch` with `repetitions: 3`, `order: shuffle` and seeds 20261122

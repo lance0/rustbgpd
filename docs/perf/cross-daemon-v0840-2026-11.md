@@ -1,6 +1,7 @@
 # Cross-daemon IXP matrix at v0.84.0: rustbgpd, BIRD 3.3.3 and OpenBGPD 9.3 on one host — 2026-11-22
 
-One sequential campaign on 2026-11-22 (UTC) measured the v0.84.0 release commit (`5f5ca6a31`)
+One sequential campaign on 2026-11-22 (UTC) measured the v0.84.0 release preparation head (`5f5ca6a31`, whose tree is identical to the
+v0.84.0 squash commit `8ac5f59ab`; the tag at `0d2c9027a` adds only documentation changes)
 against BIRD 3.3.3 and OpenBGPD 9.3 on the IXP matrix: S1 cold start, S2 policy reload and S3
 member flap at 700 route-server clients × 400,400 IPv4 routes, two runs per daemon with the
 daemon order rotated. All 12 cells passed at their first attempt; none was excluded or rerun.

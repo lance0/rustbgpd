@@ -15,7 +15,7 @@
     },
     {
       "path": "docs/perf/competitive-bgperf2-v0840-2026-11.md",
-      "measured_commit": "5f5ca6a312d1bdf7094440ae363495574a6ddecc",
+      "measured_commit": "8ac5f59abf2a228dfb5b0611fef6acee9b1a8961",
       "measured_on": "2026-11-22"
     },
     {
@@ -40,7 +40,7 @@
     },
     {
       "path": "docs/perf/cross-daemon-v0840-2026-11.md",
-      "measured_commit": "5f5ca6a312d1bdf7094440ae363495574a6ddecc",
+      "measured_commit": "8ac5f59abf2a228dfb5b0611fef6acee9b1a8961",
       "measured_on": "2026-11-22"
     },
     {
