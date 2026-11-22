@@ -865,7 +865,7 @@ mixed shape has a single changed pair, so that per-peer walk stays empty.
   `changed - ceil(changed / G)` one at a time. `G = changed` is the distinct
   shape: no cohort, every changed peer in the walk. Seven pairs at 700 changed
   peers give cohort 100 and remainder 600. `G` absent or 1 emits the historical
-  files byte for byte. Observers still complete on the generation marker.
+  files byte for byte.
 - `GEN_EXPORT_PEER_CONTEXT=1` (generator, mixed mode only) adds a first
   `peer-gate` term to `member-out` and every `member-out-k`, in both
   generations, that rejects routes toward peer AS 64496, which no stub uses.
@@ -876,8 +876,11 @@ mixed shape has a single changed pair, so that per-peer walk stays empty.
   unchanged. Absent or 0 emits the files unchanged.
 - `RELOADSTALL_EXPORT_PAIRS=G` (harness) requires an explicit `changed_peers`
   and prints `# export_shape pairs=G changed_peers=C expected_cohort=..
-  expected_remainder=..`. It only logs the expected split; set it to the
-  generator's `G`.
+  expected_remainder=..`. Set it to the generator's `G`. On every IPv4 or
+  IPv6 base announcement carrying the active generation marker, changed
+  observers in group `k > 0` must receive `65401:k` as their only
+  `65401:*` community. Group 0 must receive none. A mismatch fails the
+  reload even if a later UPDATE corrects it.
 - `RELOADSTALL_DAEMON_LOG=<path>` (native SIGHUP only): the daemon's JSON log.
   For each reload the harness reads the first `reload_generation_phase` line
   written after the pre-trigger scrape (after staging, so a reload a stage

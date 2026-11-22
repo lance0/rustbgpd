@@ -174,8 +174,9 @@
 //!
 //! Remainder-walk extensions (heterogeneous export shape) — additive; the
 //! historical rows are unchanged:
-//! - `RELOADSTALL_EXPORT_PAIRS=G`: log the expected cohort/remainder split of
-//!   the generator's `GEN_EXPORT_PAIRS=G` shape (`export_split`).
+//! - `RELOADSTALL_EXPORT_PAIRS=G`: report the cohort/remainder split and check
+//!   each changed observer's active-generation base announcements against the
+//!   generator's `GEN_EXPORT_PAIRS=G` group (no pair tag for group 0).
 //! - `RELOADSTALL_DAEMON_LOG`: the daemon's JSON log; each reload reports its
 //!   first `reload_generation_phase` line in `reloadstall_actor_csv`.
 //! - Every native SIGHUP run records `bgp_rib_actor_slice_max_microseconds
@@ -848,6 +849,15 @@ fn export_split(changed: u32, pairs: u32) -> (u32, u32) {
     (cohort, changed - cohort)
 }
 
+fn observer_export_pairs(changed: u32, pairs: u32) -> Vec<u32> {
+    (0..pairs)
+        .flat_map(|pair| {
+            let (_, count) = member_slice(changed, pairs, pair);
+            std::iter::repeat_n(pair, count as usize)
+        })
+        .collect()
+}
+
 async fn notification_checkpoint(
     addr: SocketAddr,
     checkpoint: (&str, u32, usize, usize, u32, u64),
@@ -1267,6 +1277,8 @@ async fn finish_or_exit(stubs: Vec<Stub>, churn_tasks: Vec<tokio::task::JoinHand
 
 #[derive(Default)]
 struct GenerationProgress {
+    export_pair: Option<u32>,
+    pair_error: Option<String>,
     seen: Vec<u64>,
     /// Every base prefix observed with the active generation marker BEFORE
     /// own-announcement exclusion — the LAN-892 received view. With overlap,
@@ -1305,8 +1317,31 @@ struct GenerationProgress {
     duplicate_withdrawn: u64,
 }
 
+/// A pair error latched after reload `r`'s last progress check: the trackers
+/// stay armed through the cycle quiesce, until the next reset or exit.
+fn latched_pair_error(observers: &[Obs], r: u32) -> Option<String> {
+    observers.iter().enumerate().find_map(|(i, obs)| {
+        [("ipv4", &obs.generation), ("ipv6", &obs.generation6)]
+            .into_iter()
+            .find_map(|(family, generation)| {
+                let error = generation.lock().unwrap().pair_error.clone()?;
+                Some(format!("FAIL: reload {r} observer {i} {family}: {error}"))
+            })
+    })
+}
+
+/// The final cycle's check, once the fleet is down and nothing can latch.
+fn exit_on_latched_pair_error(observers: &[Obs], reloads: u32) {
+    if let Some(error) = latched_pair_error(observers, reloads) {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
+}
+
 impl GenerationProgress {
     fn reset(&mut self, total_prefixes: u32, target: u64, excluded_start: u32, excluded_len: u32) {
+        self.export_pair = None;
+        self.pair_error = None;
         self.seen.clear();
         self.seen
             .resize(usize::try_from(total_prefixes).unwrap().div_ceil(64), 0);
@@ -1402,6 +1437,38 @@ impl GenerationProgress {
             .is_some_and(|word| word & (1u64 << (prefix_index % 64)) != 0);
         if expects_announce != withdrawn {
             self.observe(prefix_index, t_us);
+        }
+    }
+
+    fn observe_generation_rows(
+        &mut self,
+        expected_community: u32,
+        communities: &[u32],
+        mut base_indices: impl Iterator<Item = usize>,
+        t_us: u64,
+    ) {
+        if expected_community == 0 || !communities.contains(&expected_community) {
+            return;
+        }
+        if let Some(pair) = self.export_pair {
+            let pair_tags = communities
+                .iter()
+                .copied()
+                .filter(|c| c >> 16 == 65_401)
+                .map(|c| c & 0xffff);
+            let expected = (pair != 0).then_some(pair);
+            let mut tags = pair_tags.clone();
+            if tags.next() != expected || tags.any(|tag| Some(tag) != expected) {
+                if let Some(index) = base_indices.next() {
+                    self.pair_error.get_or_insert_with(|| format!(
+                        "base index {index} expected export pair {pair}, received 65401:* values {:?}", pair_tags.collect::<Vec<_>>()
+                    ));
+                }
+                return;
+            }
+        }
+        for index in base_indices {
+            self.observe(index, t_us);
         }
     }
 
@@ -1613,14 +1680,14 @@ fn observe_generation(
     total_prefixes: u32,
     t_us: u64,
 ) {
-    if expected_community == 0 || !communities.contains(&expected_community) {
-        return;
-    }
-    for prefix in announced {
-        if let Some(index) = base_prefix_index(prefix, total_prefixes) {
-            progress.observe(index, t_us);
-        }
-    }
+    progress.observe_generation_rows(
+        expected_community,
+        communities,
+        announced
+            .into_iter()
+            .filter_map(|prefix| base_prefix_index(prefix, total_prefixes)),
+        t_us,
+    );
 }
 
 fn churn_prefix(churner: u32, j: u32) -> Ipv4Prefix {
@@ -1891,14 +1958,14 @@ fn observe_generation6(
     total_prefixes: u32,
     t_us: u64,
 ) {
-    if expected_community == 0 || !communities.contains(&expected_community) {
-        return;
-    }
-    for prefix in announced {
-        if let Some(index) = base_prefix6_index(*prefix, total_prefixes) {
-            progress.observe(index, t_us);
-        }
-    }
+    progress.observe_generation_rows(
+        expected_community,
+        communities,
+        announced
+            .iter()
+            .filter_map(|&prefix| base_prefix6_index(prefix, total_prefixes)),
+        t_us,
+    );
 }
 
 /// IPv6 slice of the base table owned by stub `i` (dual-stack; no overlap
@@ -4511,8 +4578,7 @@ fn main() {
     // Dual-stack / filtering knobs; both absent reproduces the frozen contract.
     let dualstack_enabled = env_u64("RELOADSTALL_DUALSTACK", 0) != 0;
     let filter_count = u32::try_from(env_u64("RELOADSTALL_FILTER_COUNT", 0)).unwrap();
-    // Heterogeneous export shape (pairs with the generator's GEN_EXPORT_PAIRS);
-    // only logged here, since the receiver contract is the same for every pair.
+    // Match the generator's GEN_EXPORT_PAIRS and its contiguous observer groups.
     let export_pairs = env_u64("RELOADSTALL_EXPORT_PAIRS", 0);
     if export_pairs != 0 {
         if a.len() < 11 || export_pairs > u64::from(changed_peers) {
@@ -4527,6 +4593,7 @@ fn main() {
              expected_cohort={cohort} expected_remainder={remainder}"
         );
     }
+    let observer_pairs = observer_export_pairs(changed_peers, export_pairs as u32);
     let daemon_log = std::env::var_os("RELOADSTALL_DAEMON_LOG").map(PathBuf::from);
     if let Some(path) = &daemon_log {
         if reload_metrics_addr.is_none() {
@@ -5267,6 +5334,16 @@ fn main() {
                     )
                 })
                 .collect();
+            // Disarm, then fail on anything the previous cycle latched after
+            // its last check, before the reset below clears it. That cycle's
+            // actor row is already printed.
+            let changed = &ctx.obs[..changed_peers as usize];
+            for observer in changed {
+                observer.expected_community.store(0, Ordering::Release);
+            }
+            if let Some(error) = latched_pair_error(changed, r - 1) {
+                exit_after_actor_rows(None, run_actor_max_us, Some(error)).await;
+            }
             for (i, observer) in ctx
                 .obs
                 .iter()
@@ -5279,12 +5356,14 @@ fn main() {
                 generation.reset(total, u64::from(total - own_len), own_start, own_len);
                 generation.exclude_extra(&ctx.extras[i]);
                 generation.set_filtered(&filtered);
+                generation.export_pair = observer_pairs.get(i).copied();
                 drop(generation);
                 if dualstack() {
                     let mut generation6 = observer.generation6.lock().unwrap();
                     let (own_start6, own_len6) = member_slice(total6, n_peers, i as u32);
                     generation6.reset(total6, u64::from(total6 - own_len6), own_start6, own_len6);
                     generation6.set_filtered(&filtered);
+                    generation6.export_pair = observer_pairs.get(i).copied();
                 }
             }
             // The tracker stays disarmed until its trigger timestamp exists,
@@ -5355,19 +5434,21 @@ fn main() {
             // fixed deadline falsely fails some larger shape while the wire
             // is still delivering. Fail loudly only when no changed observer
             // makes generation progress for STALL_WINDOW.
-            let unique_sum = |ctx: &Ctx| -> u64 {
-                (0..changed_peers as usize)
-                    .map(|i| {
-                        let generation = ctx.obs[i].generation.lock().unwrap();
-                        let mut progress = generation.unique + generation.filtered_withdrawn;
-                        drop(generation);
-                        if dualstack() {
-                            let generation6 = ctx.obs[i].generation6.lock().unwrap();
-                            progress += generation6.unique + generation6.filtered_withdrawn;
+            let progress_sum = || -> Result<u64, String> {
+                let mut total = 0;
+                for (i, obs) in ctx.obs[..changed_peers as usize].iter().enumerate() {
+                    let read = |g: &GenerationProgress, family| {
+                        if let Some(error) = &g.pair_error {
+                            return Err(format!("FAIL: reload {r} observer {i} {family}: {error}"));
                         }
-                        progress
-                    })
-                    .sum()
+                        Ok(g.unique + g.filtered_withdrawn)
+                    };
+                    total += read(&obs.generation.lock().unwrap(), "ipv4")?;
+                    if dualstack() {
+                        total += read(&obs.generation6.lock().unwrap(), "ipv6")?;
+                    }
+                }
+                Ok(total)
             };
             let mut last_unique = 0u64;
             let mut last_progress = Instant::now();
@@ -5410,6 +5491,10 @@ fn main() {
                     }
                     next_settlement_check = Instant::now() + Duration::from_secs(1);
                 }
+                let sum = match progress_sum() {
+                    Ok(sum) => sum,
+                    Err(error) => exit_after_actor_rows(actor_window.as_mut(), run_actor_max_us, Some(error)).await,
+                };
                 let done =
                     (0..changed_peers as usize).all(|i| completion_us(&ctx, i).is_some());
                 if done && !applied && !delivery_reported {
@@ -5426,7 +5511,6 @@ fn main() {
                         .count();
                     eprintln!("reload {r} progress: complete={sat}/{changed_peers}");
                 }
-                let sum = unique_sum(&ctx);
                 // Before the first re-advertised prefix, allow the
                 // larger FIRST_OUTPUT_WINDOW: a large-policy reload
                 // re-parses and recompiles for minutes before the
@@ -5679,6 +5763,9 @@ fn main() {
                 filtered_withdrawn[1],
                 filtered_expected[1]
             );
+            if let Err(error) = progress_sum() {
+                exit_after_actor_rows(actor_window.as_mut(), run_actor_max_us, Some(error)).await;
+            }
             if stable_marker_peers != expected_stable
                 || up != n_peers as usize
                 || parse_errors != 0
@@ -5793,6 +5880,15 @@ fn main() {
             // to self-pace the whole window).
             tokio::time::sleep(Duration::from_secs(cycle_quiesce_secs)).await;
             if is_trip_slot(r, trip_every) {
+                // The trip resets survivor trackers. Disarm, then fail on
+                // anything this cycle latched after its last check.
+                let changed = &ctx.obs[..changed_peers as usize];
+                for observer in changed {
+                    observer.expected_community.store(0, Ordering::Release);
+                }
+                if let Some(error) = latched_pair_error(changed, r) {
+                    exit_after_actor_rows(None, run_actor_max_us, Some(error)).await;
+                }
                 // This reload's actor row is already printed; a trip-cycle
                 // failure exits inside `run_trip_cycle` without the run row,
                 // which only the soak (never a sweep) runs.
@@ -5848,6 +5944,7 @@ fn main() {
                 std::process::exit(1);
             }
             finish_or_exit(stubs, churn_tasks).await;
+            exit_on_latched_pair_error(&ctx.obs[..changed_peers as usize], reloads);
             print_refresh_accounting(&ctx);
             std::process::exit(0);
         };
@@ -5863,6 +5960,7 @@ fn main() {
         }
         println!("done rss_mib={}", rss_mib(pid));
         finish_or_exit(stubs, churn_tasks).await;
+        exit_on_latched_pair_error(&ctx.obs[..changed_peers as usize], reloads);
         print_refresh_accounting(&ctx);
         std::process::exit(0);
     });
@@ -7093,6 +7191,138 @@ mod tests {
             Some(30),
             "completion time is stable"
         );
+    }
+
+    #[test]
+    fn export_pairs_follow_contiguous_generator_groups() {
+        assert_eq!(observer_export_pairs(7, 3), [0, 0, 0, 1, 1, 2, 2]);
+        assert_eq!(observer_export_pairs(3, 3), [0, 1, 2]);
+        assert_eq!(observer_export_pairs(3, 1), [0, 0, 0]);
+        assert!(observer_export_pairs(7, 0).is_empty());
+    }
+
+    #[test]
+    fn generation_progress_checks_export_pair_on_each_base_announcement() {
+        const PAIR: u32 = 65_401 << 16;
+        for generation in [COMMUNITY_GEN_A, COMMUNITY_GEN_B] {
+            for (pair, tags, accepted) in [
+                (0, vec![], true),
+                (0, vec![PAIR], false),
+                (0, vec![PAIR | 1], false),
+                (1, vec![PAIR | 1], true),
+                (1, vec![PAIR | 1, PAIR | 1], true),
+                (1, vec![], false),
+                (1, vec![PAIR | 2], false),
+                (1, vec![PAIR | 1, PAIR | 2], false),
+            ] {
+                let mut communities = vec![generation];
+                communities.extend(tags);
+                for ipv6 in [false, true] {
+                    let mut progress = GenerationProgress::default();
+                    progress.reset(2, 2, 0, 0);
+                    progress.export_pair = Some(pair);
+                    if ipv6 {
+                        observe_generation6(
+                            &mut progress,
+                            generation,
+                            &communities,
+                            &[base_prefix6(0), base_prefix6(1)],
+                            2,
+                            10,
+                        );
+                    } else {
+                        observe_generation(
+                            &mut progress,
+                            generation,
+                            &communities,
+                            [base_prefix(0), base_prefix(1)],
+                            2,
+                            10,
+                        );
+                    }
+                    assert_eq!(
+                        progress.completed_at_us.is_some(),
+                        accepted,
+                        "pair={pair}, communities={communities:?}, ipv6={ipv6}"
+                    );
+                    assert_eq!(progress.unique, if accepted { 2 } else { 0 });
+                    assert_eq!(progress.pair_error.is_none(), accepted);
+                    assert_eq!(progress.received[0], if accepted { 3 } else { 0 });
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn export_pair_mismatch_requires_current_base_rows_and_survives_a_correction() {
+        let mut progress = GenerationProgress::default();
+        progress.reset(2, 2, 0, 0);
+        progress.export_pair = Some(2);
+
+        let current = COMMUNITY_GEN_B;
+        let wrong = [current, (65_401 << 16) | 1];
+        observe_generation(
+            &mut progress,
+            current,
+            &[COMMUNITY_GEN_A],
+            [base_prefix(0)],
+            2,
+            1,
+        );
+        observe_generation(&mut progress, current, &wrong, [churn_prefix(0, 0)], 2, 2);
+        assert!(progress.pair_error.is_none());
+        assert_eq!(progress.unique, 0);
+
+        observe_generation(
+            &mut progress,
+            current,
+            &wrong,
+            [churn_prefix(0, 0), base_prefix(1)],
+            2,
+            3,
+        );
+        observe_generation(
+            &mut progress,
+            current,
+            &[current, (65_401 << 16) | 2],
+            [base_prefix(0), base_prefix(1)],
+            2,
+            4,
+        );
+        assert_eq!(progress.unique, 2);
+        assert_eq!(
+            progress.pair_error.as_deref(),
+            Some("base index 1 expected export pair 2, received 65401:* values [1]")
+        );
+        progress.reset(2, 2, 0, 0);
+        assert!(progress.pair_error.is_none());
+    }
+
+    #[test]
+    fn pair_errors_latched_after_the_last_check_fail_before_reset_and_exit() {
+        let observers = [Obs::new(), Obs::new()];
+        assert_eq!(latched_pair_error(&observers, 3), None);
+        observers[1].generation6.lock().unwrap().pair_error = Some("late".into());
+        assert_eq!(
+            latched_pair_error(&observers, 3).as_deref(),
+            Some("FAIL: reload 3 observer 1 ipv6: late")
+        );
+
+        let source = include_str!("main.rs");
+        let check = ["latched_pair_error(changed, ", "r - 1)"].concat();
+        let check = source.find(&check).unwrap();
+        // The only reset that arms an export pair, in the reload loop.
+        let reset = ["generation.export_pair = ", "observer_pairs"].concat();
+        assert_eq!(source.matches(&reset).count(), 1);
+        assert!(check < source.find(&reset).unwrap());
+        let exit = ["exit_on_latched_pair_error(", "&ctx.obs"].concat();
+        assert_eq!(source.matches(&exit).count(), 2);
+        // A trip re-arms survivors through `reset`, so its check comes first.
+        let trip = ["latched_pair_error(changed, ", "r)"].concat();
+        let trip = source.find(&trip).unwrap();
+        let call = ["run_trip_", "cycle(\n                    &ctx"].concat();
+        let call = source.find(&call).unwrap();
+        assert!(trip < call && call - trip < 800);
     }
 
     #[test]
