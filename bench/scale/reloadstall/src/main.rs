@@ -1317,6 +1317,27 @@ struct GenerationProgress {
     duplicate_withdrawn: u64,
 }
 
+/// A pair error latched after reload `r`'s last progress check: the trackers
+/// stay armed through the cycle quiesce, until the next reset or exit.
+fn latched_pair_error(observers: &[Obs], r: u32) -> Option<String> {
+    observers.iter().enumerate().find_map(|(i, obs)| {
+        [("ipv4", &obs.generation), ("ipv6", &obs.generation6)]
+            .into_iter()
+            .find_map(|(family, generation)| {
+                let error = generation.lock().unwrap().pair_error.clone()?;
+                Some(format!("FAIL: reload {r} observer {i} {family}: {error}"))
+            })
+    })
+}
+
+/// The final cycle's check, once the fleet is down and nothing can latch.
+fn exit_on_latched_pair_error(observers: &[Obs], reloads: u32) {
+    if let Some(error) = latched_pair_error(observers, reloads) {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
+}
+
 impl GenerationProgress {
     fn reset(&mut self, total_prefixes: u32, target: u64, excluded_start: u32, excluded_len: u32) {
         self.export_pair = None;
@@ -5313,6 +5334,16 @@ fn main() {
                     )
                 })
                 .collect();
+            // Disarm, then fail on anything the previous cycle latched after
+            // its last check, before the reset below clears it. That cycle's
+            // actor row is already printed.
+            let changed = &ctx.obs[..changed_peers as usize];
+            for observer in changed {
+                observer.expected_community.store(0, Ordering::Release);
+            }
+            if let Some(error) = latched_pair_error(changed, r - 1) {
+                exit_after_actor_rows(None, run_actor_max_us, Some(error)).await;
+            }
             for (i, observer) in ctx
                 .obs
                 .iter()
@@ -5904,6 +5935,7 @@ fn main() {
                 std::process::exit(1);
             }
             finish_or_exit(stubs, churn_tasks).await;
+            exit_on_latched_pair_error(&ctx.obs[..changed_peers as usize], reloads);
             print_refresh_accounting(&ctx);
             std::process::exit(0);
         };
@@ -5919,6 +5951,7 @@ fn main() {
         }
         println!("done rss_mib={}", rss_mib(pid));
         finish_or_exit(stubs, churn_tasks).await;
+        exit_on_latched_pair_error(&ctx.obs[..changed_peers as usize], reloads);
         print_refresh_accounting(&ctx);
         std::process::exit(0);
     });
@@ -7254,6 +7287,27 @@ mod tests {
         );
         progress.reset(2, 2, 0, 0);
         assert!(progress.pair_error.is_none());
+    }
+
+    #[test]
+    fn pair_errors_latched_after_the_last_check_fail_before_reset_and_exit() {
+        let observers = [Obs::new(), Obs::new()];
+        assert_eq!(latched_pair_error(&observers, 3), None);
+        observers[1].generation6.lock().unwrap().pair_error = Some("late".into());
+        assert_eq!(
+            latched_pair_error(&observers, 3).as_deref(),
+            Some("FAIL: reload 3 observer 1 ipv6: late")
+        );
+
+        let source = include_str!("main.rs");
+        let check = ["latched_pair_error(changed, ", "r - 1)"].concat();
+        let check = source.find(&check).unwrap();
+        // The only reset that arms an export pair, in the reload loop.
+        let reset = ["generation.export_pair = ", "observer_pairs"].concat();
+        assert_eq!(source.matches(&reset).count(), 1);
+        assert!(check < source.find(&reset).unwrap());
+        let exit = ["exit_on_latched_pair_error(", "&ctx.obs"].concat();
+        assert_eq!(source.matches(&exit).count(), 2);
     }
 
     #[test]
