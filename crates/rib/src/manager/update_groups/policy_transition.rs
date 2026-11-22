@@ -1290,6 +1290,7 @@ impl RibManager {
         destination: &GroupRibOut,
         rs_asns: &[u32],
         speculative: bool,
+        mut visit_destination: impl FnMut(Prefix),
         checkpoint: &mut impl FnMut(bool),
     ) -> Result<BatchedTransitionInventory, Option<Box<super::RejectedBatchedInventory>>> {
         use crate::manager::distribution::rs_control::rs_control_route_tagged;
@@ -1330,12 +1331,15 @@ impl RibManager {
         checkpoint(true);
         let mut supplements: AddrMap<PeerId, BatchedMemberSupplement> = AddrMap::default();
         let mut counters = BatchedTransitionCounters::default();
+        let mut matched = 0;
         let mut rejected = false;
         'destination: for route in destination.table.iter() {
             checkpoint(false);
             let key = (route.prefix, route.path_id);
             let next_hop = destination.nh_override(key);
             let prior = source.table.get(&route.prefix, route.path_id);
+            matched += usize::from(prior.is_some());
+            visit_destination(route.prefix);
             let action_only = |old: Option<super::AdvEntry<'_>>,
                                new: Option<super::AdvEntry<'_>>| {
                 old.zip(new).is_some_and(|(old, new)| {
@@ -1487,16 +1491,30 @@ impl RibManager {
             return Err(None);
         }
         checkpoint(true);
-        let mut withdraw: Vec<(Prefix, u32)> = Vec::with_capacity(source.table.len());
+        // Each staged key occurs once, so every unmatched source key needs a withdrawal.
+        // A count above the source length would break that invariant; the
+        // exact scan below still derives the withdrawals in that case.
+        let missing = source.table.len().checked_sub(matched);
+        debug_assert!(
+            missing.is_some(),
+            "matched {matched} destination keys against {} source keys",
+            source.table.len()
+        );
+        let mut withdraw = Vec::with_capacity(missing.unwrap_or(source.table.len()));
         checkpoint(true);
-        for route in source.table.iter() {
-            checkpoint(false);
-            if destination
-                .table
-                .get(&route.prefix, route.path_id)
-                .is_none()
-            {
-                withdraw.push((route.prefix, route.path_id));
+        if missing != Some(0) {
+            for route in source.table.iter() {
+                #[cfg(test)]
+                crate::manager::WITHDRAW_SCAN_VISITS
+                    .set(crate::manager::WITHDRAW_SCAN_VISITS.get() + 1);
+                checkpoint(false);
+                if destination
+                    .table
+                    .get(&route.prefix, route.path_id)
+                    .is_none()
+                {
+                    withdraw.push((route.prefix, route.path_id));
+                }
             }
         }
         for entry in destination.runner_up.values() {

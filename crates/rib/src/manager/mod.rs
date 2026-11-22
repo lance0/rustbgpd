@@ -107,6 +107,29 @@ fn executor_handoffs() -> (usize, usize) {
     EXECUTOR_HANDOFFS.with(std::cell::Cell::get)
 }
 
+#[cfg(test)]
+thread_local! {
+    static DENIAL_LOC_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static DENIAL_DEST_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static WITHDRAW_SCAN_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn distinct_reload_visits() -> (usize, usize, usize) {
+    (
+        DENIAL_LOC_VISITS.get(),
+        DENIAL_DEST_VISITS.get(),
+        WITHDRAW_SCAN_VISITS.get(),
+    )
+}
+
+#[cfg(test)]
+fn reset_distinct_reload_visits() {
+    DENIAL_LOC_VISITS.set(0);
+    DENIAL_DEST_VISITS.set(0);
+    WITHDRAW_SCAN_VISITS.set(0);
+}
+
 /// Add one export batch's tally for `peer` to its neighbor's totals, one map
 /// lookup per peer per batch. An empty tally touches nothing.
 fn add_export_tally(
