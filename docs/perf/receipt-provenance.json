@@ -14,6 +14,11 @@
       "measured_on": "2026-08-30"
     },
     {
+      "path": "docs/perf/competitive-bgperf2-v0840-2026-11.md",
+      "measured_commit": "5f5ca6a312d1bdf7094440ae363495574a6ddecc",
+      "measured_on": "2026-11-22"
+    },
+    {
       "path": "docs/perf/cross-daemon-v0740-2026-10.md",
       "measured_commit": "4d14851f77b064dd254f2319708dd91f281f9b0d",
       "measured_on": "2026-10-03"
@@ -97,8 +102,13 @@
     },
     {
       "source": "docs/benchmarks.md",
-      "anchor": "| How did the measured releases compare for route import and convergence? | [v0.68.0 cross-stack receipt]",
+      "anchor": "| How did the measured releases compare for route import and convergence? | [v0.84.0 cross-stack receipt]",
       "receipt": "docs/perf/competitive-bgperf2-v0680-2026-08.md"
+    },
+    {
+      "source": "docs/benchmarks.md",
+      "anchor": "| How did the measured releases compare for route import and convergence? | [v0.84.0 cross-stack receipt]",
+      "receipt": "docs/perf/competitive-bgperf2-v0840-2026-11.md"
     },
     {
       "source": "docs/benchmarks.md",
@@ -167,8 +177,13 @@
     },
     {
       "source": "docs/explanation/comparison.md",
-      "anchor": "The freshest published [v0.68.0 cross-stack",
+      "anchor": "The freshest published [v0.84.0 cross-stack",
       "receipt": "docs/perf/competitive-bgperf2-v0680-2026-08.md"
+    },
+    {
+      "source": "docs/explanation/comparison.md",
+      "anchor": "The freshest published [v0.84.0 cross-stack",
+      "receipt": "docs/perf/competitive-bgperf2-v0840-2026-11.md"
     },
     {
       "source": "docs/explanation/ixp-evaluation.md",
@@ -242,8 +257,13 @@
     },
     {
       "source": "docs/perf/README.md",
-      "anchor": "The [v0.68.0 cross-stack bgperf2",
+      "anchor": "The [v0.84.0 cross-stack bgperf2",
       "receipt": "docs/perf/competitive-bgperf2-v0680-2026-08.md"
+    },
+    {
+      "source": "docs/perf/README.md",
+      "anchor": "The [v0.84.0 cross-stack bgperf2",
+      "receipt": "docs/perf/competitive-bgperf2-v0840-2026-11.md"
     }
   ]
 }

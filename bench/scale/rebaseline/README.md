@@ -142,7 +142,7 @@ the resulting immutable image digest, and the bgperf2 `git rev-parse HEAD` (or
 an exact packaged version). A mutable image tag is not artifact identity.
 
 New campaigns use the maintained fork `https://github.com/lance0/bgperf2` at
-commit `642a17746e7313deee6895f9ed57c685f9ecb019`. To use a later fork commit,
+commit `68b74022f73952ba2a112eb87b01ce0487b893bf`. To use a later fork commit,
 repin deliberately: change the commit on this line in the same change that
 adopts it, and do not run from an unpinned fork `master`. Record the bgperf2
 checkout's `git rev-parse HEAD` as `bgperf2.revision_or_version` in the
@@ -158,9 +158,10 @@ continue in all modes. With `off`, convergence uses the monitor checkpoint
 and the full 20-sample assurance window; `poll5` can delay the target
 confirmation that permits the shorter five-sample window.
 
-This extension is not in the campaign pin above. Adopt it only through an
-explicit fork repin after its separate alternating `poll1`/`off` 2x100k
-qualification under the benchmark lock. Do not overlap that comparison with
+The campaign pin above includes this extension, and its default `poll1`
+keeps the earlier one-second cadence. Use `poll5` or `off` in a campaign only
+after their separate alternating `poll1`/`off` 2x100k qualification under the
+benchmark lock. Do not overlap that comparison with
 another timed workload. The control alone is not evidence of neutral polling
 cost or convergence timing.
 

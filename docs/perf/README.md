@@ -148,11 +148,15 @@ delivering its 1600-route delta in ~15 ms with zero policy evaluations.
 
 ## Route import comparisons
 
-The [v0.68.0 cross-stack bgperf2
-receipt](competitive-bgperf2-v0680-2026-08.md), measured 2026-08-30, is the
-latest full five-shape run and the headline same-host IPv4 import/convergence comparison. All 80 cells
-reached the exact expected route count across five fixed shapes; the largest is
-two peers × 100,000 prefixes, not a full-table cell. A [2026-10-19 paired-read rerun](../benchmarks.md#2026-10-19-paired-read-rerun) measured unreleased rustbgpd `3e3fba0de` against BIRD 2.19.3, released 2026-10-02, BIRD 3.3.3, and GoBGP v4.10.0, released 2026-10-04, on three of the five shapes with three repetitions per cell. rustbgpd had the lowest median total time in all three shapes on that host, at 10 peers × 1k within one sampling step of BIRD 2. BIRD 2.20.0, released 2026-10-12, and FRR 10.7.1, released 2026-08-31, are not yet measured. Microbenchmarks and memory
+The [v0.84.0 cross-stack bgperf2
+receipt](competitive-bgperf2-v0840-2026-11.md), measured 2026-11-22, is the
+latest full five-shape run and the headline same-host IPv4 import/convergence
+comparison: rustbgpd v0.84.0, BIRD 2.19.2, FRR 10.7.0 and GoBGP 4.8.0, three
+shuffled runs per cell. All 60 runs reached the exact expected route count, and
+rustbgpd had the lowest median total time in all five shapes; the largest is
+two peers × 100,000 prefixes, not a full-table cell. The [v0.68.0
+receipt](competitive-bgperf2-v0680-2026-08.md) keeps the campaign of the same
+daemons measured 2026-08-30 on an earlier harness. A [2026-10-19 paired-read rerun](../benchmarks.md#2026-10-19-paired-read-rerun) measured unreleased rustbgpd `3e3fba0de` against BIRD 2.19.3, released 2026-10-02, BIRD 3.3.3, and GoBGP v4.10.0, released 2026-10-04, on three of the five shapes with three repetitions per cell. rustbgpd had the lowest median total time in all three shapes on that host, at 10 peers × 1k within one sampling step of BIRD 2. BIRD 2.20.0, released 2026-10-12, and FRR 10.7.1, released 2026-08-31, are not yet measured. Microbenchmarks and memory
 scaling are in [Benchmarks](../benchmarks.md). That page also retains
 the corrected July campaign as explicitly historical evidence; it supports no
 cross-daemon ranking. Every receipt is indexed in
@@ -295,6 +299,7 @@ records.
 | [`competitive-bgperf2-2026-07.md`][competitive-bgperf2-2026-07.md] | Initial campaign 2026-07-26; latest refresh 2026-07-27 | Four daemons, five fleet shapes, three runs per shape | Historical observations whose cross-daemon ranking was later retracted | Any projection beyond 100 peers |
 | [`competitive-bgperf2-v0670-2026-08.md`][competitive-bgperf2-v0670-2026-08.md] | 2026-08-29 | Four daemons, five import shapes, four repetitions | 79 of 80 cells reached the exact expected table | Export, reload, churn, IPv6, Add-Path, OpenBGPD, or another host |
 | [`competitive-bgperf2-v0680-2026-08.md`][competitive-bgperf2-v0680-2026-08.md] | 2026-08-30 | Four daemons, five import shapes, four counterbalanced repetitions | All 80 cells reached the exact expected table | Universal throughput, memory, or CPU ranking; BIRD 2.19.3, FRR 10.7.1 or GoBGP v4.10.0 |
+| [`competitive-bgperf2-v0840-2026-11.md`](competitive-bgperf2-v0840-2026-11.md) | 2026-11-22 | rustbgpd v0.84.0 (`5f5ca6a31`), BIRD 2.19.2, FRR 10.7.0 and GoBGP 4.8.0, five import shapes, three shuffled repetitions, bgperf2 fork `68b7402` | All 60 runs reached the exact expected table; rustbgpd had the lowest median total time in all five shapes | Universal throughput, memory, or CPU ranking; attribution of the change from v0.68.0; BIRD 3, FRR 10.7.1, GoBGP v4.10.0 or OpenBGPD |
 | [`config-persistence-2026-07.md`][config-persistence-2026-07.md] | 2026-07-25 | Pinned persistence, history, rollback, and commit-confirm lifecycle harness | Behavioral assertions preserved by the workspace integration test | Timing or performance |
 | [`controller-injection-2026-09.md`](controller-injection-2026-09.md) | 2026-09-20–21 | Unary inserts, replacements and deletes through 100k routes, one passive client | Scoped CPU reduction from deferred controller attribute collection; existing local-route reconciliation | Batch packing, multi-client scale or isolated-host latency |
 | [`cross-daemon-v0840-2026-11.md`](cross-daemon-v0840-2026-11.md) | 2026-11-22 | rustbgpd v0.84.0 (`5f5ca6a31`), BIRD 3.3.3 and OpenBGPD 9.3 at IXP-700 S1/S2/S3, two runs per daemon with the order rotated, 12 legs | Same-day rows against both incumbents for every matrix cell, including the losses and the bands that moved against v0.80.x, with cgroup peaks for memory | IRR reload, three-run ranges, BIRD 3.4.0, RR1000, IPv6, or attribution of any change |
@@ -478,6 +483,7 @@ from that file; a directory name does not fill a missing date.
 | [`artifacts/boxed-mp-path-attributes-2026-09/parse-ipv6-summary.md`](artifacts/boxed-mp-path-attributes-2026-09/parse-ipv6-summary.md) | Unstated | Six-attempt revised-parse follow-up comparison including the IPv6 typical rows | No confident regressions under the configured rule | Unstated |
 | [`artifacts/competitive-bgperf2-2026-07/README.md`](artifacts/competitive-bgperf2-2026-07/README.md) | 2026-07 | Four daemons, five fleet shapes, and three runs per shape | The retained inputs can recompute the linked receipt | Unstated |
 | [`artifacts/competitive-bgperf2-v0680-2026-08/README.md`](artifacts/competitive-bgperf2-v0680-2026-08/README.md) | Unstated | Eighty rows across five fixed import shapes | The retained row and image inventory | A full-table campaign |
+| [`artifacts/competitive-bgperf2-v0840-2026-11/README.md`](artifacts/competitive-bgperf2-v0840-2026-11/README.md) | 2026-11-22 | Sixty rows across five fixed import shapes | The retained rows, image IDs, seeds and per-run pairing counts | A full-table campaign |
 | [`artifacts/controller-injection-2026-09/README.md`](artifacts/controller-injection-2026-09/README.md) | Unstated | Eight completed controller-injection cells with passive-receiver counts, paginated reconciliation, and metrics snapshots | The retained result and evidence inventory for the linked receipt | Unstated |
 | [`artifacts/cross-daemon-v0801-s3-2026-10/README.md`](artifacts/cross-daemon-v0801-s3-2026-10/README.md) | 2026-10-25 | The three rustbgpd S3 legs of the v0.80.1 flap-storm addendum | Curated `comparison.json`, harness logs, status, RSS samples, VmHWM and cgroup readouts, provenance, gzipped daemon logs and the summarizer output | Competitor legs, scenario configurations or other cells |
 | [`artifacts/cross-daemon-v0800-2026-10/README.md`](artifacts/cross-daemon-v0800-2026-10/README.md) | 2026-10-25 | All 12 matrix legs and 9 IRR roots of the v0.80.0 cross-daemon campaign, plus its Criterion, rrharness and bgperf2 outputs | Harness logs, status, RSS samples, VmHWM and cgroup readouts, provenance, IRR rows, gzipped rustbgpd daemon logs, and the extracted summary and tail CSVs | Scenario configurations or competitor daemon logs |
