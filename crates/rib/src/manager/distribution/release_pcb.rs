@@ -95,7 +95,7 @@ impl RibManager {
     ) -> Option<PreparedPcb> {
         let group = self.group_ribs.get(&gid)?;
         let family = prefix_family(&prefix);
-        debug_assert!(!self.selection_deferred(family));
+        let local_only = self.selection_deferred(family);
         let route = |(source, path): Path| {
             self.ribs[&source]
                 .get(&prefix, path)
@@ -122,7 +122,8 @@ impl RibManager {
                     break;
                 };
                 pcb.after = Some(candidate.path_id);
-                if crate::srv6::unicast_eligible(candidate)
+                if (!local_only || super::unicast_deferral_exempt(candidate))
+                    && crate::srv6::unicast_eligible(candidate)
                     && !should_suppress_ibgp_inner(
                         candidate,
                         group.is_ebgp,

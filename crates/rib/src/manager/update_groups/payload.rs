@@ -1351,6 +1351,8 @@ pub(in crate::manager) fn emit_group_deltas_for_member_with_checkpoint<'a>(
         rs_control_route_rewrite, rs_control_suppressed,
     };
     for delta in deltas {
+        #[cfg(test)]
+        crate::manager::source_departure::inspect_receiver_row();
         checkpoint();
         match &delta.new {
             Some((route, nh)) => {
@@ -1571,6 +1573,8 @@ pub(in crate::manager) fn emit_pcb_rs_member_with_checkpoint(
                 .map(|(prefix, prior)| (*prefix, prior.as_deref())),
         );
     for (prefix, prior) in slots {
+        #[cfg(test)]
+        crate::manager::source_departure::inspect_receiver_row();
         checkpoint();
         resolved.insert(prefix);
         let old = prior
@@ -1692,6 +1696,8 @@ pub(in crate::manager) fn emit_lane_deltas_for_member_with_checkpoint<'a>(
         rs_control_prepend_count, rs_control_route_rewrite, rs_control_suppressed,
     };
     for delta in lane_deltas {
+        #[cfg(test)]
+        crate::manager::source_departure::inspect_receiver_row();
         checkpoint();
         if delta.emit_target != Some(member) {
             continue;
@@ -1815,6 +1821,8 @@ pub(in crate::manager) fn emit_rs_tag_transitions_with_checkpoint<'a>(
         return;
     };
     for transition in transitions {
+        #[cfg(test)]
+        crate::manager::source_departure::inspect_receiver_row();
         checkpoint();
         if transition.route.peer == member {
             continue;

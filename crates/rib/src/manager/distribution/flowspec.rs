@@ -408,6 +408,8 @@ impl RibManager {
     ) {
         let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
         for key in keys {
+            #[cfg(test)]
+            crate::manager::source_departure::inspect_receiver_row();
             checkpoint();
             let Some(best) = loc_rib.get_flowspec(key) else {
                 if rib_out.get_flowspec(key).is_some() {
@@ -622,15 +624,43 @@ impl RibManager {
         });
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "family selection, checkpointed staging, and commit retain their shared mutation order"
-    )]
     fn recompute_validated_flowspec_inner(&mut self, affected: &HashSet<FlowSpecKey>) {
+        let mut changed = self.select_validated_flowspec_keys(affected);
+        if changed.is_empty() {
+            return;
+        }
+        let peers: Vec<_> = self
+            .outbound_peers
+            .keys()
+            .inspect(|_| self.replacement_checkpoint_at("selection_flowspec", false))
+            .copied()
+            .collect();
+        self.distribute_flowspec_to_peers(&changed, &peers);
+        super::super::retire_hash_set(&mut changed, &mut || {
+            self.replacement_checkpoint_at("selection_flowspec", false);
+        });
+    }
+
+    /// Select the departure's complete rule set before paging delivery.
+    /// Validation inventories surviving candidates once for the whole set.
+    pub(in crate::manager) fn select_flowspec_departure_keys(
+        &mut self,
+        affected: &HashSet<FlowSpecKey>,
+    ) -> HashSet<FlowSpecKey> {
+        self.with_selection_readiness(|manager| {
+            manager.sync_flowspec_validation(affected);
+            manager.select_validated_flowspec_keys(affected)
+        })
+    }
+
+    fn select_validated_flowspec_keys(
+        &mut self,
+        affected: &HashSet<FlowSpecKey>,
+    ) -> HashSet<FlowSpecKey> {
         use crate::route::FlowSpecRoute;
 
         let readiness = self.replacement_readiness.clone();
-        let mut checkpoint = || {
+        let checkpoint = || {
             super::super::replacement_readiness_checkpoint_at(
                 &readiness,
                 "selection_flowspec",
@@ -640,7 +670,7 @@ impl RibManager {
         checkpoint();
         self.record_deferred_flowspec(affected);
         if affected.is_empty() {
-            return;
+            return HashSet::new();
         }
 
         // Changed keys are a subset of the selected inputs: an owner
@@ -700,7 +730,7 @@ impl RibManager {
             &changed_keys,
         );
         if changed_keys.is_empty() {
-            return;
+            return changed_keys;
         }
 
         let lens = self.loc_rib.family_lens();
@@ -715,10 +745,42 @@ impl RibManager {
             lens.flowspec_vpn,
         );
 
+        changed_keys
+    }
+
+    /// Deliver only this departure page, using current best and admitted
+    /// routes and the same per-receiver credit and recovery as live changes.
+    pub(in crate::manager) fn distribute_flowspec_departure_page(
+        &mut self,
+        changed_keys: &HashSet<FlowSpecKey>,
+        peers: &[PeerId],
+    ) {
+        self.with_selection_readiness(|manager| {
+            manager.distribute_flowspec_to_peers(changed_keys, peers);
+        });
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "FlowSpec family gating, checkpointed staging, and commit share the same receiver pass"
+    )]
+    fn distribute_flowspec_to_peers(
+        &mut self,
+        changed_keys: &HashSet<FlowSpecKey>,
+        peers: &[PeerId],
+    ) {
+        let readiness = self.replacement_readiness.clone();
+        let mut checkpoint = || {
+            super::super::replacement_readiness_checkpoint_at(
+                &readiness,
+                "selection_flowspec",
+                false,
+            );
+        };
         // The FlowSpec families this pass carries, read once: a receiver's
         // gate below then costs the same however many rules changed.
         let mut changed_families: Vec<(Afi, Safi)> = Vec::new();
-        for key in &changed_keys {
+        for key in changed_keys {
             checkpoint();
             let family = key.family();
             if !changed_families.contains(&family) {
@@ -733,14 +795,7 @@ impl RibManager {
         // Shares each modified attribute set across the rules and peers
         // of this pass, as unicast and EVPN export do.
         let mut export_memo = super::ExportMemo::default();
-        // Distribute FlowSpec changes to outbound peers
-        let peers: Vec<PeerId> = self
-            .outbound_peers
-            .keys()
-            .inspect(|_| checkpoint())
-            .copied()
-            .collect();
-        for peer in peers {
+        for &peer in peers {
             checkpoint();
             if self.outbound_channel_gone(peer) {
                 self.drop_gone_dirty_peer(peer);
@@ -799,7 +854,7 @@ impl RibManager {
                 &self.loc_rib,
                 rib_out,
                 &self.peer_is_rr_client,
-                &changed_keys,
+                changed_keys,
                 peer,
                 target_peer_asn,
                 target_peer_group,
@@ -839,7 +894,6 @@ impl RibManager {
             }
         }
         export_memo.retire_with(&mut checkpoint);
-        super::super::retire_hash_set(&mut changed_keys, &mut checkpoint);
     }
 }
 
