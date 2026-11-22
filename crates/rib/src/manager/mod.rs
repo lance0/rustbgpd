@@ -8035,6 +8035,14 @@ impl RibManager {
 
         loop {
             if self.source_departure.is_some() {
+                // An UPDATE admitted between departure batches can lose the
+                // capacity notice lane. Fail stop as the loop top does.
+                if self.dampening_history.notice_failed() {
+                    tracing::error!(
+                        "dampening capacity disable owner unavailable; terminating RIB actor"
+                    );
+                    return self;
+                }
                 self.poll_source_departure_turn();
                 self.drain_readiness_queries(None);
                 #[cfg(test)]

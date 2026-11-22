@@ -744,3 +744,37 @@ async fn closed_capacity_notice_lane_terminates_rib_actor() {
         .await
         .expect("RIB exits when capacity-disable ownership is unavailable");
 }
+
+#[tokio::test(start_paused = true)]
+async fn closed_capacity_notice_lane_terminates_rib_actor_during_source_departure() {
+    let (mut manager, notices) = manager(limits(1, 1));
+    drop(notices);
+    let owner = owner(1);
+    let first = source(1, 1, 65001, &owner);
+    let refused = source(2, 2, 65002, &owner);
+    publish(&mut manager, 1, vec![owner]).unwrap();
+    let _first_out = register(&mut manager, &first, true, false);
+    let _refused_out = register(&mut manager, &refused, true, false);
+    deliver(&mut manager, batch(&first, &[1], &[], true));
+    deliver(&mut manager, batch(&refused, &[2], &[], true));
+    assert!(manager.dampening_history.notice_failed());
+    // Stage a departure that owns the actor for many polls. The lost
+    // control lane must stop the actor before any of them run.
+    let affected: HashSet<Prefix> = (0..512)
+        .map(|row| Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(0x0a09_0000 + row), 32)))
+        .collect();
+    manager.start_source_departure(first.peer, affected.clone(), affected, &HashSet::new());
+    assert!(manager.source_departure.is_some());
+    let (_live_tx, live_rx) = mpsc::channel(4);
+    manager.rx = live_rx;
+    let end = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        Box::pin(manager.run_actor()),
+    )
+    .await
+    .expect("RIB exits when capacity-disable ownership is unavailable");
+    assert!(
+        end.source_departure.is_some(),
+        "fail-stop waited for the departure to finish"
+    );
+}
