@@ -1820,6 +1820,8 @@ impl RibManager {
                 // The resync restaged the table under what the receiver
                 // accepts now (the change that made it dirty included): a
                 // walk kept past it makes no estimate from rows before it.
+                // Defense in depth: no VPN, labeled or EVPN step runs while
+                // the family is deferred, and every way out relogs it.
                 owing.forget_walk_sample(index);
             }
         }
@@ -2441,7 +2443,11 @@ impl RibManager {
     /// whose list has had a key logged since its starting log adds
     /// nothing, as does one whose receiver's acceptance changed without a
     /// log (its sample is dropped), since rows counted before such a change
-    /// say nothing of the keys ahead after it. An AFI without a rate adds
+    /// say nothing of the keys ahead after it. A receiver whose export
+    /// chain reads a policy dataset makes no estimate: the peer manager
+    /// publishes a dataset swap on the shared handle before the RIB hears
+    /// of it, so cursor steps in between commit rows at the new contents
+    /// with nothing logged. An AFI without a rate adds
     /// nothing, so a table can fall short and grow by the steps' reserves
     /// as before, but is not sized past what one estimate from each AFI's
     /// cumulative rate reads. The key index is sized by the unclamped rate
@@ -2468,7 +2474,11 @@ impl RibManager {
             return;
         };
         let total = rows[0] + rows[1];
-        if total > PRESIZE_ROWS {
+        if total > PRESIZE_ROWS
+            || self
+                .export_policy_for(peer)
+                .is_some_and(|chain| chain.compiled().referenced_datasets().next().is_some())
+        {
             return;
         }
         let lens = self.loc_rib.family_lens();

@@ -23,9 +23,12 @@
   presized only when the release inventory's sample was taken with no
   change to the list or the receiver's acceptance; otherwise it grows as
   before. So a key logged into the list after the inventory (a
-  re-announcement, withdrawal, relabel, best-path change or policy
-  dataset re-evaluation), an RT-Constrain membership change, or a resync
+  re-announcement, withdrawal, relabel or best-path change), an
+  RT-Constrain membership change, or a resync
   of the receiver before the estimate means the walk makes no estimate.
+  A receiver whose export policy uses a policy dataset makes no estimate
+  at all: a dataset swap takes effect for the walk before the receiver's
+  re-evaluation runs, so its sample could mix rows from both contents.
   A change after the estimate (a withdrawal, for example) leaves the
   reservation in place, as the whole-family send did. A receiver
   whose export policy or RT-Constrain membership accepts a fraction of

@@ -3,8 +3,8 @@
 //! rows per prefix read so far and the prefixes still ahead of its cursor.
 
 use super::super::cursor_presize::{
-    Growth, PRESIZE_ROWS, assert_at_or_below_control, assert_fitted, deny_med_chain, set_med,
-    tenth_med, with_control,
+    Growth, PRESIZE_ROWS, assert_at_or_below_control, assert_fitted, dataset_chain, deny_med_chain,
+    prefix_dataset, set_med, tenth_med, with_control,
 };
 use super::*;
 
@@ -92,6 +92,15 @@ fn tenth(index: u32) -> LabeledRibRoute {
 /// A receiver behind [`deny_med_chain`] sending `add_path` paths a prefix
 /// (`u32::MAX`: every path), owing `IPv4` labeled unicast whole.
 fn filtered_receiver(manager: &mut RibManager, add_path: u32) -> Receiver {
+    receiver_behind(manager, deny_med_chain(), add_path)
+}
+
+/// [`filtered_receiver`] behind `export_policy`.
+fn receiver_behind(
+    manager: &mut RibManager,
+    export_policy: rustbgpd_policy::PolicyChain,
+    add_path: u32,
+) -> Receiver {
     let peer = receiver(0);
     let (outbound_tx, mut rx) = mpsc::channel(4096);
     manager.handle_update(RibUpdate::PeerUp {
@@ -103,7 +112,7 @@ fn filtered_receiver(manager: &mut RibManager, add_path: u32) -> Receiver {
         peer_asn: 65000,
         peer_router_id: Ipv4Addr::new(10, 0, 0, 200),
         outbound_tx,
-        export_policy: Some(deny_med_chain()),
+        export_policy: Some(export_policy),
         sendable_families: vec![L4],
         is_ebgp: false,
         route_reflector_client: true,
@@ -396,4 +405,60 @@ fn accepted_labeled_prefixes_denied_after_a_default_step_fit() {
     };
     let (head, control) = with_control(shape);
     assert_at_or_below_control(&head, &control, "denied after a default step");
+}
+
+/// One in five labeled prefixes accepted through a policy dataset; after
+/// one default step (about 205 rows) the peer manager publishes a swap to
+/// one in fifty, and 8 steps run before the RIB receives the
+/// re-evaluation. A receiver whose export policy reads a dataset makes no
+/// estimate, so the table fits the control. Red when it estimates: the
+/// sample mixes both contents' rows.
+#[test]
+fn a_labeled_dataset_swap_published_before_its_re_evaluation_fits() {
+    use rustbgpd_policy::datasets::{DatasetHandle, DatasetKind};
+    const TOTAL: u32 = 100_000;
+    let allowed = |keep: fn(u32) -> bool| {
+        prefix_dataset((0..TOTAL).filter(|&i| keep(i)).map(|i| prefix(L4, i)))
+    };
+    let shape = || {
+        let handle = Arc::new(DatasetHandle::new(
+            "allowed",
+            DatasetKind::Prefix,
+            allowed(|i| i % 5 == 0),
+        ));
+        let mut manager = manager(4 * CHUNK_ROWS);
+        sources_up(&mut manager);
+        let mut receivers = vec![receiver_behind(&mut manager, dataset_chain(&handle), 0)];
+        let peer = receivers[0].peer;
+        received(&mut manager, &all(TOTAL), &[]);
+        tick(&mut manager, &mut receivers);
+        let prior = handle.pin();
+        assert!(handle.refresh(allowed(|i| i % 50 == 0)).is_some());
+        for _ in 0..8 {
+            tick(&mut manager, &mut receivers);
+        }
+        let (reply, mut result) = oneshot::channel();
+        manager.handle_update(RibUpdate::ReevaluatePeerExportPolicies {
+            peers: vec![peer],
+            swaps: Some(vec![crate::update::DatasetSwap {
+                handle: Arc::clone(&handle),
+                prior,
+            }]),
+            reply,
+        });
+        result.try_recv().unwrap().unwrap();
+        drain(&mut manager, &mut receivers);
+        assert_eq!(receivers[0].wire.table.len(), (TOTAL / 50) as usize);
+        (
+            tables(&manager, peer).1,
+            manager.adj_rib_out_commit_stats.walk_presizes,
+        )
+    };
+    let ((head, presizes), (control, _)) = with_control(shape);
+    assert_eq!(
+        presizes, 0,
+        "no estimate (capacities {head:?}, control {control:?})"
+    );
+    let spread = control.map(|capacity| capacity + capacity / 4);
+    assert_at_or_below_control(&head, &spread, "dataset swap before its re-evaluation");
 }

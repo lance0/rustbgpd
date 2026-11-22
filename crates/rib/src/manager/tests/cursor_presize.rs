@@ -158,3 +158,52 @@ pub(super) fn set_med(attributes: &mut Arc<AttrSet>, med: u32) {
         attrs.push(PathAttribute::Med(med));
     });
 }
+
+/// A prefix-set dataset of `prefixes`.
+pub(super) fn prefix_dataset(
+    prefixes: impl IntoIterator<Item = Prefix>,
+) -> rustbgpd_policy::datasets::DatasetData {
+    use rustbgpd_policy::sets::{PrefixSet, PrefixSetEntry};
+    rustbgpd_policy::datasets::DatasetData::Prefix(PrefixSet::new(prefixes.into_iter().map(
+        |prefix| PrefixSetEntry {
+            prefix,
+            ge: None,
+            le: None,
+        },
+    )))
+}
+
+/// An export chain that accepts a route whose prefix is in `handle`'s
+/// dataset and rejects the rest.
+pub(super) fn dataset_chain(
+    handle: &Arc<rustbgpd_policy::datasets::DatasetHandle>,
+) -> rustbgpd_policy::PolicyChain {
+    let mut bindings = rustbgpd_policy::datasets::DatasetBindings::new();
+    bindings.insert(Arc::clone(handle));
+    rpol_chain(
+        "dataset prefix-set allowed\n\
+         policy p { term pass { if route.prefix in allowed { accept } reject } }",
+        &bindings,
+    )
+}
+
+/// The export chain of policy `p` in `source`.
+pub(super) fn rpol_chain(
+    source: &str,
+    bindings: &rustbgpd_policy::datasets::DatasetBindings,
+) -> rustbgpd_policy::PolicyChain {
+    let compiled = rustbgpd_policy::rpol::RpolFile::parse(source)
+        .unwrap()
+        .compile_policy_bound(
+            "p",
+            &[],
+            &mut rustbgpd_policy::sets::SetStore::new(),
+            bindings,
+        )
+        .unwrap()
+        .unwrap();
+    rustbgpd_policy::PolicyChain::from_named(vec![rustbgpd_policy::NamedPolicy::from_rpol(
+        "p".to_string(),
+        Arc::new(compiled),
+    )])
+}

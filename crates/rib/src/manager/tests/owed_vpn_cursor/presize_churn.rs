@@ -10,9 +10,11 @@
 
 use std::cell::RefCell;
 
+use rustbgpd_policy::datasets::{DatasetBindings, DatasetHandle, DatasetKind};
+
 use super::super::cursor_presize::{
-    Growth, assert_at_or_below_control, assert_fitted, deny_med_chain, set_med, with_control,
-    with_control_async,
+    Growth, assert_at_or_below_control, assert_fitted, dataset_chain, deny_med_chain,
+    prefix_dataset, rpol_chain, set_med, with_control, with_control_async,
 };
 use super::*;
 
@@ -359,4 +361,293 @@ async fn accepted_keys_denied_mid_sample_through_the_run_loop_fit() {
     }))
     .await;
     assert_fits(head, control.2, "denied mid-sample, run loop");
+}
+
+/// The dataset that accepts the hosts (row `index / 2`: each prefix is
+/// under two RDs) of `total` rows for which `allowed` holds.
+fn allowed_hosts(total: u32, allowed: fn(u32) -> bool) -> rustbgpd_policy::datasets::DatasetData {
+    prefix_dataset((0..total).step_by(2).filter(|i| allowed(i / 2)).map(|i| {
+        let VpnPrefix::V4 { addr, len } = key(P4, i).prefix else {
+            unreachable!()
+        };
+        Prefix::V4(Ipv4Prefix::new(addr, len))
+    }))
+}
+
+/// Credit `credit`; one pass (the starting log) of `total` keys behind
+/// [`dataset_chain`], the hosts where `before` holds accepted. After
+/// `first` steps the dataset is swapped to `after` on the shared handle,
+/// as the peer manager publishes it; `window` steps run before the RIB
+/// receives the re-evaluation, then the walk drains. Returns the table
+/// and the estimates made.
+fn dataset_swapped_after_first_steps(
+    credit: usize,
+    total: u32,
+    first: usize,
+    window: usize,
+    before: fn(u32) -> bool,
+    after: fn(u32) -> bool,
+) -> ((usize, usize, [usize; 2]), usize) {
+    let handle = Arc::new(DatasetHandle::new(
+        "allowed",
+        DatasetKind::Prefix,
+        allowed_hosts(total, before),
+    ));
+    let mut manager = manager(credit);
+    sources_up(&mut manager);
+    let peer = receiver(0);
+    let mut rx = up_with(
+        &mut manager,
+        peer,
+        0,
+        4096,
+        &[P4],
+        0,
+        Some(dataset_chain(&handle)),
+    );
+    Wire::default().write(&mut rx);
+    manager.owe_eor(peer, P4);
+    manager.owe_whole_family(peer, F4);
+    let mut receivers = vec![Receiver {
+        peer,
+        rx,
+        wire: Wire::default(),
+    }];
+    received(&mut manager, P4, &all(total), &[]);
+    for _ in 0..first {
+        tick(&mut manager, &mut receivers);
+    }
+    let prior = handle.pin();
+    assert!(handle.refresh(allowed_hosts(total, after)).is_some());
+    for _ in 0..window {
+        tick(&mut manager, &mut receivers);
+    }
+    let (reply, mut result) = oneshot::channel();
+    manager.handle_update(RibUpdate::ReevaluatePeerExportPolicies {
+        peers: vec![peer],
+        swaps: Some(vec![crate::update::DatasetSwap {
+            handle: Arc::clone(&handle),
+            prior,
+        }]),
+        reply,
+    });
+    result.try_recv().unwrap().unwrap();
+    drain(&mut manager, &mut receivers);
+    let expected = (0..total).filter(|i| after(i / 2)).count();
+    assert_eq!(receivers[0].wire.table.len(), expected, "exact table");
+    (
+        table(&manager, peer),
+        manager.adj_rib_out_commit_stats.walk_presizes,
+    )
+}
+
+fn assert_dataset_swap_fits(
+    credit: usize,
+    total: u32,
+    first: usize,
+    windows: &[usize],
+    rates: [fn(u32) -> bool; 2],
+    case: &str,
+) {
+    for &window in windows {
+        let case = format!("{case}, {window} steps before the re-evaluation");
+        let ((head, presizes), ((_, _, control), _)) = with_control(|| {
+            dataset_swapped_after_first_steps(credit, total, first, window, rates[0], rates[1])
+        });
+        assert_eq!(
+            presizes, 0,
+            "{case}: no estimate (capacities {:?}, control {control:?})",
+            head.2
+        );
+        assert_fits(head, control, &case);
+    }
+}
+
+/// The default step (1,024 keys): 100,000 keys, one host in five
+/// accepted; after one step (about 205 rows) the dataset keeps one in
+/// fifty. The peer manager publishes the swap before the RIB is told, and
+/// the walk steps on in between at the new contents with nothing logged.
+/// Red when a receiver whose export policy reads a dataset estimates: two
+/// to four times the control with 8 steps before the re-evaluation.
+#[test]
+fn a_dataset_swap_published_before_its_re_evaluation_fits() {
+    assert_dataset_swap_fits(
+        4 * CHUNK_ROWS,
+        100_000,
+        1,
+        &[0, 8],
+        [|h| h % 5 == 0, |h| h % 50 == 0],
+        "one in five, then one in fifty",
+    );
+}
+
+/// Credit 400 (200-key steps): 40,000 keys, nine hosts in ten accepted;
+/// after two steps (about 360 rows) the dataset keeps one in a hundred.
+/// Red as above: about 36 times the control with 2 steps before the
+/// re-evaluation.
+#[test]
+fn a_dataset_swap_published_before_its_re_evaluation_fits_credit_limited() {
+    assert_dataset_swap_fits(
+        400,
+        40_000,
+        2,
+        &[0, 2],
+        [|h| h % 10 != 0, |h| h % 100 == 1],
+        "nine in ten, then one in a hundred",
+    );
+}
+
+/// A receiver whose export policy reads no dataset still sizes its table
+/// once from a quiet sample. Red when every receiver with an export
+/// policy is denied the estimate.
+#[test]
+fn a_receiver_whose_export_policy_reads_no_dataset_still_presizes() {
+    const TOTAL: u32 = 20_000;
+    let shape = || {
+        let mut manager = manager(4 * CHUNK_ROWS);
+        sources_up(&mut manager);
+        let peer = receiver(0);
+        let chain = rpol_chain("policy p { term t { accept } }", &DatasetBindings::new());
+        let mut rx = up_with(&mut manager, peer, 0, 4096, &[P4], 0, Some(chain));
+        Wire::default().write(&mut rx);
+        manager.owe_eor(peer, P4);
+        manager.owe_whole_family(peer, F4);
+        let mut receivers = vec![Receiver {
+            peer,
+            rx,
+            wire: Wire::default(),
+        }];
+        received(&mut manager, P4, &all(TOTAL), &[]);
+        drain(&mut manager, &mut receivers);
+        assert_eq!(receivers[0].wire.table.len(), TOTAL as usize, "exact table");
+        (
+            table(&manager, peer),
+            manager.adj_rib_out_commit_stats.walk_presizes,
+        )
+    };
+    let ((head, presizes), ((_, _, control), _)) = with_control(shape);
+    assert_eq!(presizes, 1, "one estimate");
+    assert_fits(head, control, "no dataset");
+}
+
+const WAITER2: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 4);
+
+/// The kept-walk branch of `owing_resync_covered`: a collision-failback
+/// stage owes R the family and its walk reads under 512 keys; a second
+/// waiter re-holds selection; R's export policy changes and it is resynced
+/// inside the hold, which keeps the walk. Returns the table, the estimates
+/// made and the walk's keys read just after the resync.
+fn re_held_resync() -> ((usize, usize, [usize; 2]), usize, usize) {
+    const TOTAL: u32 = 40_000;
+    let (a, b) = (peer_v4(WAITER), peer_v4(WAITER2));
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(
+        rx,
+        dummy_query_rx(),
+        None,
+        Some(Ipv4Addr::new(10, 0, 0, 100)),
+        BgpMetrics::new(),
+    )
+    .with_outbound_row_credit(400)
+    .with_selection_deferral(SelectionDeferralConfig {
+        timeout: Duration::from_secs(60),
+        waiters: [a, b]
+            .into_iter()
+            .map(|peer| SelectionDeferralWaiterConfig {
+                peer: peer.into(),
+                families: vec![P4],
+            })
+            .collect(),
+    });
+    manager.test_force_ungrouped = true;
+    manager.flush_poll_budget = Duration::ZERO;
+    let metrics = manager.metrics.clone();
+    let families = HashSet::from([P4]);
+    let classify = |manager: &mut RibManager, peer, session| {
+        assert!(
+            manager
+                .selection_deferral
+                .as_mut()
+                .unwrap()
+                .classify_session(peer, session, false, &families, &metrics)
+                .is_empty()
+        );
+    };
+    classify(&mut manager, a, 11);
+    assert!(manager.selection_deferred(P4));
+    sources_up(&mut manager);
+    let peer = receiver(0);
+    let mut rx = up_with(&mut manager, peer, 0, 4096, &[P4], 0, None);
+    Wire::default().write(&mut rx);
+    let mut receivers = vec![Receiver {
+        peer,
+        rx,
+        wire: Wire::default(),
+    }];
+    // Every key accepted now; after the policy change one in a hundred.
+    let rows = (0..TOTAL)
+        .map(|i| row(i, u32::from(i % 100 != 1)))
+        .collect();
+    send(&mut manager, SOURCE, rows, vec![]);
+    tick(&mut manager, &mut receivers);
+    assert!(receivers[0].wire.table.is_empty(), "held");
+    let stage = {
+        let selection = manager.selection_deferral.as_mut().unwrap();
+        selection.session_down(a, 11, &metrics);
+        selection
+            .await_collision_failback_refresh(a, 11, false, &families, true, &metrics)
+            .unwrap()
+    };
+    manager.apply_selection_deferral_transitions(stage, "collision failback");
+    assert!(!manager.selection_deferred(P4));
+    assert!(manager.owes_whole(peer, F4), "R walks");
+    for _ in 0..2 {
+        tick(&mut manager, &mut receivers);
+    }
+    let read = manager.walk_keys_read(peer, F4);
+    assert!(read > 0 && read < 512, "mid-sample: {read}");
+    classify(&mut manager, b, 22);
+    assert!(manager.selection_deferred(P4), "re-held");
+    manager
+        .replace_peer_export_policy_synchronously(peer, Some(deny_med_chain()))
+        .unwrap();
+    for _ in 0..20 {
+        tick(&mut manager, &mut receivers);
+        if !manager.dirty_peers.contains(&peer) {
+            break;
+        }
+    }
+    assert!(manager.owes_whole(peer, F4), "the walk is kept");
+    let read_after = manager.walk_keys_read(peer, F4);
+    let transitions: Vec<_> = {
+        let selection = manager.selection_deferral.as_mut().unwrap();
+        let mut transitions: Vec<_> = selection
+            .end_of_rib(b, 22, P4, &metrics)
+            .into_iter()
+            .collect();
+        assert!(selection.begin_route_refresh(a, 11, P4).is_none());
+        transitions.extend(selection.end_route_refresh(a, 11, P4, &metrics));
+        transitions
+    };
+    manager.apply_selection_deferral_transitions(transitions, "release");
+    drain(&mut manager, &mut receivers);
+    let expected = (0..TOTAL).filter(|i| i % 100 == 1).count();
+    assert_eq!(receivers[0].wire.table.len(), expected, "exact table");
+    (
+        table(&manager, peer),
+        manager.adj_rib_out_commit_stats.walk_presizes,
+        read_after,
+    )
+}
+
+/// A walk kept across a resync inside a selection hold drops its sample,
+/// and makes no estimate after the release. Defense in depth: no step runs
+/// while the family is deferred and the release relogs the inventory, so
+/// the table matches the control even without the reset.
+#[test]
+fn a_walk_kept_across_a_re_held_resync_drops_its_sample() {
+    let ((head, presizes, read), ((_, _, control), _, _)) = with_control(re_held_resync);
+    assert_eq!(read, 0, "the resync dropped the sample");
+    assert_eq!(presizes, 0, "no estimate");
+    assert_fits(head, control, "re-held resync");
 }
