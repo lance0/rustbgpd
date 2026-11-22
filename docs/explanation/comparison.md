@@ -685,8 +685,9 @@ against rustbgpd v0.74.0; BIRD 3.3.3 and BIRD 3.4.0 are not yet measured in the 
 and their receiver-bound completion rows used the glibc-malloc harness, so
 they are not directly comparable ([why](../perf/headline-refresh-jemalloc-2026-10.md#why-earlier-receiver-bound-rows-are-not-comparable)).
 
-At IRR scale, the [same-night v0.80.0 receipt](../perf/cross-daemon-v0800-2026-10.md) runs three
-cross-daemon roots at each of 0%, 10%, and 50% received-view overlap, at
+At IRR scale, the [same-night v0.80.0 receipt](../perf/cross-daemon-v0800-2026-10.md),
+measured 2026-10-25, runs three cross-daemon roots at each of 0%, 10%, and
+50% received-view overlap, at
 320 members × 183,040 generated IPv4 prefixes. rustbgpd completion p50 is
 0.598–0.853 seconds across the three overlaps, against BIRD 3.3.3's
 12.884–15.858 seconds and OpenBGPD 9.3's 44.921–64.451 seconds, measured

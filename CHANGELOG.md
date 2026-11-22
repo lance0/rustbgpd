@@ -11,6 +11,739 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.84.0] — 2026-11-22
+
+### Added
+
+- `bgp_rib_outbound_eviction_recovery_seconds{outcome}` measures one
+  receiver's recovery build after an owed-row cap eviction or when a dirty
+  resync during an EVPN selection hold defers a rebuild until release. A
+  refused data commit has its own series. See the
+  [metric reference](docs/reference/operations.md).
+- `bgp_rib_outbound_owed_drain_step_seconds{scope}`: the duration of one
+  owed-route drain step toward one receiver on the RIB actor, with `scope`
+  `cursor` (IPv4 or IPv6 unicast or labeled unicast, or EVPN, owed whole),
+  `keyed` (a receiver's owed routes) or `whole` (one whole-family pass of
+  another family). Bucket edges include 50 ms and 250 ms. See the
+  [metric reference](docs/reference/operations.md).
+- Config diffs and SIGHUP errors name individual restart-required RPKI, BMP
+  and MRT fields. Credential values, free-form BMP text and MRT paths are
+  redacted. `rbgp config last-reload` and the `GetLastSighupReload` RPC list
+  the fields observed to require a restart. The versioned CLI JSON envelope
+  advances to `rbgp-json/1.5`.
+- `ListSessionEvents` reports `evicted_total` and `oldest_retained_unix_ms`,
+  `bgp_session_event_history_evicted_total` counts evictions, and
+  `NeighborState.last_error_unix_ms` records when `last_error` was set.
+  `rbgp events sessions` prints a stderr note after an eviction, and
+  `rbgp neighbor` shows when the last error occurred, in JSON as
+  `last_error_unix_ms`. The proto fields are additive.
+- During a startup IPv4 or IPv6 unicast selection release, a
+  `ListReceivedRoutes`, `ListBestRoutes` or `ListAdvertisedRoutes` client can
+  set `accept_releasing` to read the rows already committed. Every page from
+  this daemon carries `selection_release.releasing_families`, including empty
+  and final pages. A client that omits the opt-in gets its page after the
+  release, and readiness counts and `bgp_rib_loc_prefixes` keep the last
+  complete value until it finishes. A limited `rbgp rib` query opts in and
+  names the releasing families after the rows, and in JSON as
+  `releasing_families`; against an older daemon the text reports that release
+  status is unavailable and JSON omits the field. The proto fields are
+  additive. See [pagination](docs/reference/api.md#pagination).
+
+### Changed
+
+- `bgp_rib_actor_turn_duration_seconds` and
+  `bgp_rib_actor_work_duration_seconds` gain a 250 ms bucket edge
+  (`le="0.25"`), between the existing 200 ms and 500 ms edges, so a turn or
+  work unit can be placed against a 250 ms bound. The existing edges are
+  unchanged and buckets are cumulative, so queries and dashboards that read an
+  existing `le` value, `_sum` or `_count` are unaffected; each series exports
+  one more bucket line. See the
+  [metric reference](docs/reference/operations.md).
+- After non-unicast selection release, receivers get End-of-RIB over several
+  RIB turns. Outstanding release work runs every 10 ms. An uncontended VPN
+  release visits up to eight receivers per tick. An RT-Constrain membership
+  rebuild releases up to two completed holds per tick after the initial batch.
+  A full writer keeps its ordinary retry deadline: a refused End-of-RIB is
+  offered again one second later. Due retries then run eight receivers per 10
+  ms tick until each has had one offer, and the next round waits another
+  second. `bgp_rib_dirty_resync_total` no longer counts ticks that only retry
+  or release End-of-RIB markers.
+- MRT dumps encode and write bounded chunks instead of retaining a second
+  complete route table and encoded file. Peer metadata is captured at the
+  start; peers joining during a dump are excluded. EVPN steps visit at most
+  4,096 slots, including vacancies, and use temporary disk sorting to retain
+  record order. Owned route chunks and encoded records each have an 8 MiB cap;
+  an oversized prefix fails the dump without publishing a partial file. A
+  neighbor whose EVPN table is removed, cleared or replaced mid-dump keeps the
+  rows already read and the rest is skipped as withdrawn. The dump is staged
+  in the output directory for its whole duration, and startup removes stage
+  files a previous process left behind. See
+  [dump consistency and limits](docs/reference/configuration.md#what-one-dump-shows).
+- When the first member of an eligible unicast update group joins a RIB with
+  at least 10,000 best routes, the RIB can install unrelated updates while it
+  builds the group table. The initial member replay follows publication of the
+  complete table. This applies to plain single-best unicast groups with no
+  export policy or peer-specific export controls. A policy change that needs
+  the same unfinished table keeps the old policy in effect until the table is
+  ready and earlier route updates have reached distribution. A cold
+  registration can reclaim an unused table left by a completed policy
+  preparation. When a policy change needs a different cold destination,
+  unrelated updates can still reach peers under the installed policy while the
+  first build finishes or the unused table is retired.
+
+### Removed
+
+- Removed `rustbgpd --migrate-config downgrade-v0.64` and its `--validator`
+  option. To roll back to v0.64.0, restore a config that release accepts or
+  use the v0.83.0 offline tool to convert the RFC 8212 posture. See the
+  [rollback procedure](docs/how-to/deployment.md#rollback).
+- The deprecated config key spellings `max_prefixes_ipv4`,
+  `max_prefixes_ipv6`, `max_prefixes_received_ipv4`,
+  `max_prefixes_received_ipv6`, `max_prefixes_out_ipv4`,
+  `max_prefixes_out_ipv6` and `recovery_delay_secs` are no longer accepted.
+  The published JSON schema no longer lists them.
+
+### Fixed
+
+- An administrative reset (`rbgp neighbor reset`, gRPC `ResetNeighbor`) no
+  longer leaves the peer's routes retained under graceful restart or LLGR in
+  two cases. When the peer negotiated the RFC 8538 N bit and draining queued
+  output before the close raised Cease / Out of Resources, that plain Cease/8
+  made both sides retain each other's routes; it is now sent as a Cease / Hard
+  Reset carrying the Cease/8. When the reset found the session Idle after an
+  earlier graceful-restart loss, it only restarted the connection and left the
+  retained routes stale; it now purges them first. See
+  [Reset a peer session](docs/reference/operations.md#reset-a-peer-session).
+- A paced first-member update-group build no longer starts over repeatedly
+  while another peer sends large UPDATEs. With Extended Message, one UPDATE
+  can change 2,048 or more best routes; a steady stream of them changed routes
+  faster than the build picked the changes up, so the build threw its partial
+  table away and began again for as long as the stream lasted. The build now
+  picks up changes on every one of its turns while more than 2,048 are
+  waiting, which matches the rate at which route input can change best routes.
+- When a config transaction (`ApplyConfigTransaction` or gNMI `Set`) has
+  applied new policy chains live and then fails to publish the candidate, its
+  rollback now restores the prior chains instead of re-applying them as a new
+  forward edit. Previously the rollback went through the forward edit's
+  qualification, so a peer that came up without Route Refresh after the apply
+  made the whole rollback refuse, and every target kept the candidate chains
+  until the daemon fenced.
+- Aborting, canceling (gNMI) or timing out a commit-confirmed config
+  transaction now restores the prior import policy even when a peer lost Route
+  Refresh inside the confirm window. Before, the rollback was applied as a new
+  import edit, which is refused for such a peer, so it failed with
+  `abort_failed` / `auto_revert_failed` and the unconfirmed candidate kept
+  running behind the mutation fence. The prior policy is installed and that
+  one session is reset so the peer resends its routes under it; a forward
+  import edit for such a peer, including a history rollback, is still refused.
+- A route change event no longer rebuilds the whole table of every
+  update-group member that is waiting to be resynced in the same RIB actor
+  turn. This covers an UPDATE, a withdrawal, a route injection, a source
+  session going down, an RPKI or ASPA validation change, a graceful-restart or
+  LLGR stale sweep and an End-of-RIB stale purge, including an End-of-RIB with
+  nothing stale and a source going down with no routes left. Those members
+  were resynced inline, one after another, so with many members dirty after
+  backpressure one unrelated event could hold every other peer's updates for
+  seconds, and for minutes at full-table scale. The event now leaves each
+  dirty member to the resync tick, which rebuilds one member per slice within
+  its poll budget, and records the change in the member's withdrawal residue
+  as it does when the member's channel is full.
+- Disabling a peer (`rbgp neighbor disable`, gRPC `DisableNeighbor`, a config
+  `admin_down`) or deleting it (gRPC `DeleteNeighbor`, `rbgp neighbor delete`,
+  removal by a config reload) no longer leaves routes retained when the peer
+  negotiated RFC 8538 Notification Graceful Restart. The plain Cease /
+  Administrative Shutdown made both sides keep each other's routes as stale
+  for the restart time, then any LLGR stale time, although the session was not
+  coming back. The NOTIFICATION is now a Cease / Hard Reset wrapping the
+  Administrative Shutdown and any RFC 9003 shutdown communication (RFC 8538
+  §5.1, §5.2), as is a Cease / Out of Resources raised while the teardown
+  drains queued output. A disable that finds the session Idle or reconnecting
+  purges routes still retained from an earlier session loss. A dynamic peer
+  removed because a config rollback left no range that admits it, and an
+  interface-only (unnumbered) neighbor removed from the configuration, are
+  handled like a deleted peer. The session-crash and maximum-prefix latches
+  stop the peer the same way; a maximum-prefix breach already sent its own
+  Cease as a Hard Reset. See
+  [Enable / disable a peer](docs/reference/operations.md#enable--disable-a-peer).
+- Pace export-policy reload and rollback for changed residual peers with no
+  currently sendable address family. These peers can still enumerate the
+  routing table during regrouping; their work now uses the existing paced
+  commands. One peer's full-table operation remains a single actor turn.
+- During post-restart EVPN selection deferral, a receiver that needs an EVPN
+  rebuild continues to receive resyncs and refreshes for its other families.
+  Its EVPN withdrawals precede the family's End-of-RIB after selection
+  resumes.
+- A receiver that holds EVPN outside an update group and is owed the whole
+  family is no longer sent it as one table-sized operation outside its
+  outbound credit. That happened after an RFC 4724 selection release, and when
+  the EVPN routes a receiver was owed exceeded a quarter of its table. EVPN
+  now uses the row cursor unicast uses: one shared list of the route keys that
+  changed while any receiver owed the family, and at most 1,024 routes per
+  step toward each receiver, each step an ordinary update charged against that
+  receiver's credit, with the End-of-RIB after the last step. A selection
+  release records its whole inventory in that list once, so a receiver that
+  joined during the hold also gets the routes whose best path did not change.
+- After post-restart EVPN selection resumes, a receiver whose EVPN rebuild has
+  been sent no longer waits for an IPv4, IPv6 or VPN selection hold before its
+  EVPN ROUTE-REFRESH is answered, and the eviction-recovery histogram counts
+  that rebuild once.
+- A receiver's advertised EVPN table no longer copies every stored route when
+  it grows. The routes were stored inside the table's hash buckets, 208 bytes
+  each with the key, so the growth steps at 28,672, 57,344 and 114,688 routes
+  moved 6, 12 and 24 MB inside one insert. Every EVPN receiver holds about the
+  same routes, so all of them took the same step inside one inbound UPDATE,
+  and every peer's updates waited behind it. The routes now live in a slab
+  that does not move them, and the table holds 68-byte entries that point into
+  it and grows one sixteenth at a time: up to about 900,000 routes per
+  receiver no single insert moves more than 2 MiB. Past that a growth step
+  moves one sixteenth of the table's entries, 3.9 MB at 911,000 routes. The
+  evidence is a work count in a unit test, not a timing.
+- When an outbound commit reserves space for new EVPN routes under a readiness
+  owner, it now grows the receiver's first route segment in that reserve.
+  Previously, with 1,024 new routes per batch, the ninth reserve grew the
+  segment from 8,192 to 16,384 slots and its first insert grew it again to
+  65,536. The reserve now grows directly to 65,536. Each old growth operation
+  had 8,192 initialized slots (1,179,648 bytes) per receiver. The allocator
+  can grow in place. The same sizing rule applies when an update group seeds a
+  receiver's private table.
+- A policy restore that fails partway, during a SIGHUP generation rollback or
+  the interface-only restore after a failed peer-group change, no longer
+  unwinds the chains it already restored back to the candidate chains it was
+  removing. Previously a restore that failed in a batched export cohort, its
+  RIB transition, its deferred Route Refresh (for example, a peer that came up
+  without Route Refresh), or the per-peer remainder reinstalled the candidate
+  import and export chains on the peers it had already restored before the
+  daemon fenced.
+- When an update-group member owes withdrawals and lacks a complete record of
+  its advertised routes, its unicast or VPN route refresh now follows resync.
+  The same applies after such a member leaves its group, or joins one from a
+  private table, before it refreshes. The peer receives its withdrawals before
+  the refresh can purge those routes; before, it received one redundant
+  withdrawal after End-of-Route-Refresh.
+- The end of an End-of-RIB hold no longer exports the families a receiver is
+  still owed inside the one RIB turn that handles it. After an RFC 4724
+  selection release, a receiver outside an update group is owed the released
+  table; the end of a planned-restart grace window, the RT-Constrain
+  membership hold or its cap, or the ORF cap then sent every such receiver its
+  whole owed table in that turn, without reading its outbound credit. Grace
+  windows share a deadline, so a planned restart brought back a turn that grew
+  with receivers times routes and held every peer's updates, queries and
+  timers behind it. These releases now send only the End-of-RIB markers whose
+  table is complete, and the resync tick delivers each owed family, one family
+  of one receiver per step, after reading that receiver's credit.
+- A distribution pass with no route change, such as each resync tick slice
+  while any peer is dirty, no longer captures an admitted-key recovery proof
+  for every clean update-group member whose outbound queue is full. The pass
+  sends those members nothing, so each proof was released unused, and the next
+  slice or one-second retry walked their group tables again. Such turns now
+  cost less CPU and finish sooner. A pass that changes a route, a forced
+  refresh and a complete EVPN feed still capture before the table moves.
+- A live import policy edit (SIGHUP, gRPC policy mutation, or in-place
+  neighbor update) for an Established peer that did not negotiate Route
+  Refresh is now rejected before any session is modified. Previously the
+  candidate chain was hot-applied, the refresh failed and the edit was rolled
+  back and reported as cleanly restored, while UPDATEs received in between
+  stayed accepted under the candidate chain.
+- A receiver that is owed a whole IPv4 or IPv6 labeled-unicast family is no
+  longer sent it as one table-sized operation outside its outbound credit.
+  That happened after an RFC 4724 selection release, and when the labeled
+  routes a receiver was owed exceeded a quarter of its table. Labeled unicast
+  now uses the row cursor unicast and EVPN use: one shared list per address
+  family of the prefixes that changed while any receiver owed the family, and
+  at most 1,024 prefixes per step toward each receiver, each step an ordinary
+  update charged against that receiver's credit, with the End-of-RIB after the
+  last step. A selection release records its whole inventory in that list
+  once, so a receiver that joined during the hold also gets the routes whose
+  best path did not change.
+- An outbound prefix limit installed by a reload on an update-group member
+  that had not yet received the group's latest routes, such as a member whose
+  first session established during a graceful-restart selection hold while its
+  outbound queue was full, now starts from the prefixes that member was
+  actually sent. It used to start from the group's desired routes, so a route
+  deleted before it ever reached the member stayed counted after the hold
+  released, although the member never received it and no withdrawal was owed.
+  The routes on the wire were correct. The reload's limit check now measures
+  the same prefixes, so a limit below what such a member still holds,
+  including a route whose withdrawal has not reached it yet, is refused before
+  anything changes instead of being installed over its limit.
+- The RIB no longer scans all peers to arm the End-of-RIB retry timer. Each
+  tick checks at most eight peers for marker retries.
+- Ordinary eBGP advertisements now omit a learned route's MULTI_EXIT_DISC
+  unless outbound policy sets a MED for that advertisement. Locally originated
+  routes, iBGP advertisements and transparent route-server exports retain
+  their MED.
+- The first outbound advertisement honors the session's negotiated prefix
+  filter even when sender registration is deferred. An `IMMEDIATE` update
+  releases that family's initial advertisement. A `DEFER` update keeps the
+  family waiting for a later refresh.
+- A receiver that walks a VPNv4, VPNv6, labeled-unicast or EVPN family through
+  the row cursor into its own Adj-RIB-Out (after an RFC 4724 selection
+  release, for example) now has that table sized once, while it holds at most
+  2,048 routes. Before, each 1,024-key step reserved only its own rows, so the
+  table's hash indexes doubled again and again during the walk, and every
+  receiver walking the same list doubled in the same steps. The freed tables
+  stayed resident in the allocator while paused receivers kept the daemon
+  idle, which raised peak memory when many private VPN receivers were rebuilt
+  at once. The size comes from each address family's own sample once the
+  walk's cursor steps have read at least 512 of its keys and committed at
+  least 256 of its routes: the routes those steps committed per entry of the
+  shared key list they passed, at most one route a key, times the entries
+  still ahead of the cursor in the release's inventory. That inventory is
+  logged in one pass in hash order, so the keys read first are a fair sample
+  of the rest of it; keys that arrive in later passes come in arrival order (a
+  source, VRF or Route Target at a time), so none of them is counted, and the
+  table grows step by step for them as before. Routes that reach the table any
+  other way (held before the walk, or sent from the receiver's own owed keys)
+  do not count. The table is presized only when the release inventory's sample
+  was taken with no change to the list or the receiver's acceptance; otherwise
+  it grows as before. So a key logged into the list after the inventory (a
+  re-announcement, withdrawal, relabel or best-path change), an RT-Constrain
+  membership change, or a resync of the receiver before the estimate means the
+  walk makes no estimate. A receiver whose export policy uses a policy dataset
+  makes no estimate at all: a dataset swap takes effect for the walk before
+  the receiver's re-evaluation runs, so its sample could mix rows from both
+  contents. A change after the estimate (a withdrawal, for example) leaves the
+  reservation in place, as the whole-family send did. A receiver whose export
+  policy or RT-Constrain membership accepts a fraction of the release's
+  inventory therefore gets a table sized to that fraction of it, and VPNv4 and
+  VPNv6 (or the two labeled families) sharing one table are each sized by
+  their own acceptance. An Add-Path receiver's route index is sized for one
+  path a key and grows past it step by step; its key index is sized for the
+  keys it accepts. A family without such a sample adds nothing, and a cursor
+  that starts because a receiver's owed keys passed their byte cap makes no
+  estimate. A table that already holds more than 2,048 routes is not resized
+  this way. Unicast, whose table is sized from the Loc-RIB when it is created,
+  and VPN owned by an update group are unchanged.
+- Route-server clients with `per_client_best = true` no longer converge slowly
+  after a restart. The paced startup release of a unicast family delivered
+  such an update group one prefix and one client at a time while the
+  route-processing lane was closed to other input, so a release that takes
+  seconds for an ordinary group took tens of seconds and delayed unrelated
+  UPDATEs by seconds. The group's prefixes are now ranked in bounded steps,
+  staged together and sent to 16 clients a step, in one message for each
+  stage. A stage holds prefixes of one batch of up to 1,024 and closes at
+  2,048 work units, counting one unit for each prefix and one for each of its
+  denied or control-community-suppressible candidates. A batch of prefixes
+  with no such candidate is one message; a batch that carries them is several.
+  No route was lost or wrong. A prefix with more than 128 denied or
+  control-community-suppressible candidates is still released on its own.
+- One peer's burst no longer delays every other peer's updates for the length
+  of the burst. Each session now stops reading its socket while 1,536 routes
+  it already sent are unfinished in the RIB and resumes at 1,024, so the RIB's
+  input queue holds a bounded number of route entries per source and TCP paces
+  the sender. The limit counts route entries, not messages: about two UPDATEs
+  of roughly 1,000 routes, or up to 1,536 one-route UPDATEs. Previously a
+  session queued its whole burst ahead of other peers: in the transport
+  harness, 150,000 routes sent at once toward 150 private receivers made an
+  unrelated peer's update wait about 15 s. The wait still grows with the
+  number of peers bursting at once. See
+  [ADR-0078](docs/adr/0078-inbound-rib-backpressure.md).
+- A rollback that puts a prior import policy back on a peer that did not
+  negotiate Route Refresh now resets that one session instead of leaving the
+  outcome ambiguous. The prior policy is installed first, and the peer resends
+  its routes under it when it reconnects. This covers a config transaction
+  (`ApplyConfigTransaction` or gNMI `Set`) whose candidate could not be
+  published, and the compensation of a failed live policy or peer-group edit.
+  It also closes a gap in that compensation: a peer that took the new policy
+  while down and came up without Route Refresh used to keep the routes the new
+  policy accepted while the edit reported a complete rollback.
+- A peer that requests a route refresh while backpressure delays its initial
+  End-of-RIB now receives the refresh after that marker. Peers using Enhanced
+  Route Refresh receive both BoRR and EoRR for the original request.
+- A unicast route refresh received during deferred registration now gets its
+  response if selection finishes before the outbound session is registered.
+- When a graceful-restart selection hold released, a forced resync it had
+  deferred for a receiver outside any update group (from an Address Prefix ORF
+  refresh with When-to-refresh IMMEDIATE, or an outbound refresh such as a
+  GShut toggle) ran on the held IPv4 or IPv6 unicast best paths before the
+  release selected new ones. If that receiver's full outbound queue still owed
+  a withdrawal from before the hold, for a route the source announced again
+  inside it, the receiver got the withdrawal in one UPDATE and the new route
+  in the next. For a blackhole (RTBH) host route the receiver briefly had no
+  blackhole route. The deferred resync now runs after the release's unicast
+  selection, so such a receiver gets one UPDATE that replaces the row.
+- An RFC 4724 selection release no longer exports the released family to every
+  receiver that holds it in its own Adj-RIB-Out (EVPN, labeled-unicast,
+  FlowSpec, BGP-LS and RT-Constrain receivers, and unicast or VPN receivers
+  outside an update group) inside the one RIB turn that handles the release.
+  That turn grew with receivers times routes and held every peer's updates,
+  queries and timers behind it. The release now records the family as owed to
+  each such receiver and the resync tick sends it, one receiver per step.
+- Complete family selection and shared group staging before replaying pending
+  outbound resyncs at graceful-restart selection-hold release. A receiver
+  whose writer was full and whose outbound refresh was pending could receive a
+  withdrawal followed by a re-announcement of a route re-received during the
+  hold. This affected grouped unicast, received FlowSpec rules, VPN, labeled
+  unicast, private EVPN, and BGP-LS. Resyncs now use the released selection
+  and staged group tables, with End-of-RIB afterward; refused sends retain
+  their recovery obligations.
+- A session ending while a paced first-member update-group build holds an
+  export-policy change for that peer no longer makes every other peer's
+  UPDATEs wait for the rest of the build. The session end (peer down,
+  graceful-restart entry, or a late end handed off by a dropped session) had
+  to follow the pending policy change, and it was held at the head of the
+  RIB's input queue, so nothing behind it was read until the build finished:
+  about 2,000 actor turns on a 1M-route table. It is now kept in the ordered
+  window that already holds later policy commands, and it runs right after the
+  policy change commits and before any newer input.
+- A unicast advertised-route table moves far less memory when its prefix index
+  grows. Each receiver's table and each update group's shared table indexes
+  its prefixes in a trie whose cells sit in one vector that doubles by copying
+  and cannot be reserved ahead. A cell was a 24-byte list of path IDs and
+  route handles, so the doubling at 1,048,576 cells moved 24 MiB inside one
+  insert, and every peer's updates waited behind it. A cell is now 4 bytes:
+  the route's handle for a prefix advertised with one path, or the slot of a
+  path list kept beside the table for a prefix advertised with several. The
+  same doubling moves 4 MiB. The move still grows with the table: it is six
+  times smaller, not bounded. The evidence is a work count in a unit test (1.2
+  million prefixes, no insert above 6 MiB), not a timing. How many cells a
+  table needs depends on the order its prefixes arrive in, between about one
+  and three per prefix. The trie's node vector, 16 bytes per slot, is
+  unchanged and still doubles the same way: on a sparse prefix shape arriving
+  in hash-like order it moves 8,388,608 bytes in one insert, before and after
+  this change.
+- A receiver outside an update group that is owed a whole IPv4 or IPv6 unicast
+  table is no longer sent it as one table-sized operation outside its outbound
+  credit. That happened after an RFC 4724 selection release, and when the
+  routes a receiver was owed exceeded a quarter of its table; each such send
+  was one RIB turn that grew with the table and held every peer's updates
+  behind it. The RIB now keeps, per address family, one list of the routes
+  that changed while any receiver owed the family, and sends each receiver the
+  next routes after its position: at most 1,024 per step, each step an
+  ordinary update charged against that receiver's credit. The family's
+  End-of-RIB follows the last step.
+- The RIB processes an IPv4 or IPv6 unicast startup selection release in
+  batches so it can service incoming updates while rebuilding the family. Each
+  peer's initial End-of-RIB follows its admitted routes.
+- A receiver that is owed a whole VPNv4 or VPNv6 family is no longer sent it
+  as one table-sized operation outside its outbound credit. That happened
+  after an RFC 4724 selection release, and when the VPN routes a receiver was
+  owed exceeded a quarter of its table. VPN now uses the row cursor unicast,
+  labeled unicast and EVPN use: one shared list per address family of the
+  route distinguisher and prefix keys that changed while any receiver owed the
+  family, and at most 1,024 keys per step toward each receiver, each step an
+  ordinary update charged against that receiver's credit, with the End-of-RIB
+  after the last step. A selection release records its whole inventory in that
+  list once, so a receiver that joined during the hold also gets the routes
+  whose best path did not change, and a policy dataset re-evaluation records
+  the keys it re-evaluates.
+
+### Documentation
+
+- The Add-Path `receive_max` reference now records the measured per-UPDATE
+  best-path selection cost at the default 1,024-path cap, at 65,536 stored
+  paths, and under LLGR cycling, for VPN, labeled unicast and unicast.
+- The ASPA conformance page tracks draft-ietf-sidrops-aspa-verification-31 (17
+  November 2026). No received-route verdict changes since -28; the rows for
+  the checks that precede verification, mitigation, iBGP, Roles, Complex
+  peering, logging and OTC follow the new wording and section numbers, and the
+  provider authorization row is Partial: a merged provider set keeps AS 0
+  where §5.3 now removes it.
+- [Known issues](docs/reference/known-issues.md) now records that a disabled,
+  administratively down, deleted or administratively reset Notification GR
+  peer keeps its routes stale in v0.83.0 and earlier, and the limits that
+  remain on long RIB turns toward private receivers: ordinary UPDATE bursts,
+  and whole-family sends outside the outbound credit for families other than
+  IPv4 and IPv6 unicast. It also records the long turns of v0.83.0 and earlier
+  that are fixed since: selection release, the other End-of-RIB hold releases,
+  and IPv4 and IPv6 unicast whole-family sends.
+- Correct the RFC 9494 export reference and describe what receivers without
+  LLGR see after promotion. The reflector withdraws stale routes over eBGP.
+  Over iBGP it retains `LLGR_STALE`, adds `NO_EXPORT` and sets `LOCAL_PREF` to
+  zero.
+- A new [RIB lifecycle](docs/reference/rib-lifecycle.md) reference page
+  follows a session through the RIB stage by stage. It opens with a matrix of
+  session shape against stage that names the longest unit of work in each cell
+  and marks it paced (other peers' updates run in between), bounded turns
+  (they do not), one table-sized turn, or not measured, with the test or
+  receipt behind every paced mark. It covers a session coming up, steady
+  state, a receiver falling behind (owed rows, the row cursor of the seven
+  keyed families, eviction and resync), refresh, ORF and RT-Constrain, policy
+  changes, restart and a session ending, and lists the invariants the RIB
+  keeps with the tests that pin them. The
+  [architecture](docs/explanation/architecture.md) page's data flow, peer
+  establishment and dirty-peer resync passages now describe update groups and
+  owed rows and link to it.
+- A new [receipt](docs/perf/first-group-build-registration-2026-11.md)
+  publishes the paced first-group build measurement. At 1M routes, during the
+  first policy-free plain-unicast group build, unrelated UPDATE latency fell
+  from 2,209 ms to 0.60 ms. Sessions with export policy, a configured role,
+  per-client-best, or mixed families can still take the synchronous build
+  path.
+- Document the extra full-peer replay when a family releases while another
+  unicast or VPN family remains selection-deferred: at most one additional
+  resync attempt per affected receiver in each staging or release pass, with
+  normal writer refusal retries still applicable.
+
+### Upgrade notes
+
+- Rename these keys before upgrading, in `[[neighbors]]` and `[peer_groups.*]`
+  tables and in `[[ethernet_segments]]`: `max_prefixes_ipv4` becomes
+  `max_prefixes_ipv4_unicast`; `max_prefixes_ipv6` becomes
+  `max_prefixes_ipv6_unicast`; `max_prefixes_received_ipv4` becomes
+  `max_prefixes_received_ipv4_unicast`; `max_prefixes_received_ipv6` becomes
+  `max_prefixes_received_ipv6_unicast`; `max_prefixes_out_ipv4` becomes
+  `max_prefixes_out_ipv4_unicast`; `max_prefixes_out_ipv6` becomes
+  `max_prefixes_out_ipv6_unicast`; `recovery_delay_secs` becomes
+  `recovery_delay_seconds`. A config that still uses an old key fails
+  `rustbgpd --check` and boot with an error naming the replacement key.
+- Scripts that call `rustbgpd --migrate-config downgrade-v0.64` or pass
+  `--validator` now fail. To prepare a rollback to v0.64.0, run that
+  conversion with the v0.83.0 binary or restore a config v0.64.0 accepts. See
+  the [rollback procedure](docs/how-to/deployment.md#rollback).
+- On startup, the general FIB installer rewrites a valid v1–v4
+  `fib-owned.json` as v5 and reads it back to verify the replacement. If you
+  have an older receipt, run this release and verify the on-disk version
+  before moving to a release that requires v5. See the
+  [package upgrade procedure](docs/how-to/deployment.md#upgrade).
+- eBGP neighbors no longer receive the MULTI_EXIT_DISC of a route learned
+  from another peer on ordinary advertisements, as RFC 4271 §5.1.4 requires.
+  A neighbor that relied on the propagated value needs an export policy that
+  sets the MED. Received MEDs still take part in route selection and policy
+  matching; locally originated routes, iBGP advertisements and transparent
+  route-server exports keep their MED.
+- When the shared 4096-event session history is full, a peer's repeated
+  pre-Established `state_change` retries are now evicted before any
+  `established` or `lost` event, so a flapping peer no longer pushes out other
+  peers' transitions. A nonzero `evicted_total` from `ListSessionEvents` means
+  rows were dropped; other event types newer than `oldest_retained_unix_ms`
+  are retained.
+- An administrative reset (`rbgp neighbor reset`, gRPC `ResetNeighbor`) now
+  always drops the peer's routes until the peer resends them, and the
+  NOTIFICATION event and sent-NOTIFICATION metric report subcode 9 for the
+  wrapped Cease/8. Other teardowns, such as a TCP loss, a hold timer expiry or
+  a NOTIFICATION from the peer, keep their retention.
+- A peer joining a RIB of at least 10,000 best routes as the first member of
+  its update group, and peers waiting for the same group, now get their
+  initial table and End-of-RIB while another peer streams large UPDATEs, when
+  the stream replaces the best paths of prefixes the table already holds. The
+  table takes longer to arrive while the stream lasts, because most build
+  turns then go to the changed routes. A stream that keeps announcing new
+  prefixes or withdrawing existing ones can still give the build more work
+  than its turns cover, so these peers can still wait until it stops; the
+  build no longer throws work away while they wait. Other peers' input was not
+  delayed, and still is not, with one exception. When such a build also holds
+  an export-policy change with a session end waiting behind it, and the stream
+  has left more than 2,048 changes waiting on 64 of the build's turns, the RIB
+  stops reading other peers' input until the build finishes, so that the
+  session end does not wait for as long as the stream lasts. If the UPDATE
+  being applied at that point has more than 2,048 routes, the build can still
+  be thrown away once and is then built again with the input held. Before, the
+  hold began only after the build had been thrown away at least once. An
+  export-policy change that needs a different group's table still gets the
+  build's place under such a stream: after the same 64 turns the build gives
+  up its partial table, the policy change and any session end behind it run,
+  and the joining peer's table is built again afterwards. No input is held for
+  that. Before, the first thrown-away build made way in the same manner. A
+  policy change whose caller has stopped waiting, such as a reload that timed
+  out, is skipped and does not cost the build its table.
+- When a config transaction (`ApplyConfigTransaction` or gNMI `Set`) fails to
+  publish its candidate after applying policy chains live, its rollback is no
+  longer refused by the forward edit's qualification. A peer without Route
+  Refresh gets its prior chain back, and its session is reset so it resends
+  the routes it accepted under the candidate chain, as described in the
+  [settlement watchdog guide](docs/how-to/settlement-watchdog.md). The log
+  reports the restore instead of a refused edit with a disable-the-neighbor
+  remedy.
+- When aborting, canceling or timing out a commit-confirmed config transaction
+  resets a peer that lost Route Refresh in the confirm window, the abort
+  result, `rbgp config status` and a warning log name each reset peer. A
+  rollback whose policy restore fails partway, for example because a session
+  stops answering, is no longer undone back to the candidate: the daemon
+  fences and exits 70, and the restart boot-reverts from the retained journal,
+  instead of reporting `abort_failed` / `auto_revert_failed` with the
+  candidate reinstalled. See the
+  [settlement watchdog guide](docs/how-to/settlement-watchdog.md).
+- A dirty update-group member is now resynced by the resync tick, about one
+  second after it went dirty and then at the tick's backlog cadence, instead
+  of by the next unrelated route event, so it can stay dirty slightly longer.
+  This includes members an export-policy dataset re-evaluation marks dirty. A
+  slow grouped member whose channel is still full when its tick comes is
+  retried at the next tick, up to about one second later, where an UPDATE used
+  to retry it as soon as its channel had room. Explicit resync requests, such
+  as a ROUTE-REFRESH or operator replay, an RT-Constrain or ORR change or a
+  policy cohort commit, still resync dirty members in their own pass.
+  Ungrouped peers are unchanged.
+- A disabled or deleted peer that negotiated RFC 8538 Notification Graceful
+  Restart, and the other teardowns listed with that fix, now see Cease subcode
+  9 (Hard Reset) instead of 2, and the NOTIFICATION event and
+  `bgp_notifications_sent_total` report subcode 9. Daemon shutdown, a neighbor
+  rebuilt by a reload and a dynamic peer bounced onto new peer-group
+  configuration still send a plain Cease / Administrative Shutdown and keep
+  their retention. With the N bit, a reload or config transaction that fails
+  after removing peers has already hard-reset them, so restoring them on
+  rollback is a full session flap rather than a graceful-restart resume.
+- A receiver outside an update group that is owed a whole EVPN family now gets
+  its EVPN table as many small updates over the resync ticks that follow; one
+  that has stopped reading is queued at most its credit plus one step;
+  `bgp_rib_outbound_operations_live` no longer counts these sends, and
+  `bgp_rib_outbound_owed_drain_step_seconds` records them under scope `cursor`
+  instead of `whole`. A receiver that falls behind while new routes keep
+  replacing old ones is resynced instead, by the resync tick alone, and
+  counted in `bgp_rib_outbound_owing_fallback_total`, as for unicast. A live
+  RT-Constrain membership change toward a receiver that is still being sent
+  its EVPN table is applied to the routes already sent as well. EVPN owned by
+  an update group is unchanged. FlowSpec, BGP-LS and RT-Constrain keep the
+  whole-family send; see [known issues](docs/reference/known-issues.md).
+- Memory per advertised EVPN route per receiver is lower for large tables,
+  about 40 MB against 55 MB at 150,000 routes by the tables' sizes, not a
+  daemon measurement. A receiver with more than 8,192 EVPN routes reserves
+  address space for 65,536 route slots (9.4 MB) at once; pages that hold no
+  route are not resident. The order in which the routes of one table are
+  walked was never specified and may differ.
+- A policy restore that fails partway during a SIGHUP generation rollback or
+  an interface-only restore still fences the daemon and exits 70, as described
+  in the [settlement watchdog guide](docs/how-to/settlement-watchdog.md).
+  Until it exits, peers the restore already reached keep their restored
+  chains, peers it had not reached yet still run the candidate chains, and the
+  log says the restored chains are left in place.
+- For an update-group member that owes withdrawals without a complete record
+  of its advertised routes, while another unicast or VPN family holds the
+  peer's resync under selection deferral, the unicast or VPN route-refresh
+  answer now follows that hold's release, at most at the selection-deferral
+  timeout.
+- When a planned-restart grace window, the RT-Constrain membership hold or its
+  cap, or the ORF cap ends, a receiver outside an update group gets its owed
+  table, and then that family's End-of-RIB, over the resync ticks that follow;
+  a receiver that has stopped reading delays only its own table and
+  End-of-RIB, and a receiver owed several families gets them one after
+  another. The grace-window release logs gain a `pending_families` field
+  naming the held families whose End-of-RIB did not leave with the release:
+  another hold still keeps it or its table is still owed. A ROUTE-REFRESH for
+  an owed family is answered as before.
+- A live import policy edit (SIGHUP, gRPC policy mutation or in-place neighbor
+  update) for an Established peer that did not negotiate Route Refresh now
+  fails as a failed precondition with nothing changed
+  (`policy_preflight_rejected`); the daemon log names the peer and the remedy.
+  To change that peer's import policy, disable the neighbor, which withdraws
+  its routes, apply the edit, then enable it. An `honor_graceful_shutdown` or
+  `honor_blackhole` toggle likewise leaves such a peer on its prior import
+  chain, reported as a failed peer, until the neighbor is disabled and
+  re-enabled. See the [reload matrix](docs/reference/reload-matrix.md).
+- A receiver that is owed a whole IPv4 or IPv6 labeled-unicast family now gets
+  its labeled-unicast table as many small updates over the resync ticks that
+  follow; one that has stopped reading is queued at most its credit plus one
+  step; `bgp_rib_outbound_operations_live` no longer counts these sends, and
+  `bgp_rib_outbound_owed_drain_step_seconds` records them under scope `cursor`
+  instead of `whole`. A receiver negotiated to be sent every Add-Path path of
+  a prefix is sent one prefix per step. A receiver that falls behind while new
+  routes keep replacing old ones is resynced instead, by the resync tick
+  alone, and counted in `bgp_rib_outbound_owing_fallback_total`, as for
+  unicast and EVPN. A receiver resynced inside a labeled-unicast selection
+  hold while it holds routes of the held family is resynced as a whole peer
+  after the release; `bgp_rib_outbound_eviction_recovery_seconds` times that
+  resync and the one after a fallback. FlowSpec, BGP-LS and RT-Constrain keep
+  the whole-family send; see [known issues](docs/reference/known-issues.md).
+- When a reload installs an outbound prefix limit on an update-group member
+  that had not yet received the group's latest routes, the advertised prefix
+  count, the outbound prefix limit usage, `bgp_outbound_prefix_usage` and
+  `bgp_rib_adj_out_prefixes` no longer keep a deleted route, and the route no
+  longer takes one of the limit's slots. A reload that sets a lower outbound
+  maximum than the member currently holds fails with the existing over-limit
+  refusal and leaves the running limits unchanged; retry after the member's
+  queue drains.
+- With per-session inbound backpressure, a route a restarting peer
+  re-advertises just before a stale-route or refresh deadline, behind a larger
+  burst the RIB has not finished, can be swept at the deadline and announced
+  again when it is read; see
+  [graceful restart timers](docs/reference/configuration.md). While a
+  session's input waits behind its own unfinished routes, each hold-timer
+  expiry processes one pending message from the peer, and a peer with none
+  pending gets Hold Timer Expired. After eight consecutive such expiries
+  without the RIB finishing those routes, the session is closed with
+  `Cease/Out of Resources` within about two more hold times. A hold expiry
+  that finds the peer has closed the connection, while input waited for the
+  RIB, ends the session as a TCP failure, after processing the messages the
+  peer sent before closing; a NOTIFICATION among them ends the session as a
+  received NOTIFICATION.
+- A config transaction whose rollback puts a prior import policy back on a
+  peer without Route Refresh no longer fences the daemon or exits 70; it
+  returns `INTERNAL` naming the reset peers, not `FAILED_PRECONDITION`,
+  because those peers saw their sessions reset. Each reset logs a warning with
+  the peer and `reason="route_refresh_unsupported"` and sends
+  Cease/Administrative Reset (a Hard Reset when negotiated). A forward import
+  edit for such a peer is still refused before anything is applied. If the
+  session does not accept the reset within 500 ms, the rollback fences as
+  before. See the
+  [settlement watchdog guide](docs/how-to/settlement-watchdog.md).
+- At a graceful-restart selection-hold release, a receiver outside any update
+  group whose forced resync was deferred no longer sees a withdrawal
+  immediately followed by a re-announcement of the same prefix. Update-group
+  members and non-unicast families are not covered by this fix.
+- After an RFC 4724 selection release, receivers that hold the released family
+  in their own Adj-RIB-Out get the released table over the resync ticks that
+  follow the release, each still before its own End-of-RIB; a receiver that
+  has stopped reading delays only its own table and End-of-RIB. Unicast and
+  VPN update-group members are served in the release turn as before; a
+  receiver that is a group member for one released family and holds another
+  itself gets the second from the ticks. An owed FlowSpec family is sent as a
+  diff, so a rule the receiver already holds unchanged is not announced again.
+  A ROUTE-REFRESH for a family the receiver is still owed is answered as
+  before: the table, its End-of-RIB, then the refreshed table between BoRR and
+  EoRR.
+- Completing selection and group staging before pending resyncs at a
+  selection-hold release avoids transient removal of re-received RTBH routes
+  and FlowSpec discard rules when an outbound refresh, including a
+  graceful-shutdown toggle, overlaps the release and writer backpressure.
+- While a session end waits behind an export-policy change held by a paced
+  first-member update-group build, unicast, labeled-unicast, VPN and EVPN
+  route input from other peers keeps installing. Everything else on that queue
+  (End-of-RIB, FlowSpec, BGP-LS and RT-Constrain input, reads, commands, other
+  session changes, and the same peer's own later messages) still waits behind
+  the session end, and the queue is held again, as before, when a timer for
+  stale or refreshed routes falls due or when eight commands and session ends
+  are already waiting. It is also held, for the rest of the build, once the
+  passing input has left more than 2,048 changed best routes waiting on 64 of
+  the build's turns. UPDATEs of about 2,000 or more routes that keep coming do
+  that within about 200 actor turns; one UPDATE of any size does not. While
+  the session end waits, a withdrawal from another peer can make the ended
+  session's route best, and it is advertised until the build finishes; before,
+  the withdrawn route stayed advertised for the same time.
+- The cell capacity of a single-path unicast advertised-route table is one
+  sixth of what it was, 8 MiB against 48 MiB at one million prefixes by the
+  cell sizes. The whole prefix index, cells and nodes, went from 28.0 to 8.0
+  MiB (3.5 times smaller) in a work count on 660,350 IPv4 prefixes of a real
+  shape; neither figure is a daemon measurement. A prefix advertised with
+  several Add-Path paths takes a 32-byte list slot beside its cell; lists of
+  more than two paths allocate as before.
+- A receiver outside an update group that is owed a whole IPv4 or IPv6 unicast
+  table now gets it as many small updates over the resync ticks that follow;
+  one that has stopped reading is queued at most its credit plus one step; and
+  `bgp_rib_outbound_operations_live` no longer counts these sends. A receiver
+  whose owed routes exceeded a quarter of its table keeps that set: it stays
+  owed until every route in it is sent, and changes that arrive meanwhile go
+  to the shared list. A receiver that falls behind while new routes keep
+  replacing old ones (it has stopped reading, or reads more slowly than the
+  table turns over), until it has more of the list still to read than twice
+  the most routes one pass accounted for (the family's table after the pass
+  plus the routes it carried) plus 4,096, is resynced instead and counted in
+  `bgp_rib_outbound_owing_fallback_total`. That takes one to three tables'
+  worth of prefixes the list has not held before; one large withdrawal, a peer
+  loss or a selection release does not cause it. The resync is one whole-table
+  operation per receiver, outside its credit and in one RIB turn that grows
+  with the table. Only the resync tick runs it, one receiver per unit; no
+  update pass does. Other receivers' steps still run on every tick meanwhile,
+  for about 25 ms per resync. A full outbound channel at the last step delays
+  only the End-of-RIB, which the resync tick retries; the table is not sent
+  again. A ROUTE-REFRESH answer or an operator replay for a family still owed
+  sends the remainder in its own operation, as before: the owed routes, the
+  initial End-of-RIB that waited for them, then the answer between its BoRR
+  and EoRR. A ROUTE-REFRESH from a receiver waiting for the resync above is
+  answered after it, in the same order. FlowSpec, BGP-LS and RT-Constrain keep
+  the whole-family send; see [known issues](docs/reference/known-issues.md).
+- A receiver that is owed a whole VPNv4 or VPNv6 family now gets its VPN table
+  as many small updates over the resync ticks that follow; one that has
+  stopped reading is queued at most its credit plus one step;
+  `bgp_rib_outbound_operations_live` no longer counts these sends, and
+  `bgp_rib_outbound_owed_drain_step_seconds` records them under scope `cursor`
+  instead of `whole`. A receiver negotiated to be sent every Add-Path path of
+  a key is sent one key per step. A receiver that falls behind while new
+  routes keep replacing old ones is resynced instead, by the resync tick
+  alone, and counted in `bgp_rib_outbound_owing_fallback_total`, as for
+  unicast. VPN owned by an update group and a receiver whose RT-Constrain
+  membership changes are unchanged. FlowSpec, BGP-LS and RT-Constrain keep the
+  whole-family send; see [known issues](docs/reference/known-issues.md).
+
 ## [0.83.0] — 2026-11-15
 
 > **Release framing — paced reloads, recovery in place and bounded work.**
