@@ -279,9 +279,8 @@ inbound RIB input, and stops a disable, delete or administrative reset from
 leaving a Notification GR peer's routes retained. It removes the deprecated
 config key spellings and the v0.64 offline downgrade. It publishes no library
 crate and keeps wire 0.28.0, FSM 0.15.1 and RPKI 0.10.1. It ships on its
-per-change regression tests and main CI; no flagship receipt covers it. Under
-the
-[release checklist](release-checklist.md#flagship-operating-proof), a
+per-change regression tests and main CI; no flagship receipt covers it.
+Under the [release checklist](release-checklist.md#flagship-operating-proof), a
 qualifying 24-hour management-load soak on the selected candidate is what a
 flagship operating claim requires; a release may ship without one when this
 page records that no receipt covers it. Earlier

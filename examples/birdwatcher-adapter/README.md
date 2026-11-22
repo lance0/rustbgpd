@@ -62,7 +62,9 @@ Every adapter RPC is a read, but the convenient owner-only default socket
 authenticates its clients as operator-tier `local-operator`. Run the adapter as
 the `rustbgpd` user and use `unix:///var/lib/rustbgpd/grpc.sock` only when that
 broader local trust is acceptable. For least privilege, give the adapter a
-dedicated loopback listener mapped to `observer`:
+dedicated loopback listener mapped to `observer`. This fragment merges into a
+complete config; it omits the required `[global]` keys `asn`, `router_id` and
+`listen_port`:
 
 ```toml
 [security.grpc]

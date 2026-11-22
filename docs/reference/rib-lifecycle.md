@@ -10,7 +10,7 @@ question about any operation is: how long is the longest single turn, and
 what waits behind it? The answer depends on the shape of the session. This
 page gives it per shape and per stage.
 
-It describes `main` after v0.83.0, read from the code in November 2026.
+It describes v0.84.0, read from the code in November 2026.
 rustbgpd is public alpha overall; nothing here is a compatibility promise.
 The [stability guide](stability.md) says which route-server and
 route-reflector surfaces carry the narrow v1 contract and which families
@@ -141,7 +141,8 @@ What backs each **paced** and **bounded turns** mark:
   [Restart](#restart). Work counts; no public timing.
 - *Restart, private receivers.* The selection-release entry in
   [known issues](known-issues.md): 150 private receivers, 150,000 rows, in
-  the transport harness.
+  the transport harness; the longest unrelated-peer gap was 0.38–0.52 s
+  (86–94 s for one turn before the fix).
 
 ### Worked example: a route-server client joins a 1M-route table
 
@@ -251,10 +252,12 @@ where this actor sits among the daemon's other tasks.
 ```mermaid
 flowchart TD
     U["Session reaches Established"] --> W["Large, busy table: wait for queued input"]
+    U -->|"small or quiet RIB"| J
     W --> J["Register"]
     J -->|"grouped"| E["Join update group"]
     J -->|"private"| V["Own table, one turn"]
     E --> F["First member: build group table"]
+    E -->|"later member or queued joiner"| T
     F --> N["Plain unicast: paced turns. Other shapes: in the replay turn"]
     N --> T["Replay group table, one turn"]
     T --> X["End-of-RIB per family"]
@@ -371,8 +374,8 @@ holds under [Restart](#restart)).
 - Measured: the shared replay at 700 IPv4 route-server members and 400,400
   prefixes ([receipt](../perf/join-cohort-converged-rejoin-2026-10.md)).
   A full-table ROUTE-REFRESH replay of one family, which uses the same
-  group replay, held the actor for 211–246 ms at 700 route-server peers
-  and 400,400 IPv4 prefixes
+  group replay, held the actor for 231–246 ms (fix arm; base 211–227 ms)
+  at 700 route-server peers and 400,400 IPv4 prefixes
   ([receipt](../perf/route-refresh-readiness-2026-10.md)).
 - Measured for the plain shape: after a paced build, the initial table
   of one IPv4 session with no policy was one turn of 1.33–1.38 s at one
@@ -643,8 +646,8 @@ the deferrals below applies (`handle_route_refresh_request` in
   queue between them ends the cohort, among other conditions. Measured:
   200-peer IPv4 route reflector, 400,000 prefixes
   ([receipt](../perf/shared-route-refresh-2026-10-11.md)); a one-family
-  replay held the actor for 211–246 ms at 700 route-server
-  peers and 400,400 IPv4 prefixes
+  replay held the actor for 231–246 ms (fix arm; base 211–227 ms) at 700
+  route-server peers and 400,400 IPv4 prefixes
   ([receipt](../perf/route-refresh-readiness-2026-10.md)).
 - The answer waits, and is sent later by the resync tick or the release,
   in these cases: the family is inside a selection hold for this peer
@@ -816,7 +819,8 @@ release, so its rows go out from the resync tick: by row cursor for
 unicast, labeled unicast, VPN and EVPN, and as one operation per receiver
 for FlowSpec, BGP-LS and RT-Constrain
 ([Receiver falls behind](#receiver-falls-behind)). Measured for unicast:
-150 private receivers, 150,000 rows, in the transport harness (the
+150 private receivers, 150,000 rows, in the transport harness, with a longest
+unrelated-peer gap of 0.38–0.52 s (86–94 s for one turn before the fix; the
 selection-release entry in [known issues](known-issues.md)).
 
 **Other families.** Labeled unicast, VPN, EVPN, FlowSpec, BGP-LS and

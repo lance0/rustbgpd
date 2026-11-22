@@ -33,7 +33,7 @@ config.toml + policy/*.rpol + datasets/*.list + render-receipt.json
 swap + SIGHUP                                (one runtime generation)
         │
         ▼
-rbgp verification  +  Alice-LG via the birdwatcher adapter
+verify: rbgp summary, rib, policy stats  +  Alice-LG via the birdwatcher adapter
 ```
 
 This recipe assumes the [route-server cookbook](route-server.md)

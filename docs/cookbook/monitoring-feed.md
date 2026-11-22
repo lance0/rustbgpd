@@ -65,7 +65,8 @@ sys_descr = "fabric RR monitoring feed"
 # End-of-RIB. rib_in_pre and rib_out_post have no reconnect dump and start
 # at the next UPDATE. A configured collector can (re)connect at any time
 # without a daemon restart; adding or changing a [[bmp.collectors]] entry is
-# restart-required (see the reload matrix).
+# restart-required (see the reload matrix). After a SIGHUP,
+# `rbgp config last-reload` lists such an edit as pending a restart.
 [[bmp.collectors]]
 address = "10.20.0.10:1790"
 reconnect_interval = 5

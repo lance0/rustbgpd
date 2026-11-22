@@ -368,7 +368,7 @@ the [wire changelog](../../crates/wire/CHANGELOG.md) records earlier lines.
 
 1. **`rustbgpd-wire`.** This is the foundation —
    dependent crate versions cannot publish before their wire dependency exists
-   on crates.io. FSM and RPKI re-export wire types in their public APIs, so a
+   on crates.io. FSM and RPKI expose wire types in their public APIs, so a
    wire compatibility-line move is also a minor bump for each of them; upgrade
    crates exchanging wire types together.
 
@@ -398,7 +398,7 @@ the [wire changelog](../../crates/wire/CHANGELOG.md) records earlier lines.
      [enum policy](../../crates/rpki/README.md#enum-exhaustiveness).
 
 4. **Later: `rib`, `bmp`, `mrt`, `policy`.** These pull in heavier deps
-   (`prefix-trie`, `ipnet`, `flate2`, `chrono`) and have more churn. Publish
+   (`prefix-trie`, `ipnet`, `flate2`) and have more churn. Publish
    only when there is a concrete external consumer asking for them. The `rib`
    in particular exposes best-path selection, which is a large, still-evolving
    surface — it is not ready to be a stable external API in alpha.
@@ -495,7 +495,7 @@ per-crate semver bump rules.
 
 ---
 
-## 8. The Shape-A (gRPC) embedder surface — recent additions
+## 8. The Shape-A (gRPC) embedder surface
 
 Shape A (§3.5) — a separate process driving the daemon over gRPC — is
 the recommended production embedding, and its surface grew. What a

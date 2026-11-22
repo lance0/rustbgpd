@@ -54,7 +54,7 @@ candidate/: config.toml + policy/*.rpol + datasets/*.list
             + birdwatcher-protocol-aliases.conf
             + render-receipt.json          (written last, after --check --strict)
         │  rs-config-render activate       (immutable generation, atomic `current` swap,
-        ▼                                   one synchronous reload, rbgp settlement check)
+        ▼                                   one synchronous reload, settlement via rbgp metrics)
 rustbgpd@<handle>.service reads <runtime>/activation/current/config.toml
         │
         ▼
