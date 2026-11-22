@@ -1492,10 +1492,17 @@ impl RibManager {
         }
         checkpoint(true);
         // Each staged key occurs once, so every unmatched source key needs a withdrawal.
-        let missing = source.table.len() - matched;
-        let mut withdraw = Vec::with_capacity(missing);
+        // A count above the source length would break that invariant; the
+        // exact scan below still derives the withdrawals in that case.
+        let missing = source.table.len().checked_sub(matched);
+        debug_assert!(
+            missing.is_some(),
+            "matched {matched} destination keys against {} source keys",
+            source.table.len()
+        );
+        let mut withdraw = Vec::with_capacity(missing.unwrap_or(source.table.len()));
         checkpoint(true);
-        if missing != 0 {
+        if missing != Some(0) {
             for route in source.table.iter() {
                 #[cfg(test)]
                 crate::manager::WITHDRAW_SCAN_VISITS
