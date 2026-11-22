@@ -366,7 +366,7 @@ fn conditional_attachment_change() {
         let set = crate::ConditionalAdvertisementSet {
             definitions: vec![crate::ConditionalAdvertisement {
                 name: name.clone(),
-                advertise_policy: Default::default(),
+                advertise_policy: rustbgpd_policy::PolicyChain::default(),
                 advertise_if: crate::ConditionalAdvertiseIf::Absent,
                 condition_prefixes: vec![rustbgpd_policy::sets::PrefixSetEntry::exact(Prefix::V4(
                     prefix(83, 0),
@@ -624,7 +624,7 @@ fn paced_policy_replacement() {
                 });
                 let outcome = rx.try_recv().unwrap().unwrap();
                 assert_eq!(outcome.applied, count + 1);
-                assert!(outcome.pending.is_empty());
+                assert_eq!(outcome.pending, [] as [PeerId; 0]);
                 assert!(m.export_chains[&target()].is_some());
             })
         },
@@ -652,7 +652,7 @@ fn authoritative_policy_command() {
                     replacements,
                     reply,
                 });
-                assert!(rx.try_recv().unwrap().unwrap().is_empty());
+                assert_eq!(rx.try_recv().unwrap().unwrap(), [] as [PeerId; 0]);
                 assert!(m.export_chains[&target()].is_some());
             })
         });
@@ -733,7 +733,7 @@ fn owned_evpn_metadata_change_and_targeted_restage_leave_sibling_debt_for_tick()
             let mut announced = Vec::new();
             while let Ok(update) = rx.try_recv() {
                 announced.extend(update.announce.iter().map(|r| r.prefix));
-                assert!(update.evpn_withdraw.is_empty());
+                assert_eq!(update.evpn_withdraw, [] as [rustbgpd_wire::EvpnRouteKey; 0]);
                 assert!(update.evpn_announce.iter().all(|r| r.key() == key));
             }
             assert_eq!(announced, [Prefix::V4(prefix(84, 0))]);

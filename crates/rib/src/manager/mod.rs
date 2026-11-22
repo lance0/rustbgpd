@@ -670,10 +670,10 @@ enum FullPassPath {
 /// Runs as a single tokio task, receiving updates via an mpsc channel.
 /// No `Arc<RwLock>` — all state is owned by this task.
 #[cfg_attr(
-    any(test, feature = "bench-internals"),
+    test,
     expect(
         clippy::struct_excessive_bools,
-        reason = "independent test and benchmark switches coexist with production event-ID exhaustion, outbound-close and release-staging flags"
+        reason = "independent test switches coexist with production event-ID exhaustion and outbound-close flags"
     )
 )]
 pub struct RibManager {

@@ -3714,6 +3714,11 @@ async fn clean_policy_transition_replies_for_cohort_and_leaves_unrelated_debt_vi
         .unwrap();
     assert_eq!(response.await.unwrap().pending_peers, 0);
     assert_metric(
+        gauge_metric_value(&metrics, "bgp_rib_outbound_dirty_peers", &[]),
+        0.0,
+        "dirty peers after the tick",
+    );
+    assert_metric(
         gauge_metric_value(&metrics, "bgp_update_group_residue_entries", &[]),
         0.0,
         "residue after the tick",
@@ -11680,12 +11685,12 @@ impl crate::update::ExactExportSnapshot for HeldDirtyResyncEncoder {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn grouped_dirty_resync_timer_services_interior_readiness() {
-    dirty_resync_timer_services_interior_readiness(false).await;
+    Box::pin(dirty_resync_timer_services_interior_readiness(false)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn private_dirty_resync_timer_services_interior_readiness() {
-    dirty_resync_timer_services_interior_readiness(true).await;
+    Box::pin(dirty_resync_timer_services_interior_readiness(true)).await;
 }
 
 #[expect(
@@ -15454,18 +15459,11 @@ fn replacement_readiness_services_production_interiors_before_ack_and_queued_mut
                 });
             reply.send(Ok(Vec::new())).unwrap();
         } else if residual {
-            // A pre-existing dirty member outside the replacement command
-            // must also finish the forced repair before it acknowledges.
-            let members = if stage == "family_commit" {
-                &fleet.members[..3]
-            } else {
-                &fleet.members
-            };
             fleet.manager.paced_elapsed_for_test = Some(Duration::ZERO);
             fleet
                 .manager
                 .handle_update(RibUpdate::ApplyPacedExportPolicies {
-                    replacements: batch_replacements(members, &next),
+                    replacements: batch_replacements(&fleet.members, &next),
                     cost: Some(crate::update::PacedMemberCost::default()),
                     reply: paced_reply,
                 });
