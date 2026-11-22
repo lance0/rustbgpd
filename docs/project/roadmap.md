@@ -270,7 +270,17 @@ events between steps, and adds `rbgp reload`, neighbor administrative state
 and the `bgp_rib_stalled` gauge. It removes the string event `timestamp`
 fields, `Route.med` and the listener `access_mode` key. It publishes FSM
 0.15.1 and RPKI 0.10.1 and keeps wire 0.28.0. It ships on its per-change
-regression tests and main CI; no flagship receipt covers it. Under the
+regression tests and main CI; no flagship receipt covers it. v0.84.0
+(2026-11-22) is a minor release that sends owed whole-family tables to
+receivers outside update groups as credit-charged row-cursor steps for
+unicast, labeled unicast, VPN and EVPN, moves selection-release and
+End-of-RIB hold-release exports onto the resync tick, bounds per-session
+inbound RIB input, and stops a disable, delete or administrative reset from
+leaving a Notification GR peer's routes retained. It removes the deprecated
+config key spellings and the v0.64 offline downgrade. It publishes no library
+crate and keeps wire 0.28.0, FSM 0.15.1 and RPKI 0.10.1. It ships on its
+per-change regression tests and main CI; no flagship receipt covers it. Under
+the
 [release checklist](release-checklist.md#flagship-operating-proof), a
 qualifying 24-hour management-load soak on the selected candidate is what a
 flagship operating claim requires; a release may ship without one when this
