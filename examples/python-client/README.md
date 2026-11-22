@@ -58,7 +58,8 @@ python -m pip install -r requirements.txt
 
 This is the shape to build against. A TCP listener under the default tier
 authorization must authenticate, and mTLS is the recommended default for any
-non-loopback gRPC listener:
+non-loopback gRPC listener. This fragment merges into a complete config; it
+omits the required `[global]` keys `asn`, `router_id` and `listen_port`:
 
 ```toml
 [global.telemetry.grpc_tcp]

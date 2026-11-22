@@ -89,6 +89,13 @@ The diff annotates each changed field. Two classes matter here:
 Mixing a hot edit and a reset edit on one neighbor applies both through
 one session rebuild.
 
+`[rpki]`, `[bmp]` and `[mrt]` edits are restart-required: SIGHUP keeps the
+running values, `rbgp config diff` keeps naming the edited field (for example
+`cache_servers[0].refresh_interval` under `[rpki]`), and
+`rbgp config last-reload` lists it as a pending restart-required field until
+the daemon restarts. See the
+[reload matrix](../reference/reload-matrix.md#rpki-bmp-mrt).
+
 ## Risky edits: commit-confirm
 
 For anything you would want auto-rolled-back if you cut yourself off,

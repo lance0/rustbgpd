@@ -3219,7 +3219,7 @@ verdict and exact staged modifications of every tracked `.rpol` file and
 every `rpol` block in the repository's Markdown, run against their own `test` blocks and a fixed
 route matrix, together with a case count for every language construct and
 the term names every policy lowers to. A change to `decision_corpus.golden`
-is a behaviour change; justify it in the PR.
+is a behavior change; justify it in the PR.
 
 ### v1 construct inventory
 

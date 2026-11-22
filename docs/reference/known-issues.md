@@ -60,14 +60,14 @@ resolved.
   - Selection release, v0.83.0 and earlier: an RFC 4724 selection release
     toward private receivers ran as one RIB turn that grew with receivers ×
     rows, 86–94 s at 150 receivers × 150,000 rows in the transport harness
-    (production RIB and transport, in-process, over loopback). Fixed on main
-    after v0.83.0 for that shape: the longest gap seen by an unrelated peer
+    (production RIB and transport, in-process, over loopback). Fixed in
+    v0.84.0 for that shape: the longest gap seen by an unrelated peer
     was 0.38–0.52 s, at the cost of a 9.7% higher memory peak for unicast.
   - Other End-of-RIB hold releases, v0.83.0 and earlier: replay grace
     window expiry and replay-complete, route-target-membership releases and
     the ORF cap sent each private receiver's owed families inside the
     releasing turn, without reading outbound credit, so the work grew with
-    receivers × rows. Fixed on main after v0.83.0: these releases send only
+    receivers × rows. Fixed in v0.84.0: these releases send only
     the End-of-RIB markers whose table is complete, and the resync ticks
     deliver each owed family, one family of one receiver per step, after
     reading that receiver's credit. The evidence is work counts in
@@ -95,7 +95,7 @@ resolved.
     at 150 receivers. The wait still
     grows with the number of sources bursting at once, and route input
     that does not come from a session is not bounded this way.
-  - Paced EVPN bursts, still on main: at one 1,024-route UPDATE per 500 ms
+  - Paced EVPN bursts, still in v0.84.0: at one 1,024-route UPDATE per 500 ms
     toward 150 private receivers an unrelated peer's update waited up to
     4.6 s (about 0.4 s for unicast), in a single untimed harness run. The
     session bound above does not change it: the wait is inside one inbound
@@ -108,7 +108,7 @@ resolved.
     such send was one table-sized RIB turn, 278–632 ms at 150,000 rows, and
     recovery after credit exhaustion past the threshold was one table walk
     per receiver: 54.9 s at 150 receivers × 190,000 rows, in a single
-    untimed run. Fixed on main after v0.83.0: the receiver is sent the
+    untimed run. Fixed in v0.84.0: the receiver is sent the
     routes that changed since it began to owe the family, at most 1,024 per
     step, and each step is an ordinary update charged against its credit.
     The evidence is work counts in unit-level tests, not timings. A
@@ -139,8 +139,8 @@ resolved.
     receiver's own owed routes, kept when they exceed the keyed threshold,
     stay owed until all are sent: updates that arrive meanwhile go to the
     shared list, and the End-of-RIB follows both.
-  - EVPN whole-family sends toward private receivers, fixed on main after
-    v0.83.0: EVPN owed whole (after a selection release, or past the keyed
+  - EVPN whole-family sends toward private receivers, fixed in v0.84.0:
+    EVPN owed whole (after a selection release, or past the keyed
     threshold) is sent as unicast is, from a shared list of the route keys
     that changed, at most 1,024 per step, each step an ordinary update
     charged against the receiver's credit, with the End-of-RIB after the
@@ -162,7 +162,7 @@ resolved.
     start.
     An EVPN family owned by an update group, and a receiver in a private
     handoff, keep the recovery path and its complete feed.
-  - Labeled-unicast whole-family sends, fixed on main after v0.83.0:
+  - Labeled-unicast whole-family sends, fixed in v0.84.0:
     IPv4 and IPv6 labeled unicast owed whole are sent as EVPN is, from one
     shared list per address family, at most 1,024 prefixes per step, each
     step charged against the receiver's credit, with the End-of-RIB after
@@ -175,7 +175,7 @@ resolved.
     it is sent, with a capture of its group's table for a group member),
     one receiver per tick. The evidence is work counts and wire content in
     unit-level tests; no timed run has been made.
-  - VPN whole-family sends, fixed on main after v0.83.0: VPNv4 and VPNv6
+  - VPN whole-family sends, fixed in v0.84.0: VPNv4 and VPNv6
     owed whole are sent as unicast is, from one shared list per address
     family of route distinguisher and prefix keys, at most 1,024 per step,
     each step charged against the receiver's credit, with the End-of-RIB
@@ -186,7 +186,7 @@ resolved.
     membership changes is still resynced as a whole peer. The evidence is
     work counts and wire content in unit-level tests; no timed run has
     been made.
-  - Whole-family sends of the other families, still on main:
+  - Whole-family sends of the other families, still in v0.84.0:
     FlowSpec, BGP-LS and RT-Constrain owed whole still go
     out as one operation per receiver that is not charged against the
     outbound credit, in one RIB turn that grows with the family's table.
@@ -258,19 +258,19 @@ resolved.
   advertises for the prefix, or why it is held; the helper's own stale-route
   view shows whether it still holds the RTBH.
 
-- **Disabling or deleting a Notification GR peer leaves its routes stale in
-  v0.83.0 and earlier.** With the RFC 8538 N bit negotiated, a neighbor
-  disable, administrative down (`admin_down`), neighbor deletion or
-  administrative reset sends a plain Cease, so both speakers keep each
-  other's routes as stale for the restart time and any long-lived stale
-  time, although RFC 8538 §5.1 maps these events to Hard Reset. Fixed on
-  main after v0.83.0: these events now send Cease / Hard Reset wrapping the
-  original subcode, and neither side retains routes. Daemon shutdown still
-  sends the plain Cease and retains routes, by design, because the daemon
-  is expected to restart. On a released tag, expect a disabled or deleted
-  Notification GR peer's routes to remain until the stale timers expire.
-
 ## Resolved
+
+- **Disabling or deleting a Notification GR peer left its routes stale
+  (resolved in v0.84.0).** In v0.83.0 and earlier, with the RFC 8538 N bit
+  negotiated, a neighbor disable, administrative down (`admin_down`),
+  neighbor deletion or administrative reset sent a plain Cease, so both
+  speakers kept each other's routes as stale for the restart time and any
+  long-lived stale time, although RFC 8538 §5.1 maps these events to Hard
+  Reset. These events now send Cease / Hard Reset wrapping the original
+  subcode, and neither side retains routes. Daemon shutdown still sends the
+  plain Cease and retains routes, by design, because the daemon is expected
+  to restart. On v0.83.0 and earlier, expect a disabled or deleted
+  Notification GR peer's routes to remain until the stale timers expire.
 
 - **MRT snapshot per-entry attribute clones (resolved).** Ordinary IPv4/IPv6
   `TABLE_DUMP_V2` and EVPN `RIB_GENERIC` encoding borrow route attributes and

@@ -12,7 +12,7 @@ A modern, API-first BGP daemon in Rust, inspired by GoBGP's ergonomics and "driv
 
 **API-first routing control plane.** gRPC is the primary interface for all configuration and operations. The config file is a convenience for initial boot state — once the daemon is running, gRPC owns the truth. Clients in Python, Go, Rust, and Node should have a clean, typed experience from day one.
 
-**Interop correctness over feature breadth.** RFC-compliant session behavior and attribute encoding/decoding, validated against real peers (FRR, BIRD, Junos, Arista EOS, Cisco IOS-XE/NX-OS where possible). A small feature set that works correctly is worth more than a large one that doesn't.
+**Interop correctness over feature breadth.** RFC-compliant session behavior and attribute encoding/decoding, validated against real peers in the containerlab interop matrix (FRR, BIRD, GoBGP, ExaBGP, OpenBGPD); Junos, Arista and Cisco are best-effort lab targets (see [Compatibility Targets](#compatibility-targets)). A small feature set that works correctly is worth more than a large one that doesn't.
 
 **Observable by default.** Prometheus metrics, structured logs, and machine-parseable errors everywhere. Operators should never have to guess what the daemon is doing or why a session flapped.
 

@@ -914,7 +914,7 @@ Be honest about where rustbgpd isn't the right tool:
   7999 discard routes and explicit `[[fib_tables]]` unicast tables, but it is
   not a full FRR/BIRD replacement. Use a full routing suite when you need
   default-on main-table ownership, IGPs, broad policy-driven redistribution,
-  crash-restart FIB adoption, or mature multi-protocol forwarding features.
+  or mature multi-protocol forwarding features.
 - **EVPN VTEP role — alpha.** rustbgpd-as-RR has been
   the supported deployment since Phase 1 (ADR-0050). Phase 2
   (declarative instance schema, FDB reconciler, local MAC + MAC+IP

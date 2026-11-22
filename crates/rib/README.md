@@ -59,6 +59,9 @@ The split itself moves at most 16,384 entries. This bounds the amount of data
 rehash moves; it does not guarantee a fixed elapsed time for every insertion.
 Maps that only fill an empty snapshot can instead reserve their known upper
 bound before the walk. Retirement must retain its per-entry checkpoints.
+Per-receiver labeled-unicast Adj-RIB-Out tables, which hold routes inline,
+use `LargeShardedMap` instead: one table until 114,688 entries, then eight
+shards.
 
 The update-group and manager inventory has these boundaries:
 
