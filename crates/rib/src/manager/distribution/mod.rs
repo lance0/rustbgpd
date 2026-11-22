@@ -5871,6 +5871,11 @@ impl RibManager {
             credit: None,
             latch: None,
         };
+        #[cfg(feature = "bench-internals")]
+        let published = self
+            .departure_probe
+            .as_ref()
+            .map_or(0, |probe| probe.withdrawals_for_receiver(peer, &update));
         match admission {
             LadderAdmission::Slot(slot) => slot.send(update),
             LadderAdmission::Ordinary {
@@ -5887,6 +5892,12 @@ impl RibManager {
                 &credit,
                 self.private_families(peer),
             ),
+        }
+        #[cfg(feature = "bench-internals")]
+        if published != 0
+            && let Some(probe) = &self.departure_probe
+        {
+            probe.withdrawals_published(published);
         }
         if let Some(count) = staged_evpn_count {
             self.set_evpn_admitted_count(peer, count);
@@ -9098,6 +9109,10 @@ impl RibManager {
         #[cfg(test)]
         crate::orr::rebuild_growth::record_selection(owned, reserved, &changed);
         self.publish_unicast_selection_counts();
+        #[cfg(feature = "bench-internals")]
+        if let Some(probe) = &self.departure_probe {
+            probe.selection_finished(false);
+        }
         changed
     }
 
@@ -9128,6 +9143,10 @@ impl RibManager {
     /// fast path's direct install.
     fn publish_best_change_events(&mut self, prefix: Prefix, previous_best: Option<BestSource>) {
         let current_best = self.loc_rib.get(&prefix).map(BestSource::of);
+        #[cfg(feature = "bench-internals")]
+        if let Some(probe) = &self.departure_probe {
+            probe.winner_installed(prefix, current_best.map(|best| best.peer));
+        }
         match (previous_best, current_best) {
             (None, Some(current)) => {
                 debug!(%prefix, peer = %current.peer, "best path added");

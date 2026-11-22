@@ -7,7 +7,7 @@ harness.
 
 ## What it measures
 
-Drives the real `RibManager` run loop directly (no TCP/transport) on a
+The flood and churn cells drive the real `RibManager` run loop directly on a
 dedicated OS thread named `ribmgr` under a current-thread tokio runtime, with N
 registered route-reflector-client outbound peers whose bounded channels are
 drained by trivial consumer tasks. Route injection is via
@@ -426,3 +426,54 @@ rrharness recovery-memory peer-down 4 smoke-vpn --correctness-only
 rrharness recovery-memory widen 4 smoke-mixed --correctness-only
 rrharness recovery-memory widen 4 smoke-vpn --correctness-only
 ```
+
+## Source departure
+
+One source owns every initial winner. After all receivers have the initial
+table, the driver queues two messages on the primary RIB lane in succession:
+the source's non-GR departure and an unrelated IPv4 UPDATE from a second
+source. The receivers decode the production session encoder's BGP frames
+over TCP loopback. Registration and ingress use RIB session messages directly.
+
+| Shape | Receivers | Sole winners | Modes |
+| --- | ---: | ---: | --- |
+| Smoke | 8 | 1,024 | Grouped unicast, neighbor-set-private unicast, private FlowSpec |
+| Standard | 150 | 37,000 | All three modes |
+| Large | 700 | 400,000 | Neighbor-set-private unicast, subject to memory preflight |
+
+The actor-side observer dates the probe when the Loc-RIB selects it from the
+expected source. Comparing that timestamp with publication of the last
+withdrawal establishes order independently of when the loopback readers run.
+End-to-end convergence uses the receivers' decoded tables. Source detach and
+selection, the longest physical actor poll, and the fenced scope's memory
+peak are reported separately.
+
+Each trial starts with an exact seeded table and no receiver debt. A large
+departure can spend a fast receiver's row credit before the next UPDATE. The
+receipt records any resulting refusals and recovery work, so their cost is
+visible even when the final table is exact.
+
+Build `cargo build --locked --profile scale -p rrharness` on each product
+revision with the same harness and observer changes applied. Run both binaries
+through the same copy of the Python driver, with a fresh output directory
+for each arm:
+
+```sh
+python3 bench/scale/source_departure.py --binary "$parent_binary" \
+  --arm parent --shape smoke --output "$results/parent"
+python3 bench/scale/source_departure.py --binary "$candidate_binary" \
+  --arm candidate --shape smoke --output "$results/candidate"
+```
+
+The smoke runs two repetitions per mode. The negative control, `--break-witness`,
+changes the prefix the observer watches while sending the original probe.
+A complete receiver table must still fail the missing Loc-RIB witness check.
+
+For a large trial, pass `--shape large --reference <standard-receipt.json>`.
+The preflight scales the same binary's highest passing standard private-unicast
+cgroup peak by the receiver-row ratio and adds 25%. It compares that estimate
+with the scope and ancestor limits and host available memory less 4 GiB.
+The default scope limit is 64 GiB and swap is disabled. A missing reference
+or insufficient headroom records a skip before starting the binary. Each
+repetition has its own scope and receipt. The caller controls the host lock,
+trial order and compiler exclusion for a timed campaign.

@@ -3,9 +3,12 @@
 //! timed without TCP.
 
 use std::future::Future;
-use std::net::Ipv4Addr;
+use std::io;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::task::{Context, Waker};
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpStream;
 
 use bytes::Bytes;
 use rustbgpd_fsm::NegotiatedSession;
@@ -25,7 +28,7 @@ pub struct OutboundEncodeBench {
     session: PeerSession,
     bulk_rx: mpsc::Receiver<Bytes>,
     completed: tokio::sync::watch::Sender<u64>,
-    _priority_rx: mpsc::UnboundedReceiver<Bytes>,
+    priority_rx: mpsc::UnboundedReceiver<Bytes>,
 }
 
 impl OutboundEncodeBench {
@@ -40,11 +43,44 @@ impl OutboundEncodeBench {
         peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
         let mut config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
         config.route_server_client = true;
+        Self::with_config(config, BgpMetrics::new(), Ipv4Addr::new(10, 0, 0, 2), queue)
+    }
+
+    /// Construct one already-negotiated iBGP route-reflector client for the
+    /// manager-direct loopback harness. Handshake and inbound FSM are outside the cell.
+    #[must_use]
+    pub fn reflector_client(
+        peer: Ipv4Addr,
+        flowspec: bool,
+        metrics: BgpMetrics,
+        queue: usize,
+    ) -> Self {
+        let router_id = Ipv4Addr::new(10, 255, 255, 255);
+        let mut peer_config = PeerConfig::new(64_512, 64_512, router_id);
+        peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+        if flowspec {
+            peer_config.families.push((Afi::Ipv4, Safi::FlowSpec));
+        }
+        let mut config = TransportConfig::new(peer_config, SocketAddr::new(IpAddr::V4(peer), 179));
+        config.route_reflector_client = true;
+        config.cluster_id = Some(router_id);
+        config.local_address = Some(IpAddr::V4(router_id));
+        Self::with_config(config, metrics, peer, queue)
+    }
+
+    fn with_config(
+        config: TransportConfig,
+        metrics: BgpMetrics,
+        router_id: Ipv4Addr,
+        queue: usize,
+    ) -> Self {
+        let peer_asn = config.peer.remote_asn;
+        let families = config.peer.families.clone();
         let (_command_tx, commands) = mpsc::channel(1);
         let (rib_tx, _rib_rx) = mpsc::channel(1);
         let mut session = PeerSession::new_at_tcp_ao_generation(
             config,
-            BgpMetrics::new(),
+            metrics,
             commands,
             rib_tx,
             None,
@@ -59,12 +95,12 @@ impl OutboundEncodeBench {
             crate::TcpAoRotationGeneration::STARTUP,
         );
         let mut negotiated = NegotiatedSession::default();
-        negotiated.peer_asn = 65_002;
-        negotiated.peer_router_id = Ipv4Addr::new(10, 0, 0, 2);
+        negotiated.peer_asn = peer_asn;
+        negotiated.peer_router_id = router_id;
         negotiated.hold_time = 90;
         negotiated.keepalive_interval = 30;
         negotiated.four_octet_as = true;
-        negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast)];
+        negotiated.negotiated_families = families;
         session.negotiated = Some(Arc::new(negotiated));
         let (bulk_tx, bulk_rx) = mpsc::channel(queue);
         let (completed, writer_completed) = tokio::sync::watch::channel(0);
@@ -76,7 +112,49 @@ impl OutboundEncodeBench {
             session,
             bulk_rx,
             completed,
-            _priority_rx: priority_rx,
+            priority_rx,
+        }
+    }
+
+    /// Register this session's own encoder with the RIB so each admitted
+    /// envelope retains the snapshot used for its preflight.
+    #[must_use]
+    pub fn export_encoder(&self) -> Arc<dyn rustbgpd_rib::update::ExactExportEncoder> {
+        self.session.publish_export_profile();
+        self.session.export_encoder.clone()
+    }
+
+    /// Send all frames for an admitted RIB envelope to its loopback peer.
+    /// Acknowledge each writer batch only after TCP accepted its bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the socket error or a session writer teardown.
+    pub async fn write_envelope(
+        &mut self,
+        update: OutboundRouteUpdate,
+        socket: &mut TcpStream,
+    ) -> io::Result<()> {
+        self.session.handle_outbound_route_update(update).await;
+        loop {
+            if self.session.writer_bulk_tx.is_none() {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "outbound session writer closed",
+                ));
+            }
+            while let Ok(frame) = self.priority_rx.try_recv() {
+                socket.write_all(&frame).await?;
+            }
+            while let Ok(frame) = self.bulk_rx.try_recv() {
+                socket.write_all(&frame).await?;
+            }
+            self.completed
+                .send_replace(self.session.writer_bulk_admitted);
+            if self.session.pending_outbound.is_none() {
+                return Ok(());
+            }
+            self.session.advance_pending_outbound();
         }
     }
 

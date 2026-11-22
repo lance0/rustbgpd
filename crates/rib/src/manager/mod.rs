@@ -16,6 +16,10 @@ pub use bench_support::{
     bench_recovery_capture_scan,
 };
 mod conditional_advertisement;
+#[cfg(feature = "bench-internals")]
+mod departure_probe;
+#[cfg(feature = "bench-internals")]
+pub use departure_probe::{SourceDepartureProbe, SourceDepartureSnapshot};
 mod dampening_history;
 mod distribution;
 mod eor_grace;
@@ -1387,6 +1391,8 @@ pub struct RibManager {
     /// Closed-cohort wire-oracle preparation only. Never configured by the daemon.
     #[cfg(feature = "bench-internals")]
     bench_evpn_group_ownership: bool,
+    #[cfg(feature = "bench-internals")]
+    departure_probe: Option<Arc<SourceDepartureProbe>>,
     /// Differential-oracle test hook: disqualify every peer from
     /// grouping so identical scenarios can be driven through the
     /// per-peer path (the correctness oracle) and compared against a
@@ -3158,6 +3164,8 @@ impl RibManager {
             paced_elapsed_for_test: None,
             #[cfg(feature = "bench-internals")]
             bench_evpn_group_ownership: false,
+            #[cfg(feature = "bench-internals")]
+            departure_probe: None,
             #[cfg(test)]
             test_force_ungrouped: false,
             #[cfg(any(test, feature = "bench-internals"))]

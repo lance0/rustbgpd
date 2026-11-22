@@ -14,6 +14,7 @@
 //!   rrharness flood <n_clients> <n_prefixes> <secs> <out_prefix>
 //!   rrharness churn <n_clients> <n_cand> <n_prefixes> <secs> <out_prefix>
 //!   rrharness late-join <n_clients> <n_prefixes>
+//!   rrharness source-departure <mode> <n_clients> <n_prefixes>
 
 use rustbgpd_rib::PeerId;
 use std::collections::{BTreeMap, HashMap};
@@ -38,6 +39,8 @@ use tokio::sync::{mpsc, oneshot};
 mod recovery_memory;
 mod recovery_retirement;
 mod recovery_scan;
+mod source_departure;
+mod source_departure_receivers;
 
 /// The harness runs the daemon's `RibManager` in-process, so its stage/drain
 /// timings and RSS must come from the allocator the daemon ships with.
@@ -633,6 +636,17 @@ fn write_folded(report: &pprof::Report, path: &str) -> io::Result<()> {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mode = args.get(1).expect("mode").clone();
+    if mode == "source-departure" {
+        if let Err(error) = source_departure::run(&args[2..]) {
+            if error.to_string().contains("receiver inventory mismatch:") {
+                eprintln!("FAIL: source-departure: {error}");
+            } else {
+                eprintln!("source-departure: {error}");
+            }
+            std::process::exit(1);
+        }
+        return;
+    }
     if mode == "recovery-memory" {
         recovery_memory::main(&args[2..]);
         return;
