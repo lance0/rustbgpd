@@ -88,6 +88,43 @@ fn distinct_reload_restamps_new_and_retained_denials_and_withdraws_nothing_for_s
 }
 
 #[test]
+fn distinct_reload_restore_restamps_the_forward_denial_history() {
+    let permit = mods_chain(RouteModifications::default());
+    let deny = deny_chain(fixture_prefix(0));
+    let prefix = Prefix::V4(fixture_prefix(0));
+    let (mut manager, peers, mut receivers) =
+        direct_clean_transition_manager_with_policy(&permit, 1, 2, None);
+    let peer = peers[0];
+    replace(&mut manager, peer, &deny);
+    assert_delta(&mut receivers[0], &[], &[(prefix, 0)]);
+    assert!(manager.policy_filtered_routes[&peer].contains_key(&prefix));
+
+    // The restored destination has no group denial; only the mover's
+    // forward history requires the restore to restamp.
+    reset_distinct_reload_visits();
+    let (reply, mut restored) = oneshot::channel();
+    manager.handle_update(RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+        replacements: batch_replacements(&[peer], &permit),
+        reply,
+    });
+    assert_eq!(
+        restored.try_recv().unwrap().unwrap(),
+        [crate::update::PeerExportPolicyRestoreReceipt::Restored { peer }]
+    );
+    assert_eq!(
+        manager
+            .authoritative_transition_receipts
+            .last()
+            .unwrap()
+            .shared_members,
+        1
+    );
+    assert_delta(&mut receivers[0], &[(prefix, 0)], &[]);
+    assert!(!manager.policy_filtered_routes.contains_key(&peer));
+    assert_eq!(distinct_reload_visits(), (2, 2, 0));
+}
+
+#[test]
 fn distinct_reload_equal_cardinality_replacement_announces_and_withdraws() {
     let (mut manager, peers, mut receivers) =
         direct_clean_transition_manager_with_policy(&deny_chain(fixture_prefix(0)), 1, 2, None);
