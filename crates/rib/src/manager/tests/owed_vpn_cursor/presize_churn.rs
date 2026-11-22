@@ -570,7 +570,8 @@ fn re_held_resync() -> ((usize, usize, [usize; 2]), usize, usize) {
                 .as_mut()
                 .unwrap()
                 .classify_session(peer, session, false, &families, &metrics)
-                .is_empty()
+                .is_empty(),
+            "the waiter holds selection"
         );
     };
     classify(&mut manager, a, 11);
