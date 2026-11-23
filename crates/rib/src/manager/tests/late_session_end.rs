@@ -23,6 +23,17 @@ fn peer_up(manager: &mut RibManager, session_id: u64) {
 
 /// A `PeerUp` whose session replaces the retired session `supersedes`.
 fn peer_up_superseding(manager: &mut RibManager, session_id: u64, supersedes: Option<u64>) {
+    let negotiated_llgr_families = manager
+        .pending_peer_gr_context
+        .get(&(peer(), session_id))
+        .map(|context| {
+            context
+                .peer_llgr_families
+                .iter()
+                .map(|f| (f.afi, f.safi))
+                .collect()
+        })
+        .unwrap_or_default();
     let (outbound_tx, _outbound_rx) = mpsc::channel(8);
     manager.handle_update(RibUpdate::PeerUp {
         peer: peer(),
@@ -41,7 +52,7 @@ fn peer_up_superseding(manager: &mut RibManager, session_id: u64, supersedes: Op
         add_path_send_families: Vec::new(),
         add_path_send_max: 0,
         negotiated_orf_recv: Vec::new(),
-        negotiated_llgr_families: Vec::new(),
+        negotiated_llgr_families,
     });
 }
 
@@ -62,12 +73,16 @@ fn peer_down(manager: &mut RibManager, session_id: u64) {
 }
 
 fn restart_end(session_id: u64) -> RibUpdate {
+    restart_end_for(session_id, vec![(Afi::Ipv4, Safi::Unicast)])
+}
+
+fn restart_end_for(session_id: u64, gr_families: Vec<(Afi, Safi)>) -> RibUpdate {
     RibUpdate::PeerGracefulRestart {
         peer: peer(),
         session_id,
         restart_time: 90,
         stale_routes_time: 120,
-        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        gr_families,
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
         llgr_stale_time: 0,
@@ -667,10 +682,18 @@ fn v4(octet: u8) -> Prefix {
 /// peer already holds.
 fn announce(manager: &mut RibManager, session_id: u64, octet: u8) {
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, octet, 0), 24);
+    announce_routes(
+        manager,
+        session_id,
+        vec![make_route(prefix, Ipv4Addr::new(192, 0, 2, 1))],
+    );
+}
+
+fn announce_routes(manager: &mut RibManager, session_id: u64, announced: Vec<Route>) {
     manager.handle_update(RibUpdate::RoutesReceived {
         session_id,
         peer: peer(),
-        announced: vec![make_route(prefix, Ipv4Addr::new(192, 0, 2, 1))],
+        announced,
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
@@ -755,6 +778,117 @@ fn replacement_before_the_end_of_a_restart_reconnect_sweeps_its_fresh_routes() {
     }
 }
 
+const DUAL_STACK: [(Afi, Safi); 2] = [(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+
+fn reconnect_context(
+    session_id: u64,
+    gr_families: Vec<(Afi, Safi)>,
+    llgr: Vec<rustbgpd_wire::LlgrFamily>,
+) -> RibUpdate {
+    RibUpdate::SetPeerGracefulRestartContext {
+        peer: peer(),
+        session_id,
+        peer_restart_state: true,
+        peer_gr_helper: true,
+        peer_gr_families: gr_families,
+        peer_enhanced_refresh: false,
+        peer_llgr_families: llgr,
+        local_llgr_stale_time: 3600,
+    }
+}
+
+fn ipv6_route_from_peer() -> Route {
+    let mut v6_route = make_v6_route(
+        Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32),
+        "2001:db8::1".parse().unwrap(),
+    );
+    set_peer(&mut v6_route, peer());
+    v6_route
+}
+
+/// A family the reconnect completed still belongs to its negotiated GR set.
+#[test]
+fn superseded_reconnect_retains_completed_unicast_family() {
+    let v4_route = make_route(
+        Ipv4Prefix::new(Ipv4Addr::new(10, 0, 1, 0), 24),
+        Ipv4Addr::new(192, 0, 2, 1),
+    );
+    let v6_route = ipv6_route_from_peer();
+    for (completed, refreshed, omitted) in [
+        (Afi::Ipv4, &v6_route, &v4_route),
+        (Afi::Ipv6, &v4_route, &v6_route),
+    ] {
+        for timer in [false, true] {
+            let mut manager = test_manager();
+            peer_up(&mut manager, 1);
+            manager.handle_update(restart_end_for(1, DUAL_STACK.to_vec()));
+            manager.handle_update(reconnect_context(2, DUAL_STACK.to_vec(), vec![]));
+            peer_up_superseding(&mut manager, 2, Some(1));
+            announce_routes(&mut manager, 2, vec![refreshed.clone(), omitted.clone()]);
+            manager.handle_update(RibUpdate::EndOfRib {
+                peer: peer(),
+                session_id: 2,
+                afi: completed,
+                safi: Safi::Unicast,
+            });
+            assert_eq!(manager.gr_peers[&peer()].len(), 1);
+            manager.handle_update(reconnect_context(3, DUAL_STACK.to_vec(), vec![]));
+            peer_up_superseding(&mut manager, 3, Some(2));
+            if timer {
+                late_down(&mut manager, 2);
+            } else {
+                manager.handle_update(RibUpdate::LateSessionEnd(Box::new(restart_end_for(
+                    2,
+                    DUAL_STACK.to_vec(),
+                ))));
+            }
+            for route in [omitted, refreshed] {
+                assert!(
+                    manager
+                        .loc_rib
+                        .get(&route.prefix)
+                        .is_some_and(|r| r.is_stale),
+                    "replacement lost {0} before End-of-RIB",
+                    route.prefix
+                );
+            }
+            announce_routes(&mut manager, 3, vec![refreshed.clone()]);
+            manager.handle_update(RibUpdate::EndOfRib {
+                peer: peer(),
+                session_id: 3,
+                afi: helpers::prefix_family(&refreshed.prefix).0,
+                safi: Safi::Unicast,
+            });
+            assert!(
+                manager
+                    .loc_rib
+                    .get(&omitted.prefix)
+                    .is_some_and(|r| r.is_stale)
+            );
+            if timer {
+                assert!(manager.gr_stale_deadlines.contains_key(&peer()));
+                manager.sweep_gr_stale(peer());
+            } else {
+                manager.handle_update(RibUpdate::EndOfRib {
+                    peer: peer(),
+                    session_id: 3,
+                    afi: completed,
+                    safi: Safi::Unicast,
+                });
+            }
+            assert!(manager.loc_rib.get(&omitted.prefix).is_none());
+            assert!(
+                manager
+                    .loc_rib
+                    .get(&refreshed.prefix)
+                    .is_some_and(|r| !r.is_stale)
+            );
+            peer_down(&mut manager, 3);
+            assert_eq!(retention(&manager), (0, 0, false));
+        }
+    }
+}
+
 /// Without End-of-RIB from the replacement, the re-armed stale timer
 /// removes what the replaced session left.
 /// Mutation-red: without the mark at the superseding `PeerUp`, route 2 is
@@ -807,6 +941,27 @@ fn replacement_before_the_end_without_restart_clears_the_table() {
     assert_eq!(live(&manager), [2]);
 }
 
+/// The last End-of-RIB ends retention. A replacement only names its predecessor
+/// and cannot infer a new restart from the predecessor's GR capability.
+#[test]
+fn superseding_a_completed_reconnect_does_not_restart_retention() {
+    let mut manager = test_manager();
+    peer_up(&mut manager, 1);
+    restart(&mut manager, 1);
+    manager.handle_update(reconnect_context(
+        2,
+        vec![(Afi::Ipv4, Safi::Unicast)],
+        vec![],
+    ));
+    peer_up_superseding(&mut manager, 2, Some(1));
+    announce(&mut manager, 2, 1);
+    end_of_rib(&mut manager, 2);
+    assert_eq!(retention(&manager), (1, 0, false));
+    peer_up_superseding(&mut manager, 3, Some(2));
+    assert_eq!(retention(&manager), (0, 0, false));
+    assert!(manager.loc_rib.get(&v4(1)).is_none());
+}
+
 /// The reconnect's end delivered before its replacement's `PeerUp`: the
 /// end does the work and the `PeerUp` finds no registered sender, so the
 /// reset block is never entered. Mutation-red only for a mark placed
@@ -846,11 +1001,17 @@ fn in_order_end_then_replacement_is_unchanged() {
 /// (RFC 9494 §4.2); the reconnect's fresh route becomes stale.
 /// Mutation-red: without the mark route 2 stays fresh; marking only the
 /// GR-phase families withdraws the LLGR-stale route 1.
-#[test]
-fn supersede_mark_keeps_llgr_stale_routes() {
+#[tokio::test(start_paused = true)]
+async fn supersede_mark_keeps_llgr_stale_routes() {
     let mut manager = test_manager();
     peer_up(&mut manager, 1);
     announce(&mut manager, 1, 1);
+    let llgr = vec![rustbgpd_wire::LlgrFamily {
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        forwarding_preserved: false,
+        stale_time: 3600,
+    }];
     manager.handle_update(RibUpdate::PeerGracefulRestart {
         peer: peer(),
         session_id: 1,
@@ -858,14 +1019,10 @@ fn supersede_mark_keeps_llgr_stale_routes() {
         stale_routes_time: 120,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
         peer_llgr_capable: true,
-        peer_llgr_families: vec![rustbgpd_wire::LlgrFamily {
-            afi: Afi::Ipv4,
-            safi: Safi::Unicast,
-            forwarding_preserved: false,
-            stale_time: 3600,
-        }],
+        peer_llgr_families: llgr.clone(),
         llgr_stale_time: 3600,
     });
+    manager.handle_update(reconnect_context(2, DUAL_STACK.to_vec(), llgr.clone()));
     peer_up_superseding(&mut manager, 2, Some(1));
     // The reconnect sends no End-of-RIB before the restart timer expires.
     manager.sweep_gr_stale(peer());
@@ -876,10 +1033,23 @@ fn supersede_mark_keeps_llgr_stale_routes() {
     announce(&mut manager, 2, 2);
     assert_eq!(held(&manager, 2), Some((false, false, true)));
 
+    let v6 = ipv6_route_from_peer();
+    announce_routes(&mut manager, 2, vec![v6.clone()]);
+    let llgr_key = (peer(), Afi::Ipv4, Safi::Unicast);
+    let original_deadline = manager.llgr_stale_deadlines[&llgr_key];
+    manager.handle_update(reconnect_context(3, DUAL_STACK.to_vec(), llgr));
     peer_up_superseding(&mut manager, 3, Some(2));
     assert!(held(&manager, 1).is_some_and(|(_, llgr, selected)| llgr && selected));
     assert_eq!(held(&manager, 2), Some((true, false, true)));
-    assert!(manager.gr_peers.contains_key(&peer()));
+    assert!(manager.loc_rib.get(&v6.prefix).is_some_and(|r| r.is_stale));
+    assert_eq!(
+        manager.gr_stale_deadlines[&peer()],
+        tokio::time::Instant::now() + Duration::from_secs(120)
+    );
+    manager.sweep_gr_stale(peer());
+    assert!(manager.loc_rib.get(&v6.prefix).is_none());
+    assert_eq!(manager.llgr_stale_deadlines[&llgr_key], original_deadline);
+    assert!(held(&manager, 1).is_some_and(|(_, llgr, selected)| llgr && selected));
 }
 
 /// A `PeerUp` that names no superseded session during retention is a
