@@ -11,6 +11,12 @@ use crate::manager::lease_expiry::GuardedAdmission;
 use crate::route::{FlowSpecKey, FlowSpecRouteKey};
 use crate::update::InjectOutcome;
 
+/// The first advertised key proves that admission needs a writer and credit.
+pub(in crate::manager) struct DepartureWithdrawals<'a> {
+    pub(super) first: &'a FlowSpecKey,
+    pub(super) rest: std::collections::hash_set::Iter<'a, FlowSpecKey>,
+}
+
 impl RibManager {
     pub(super) fn process_flowspec_withdraw_chunk(
         &mut self,
@@ -412,7 +418,11 @@ impl RibManager {
             crate::manager::source_departure::inspect_receiver_row();
             checkpoint();
             let Some(best) = loc_rib.get_flowspec(key) else {
+                #[cfg(test)]
+                crate::manager::source_departure::count_flowspec_withdrawal(0, 1, 0);
                 if rib_out.get_flowspec(key).is_some() {
+                    #[cfg(test)]
+                    crate::manager::source_departure::count_flowspec_withdrawal(1, 0, 0);
                     fs_withdraw.push(key.clone());
                 }
                 continue;
@@ -635,7 +645,7 @@ impl RibManager {
             .inspect(|_| self.replacement_checkpoint_at("selection_flowspec", false))
             .copied()
             .collect();
-        self.distribute_flowspec_to_peers(&changed, &peers);
+        self.distribute_flowspec_to_peers(&changed, &peers, false);
         super::super::retire_hash_set(&mut changed, &mut || {
             self.replacement_checkpoint_at("selection_flowspec", false);
         });
@@ -760,7 +770,8 @@ impl RibManager {
         peers: &[PeerId],
     ) {
         self.with_selection_readiness(|manager| {
-            manager.distribute_flowspec_to_peers(changed_keys, peers);
+            let withdrawals_only = manager.loc_rib.flowspec_len() == 0;
+            manager.distribute_flowspec_to_peers(changed_keys, peers, withdrawals_only);
         });
     }
 
@@ -772,6 +783,7 @@ impl RibManager {
         &mut self,
         changed_keys: &HashSet<FlowSpecKey>,
         peers: &[PeerId],
+        withdrawals_only: bool,
     ) {
         let readiness = self.replacement_readiness.clone();
         let mut checkpoint = || {
@@ -833,61 +845,94 @@ impl RibManager {
                 crate::manager::outbound_owing::WholePass::Skip => continue,
             }
             self.note_outbound_staging(peer);
-            let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
-            let interpret_rfc1997 = self.peer_interpret_rfc1997.contains(&peer);
-            let target_is_rr_client = self.peer_is_rr_client.get(&peer).copied().unwrap_or(false);
-            let target_peer_asn = self.peer_asn.get(&peer).copied();
-            let target_peer_group = self.peer_group.get(&peer).map(String::as_str);
-            let export_pol = self
-                .export_policy_for(peer)
-                .map(rustbgpd_policy::PolicyChain::share);
-            let target_peer_label = peer.label();
-            let metrics = self.metrics.clone();
+            let page;
+            let batch = if withdrawals_only
+                && self.owing_peer_in_scope(peer)
+                && self.owing(peer).is_none()
+                && !self.outbound_operation_live(peer)
+                && !self.peer_unexportable.contains_key(&peer)
+            {
+                let Some(rib_out) = self.adj_ribs_out.get(&peer) else {
+                    continue;
+                };
+                let mut rest = changed_keys.iter();
+                let Some(first) = rest.find(|key| {
+                    checkpoint();
+                    #[cfg(test)]
+                    {
+                        crate::manager::source_departure::inspect_receiver_row();
+                        crate::manager::source_departure::count_flowspec_withdrawal(0, 1, 0);
+                    }
+                    rib_out.get_flowspec(key).is_some()
+                }) else {
+                    continue;
+                };
+                page = DepartureWithdrawals { first, rest };
+                OutboundCommitBatch {
+                    departure_withdrawals: Some(&page),
+                    ..OutboundCommitBatch::default()
+                }
+            } else {
+                let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
+                let interpret_rfc1997 = self.peer_interpret_rfc1997.contains(&peer);
+                let target_is_rr_client =
+                    self.peer_is_rr_client.get(&peer).copied().unwrap_or(false);
+                let target_peer_asn = self.peer_asn.get(&peer).copied();
+                let target_peer_group = self.peer_group.get(&peer).map(String::as_str);
+                let export_pol = self
+                    .export_policy_for(peer)
+                    .map(rustbgpd_policy::PolicyChain::share);
+                let target_peer_label = peer.label();
+                let metrics = self.metrics.clone();
 
-            let loc_rib_len = self.loc_rib.len();
-            let rib_out = self
-                .adj_ribs_out
-                .entry(peer)
-                .or_insert_with(|| crate::adj_rib_out::AdjRibOut::with_capacity(peer, loc_rib_len));
-            let mut export_tally = crate::update::NeighborPolicyStats::default();
-            let policy_stats = &mut export_tally;
+                let loc_rib_len = self.loc_rib.len();
+                let rib_out = self.adj_ribs_out.entry(peer).or_insert_with(|| {
+                    crate::adj_rib_out::AdjRibOut::with_capacity(peer, loc_rib_len)
+                });
+                let mut export_tally = crate::update::NeighborPolicyStats::default();
+                let policy_stats = &mut export_tally;
 
-            let mut fs_announce = Vec::new();
-            let mut fs_withdraw = Vec::new();
-            Self::stage_flowspec_rules_with_checkpoint(
-                &self.loc_rib,
-                rib_out,
-                &self.peer_is_rr_client,
-                changed_keys,
-                peer,
-                target_peer_asn,
-                target_peer_group,
-                target_is_ebgp,
-                interpret_rfc1997,
-                target_is_rr_client,
-                self.cluster_id,
-                sendable.as_ref(),
-                llgr.as_ref(),
-                export_pol.as_ref(),
-                &metrics,
-                policy_stats,
-                &target_peer_label,
-                &mut fs_announce,
-                &mut fs_withdraw,
-                &mut export_memo,
-                &mut checkpoint,
-            );
-            crate::manager::add_export_tally(&mut self.export_policy_counters, peer, export_tally);
-
-            if (!fs_announce.is_empty() || !fs_withdraw.is_empty())
-                && let Err(failure) = self.try_send_and_commit_outbound_update(
+                let mut fs_announce = Vec::new();
+                let mut fs_withdraw = Vec::new();
+                Self::stage_flowspec_rules_with_checkpoint(
+                    &self.loc_rib,
+                    rib_out,
+                    &self.peer_is_rr_client,
+                    changed_keys,
                     peer,
-                    OutboundCommitBatch {
-                        flowspec_announce: fs_announce,
-                        flowspec_withdraw: fs_withdraw,
-                        ..OutboundCommitBatch::default()
-                    },
-                )
+                    target_peer_asn,
+                    target_peer_group,
+                    target_is_ebgp,
+                    interpret_rfc1997,
+                    target_is_rr_client,
+                    self.cluster_id,
+                    sendable.as_ref(),
+                    llgr.as_ref(),
+                    export_pol.as_ref(),
+                    &metrics,
+                    policy_stats,
+                    &target_peer_label,
+                    &mut fs_announce,
+                    &mut fs_withdraw,
+                    &mut export_memo,
+                    &mut checkpoint,
+                );
+                crate::manager::add_export_tally(
+                    &mut self.export_policy_counters,
+                    peer,
+                    export_tally,
+                );
+                if fs_announce.is_empty() && fs_withdraw.is_empty() {
+                    continue;
+                }
+                OutboundCommitBatch {
+                    flowspec_announce: fs_announce,
+                    flowspec_withdraw: fs_withdraw,
+                    ..OutboundCommitBatch::default()
+                }
+            };
+
+            if let Err(failure) = self.try_send_and_commit_outbound_update(peer, batch)
                 && self.owing_send_failed(
                     peer,
                     whole_pass == crate::manager::outbound_owing::WholePass::Stage,

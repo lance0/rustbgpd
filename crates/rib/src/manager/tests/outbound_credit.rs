@@ -2557,7 +2557,7 @@ fn an_envelope_is_charged_its_rows_in_each_private_family() {
 }
 
 /// A batch with rows in every family, each count distinct.
-fn mixed_batch(rows: &FamilyRows) -> OutboundCommitBatch {
+fn mixed_batch(rows: &FamilyRows) -> OutboundCommitBatch<'static> {
     let key = (rows.unicast.prefix, 0);
     OutboundCommitBatch {
         flowspec_announce: copies(&rows.flowspec, 1),
@@ -2592,7 +2592,7 @@ fn a_batch_counts_the_rows_of_the_families_the_peer_holds_privately() {
     let manager = manager();
     let private = peer_v4(Ipv4Addr::new(10, 0, 60, 1));
     assert_eq!(
-        mixed_batch(&rows).private_rows(&manager, private),
+        mixed_batch(&rows).staged_private_rows(&manager, private),
         always + unicast + vpn + evpn
     );
     // Pending OTC diagnostics of the peer are charged rows too.
@@ -2603,7 +2603,7 @@ fn a_batch_counts_the_rows_of_the_families_the_peer_holds_privately() {
         .or_default()
         .insert((rows.unicast.prefix, 0), rows.unicast.clone());
     assert_eq!(
-        mixed_batch(&rows).private_rows(&manager, private),
+        mixed_batch(&rows).staged_private_rows(&manager, private),
         always + unicast + vpn + evpn + 1
     );
     // A grouped unicast member that owns its EVPN routes in the group.
@@ -2612,7 +2612,7 @@ fn a_batch_counts_the_rows_of_the_families_the_peer_holds_privately() {
     assert!(manager.evpn_grouped_member_of(member).is_some());
     let vpn_private = manager.vpn_grouped_member_of(member).is_none();
     assert_eq!(
-        mixed_batch(&rows).private_rows(&manager, member),
+        mixed_batch(&rows).staged_private_rows(&manager, member),
         always + if vpn_private { vpn } else { 0 }
     );
     for shared in [vec![], vec![(rows.unicast.prefix, 0)]] {
@@ -2620,7 +2620,7 @@ fn a_batch_counts_the_rows_of_the_families_the_peer_holds_privately() {
         batch.withdraw = Vec::new();
         batch.shared_withdraw = Some(Arc::new(shared).into());
         assert_eq!(
-            batch.private_rows(&manager, member),
+            batch.staged_private_rows(&manager, member),
             always + if vpn_private { vpn } else { 0 },
             "shared unicast ownership leaves other private-family rows charged"
         );
