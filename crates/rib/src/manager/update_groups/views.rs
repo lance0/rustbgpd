@@ -254,11 +254,13 @@ impl RibManager {
             if !is_force
                 && let Some(base) = baseline
                 && base.get(&key).is_some_and(|old| {
-                    crate::manager::helpers::unicast_routes_equal(
+                    crate::manager::helpers::unicast_routes_equal_for_profile(
                         old,
                         baseline_actions.and_then(|actions| actions.get(&key)),
                         &route,
                         entry.nh,
+                        group.is_ebgp,
+                        None,
                     )
                 })
             {

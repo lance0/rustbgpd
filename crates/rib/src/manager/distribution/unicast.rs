@@ -1,5 +1,5 @@
 use super::super::conditional_advertisement::ConditionalGate;
-use super::super::helpers::unicast_deferral_exempt;
+use super::super::helpers::{unicast_deferral_exempt, unicast_routes_equal_for_profile};
 use super::super::update_groups::release_fallback::DiagnosticHead;
 use super::super::update_groups::{
     GroupEvalAccumulator, PerClientBestPrefixStage, PolicyLabel, RunnerUp, capture_source_attrs,
@@ -1633,11 +1633,12 @@ impl RibManager {
         if source.is_some() {
             let existing = rib_out.and_then(|out| out.get(&prefix, explain.path_id));
             let in_sync = existing.is_some_and(|existing| {
-                crate::manager::helpers::unicast_routes_equal_for_profile(
+                unicast_routes_equal_for_profile(
                     existing,
                     rib_out.and_then(|out| out.next_hop_override(&prefix, explain.path_id)),
                     &post_policy_candidate,
                     post_policy_action.as_ref(),
+                    target_is_ebgp,
                     snapshot,
                 )
             });
@@ -1723,11 +1724,12 @@ impl RibManager {
             }
             let existing = rib_out.and_then(|out| out.get(&prefix, 0));
             let in_sync = existing.is_some_and(|existing| {
-                crate::manager::helpers::unicast_routes_equal_for_profile(
+                unicast_routes_equal_for_profile(
                     existing,
                     rib_out.and_then(|out| out.next_hop_override(&prefix, 0)),
                     &modified,
                     nh_action.as_ref(),
+                    target_is_ebgp,
                     snapshot,
                 )
             });
@@ -2440,7 +2442,15 @@ impl RibManager {
                 None => modified.path_id = 0,
             }
             stage_multipath_row(
-                rib_out, prefix, candidate, modified, nh_action, force, out, checkpoint,
+                rib_out,
+                prefix,
+                candidate,
+                modified,
+                nh_action,
+                force,
+                target_is_ebgp,
+                out,
+                checkpoint,
             );
 
             next_rank += 1;
@@ -2456,7 +2466,15 @@ impl RibManager {
             {
                 modified.path_id = key;
                 stage_multipath_row(
-                    rib_out, prefix, candidate, modified, nh_action, force, out, checkpoint,
+                    rib_out,
+                    prefix,
+                    candidate,
+                    modified,
+                    nh_action,
+                    force,
+                    target_is_ebgp,
+                    out,
+                    checkpoint,
                 );
             }
         }
@@ -3048,11 +3066,12 @@ impl RibManager {
             || rib_out.local_export_source(prefix, 0)
                 != crate::adj_rib_out::LocalExportSource::from_route(best)
             || rib_out.get(prefix, 0).is_none_or(|existing| {
-                !crate::manager::helpers::unicast_routes_equal_for_profile(
+                !unicast_routes_equal_for_profile(
                     existing,
                     rib_out.next_hop_override(prefix, modified.path_id),
                     &modified,
                     nh_action.as_ref(),
+                    target_is_ebgp,
                     target.explain_snapshot(),
                 )
             });
@@ -3345,11 +3364,13 @@ impl RibManager {
             || rib_out.local_export_source(prefix, 0)
                 != crate::adj_rib_out::LocalExportSource::from_route(best)
             || rib_out.get(prefix, 0).is_none_or(|existing| {
-                !unicast_routes_equal(
+                !unicast_routes_equal_for_profile(
                     existing,
                     rib_out.next_hop_override(prefix, modified.path_id),
                     &modified,
                     nh_action.as_ref(),
+                    target_is_ebgp,
+                    None,
                 )
             });
         if changed {
@@ -3967,6 +3988,7 @@ fn stage_multipath_row(
     modified: crate::route::Route,
     nh_action: Option<rustbgpd_policy::NextHopAction>,
     force: bool,
+    target_is_ebgp: bool,
     out: &mut UnicastDistributionResult,
     checkpoint: &mut impl FnMut(),
 ) {
@@ -3976,11 +3998,13 @@ fn stage_multipath_row(
         || rib_out
             .get(prefix, modified.path_id)
             .is_none_or(|existing| {
-                !unicast_routes_equal(
+                !unicast_routes_equal_for_profile(
                     existing,
                     rib_out.next_hop_override(prefix, modified.path_id),
                     &modified,
                     nh_action.as_ref(),
+                    target_is_ebgp,
+                    None,
                 )
             });
     if changed {
