@@ -30,6 +30,7 @@ use super::helpers::{
     vpn_routes_equal,
 };
 use super::update_groups::GroupMembership;
+use super::update_groups::admitted_recovery::OnReservationRefusal;
 use super::{
     AuthoritativeTransitionReceipt, PendingRouteChunk, PendingRoutesReceived,
     PolicyFilteredRouteKey, RibManager, UnicastPrefixPeers,
@@ -315,6 +316,8 @@ pub(in crate::manager) struct OutboundCommitBatch {
     pub(in crate::manager) defer_grouped_refresh_prior: bool,
     /// Explicit family replay re-emits even a wire-equivalent action change.
     pub(in crate::manager) force_unicast_replay: bool,
+    /// A refused replay page hands its exact prior to dirty recovery before enqueue.
+    pub(in crate::manager) on_proof_refusal: OnReservationRefusal,
     /// Unicast candidates came from a clean, member-scoped source-departure stage.
     pub(in crate::manager) staged_departure_group: Option<usize>,
     pub(in crate::manager) announce_source_exclusion: Option<PeerId>,
@@ -4032,6 +4035,7 @@ impl RibManager {
                                 super::checkpoint_with_summary_reader(readiness, None, false, live);
                             })
                             .flatten(),
+                        batch.on_proof_refusal,
                         &mut |force| {
                             super::checkpoint_with_summary_reader(readiness, None, force, live);
                         },
@@ -4039,7 +4043,12 @@ impl RibManager {
                 }) {
                     Ok(true) => held_proof_reserved = true,
                     Ok(false) => {}
-                    Err(error) => self.record_group_recovery_refusal(peer, error, false),
+                    Err(error) => {
+                        self.record_group_recovery_refusal(peer, error, false);
+                        if batch.on_proof_refusal == OnReservationRefusal::StopBeforeSend {
+                            return Ok(false);
+                        }
+                    }
                 }
             }
             if !held_proof_reserved {
@@ -4239,6 +4248,7 @@ impl RibManager {
             unicast_otc_prechecked,
             defer_grouped_refresh_prior,
             force_unicast_replay: _,
+            on_proof_refusal,
             staged_departure_group,
             announce_source_exclusion,
             mut shared_group_encode,
@@ -4740,6 +4750,8 @@ impl RibManager {
                 // Keys and prior advertised state are fallback-only. A clean
                 // grouped member materializes its staged prior at most once,
                 // and only when a failed probe can actually owe a withdrawal.
+                #[cfg(test)]
+                let prior_work_start = super::slice_timing::checkpoint_count();
                 let candidate_keys = candidates
                     .iter()
                     .inspect(|_| self.replacement_checkpoint(false))
@@ -4812,10 +4824,33 @@ impl RibManager {
                     if let Some(observer) = &retirement_observer {
                         observer("admitted_prior_retain_after");
                     }
-                    previously_advertised.extend(
-                        admitted.iter_with_checkpoint(|_| self.replacement_checkpoint(false)),
-                    );
+                    if on_proof_refusal == OnReservationRefusal::StopBeforeSend {
+                        // Replay can owe a withdrawal only for a key in this page.
+                        let explicit_withdrawals = withdraw
+                            .iter()
+                            .map(|&(prefix, path_id)| ExactExportKey::Unicast(prefix, path_id))
+                            .chain(vpn_withdraw.iter().cloned().map(ExactExportKey::Vpn));
+                        previously_advertised.extend(
+                            candidate_keys
+                                .iter()
+                                .cloned()
+                                .chain(explicit_withdrawals)
+                                .filter(|key| {
+                                    self.replacement_checkpoint(false);
+                                    admitted.contains(key)
+                                }),
+                        );
+                    } else {
+                        previously_advertised.extend(
+                            admitted.iter_with_checkpoint(|_| self.replacement_checkpoint(false)),
+                        );
+                    }
                 }
+                #[cfg(test)]
+                super::slice_timing::record_work(
+                    "exact_export_prior_visits",
+                    super::slice_timing::checkpoint_count() - prior_work_start,
+                );
                 let decision = reconcile_exact_export_overlay(
                     self.peer_unexportable.get(&peer),
                     &mut overlay_changes,
@@ -5236,6 +5271,7 @@ impl RibManager {
                                 super::checkpoint_with_summary_reader(readiness, None, false, live);
                             })
                             .flatten(),
+                        on_proof_refusal,
                         &mut |force| {
                             #[cfg(test)]
                             super::checkpoint_with_summary_reader(
@@ -5251,6 +5287,9 @@ impl RibManager {
                 })
             {
                 self.record_group_recovery_refusal(peer, error, false);
+                if on_proof_refusal == OnReservationRefusal::StopBeforeSend {
+                    return Ok(false);
+                }
             }
             self.refresh_group_recovery_gauges();
         }

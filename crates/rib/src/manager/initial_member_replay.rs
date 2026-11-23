@@ -9,7 +9,7 @@ use changes::ReplayChanges;
 use tokio::sync::mpsc;
 
 use super::distribution::OutboundCommitBatch;
-use super::update_groups::admitted_recovery::Key;
+use super::update_groups::admitted_recovery::{Key, OnReservationRefusal};
 use super::{PeerId, RibManager};
 use crate::fast_hash::FastSet;
 use crate::loc_rib::{REGISTRATION_PAGE_SIZE, RegistrationScanStatus};
@@ -119,17 +119,23 @@ impl RibManager {
     }
 
     pub(super) fn wake_initial_member_replay(&mut self) -> bool {
-        let Some(peer) = self.initial_member_replays.blocked.pop_front() else {
-            return false;
-        };
-        if !self.outbound_channel_gone(peer)
-            && (self.outbound_channel_full(peer) || self.outbound_operation_live(peer))
-        {
+        // The release notification is shared. Check each parked member once
+        // so a stalled writer cannot consume another member's wakeup.
+        for _ in 0..self.initial_member_replays.blocked.len() {
+            let peer = self
+                .initial_member_replays
+                .blocked
+                .pop_front()
+                .expect("parked replay");
+            if self.outbound_channel_gone(peer)
+                || (!self.outbound_channel_full(peer) && !self.outbound_operation_live(peer))
+            {
+                self.initial_member_replays.ready.push_back(peer);
+                return true;
+            }
             self.initial_member_replays.blocked.push_back(peer);
-            return false;
         }
-        self.initial_member_replays.ready.push_back(peer);
-        true
+        false
     }
 
     pub(super) fn service_initial_member_replay(&mut self) -> bool {
@@ -311,9 +317,10 @@ impl RibManager {
     fn commit_initial_member_batch(
         &mut self,
         peer: PeerId,
-        batch: OutboundCommitBatch,
+        mut batch: OutboundCommitBatch,
         prior: FastSet<ExactExportKey>,
     ) -> bool {
+        batch.on_proof_refusal = OnReservationRefusal::StopBeforeSend;
         if self
             .try_send_and_commit_outbound_update_with_group_prior(peer, batch, prior, None)
             .is_err()

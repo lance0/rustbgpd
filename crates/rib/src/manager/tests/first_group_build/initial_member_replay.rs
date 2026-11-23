@@ -1,4 +1,7 @@
 //! Drive the registration owner one turn at a time to change a live partial replay.
+mod exact_refusal;
+mod reservation;
+
 use super::*;
 use crate::SelectionDeferralConfig;
 use crate::SelectionDeferralWaiterConfig;
@@ -377,4 +380,30 @@ async fn action_only_repair_suppresses_only_the_already_admitted_key() {
     drop(tx);
     let manager = actor.await.unwrap();
     assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
+}
+
+#[tokio::test(start_paused = true)]
+async fn one_credit_wakeup_finds_the_ready_writer_behind_a_stalled_member() {
+    let (mut manager, _tx, _) = replay_fixture();
+    let mut slow = member(&mut manager, receiver(1), 1, false, false);
+    let held = first_page(&mut manager, &mut slow);
+    manager.advance_pending_initial_registration();
+    let mut healthy = member(&mut manager, receiver(2), 1, false, false);
+    let released = first_page(&mut manager, &mut healthy);
+    manager.advance_pending_initial_registration();
+    assert!(!manager.initial_member_replays.runnable());
+    assert!(manager.initial_member_replays.parked());
+
+    drop(released);
+    assert!(
+        manager.wake_initial_member_replay(),
+        "a sibling returned credit"
+    );
+    manager.advance_pending_initial_registration();
+    let next = healthy
+        .try_recv()
+        .expect("ready sibling immediately advances");
+    assert!(!next.announce.is_empty());
+    assert!(slow.is_empty());
+    drop(held);
 }

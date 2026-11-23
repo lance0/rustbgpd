@@ -139,6 +139,14 @@ pub(in crate::manager) struct Failure {
     pub(in crate::manager) attempted_daemon_bytes: usize,
 }
 
+/// Whether a refused reservation can still send using conservative withdrawals.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(in crate::manager) enum OnReservationRefusal {
+    #[default]
+    ContinueWithFallback,
+    StopBeforeSend,
+}
+
 type Keys = SmallVec<[Key; 0]>;
 type Records = SmallVec<[Record; 0]>;
 
@@ -2250,6 +2258,7 @@ impl AdmittedRecovery {
         &mut self,
         peer: PeerId,
         announcements: A,
+        on_refusal: OnReservationRefusal,
         checkpoint: &mut impl FnMut(bool),
     ) -> Result<bool, Failure>
     where
@@ -2270,6 +2279,11 @@ impl AdmittedRecovery {
         )
         .and_then(|capacity| self.grow_keys(index, capacity, checkpoint));
         if let Err(error) = result {
+            // A replay refuses the envelope before enqueue. Its old proof is
+            // still exact and may be the sole record of a queued withdrawal.
+            if on_refusal == OnReservationRefusal::StopBeforeSend {
+                return Err(error);
+            }
             return Err(self.fail(index, error, checkpoint));
         }
         Ok(true)
@@ -2407,7 +2421,12 @@ impl AdmittedRecovery {
             previous = Some(key);
         }
         if reserve
-            && !self.reserve_admitted_with_checkpoint(peer, announcements.clone(), checkpoint)?
+            && !self.reserve_admitted_with_checkpoint(
+                peer,
+                announcements.clone(),
+                OnReservationRefusal::ContinueWithFallback,
+                checkpoint,
+            )?
         {
             return Ok(false);
         }
@@ -2579,7 +2598,12 @@ impl AdmittedRecovery {
         peer: PeerId,
         announcements: A,
     ) -> Result<bool, Failure> {
-        self.reserve_admitted_with_checkpoint(peer, announcements, &mut |_| {})
+        self.reserve_admitted_with_checkpoint(
+            peer,
+            announcements,
+            OnReservationRefusal::ContinueWithFallback,
+            &mut |_| {},
+        )
     }
 
     pub(in crate::manager) fn apply_admitted<A, W>(
@@ -3331,6 +3355,7 @@ mod tests {
             .reserve_admitted_with_checkpoint(
                 peer(1),
                 [key(5), key(3), key(4)].iter().copied(),
+                OnReservationRefusal::ContinueWithFallback,
                 &mut |force| events.push(force),
             )
             .unwrap();
@@ -3436,11 +3461,16 @@ mod tests {
         let before = ledger.bytes();
         visited = 0;
         ledger
-            .reserve_admitted_with_checkpoint(peer(1), raw.iter().copied(), &mut |force| {
-                if !force {
-                    visited += 1;
-                }
-            })
+            .reserve_admitted_with_checkpoint(
+                peer(1),
+                raw.iter().copied(),
+                OnReservationRefusal::ContinueWithFallback,
+                &mut |force| {
+                    if !force {
+                        visited += 1;
+                    }
+                },
+            )
             .unwrap();
         assert!(visited >= raw.len());
         assert_eq!(ledger.bytes(), before);
