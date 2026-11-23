@@ -553,6 +553,28 @@ fn config(timeout: Duration, peers: &[PeerId]) -> SelectionDeferralConfig {
     }
 }
 
+#[test]
+fn registration_with_a_deferred_family_uses_the_authoritative_group_build() {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_selection_deferral(config(Duration::from_mins(1), &[peer(1)]));
+    manager.first_group_build_min_routes = 0;
+
+    let (dual_tx, _dual_rx) = mpsc::channel(8);
+    manager.handle_update(peer_up_with_families(
+        peer(2),
+        1,
+        dual_tx,
+        vec![READY_FAMILY, FAMILY],
+    ));
+    assert!(manager.grouped_member_of(peer(2)).is_some());
+
+    let (v6_tx, _v6_rx) = mpsc::channel(8);
+    manager.handle_update(peer_up_with_families(peer(3), 1, v6_tx, vec![READY_FAMILY]));
+    assert!(manager.pending_initial_registrations.contains(&peer(3)));
+    assert!(manager.first_group_build.is_some());
+}
+
 /// Load-bearing proof: deleting the failure-series initialization from
 /// `SelectionDeferral::new` leaves both maps empty in this fresh registry.
 #[test]
