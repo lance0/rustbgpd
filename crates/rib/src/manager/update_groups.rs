@@ -2714,7 +2714,7 @@ impl RibManager {
             if force && let Some(observer) = &observer {
                 observer("common_capture");
             }
-            super::replacement_readiness_checkpoint(&readiness, force);
+            super::counted_checkpoint(&readiness, "capture_group_admitted", force);
         }
     }
 

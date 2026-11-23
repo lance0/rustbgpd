@@ -1880,16 +1880,24 @@ impl RibManager {
         if self.dirty_peers.contains(&peer) {
             return;
         }
-        if !evpn_coverage_required
-            && self.send_route_refresh_response_inner(
+        if !evpn_coverage_required {
+            use super::route_refresh::{FamilyReplayKind, FamilyReplayOutcome};
+            match self.send_route_refresh_response_inner(
                 peer,
                 family.0,
                 family.1,
-                super::route_refresh::FamilyReplayKind::SelectionRelease,
-            ) == super::route_refresh::FamilyReplayOutcome::Failed
-        {
-            self.mark_outbound_dirty(peer);
-            return;
+                FamilyReplayKind::SelectionRelease,
+            ) {
+                FamilyReplayOutcome::Failed => {
+                    self.mark_outbound_dirty(peer);
+                    return;
+                }
+                FamilyReplayOutcome::NoReleaseRows => {
+                    self.settle_free_family_eor(peer, family, None);
+                    return;
+                }
+                FamilyReplayOutcome::Committed | FamilyReplayOutcome::Deferred => {}
+            }
         }
         self.settle_eor_of(peer, &[family], EorTrigger::Release);
     }

@@ -218,3 +218,156 @@ fn source_departure_add_path_replaces_or_withdraws_the_old_sender_path_id() {
     assert_eq!(read(&mut rx, &mut wire), (replacements, removals));
     assert_eq!(wire, final_table);
 }
+
+/// The largest transport envelope a receiver got, in unicast rows.
+fn largest_envelope(receiver: &mut mpsc::Receiver<OutboundRouteUpdate>) -> usize {
+    let mut largest = 0;
+    while let Ok(update) = receiver.try_recv().map(delivered) {
+        largest = largest.max(update.unicast_withdrawals().count() + update.announce.len());
+    }
+    largest
+}
+
+/// Quiet pages widen only for plain groups and single-path private peers.
+/// A per-client-best group keeps 16-key pages for its winner and lane walks.
+#[test]
+fn quiet_departure_keeps_narrow_pages_for_a_per_client_best_group() {
+    let mut manager = manager();
+    let mut best_rx = receiver(&mut manager, BEST, false);
+    let mut observer_rx = receiver(&mut manager, OBSERVER, false);
+    assert!(manager.group_ribs[&manager.grouped_member_of(peer_v4(BEST)).unwrap()].per_client_best);
+    seed(&mut manager);
+    largest_envelope(&mut best_rx);
+    largest_envelope(&mut observer_rx);
+    depart(&mut manager);
+    let largest = largest_envelope(&mut best_rx).max(largest_envelope(&mut observer_rx));
+    assert!(
+        (1..=16).contains(&largest),
+        "per-client-best departure envelope of {largest} rows"
+    );
+}
+
+/// An Add-Path sender replaces or withdraws each old path ID. Its private
+/// walks keep 16-key pages, so one page holds at most two rows per key.
+#[test]
+fn quiet_departure_keeps_narrow_pages_for_an_add_path_receiver() {
+    let mut manager = manager();
+    let mut rx = receiver(&mut manager, OBSERVER, true);
+    seed(&mut manager);
+    largest_envelope(&mut rx);
+    depart(&mut manager);
+    let largest = largest_envelope(&mut rx);
+    assert!(
+        (1..=2 * 16).contains(&largest),
+        "Add-Path departure envelope of {largest} rows"
+    );
+}
+
+/// The winning source leaves, so every row moves to its runner-up.
+fn depart_winner(manager: &mut RibManager) {
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: peer_v4(BEST),
+        session_id: 0,
+    });
+    assert!(
+        manager.source_departure.is_some(),
+        "fixture must traverse the paged departure"
+    );
+    while manager.source_departure.is_some() {
+        manager.advance_source_departure();
+    }
+}
+
+/// A per-client-best receiver whose export policy keeps it out of every group.
+fn private_per_client_best_receiver(
+    manager: &mut RibManager,
+    address: Ipv4Addr,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    let peer = peer_v4(address);
+    manager.handle_update(RibUpdate::SetPeerExportEncoder {
+        peer,
+        session_id: 0,
+        encoder: ReusableExactExportEncoder::new(u64::from(u32::from(address)), 1),
+    });
+    manager.handle_update(RibUpdate::SetPeerExportContext {
+        peer,
+        session_id: 0,
+        local_role: Some(rustbgpd_wire::BgpRole::RouteServer),
+    });
+    let (tx, rx) = mpsc::channel(512);
+    let mut up = test_peer_up(peer, 0, tx);
+    let RibUpdate::PeerUp {
+        per_client_best,
+        export_policy,
+        ..
+    } = &mut up
+    else {
+        unreachable!()
+    };
+    *per_client_best = true;
+    *export_policy = Some(super::update_groups::peer_context_chain());
+    manager.handle_update(up);
+    rx
+}
+
+/// A private per-client-best receiver ranks every candidate itself, so its
+/// quiet departure pages stay narrow like a grouped per-client-best lane.
+#[test]
+fn quiet_departure_keeps_narrow_pages_for_a_private_per_client_best_receiver() {
+    let mut manager = manager();
+    let mut rx = private_per_client_best_receiver(&mut manager, OBSERVER);
+    assert!(manager.grouped_member_of(peer_v4(OBSERVER)).is_none());
+    assert!(manager.private_per_client_best(peer_v4(OBSERVER)));
+    seed(&mut manager);
+    largest_envelope(&mut rx);
+    depart_winner(&mut manager);
+    let largest = largest_envelope(&mut rx);
+    assert!(
+        (1..=16).contains(&largest),
+        "private per-client-best departure envelope of {largest} rows"
+    );
+}
+
+/// An RFC 9107 receiver with a resolved vantage ranks candidates by its own
+/// IGP view, so its quiet departure pages stay narrow.
+#[test]
+fn quiet_departure_keeps_narrow_pages_for_an_orr_receiver_with_a_resolved_vantage() {
+    let mut manager = manager();
+    let feed = Ipv4Addr::new(10, 9, 9, 9);
+    manager.handle_update(super::registering_peer_up(peer_v4(feed), 0));
+    manager.handle_update(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: peer_v4(feed),
+        announced: crate::orr::fixtures::square_topology(feed),
+        withdrawn: vec![],
+    });
+    let client = peer_v4(OBSERVER);
+    let (tx, mut rx) = mpsc::channel(512);
+    let mut up = test_peer_up(client, 0, tx);
+    let RibUpdate::PeerUp {
+        is_ebgp,
+        route_reflector_client,
+        orr_vantage,
+        peer_asn,
+        ..
+    } = &mut up
+    else {
+        unreachable!()
+    };
+    *is_ebgp = false;
+    *route_reflector_client = true;
+    *orr_vantage = Some(super::vantage_at_node_a());
+    *peer_asn = 65_000;
+    manager.handle_update(up);
+    manager.rebuild_orr_and_resync();
+    assert!(manager.orr_vantage_resolved(client));
+    assert!(manager.grouped_member_of(client).is_none());
+    seed(&mut manager);
+    largest_envelope(&mut rx);
+    depart_winner(&mut manager);
+    let largest = largest_envelope(&mut rx);
+    assert!(
+        (1..=16).contains(&largest),
+        "ORR departure envelope of {largest} rows"
+    );
+}

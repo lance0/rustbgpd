@@ -36,6 +36,9 @@ pub(super) enum FamilyReplayKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FamilyReplayOutcome {
     Committed,
+    /// The release visit had no missing group rows to enqueue. Private
+    /// families leave their outstanding rows with the owed-key drain.
+    NoReleaseRows,
     Deferred,
     Failed,
 }
@@ -1154,11 +1157,11 @@ impl RibManager {
                 _ => false,
             };
             if !grouped {
-                return FamilyReplayOutcome::Deferred;
+                return FamilyReplayOutcome::NoReleaseRows;
             }
             if !self.pending_group_admitted.contains_key(&peer) {
                 if !self.retain_initial_group_admitted(peer) {
-                    return FamilyReplayOutcome::Committed;
+                    return FamilyReplayOutcome::NoReleaseRows;
                 }
                 self.mark_outbound_dirty(peer);
                 return FamilyReplayOutcome::Failed;
@@ -1217,7 +1220,7 @@ impl RibManager {
                     // ahead of the answer: RFC 7313 section 4 allows no BoRR
                     // before it, and the answer then carries its markers.
                     if owed && self.eor.owes(peer, family) {
-                        self.settle_free_eor_in(peer, family, operation);
+                        self.settle_free_family_eor(peer, family, Some(operation));
                     }
                     if let Some(slot) = operation.slot() {
                         Some((Some(operation), Some(slot)))
@@ -2566,7 +2569,7 @@ impl RibManager {
             && rtc_withdraw.is_empty();
         let admission = if selection_noop {
             super::retire_hash_set(&mut group_prior, &mut || self.replacement_checkpoint(false));
-            Ok(())
+            Ok(false)
         } else {
             self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
                 peer,
@@ -2674,6 +2677,9 @@ impl RibManager {
         if matches!(replay_kind, FamilyReplayKind::SelectionRelease) {
             self.complete_initial_selection_replay(peer);
             self.retire_completed_initial_group_admitted(peer);
+            if matches!(admission, Ok(false)) {
+                return FamilyReplayOutcome::NoReleaseRows;
+            }
         }
         FamilyReplayOutcome::Committed
     }

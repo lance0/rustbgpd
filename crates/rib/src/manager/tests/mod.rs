@@ -1800,7 +1800,7 @@ mod selection_deferral_startup_gate_edges;
 mod selection_release_drain;
 mod session_export_policy;
 mod slice_timing;
-mod source_departure;
+pub(super) mod source_departure;
 mod source_departure_alternates;
 mod source_departure_markers;
 mod stalled_receiver_oracle;

@@ -2892,7 +2892,7 @@ impl RibManager {
         peer: PeerId,
         over: [Option<u64>; 2],
         floors: &mut CursorFloors,
-    ) {
+    ) -> bool {
         if let Some(owing) = self.owing(peer) {
             for (index, cut) in over.into_iter().enumerate() {
                 if let Some(cut) = cut
@@ -2901,11 +2901,13 @@ impl RibManager {
                         .is_some_and(|at| at < cut)
                 {
                     self.evict_owed_cursor(peer, OwedFamily::CURSORS[index]);
-                    break;
+                    self.collect_owed_floors(peer, floors);
+                    return true;
                 }
             }
         }
         self.collect_owed_floors(peer, floors);
+        false
     }
 
     pub(super) fn finish_release_owed_cap(&mut self, over: [Option<u64>; 2], floors: CursorFloors) {

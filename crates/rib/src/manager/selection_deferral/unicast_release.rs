@@ -174,12 +174,15 @@ impl RibManager {
         if self.dirty_peers.contains(&peer) || self.force_outbound_peers.contains(&peer) {
             self.wake_unicast_release_resync(peer, family);
         } else if self.grouped_member_of(peer).is_some()
-            && self.send_route_refresh_response_inner(
-                peer,
-                family.0,
-                family.1,
-                FamilyReplayKind::SelectionRelease,
-            ) == FamilyReplayOutcome::Committed
+            && matches!(
+                self.send_route_refresh_response_inner(
+                    peer,
+                    family.0,
+                    family.1,
+                    FamilyReplayKind::SelectionRelease
+                ),
+                FamilyReplayOutcome::Committed | FamilyReplayOutcome::NoReleaseRows
+            )
         {
             self.settle_eor_of(
                 peer,
@@ -666,7 +669,7 @@ impl RibManager {
         if let Some(pass) = &mut walk.distribution {
             if walk.rejection_retirement.is_none() {
                 self.selection_release_staging = Some(HashSet::new());
-                let done = self.poll_unicast_release_distribution(pass);
+                let done = self.poll_unicast_release_distribution(pass, false);
                 debug_assert!(
                     self.selection_release_staging
                         .as_ref()
