@@ -930,11 +930,10 @@ pub struct TransportConfig {
     /// eBGP boundary. iBGP and transparent route-server-client sessions
     /// preserve them regardless of this setting. Default: `false`.
     pub send_non_transitive_extended_communities: bool,
-    /// RFC 7947 §2.3.2 per-client best-path for a route-server client:
-    /// the RIB stages the first export-policy-permitted candidate for
-    /// this peer instead of the Loc-RIB best (path-hiding mitigation
-    /// for clients without Add-Path). Requires `route_server_client`;
-    /// families with negotiated Add-Path send ignore it.
+    /// RFC 7947 §2.3.2 per-client best-path for a route-server client.
+    /// The RIB stages the highest-ranked path permitted by export policy
+    /// and the local role’s OTC egress rule. Requires `route_server_client`.
+    /// Families with negotiated Add-Path send use Add-Path.
     pub per_client_best: bool,
     /// ADR-0107 strict-peer `NEXT_HOP` ownership enforcement for a
     /// route-server client (RFC 7948 §4.8). When `true`, an inbound

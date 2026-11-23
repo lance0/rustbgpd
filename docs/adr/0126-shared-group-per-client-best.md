@@ -26,6 +26,24 @@ cost for those prefixes are O(permitted candidates), not one lane entry,
 and the extra evaluations follow Decision 2's over-replay posture.
 Prefixes without such a community keep the decisions as written.
 
+**Amended 2026-11-23.** Decisions 2, 4 and 5 now apply OTC egress
+eligibility when choosing the per-client winner, runner-up and
+control-community fallback. RFC 9234 §5 prohibits exporting a marked
+path to a Provider, Peer or RS. A different path for the same prefix
+can still be eligible. RFC 7947 §2.3.2.1 describes running per-client
+selection after filtering. Its path-hiding discussion is informational.
+[RFC 9234 §5](https://www.rfc-editor.org/rfc/rfc9234.html#section-5) ·
+[RFC 7947 §2.3](https://www.rfc-editor.org/rfc/rfc7947.html#section-2.3)
+
+In an IPv4 unicast comparison with local role Peer, two independent
+sources supplied a preferred marked path and a lower-ranked unmarked
+path. BIRD 3.3.3 with `secondary` on a sorted table and OpenBGPD 9.3
+with `rde evaluate all` each sent the alternate to a third-party
+receiver. Their default clients received no route for that prefix.
+Both servers applied their native OTC check with permitting output
+policy. [BIRD pre-export check](https://gitlab.nic.cz/labs/bird/-/blob/2ed8b59333bed0f328c6804b70c09412b2f608d4/proto/bgp/attrs.c#L2823-2831) ·
+[OpenBGPD export check and walk](https://github.com/openbgpd-portable/openbgpd-openbsd/blob/dd857f136d9cd8eefdef7374eba3eafddae65a00/src/usr.sbin/bgpd/rde_update.c#L113-L264)
+
 ## Context
 
 Both documented RFC 7947 §2.3 path-hiding mitigations — `per_client_best`
@@ -59,7 +77,7 @@ computation plus exactly two divergences from today's grouped output:
    (policy-filtered); per-client best walks on. This divergence is
    group-wide, since verdicts are chain-content-uniform.
 
-This is precisely the optimization RFC 7947 §2.3.2.2 blesses: a global
+RFC 7947 §2.3.2.1 describes this optimization: a global
 Loc-RIB with per-client views "stored as deltas" instead of materialized
 per-client Loc-RIBs (which ADR-0101 Decision 2 rejected permanently).
 
@@ -121,6 +139,11 @@ per ADR-0098 Decision 4), sort by `best_path_cmp`, walk in order:
 - **runner-up `r`** = first permitted candidate whose source differs from
   `w`'s source → staged in the exception lane;
 - early exit once both are found.
+
+For these selection rules, a candidate permitted by policy must also
+pass the group’s OTC egress check after policy modifications. The walk
+can therefore examine several blocked candidates, including multiple
+paths from one source, before it fills either slot.
 
 At zero overlap the walk terminates after one permit — cost identical to
 today's grouped pass. Each overlapped prefix adds one candidate evaluation.
@@ -190,6 +213,15 @@ lands as aggregate integer adds rather than records per (prefix × peer),
 and does not touch the equivalence verdict: the differential oracle
 compares per-member streams and folded state, never counters.
 
+A join or route refresh reconstructs one policy permit per eligible
+advertised slot from the group's stored decision labels. A marked-only
+prefix contributes zero permits. A marked candidate followed by an
+eligible alternate contributes one, attributed to the alternate.
+Private staging re-evaluates policy and counts every visited permit,
+including the marked candidate. Group steady-state evaluation likewise
+records the candidates it actually visits. The OTC rejection counter
+continues to count a newly observed per-member rejection separately.
+
 ### 3. The exception lane: a per-prefix runner-up sidecar
 
 The runner-up lives in a per-group sidecar map keyed by prefix — one
@@ -233,18 +265,10 @@ remains the safe direction); advertised queries, BMP stat 17, and adj-out
 gauges synthesize from per-source counts with the one-substitution
 adjustment.
 
-The query and count synthesis reports `adv(m)` **minus OTC-blocked
-slots** — the outcome of the Decision 5 backstop, which strips a
-blocked route from every emission while the winner stays in the table
-and a blocked runner-up stays in the lane. The ungrouped path's
-Adj-RIB-Out is post-backstop by construction (a stripped route is never
-committed), so the derived views subtract the same slots to report the
-same truth: the blocked winner toward every non-source member, a
-blocked lane substitution toward `source(w)`. The OTC residue and the
-lane supply the subtraction's inputs; an exact-export rejection at a
-slot the backstop already suppressed subtracts nothing further. A plain
-group's in-walk gate keeps blocked routes out of its table, so its
-views carry no subtraction at all.
+The advertised view and its count include the eligible path selected for
+the member. A diagnostic for an OTC-blocked candidate at the same prefix
+does not subtract that path from either view. Exact-export rejections
+still apply to the selected path.
 
 ### 5. Emit: one new source-flip matrix arm plus a lane delta
 
@@ -272,21 +296,15 @@ divergence (ADR-0101 Decision 3) applies per member at the same emit
 seams; lane entries carry source attributes so tag transitions extend to
 them.
 
-RFC 9234 OTC egress for per-client-best groups is enforced at the
-central pre-commit backstop, matching the ungrouped per-client-best
-path's semantics: the winner walk stages the first permitted candidate
-regardless of OTC, and every member emission — steady-state, refresh,
-join, and resync alike — passes through the backstop, which strips a
-blocked route and converts it to a withdraw where a delivered
-advertisement may be replaced (over-withdraw remains the safe
-direction). The in-walk gate serves single-best staging only. A blocked
-winner therefore stays in the group table and a blocked runner-up stays
-in the lane; the group's OTC residue derivation covers both — the
-recorded winner for non-source members, the lane entry toward
-`source(w)` — so per-member diagnostics and the replay reconciliations
-see exactly the backstop's outcome. The differential-oracle comparison
-is post-backstop on both sides, so byte-identity holds with OTC-blocked
-routes invisible to both.
+For per-client best, apply the local role’s OTC egress check after policy
+and before a path takes the member’s slot. Keep the rejected candidate
+for the existing per-member diagnostic if it would otherwise have won
+for that member. Apply split horizon and member-specific control
+communities to that diagnostic selection as well. The eligible alternate
+replaces a prior advertisement at path ID zero. Withdraw a prior route
+when the member has no eligible replacement. Refresh, join and resync
+derive the same eligible view and deduplicated diagnostic. The common
+pre-commit and transport encoder checks still protect delivery.
 
 ### 6. The OpenBGPD bug family, as non-goals-to-avoid with mechanisms
 
@@ -447,7 +465,7 @@ flip.
 - **Add-Path send grouping** — stays disqualified per ADR-0099 Decision 5
   ("per-member path-id maps or nothing").
 - **Per-client Loc-RIBs** — rejected permanently (ADR-0101 Decision 2);
-  this design is the RFC 7947 §2.3.2.2 delta formulation instead.
+  RFC 7947 §2.3.2.1 describes storing per-client deltas over a global Loc-RIB.
 - **VPN/RTC per-client-best staging** and ORR combinations — out of scope;
   existing validation and fallbacks stand.
 - **ADR-0105 fast-path broadening** — per-client-best groups stay
@@ -468,7 +486,7 @@ export-policy evaluation per overlapped changed prefix.
 
 ## References
 
-- RFC 7947 §2.3 (path hiding; §2.3.2.2 per-client views as deltas over a
+- RFC 7947 §2.3 (path hiding; §2.3.2.1 per-client views as deltas over a
   global Loc-RIB; §2.3.3 Add-Path send-only) —
   <https://www.rfc-editor.org/rfc/rfc7947>
 - BIRD User's Guide: `secondary` (first filter-accepted route from a

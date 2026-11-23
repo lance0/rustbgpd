@@ -3005,11 +3005,9 @@ pub enum RibUpdate {
         /// client's IGP location as a BGP-LS topology node.
         orr_vantage: Option<IpAddr>,
         /// RFC 7947 §2.3.2 per-client best-path for a route-server
-        /// client: unicast export stages the first export-policy-
-        /// permitted candidate (path-hiding mitigation) instead of the
-        /// Loc-RIB best. Families with negotiated Add-Path send take the
-        /// multipath path instead (a negotiated capability outranks the
-        /// fallback).
+        /// client. Unicast export stages the first candidate permitted
+        /// by policy and the local role’s OTC egress rule. Families with
+        /// negotiated Add-Path send use the multipath path.
         per_client_best: bool,
         /// RFC 1997 `NO_EXPORT`/`NO_EXPORT_SUBCONFED` egress enforcement
         /// for this peer: when `true` and the peer is eBGP, source routes

@@ -855,6 +855,70 @@ fn begin_close_flushes_owed_withdrawals() {
     drop(charge);
 }
 
+#[test]
+fn otc_fallback_close_flushes_unrelated_owed_withdrawal() {
+    let mut manager = manager(1);
+    let peer = peer_v4(Ipv4Addr::new(10, 0, 9, 2));
+    manager.handle_update(registering_peer_up(peer_v4(SOURCE), 0));
+    manager.handle_update(RibUpdate::SetPeerExportContext {
+        peer,
+        session_id: 0,
+        local_role: Some(rustbgpd_wire::BgpRole::Customer),
+    });
+    let (tx, mut rx) = mpsc::channel(32);
+    let mut registration = peer_up_message(peer, ipv4_sendable(), tx);
+    if let RibUpdate::PeerUp {
+        is_ebgp,
+        route_reflector_client,
+        per_client_best,
+        ..
+    } = &mut registration
+    {
+        *is_ebgp = true;
+        *route_reflector_client = false;
+        *per_client_best = true;
+    }
+    manager.handle_update(registration);
+    send_all(&mut rx);
+
+    let withdrawn = route_prefix(1);
+    received(&mut manager, vec![route(1, 0)], vec![], vec![], vec![]);
+    assert_eq!(send_all(&mut rx)[0].announce[0].prefix, withdrawn);
+    let credit = manager.outbound_credit_handle(peer);
+    let _charge = crate::outbound_credit::OutboundCharge::new(&credit, 1);
+    let mut blocked = route(2, 0);
+    AttrSet::edit(&mut blocked.attributes, |attrs| {
+        attrs.push(PathAttribute::OnlyToCustomer(64512));
+    });
+    received(
+        &mut manager,
+        vec![blocked],
+        vec![(withdrawn, 0)],
+        vec![],
+        vec![],
+    );
+    assert_eq!(owed(&manager, peer, V4), 2);
+    assert!(held(&mut rx).is_empty());
+
+    manager.handle_update(RibUpdate::BeginClose);
+    let queued = send_all(&mut rx);
+    assert_eq!(
+        queued.len(),
+        1,
+        "the unrelated withdrawal must pass spent credit"
+    );
+    assert_eq!(
+        queued[0].unicast_withdrawals().copied().collect::<Vec<_>>(),
+        [(withdrawn, 0)]
+    );
+    assert!(queued[0].announce.is_empty() && queued[0].otc_blocked.is_empty());
+    assert_eq!(
+        owed(&manager, peer, V4),
+        1,
+        "the unreconciled diagnostic stays owed"
+    );
+}
+
 fn close_marker_held_by_withdrawal() -> (
     RibManager,
     PeerId,

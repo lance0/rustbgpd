@@ -1065,14 +1065,17 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
     }
 
     let advertised_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
-    let advertised = make_route(advertised_prefix, Ipv4Addr::new(198, 51, 100, 1));
+    let source = Ipv4Addr::new(198, 51, 100, 1);
+    let advertised = make_route(advertised_prefix, source);
+    // A permitted control makes each forced replay independently observable.
+    let control_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 115, 0), 24);
     tx.send(registering_peer_up(advertised.peer, 0))
         .await
         .unwrap();
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: advertised.peer,
-        announced: vec![advertised.clone()],
+        announced: vec![advertised.clone(), make_route(control_prefix, source)],
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
@@ -1088,7 +1091,7 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
             .expect("outbound update timed out")
             .map(delivered)
             .unwrap();
-        assert_eq!(update.announce.len(), 1);
+        assert_eq!(update.announce.len(), 2);
         assert_eq!(update.unicast_withdrawals().count(), 0);
         assert!(update.otc_blocked.is_empty());
     }
@@ -1191,20 +1194,17 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
         assert_eq!(result.await.unwrap(), Ok(()));
     }
     let _ = query_best_routes(&tx).await;
-    let mut resyncs = 0;
-    for (_, out_rx) in &mut receivers {
+    for (peer, out_rx) in &mut receivers {
+        let mut replayed = Vec::new();
         while let Ok(update) = out_rx.try_recv().map(delivered) {
-            resyncs += 1;
+            replayed.extend(update.announce.iter().map(|route| route.prefix));
             assert!(
                 update.otc_blocked.is_empty(),
                 "force resync repeated an unchanged OTC edge"
             );
         }
+        assert_eq!(replayed, [Prefix::V4(control_prefix)], "{peer} replay");
     }
-    assert!(
-        resyncs > 0,
-        "force resync proof did not observe an envelope"
-    );
     for (peer, _) in &receivers {
         tx.send(RibUpdate::RouteRefreshRequest {
             queued: Arc::default(),

@@ -156,6 +156,8 @@ pub(in crate::manager) struct UnicastDistributionResult<P = PolicyFilteredRouteK
     pub(in crate::manager) withdraw: Vec<(Prefix, u32)>,
     pub(in crate::manager) next_hop_override: Vec<Option<rustbgpd_policy::NextHopAction>>,
     pub(in crate::manager) policy_filtered: Vec<P>,
+    /// First otherwise-permitted path skipped by private per-client best, per prefix.
+    pub(in crate::manager) pcb_otc_blocked: Vec<crate::route::Route>,
     /// The exact-export snapshot Add-Path key planning probed with, if it
     /// probed: the commit reuses it, so both see one session profile.
     pub(in crate::manager) exact_export_snapshot:
@@ -170,6 +172,7 @@ impl<P> Default for UnicastDistributionResult<P> {
             withdraw: Vec::new(),
             next_hop_override: Vec::new(),
             policy_filtered: Vec::new(),
+            pcb_otc_blocked: Vec::new(),
             exact_export_snapshot: None,
         }
     }
@@ -193,6 +196,7 @@ impl<P> UnicastDistributionResult<P> {
         super::retire_vec(&mut self.withdraw, checkpoint);
         super::retire_vec(&mut self.next_hop_override, checkpoint);
         super::retire_vec(&mut self.policy_filtered, checkpoint);
+        super::retire_vec(&mut self.pcb_otc_blocked, checkpoint);
     }
 }
 
@@ -293,6 +297,8 @@ impl OutboundCommitFailure {
 /// invariant before a commit batch can be represented.
 #[derive(Default)]
 pub(in crate::manager) struct OutboundCommitBatch {
+    /// Private OTC diagnostics, including a skipped PCB path that shares its alternate's slot.
+    pub(in crate::manager) otc_blocked: Vec<crate::route::Route>,
     pub(in crate::manager) unicast: AlignedUnicastPayload,
     pub(in crate::manager) local_sources:
         crate::fast_hash::FastMap<(Prefix, u32), LocalExportSource>,
@@ -469,6 +475,7 @@ impl OutboundCommitBatch {
         if let Some(observer) = observer {
             observer("batch_announce_retirement_before");
         }
+        super::retire_vec(&mut self.otc_blocked, checkpoint);
         retire_arc_vec(std::mem::take(&mut self.unicast.announce), &mut || {
             #[cfg(test)]
             if let Some(observer) = observer {
@@ -511,7 +518,8 @@ impl OutboundCommitBatch {
     /// Rows of this batch in families `peer` holds privately; the
     /// membership lookups run only for families the batch carries.
     pub(in crate::manager) fn private_rows(&self, manager: &RibManager, peer: PeerId) -> usize {
-        let mut rows = self.flowspec_announce.len()
+        let mut rows = self.otc_blocked.len()
+            + self.flowspec_announce.len()
             + self.flowspec_withdraw.len()
             + self.bgpls_announce.len()
             + self.bgpls_withdraw.len()
@@ -562,6 +570,12 @@ impl OutboundCommitBatch {
                 self.unicast_withdrawals(),
                 |row| row.0,
             ))
+            && moves_only(
+                &self.otc_blocked,
+                |route| route.prefix,
+                self.unicast_withdrawals(),
+                |row| row.0,
+            )
             && (!private.vpn
                 || moves_only(
                     &self.vpn_announce,
@@ -3730,23 +3744,26 @@ impl RibManager {
         };
 
         let local_role = self.peer_local_roles.get(&peer).copied().flatten();
-        let otc_reconcile = otc_reconcile_prefixes.map(|_| {
-            batch
-                .unicast
-                .announce
-                .iter()
-                .inspect(|_| checkpoint())
-                .filter(|route| {
-                    batch.announce_source_exclusion != Some(route.peer)
-                        && otc_egress_blocked(route, local_role)
-                })
-                .cloned()
-                .collect::<Vec<_>>()
-        });
+        let has_pcb_otc = !batch.otc_blocked.is_empty();
+        if otc_reconcile_prefixes.is_some() {
+            batch.otc_blocked.extend(
+                batch
+                    .unicast
+                    .announce
+                    .iter()
+                    .inspect(|_| checkpoint())
+                    .filter(|route| {
+                        batch.announce_source_exclusion != Some(route.peer)
+                            && otc_egress_blocked(route, local_role)
+                    })
+                    .cloned(),
+            );
+        }
         // Validate the trust boundary before consuming any durable pending
         // state (OTC diagnostics or the rejected-route overlay). A failed
         // precommit leaves those structures intact for the retry.
-        let has_candidate_route_payload = !batch.unicast.announce.is_empty()
+        let has_candidate_route_payload = has_pcb_otc
+            || !batch.unicast.announce.is_empty()
             || !batch.unicast_withdrawals().is_empty()
             || !batch.flowspec_announce.is_empty()
             || !batch.flowspec_withdraw.is_empty()
@@ -3797,7 +3814,9 @@ impl RibManager {
                 group_stage,
             )
         });
-        if (suppressed || (batch.evpn_complete_feed.is_some() && !has_candidate_route_payload))
+        if (has_pcb_otc
+            || suppressed
+            || (batch.evpn_complete_feed.is_some() && !has_candidate_route_payload))
             && batch.unicast.announce.is_empty()
             && batch.unicast_withdrawals().is_empty()
             && batch.end_of_rib.is_empty()
@@ -3814,14 +3833,14 @@ impl RibManager {
             && batch.labeled_withdraw.is_empty()
             && batch.rtc_announce.is_empty()
             && batch.rtc_withdraw.is_empty()
-            && match (otc_reconcile_prefixes, otc_reconcile.as_ref()) {
-                (Some(prefixes), Some(blocked)) => {
+            && match otc_reconcile_prefixes {
+                Some(prefixes) => {
                     !self.pending_otc_blocked.get(&peer).is_some_and(|pending| {
                         pending.keys().any(|(prefix, _)| {
                             checkpoint();
                             !prefixes.contains(prefix)
                         })
-                    }) && !blocked.iter().any(|route| {
+                    }) && !batch.otc_blocked.iter().any(|route| {
                         checkpoint();
                         prefixes.contains(&route.prefix)
                             && (self
@@ -3834,7 +3853,7 @@ impl RibManager {
                                 }))
                     })
                 }
-                _ => !self.pending_otc_blocked.contains_key(&peer),
+                None => !self.pending_otc_blocked.contains_key(&peer),
             }
         {
             // A fully suppressed envelope is a successful no-op commit. Like
@@ -3845,10 +3864,12 @@ impl RibManager {
             let complete = batch.evpn_complete_feed.take();
             let completed =
                 complete.is_none_or(|seal| self.complete_evpn_feed_admitted(peer, seal, 0));
-            if completed
-                && let (Some(prefixes), Some(blocked)) = (otc_reconcile_prefixes, otc_reconcile)
-            {
-                self.reconcile_peer_otc_blocked(peer, prefixes, blocked);
+            if completed && let Some(prefixes) = otc_reconcile_prefixes {
+                self.reconcile_peer_otc_blocked(
+                    peer,
+                    prefixes,
+                    std::mem::take(&mut batch.otc_blocked),
+                );
             }
 
             batch.retire_with(
@@ -3910,6 +3931,7 @@ impl RibManager {
                 return self.outbound_commit_failed(peer, failure);
             }
         };
+        let otc_reconcile = std::mem::take(&mut batch.otc_blocked);
         // Partial admission cannot fall back to unknown OLD while selection
         // keeps ordinary rows frozen. Reserve before another family advances
         // its admission; the later reservation only sees a filtered subset.
@@ -4135,6 +4157,7 @@ impl RibManager {
         let common_unicast_candidates = Arc::clone(&batch.unicast.announce);
         let mut common_probe_input = None;
         let OutboundCommitBatch {
+            otc_blocked: _,
             unicast:
                 AlignedUnicastPayload {
                     mut announce,
@@ -4214,14 +4237,8 @@ impl RibManager {
             group_prior.extend(materialize_clean_group_prior(self, lazy));
         }
 
-        // RFC 9234 egress enforcement for every concrete-peer selection
-        // shape. Single-best group staging applies the same gate before its
-        // shared table commit; this central pass covers private single-best,
-        // ORR, Add-Path, and per-client-best without duplicating their tails
-        // — including per-client-best GROUP members, whose winner walk
-        // stages the first permitted candidate regardless of OTC and defers
-        // egress enforcement here (ADR-0126 Decision 5), matching the
-        // ungrouped per-client-best path.
+        // Final RFC 9234 check before advertised-state commit. Per-client best
+        // has also used the same predicate to choose an eligible alternate.
         if !unicast_otc_prechecked
             && announce.iter().inspect(|_| checkpoint()).any(|route| {
                 announce_source_exclusion != Some(route.peer)
@@ -4235,7 +4252,7 @@ impl RibManager {
             debug_assert!(
                 grouped_unicast_count.is_none() || per_client_best_member,
                 "single-best group staging must reject OTC before its shared table commit; \
-                 per-client-best groups defer to this backstop by design"
+                 per-client-best group rows still pass the final egress check"
             );
             if per_client_best_member
                 && !self.pending_group_admitted.contains_key(&peer)
@@ -5250,8 +5267,8 @@ impl RibManager {
                     "route rejected before Adj-RIB-Out commit because its exact wire form is unexportable");
             }
         }
-        if let (Some(prefixes), Some(blocked)) = (otc_reconcile_prefixes, otc_reconcile) {
-            self.reconcile_peer_otc_blocked(peer, prefixes, blocked);
+        if let Some(prefixes) = otc_reconcile_prefixes {
+            self.reconcile_peer_otc_blocked(peer, prefixes, otc_reconcile);
         }
         let otc_blocked: Vec<crate::route::Route> = self
             .pending_otc_blocked
@@ -11276,7 +11293,9 @@ impl RibManager {
                             }
                             continue;
                         }
-                        let rows_before = unicast.announce.len() + unicast.withdraw.len();
+                        let rows_before = unicast.announce.len()
+                            + unicast.withdraw.len()
+                            + unicast.pcb_otc_blocked.len();
                         let orf = orf_filters.as_ref().and_then(|m| m.get(&family));
                         let prefix_send_max = if peer_add_path_send_families.contains(&family) {
                             peer_add_path_send_limits
@@ -11333,8 +11352,8 @@ impl RibManager {
                             );
                         } else if per_client_best {
                             // RFC 7947 §2.3.2 per-client best-path: the first
-                            // export-policy-permitted candidate from the
-                            // per-target candidate set, staged at path_id 0
+                            // candidate permitted by policy and OTC for
+                            // this target, staged at path_id 0
                             // (single-best shape). Add-Path families took the
                             // multipath arm above — a negotiated capability
                             // outranks the fallback. ORR cannot coexist: the
@@ -11468,8 +11487,10 @@ impl RibManager {
                             );
                         }
                         staged_rows = staged_rows.saturating_add(
-                            (unicast.announce.len() + unicast.withdraw.len())
-                                .saturating_sub(rows_before),
+                            (unicast.announce.len()
+                                + unicast.withdraw.len()
+                                + unicast.pcb_otc_blocked.len())
+                            .saturating_sub(rows_before),
                         );
                     }
 
@@ -11825,6 +11846,13 @@ impl RibManager {
                                 unstaged_prefixes.push(route.prefix);
                             }
                         }
+                        unicast.pcb_otc_blocked.retain(|route| {
+                            let moved = withdrawn.contains(&route.prefix);
+                            if !moved {
+                                unstaged_prefixes.push(route.prefix);
+                            }
+                            moved
+                        });
                         let withdrawn: HashSet<_> = evpn_withdraw.iter().copied().collect();
                         evpn_announce.retain(|route| {
                             let moved = withdrawn.contains(&route.key());
@@ -11913,6 +11941,7 @@ impl RibManager {
                         };
                     self.replacement_checkpoint(true);
                     if !announce.is_empty()
+                        || !unicast.pcb_otc_blocked.is_empty()
                         || shared_withdraw
                             .as_ref()
                             .is_some_and(|rows| !rows.is_empty())
@@ -12088,6 +12117,7 @@ impl RibManager {
                                 peer,
                                 OutboundCommitBatch {
                                     local_sources: unicast.local_sources,
+                                    otc_blocked: unicast.pcb_otc_blocked,
                                     force_unicast_replay: is_force,
                                     staged_departure_group: member_of.filter(|gid| {
                                         RELEASING
@@ -12234,6 +12264,14 @@ impl RibManager {
                             }
                         }
                     } else {
+                        // Removing a blocked first choice can leave its already-sent
+                        // alternate unchanged. Clear the remembered edge for the next block.
+                        if member_of.is_none()
+                            && per_client_best
+                            && self.peer_otc_blocked.contains_key(&peer)
+                        {
+                            self.reconcile_peer_otc_blocked(peer, &effective_prefixes, Vec::new());
+                        }
                         super::retire_vec(&mut unicast.withdraw, &mut || checkpoint());
                         super::retire_vec(&mut fs_announce, &mut || checkpoint());
                         super::retire_vec(&mut fs_withdraw, &mut || checkpoint());

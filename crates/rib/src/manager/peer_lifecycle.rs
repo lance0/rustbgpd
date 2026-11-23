@@ -4392,6 +4392,7 @@ impl RibManager {
         let (announce, next_hop_override) = grouped_unicast
             .unwrap_or_else(|| (unicast.announce.into(), unicast.next_hop_override.into()));
         let has_outbound_diff = !announce.is_empty()
+            || !unicast.pcb_otc_blocked.is_empty()
             || evpn_complete_feed.is_some()
             || !unicast.withdraw.is_empty()
             || !fs_announce.is_empty()
@@ -4449,6 +4450,7 @@ impl RibManager {
         };
         let batch = has_outbound_diff.then(|| OutboundCommitBatch {
             local_sources: unicast.local_sources,
+            otc_blocked: unicast.pcb_otc_blocked,
             force_unicast_replay: true,
             unicast_otc_prechecked,
             announce_source_exclusion,

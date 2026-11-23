@@ -246,9 +246,10 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
   peers with different OTC egress behavior cannot share advertised state.
 - E2 suppression for IPv4/IPv6 unicast happens after export-policy
   modifications but before grouped or private Adj-RIB-Out commit. This covers
-  single-best, ORR, Add-Path, and per-client-best selection. A route that was
-  previously advertised and becomes OTC-blocked is withdrawn and removed from
-  logical advertised state; a newly blocked route is never committed.
+  single-best, ORR, Add-Path, and per-client-best selection. For IPv4/IPv6 unicast per-client best, the walk skips a
+  blocked candidate and selects the best eligible alternate. If the last
+  eligible path disappears, the server withdraws its prior advertisement.
+  A first-time rejection creates no advertised route.
 - Transport retains the E2 check as a defense-in-depth encoder guard and owns
   the established `bgp_otc_routes_blocked_total` counter and log
   diagnostics. The RIB passes rejected route context explicitly, so metrics,

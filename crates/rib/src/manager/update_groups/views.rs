@@ -575,9 +575,9 @@ impl RibManager {
     /// retained decision attribution — the lane entry's where the member
     /// sourced the winner of a per-client-best prefix), one deny per
     /// persistent denial — own-sourced excluded on the denial side and
-    /// substituted-or-excluded on the permit side, exactly what the
-    /// per-peer initial-dump staging would have recorded, without
-    /// re-running policy. A route-refresh replay passes its `family` so
+    /// substituted-or-excluded on the permit side. Private PCB staging also
+    /// evaluates candidates skipped for OTC. Replay counts the stored
+    /// eligible slot without re-running policy. A route-refresh passes its `family` so
     /// only the refreshed family's entries count (the per-peer path
     /// re-evaluates only that family).
     pub(in crate::manager) fn apply_group_join_counters(

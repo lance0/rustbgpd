@@ -414,8 +414,8 @@ impl RibManager {
     ///
     /// `per_client_best` selects the RFC 7947 §2.3.2 arm: rank the live
     /// collector's candidate set with the Loc-RIB comparator and take
-    /// the first export-policy-permitted candidate, recording one
-    /// reason per denied candidate — the same walk
+    /// the first permitted candidate that passes OTC egress, recording
+    /// the reasons for falling back — the same walk
     /// `distribute_multipath_prefix(send_max = 1, stage_path_id_zero)`
     /// performs live. Ignored when Add-Path send is negotiated for the
     /// prefix's family (a negotiated capability outranks the fallback,
@@ -742,8 +742,8 @@ impl RibManager {
             // candidate set the live filtered-best collector walks
             // (`multipath_candidates` — split horizon, RFC 4456
             // reflection, per-candidate LLGR) with the Loc-RIB
-            // comparator, then take the first export-policy-permitted
-            // candidate — the same walk
+            // comparator, then select the first candidate that passes export policy
+            // and OTC egress — the same walk
             // `distribute_multipath_prefix(send_max = 1)` performs
             // live, with one recorded verdict per denied candidate.
             let mut ranked: Vec<&crate::route::Route> = multipath_candidates(
@@ -788,6 +788,7 @@ impl RibManager {
             let mut winner = None;
             let mut policy_memo = super::ExportMemo::default();
             let mut first_no_advertise_suppression = None;
+            let mut first_otc_blocked = None;
             let mut conditional_suppressions = 0_usize;
             let mut first_conditional_step = None;
             for (index, &candidate) in ranked.iter().enumerate() {
@@ -845,7 +846,7 @@ impl RibManager {
                     first_conditional_step.get_or_insert(step);
                     continue;
                 }
-                let permitted = match export_pol {
+                let otc_blocked = match export_pol {
                     Some(chain) => {
                         let (result, evaluation, deny_term, _) =
                             chain.compiled().evaluate_with_deny_attribution(&ctx);
@@ -871,10 +872,9 @@ impl RibManager {
                                         next_hop = candidate.next_hop,
                                     ),
                                 });
-                                false
-                            } else {
-                                true
+                                continue;
                             }
+                            super::otc_egress_blocked(&modified, target_local_role)
                         } else {
                             let label = super::policy_label(
                                 evaluation.matched_policy.as_deref(),
@@ -890,16 +890,33 @@ impl RibManager {
                                     next_hop = candidate.next_hop,
                                 ),
                             });
-                            false
+                            continue;
                         }
                     }
-                    None => true,
+                    None => super::otc_egress_blocked(candidate, target_local_role),
                 };
-                if permitted {
-                    winner = Some((index, candidate));
-                    break;
+                if otc_blocked {
+                    first_otc_blocked.get_or_insert((index, candidate));
+                    continue;
                 }
+                winner = Some((index, candidate));
+                break;
             }
+            // With no eligible alternate, trace the first otherwise-permitted
+            // route through the ordinary OTC stop, including its policy changes.
+            let all_permits_blocked = winner.is_none() && first_otc_blocked.is_some();
+            if winner.is_some()
+                && let Some((index, candidate)) = first_otc_blocked
+            {
+                explain.reasons.push(ExplainReason {
+                    code: "otc_egress_blocked",
+                    message: format!(
+                        "candidate {} of {total} (from {}) carries Only-To-Customer toward a Provider, Peer, or Route Server",
+                        index + 1, candidate.peer,
+                    ),
+                });
+            }
+            let winner = winner.or(first_otc_blocked);
             // ADR-0137: with no winner, a suppressed candidate keeps its
             // conditional rung even when other candidates fell to export
             // policy or NO_ADVERTISE; the terminal outcome below names both.
@@ -973,6 +990,11 @@ impl RibManager {
                 });
                 return explain;
             };
+            let selection = if all_permits_blocked {
+                "was permitted by export policy but all permitted candidates fail OTC egress"
+            } else {
+                "is the first candidate permitted by export policy and OTC egress"
+            };
             gate(
                 &mut explain.gates,
                 "best_route",
@@ -980,7 +1002,7 @@ impl RibManager {
                 Pass,
                 format!(
                     "per-client best-path (RFC 7947 §2.3.2): candidate {} of {total} \
-                     from {} is the first export-policy-permitted candidate",
+                     from {} {selection}",
                     rank + 1,
                     winner.peer
                 ),
@@ -2105,7 +2127,7 @@ impl RibManager {
     /// the peer already holds.
     ///
     /// `stage_path_id_zero` is the RFC 7947 §2.3.2 per-client best-path
-    /// mode (`send_max = 1`): the one permitted candidate is staged at
+    /// mode (`send_max = 1`): the first permitted candidate passing OTC is staged at
     /// `path_id 0` instead of rank 1, so Adj-RIB-Out, BMP RIB-Out, and
     /// `ListAdvertisedRoutes` present the ordinary single-best shape
     /// (the wire is already path-id-free — Add-Path send was not
@@ -2234,6 +2256,7 @@ impl RibManager {
             .then(|| AddPathKeys::new(wire, prefix, local_only, ribs, checkpoint));
         let mut changed: smallvec::SmallVec<[_; 2]> = smallvec::SmallVec::new();
         let mut next_rank: u32 = 1;
+        let mut reported_otc = false;
         let limit = if send_max == u32::MAX {
             usize::MAX
         } else {
@@ -2325,6 +2348,15 @@ impl RibManager {
                 );
                 super::rs_control::apply_rs_control_egress(&mut modified, rs_asn, prepend);
             }
+            if stage_path_id_zero && super::otc_egress_blocked(&modified, local_role) {
+                if !reported_otc {
+                    // The old first choice owns the diagnostic edge at slot zero.
+                    modified.path_id = 0;
+                    out.pcb_otc_blocked.push(modified);
+                    reported_otc = true;
+                }
+                continue;
+            }
             // A path that keeps its key stages now; the others wait until
             // every staged path has claimed what it keeps.
             match keys.as_mut().map(|keys| {
@@ -2411,10 +2443,10 @@ impl RibManager {
     /// collected WITHOUT the per-target split-horizon exclusion (that
     /// stays at member emit) and walked in best-path order:
     ///
-    /// - **winner** = the first export-permitted candidate, staged at
+    /// - **winner** = the first export-permitted and OTC-eligible candidate, staged at
     ///   `path_id 0` against the group table (the caller's
     ///   announce/withdraw outputs, equality-suppressed as usual);
-    /// - **runner-up** = the first permitted candidate whose source
+    /// - **runner-up** = the first eligible candidate whose source
     ///   differs from the winner's, returned as the exception-lane
     ///   payload;
     /// - early exit once both are found, unless one of them carries an
@@ -2443,17 +2475,10 @@ impl RibManager {
     /// `rs_control` and ORR are absent by construction: control
     /// communities diverge per TARGET (enforced at the member-emit
     /// seams over the winner and the fallback list), and ORR peers cannot be
-    /// per-client-best (validation-enforced). RFC 9234 OTC egress is
-    /// deliberately NOT gated in this walk: per-client-best groups
-    /// enforce OTC at the central pre-commit backstop
-    /// (`try_send_and_commit_outbound_update_with_group_prior_and_otc_scope`),
-    /// matching the ungrouped per-client-best path — the in-walk gate
-    /// in [`Self::distribute_single_best_prefix`] serves single-best
-    /// staging only. A blocked winner stays staged and is RECORDED
-    /// into `otc_blocked` for the group's residue; a blocked
-    /// runner-up needs no recording — the residue derivation
-    /// (`GroupRibOut::otc_blocked_for_member`) reads it from the lane
-    /// entry itself.
+    /// per-client-best (validation-enforced). A candidate blocked by the
+    /// group-local OTC role after export policy consumes neither winner nor
+    /// runner-up. Its ranked position can still determine a member's first
+    /// rejection for diagnostics, independently of the path advertised.
     #[expect(
         clippy::too_many_arguments,
         clippy::fn_params_excessive_bools,
@@ -3941,6 +3966,9 @@ pub(super) struct PcbWalk {
     winner_source: Option<PeerId>,
     clean_sources: smallvec::SmallVec<[PeerId; 2]>,
     suppressible_seen: bool,
+    // Two distinct unconditional sources settle every member's pre-OTC diagnostic.
+    diagnostic_sources: smallvec::SmallVec<[PeerId; 2]>,
+    needs_diagnostic_list: bool,
     fallback: crate::manager::update_groups::release_fallback::FallbackRows,
 }
 
@@ -4024,25 +4052,55 @@ impl PcbWalk {
             return false;
         }
         modified.path_id = 0;
-        if may_suppress(candidate.communities(), candidate.large_communities()) {
+        use crate::manager::update_groups::release_fallback::DiagnosticHead;
+        let suppressible = may_suppress(candidate.communities(), candidate.large_communities());
+        let entry = |route, nh, label| RunnerUp {
+            route,
+            nh,
+            source_attrs: capture_source_attrs(candidate),
+            policy_label: label,
+            winner_source: self.winner_source.unwrap_or(candidate.peer),
+            local_source: crate::adj_rib_out::LocalExportSource::from_route(candidate),
+        };
+        if super::otc_role_blocks(group_local_role) {
+            let can_diagnose = self.diagnostic_sources.len() < 2
+                && !self.diagnostic_sources.contains(&candidate.peer);
+            if can_diagnose && !suppressible {
+                self.diagnostic_sources.push(candidate.peer);
+            }
+            if super::otc_egress_blocked(&modified, group_local_role) {
+                if can_diagnose {
+                    if self.fallback.otc_role.is_none() {
+                        self.fallback.otc_role = group_local_role;
+                        self.fallback.diagnostic_head = match (self.winner_source, suppressible) {
+                            (Some(_), _) => DiagnosticHead::Winner,
+                            (None, true) => DiagnosticHead::List,
+                            (None, false) => DiagnosticHead::Marked,
+                        };
+                        if self.fallback.diagnostic_head == DiagnosticHead::Marked {
+                            otc_blocked.push(modified);
+                            return false;
+                        }
+                        otc_blocked.push(modified.clone());
+                    }
+                    self.needs_diagnostic_list = true;
+                    self.fallback.push(entry(modified, None, None));
+                }
+                return false;
+            }
+        }
+        if suppressible {
             self.suppressible_seen = true;
         } else {
             self.clean_sources.push(candidate.peer);
         }
         if let Some(winner) = self.winner_source {
-            let entry = RunnerUp {
-                route: modified,
-                nh: nh_action,
-                source_attrs: capture_source_attrs(candidate),
-                policy_label: label,
-                winner_source: winner,
-                local_source: crate::adj_rib_out::LocalExportSource::from_route(candidate),
-            };
+            let entry = entry(modified, nh_action, label);
             // The runner-up: the first permitted candidate from another
             // source.
             let runner_up = self.stage.runner_up.is_none() && candidate.peer != winner;
             let settled = self.clean_sources.len() == 2;
-            if settled && !self.suppressible_seen {
+            if settled && !self.suppressible_seen && !self.needs_diagnostic_list {
                 // No suppression-form community on the winner or the
                 // runner-up: the walk ends exactly as it always has, and
                 // keeps no fallback.
@@ -4058,23 +4116,16 @@ impl PcbWalk {
             }
             return false;
         }
+        if self.fallback.diagnostic_head != DiagnosticHead::Winner
+            && self.diagnostic_sources.len() < 2
+        {
+            // The eligible winner follows a diagnostic candidate in the same ranked list.
+            self.fallback
+                .push(entry(modified.clone(), nh_action.clone(), label.clone()));
+        }
         self.winner_source = Some(candidate.peer);
         self.stage.winner_label = label;
         self.stage.winner_source_attrs = capture_source_attrs(candidate);
-        // RFC 9234 record-not-act (ADR-0126): a blocked winner
-        // stays staged — the pre-commit backstop strips it from
-        // every member emission — but its blocked identity must
-        // land in the group residue so per-member diagnostics and
-        // the replay reconciliations see the backstop's outcome.
-        // `group_local_role` is group-uniform (snapshot on
-        // `GroupRibOut`), so this one verdict covers every member.
-        // Recorded even when the announce below is
-        // equality-suppressed: the caller's `record_otc_blocked`
-        // refreshes this prefix's residue every pass.
-        if super::otc_egress_blocked(&modified, group_local_role) {
-            checkpoint();
-            otc_blocked.push(modified.clone());
-        }
         let changed = rib_out.local_export_source(prefix, 0)
             != crate::adj_rib_out::LocalExportSource::from_route(candidate)
             || rib_out.get(prefix, 0).is_none_or(|existing| {
@@ -4105,7 +4156,7 @@ impl PcbWalk {
         // suppresses selects from the rest of the walk, like its per-peer
         // walk; without a suppressible candidate `[winner, runner-up]` is
         // the whole selection.
-        if self.suppressible_seen && !self.fallback.is_empty() {
+        if (self.suppressible_seen || self.needs_diagnostic_list) && !self.fallback.is_empty() {
             checkpoint();
             self.stage.rs_fallback = Some(crate::manager::update_groups::RsFallback::new(
                 self.fallback,
