@@ -2431,7 +2431,8 @@ impl RibManager {
         self.bench_complete_deferred_registrations();
     }
 
-    /// Drive the production registration steps synchronously through initial replay.
+    /// Finish deferred registrations and first-group builds. Large unicast groups
+    /// leave their writer-paced initial replay to [`Self::bench_finish_initial_replays`].
     pub fn bench_complete_deferred_registrations(&mut self) {
         while self.first_group_build.is_some() || !self.pending_initial_registrations.is_empty() {
             if self.optional_destination_retirement_active() {
@@ -2441,6 +2442,31 @@ impl RibManager {
             } else {
                 self.advance_pending_initial_registration();
             }
+        }
+    }
+
+    /// Advance each remaining clean replay through the registration lane. Drain its
+    /// writer envelopes between steps so dropping a page returns its operation latch.
+    /// The returned duration counts producer work only.
+    ///
+    /// # Panics
+    /// Panics if the caller leaves a writer full or holds an admitted page's latch.
+    pub fn bench_finish_initial_replays(&mut self, mut drain: impl FnMut()) -> std::time::Duration {
+        let mut elapsed = std::time::Duration::ZERO;
+        loop {
+            drain();
+            if !self.initial_member_replays.runnable() && !self.initial_member_replays.parked() {
+                return elapsed;
+            }
+            let started = std::time::Instant::now();
+            if !self.initial_member_replays.runnable() {
+                assert!(
+                    self.wake_initial_member_replay(),
+                    "initial replay writer must drain"
+                );
+            }
+            self.advance_pending_initial_registration();
+            elapsed += started.elapsed();
         }
     }
 
@@ -2615,7 +2641,7 @@ impl RibManager {
                 .expect("synchronous ORF reply")
                 .expect("benchmark ORF entries install");
         }
-        while rx.try_recv().is_ok() {}
+        self.bench_finish_initial_replays(|| while rx.try_recv().is_ok() {});
         rx
     }
 
@@ -2713,7 +2739,7 @@ impl RibManager {
             );
             // Drain the initial-table dump's End-of-RIB marker so the channel
             // starts empty for the measured fanout pass.
-            while rx.try_recv().is_ok() {}
+            self.bench_finish_initial_replays(|| while rx.try_recv().is_ok() {});
             receivers.push(rx);
         }
         receivers
@@ -2896,7 +2922,7 @@ impl RibManager {
                         negotiated_llgr_families: Vec::new(),
                     },
                 );
-                while rx.try_recv().is_ok() {}
+                self.bench_finish_initial_replays(|| while rx.try_recv().is_ok() {});
                 rx
             })
             .collect()

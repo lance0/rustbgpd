@@ -7505,6 +7505,72 @@ fn rs_targets_record_thousands_of_asns_as_one_sorted_set() {
 }
 
 #[test]
+fn initial_replay_snapshots_source_and_label_counts_before_page_diagnostics() {
+    let mut manager = staging_manager();
+    let mut group = empty_group();
+    group.apply_delta(&announce_delta(prefix(1), MEMBER, None));
+    group.apply_delta(&announce_delta(prefix(2), OTHER1, None));
+    let denied = |n, source, label: &str| {
+        (
+            PolicyFilteredRouteKey {
+                target_peer: GROUP_FILTERED_PLACEHOLDER,
+                source_peer: source,
+                path_id: 0,
+                prefix: prefix(n),
+            },
+            Some(Arc::from(label)),
+        )
+    };
+    let scope = HashSet::from([prefix(3), prefix(4), prefix(5)]);
+    group.record_policy_filtered(
+        &scope,
+        &[
+            denied(3, OTHER1, "a"),
+            denied(4, MEMBER, "a"),
+            denied(5, OTHER2, "b"),
+        ],
+        &mut || {},
+    );
+    manager.group_ribs.insert(PCB_GID, group);
+    manager.start_initial_replay_policy(MEMBER, PCB_GID);
+    let tally = manager.export_policy_counters[&MEMBER].snapshot();
+    assert_eq!(tally.export_policy_routes_permitted, 1);
+    assert_eq!(tally.export_policy_routes_denied, 2);
+
+    // An unseen denial changes source and label; a second is withdrawn.
+    let group = manager.group_ribs.get_mut(&PCB_GID).unwrap();
+    group.record_policy_filtered(
+        &HashSet::from([prefix(3), prefix(5)]),
+        &[denied(3, MEMBER, "b")],
+        &mut || {},
+    );
+    manager.start_initial_replay_policy(OTHER1, PCB_GID);
+    assert_eq!(
+        manager.export_policy_counters[&OTHER1]
+            .snapshot()
+            .export_policy_routes_denied,
+        2
+    );
+    let group = &manager.group_ribs[&PCB_GID];
+    for (label, (total, sources)) in &group.single_best_denials.labels {
+        assert!(matches!(label.as_deref(), Some("a" | "b")));
+        assert_eq!((*total, sources.get(&MEMBER)), (1, Some(&1)));
+    }
+
+    let mut events = manager.route_events_tx.subscribe();
+    for _ in 0..2 {
+        manager.apply_initial_replay_page_policy(MEMBER, PCB_GID, &scope);
+        manager.apply_initial_replay_page_policy(OTHER1, PCB_GID, &scope);
+    }
+    assert_eq!(manager.export_policy_counters[&MEMBER].snapshot(), tally);
+    assert!(!manager.policy_filtered_routes.contains_key(&MEMBER));
+    assert_eq!(manager.policy_filtered_routes[&OTHER1].len(), 2);
+    assert_eq!(events.try_recv().unwrap().prefix, prefix(3));
+    assert_eq!(events.try_recv().unwrap().prefix, prefix(4));
+    assert!(events.try_recv().is_err());
+}
+
+#[test]
 fn first_group_retirement_pages_policy_denials_and_source_attributes() {
     use crate::manager::slice_timing::take_first_group_retirement_work;
 
@@ -7540,14 +7606,14 @@ fn first_group_retirement_pages_policy_denials_and_source_attributes() {
     take_first_group_retirement_work();
     assert!(!group.retire_first_group_page(0));
     assert_eq!(take_first_group_retirement_work(), [0, 0, 0]);
-    assert_eq!(retained_label.strong_count(), 6);
+    assert_eq!(retained_label.strong_count(), 7);
     assert!(!group.retire_first_group_page(1));
     assert_eq!(take_first_group_retirement_work(), [1, 0, 0]);
     assert_eq!(source_attrs.strong_count(), 0);
-    assert_eq!(retained_label.strong_count(), 6);
+    assert_eq!(retained_label.strong_count(), 7);
     assert!(!group.retire_first_group_page(4));
     assert_eq!(take_first_group_retirement_work(), [0, 4, 0]);
-    assert_eq!(retained_label.strong_count(), 2);
+    assert_eq!(retained_label.strong_count(), 3);
     assert!(group.retire_first_group_page(2));
     assert_eq!(take_first_group_retirement_work(), [0, 2, 0]);
     assert_eq!(retained_label.strong_count(), 0);
@@ -7634,7 +7700,7 @@ fn optional_group_retirement_charges_sparse_denials_without_advertised_rows() {
         assert_eq!(done, charged == total_buckets);
         assert_eq!(
             live_label.strong_count(),
-            usize::from(charged <= last_policy)
+            2 * usize::from(charged <= last_policy)
         );
         assert_eq!(live_attrs.strong_count(), usize::from(!done));
         assert!(done || budget == 0);

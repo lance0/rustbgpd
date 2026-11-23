@@ -34,19 +34,26 @@ fn observe_adoption_update(
     );
 }
 
-async fn receive_cold_inventory(
-    cold: &mut mpsc::Receiver<OutboundRouteUpdate>,
+// Advance only the installed member's replay. The optional disposal under
+// test stays at the same frontier while the receiver acknowledges each page.
+fn receive_before_retirement(
+    manager: &mut RibManager,
+    receiver: &mut mpsc::Receiver<OutboundRouteUpdate>,
     expected: &BTreeMap<Prefix, u32>,
+    tags: &[u32],
 ) {
-    let mut state = Received::default();
-    while state.ends == 0 {
-        let update = delivered(cold.recv().await.unwrap());
-        let before = state.rows.len();
-        state.apply(&update);
-        assert_eq!(state.rows.len() - before, update.announce.len());
+    use std::task::{Context, Waker};
+
+    let mut initial = std::pin::pin!(Received::initial(receiver, expected, tags));
+    let mut cx = Context::from_waker(Waker::noop());
+    for _ in 0..ROWS {
+        if initial.as_mut().poll(&mut cx).is_ready() {
+            return;
+        }
+        manager.wake_initial_member_replay();
+        manager.service_initial_member_replay();
     }
-    assert_eq!(state.ends, 1);
-    state.check(expected, &[]);
+    panic!("adopter did not reach End-of-RIB");
 }
 
 #[tokio::test]
@@ -83,7 +90,7 @@ async fn ordinary_adopter_retires_the_acknowledged_inventory_and_unlocks_cold_re
     let mut joined = queue_late_registration(&primary, adopter, target.clone());
     assert!(manager.drain_ready_updates().await);
     assert_eq!(manager.grouped_member_of(adopter), Some(destination));
-    Received::initial(&mut joined, &expected, &[NEXT_TAG]);
+    receive_before_retirement(&mut manager, &mut joined, &expected, &[NEXT_TAG]);
     assert_eq!(manager.prepared_destination, None);
     assert!(
         manager.prestaged_inventory.is_none(),
@@ -110,7 +117,7 @@ async fn ordinary_adopter_retires_the_acknowledged_inventory_and_unlocks_cold_re
     let mut second = queue_late_registration(&primary, warm, target);
     assert!(manager.drain_ready_updates().await);
     assert_eq!(manager.grouped_member_of(warm), Some(destination));
-    Received::initial(&mut second, &expected, &[NEXT_TAG]);
+    receive_before_retirement(&mut manager, &mut second, &expected, &[NEXT_TAG]);
 
     let marker = overlap_prefix(ROWS + 1);
     primary
@@ -138,7 +145,7 @@ async fn ordinary_adopter_retires_the_acknowledged_inventory_and_unlocks_cold_re
     let actor = tokio::spawn(actor);
     tokio::time::timeout(
         Duration::from_secs(30),
-        receive_cold_inventory(&mut cold, &expected),
+        Received::initial(&mut cold, &expected, &[]),
     )
     .await
     .expect("cold replay after inventory retirement");

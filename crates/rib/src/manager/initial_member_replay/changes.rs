@@ -1,0 +1,235 @@
+//! Preserve actual staged changes in publication order once replay begins
+//! sending. Discovery owns the untouched rows.
+
+use std::collections::{BTreeSet, VecDeque};
+
+use rustbgpd_policy::NextHopAction;
+use rustbgpd_wire::Prefix;
+
+use super::{Phase, REGISTRATION_PAGE_SIZE, RibManager};
+use crate::PeerId;
+use crate::manager::distribution::OutboundCommitBatch;
+use crate::manager::selection_deferral::retained_route_bytes;
+use crate::manager::update_groups::{GroupDelta, GroupStageOutput};
+use crate::outbound_credit::OutboundOperation;
+use crate::route::Route;
+use crate::update::ExactExportKey;
+
+const MAX_BODY_BYTES: usize = 256 * 1024;
+
+enum PreviousRoute {
+    Different,
+    Same(Option<NextHopAction>),
+}
+
+struct Announcement {
+    route: Route,
+    action: Option<NextHopAction>,
+    previous: PreviousRoute,
+    local_source: Option<crate::adj_rib_out::LocalExportSource>,
+    charge: usize,
+}
+
+impl Announcement {
+    fn into_batch(
+        self,
+        manager: &RibManager,
+        peer: PeerId,
+        admitted: bool,
+    ) -> Option<OutboundCommitBatch<'static>> {
+        let mut exact_export_snapshot = None;
+        // The stage proved route equality. The receiver supplies the actual
+        // prior and a single immutable profile for comparison and admission.
+        if let PreviousRoute::Same(old) = self.previous
+            && admitted
+            && (self.route.peer != PeerId::LOCAL
+                || manager
+                    .adj_ribs_out
+                    .get(&peer)
+                    .and_then(|rib| rib.local_export_source(&self.route.prefix, 0))
+                    == self.local_source)
+            && let Some(encoder) = manager.peer_export_encoders.get(&peer)
+        {
+            let snapshot = encoder.snapshot();
+            if snapshot.owner_id() == encoder.owner_id() {
+                if snapshot.unicast_next_hop_actions_equal(
+                    &self.route,
+                    old.as_ref(),
+                    self.action.as_ref(),
+                ) {
+                    return None;
+                }
+                exact_export_snapshot = Some(snapshot);
+            }
+        }
+        let prefix = self.route.prefix;
+        let mut batch =
+            OutboundCommitBatch::with_unicast(vec![self.route].into(), vec![self.action].into());
+        batch.exact_export_snapshot = exact_export_snapshot;
+        if let Some(source) = self.local_source {
+            batch.local_sources.insert((prefix, 0), source);
+        }
+        Some(batch)
+    }
+}
+
+enum Change {
+    Announce(Box<Announcement>),
+    Withdraw(Prefix),
+}
+
+#[derive(Default)]
+pub(super) struct ReplayChanges {
+    pending: VecDeque<Change>,
+    // Keys drained from the journal that are absent after a withdrawal or
+    // exact-export rejection must not be rediscovered.
+    absent: BTreeSet<Prefix>,
+    body_bytes: usize,
+}
+
+impl ReplayChanges {
+    pub(super) fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    pub(super) fn owns_absent(&self, prefix: &Prefix) -> bool {
+        self.absent.contains(prefix)
+    }
+
+    fn push(&mut self, peer: PeerId, delta: &GroupDelta, stage: &GroupStageOutput) -> bool {
+        let row = delta.new.as_ref().filter(|(row, _)| row.peer != peer);
+        if row.is_none() && delta.old_source.is_none_or(|source| source == peer) {
+            return true;
+        }
+        if self.pending.len() >= REGISTRATION_PAGE_SIZE {
+            return false;
+        }
+        let change = if let Some((route, action)) = row {
+            let Some(charge) = retained_route_bytes(route, size_of::<Announcement>())
+                .filter(|charge| *charge <= MAX_BODY_BYTES - self.body_bytes)
+            else {
+                return false;
+            };
+            self.body_bytes += charge;
+            Change::Announce(Box::new(Announcement {
+                route: route.clone(),
+                action: action.clone(),
+                previous: stage
+                    .prior_equal_actions
+                    .get(&(delta.prefix, delta.path_id))
+                    .map_or(PreviousRoute::Different, |old| {
+                        PreviousRoute::Same(old.clone())
+                    }),
+                local_source: delta.local_source,
+                charge,
+            }))
+        } else {
+            Change::Withdraw(delta.prefix)
+        };
+        self.pending.push_back(change);
+        true
+    }
+}
+
+impl RibManager {
+    pub(in crate::manager) fn record_initial_replay_changes(
+        &mut self,
+        peer: PeerId,
+        stage: &GroupStageOutput,
+    ) -> bool {
+        let replay = self
+            .initial_member_replays
+            .members
+            .get_mut(&peer)
+            .expect("active replay");
+        if matches!(replay.phase, Phase::PrepareProof(_)) {
+            return true;
+        }
+        if stage.deltas.len() > REGISTRATION_PAGE_SIZE {
+            return false;
+        }
+        for delta in &stage.deltas {
+            // A write outside the scan's repair scope must go to the normal
+            // resync before the receiver can settle its initial table.
+            if !self
+                .loc_rib
+                .member_replay_change_recorded(peer, delta.prefix)
+                || !replay.changes.push(peer, delta, stage)
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub(super) fn send_initial_replay_change(
+        &mut self,
+        peer: PeerId,
+        mut operation: OutboundOperation,
+    ) {
+        let changes = &mut self
+            .initial_member_replays
+            .members
+            .get_mut(&peer)
+            .expect("active replay")
+            .changes;
+        let change = changes.pending.pop_front().expect("pending replay change");
+        let prefix = match &change {
+            Change::Announce(row) => row.route.prefix,
+            Change::Withdraw(prefix) => *prefix,
+        };
+        let key = ExactExportKey::Unicast(prefix, 0);
+        let prior = self
+            .pending_group_admitted
+            .get(&peer)
+            .filter(|view| view.contains(&key))
+            .map(|_| key.clone());
+        #[cfg(test)]
+        super::super::slice_timing::record_work("initial_member_replay_visits", 1);
+        let batch = match change {
+            Change::Announce(row) => {
+                changes.body_bytes -= row.charge;
+                let Some(batch) = row.into_batch(self, peer, prior.is_some()) else {
+                    self.initial_member_replays.ready.push_back(peer);
+                    return;
+                };
+                batch
+            }
+            Change::Withdraw(prefix) => OutboundCommitBatch {
+                withdraw: vec![(prefix, 0)],
+                ..OutboundCommitBatch::default()
+            },
+        };
+        if prior.is_some() || batch.withdraw.is_empty() {
+            let batch = OutboundCommitBatch {
+                slot: operation.slot(),
+                force_unicast_replay: true,
+                unicast_otc_prechecked: true,
+                ..batch
+            };
+            if !self.commit_initial_member_batch(peer, batch, prior.into_iter().collect()) {
+                return;
+            }
+        }
+        let changes = &mut self
+            .initial_member_replays
+            .members
+            .get_mut(&peer)
+            .expect("active replay")
+            .changes;
+        if self
+            .pending_group_admitted
+            .get(&peer)
+            .is_some_and(|view| view.contains(&key))
+        {
+            changes.absent.remove(&prefix);
+        } else if changes.absent.len() < REGISTRATION_PAGE_SIZE || changes.absent.contains(&prefix)
+        {
+            changes.absent.insert(prefix);
+        } else {
+            self.recover_initial_member_replay(peer);
+            return;
+        }
+        self.initial_member_replays.ready.push_back(peer);
+    }
+}

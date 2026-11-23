@@ -86,7 +86,12 @@ struct BucketCursor {
 impl BucketCursor {
     /// Removal never moves neighboring buckets. Empty shards can be skipped by
     /// their count; every inspected bucket of a populated shard costs one unit.
-    fn drain<K, V>(&mut self, map: &mut ShardedMap<K, V>, budget: &mut usize) -> bool {
+    fn drain<K, V>(
+        &mut self,
+        map: &mut ShardedMap<K, V>,
+        budget: &mut usize,
+        mut retire: impl FnMut(V),
+    ) -> bool {
         let shards = map.shards_mut();
         while let Some(shard) = shards.get_mut(self.shard) {
             while !shard.is_empty() {
@@ -95,7 +100,7 @@ impl BucketCursor {
                 }
                 debug_assert!(self.bucket < shard.num_buckets());
                 if let Ok(entry) = shard.get_bucket_entry(self.bucket) {
-                    drop(entry.remove().0);
+                    retire(entry.remove().0.1);
                 }
                 self.bucket += 1;
                 *budget -= 1;
@@ -302,15 +307,20 @@ impl OptionalGroupRetirement {
         debug_assert!(self.group.source_counts.is_empty() && self.group.source_attrs.is_empty());
         // The single-best stager replaces each prefix's entire denial map
         // with at most one (source, path ID) and its Arc<str> policy label.
+        let retire = |denials| {
+            self.group
+                .single_best_denials
+                .retire_prefix(denials, &mut || {});
+        };
         let denials_retired = match &mut self.group.policy_filtered {
-            PolicyRows::Sharded(map) => self.denials.drain(map, budget),
-            PolicyRows::Ordered(map) => PolicyRows::retire_ordered(map, budget),
+            PolicyRows::Sharded(map) => self.denials.drain(map, budget, retire),
+            PolicyRows::Ordered(map) => PolicyRows::retire_ordered(map, budget, retire),
         };
         if !denials_retired {
             return false;
         }
         match &mut self.group.otc_blocked {
-            OtcBlocked::Optional(map) => self.otc.drain(map, budget),
+            OtcBlocked::Optional(map) => self.otc.drain(map, budget, drop),
             OtcBlocked::Ordinary(map) => {
                 debug_assert!(
                     map.is_empty(),

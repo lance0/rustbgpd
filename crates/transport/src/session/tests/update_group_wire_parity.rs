@@ -990,3 +990,5 @@ async fn wire_parity_trace_detects_attribute_and_eor_perturbations() {
     early.insert(0, moved);
     assert_ne!(trace(&early), baseline, "premature EoR undetected");
 }
+
+mod initial_replay;
