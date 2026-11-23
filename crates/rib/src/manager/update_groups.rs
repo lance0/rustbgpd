@@ -1008,12 +1008,15 @@ impl GroupRibOut {
         self.owns_evpn = enabled;
     }
 
+    /// Returns the first count slot that had drifted from the residue map,
+    /// after rebuilding the counts from that map.
     fn record_otc_blocked<S: std::hash::BuildHasher>(
         &mut self,
         prefixes: &HashSet<Prefix, S>,
         blocked: &[Route],
         checkpoint: &mut impl FnMut(),
-    ) {
+    ) -> Option<usize> {
+        let mut drifted = None;
         if !self.otc_blocked.is_empty() {
             for prefix in prefixes {
                 checkpoint();
@@ -1025,14 +1028,22 @@ impl GroupRibOut {
                     && let Some(old) = old
                 {
                     let slot = Self::count_slot(prefix);
-                    self.otc_blocked_totals[slot] -= 1;
-                    let counts = self
+                    let total = self.otc_blocked_totals[slot].checked_sub(1);
+                    let source = self
                         .otc_blocked_sources
                         .get_mut(&old.peer)
-                        .expect("blocked winner has a source count");
-                    counts[slot] -= 1;
-                    if *counts == [0; 2] {
-                        self.otc_blocked_sources.remove(&old.peer);
+                        .and_then(|counts| {
+                            counts[slot] = counts[slot].checked_sub(1)?;
+                            Some(*counts)
+                        });
+                    if let (Some(total), Some(counts)) = (total, source) {
+                        self.otc_blocked_totals[slot] = total;
+                        if counts == [0; 2] {
+                            self.otc_blocked_sources.remove(&old.peer);
+                        }
+                    } else {
+                        debug_assert!(false, "OTC-blocked winner counts drifted at slot {slot}");
+                        drifted.get_or_insert(slot);
                     }
                 }
             }
@@ -1056,6 +1067,22 @@ impl GroupRibOut {
                 self.otc_blocked_totals[slot] += 1;
                 self.otc_blocked_sources.entry(route.peer).or_default()[slot] += 1;
             }
+        }
+        if drifted.is_some() {
+            self.rebuild_otc_blocked_counts(checkpoint);
+        }
+        drifted
+    }
+
+    /// Recount the per-client-best winner terms from the residue map.
+    fn rebuild_otc_blocked_counts(&mut self, checkpoint: &mut impl FnMut()) {
+        self.otc_blocked_totals = [0; 2];
+        self.otc_blocked_sources.clear();
+        for route in self.otc_blocked.values() {
+            checkpoint();
+            let slot = Self::count_slot(&route.prefix);
+            self.otc_blocked_totals[slot] += 1;
+            self.otc_blocked_sources.entry(route.peer).or_default()[slot] += 1;
         }
     }
 

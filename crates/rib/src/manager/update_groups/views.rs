@@ -8,6 +8,26 @@ use super::{
     rt_passes, vpn_routes_equal,
 };
 
+/// The overlay may be detached while its keys retire, so a drifted counter
+/// cannot be recounted here. Clamp it rather than wrap or stop the actor.
+pub(super) fn decrement_refused_count(count: &mut usize, gid: usize, peer: PeerId, slot: usize) {
+    if let Some(next) = count.checked_sub(1) {
+        *count = next;
+    } else {
+        debug_assert!(
+            false,
+            "refused-view count underflow for {peer} at slot {slot}"
+        );
+        tracing::error!(
+            group = gid,
+            %peer,
+            slot,
+            counter = "visible_rejections",
+            "refused-view count underflow; clamped at zero"
+        );
+    }
+}
+
 impl GroupRibOut {
     pub(super) fn visible_rejected_slot(
         &self,
@@ -127,7 +147,7 @@ impl RibManager {
                 counts[slot] += 1;
             }
         } else if let (Some(slot), Some(counts)) = (slot, group.visible_rejections.get_mut(&peer)) {
-            counts[slot] -= 1;
+            decrement_refused_count(&mut counts[slot], gid, peer, slot);
         }
     }
 
