@@ -24,6 +24,16 @@ fn apply(
     rib: &mut PeerRib,
     keep: Option<(Prefix, u32)>,
 ) -> usize {
+    apply_observing(rx, rib, keep, |_, _| {})
+}
+
+/// Observe the receiver after applying the rows and before processing its family marker.
+fn apply_observing(
+    rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
+    rib: &mut PeerRib,
+    keep: Option<(Prefix, u32)>,
+    mut observe: impl FnMut(&OutboundRouteUpdate, &PeerRib),
+) -> usize {
     let mut markers = 0;
     while let Ok(update) = rx.try_recv() {
         assert!(
@@ -37,6 +47,7 @@ fn apply(
         for route in update.announce.iter() {
             rib.insert((route.prefix, route.path_id), false);
         }
+        observe(&update, rib);
         if update.end_of_rib.contains(&FAMILY) {
             markers += 1;
             rib.retain(|_, stale| !*stale);
@@ -140,13 +151,17 @@ fn register_with(
 }
 
 fn inject_rtbh(manager: &mut RibManager, prefix: Ipv4Prefix) {
+    inject_with_communities(manager, prefix, vec![rustbgpd_wire::COMMUNITY_BLACKHOLE]);
+}
+
+fn inject_with_communities(manager: &mut RibManager, prefix: Ipv4Prefix, communities: Vec<u32>) {
     let mut route = make_route(prefix, SOURCE);
     set_peer(&mut route, crate::PeerId::LOCAL);
     route.origin_type = crate::route::RouteOrigin::Local;
     route.attributes = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath { segments: vec![] }),
-        PathAttribute::Communities(vec![rustbgpd_wire::COMMUNITY_BLACKHOLE]),
+        PathAttribute::Communities(communities),
     ]);
     let (reply, mut result) = oneshot::channel();
     manager.handle_update(RibUpdate::InjectRoute { route, reply });
@@ -2818,6 +2833,131 @@ fn register_rs_client(manager: &mut RibManager, session_id: u64, grouped: bool) 
     manager.handle_update(up);
     assert_eq!(manager.grouped_member_of(observer).is_some(), grouped);
     (tx, rx, Vec::new())
+}
+
+/// The route stays in the group table but 0:65004 suppresses it toward OBSERVER.
+fn suppress_member_rtbh(manager: &mut RibManager, prefix: Ipv4Prefix) {
+    inject_with_communities(
+        manager,
+        prefix,
+        vec![rustbgpd_wire::COMMUNITY_BLACKHOLE, 65004],
+    );
+}
+
+#[test]
+fn member_suppression_withdraws_a_live_rtbh() {
+    let mut manager = manager_with_dormant_waiter();
+    let (_, mut rx, _) = register_rs_client(&mut manager, 82, true);
+    let prefix = host(8, 1);
+    let key = (Prefix::V4(prefix), 0);
+    inject_rtbh(&mut manager, prefix);
+    let mut rib = PeerRib::new();
+    apply(&mut rx, &mut rib, None);
+    assert_eq!(rib.get(&key), Some(&false));
+
+    let _waiter = connect(&mut manager, WAITER, 64, true, false);
+    suppress_member_rtbh(&mut manager, prefix);
+    let mut withdrawals = 0;
+    let markers = apply_observing(&mut rx, &mut rib, None, |update, _| {
+        assert!(update.announce.iter().all(|r| r.prefix != key.0));
+        withdrawals += update.unicast_withdrawals().filter(|k| **k == key).count();
+    });
+    assert!(manager.selection_deferred(FAMILY));
+    assert_eq!((withdrawals, markers), (1, 0));
+    assert!(!rib.contains_key(&key));
+}
+
+#[test]
+fn member_suppression_reconciles_stale_rtbh_at_family_eor() {
+    let mut manager = manager_with_dormant_waiter();
+    let _source = connect(&mut manager, SOURCE, 64, false, false);
+    let (_, mut old_rx, _) = register_rs_client(&mut manager, 82, true);
+    let prefixes = [host(8, 1), host(8, 2), host(8, 3)];
+    let [replaced, blocked, control] = prefixes.map(|p| (Prefix::V4(p), 0));
+    for prefix in prefixes {
+        inject_rtbh(&mut manager, prefix);
+    }
+    let mut rib = PeerRib::new();
+    apply_observing(&mut old_rx, &mut rib, None, |update, _| {
+        for route in update.announce.iter() {
+            assert!(
+                route
+                    .communities()
+                    .contains(&rustbgpd_wire::COMMUNITY_BLACKHOLE)
+            );
+        }
+    });
+    assert_eq!(
+        rib,
+        PeerRib::from([(replaced, false), (blocked, false), (control, false)])
+    );
+    clean_end(&mut manager, 82);
+    drop(old_rx);
+    for stale in rib.values_mut() {
+        *stale = true;
+    }
+
+    let _waiter = connect(&mut manager, WAITER, 64, true, false);
+    for prefix in &prefixes[..2] {
+        suppress_member_rtbh(&mut manager, *prefix);
+    }
+    // Only the first suppressed key has an eligible ordinary path.
+    announce(&mut manager, [prefixes[0]]);
+    let (_, mut rx, _) = register_rs_client(&mut manager, 182, true);
+    for released in [false, true] {
+        if released {
+            manager.handle_update(RibUpdate::EndOfRib {
+                peer: peer_v4(WAITER),
+                session_id: u64::from(WAITER.octets()[3]),
+                afi: FAMILY.0,
+                safi: FAMILY.1,
+            });
+        }
+        for _ in 0..4 {
+            manager.distribute_resync_request();
+            manager.resync_dirty_peers_bounded();
+        }
+        let markers = apply_observing(&mut rx, &mut rib, Some(control), |update, rows| {
+            for route in update.announce.iter() {
+                assert_ne!(route.prefix, blocked.0, "suppressed RTBH was replayed");
+                if route.prefix == replaced.0 {
+                    assert_eq!(route.peer, peer_v4(SOURCE));
+                    assert!(
+                        !route
+                            .communities()
+                            .contains(&rustbgpd_wire::COMMUNITY_BLACKHOLE)
+                    );
+                }
+            }
+            if update.end_of_rib.contains(&FAMILY) {
+                assert_eq!(
+                    rows.get(&replaced),
+                    Some(&false),
+                    "ordinary replacement precedes EoR"
+                );
+                assert_eq!(
+                    rows.get(&blocked),
+                    Some(&true),
+                    "unrefreshed RTBH survives until EoR"
+                );
+                assert_eq!(
+                    rows.get(&control),
+                    Some(&false),
+                    "control refreshed before EoR"
+                );
+            }
+        });
+        assert_eq!(manager.selection_deferred(FAMILY), !released);
+        assert_eq!(markers, usize::from(released));
+        if released {
+            assert_eq!(rib, PeerRib::from([(replaced, false), (control, false)]));
+        } else {
+            assert_eq!(
+                rib,
+                PeerRib::from([(replaced, true), (blocked, true), (control, false)])
+            );
+        }
+    }
 }
 
 /// A route-server client holds a local RTBH route as its fallback below a

@@ -1,7 +1,8 @@
 //! Build a cold registration's unicast table privately, one actor turn at a time.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 
+use rustbgpd_policy::{PolicyChain, PolicyHitCounters};
 use rustbgpd_wire::Prefix;
 use tokio::sync::mpsc;
 
@@ -45,7 +46,91 @@ pub(super) struct FirstGroupBuild {
     // Turns this attempt found the repair log more than half full while its
     // writer kept a session end retained or another destination waited.
     behind_turns: u16,
+    policy: Option<Box<FirstGroupPolicy>>,
     table: GroupRibOut,
+}
+
+/// Per-policy state is proportional to chain size and the existing repair
+/// limit. The table and denied-prefix sidecar already identify evaluated rows.
+struct FirstGroupPolicy {
+    datasets: Vec<u64>,
+    superseded: Option<PolicyHitCounters>,
+    retiring: VecDeque<Option<crate::route::Route>>,
+}
+
+impl FirstGroupPolicy {
+    fn start(chain: &PolicyChain, loc_rib: &mut crate::loc_rib::LocRib) -> Box<Self> {
+        loc_rib.track_displaced_registration_winners();
+        Box::new(Self {
+            datasets: chain
+                .compiled()
+                .referenced_datasets()
+                .map(|slot| slot.handle.pin().generation)
+                .collect(),
+            superseded: None,
+            retiring: VecDeque::new(),
+        })
+    }
+
+    fn prepare_page(
+        &mut self,
+        table: &GroupRibOut,
+        page: &mut crate::loc_rib::RegistrationPage,
+    ) -> bool {
+        let chain = table.export_chain.as_ref().expect("private policy build");
+        if page.repairs == 0 {
+            // A bucket rewind or an earlier repair can rediscover an
+            // already-staged prefix without a corresponding displaced input.
+            page.keys
+                .retain(|prefix| !table.first_group_policy_evaluated(prefix));
+        } else {
+            let mut memo = super::distribution::ExportMemo::default();
+            for old in &page.displaced {
+                if table.first_group_policy_evaluated(&old.prefix) {
+                    let hits = self
+                        .superseded
+                        .get_or_insert_with(|| PolicyHitCounters::for_chain(chain.compiled()));
+                    if !RibManager::count_displaced_first_group_winner(old, chain, hits, &mut memo)
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    fn finish(&self, chain: &mut PolicyChain) -> bool {
+        // Generation numbers are monotonic, so this also detects a swap
+        // during a page or between an original and its inverse evaluation.
+        // Two surviving errors can have different diagnoses. Only the
+        // authoritative traversal determines which becomes last_error.
+        chain.hit_counters().eval_errors() <= 1
+            && chain
+                .compiled()
+                .referenced_datasets()
+                .map(|slot| slot.handle.pin().generation)
+                .eq(self.datasets.iter().copied())
+            && self
+                .superseded
+                .as_ref()
+                .is_none_or(|hits| chain.exclude_staged_evaluations(hits))
+    }
+}
+
+impl FirstGroupBuild {
+    pub(super) fn founded_by(&self, peer: PeerId, record: &super::LiveSessionRecord) -> bool {
+        self.peer == peer
+            && matches!(&self.phase, FirstGroupPhase::Scanning(Some(waiter))
+            if waiter.session_id == record.session_id && waiter.sender.same_channel(&record.outbound_tx))
+    }
+
+    fn stop_scan(&mut self, loc_rib: &mut crate::loc_rib::LocRib) {
+        let displaced = loc_rib.stop_registration_scan();
+        if let Some(policy) = &mut self.policy {
+            policy.retiring = displaced;
+        }
+    }
 }
 
 /// Owns the build slot until every detached preparation allocation is released.
@@ -71,22 +156,6 @@ enum FirstGroupPhase {
 }
 
 impl RibManager {
-    pub(super) fn first_group_candidate(
-        &mut self,
-        peer: PeerId,
-    ) -> Option<(usize, u64, mpsc::Sender<OutboundRouteUpdate>)> {
-        #[cfg(test)]
-        let threshold = self.first_group_build_min_routes;
-        #[cfg(not(test))]
-        let threshold = super::INITIAL_DUMP_DEFER_MIN_ROUTES;
-        if self.loc_rib.len() < threshold {
-            return None;
-        }
-        let candidate = self.prospective_first_group(peer, None)?;
-        (!self.group_ribs.contains_key(&candidate.0) || self.prestaging_destination(candidate.0))
-            .then_some(candidate)
-    }
-
     pub(super) fn start_first_group(
         &mut self,
         peer: PeerId,
@@ -96,6 +165,11 @@ impl RibManager {
     ) {
         debug_assert!(self.first_group_slot_available());
         self.loc_rib.start_registration_scan();
+        let table = self.first_group_table(peer, gid);
+        let policy = table
+            .export_chain
+            .as_ref()
+            .map(|chain| FirstGroupPolicy::start(chain, &mut self.loc_rib));
         self.first_group_build = Some(Box::new(FirstGroupBuild {
             gid,
             peer,
@@ -104,13 +178,20 @@ impl RibManager {
             other_destination_waits: false,
             prepare_source: None,
             behind_turns: 0,
-            table: self.first_group_table(peer, gid),
+            table,
+            policy,
         }));
     }
 
     pub(super) fn registration_waits_for_first_group(&self, peer: PeerId) -> bool {
         self.first_group_build.as_ref().is_some_and(|job| {
-            job.peer == peer || self.registration_matches_first_group(peer, job.gid)
+            job.peer == peer
+                || (!self.outbound_peers.contains_key(&peer)
+                    && self.pending_registration_matches_group(
+                        peer,
+                        job.gid,
+                        job.table.export_chain.as_ref(),
+                    ))
         })
     }
 
@@ -232,12 +313,12 @@ impl RibManager {
     /// An acknowledged Prepare is an optimization with no caller lifetime
     /// attached. A concrete cold waiter can reclaim its slot. A later policy
     /// transaction will use its ordinary authoritative preparation.
-    pub(super) fn claim_registration_slot(&mut self, gid: usize) -> bool {
+    pub(super) fn claim_registration_slot(&mut self, gid: Option<usize>) -> bool {
         if self.first_group_slot_available() {
             return true;
         }
         if let Some(prepared) = self.completed_memberless_optional()
-            && prepared != gid
+            && Some(prepared) != gid
             && self.pending_destination_prestage.is_none()
             && self.first_group_build.is_none()
             && !self.optional_destination_retirement_active()
@@ -451,13 +532,10 @@ impl RibManager {
                 return;
             };
             *search += 1;
-            let Some((gid, session, sender)) = self.first_group_candidate(peer) else {
-                return;
-            };
-            if !self.claim_registration_slot(gid) {
+            self.defer_first_group_registration(peer);
+            if self.first_group_build.is_none() {
                 return;
             }
-            self.start_first_group(peer, gid, session, sender);
         }
         self.advance_first_group_build();
     }
@@ -483,8 +561,8 @@ impl RibManager {
         };
         let current = job.writer.is_some()
             || founder.as_ref().is_some_and(|waiter| {
-                self.prospective_first_group(job.peer, Some(job.gid))
-                    .is_some_and(|(_, session, sender)| {
+                self.current_first_group_waiter(job.peer, job.gid, job.table.export_chain.as_ref())
+                    .is_some_and(|(session, sender)| {
                         session == waiter.session_id && waiter.sender.same_channel(&sender)
                     })
             });
@@ -515,7 +593,7 @@ impl RibManager {
             if job.writer.is_some() && self.session_end_retained() {
                 self.seal_first_group_commit_frontier();
             }
-            self.loc_rib.stop_registration_scan();
+            job.stop_scan(&mut self.loc_rib);
             job.phase = FirstGroupPhase::Retiring;
             self.retire_first_group_page(job);
             return;
@@ -525,11 +603,34 @@ impl RibManager {
         if outrun {
             self.seal_first_group_commit_frontier();
         }
-        let page = self.loc_rib.take_registration_page();
+        let mut page = self.loc_rib.take_registration_page();
+        #[cfg(test)]
+        {
+            super::slice_timing::record_work("first_group_discovery", page.bucket_visits);
+            super::slice_timing::record_work("first_group_repairs", page.repairs);
+        }
         debug_assert!(page.bucket_visits + page.repairs <= REGISTRATION_PAGE_SIZE);
+        if let Some(policy) = &mut job.policy
+            && !policy.prepare_page(&job.table, &mut page)
+        {
+            self.fallback_policy_first_group(job);
+            return;
+        }
         if !page.keys.is_empty() {
             let prefixes = page.keys.into_iter().collect();
             job.table = self.stage_first_group_page(job.gid, job.table, &prefixes);
+        }
+        // Errors are never subtracted, so a second one already decides the
+        // fallback at publication. Stop before staging the rest of the table.
+        if job.policy.is_some()
+            && job
+                .table
+                .export_chain
+                .as_ref()
+                .is_some_and(|chain| chain.hit_counters().eval_errors() > 1)
+        {
+            self.fallback_policy_first_group(job);
+            return;
         }
         if self.loc_rib.registration_scan_status() != RegistrationScanStatus::Ready
             || !self.pending_route_batches.is_empty()
@@ -551,7 +652,22 @@ impl RibManager {
                 return;
             }
         }
-        self.loc_rib.stop_registration_scan();
+        self.finish_first_group_build(job);
+    }
+
+    fn finish_first_group_build(&mut self, mut job: Box<FirstGroupBuild>) {
+        if let Some(policy) = &job.policy
+            && !policy.finish(
+                job.table
+                    .export_chain
+                    .as_mut()
+                    .expect("private policy build"),
+            )
+        {
+            self.fallback_policy_first_group(job);
+            return;
+        }
+        job.stop_scan(&mut self.loc_rib);
         let gid = job.gid;
         let peer = job.peer;
         if let Some(table) = self.publish_first_group(gid, job.table) {
@@ -609,12 +725,48 @@ impl RibManager {
         self.settle_obsolete_first_group_writer(*writer);
     }
 
+    /// The current policy inputs cannot reproduce a private evaluation.
+    /// Retire its pages, then let the same session use ordinary registration.
+    fn fallback_policy_first_group(&mut self, mut job: Box<FirstGroupBuild>) {
+        debug_assert!(job.writer.is_none() && job.table.export_chain.is_some());
+        if let FirstGroupPhase::Scanning(Some(founder)) = &job.phase
+            && let Some(record) = self
+                .live_sessions
+                .get_mut(&job.peer)
+                .and_then(|sessions| sessions.last_mut())
+            && record.session_id == founder.session_id
+            && record.outbound_tx.same_channel(&founder.sender)
+        {
+            record.registration_policy_fallback = true;
+        }
+        self.clear_first_group_commit_frontier();
+        job.stop_scan(&mut self.loc_rib);
+        job.phase = FirstGroupPhase::Retiring;
+        self.retire_first_group_page(job);
+    }
+
     fn retire_first_group_page(&mut self, mut job: Box<FirstGroupBuild>) {
-        if !job.table.retire_first_group_page(REGISTRATION_PAGE_SIZE) {
+        let mut budget = REGISTRATION_PAGE_SIZE;
+        if let Some(policy) = &mut job.policy {
+            let count = budget.min(policy.retiring.len());
+            let retired = policy.retiring.drain(..count);
+            #[cfg(test)]
+            super::slice_timing::record_work("first_group_retired_displaced", retired.len());
+            drop(retired);
+            budget -= count;
+            if !policy.retiring.is_empty() {
+                self.first_group_build = Some(job);
+                return;
+            }
+        }
+        if !job.table.retire_first_group_page(budget) {
             self.first_group_build = Some(job);
             return;
         }
         let Some(writer) = job.writer.as_deref() else {
+            if job.table.export_chain.is_some() {
+                self.reclaim_unused_update_group_policies();
+            }
             if job.other_destination_waits {
                 self.clear_first_group_commit_frontier();
             }
@@ -633,9 +785,14 @@ impl RibManager {
         job.table = job.table.empty_first_group_table();
         job.behind_turns = 0;
         self.loc_rib.start_registration_scan();
+        job.policy = job
+            .table
+            .export_chain
+            .as_ref()
+            .map(|chain| FirstGroupPolicy::start(chain, &mut self.loc_rib));
         let founder = self
-            .prospective_first_group(job.peer, Some(job.gid))
-            .map(|(_, session_id, sender)| Waiter { session_id, sender });
+            .current_first_group_waiter(job.peer, job.gid, job.table.export_chain.as_ref())
+            .map(|(session_id, sender)| Waiter { session_id, sender });
         job.phase = FirstGroupPhase::Scanning(founder);
         self.first_group_build = Some(job);
     }

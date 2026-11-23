@@ -208,9 +208,12 @@ resolved.
   tell whether the helper holds the stale RTBH at that key or an ordinary
   route that was never replaced; withdrawing it could remove a route the
   helper rightly keeps. The candidate counts even when this peer's export
-  policy denies it. The helper therefore keeps that RTBH until whichever
-  comes first: an ordinary route for the prefix is advertised to it at the
-  same key, implicitly replacing the stale row, or End-of-RIB reaches it.
+  policy denies it. The same uncertainty applies when a route-server control
+  community suppresses a previously advertised RTBH toward a reconnecting
+  client. A permitted ordinary route replaces the stale blackhole when the
+  helper processes it at the same key. If no replacement reaches that key,
+  the helper clears the stale blackhole when it processes the family's
+  End-of-RIB and keeps the routes refreshed during replay.
   Selection release distributes routes while the grace window still holds
   End-of-RIB, so an exportable replacement normally reaches the helper at
   release, or in the resync ticks right after it for a receiver outside an

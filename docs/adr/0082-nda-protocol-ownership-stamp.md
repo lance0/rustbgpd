@@ -241,8 +241,7 @@ stamp-or-legacy migration window.**
   torvalds/linux master (verified 2026-06: no `NDA_PROTOCOL` in
   `net/bridge/br_fdb.c` or `drivers/net/vxlan/vxlan_core.c`)
 - Proposed bridge/vxlan FDB protocol support (unmerged, Aug 2025):
-  <https://www.mail-archive.com/bridge@lists.linux-foundation.org/msg11200.html>,
-  <https://lkml.org/lkml/2025/8/18/1486>
+  <https://www.mail-archive.com/bridge@lists.linux-foundation.org/msg11200.html>
 - FRR zebra `is_own` check and NDA_PROTOCOL stamping:
   <https://github.com/FRRouting/frr/blob/master/zebra/rt_netlink.c>
 - FRR EVPN graceful restart (PR #19778, merged 2026-01-06; neigh restore

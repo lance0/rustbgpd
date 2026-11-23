@@ -577,7 +577,11 @@ impl RibManager {
                 }
                 return;
             }
-            self.deferred_selection_keys.complete_family_release(family);
+            let readiness = &self.replacement_readiness;
+            self.deferred_selection_keys
+                .complete_family_release(family, &mut || {
+                    super::super::replacement_readiness_checkpoint(readiness, false);
+                });
             if let Some(reason) = job.terminal {
                 self.begin_release_markers(job.afi, reason, job.reason);
                 job.phase = Phase::Markers;

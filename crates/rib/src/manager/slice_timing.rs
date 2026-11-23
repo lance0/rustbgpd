@@ -70,6 +70,42 @@ pub(super) fn checkpoints() -> std::collections::BTreeMap<&'static str, usize> {
     CHECKPOINTS.with_borrow(Clone::clone)
 }
 
+// Physical work inside group construction, kept apart from readiness checkpoints.
+#[cfg(test)]
+thread_local! {
+    static GROUP_WORK: RefCell<std::collections::BTreeMap<&'static str, usize>> =
+        const { RefCell::new(std::collections::BTreeMap::new()) };
+}
+
+#[cfg(test)]
+pub(super) fn group_work() -> std::collections::BTreeMap<&'static str, usize> {
+    GROUP_WORK.with_borrow(Clone::clone)
+}
+
+/// Physical slot attempts (including holes), denial pops and displaced queue entries.
+#[cfg(test)]
+pub(super) fn take_first_group_retirement_work() -> [usize; 3] {
+    GROUP_WORK.with_borrow_mut(|counts| {
+        [
+            "first_group_retired_slots",
+            "first_group_retired_denials",
+            "first_group_retired_displaced",
+        ]
+        .map(|stage| counts.remove(stage).unwrap_or(0))
+    })
+}
+
+#[cfg(test)]
+pub(super) fn checkpoint_count() -> usize {
+    CHECKPOINTS.with_borrow(|counts| counts.values().sum())
+}
+
+/// Charge actual visits made by a build substep to the enclosing actor poll.
+#[cfg(test)]
+pub(super) fn record_work(stage: &'static str, units: usize) {
+    GROUP_WORK.with_borrow_mut(|counts| *counts.entry(stage).or_default() += units);
+}
+
 /// Note a readiness checkpoint. Outside a timed actor poll (direct
 /// unit-test calls, other threads) this records no slice.
 #[inline]
