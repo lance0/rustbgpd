@@ -2423,26 +2423,24 @@ fn pcb_grouped_count_queries_include_lane_term() {
     seed(&mut m, cand(p2, OTHER1, 300));
     m.group_ribs.insert(PCB_GID, per_client_best_group(None));
     let _ = stage_pcb(&mut m, &[p1, p2]);
+    // The joining member brings a rejection of its substituted slot.
+    m.set_exact_export_rejection(MEMBER, ExactExportKey::Unicast(p1, 0), true);
     m.update_groups
         .members
         .insert(MEMBER, GroupMembership::Grouped(PCB_GID));
+    m.install_group_member(PCB_GID, MEMBER);
 
-    assert_eq!(m.grouped_advertised_count(MEMBER), Some(2));
-    assert_eq!(
-        m.grouped_family_counts(MEMBER),
-        Some(vec![((Afi::Ipv4, Safi::Unicast), 2)])
-    );
-
-    // Reject the substituted slot: it counts against the member's
-    // view exactly like a staged-entry slot would.
-    m.peer_unexportable
-        .entry(MEMBER)
-        .or_default()
-        .insert(ExactExportKey::Unicast(p1, 0));
     assert_eq!(m.grouped_advertised_count(MEMBER), Some(1));
     assert_eq!(
         m.grouped_family_counts(MEMBER),
         Some(vec![((Afi::Ipv4, Safi::Unicast), 1)])
+    );
+
+    m.set_exact_export_rejection(MEMBER, ExactExportKey::Unicast(p1, 0), false);
+    assert_eq!(m.grouped_advertised_count(MEMBER), Some(2));
+    assert_eq!(
+        m.grouped_family_counts(MEMBER),
+        Some(vec![((Afi::Ipv4, Safi::Unicast), 2)])
     );
 }
 
@@ -6274,6 +6272,7 @@ fn pcb_rejected_and_otc_blocked_slot_subtracts_once() {
     m.update_groups
         .members
         .insert(MEMBER, GroupMembership::Grouped(PCB_GID));
+    m.install_group_member(PCB_GID, MEMBER);
 
     assert_eq!(m.grouped_advertised_count(MEMBER), Some(1));
     assert_eq!(
@@ -6284,10 +6283,7 @@ fn pcb_rejected_and_otc_blocked_slot_subtracts_once() {
     // Rejecting the blocked slot changes nothing: the route was
     // never on the member's wire and the OTC term already
     // subtracted it.
-    m.peer_unexportable
-        .entry(MEMBER)
-        .or_default()
-        .insert(ExactExportKey::Unicast(p1, 0));
+    m.set_exact_export_rejection(MEMBER, ExactExportKey::Unicast(p1, 0), true);
     assert_eq!(
         m.grouped_advertised_count(MEMBER),
         Some(1),
@@ -6298,11 +6294,19 @@ fn pcb_rejected_and_otc_blocked_slot_subtracts_once() {
         Some(vec![((Afi::Ipv4, Safi::Unicast), 1)])
     );
 
+    // Restaging can expose or hide a refused slot before the member sends again.
+    for route in [cand(p1, OTHER1, 300), with_otc_attr(cand(p1, OTHER1, 300))] {
+        seed(&mut m, route);
+        let _ = stage_pcb(&mut m, &[p1]);
+        assert_eq!(m.grouped_advertised_count(MEMBER), Some(1));
+        assert_eq!(
+            m.grouped_family_counts(MEMBER),
+            Some(vec![((Afi::Ipv4, Safi::Unicast), 1)])
+        );
+    }
+
     // A rejected clean slot still subtracts.
-    m.peer_unexportable
-        .entry(MEMBER)
-        .or_default()
-        .insert(ExactExportKey::Unicast(p2, 0));
+    m.set_exact_export_rejection(MEMBER, ExactExportKey::Unicast(p2, 0), true);
     assert_eq!(m.grouped_advertised_count(MEMBER), Some(0));
     assert_eq!(m.grouped_family_counts(MEMBER), Some(vec![]));
 }

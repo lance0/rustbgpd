@@ -496,6 +496,16 @@ The pacing limit remains a predicted member budget, not a hard row or time
 bound. One member's full-table operation, shared cohort work and other dirty
 peers reached by the trailing distribution pass retain their existing limits.
 
+**Amended:** 2026-11-22 — a successful RIB policy replacement applies the
+change and gives each affected peer a retry opportunity before replying.
+This applies to authoritative, paced and rollback commands. Naming an
+unchanged peer in a rollback leaves that peer's existing debt on the tick.
+A receiver whose writer refuses the retry retains its recovery obligation.
+Unrelated dirty peers keep their place on the RIB resync tick. This amendment
+supersedes the terminal global retry described in sections 3 and 5 and in
+the evidence review below. The outbound convergence query and dirty gauges
+continue to count every pending peer.
+
 ## Context
 
 A live policy reload can move hundreds of route-reflector or route-server

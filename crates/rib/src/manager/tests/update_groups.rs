@@ -1354,7 +1354,7 @@ fn grouped_peer_non_unicast_first_delta_keeps_private_unicast_unallocated() {
 
 /// Register an IPv4-sendable peer whose session withheld negotiated IPv6
 /// unicast (`SetPeerWithheldFamilies` staged before `PeerUp`).
-fn register_withheld_v6_peer(
+pub(super) fn register_withheld_v6_peer(
     manager: &mut RibManager,
     peer: PeerId,
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
@@ -3549,7 +3549,7 @@ async fn clean_policy_transition_falls_back_for_distinct_runtime_group_edges() {
     clippy::too_many_lines,
     reason = "the residue regression constructs an unrelated saturated member and proves the batch reply boundary"
 )]
-async fn clean_policy_transition_drains_unrelated_dirty_residue_before_reply() {
+async fn clean_policy_transition_replies_for_cohort_and_leaves_unrelated_debt_visible() {
     let metrics = BgpMetrics::new();
     let RunningManager { tx, handle } = spawn_running_manager(64, metrics.clone());
     let probes = Arc::new(AtomicUsize::new(0));
@@ -3667,22 +3667,31 @@ async fn clean_policy_transition_drains_unrelated_dirty_residue_before_reply() {
         crate::update::ExportPolicyCohortOutcome::Committed
     );
 
-    let (health_reply, health_response) = oneshot::channel();
-    tx.send(RibUpdate::TestQueryOutboundHealth {
-        reply: health_reply,
-    })
-    .await
-    .unwrap();
-    assert_eq!(
-        health_response.await.unwrap(),
-        (0, 0, 0, 0, 0, 0),
-        "the success reply must follow the global dirty drain"
-    );
+    for receiver in &mut cohort_receivers {
+        let committed = delivered(receiver.try_recv().expect("cohort output before reply"));
+        assert_eq!(committed.announce.len(), 1);
+        assert_eq!(committed.announce[0].prefix, Prefix::V4(second_prefix));
+        assert!(committed.announce[0].attributes.iter().any(|attribute| {
+            matches!(attribute, PathAttribute::Communities(values) if values.contains(&0xFDE8_1102))
+        }));
+    }
+    assert!(matches!(
+        dirty_receiver.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::QueryOutboundConvergence { reply })
+        .await
+        .unwrap();
+    assert_eq!(response.await.unwrap().pending_peers, 1);
     assert_metric(
-        gauge_metric_value(&metrics, "bgp_update_group_residue_entries", &[]),
-        0.0,
-        "residue after pre-reply dirty drain",
+        gauge_metric_value(&metrics, "bgp_rib_outbound_dirty_peers", &[]),
+        1.0,
+        "unrelated debt remains observable after the reply",
     );
+    assert!(gauge_metric_value(&metrics, "bgp_update_group_residue_entries", &[]) > 0.0);
+
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
     let healed = fixture_update(dirty_receiver.recv()).await;
     assert!(
         healed
@@ -3690,13 +3699,29 @@ async fn clean_policy_transition_drains_unrelated_dirty_residue_before_reply() {
             .copied()
             .collect::<Vec<_>>()
             .contains(&(Prefix::V4(first_prefix), 0)),
-        "the pre-reply drain must emit the unrelated withdrawal residue"
+        "the resync tick must emit the unrelated withdrawal residue"
     );
     assert!(
         healed
             .announce
             .iter()
             .any(|route| route.prefix == Prefix::V4(second_prefix))
+    );
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::QueryOutboundConvergence { reply })
+        .await
+        .unwrap();
+    assert_eq!(response.await.unwrap().pending_peers, 0);
+    assert_metric(
+        gauge_metric_value(&metrics, "bgp_rib_outbound_dirty_peers", &[]),
+        0.0,
+        "dirty peers after the tick",
+    );
+    assert_metric(
+        gauge_metric_value(&metrics, "bgp_update_group_residue_entries", &[]),
+        0.0,
+        "residue after the tick",
     );
 
     drop(tx);
@@ -6160,7 +6185,7 @@ async fn grouped_and_ungrouped_export_counters_match_after_dirty_resync() {
 /// RR-client members installed on one shared export policy, `route_count`
 /// Loc-RIB routes distributed and drained, no actor task. Tests step the
 /// parked transition through the same seam the run loop polls.
-fn direct_clean_transition_manager(
+pub(super) fn direct_clean_transition_manager(
     member_count: usize,
     route_count: usize,
     readiness_rx: Option<mpsc::Receiver<crate::update::RibReadinessQuery>>,
@@ -6271,7 +6296,7 @@ fn direct_clean_transition_manager_with_policy(
 
 /// One run-loop poll of the parked transition, returning the recorded poll
 /// kind and outcome exactly as the actor seam observes them.
-fn step_parked_transition(manager: &mut RibManager) -> (&'static str, &'static str) {
+pub(super) fn step_parked_transition(manager: &mut RibManager) -> (&'static str, &'static str) {
     use crate::manager::distribution::CleanPolicyTransitionAdvance;
     let pending = manager
         .pending_clean_policy_transition
@@ -6301,7 +6326,7 @@ fn step_parked_transition(manager: &mut RibManager) -> (&'static str, &'static s
     }
 }
 
-fn start_clean_transition(
+pub(super) fn start_clean_transition(
     manager: &mut RibManager,
     peers: &[PeerId],
     next_policy: &PolicyChain,
@@ -11668,12 +11693,12 @@ impl crate::update::ExactExportSnapshot for HeldDirtyResyncEncoder {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn grouped_dirty_resync_timer_services_interior_readiness() {
-    dirty_resync_timer_services_interior_readiness(false).await;
+    Box::pin(dirty_resync_timer_services_interior_readiness(false)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn private_dirty_resync_timer_services_interior_readiness() {
-    dirty_resync_timer_services_interior_readiness(true).await;
+    Box::pin(dirty_resync_timer_services_interior_readiness(true)).await;
 }
 
 #[expect(
@@ -15442,18 +15467,11 @@ fn replacement_readiness_services_production_interiors_before_ack_and_queued_mut
                 });
             reply.send(Ok(Vec::new())).unwrap();
         } else if residual {
-            // A pre-existing dirty member outside the replacement command
-            // must also finish the forced repair before it acknowledges.
-            let members = if stage == "family_commit" {
-                &fleet.members[..3]
-            } else {
-                &fleet.members
-            };
             fleet.manager.paced_elapsed_for_test = Some(Duration::ZERO);
             fleet
                 .manager
                 .handle_update(RibUpdate::ApplyPacedExportPolicies {
-                    replacements: batch_replacements(members, &next),
+                    replacements: batch_replacements(&fleet.members, &next),
                     cost: Some(crate::update::PacedMemberCost::default()),
                     reply: paced_reply,
                 });
@@ -18192,14 +18210,14 @@ fn batched_authoritative_rollback_shares_an_occupied_destination() {
     assert!(fleet.manager.dirty_peers.is_empty());
 }
 
-/// The batch keeps its global retry opportunity: an incumbent already owing
-/// a withdrawal may recover, or retain that debt if its channel stays full.
+/// An incumbent keeps its withdrawal debt while other members move. The
+/// next tick retries it when writable and retains its debt when blocked.
 #[test]
 #[expect(
     clippy::too_many_lines,
     reason = "the same real missed withdrawal verifies successful and blocked incumbent retry"
 )]
-fn batched_authoritative_occupied_destination_preserves_incumbent_retry() {
+fn batched_authoritative_occupied_destination_leaves_incumbent_retry_to_tick() {
     for blocked in [false, true] {
         let old_policy = community_chain(0xFDE8_0001);
         let next_policy = community_chain(0xFDE8_0002);
@@ -18277,6 +18295,14 @@ fn batched_authoritative_occupied_destination_preserves_incumbent_retry() {
             let shared = receiver.try_recv().map(delivered).unwrap();
             assert!(shared.shared_group_encode.is_some());
         }
+        assert!(fleet.manager.dirty_peers.contains(&incumbent));
+        assert_eq!(fleet.receivers[3].len(), queued);
+        assert_eq!(
+            fleet.manager.group_ribs[&destination].tombstones,
+            tombstones
+        );
+
+        fleet.manager.resync_dirty_peers_bounded();
         assert_eq!(fleet.manager.dirty_peers.contains(&incumbent), blocked);
         assert_eq!(
             fleet.manager.group_ribs[&destination]
@@ -21044,3 +21070,67 @@ mod distinct_reload_controls;
 mod distinct_reload_scope_receipt;
 mod distinct_reload_work;
 mod optional_eviction_writer;
+
+/// Removing interest in a refused route must not subtract it from the
+/// remaining route's count. Regaining interest reprobes the refused route.
+#[test]
+fn rtc_membership_changes_keep_refused_vpn_counts_exact_after_resync() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let ip = Ipv4Addr::new(10, 252, 2, 1);
+    let peer = peer_v4(ip);
+    let mut families = vpn_sendable();
+    families.push((Afi::Ipv4, Safi::RtConstrain));
+    let mut receiver = register_direct_peer_with_families(&mut manager, peer, families);
+    assert!(manager.vpn_grouped_member_of(peer).is_some());
+    let interest = make_rtc_rib_route(ip, 200, 100);
+    manager.handle_rtc_routes_received(
+        peer,
+        vec![make_rtc_rib_route(ip, 100, 100), interest.clone()],
+        vec![],
+    );
+    let source = Ipv4Addr::new(192, 0, 2, 252);
+    let mut visible = make_vpn_rib_route_with_rts(source, 1, vec![rt(100)]);
+    let mut refused = make_vpn_rib_route_with_rts(source, 2, vec![rt(200)]);
+    visible.origin_type = crate::route::RouteOrigin::Ebgp;
+    refused.origin_type = crate::route::RouteOrigin::Ebgp;
+    let key = crate::update::ExactExportKey::Vpn(refused.key());
+    let encoder = super::exportability::MockExactExportEncoder::accepting(1);
+    encoder.set_profile(1, [key.clone()]);
+    manager.peer_export_encoders.insert(peer, encoder);
+    manager.handle_vpn_routes_received(peer_v4(source), vec![visible.clone(), refused], vec![]);
+
+    let check = |manager: &RibManager| {
+        assert_eq!(manager.grouped_vpn_advertised_count(peer), Some(1));
+        assert_eq!(manager.grouped_vpn_advertised_lens(peer), Some([1, 0]));
+    };
+    let mut wire = HashSet::new();
+    let mut drain = |receiver: &mut mpsc::Receiver<OutboundRouteUpdate>| {
+        while let Ok(update) = receiver.try_recv() {
+            for key in update.vpn_withdraw {
+                wire.remove(&key);
+            }
+            wire.extend(update.vpn_announce.iter().map(VpnRibRoute::key));
+        }
+        assert_eq!(wire, HashSet::from([visible.key()]));
+    };
+    check(&manager);
+    drain(&mut receiver);
+    for dirty in [false, true] {
+        assert!(manager.peer_unexportable[&peer].contains(&key));
+        if dirty {
+            assert!(manager.mark_outbound_dirty(peer));
+        }
+        manager.handle_rtc_routes_received(peer, vec![], vec![interest.key()]);
+        if dirty {
+            assert!(manager.dirty_peers.contains(&peer));
+            manager.resync_dirty_peers_bounded();
+        }
+        assert!(!manager.dirty_peers.contains(&peer));
+        check(&manager);
+        drain(&mut receiver);
+        manager.handle_rtc_routes_received(peer, vec![interest.clone()], vec![]);
+        check(&manager);
+        drain(&mut receiver);
+    }
+}

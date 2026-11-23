@@ -93,6 +93,8 @@ pub use manager::{
     SelectionDeferralWaiterConfig,
 };
 #[cfg(feature = "bench-internals")]
+pub use manager::{SourceDepartureProbe, SourceDepartureSnapshot};
+#[cfg(feature = "bench-internals")]
 pub use orf::bench_orf_filter;
 pub use orr::{
     NodeDescriptors, NodeIx, OrrLink, OrrLinkSnapshot, OrrNodeSnapshot, OrrPrefixSnapshot,

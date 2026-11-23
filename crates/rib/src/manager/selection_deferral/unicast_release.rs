@@ -665,9 +665,14 @@ impl RibManager {
         }
         if let Some(pass) = &mut walk.distribution {
             if walk.rejection_retirement.is_none() {
-                self.selection_release_staging = true;
+                self.selection_release_staging = Some(HashSet::new());
                 let done = self.poll_unicast_release_distribution(pass, false);
-                self.selection_release_staging = false;
+                debug_assert!(
+                    self.selection_release_staging
+                        .as_ref()
+                        .is_some_and(HashSet::is_empty)
+                );
+                self.selection_release_staging = None;
                 if !done {
                     return false;
                 }

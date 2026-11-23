@@ -487,11 +487,11 @@ fn export_explain_outbound_limit_preserves_earlier_exact_rejection() {
             .into_iter()
             .find(|prefix| !advertised.contains(prefix))
             .unwrap();
-        manager
-            .peer_unexportable
-            .entry(peer)
-            .or_default()
-            .insert(crate::update::ExactExportKey::Unicast(withheld, 0));
+        manager.set_exact_export_rejection(
+            peer,
+            crate::update::ExactExportKey::Unicast(withheld, 0),
+            true,
+        );
         let explanation = explain_export(&mut manager, peer, withheld);
         assert_eq!(explanation.decision, crate::update::ExplainDecision::Deny);
         assert_eq!(explanation.gates.last().unwrap().gate, "exact_export");

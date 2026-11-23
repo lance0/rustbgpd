@@ -594,13 +594,12 @@ A route-change event (UPDATE ingest, a source going down, route injection,
 graceful-restart and LLGR sweeps, an End-of-RIB stale purge) does not
 rebuild a dirty member inline: its pass leaves the member dirty, adds the
 pass's withdrawals to what the group keeps for it, and the resync tick
-rebuilds it. Passes that must heal before they continue or reply still
-rebuild every dirty member in the pass: a policy cohort commit, a refresh
-replay, and the RT-Constrain and ORR heals. The cost is latency: the first
-tick comes about 1 s after the member goes dirty, and a slow member whose
-channel is still full at its tick waits for the next one, about 1 s later,
-where the next route change used to retry it as soon as its channel had
-room.
+rebuilds it. Explicit recovery retries the receivers affected by the
+operation. A policy replacement gives its affected peers a retry before
+replying. A refresh retries the requesting peer, and RT-Constrain and ORR
+retry the receivers whose export view changed. Unrelated dirty peers stay
+on the resync tick. The first tick comes about 1 s after the member goes
+dirty. A member whose channel is still full can wait another tick.
 
 **The resync tick.** Owed-key drains, deferred refresh answers and dirty
 receivers share one 25 ms poll budget per tick, and each lane takes at

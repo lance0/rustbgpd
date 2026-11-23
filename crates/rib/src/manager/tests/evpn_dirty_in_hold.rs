@@ -21,13 +21,13 @@ fn session(address: Ipv4Addr) -> u64 {
 
 /// An export chain of the receiver's own: it holds EVPN in its own
 /// Adj-RIB-Out (private, no update group).
-fn private_chain() -> rustbgpd_policy::PolicyChain {
+fn private_chain(denied_asn: u32) -> rustbgpd_policy::PolicyChain {
     let mut chain = deny_prefixes_chain(&[Prefix::V4(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0))]);
     let entry = &mut chain.policies[0].policy.entries[0];
     entry.prefix = None;
     entry.match_neighbor_set = Some(rustbgpd_policy::NeighborSetMatch {
         addresses: vec![],
-        remote_asns: vec![u32::MAX],
+        remote_asns: vec![denied_asn],
         peer_groups: vec![],
     });
     rustbgpd_policy::PolicyChain::from_named(chain.policies)
@@ -42,7 +42,7 @@ fn connect(
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let peer = peer_v4(address);
     let (outbound_tx, outbound_rx) = mpsc::channel(capacity);
-    let export_policy = private.then(private_chain);
+    let export_policy = private.then(|| private_chain(65001));
     manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
         peer,
         session_id: session(address),
@@ -164,17 +164,18 @@ fn a_withdrawal_missed_before_an_evpn_hold_reaches_a_private_receiver_after_rele
     received(&mut manager, &[10], &[]);
     received(&mut manager, &[11], &[]);
     assert!(manager.outbound_channel_full(receiver));
-    let (reply, _result) = oneshot::channel();
+    let (reply, mut result) = oneshot::channel();
     manager.handle_update(RibUpdate::ReplacePeerExportPolicy {
         peer: receiver,
-        export_policy: Some(private_chain()),
+        export_policy: Some(private_chain(65002)),
         reply,
     });
-    received(&mut manager, &[], &[1]);
+    result.try_recv().unwrap().unwrap();
     assert!(
         manager.dirty_peers.contains(&receiver),
-        "full channel => dirty"
+        "the changed policy's retry is blocked by the full channel"
     );
+    received(&mut manager, &[], &[1]);
 
     // 3. The configured GR waiter connects: the EVPN hold arms.
     let mut waiter_rx = connect(&mut manager, WAITER, 64, true, false);

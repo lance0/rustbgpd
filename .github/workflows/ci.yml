@@ -671,6 +671,7 @@ jobs:
           python3 bench/tests/test_verify_mrt_attribute_scratch_campaign.py
           bash -n bench/scale/compare-rrharness.sh
           bash bench/tests/test-rrharness-driver.sh
+          python3 -m unittest discover -s bench/scale -p 'test_source_departure*.py' -v
           python3 -m unittest discover \
             -s bench/scale/enhanced-route-refresh -p 'test_*.py'
           python3 -m unittest discover \

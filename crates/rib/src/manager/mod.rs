@@ -16,6 +16,10 @@ pub use bench_support::{
     bench_recovery_capture_scan,
 };
 mod conditional_advertisement;
+#[cfg(feature = "bench-internals")]
+mod departure_probe;
+#[cfg(feature = "bench-internals")]
+pub use departure_probe::{SourceDepartureProbe, SourceDepartureSnapshot};
 mod dampening_history;
 mod distribution;
 mod eor_grace;
@@ -331,6 +335,9 @@ struct AdjRibOutCommitStats {
     /// Per-peer passes that built a full resync (dirty or force).
     #[cfg(test)]
     resync_builds: usize,
+    /// Full resyncs for just the fixture's contiguous range of unrelated peers.
+    #[cfg(test)]
+    watched_resync_builds: Option<(PeerId, PeerId, usize)>,
     /// Owed-drain work: unicast and EVPN keys a drain, absorption or close
     /// flush read, the drain steps that read any, and the most one step
     /// read.
@@ -667,10 +674,10 @@ enum FullPassPath {
 /// Runs as a single tokio task, receiving updates via an mpsc channel.
 /// No `Arc<RwLock>` — all state is owned by this task.
 #[cfg_attr(
-    any(test, feature = "bench-internals"),
+    test,
     expect(
         clippy::struct_excessive_bools,
-        reason = "independent test and benchmark switches coexist with production event-ID exhaustion, outbound-close and release-staging flags"
+        reason = "independent test switches coexist with production event-ID exhaustion and outbound-close flags"
     )
 )]
 pub struct RibManager {
@@ -1124,8 +1131,9 @@ pub struct RibManager {
     eor_replay: eor_grace::ReplayWait,
     /// Process-start RFC 4724 route-selection gates. `None` on cold starts.
     selection_deferral: Option<selection_deferral::SelectionDeferral>,
-    /// Release updates every selected view before pending whole-peer resyncs emit.
-    selection_release_staging: bool,
+    /// While staging, retain explicitly requested retries, including cross-family
+    /// effects such as a BGP-LS change to a unicast receiver's ORR vantage.
+    selection_release_staging: Option<HashSet<PeerId>>,
     unicast_release: selection_deferral::UnicastReleases,
     release_readiness_count: Option<usize>,
     /// Route identities touched while their family's Loc-RIB was frozen.
@@ -1417,6 +1425,8 @@ pub struct RibManager {
     /// Closed-cohort wire-oracle preparation only. Never configured by the daemon.
     #[cfg(feature = "bench-internals")]
     bench_evpn_group_ownership: bool,
+    #[cfg(feature = "bench-internals")]
+    departure_probe: Option<Arc<SourceDepartureProbe>>,
     /// Differential-oracle test hook: disqualify every peer from
     /// grouping so identical scenarios can be driven through the
     /// per-peer path (the correctness oracle) and compared against a
@@ -3159,7 +3169,7 @@ impl RibManager {
             eor_grace_deadlines: graceful_restart::DeadlineMap::default(),
             eor_replay: eor_grace::ReplayWait::default(),
             selection_deferral: None,
-            selection_release_staging: false,
+            selection_release_staging: None,
             unicast_release: selection_deferral::UnicastReleases::default(),
             release_readiness_count: None,
             deferred_selection_keys: selection_deferral::DeferredSelectionKeys::default(),
@@ -3188,6 +3198,8 @@ impl RibManager {
             paced_elapsed_for_test: None,
             #[cfg(feature = "bench-internals")]
             bench_evpn_group_ownership: false,
+            #[cfg(feature = "bench-internals")]
+            departure_probe: None,
             #[cfg(test)]
             test_force_ungrouped: false,
             #[cfg(any(test, feature = "bench-internals"))]
@@ -6698,10 +6710,14 @@ impl RibManager {
                     }
                 };
                 if !keep {
+                    self.adjust_group_rejection(*peer, key, false, None);
                     self.unicast_release.rejections.record(*peer, key, false);
                 }
                 keep
             });
+            if rejected.is_empty() {
+                self.clear_group_rejections(*peer);
+            }
             !rejected.is_empty()
         });
         self.peer_unexportable = overlay;
@@ -6956,19 +6972,25 @@ impl RibManager {
         {
             self.test_exact_export_liveness_reads += reads.get();
         }
-        self.peer_unexportable.retain(|peer, rejected| {
+        let mut overlay = std::mem::take(&mut self.peer_unexportable);
+        overlay.retain(|peer, rejected| {
             checkpoint();
             rejected.retain(|key| {
                 checkpoint();
                 let identity = key.nlri_identity();
                 let keep = !rejected_withdrawn.contains(&identity) || live.contains(&identity);
                 if !keep {
+                    self.adjust_group_rejection(*peer, key, false, None);
                     self.unicast_release.rejections.record(*peer, key, false);
                 }
                 keep
             });
+            if rejected.is_empty() {
+                self.clear_group_rejections(*peer);
+            }
             !rejected.is_empty()
         });
+        self.peer_unexportable = overlay;
         retire_hash_set(&mut live, &mut checkpoint);
         retire_hash_set(&mut rejected_withdrawn, &mut checkpoint);
         retire_hash_set(&mut withdrawn, &mut checkpoint);
@@ -7571,7 +7593,7 @@ impl RibManager {
             }
         } else {
             self.mark_outbound_dirty(peer);
-            self.distribute_resync_request();
+            self.distribute_scoped_resync([peer], HashMap::new(), false);
         }
         if captured_prior
             && !self.dirty_peers.contains(&peer)
@@ -7758,11 +7780,8 @@ impl RibManager {
     /// changed next-hop cost surface (metric shift, lookup change, or
     /// vantage resolution flip) can
     /// move those peers' per-vantage bests without any unicast RIB
-    /// change, so nothing else would re-stage them. Dirty + empty-set
-    /// `distribute_changes` is the `ReplacePeerExportPolicy` precedent —
-    /// the Adj-RIB-Out equality machinery reduces the full restage to
-    /// the minimal announce/withdraw delta per peer (unaffected peers
-    /// see zero messages).
+    /// change. Restage their outbound tables and emit the announce/withdraw
+    /// delta against each peer's admitted routes.
     fn resync_orr_bound_peers(&mut self, changed: &HashSet<IpAddr>) {
         if changed.is_empty() {
             return;
@@ -7781,10 +7800,10 @@ impl RibManager {
         // Preserve the single dirty-marking seam: ORR currently disqualifies
         // grouping, but routing through the helper also marks group state if
         // that eligibility rule changes later.
-        for peer in bound {
+        for &peer in &bound {
             self.mark_outbound_dirty(peer);
         }
-        self.distribute_resync_request();
+        self.distribute_scoped_resync(bound, HashMap::new(), false);
     }
 
     /// The ORR topology input: every peer's BGP-LS Adj-RIB-In, excluding

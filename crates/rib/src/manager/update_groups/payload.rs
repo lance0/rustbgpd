@@ -2062,7 +2062,51 @@ pub(in crate::manager) struct EvpnGroupDelta {
     pub(in crate::manager) new: Option<EvpnGroupEntry>,
 }
 
+pub(in crate::manager) enum EvpnMemberDelta<'a> {
+    Announce(&'a crate::route::EvpnRibRoute),
+    Withdraw,
+}
+
 impl EvpnGroupDelta {
+    /// The ordinary wire change for this member after both projections.
+    pub(in crate::manager) fn for_member(
+        &self,
+        group: &super::GroupRibOut,
+        member: PeerId,
+        cluster_id: Option<std::net::Ipv4Addr>,
+        membership: Option<&super::RtcMembership>,
+        rejected: Option<&HashSet<crate::update::ExactExportKey>>,
+    ) -> Option<EvpnMemberDelta<'_>> {
+        let prior = self.old.as_ref().filter(|entry| {
+            entry.input.eligible(
+                &entry.route,
+                member,
+                group,
+                cluster_id,
+                membership,
+                rejected,
+            )
+        });
+        let current = self.new.as_ref().filter(|entry| {
+            // Changed desired values need a fresh exact-export probe even
+            // when the previous value failed; admission owns overlay commit.
+            entry
+                .input
+                .eligible(&entry.route, member, group, cluster_id, membership, None)
+        });
+        match (prior, current) {
+            (Some(_), None) => Some(EvpnMemberDelta::Withdraw),
+            (old, Some(new))
+                if old.is_none_or(|old| {
+                    !crate::manager::helpers::evpn_routes_equal(&old.route, &new.route)
+                }) =>
+            {
+                Some(EvpnMemberDelta::Announce(&new.route))
+            }
+            _ => None,
+        }
+    }
+
     /// The canonical changed announcement before per-member eligibility.
     pub(in crate::manager) fn changed_announce(&self) -> Option<&crate::route::EvpnRibRoute> {
         let new = self.new.as_ref()?;
@@ -2141,33 +2185,10 @@ pub(in crate::manager) fn emit_evpn_group_deltas_for_member_with_checkpoint(
 ) {
     for delta in deltas {
         checkpoint();
-        let prior = delta.old.as_ref().filter(|entry| {
-            entry.input.eligible(
-                &entry.route,
-                member,
-                group,
-                cluster_id,
-                membership,
-                rejected,
-            )
-        });
-        let current = delta.new.as_ref().filter(|entry| {
-            // Changed desired values need a fresh exact-export probe even
-            // when the previous value failed; admission owns overlay commit.
-            entry
-                .input
-                .eligible(&entry.route, member, group, cluster_id, membership, None)
-        });
-        match (prior, current) {
-            (Some(_), None) => withdraw.push(delta.key),
-            (old, Some(new))
-                if old.is_none_or(|old| {
-                    !crate::manager::helpers::evpn_routes_equal(&old.route, &new.route)
-                }) =>
-            {
-                announce(&new.route);
-            }
-            _ => {}
+        match delta.for_member(group, member, cluster_id, membership, rejected) {
+            Some(EvpnMemberDelta::Announce(route)) => announce(route),
+            Some(EvpnMemberDelta::Withdraw) => withdraw.push(delta.key),
+            None => {}
         }
     }
 }

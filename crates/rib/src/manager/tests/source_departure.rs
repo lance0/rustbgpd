@@ -1219,8 +1219,8 @@ fn drain_rs_stage(
     (announced, withdrawn)
 }
 
-#[tokio::test(start_paused = true)]
-async fn grouped_source_departure_rechecks_rs_control_tags_for_each_family_stage() {
+async fn rs_control_departure(refusals_per_family: u16) {
+    use crate::update::ExactExportKey;
     let (tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     for source in [SOURCE, OTHER] {
@@ -1232,12 +1232,30 @@ async fn grouped_source_departure_rechecks_rs_control_tags_for_each_family_stage
     let first = peer_v4(Ipv4Addr::new(192, 0, 2, 1));
     let group = manager.grouped_member_of(first).unwrap();
     assert_eq!(manager.group_ribs[&group].members.len(), outputs.len());
+    if refusals_per_family > 0 {
+        let encoder = super::exportability::MockExactExportEncoder::accepting(1);
+        encoder.set_profile(
+            1,
+            (0..refusals_per_family).flat_map(|index| {
+                [
+                    Prefix::V4(prefix(u32::from(index))),
+                    Prefix::V6(rs_v6(index)),
+                ]
+                .map(|prefix| ExactExportKey::Unicast(prefix, 0))
+            }),
+        );
+        for &peer in &manager.group_ribs[&group].members {
+            manager.peer_export_encoders.insert(peer, encoder.clone());
+        }
+    }
     for source in [SOURCE, OTHER] {
         manager.handle_update(rs_stage_routes(source));
         drain_route_chunks(&mut manager);
     }
-    let plain = expected_rows(u32::from(RS_STAGE_ROWS));
-    let tagged: BTreeSet<_> = (0..RS_STAGE_ROWS)
+    let plain: BTreeSet<_> = (refusals_per_family..RS_STAGE_ROWS)
+        .map(|index| Prefix::V4(prefix(u32::from(index))))
+        .collect();
+    let tagged: BTreeSet<_> = (refusals_per_family..RS_STAGE_ROWS)
         .map(|index| Prefix::V6(rs_v6(index)))
         .collect();
     let both: BTreeSet<_> = plain.union(&tagged).copied().collect();
@@ -1256,10 +1274,12 @@ async fn grouped_source_departure_rechecks_rs_control_tags_for_each_family_stage
     drop(tx);
     take_receiver_rows();
     let mut actor = Box::pin(manager.run_actor());
-    let mut peak = 0;
+    let (mut peak, mut work_polls) = (0, 0);
     let end = poll_fn(|cx| {
         let result = actor.as_mut().poll(cx);
-        peak = peak.max(take_receiver_rows());
+        let rows = take_receiver_rows();
+        work_polls += usize::from(rows > 0);
+        peak = peak.max(rows);
         result
     })
     .await;
@@ -1267,6 +1287,12 @@ async fn grouped_source_departure_rechecks_rs_control_tags_for_each_family_stage
     assert!(end.source_departure.is_none());
     for (index, output) in outputs.iter_mut().enumerate() {
         let (announced, withdrawn) = drain_rs_stage(output, OTHER);
+        let peer = peer_v4(Ipv4Addr::new(192, 0, 2, u8::try_from(index + 1).unwrap()));
+        let v6_count = if index == 0 { 0 } else { tagged.len() };
+        assert_eq!(
+            end.grouped_advertised_unicast_lens(peer),
+            Some([0, v6_count])
+        );
         if index == 0 {
             assert_eq!(announced, BTreeSet::new());
             assert_eq!(withdrawn, both);
@@ -1275,14 +1301,26 @@ async fn grouped_source_departure_rechecks_rs_control_tags_for_each_family_stage
             assert_eq!(withdrawn, plain);
         }
     }
+    assert!(work_polls > 1, "expected multiple receiver pages");
     eprintln!(
-        "RS-control plain-to-tagged departure: K=3 rows_per_family={RS_STAGE_ROWS} max_inspected_per_poll={peak}"
+        "RS-control plain-to-tagged departure: refusals_per_family={refusals_per_family} K=3 rows_per_family={RS_STAGE_ROWS} max_inspected_per_poll={peak}"
     );
     let unit = crate::manager::source_departure::QUIET_UNIT_RECEIVER_KEYS;
     assert!(
         peak > 0 && peak <= unit,
         "{peak} receiver-key inspections in one quiet unit, limit {unit}"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn grouped_source_departure_rechecks_rs_control_tags_for_each_family_stage() {
+    rs_control_departure(0).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn grouped_source_departure_bounds_rs_control_and_exact_refusals_together() {
+    // 192 RS checks plus 96 retained refusals exceed the 256-row poll budget.
+    rs_control_departure(96).await;
 }
 
 /// Eight private receivers holding the departing table and 2,048 unrelated

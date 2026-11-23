@@ -420,7 +420,8 @@ fn regroup_with(
     manager.create_installed_export_counters([peer]);
     manager.mark_outbound_dirty_with_evpn_feed(peer, &mut feed);
     fault(manager, peer, &mut feed);
-    manager.distribute_changes_with_evpn_feeds(
+    manager.distribute_scoped_resync(
+        [peer],
         feed.into_iter().map(|feed| (peer, feed)).collect(),
         false,
     );
@@ -1122,11 +1123,11 @@ fn fleet_pass(missed: &[usize], gate: bool) {
     for &index in missed {
         fill(&fleet.manager, members[index]);
     }
-    fleet.manager.selection_release_staging = gate;
+    fleet.manager.selection_release_staging = gate.then(HashSet::new);
     fleet
         .manager
-        .distribute_changes_with_evpn_feeds(feeds, false);
-    fleet.manager.selection_release_staging = false;
+        .distribute_scoped_resync(members.iter().copied(), feeds, false);
+    fleet.manager.selection_release_staging = None;
     let wire_after = |updates: &[OutboundRouteUpdate], index: usize, context: &str| {
         let mut wire: HashSet<_> = expected_old()[index].iter().copied().collect();
         for update in updates {

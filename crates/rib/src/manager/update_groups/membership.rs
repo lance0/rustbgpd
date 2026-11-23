@@ -978,6 +978,18 @@ impl RibManager {
                     super::super::replacement_readiness_checkpoint(&readiness, false);
                 });
             }
+            if let Some(keys) = self.peer_unexportable.get(&peer) {
+                let mut counts = [0; 4];
+                for key in keys {
+                    super::super::replacement_readiness_checkpoint(&readiness, false);
+                    if let Some(slot) =
+                        group.visible_rejected_slot(peer, key, rs_control, filter.as_ref())
+                    {
+                        counts[slot] += 1;
+                    }
+                }
+                group.visible_rejections.insert(peer, counts);
+            }
         }
     }
 }

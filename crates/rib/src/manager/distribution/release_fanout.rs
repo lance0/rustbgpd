@@ -38,6 +38,10 @@ enum Phase {
     RetireFallback(usize, Prefix),
     MemberDenials(PeerId, MemberVerdicts),
     RetireVerdicts(usize, Prefix),
+    AdjustRejections {
+        gid: usize,
+        restore: bool,
+    },
     RemoveRsCounts(usize),
     StageGroup(usize),
     Deliver,
@@ -465,6 +469,27 @@ impl RibManager {
                     pass.phase = Phase::Deliver;
                 }
             }
+            // Either correction can use a full departure row budget. Keep
+            // refusal, RS-control and emission walks in separate polls.
+            Phase::AdjustRejections { gid, restore } => {
+                let end = (pass.next_member + pass.member_limit(RELEASE_MEMBERS_PER_POLL))
+                    .min(pass.current.len());
+                self.adjust_staged_unicast_rejections(
+                    gid,
+                    Some(&pass.current[pass.next_member..end]),
+                    pass.scope(),
+                    restore,
+                );
+                pass.next_member = end;
+                if end == pass.current.len() {
+                    pass.next_member = 0;
+                    pass.phase = if restore {
+                        Phase::Deliver
+                    } else {
+                        self.release_rs_count_phase(gid)
+                    };
+                }
+            }
             Phase::RemoveRsCounts(gid) => {
                 let end = (pass.next_member + pass.member_limit(RELEASE_MEMBERS_PER_POLL))
                     .min(pass.current.len());
@@ -504,7 +529,15 @@ impl RibManager {
                     pcb,
                 );
                 pass.staged.insert(gid, stage);
-                pass.phase = Phase::Deliver;
+                pass.phase = if self
+                    .group_ribs
+                    .get(&gid)
+                    .is_some_and(GroupRibOut::has_member_rejections)
+                {
+                    Phase::AdjustRejections { gid, restore: true }
+                } else {
+                    Phase::Deliver
+                };
             }
             Phase::Deliver | Phase::DeliverAfterRsRestore { .. } => {
                 let pinned = match pass.phase {
@@ -626,6 +659,21 @@ impl RibManager {
     }
 
     fn next_release_group_phase(&self, gid: usize) -> Phase {
+        if self
+            .group_ribs
+            .get(&gid)
+            .is_some_and(GroupRibOut::has_member_rejections)
+        {
+            Phase::AdjustRejections {
+                gid,
+                restore: false,
+            }
+        } else {
+            self.release_rs_count_phase(gid)
+        }
+    }
+
+    fn release_rs_count_phase(&self, gid: usize) -> Phase {
         if self
             .group_ribs
             .get(&gid)

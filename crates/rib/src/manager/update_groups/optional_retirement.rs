@@ -2,8 +2,8 @@
 
 use super::policy_transition::retire_inventory_vec;
 use super::{
-    AddrMap, BatchedMemberSupplement, BatchedTransitionCounters, FastMap, FastState, GroupRibOut,
-    HashSet, NextHopAction, PeerId, PolicyLabel, Prefix, Route, ShardedMap, merge_owned_maps,
+    AddrMap, BatchedMemberSupplement, BatchedTransitionCounters, FastMap, GroupRibOut,
+    NextHopAction, PeerId, PolicyLabel, Prefix, Route, ShardedMap,
 };
 
 /// An optional preparation can be discarded before ever gaining a member.
@@ -12,7 +12,7 @@ use super::{
 /// remains the group's only OTC store if the destination is adopted.
 #[derive(Debug)]
 pub(super) enum OtcBlocked {
-    Ordinary(FastMap<(Prefix, u32), Route>),
+    Ordinary(FastMap<Prefix, Route>),
     Optional(ShardedMap<Prefix, Route>),
 }
 
@@ -50,42 +50,17 @@ impl OtcBlocked {
         }
     }
 
-    pub(super) fn replace_for<S: std::hash::BuildHasher>(
-        &mut self,
-        prefixes: &HashSet<Prefix, S>,
-        blocked: &[Route],
-        checkpoint: &mut impl FnMut(),
-    ) {
+    pub(super) fn get(&self, prefix: &Prefix) -> Option<&Route> {
         match self {
-            Self::Ordinary(map) => {
-                map.retain(|(prefix, _), _| {
-                    checkpoint();
-                    !prefixes.contains(prefix)
-                });
-                // Keep actor checkpoints around growth of the ordinary route map.
-                let mut incoming =
-                    FastMap::with_capacity_and_hasher(blocked.len(), FastState::default());
-                checkpoint();
-                for route in blocked {
-                    checkpoint();
-                    incoming.insert((route.prefix, route.path_id), route.clone());
-                }
-                merge_owned_maps(map, incoming, checkpoint);
-            }
-            Self::Optional(map) => {
-                // A single-best staging pass can block only the path-0 winner.
-                if !map.is_empty() {
-                    for prefix in prefixes {
-                        checkpoint();
-                        map.remove(prefix);
-                    }
-                }
-                for route in blocked {
-                    checkpoint();
-                    debug_assert_eq!(route.path_id, 0);
-                    map.insert(route.prefix, route.clone());
-                }
-            }
+            Self::Ordinary(map) => map.get(prefix),
+            Self::Optional(map) => map.get(prefix),
+        }
+    }
+
+    pub(super) fn capacity(&self) -> usize {
+        match self {
+            Self::Ordinary(map) => map.capacity(),
+            Self::Optional(map) => map.capacity(),
         }
     }
 }
