@@ -4182,6 +4182,7 @@ fn a_deferral_after_the_tombstones_retire_copies_the_withdrawals_again() {
     );
 }
 
+mod cohort_capture;
 mod cold_cohort_ownership;
 mod idle_pass_capture;
 mod retained_residue;

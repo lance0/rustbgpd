@@ -2604,16 +2604,21 @@ impl RibManager {
         self.capture_group_admitted_keys_inner(peer, false)
     }
 
+    /// No proof, fallback or dirt yet, and a live channel: a capture owns
+    /// this member's next episode.
+    fn group_capture_fresh(&self, peer: PeerId) -> bool {
+        !(self.pending_group_admitted.contains_record(peer)
+            || self.group_recovery_fallback(peer).is_some()
+            || self.dirty_peers.contains(&peer)
+            || self.outbound_channel_gone(peer))
+    }
+
     fn capture_group_admitted_keys_inner(
         &mut self,
         peer: PeerId,
         mark_dirty_on_refusal: bool,
     ) -> bool {
-        if self.pending_group_admitted.contains_record(peer)
-            || self.group_recovery_fallback(peer).is_some()
-            || self.dirty_peers.contains(&peer)
-            || self.outbound_channel_gone(peer)
-        {
+        if !self.group_capture_fresh(peer) {
             return false;
         }
         // Ingest can capture OLD before its peer-boundary readiness drain.
@@ -2625,11 +2630,295 @@ impl RibManager {
         })
     }
 
+    /// [`Self::capture_group_admitted_keys`] for each of `peers`, returning
+    /// the members captured. Members of one group whose projections differ
+    /// only by [`Self::shared_capture_group`]'s per-member exclusions share
+    /// two walks of the group table; every other member is captured alone.
+    pub(in crate::manager) fn capture_group_admitted_keys_batch(
+        &mut self,
+        peers: &[PeerId],
+    ) -> Vec<PeerId> {
+        let mut captured = Vec::new();
+        let mut cohorts: Vec<(usize, Vec<PeerId>)> = Vec::new();
+        for &peer in peers {
+            match self.shared_capture_group(peer) {
+                Some(gid) => match cohorts.iter_mut().find(|(group, _)| *group == gid) {
+                    Some((_, members)) => members.push(peer),
+                    None => cohorts.push((gid, vec![peer])),
+                },
+                None => {
+                    if self.capture_group_admitted_keys(peer) {
+                        captured.push(peer);
+                    }
+                }
+            }
+        }
+        for (gid, members) in cohorts {
+            if let [peer] = members[..] {
+                if self.capture_group_admitted_keys(peer) {
+                    captured.push(peer);
+                }
+                continue;
+            }
+            let served = super::with_executor_handoff(|| {
+                self.with_replacement_readiness(|manager| {
+                    manager.capture_group_cohort_with_readiness(gid, &members)
+                })
+            });
+            captured.extend(served);
+        }
+        captured
+    }
+
+    /// The group whose cohort capture can serve `peer`. Its group projection
+    /// ([`Self::capture_begun_group_admitted_keys`]) must equal the group's
+    /// member-independent projection minus the rows it sources and, with
+    /// RFC 7947 control, the control-indexed rows suppressed toward it.
+    /// Every other per-member input sends it to its own capture: a regroup
+    /// baseline, a per-client-best lane, VPN rows (RT filter), an
+    /// exact-export rejection, an outbound prefix limit, or a control
+    /// context the group's index does not hold.
+    fn shared_capture_group(&self, peer: PeerId) -> Option<usize> {
+        if !self.group_capture_fresh(peer) || self.pending_regroup_baseline.contains_key(&peer) {
+            return None;
+        }
+        let gid = self.grouped_member_of(peer)?;
+        let group = self.group_ribs.get(&gid)?;
+        let rs_control = self
+            .peer_rs_control
+            .get(&peer)
+            .copied()
+            .zip(self.peer_asn.get(&peer).copied());
+        (!group.per_client_best
+            && !group.stages_vpn()
+            && group.table.vpn_len() == 0
+            && self
+                .peer_unexportable
+                .get(&peer)
+                .is_none_or(HashSet::is_empty)
+            && !self.outbound_prefix_limits.contains_key(&peer)
+            && group.rs_members.get(&peer).copied() == rs_control)
+            .then_some(gid)
+    }
+
+    fn group_capture_checkpoint(&self) -> impl FnMut(bool) + use<> {
+        let readiness = self.replacement_readiness.clone();
+        #[cfg(test)]
+        let observer = self.replacement_readiness_test_hook.clone();
+        move |force| {
+            #[cfg(test)]
+            if force && let Some(observer) = &observer {
+                observer("common_capture");
+            }
+            super::replacement_readiness_checkpoint(&readiness, force);
+        }
+    }
+
+    /// One cohort capture of `members` (two or more, all fresh, all passing
+    /// [`Self::shared_capture_group`] for `gid`), with each member that the
+    /// shared pool cannot represent captured alone. Returns the captured.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the cohort's begin, projection, capture, seal and per-member fallback stay one actor transaction"
+    )]
+    fn capture_group_cohort_with_readiness(
+        &mut self,
+        gid: usize,
+        members: &[PeerId],
+    ) -> Vec<PeerId> {
+        use admitted_recovery::Key;
+        let mut checkpoint = self.group_capture_checkpoint();
+        let mut begun = Vec::with_capacity(members.len());
+        for &peer in members {
+            match self
+                .pending_group_admitted
+                .begin_capture_with_checkpoint(peer, &mut checkpoint)
+            {
+                Ok(_) => begun.push(peer),
+                Err(error) => self.record_group_recovery_refusal(peer, error, true),
+            }
+        }
+        let Some(group) = self.group_ribs.get_mut(&gid) else {
+            return begun
+                .into_iter()
+                .filter(|&peer| self.capture_begun_group_admitted_keys(peer, true))
+                .collect();
+        };
+        #[cfg(feature = "bench-internals")]
+        let mut bench_draft = Some(super::bench_support::GroupCaptureDraft::begin(
+            group.recovery_snapshot,
+            group.table.unicast_slot_count(),
+        ));
+        #[cfg(feature = "bench-internals")]
+        let bench_slots = group.table.unicast_slot_count();
+        let index: HashMap<PeerId, usize> = begun
+            .iter()
+            .enumerate()
+            .map(|(member, &peer)| (peer, member))
+            .collect();
+        let controlled: Vec<(usize, PeerId, (u32, u32))> = begun
+            .iter()
+            .enumerate()
+            .filter_map(|(member, &peer)| {
+                let rs = group.rs_members.get(&peer).copied()?;
+                Some((member, peer, rs))
+            })
+            .collect();
+        let local_role = group.local_role;
+        #[cfg(test)]
+        let projections = std::cell::Cell::new(0_usize);
+        let projected: &GroupRibOut = group;
+        // A member that is not the row's source keeps the staged route at its
+        // own key, unless RFC 7947 control suppresses it toward that member:
+        // only `rs_tagged` rows can, and only for members their targets name.
+        let project = |staged: &Route| {
+            #[cfg(test)]
+            projections.set(projections.get() + 1);
+            (!super::distribution::otc_egress_blocked(staged, local_role))
+                .then_some(Key::Unicast(staged.prefix, staged.path_id))
+        };
+        let exclude = |staged: &Route, excluded: &mut dyn FnMut(usize)| {
+            if let Some(&member) = index.get(&staged.peer) {
+                excluded(member);
+            }
+            if controlled.is_empty() {
+                return;
+            }
+            let key = (staged.prefix, staged.path_id);
+            let Some(targets) = projected.rs_tagged.get(&key) else {
+                return;
+            };
+            for &(member, peer, rs) in &controlled {
+                if peer != staged.peer
+                    && targets.names(rs)
+                    && projected
+                        .adv_entry_post_backstop_for(peer, &key.0, key.1, Some(rs))
+                        .is_none()
+                {
+                    excluded(member);
+                }
+            }
+        };
+        let capture = self
+            .pending_group_admitted
+            .capture_cohort_old_with_checkpoint(
+                &begun,
+                group.recovery_snapshot,
+                &group.table,
+                project,
+                exclude,
+                &mut checkpoint,
+            );
+        if let Some(handle) = capture.handle {
+            group.recovery_snapshot = Some(handle);
+        }
+        #[cfg(test)]
+        {
+            self.adj_rib_out_commit_stats.group_capture_projections += projections.get();
+            self.adj_rib_out_commit_stats.group_table_captures += capture.shared.len();
+        }
+        let mut captured = Vec::with_capacity(begun.len());
+        for (peer, error) in capture.failed {
+            self.record_group_recovery_refusal(peer, error, true);
+        }
+        for peer in capture.shared {
+            if let Err(error) = self
+                .pending_group_admitted
+                .seal_capture_with_checkpoint(peer, &mut checkpoint)
+            {
+                self.record_group_recovery_refusal(peer, error, true);
+                continue;
+            }
+            #[cfg(test)]
+            self.assert_cohort_proof_matches_own_capture(peer);
+            #[cfg(feature = "bench-internals")]
+            {
+                let draft = bench_draft.take().unwrap_or_else(|| {
+                    super::bench_support::GroupCaptureDraft::begin(capture.handle, bench_slots)
+                });
+                draft.sealed_shared(
+                    self.pending_group_admitted
+                        .get(&peer)
+                        .map_or(0, admitted_recovery::AdmittedKeyView::len),
+                    capture.handle,
+                    self.pending_group_admitted.bench_peer_charge(peer),
+                    self.pending_group_admitted.bytes(),
+                );
+            }
+            captured.push(peer);
+        }
+        self.refresh_group_recovery_gauges();
+        for peer in capture.individual {
+            if self.capture_begun_group_admitted_keys(peer, true) {
+                captured.push(peer);
+            }
+        }
+        captured
+    }
+
+    /// Test oracle: a proof served by a cohort capture equals the member's
+    /// own group projection, key for key.
+    #[cfg(test)]
+    fn assert_cohort_proof_matches_own_capture(&self, peer: PeerId) {
+        use admitted_recovery::Key;
+        let group = &self.group_ribs[&self.grouped_member_of(peer).expect("grouped")];
+        let rs_control = self
+            .peer_rs_control
+            .get(&peer)
+            .copied()
+            .zip(self.peer_asn.get(&peer).copied());
+        let rejected = self.peer_unexportable.get(&peer);
+        let limits = self.outbound_prefix_limits.get(&peer);
+        let mut own: Vec<Key> = group
+            .table
+            .iter()
+            .filter_map(|staged| {
+                let route = group
+                    .adv_entry_post_backstop_for(peer, &staged.prefix, staged.path_id, rs_control)?
+                    .route;
+                let key = ExactExportKey::Unicast(route.prefix, route.path_id);
+                (!rejected.is_some_and(|keys| keys.contains(&key))
+                    && limits.is_none_or(|limits| limits.admits_grouped(&route.prefix)))
+                .then_some(Key::Unicast(route.prefix, route.path_id))
+            })
+            .collect();
+        own.sort_unstable();
+        own.dedup();
+        let mut served: Vec<Key> = self
+            .pending_group_admitted
+            .get(&peer)
+            .expect("sealed proof")
+            .iter()
+            .map(|key| Key::try_from(&key).expect("unicast key"))
+            .collect();
+        served.sort_unstable();
+        assert_eq!(
+            served, own,
+            "{peer}: cohort proof differs from its own capture"
+        );
+    }
+
+    fn capture_group_admitted_keys_with_readiness(
+        &mut self,
+        peer: PeerId,
+        mark_dirty_on_refusal: bool,
+    ) -> bool {
+        let mut checkpoint = self.group_capture_checkpoint();
+        if let Err(error) = self
+            .pending_group_admitted
+            .begin_capture_with_checkpoint(peer, &mut checkpoint)
+        {
+            self.record_group_recovery_refusal(peer, error, mark_dirty_on_refusal);
+            return false;
+        }
+        self.capture_begun_group_admitted_keys(peer, mark_dirty_on_refusal)
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "keep the fallible old-view capture and its failure publication in one actor transaction"
     )]
-    fn capture_group_admitted_keys_with_readiness(
+    fn capture_begun_group_admitted_keys(
         &mut self,
         peer: PeerId,
         mark_dirty_on_refusal: bool,
@@ -2642,23 +2931,7 @@ impl RibManager {
             .get(&peer)
             .copied()
             .zip(self.peer_asn.get(&peer).copied());
-        let readiness = self.replacement_readiness.clone();
-        #[cfg(test)]
-        let observer = self.replacement_readiness_test_hook.clone();
-        let mut checkpoint = |force| {
-            #[cfg(test)]
-            if force && let Some(observer) = &observer {
-                observer("common_capture");
-            }
-            super::replacement_readiness_checkpoint(&readiness, force);
-        };
-        if let Err(error) = self
-            .pending_group_admitted
-            .begin_capture_with_checkpoint(peer, &mut checkpoint)
-        {
-            self.record_group_recovery_refusal(peer, error, mark_dirty_on_refusal);
-            return false;
-        }
+        let mut checkpoint = self.group_capture_checkpoint();
         #[cfg(feature = "bench-internals")]
         let mut bench_capture = None;
         let result = if self.pending_regroup_baseline.contains_key(&peer) || gid.is_none() {
@@ -2725,7 +2998,11 @@ impl RibManager {
             let limits = self.outbound_prefix_limits.get(&peer);
             let projected: &GroupRibOut = group;
             let old_filter = filter.as_ref();
+            #[cfg(test)]
+            let projections = std::cell::Cell::new(0_usize);
             let project_uc = |staged: &Route| {
+                #[cfg(test)]
+                projections.set(projections.get() + 1);
                 let entry = projected.adv_entry_post_backstop_for(
                     peer,
                     &staged.prefix,
@@ -2739,6 +3016,8 @@ impl RibManager {
                 .then_some(Key::Unicast(route.prefix, route.path_id))
             };
             let project_vpn = |route: &VpnRibRoute| {
+                #[cfg(test)]
+                projections.set(projections.get() + 1);
                 (projected.stages_vpn()
                     && route.peer != peer
                     && rt_passes(old_filter, route)
@@ -2760,6 +3039,10 @@ impl RibManager {
                     project_vpn,
                     &mut checkpoint,
                 );
+            #[cfg(test)]
+            {
+                self.adj_rib_out_commit_stats.group_capture_projections += projections.get();
+            }
             if let Ok(outcome) = &result
                 && let Some(handle) = outcome.handle
             {
