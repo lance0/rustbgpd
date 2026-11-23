@@ -174,12 +174,15 @@ impl RibManager {
         if self.dirty_peers.contains(&peer) || self.force_outbound_peers.contains(&peer) {
             self.wake_unicast_release_resync(peer, family);
         } else if self.grouped_member_of(peer).is_some()
-            && self.send_route_refresh_response_inner(
-                peer,
-                family.0,
-                family.1,
-                FamilyReplayKind::SelectionRelease,
-            ) == FamilyReplayOutcome::Committed
+            && matches!(
+                self.send_route_refresh_response_inner(
+                    peer,
+                    family.0,
+                    family.1,
+                    FamilyReplayKind::SelectionRelease
+                ),
+                FamilyReplayOutcome::Committed | FamilyReplayOutcome::NoReleaseRows
+            )
         {
             self.settle_eor_of(
                 peer,

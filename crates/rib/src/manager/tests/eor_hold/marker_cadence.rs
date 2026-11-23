@@ -146,6 +146,87 @@ async fn vpn_release_448() {
     check_release(448, FAMILY, 56).await;
 }
 
+// The receivers already have the unicast table when an empty VPN release
+// finds their writers full. Count both table builds and actual envelopes.
+#[tokio::test(start_paused = true)]
+async fn refused_vpn_release_retries_only_the_marker() {
+    const ROWS: u16 = 1_000;
+    let mut results = Vec::new();
+    for size in [8_u16, 64] {
+        let Cohort {
+            mut manager,
+            input,
+            _waiter_output,
+            ..
+        } = held_cohort(0, FAMILY);
+        let (source_tx, _source_output) = mpsc::channel(16);
+        manager.handle_update(super::super::lifecycle::test_peer_up(SOURCE, 3, source_tx));
+        let routes = (0..u32::from(ROWS))
+            .map(|n| make_indexed_route(n, Ipv4Addr::new(10, 0, 0, 1)))
+            .collect();
+        manager.handle_update(super::super::lifecycle::test_session_routes_received(
+            SOURCE, 3, routes,
+        ));
+        drain_route_chunks(&mut manager);
+        let mut outputs = Vec::new();
+        for n in 0..size {
+            let [hi, lo] = n.to_be_bytes();
+            let peer = peer_v4(Ipv4Addr::new(198, 18, hi, lo));
+            let mut output = connect_with(&mut manager, peer, 2, vec![V4, FAMILY]);
+            let admitted: usize = std::iter::from_fn(|| output.try_recv().ok())
+                .map(delivered)
+                .map(|update| {
+                    assert!(!update.end_of_rib.contains(&FAMILY));
+                    update.announce.len()
+                })
+                .sum();
+            assert_eq!(admitted, usize::from(ROWS));
+            let writer = &manager.outbound_peers[&peer];
+            while writer.try_send(OutboundRouteUpdate::default()).is_ok() {}
+            outputs.push(output);
+        }
+
+        let builds = manager.adj_rib_out_commit_stats.resync_builds;
+        let start = Instant::now();
+        let actor = tokio::spawn(manager.run_actor());
+        input.send(release_waiter(FAMILY)).await.unwrap();
+        barrier(&input).await;
+        sleep_until(start + Duration::from_millis(999)).await;
+        for output in &mut outputs {
+            while let Ok(update) = output.try_recv() {
+                assert!(update.end_of_rib.is_empty() && update.announce.is_empty());
+            }
+        }
+        let mut rows = 0;
+        let mut markers = vec![0; usize::from(size)];
+        let mut by_deadline = 0;
+        // Also observe a later retry interval to count duplicate deliveries
+        // and any table rebuild that the marker deadline would miss.
+        for elapsed in [1_001 + 10 * u64::from(size / 8 - 1), 5_000] {
+            sleep_until(start + Duration::from_millis(elapsed)).await;
+            barrier(&input).await;
+            for (output, count) in outputs.iter_mut().zip(&mut markers) {
+                while let Ok(update) = output.try_recv().map(delivered) {
+                    rows += update.announce.len() + update.unicast_withdrawals().count();
+                    *count += update.end_of_rib.iter().filter(|&&f| f == FAMILY).count();
+                }
+            }
+            if elapsed != 5_000 {
+                by_deadline = markers.iter().sum::<usize>();
+            }
+        }
+        drop(input);
+        let manager = actor.await.unwrap();
+        results.push((
+            manager.adj_rib_out_commit_stats.resync_builds - builds,
+            rows,
+            by_deadline,
+            markers,
+        ));
+    }
+    assert_eq!(results, [(0, 0, 8, vec![1; 8]), (0, 0, 64, vec![1; 64])]);
+}
+
 // The RTC rebuild releases four membership holds inline, then two per tick.
 #[tokio::test(start_paused = true)]
 async fn rebuilt_rtc_memberships_64() {

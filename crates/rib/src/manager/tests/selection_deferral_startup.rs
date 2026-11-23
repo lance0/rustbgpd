@@ -367,6 +367,91 @@ fn dormant_typed_selection_replays_unchanged_rows_before_late_initial_eor() {
 }
 
 #[test]
+fn refused_vpn_marker_resyncs_only_after_missing_rows_pass_export() {
+    use super::exportability::MockExactExportEncoder;
+    for accepted in [true, false] {
+        let vpn = Family::Vpn(Afi::Ipv4);
+        let family = vpn.afi_safi();
+        let (_tx, rx) = mpsc::channel(8);
+        let mut manager = RibManager::new(
+            rx,
+            dummy_query_rx(),
+            None,
+            Some(Ipv4Addr::new(10, 255, 0, 254)),
+            BgpMetrics::new(),
+        )
+        .with_selection_deferral(SelectionDeferralConfig {
+            timeout: Duration::from_mins(1),
+            waiters: vec![SelectionDeferralWaiterConfig {
+                peer: peer_v4(WAITER).into(),
+                families: vec![family],
+            }],
+        });
+        let _source = connect(
+            &mut manager,
+            SOURCE,
+            SOURCE_SESSION,
+            &[family],
+            false,
+            false,
+        );
+        let _observer = connect(
+            &mut manager,
+            Ipv4Addr::new(192, 0, 2, 5),
+            15,
+            &[family],
+            false,
+            false,
+        );
+        let key = vpn.receive(&mut manager);
+        let _waiter = connect(&mut manager, WAITER, 11, &[family], true, false);
+        let late = Ipv4Addr::new(192, 0, 2, 6);
+        let mut output = connect(&mut manager, late, 16, &[family], false, false);
+        assert!(drain(&mut output).is_empty());
+        assert!(manager.vpn_grouped_member_of(peer_v4(late)).is_some());
+
+        if !accepted {
+            let encoder = MockExactExportEncoder::accepting(1);
+            encoder.set_profile(2, [key.clone()]);
+            manager.peer_export_encoders.insert(peer_v4(late), encoder);
+        }
+        // The missing-row replay takes the last slot even if exact export
+        // strips the row. Only an admitted row needs the corrective resync.
+        let writer = manager.outbound_peers[&peer_v4(late)].clone();
+        let reserved = writer.try_reserve_many(writer.capacity() - 1).unwrap();
+        manager.handle_update(RibUpdate::EndOfRib {
+            peer: peer_v4(WAITER),
+            session_id: 11,
+            afi: family.0,
+            safi: family.1,
+        });
+        let row = output.try_recv().map(delivered).unwrap();
+        assert_eq!(
+            announced(&row),
+            accepted.then_some(key).into_iter().collect::<Vec<_>>()
+        );
+        assert_eq!(row.end_of_rib, [] as [(Afi, Safi); 0]);
+        assert_eq!(manager.dirty_peers.contains(&peer_v4(late)), accepted);
+        drop(reserved);
+
+        let builds = manager.adj_rib_out_commit_stats.resync_builds;
+        drain_resync_ticks(&mut manager);
+        assert_eq!(
+            manager.adj_rib_out_commit_stats.resync_builds - builds,
+            usize::from(accepted)
+        );
+        assert_eq!(
+            drain(&mut output)
+                .iter()
+                .filter(|update| update.end_of_rib.contains(&family))
+                .count(),
+            1
+        );
+        assert!(!manager.dirty_peers.contains(&peer_v4(late)));
+    }
+}
+
+#[test]
 #[expect(
     clippy::too_many_lines,
     reason = "one startup and RTC transcript checks the old advertised row and late initial marker together"
