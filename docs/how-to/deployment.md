@@ -564,9 +564,8 @@ Notes on the sandbox:
   actor for an answer, waits up to 5 seconds, and sends `WATCHDOG=1` when
   both answered. This is a liveness sample, not `/readyz`:
 
-  - A RIB that answers "stalled" from inside a long policy transition,
-    selection-deferral release or peer teardown is working, not dead.
-    `/readyz` returns `503` for it; the watchdog keeps pinging.
+  - A RIB that answers "stalled" at a checkpoint is still responding.
+    `/readyz` returns `503` and the watchdog keeps pinging.
   - Only silence withholds the ping: an actor that does not answer within
     5 seconds, a closed channel or a dropped reply. A ping that the notify
     socket refuses counts the same way. The daemon logs a WARN, increments
@@ -1154,8 +1153,8 @@ unready for the length of the restart; `/livez` is not affected.
 Do not point liveness at `/readyz`, with any `failureThreshold`. `/readyz`
 fails for conditions that are not a dead daemon:
 
-- The RIB reports an export-policy transition, selection-deferral release or
-  peer teardown as stalled once it has run for 30 seconds, and keeps
+- The RIB reports its active readiness owner as stalled once it has run
+  for 30 seconds, and keeps
   reporting it until the work finishes. The actor is answering and making
   progress the whole time. On a large table that work can outlast any
   threshold chosen in advance; a restart then drops every session and the

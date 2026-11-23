@@ -696,9 +696,8 @@ groups:
           summary: "RIB on {{ $labels.instance }} stalled for 10 minutes"
           description: >-
             bgp_rib_stalled on {{ $labels.instance }} has read 1 on every
-            evaluation for the last 10 minutes: one unit of work (export-policy
-            transition, selection-deferral release or peer teardown) has been
-            running that long. The actor is answering, so the systemd watchdog
+            evaluation for the last 10 minutes. The RIB is reporting stalled work.
+            The actor is answering, so the systemd watchdog
             does not restart it, but inbound route updates wait behind that
             work. Check the daemon WARN log and
             bgp_rib_readiness_query_wait_seconds for the seam; restart only if

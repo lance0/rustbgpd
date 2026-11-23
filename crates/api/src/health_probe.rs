@@ -232,16 +232,14 @@ impl CoreReadinessProbe {
     /// When both fail, the peer-manager error is reported.
     ///
     /// A daemon with zero configured peers or zero routes can still be ready.
-    /// During an actor-owned export-policy transition, selection-deferral
-    /// release or source-peer teardown, the dedicated RIB lane remains
-    /// responsive but reports a stalled owner once its age reaches 30 seconds.
+    /// During checkpointed RIB work the dedicated lane reports the current
+    /// owner's stall reason once its age reaches 30 seconds.
     ///
     /// # Errors
     ///
     /// Returns [`CoreReadinessError`] when either core actor is unavailable,
     /// drops its reply channel, or does not respond before the readiness
-    /// deadline, or when the RIB reports a stalled export-policy transition,
-    /// selection-deferral release or source-peer teardown.
+    /// deadline, or when the RIB reports that its active readiness owner has stalled.
     pub async fn check(&self) -> Result<(), CoreReadinessError> {
         if let Some(reason) = self.gate.as_ref().and_then(DaemonGate::not_ready_reason) {
             return Err(CoreReadinessError::DaemonUnavailable(reason));
@@ -275,8 +273,7 @@ impl CoreReadinessProbe {
     ///
     /// Returns [`CoreReadinessError`] when either core actor is unavailable,
     /// drops its reply channel, or does not respond before the readiness
-    /// deadline, or when the RIB reports a stalled export-policy transition,
-    /// selection-deferral release or source-peer teardown.
+    /// deadline, or when the RIB reports that its active readiness owner has stalled.
     pub async fn snapshot(&self) -> Result<CoreHealthSnapshot, CoreReadinessError> {
         if let Some(reason) = self.gate.as_ref().and_then(DaemonGate::not_ready_reason) {
             return Err(CoreReadinessError::DaemonUnavailable(reason));
@@ -334,7 +331,9 @@ impl CoreReadinessProbe {
         match self.query_rib(Instant::now() + deadline).await {
             Ok(_) => Ok(false),
             Err(
-                CoreReadinessError::RibPolicyTransitionStalled
+                CoreReadinessError::RibIngestStalled
+                | CoreReadinessError::RibWorkStalled
+                | CoreReadinessError::RibPolicyTransitionStalled
                 | CoreReadinessError::RibSelectionReleaseStalled
                 | CoreReadinessError::RibPeerTeardownStalled,
             ) => Ok(true),
@@ -409,6 +408,8 @@ impl CoreReadinessProbe {
                     .await
                     .map_err(|_| CoreReadinessError::RibDroppedReply)?
                     .map_err(|error| match error {
+                        RibReadinessError::IngestStalled => CoreReadinessError::RibIngestStalled,
+                        RibReadinessError::WorkStalled => CoreReadinessError::RibWorkStalled,
                         RibReadinessError::PolicyTransitionStalled => {
                             CoreReadinessError::RibPolicyTransitionStalled
                         }
@@ -470,7 +471,9 @@ pub const fn core_actor_answered<T>(result: &Result<T, CoreReadinessError>) -> b
             // The RIB actor answered from inside a long unit of work. Not
             // ready, but running; aborting it would drop every session to
             // repeat the same work after restart.
-            CoreReadinessError::RibPolicyTransitionStalled
+            CoreReadinessError::RibIngestStalled
+            | CoreReadinessError::RibWorkStalled
+            | CoreReadinessError::RibPolicyTransitionStalled
             | CoreReadinessError::RibSelectionReleaseStalled
             | CoreReadinessError::RibPeerTeardownStalled
             // The availability gate answered without asking the actors, so it
@@ -498,6 +501,10 @@ pub enum CoreReadinessError {
     RibTimedOut,
     /// RIB dropped the reply channel.
     RibDroppedReply,
+    /// The RIB actor's ingest readiness owner reached 30 seconds.
+    RibIngestStalled,
+    /// Other RIB work has held the readiness fence for 30 seconds.
+    RibWorkStalled,
     /// The RIB actor's policy-transition ownership fence exceeded 30 seconds.
     RibPolicyTransitionStalled,
     /// The RIB actor's selection-deferral release exceeded 30 seconds.
@@ -526,6 +533,8 @@ impl fmt::Display for CoreReadinessError {
                 write!(f, "RIB manager probe timed out ({deadline_ms}ms deadline)")
             }
             Self::RibDroppedReply => f.write_str("RIB manager dropped reply"),
+            Self::RibIngestStalled => f.write_str("RIB ingest stalled"),
+            Self::RibWorkStalled => f.write_str("RIB work stalled"),
             Self::RibPolicyTransitionStalled => f.write_str("RIB export-policy transition stalled"),
             Self::RibSelectionReleaseStalled => {
                 f.write_str("RIB selection-deferral release stalled")
@@ -638,6 +647,14 @@ mod tests {
             "RIB manager dropped reply"
         );
         assert_eq!(
+            CoreReadinessError::RibIngestStalled.to_string(),
+            "RIB ingest stalled"
+        );
+        assert_eq!(
+            CoreReadinessError::RibWorkStalled.to_string(),
+            "RIB work stalled"
+        );
+        assert_eq!(
             CoreReadinessError::RibPolicyTransitionStalled.to_string(),
             "RIB export-policy transition stalled"
         );
@@ -662,6 +679,8 @@ mod tests {
         use CoreReadinessError as E;
         assert!(core_actor_answered(&Ok(())));
         for answered in [
+            E::RibIngestStalled,
+            E::RibWorkStalled,
             E::RibPolicyTransitionStalled,
             E::RibSelectionReleaseStalled,
             E::RibPeerTeardownStalled,
@@ -724,6 +743,8 @@ mod tests {
     #[tokio::test]
     async fn liveness_holds_for_every_stalled_rib_answer_while_readiness_fails() {
         for stalled in [
+            RibReadinessError::IngestStalled,
+            RibReadinessError::WorkStalled,
             RibReadinessError::PolicyTransitionStalled,
             RibReadinessError::SelectionReleaseStalled,
             RibReadinessError::PeerTeardownStalled,
@@ -747,6 +768,8 @@ mod tests {
     async fn rib_stalled_reports_each_stalled_variant_and_ready() {
         for (answer, expected) in [
             (Ok(0), false),
+            (Err(RibReadinessError::IngestStalled), true),
+            (Err(RibReadinessError::WorkStalled), true),
             (Err(RibReadinessError::PolicyTransitionStalled), true),
             (Err(RibReadinessError::SelectionReleaseStalled), true),
             (Err(RibReadinessError::PeerTeardownStalled), true),

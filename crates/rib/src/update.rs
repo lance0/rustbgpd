@@ -61,6 +61,10 @@ pub enum RibReadinessError {
     /// An actor-owned export-policy transition exceeded its maximum healthy
     /// ownership age, so ordinary RIB work may be wedged behind its fence.
     PolicyTransitionStalled,
+    /// Ordinary RIB ingest exceeded the healthy age at a readiness checkpoint.
+    IngestStalled,
+    /// Synchronous RIB work holding a fixed Loc-RIB count exceeded the healthy age.
+    WorkStalled,
     /// An actor-owned selection-deferral release exceeded the same maximum
     /// healthy ownership age while recomputing and distributing released
     /// families, so ordinary RIB work may be wedged behind that release.

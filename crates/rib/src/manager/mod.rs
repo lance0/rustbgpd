@@ -1756,7 +1756,10 @@ struct ReplacementReadinessContext {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ReadinessOwnerKind {
+    /// Frozen-count work such as an initial export or route refresh.
     Replacement,
+    /// An export-policy command using the same frozen-count checkpoints.
+    PolicyTransition,
     SelectionRelease,
     PeerTeardown,
     /// Table-sized work inside ordinary ingest. It answers under the actor
@@ -2110,13 +2113,14 @@ fn service_replacement_readiness_with_origin(
             ReadinessOwnerKind::PeerTeardown => {
                 ("peer_teardown", RibReadinessError::PeerTeardownStalled)
             }
-            ReadinessOwnerKind::Replacement => (
+            ReadinessOwnerKind::Replacement => {
+                ("policy_transition_fence", RibReadinessError::WorkStalled)
+            }
+            ReadinessOwnerKind::PolicyTransition => (
                 "policy_transition_fence",
                 RibReadinessError::PolicyTransitionStalled,
             ),
-            ReadinessOwnerKind::Ingest => {
-                ("actor_loop", RibReadinessError::PolicyTransitionStalled)
-            }
+            ReadinessOwnerKind::Ingest => ("actor_loop", RibReadinessError::IngestStalled),
         };
         readiness
             .metrics
@@ -3532,11 +3536,22 @@ impl RibManager {
     }
 
     fn begin_replacement_readiness(&mut self) -> bool {
+        if let Some(pending) = &self.pending_clean_policy_transition {
+            self.begin_readiness_owner_kind(pending.elapsed(), ReadinessOwnerKind::PolicyTransition)
+        } else {
+            self.begin_readiness_owner_kind(
+                std::time::Duration::ZERO,
+                ReadinessOwnerKind::Replacement,
+            )
+        }
+    }
+
+    fn with_export_policy_readiness<T>(&mut self, work: impl FnOnce(&mut Self) -> T) -> T {
         let age = self.pending_clean_policy_transition.as_ref().map_or(
             std::time::Duration::ZERO,
             distribution::PendingCleanPolicyTransition::elapsed,
         );
-        self.begin_readiness_owner(age, false)
+        self.with_replacement_readiness_age(age, work)
     }
 
     fn with_replacement_readiness_age<T>(
@@ -3608,7 +3623,7 @@ impl RibManager {
             if selection_release {
                 ReadinessOwnerKind::SelectionRelease
             } else {
-                ReadinessOwnerKind::Replacement
+                ReadinessOwnerKind::PolicyTransition
             },
         )
     }
@@ -3727,7 +3742,10 @@ impl RibManager {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if context.kind == ReadinessOwnerKind::Replacement {
+            if matches!(
+                context.kind,
+                ReadinessOwnerKind::Replacement | ReadinessOwnerKind::PolicyTransition
+            ) {
                 return;
             }
             context.count = self.completed_loc_rib_count();

@@ -566,6 +566,8 @@ mod tests {
 
         for rib_answer in [
             Ok(0),
+            Err(Stalled::IngestStalled),
+            Err(Stalled::WorkStalled),
             Err(Stalled::PolicyTransitionStalled),
             Err(Stalled::SelectionReleaseStalled),
             Err(Stalled::PeerTeardownStalled),
