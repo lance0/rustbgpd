@@ -357,7 +357,7 @@ interop harness changes in this ADR.
 - [RFC 5880 Section 9 - Security considerations](https://www.rfc-editor.org/rfc/rfc5880.html#section-9)
 - [RFC 5881 - BFD for IPv4 and IPv6 single hop](https://www.rfc-editor.org/rfc/rfc5881.html)
 - [BIRD 3.3.1 BFD documentation](https://bird.nic.cz/doc/bird-3.3.1.html)
-- [BIRD 3.3.1 BFD packet source](https://gitlab.nic.cz/labs/bird/-/blob/e44ce31eba0e67f03b5cb5ecdcc67c9613be2d82/proto/bfd/packets.c)
+- [BIRD 3.3.1 BFD packet source](https://gitlab.nic.cz/labs/bird/-/blob/695c7b743aa48125ba78c22114c0c7e32a03c03b/proto/bfd/packets.c)
 - [FRR 10.7.0 BFD documentation source](https://github.com/FRRouting/frr/blob/frr-10.7.0/doc/user/bfd.rst)
 - [FRR 10.7.0 BFD packet source](https://github.com/FRRouting/frr/blob/frr-10.7.0/bfdd/bfd_packet.c)
 - [GoBGP 4.7.0 BFD documentation](https://github.com/osrg/gobgp/blob/v4.7.0/docs/sources/bfd.md)
