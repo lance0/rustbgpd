@@ -581,6 +581,27 @@ async fn fixture_update(
     delivered(fixture_delivery(receive).await.unwrap())
 }
 
+/// Drain outbound updates until one carries an `EoR` for `family`; return
+/// every update seen, including the `EoR`-bearing one. Panics if no such
+/// `EoR` arrives within 5 s.
+async fn drain_until_eor(
+    out_rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
+    family: (Afi, Safi),
+) -> Vec<OutboundRouteUpdate> {
+    let mut updates = Vec::new();
+    loop {
+        let update = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
+            .await
+            .expect("EoR-bearing update should arrive")
+            .expect("outbound channel open");
+        let done = update.end_of_rib.contains(&family);
+        updates.push(delivered(update));
+        if done {
+            return updates;
+        }
+    }
+}
+
 /// Drain the initial End-of-RIB marker sent at `PeerUp` time.
 async fn drain_eor(out_rx: &mut mpsc::Receiver<OutboundRouteUpdate>) {
     let eor = fixture_delivery(out_rx.recv()).await.unwrap();
