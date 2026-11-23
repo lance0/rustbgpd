@@ -604,7 +604,7 @@ mod tests {
             ));
             drop(first);
             super::super::service_replacement_readiness(context, false);
-            assert!(next.try_recv().unwrap().snapshots.is_empty());
+            assert_eq!(next.try_recv().unwrap().snapshots.len(), 0);
         });
     }
 

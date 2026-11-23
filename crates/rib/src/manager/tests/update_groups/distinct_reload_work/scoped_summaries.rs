@@ -398,3 +398,68 @@ fn limited_paced_policy_resync_serves_unrelated_peer_during_verdict_and_commit()
         }
     }
 }
+
+/// Keep the receiver open while making every reservation fail.
+fn hold_writer_capacity(
+    manager: &RibManager,
+    peer: PeerId,
+) -> Vec<mpsc::OwnedPermit<OutboundRouteUpdate>> {
+    let sender = &manager.outbound_peers[&peer];
+    assert!(sender.capacity() > 0);
+    (0..sender.capacity())
+        .map(|_| sender.clone().try_reserve_owned().unwrap())
+        .collect()
+}
+
+#[test]
+fn failed_authoritative_prepare_serves_unrelated_peer_between_old_keys() {
+    let (mut manager, mut members, _, _) = fixture(2);
+    let outside = members.pop().unwrap();
+    let mover = peer_v4(members[0].addr);
+    let held = hold_writer_capacity(&manager, mover);
+    let captures = manager.adj_rib_out_commit_stats.group_table_captures;
+    assert_unrelated_read_between_rows(
+        &mut manager,
+        peer_v4(outside.addr),
+        outside.output,
+        "capture_old_peer_key",
+        |manager| replace(manager, mover, members[0].new_tag, false),
+    );
+    let receipt = manager.authoritative_transition_receipts.last().unwrap();
+    assert_eq!((receipt.emits_attempted, receipt.emits_degraded), (1, 1));
+    assert_eq!(
+        manager.adj_rib_out_commit_stats.group_table_captures,
+        captures + 1
+    );
+    assert!(manager.dirty_peers.contains(&mover));
+    drop(held);
+}
+
+#[test]
+fn group_reevaluation_serves_unrelated_peer_between_shared_old_keys() {
+    let (mut manager, [first, second, _incumbent, outside]) = occupied_groups(false);
+    let affected = [peer_v4(first.addr), peer_v4(second.addr)];
+    let held = affected.map(|peer| hold_writer_capacity(&manager, peer));
+    let captures = manager.adj_rib_out_commit_stats.group_table_captures;
+    assert_unrelated_read_between_rows(
+        &mut manager,
+        peer_v4(outside.addr),
+        outside.output,
+        "capture_old_cohort_key",
+        |manager| {
+            let (reply, mut response) = oneshot::channel();
+            // A dataset change for one member re-evaluates its whole group.
+            manager.handle_update(RibUpdate::ReevaluatePeerExportPolicies {
+                peers: vec![affected[0]],
+                swaps: None,
+                reply,
+            });
+            assert_eq!(response.try_recv().unwrap(), Ok(()));
+        },
+    );
+    assert_eq!(
+        manager.adj_rib_out_commit_stats.group_table_captures,
+        captures + 2
+    );
+    drop(held);
+}

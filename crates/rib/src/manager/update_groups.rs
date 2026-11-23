@@ -2739,16 +2739,21 @@ impl RibManager {
             .then_some(gid)
     }
 
-    fn group_capture_checkpoint(&self) -> impl FnMut(bool) + use<> {
+    fn group_capture_checkpoint(&self) -> impl FnMut(bool, Option<&Self>) + use<> {
         let readiness = self.replacement_readiness.clone();
         #[cfg(test)]
         let observer = self.replacement_readiness_test_hook.clone();
-        move |force| {
+        move |force, live| {
             #[cfg(test)]
             if force && let Some(observer) = &observer {
                 observer("common_capture");
             }
-            super::counted_checkpoint(&readiness, "capture_group_admitted", force);
+            super::checkpoint_with_summary_reader(
+                &readiness,
+                cfg!(test).then_some("capture_group_admitted"),
+                force,
+                live,
+            );
         }
     }
 
@@ -2768,109 +2773,121 @@ impl RibManager {
         let mut checkpoint = self.group_capture_checkpoint();
         let mut begun = Vec::with_capacity(members.len());
         for &peer in members {
-            match self
-                .pending_group_admitted
-                .begin_capture_with_checkpoint(peer, &mut checkpoint)
-            {
+            match self.with_summary_recovery_ledger(None, |ledger, _, _, live| {
+                ledger.begin_capture_with_checkpoint(peer, &mut |force| checkpoint(force, live))
+            }) {
                 Ok(_) => begun.push(peer),
                 Err(error) => self.record_group_recovery_refusal(peer, error, true),
             }
         }
-        let Some(group) = self.group_ribs.get_mut(&gid) else {
+        #[cfg(feature = "bench-internals")]
+        let mut bench_draft = None;
+        #[cfg(feature = "bench-internals")]
+        let mut bench_slots = 0;
+        #[cfg(test)]
+        let projections = std::cell::Cell::new(0_usize);
+        #[cfg(test)]
+        let target_checks = std::cell::Cell::new(0_usize);
+        #[cfg(test)]
+        let row_observer = self.replacement_readiness_test_hook.clone();
+        let Some(capture) =
+            self.with_summary_recovery_ledger(Some(gid), |ledger, group, _, live| {
+                let group = group?;
+                #[cfg(feature = "bench-internals")]
+                {
+                    bench_slots = group.table.unicast_slot_count();
+                    bench_draft = Some(super::bench_support::GroupCaptureDraft::begin(
+                        group.recovery_snapshot,
+                        bench_slots,
+                    ));
+                }
+                let index: HashMap<PeerId, usize> = begun
+                    .iter()
+                    .enumerate()
+                    .map(|(member, &peer)| (peer, member))
+                    .collect();
+                let controlled: Vec<(usize, PeerId, (u32, u32))> = begun
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(member, &peer)| {
+                        let rs = group.rs_members.get(&peer).copied()?;
+                        Some((member, peer, rs))
+                    })
+                    .collect();
+                // Control members by each ASN a target can name them by
+                // (`RsTargets::names`): their own and the route server's.
+                let mut named: HashMap<u32, Vec<usize>> = HashMap::new();
+                for (position, &(_, _, (rs_asn, member_asn))) in controlled.iter().enumerate() {
+                    named.entry(member_asn).or_default().push(position);
+                    if rs_asn != member_asn {
+                        named.entry(rs_asn).or_default().push(position);
+                    }
+                }
+                let local_role = group.local_role;
+                // A member that is not the row's source keeps the staged route at its
+                // own key, unless RFC 7947 control suppresses it toward that member:
+                // only `rs_tagged` rows can, and only for members their targets name.
+                let project = |staged: &Route| {
+                    #[cfg(test)]
+                    {
+                        projections.set(projections.get() + 1);
+                        if let Some(observer) = &row_observer {
+                            observer("capture_old_cohort_key");
+                        }
+                    }
+                    (!super::distribution::otc_egress_blocked(staged, local_role))
+                        .then_some(Key::Unicast(staged.prefix, staged.path_id))
+                };
+                let exclude = |staged: &Route, excluded: &mut dyn FnMut(usize)| {
+                    if let Some(&member) = index.get(&staged.peer) {
+                        excluded(member);
+                    }
+                    if controlled.is_empty() {
+                        return;
+                    }
+                    let key = (staged.prefix, staged.path_id);
+                    let Some(targets) = group.rs_tagged.get(&key) else {
+                        return;
+                    };
+                    // Visit only the members the row's targets name, each once.
+                    let mut candidates = smallvec::SmallVec::<[usize; 8]>::new();
+                    if targets.all {
+                        candidates.extend(0..controlled.len());
+                    } else {
+                        for asn in &targets.asns {
+                            candidates.extend(named.get(asn).into_iter().flatten().copied());
+                        }
+                        candidates.sort_unstable();
+                        candidates.dedup();
+                    }
+                    for position in candidates {
+                        #[cfg(test)]
+                        target_checks.set(target_checks.get() + 1);
+                        let (member, peer, rs) = controlled[position];
+                        if peer != staged.peer
+                            && group
+                                .adv_entry_post_backstop_for(peer, &key.0, key.1, Some(rs))
+                                .is_none()
+                        {
+                            excluded(member);
+                        }
+                    }
+                };
+                Some(ledger.capture_cohort_old_with_checkpoint(
+                    &begun,
+                    group.recovery_snapshot,
+                    &group.table,
+                    project,
+                    exclude,
+                    &mut |force| checkpoint(force, live),
+                ))
+            })
+        else {
             return begun
                 .into_iter()
                 .filter(|&peer| self.capture_begun_group_admitted_keys(peer, true))
                 .collect();
         };
-        #[cfg(feature = "bench-internals")]
-        let mut bench_draft = Some(super::bench_support::GroupCaptureDraft::begin(
-            group.recovery_snapshot,
-            group.table.unicast_slot_count(),
-        ));
-        #[cfg(feature = "bench-internals")]
-        let bench_slots = group.table.unicast_slot_count();
-        let index: HashMap<PeerId, usize> = begun
-            .iter()
-            .enumerate()
-            .map(|(member, &peer)| (peer, member))
-            .collect();
-        let controlled: Vec<(usize, PeerId, (u32, u32))> = begun
-            .iter()
-            .enumerate()
-            .filter_map(|(member, &peer)| {
-                let rs = group.rs_members.get(&peer).copied()?;
-                Some((member, peer, rs))
-            })
-            .collect();
-        // Control members by each ASN a target can name them by
-        // (`RsTargets::names`): their own and the route server's.
-        let mut named: HashMap<u32, Vec<usize>> = HashMap::new();
-        for (position, &(_, _, (rs_asn, member_asn))) in controlled.iter().enumerate() {
-            named.entry(member_asn).or_default().push(position);
-            if rs_asn != member_asn {
-                named.entry(rs_asn).or_default().push(position);
-            }
-        }
-        let local_role = group.local_role;
-        #[cfg(test)]
-        let projections = std::cell::Cell::new(0_usize);
-        #[cfg(test)]
-        let target_checks = std::cell::Cell::new(0_usize);
-        let projected: &GroupRibOut = group;
-        // A member that is not the row's source keeps the staged route at its
-        // own key, unless RFC 7947 control suppresses it toward that member:
-        // only `rs_tagged` rows can, and only for members their targets name.
-        let project = |staged: &Route| {
-            #[cfg(test)]
-            projections.set(projections.get() + 1);
-            (!super::distribution::otc_egress_blocked(staged, local_role))
-                .then_some(Key::Unicast(staged.prefix, staged.path_id))
-        };
-        let exclude = |staged: &Route, excluded: &mut dyn FnMut(usize)| {
-            if let Some(&member) = index.get(&staged.peer) {
-                excluded(member);
-            }
-            if controlled.is_empty() {
-                return;
-            }
-            let key = (staged.prefix, staged.path_id);
-            let Some(targets) = projected.rs_tagged.get(&key) else {
-                return;
-            };
-            // Visit only the members the row's targets name, each once.
-            let mut candidates = smallvec::SmallVec::<[usize; 8]>::new();
-            if targets.all {
-                candidates.extend(0..controlled.len());
-            } else {
-                for asn in &targets.asns {
-                    candidates.extend(named.get(asn).into_iter().flatten().copied());
-                }
-                candidates.sort_unstable();
-                candidates.dedup();
-            }
-            for position in candidates {
-                #[cfg(test)]
-                target_checks.set(target_checks.get() + 1);
-                let (member, peer, rs) = controlled[position];
-                if peer != staged.peer
-                    && projected
-                        .adv_entry_post_backstop_for(peer, &key.0, key.1, Some(rs))
-                        .is_none()
-                {
-                    excluded(member);
-                }
-            }
-        };
-        let capture = self
-            .pending_group_admitted
-            .capture_cohort_old_with_checkpoint(
-                &begun,
-                group.recovery_snapshot,
-                &group.table,
-                project,
-                exclude,
-                &mut checkpoint,
-            );
         #[cfg(test)]
         {
             self.adj_rib_out_commit_stats.group_capture_target_checks += target_checks.get();
@@ -2882,10 +2899,9 @@ impl RibManager {
             self.record_group_recovery_refusal(peer, error, true);
         }
         for peer in capture.shared {
-            if let Err(error) = self
-                .pending_group_admitted
-                .seal_capture_with_checkpoint(peer, &mut checkpoint)
-            {
+            if let Err(error) = self.with_summary_recovery_ledger(None, |ledger, _, _, live| {
+                ledger.seal_capture_with_checkpoint(peer, &mut |force| checkpoint(force, live))
+            }) {
                 self.record_group_recovery_refusal(peer, error, true);
                 continue;
             }
@@ -2971,10 +2987,9 @@ impl RibManager {
         mark_dirty_on_refusal: bool,
     ) -> bool {
         let mut checkpoint = self.group_capture_checkpoint();
-        if let Err(error) = self
-            .pending_group_admitted
-            .begin_capture_with_checkpoint(peer, &mut checkpoint)
-        {
+        if let Err(error) = self.with_summary_recovery_ledger(None, |ledger, _, _, live| {
+            ledger.begin_capture_with_checkpoint(peer, &mut |force| checkpoint(force, live))
+        }) {
             self.record_group_recovery_refusal(peer, error, mark_dirty_on_refusal);
             return false;
         }
@@ -3001,19 +3016,25 @@ impl RibManager {
         let mut checkpoint = self.group_capture_checkpoint();
         #[cfg(feature = "bench-internals")]
         let mut bench_capture = None;
+        let mut snapshot_handle = None;
+        #[cfg(test)]
+        let projections = std::cell::Cell::new(0_usize);
+        #[cfg(test)]
+        let mut group_table_capture = false;
+        #[cfg(test)]
+        let observer = self.replacement_readiness_test_hook.clone();
         let result = if self.pending_regroup_baseline.contains_key(&peer) || gid.is_none() {
-            let count = self.pending_regroup_baseline.get(&peer).map_or_else(
-                || {
-                    self.adj_ribs_out
-                        .get(&peer)
-                        .map_or(0, |rib| rib.len().saturating_add(rib.vpn_len()))
-                },
-                |base| base.unicast.len().saturating_add(base.vpn.len()),
-            );
-            let ledger = &mut self.pending_group_admitted;
-            (|| {
+            let mut capture = |ledger: &mut admitted_recovery::AdmittedRecovery,
+                               base: Option<&RegroupBaseline>,
+                               rib: Option<&AdjRibOut>,
+                               live: Option<&RibManager>| {
+                let mut checkpoint = |force| checkpoint(force, live);
+                let count = base.map_or_else(
+                    || rib.map_or(0, |rib| rib.len().saturating_add(rib.vpn_len())),
+                    |base| base.unicast.len().saturating_add(base.vpn.len()),
+                );
                 ledger.reserve_capture_with_checkpoint(peer, count, &mut checkpoint)?;
-                if let Some(base) = self.pending_regroup_baseline.get(&peer) {
+                if let Some(base) = base {
                     for &(prefix, path_id) in base.unicast.keys() {
                         checkpoint(false);
                         ledger.push_capture_with_checkpoint(
@@ -3030,7 +3051,7 @@ impl RibManager {
                             &mut checkpoint,
                         )?;
                     }
-                } else if let Some(rib) = self.adj_ribs_out.get(&peer) {
+                } else if let Some(rib) = rib {
                     for route in rib.iter() {
                         checkpoint(false);
                         ledger.push_capture_with_checkpoint(
@@ -3050,54 +3071,81 @@ impl RibManager {
                     }
                 }
                 Ok(())
-            })()
-        } else if let Some(group) = gid.and_then(|gid| self.group_ribs.get_mut(&gid)) {
-            #[cfg(test)]
-            {
-                self.adj_rib_out_commit_stats.group_table_captures += 1;
-            }
-            #[cfg(feature = "bench-internals")]
-            let bench_draft = super::bench_support::GroupCaptureDraft::begin(
-                group.recovery_snapshot,
-                group.table.unicast_slot_count(),
-            );
-            let rejected = self.peer_unexportable.get(&peer);
-            let limits = self.outbound_prefix_limits.get(&peer);
-            let projected: &GroupRibOut = group;
-            let old_filter = filter.as_ref();
-            #[cfg(test)]
-            let projections = std::cell::Cell::new(0_usize);
-            let project_uc = |staged: &Route| {
-                #[cfg(test)]
-                projections.set(projections.get() + 1);
-                let entry = projected.adv_entry_post_backstop_for(
-                    peer,
-                    &staged.prefix,
-                    staged.path_id,
-                    rs_control,
-                )?;
-                let route = entry.route;
-                let key = ExactExportKey::Unicast(route.prefix, route.path_id);
-                (!rejected.is_some_and(|keys| keys.contains(&key))
-                    && limits.is_none_or(|limits| limits.admits_grouped(&route.prefix)))
-                .then_some(Key::Unicast(route.prefix, route.path_id))
             };
-            let project_vpn = |route: &VpnRibRoute| {
-                #[cfg(test)]
-                projections.set(projections.get() + 1);
-                (projected.stages_vpn()
-                    && route.peer != peer
-                    && rt_passes(old_filter, route)
-                    && !rejected
-                        .is_some_and(|keys| keys.contains(&ExactExportKey::Vpn(route.key()))))
-                .then(|| {
-                    let key = route.key();
-                    Key::Vpn(key.nlri_key, key.path_id)
+            if self.replacement_summary_groups.is_some() {
+                self.with_summary_recovery_ledger(None, |ledger, _, _, live| {
+                    let manager = live.expect("scoped recovery capture");
+                    let base = manager.pending_regroup_baseline.get(&peer);
+                    let rib = base
+                        .is_none()
+                        .then(|| manager.adj_ribs_out.get(&peer))
+                        .flatten();
+                    capture(ledger, base, rib, live)
                 })
-            };
-            let result = self
-                .pending_group_admitted
-                .capture_full_old_with_checkpoint(
+            } else {
+                let base = self.pending_regroup_baseline.get(&peer);
+                let rib = base
+                    .is_none()
+                    .then(|| self.adj_ribs_out.get(&peer))
+                    .flatten();
+                capture(&mut self.pending_group_admitted, base, rib, None)
+            }
+        } else {
+            let mut capture = |ledger: &mut admitted_recovery::AdmittedRecovery,
+                               group: Option<&GroupRibOut>,
+                               rejected: Option<&HashSet<ExactExportKey>>,
+                               limits: Option<
+                &super::outbound_prefix_limits::OutboundPrefixLimits,
+            >,
+                               live: Option<&RibManager>| {
+                let Some(group) = group else {
+                    return Ok(());
+                };
+                let mut checkpoint = |force| checkpoint(force, live);
+                #[cfg(test)]
+                {
+                    group_table_capture = true;
+                }
+                #[cfg(feature = "bench-internals")]
+                let bench_draft = super::bench_support::GroupCaptureDraft::begin(
+                    group.recovery_snapshot,
+                    group.table.unicast_slot_count(),
+                );
+                let old_filter = filter.as_ref();
+                let project_uc = |staged: &Route| {
+                    #[cfg(test)]
+                    {
+                        projections.set(projections.get() + 1);
+                        if let Some(observer) = &observer {
+                            observer("capture_old_peer_key");
+                        }
+                    }
+                    let entry = group.adv_entry_post_backstop_for(
+                        peer,
+                        &staged.prefix,
+                        staged.path_id,
+                        rs_control,
+                    )?;
+                    let route = entry.route;
+                    let key = ExactExportKey::Unicast(route.prefix, route.path_id);
+                    (!rejected.is_some_and(|keys| keys.contains(&key))
+                        && limits.is_none_or(|limits| limits.admits_grouped(&route.prefix)))
+                    .then_some(Key::Unicast(route.prefix, route.path_id))
+                };
+                let project_vpn = |route: &VpnRibRoute| {
+                    #[cfg(test)]
+                    projections.set(projections.get() + 1);
+                    (group.stages_vpn()
+                        && route.peer != peer
+                        && rt_passes(old_filter, route)
+                        && !rejected
+                            .is_some_and(|keys| keys.contains(&ExactExportKey::Vpn(route.key()))))
+                    .then(|| {
+                        let key = route.key();
+                        Key::Vpn(key.nlri_key, key.path_id)
+                    })
+                };
+                let result = ledger.capture_full_old_with_checkpoint(
                     peer,
                     group.recovery_snapshot,
                     &group.table,
@@ -3106,31 +3154,54 @@ impl RibManager {
                     project_vpn,
                     &mut checkpoint,
                 );
-            #[cfg(test)]
-            {
-                self.adj_rib_out_commit_stats.group_capture_projections += projections.get();
+                if let Ok(outcome) = &result {
+                    snapshot_handle = outcome.handle;
+                }
+                #[cfg(feature = "bench-internals")]
+                if let Ok(outcome) = &result {
+                    bench_capture = Some((bench_draft, *outcome));
+                }
+                result.map(|_| ())
+            };
+            if self.replacement_summary_groups.is_some() {
+                self.with_summary_recovery_ledger(gid, |ledger, group, _, live| {
+                    let manager = live.expect("scoped recovery capture");
+                    capture(
+                        ledger,
+                        group,
+                        manager.peer_unexportable.get(&peer),
+                        manager.outbound_prefix_limits.get(&peer),
+                        live,
+                    )
+                })
+            } else {
+                capture(
+                    &mut self.pending_group_admitted,
+                    gid.and_then(|gid| self.group_ribs.get(&gid)),
+                    self.peer_unexportable.get(&peer),
+                    self.outbound_prefix_limits.get(&peer),
+                    None,
+                )
             }
-            if let Ok(outcome) = &result
-                && let Some(handle) = outcome.handle
-            {
-                group.recovery_snapshot = Some(handle);
-            }
-            #[cfg(feature = "bench-internals")]
-            if let Ok(outcome) = &result {
-                bench_capture = Some((bench_draft, *outcome));
-            }
-            result.map(|_| ())
-        } else {
-            Ok(())
         };
+        #[cfg(test)]
+        {
+            self.adj_rib_out_commit_stats.group_table_captures += usize::from(group_table_capture);
+            self.adj_rib_out_commit_stats.group_capture_projections += projections.get();
+        }
+        if let (Some(gid), Some(handle)) = (gid, snapshot_handle) {
+            self.group_ribs
+                .get_mut(&gid)
+                .expect("captured group")
+                .recovery_snapshot = Some(handle);
+        }
         if let Err(error) = result {
             self.record_group_recovery_refusal(peer, error, mark_dirty_on_refusal);
             return false;
         }
-        if let Err(error) = self
-            .pending_group_admitted
-            .seal_capture_with_checkpoint(peer, &mut checkpoint)
-        {
+        if let Err(error) = self.with_summary_recovery_ledger(None, |ledger, _, _, live| {
+            ledger.seal_capture_with_checkpoint(peer, &mut |force| checkpoint(force, live))
+        }) {
             self.record_group_recovery_refusal(peer, error, mark_dirty_on_refusal);
             return false;
         }

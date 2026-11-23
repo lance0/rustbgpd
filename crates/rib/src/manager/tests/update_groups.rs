@@ -14377,20 +14377,11 @@ fn detached_admission_ledger_preserves_live_unrelated_initial_proof() {
     assert!(manager.grouped_member_of(mover).is_none());
     assert!(manager.grouped_member_of(retained).is_some());
     assert!(manager.grouped_member_of(closing).is_some());
-    manager
-        .live_sessions
-        .get_mut(&retained)
-        .unwrap()
-        .last_mut()
-        .unwrap()
-        .selection_initial_pending = true;
+    let sessions = manager.live_sessions.get_mut(&retained).unwrap();
+    sessions.last_mut().unwrap().selection_initial_pending = true;
     assert!(manager.retain_initial_group_admitted(retained));
-    assert!(
-        manager
-            .neighbor_rib_snapshot(retained)
-            .outbound_resync
-            .advertised_count_pending
-    );
+    let without_proof = manager.neighbor_rib_snapshot(retained);
+    assert!(without_proof.outbound_resync.advertised_count_pending);
     manager
         .pending_group_admitted
         .insert_empty(retained)
@@ -14398,12 +14389,8 @@ fn detached_admission_ledger_preserves_live_unrelated_initial_proof() {
     manager.pending_group_admitted.insert_empty(mover).unwrap();
     let expected = manager.neighbor_rib_snapshot(retained);
     assert!(!expected.outbound_resync.advertised_count_pending);
-    assert!(
-        !manager
-            .neighbor_rib_snapshot(closing)
-            .outbound_resync
-            .advertised_count_pending
-    );
+    let before_close = manager.neighbor_rib_snapshot(closing);
+    assert!(!before_close.outbound_resync.advertised_count_pending);
 
     let (tx, rx) = mpsc::channel(1);
     manager.summary_rx = Some(rx);
