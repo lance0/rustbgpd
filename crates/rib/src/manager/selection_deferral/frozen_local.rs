@@ -50,7 +50,9 @@ impl Family {
         source: LocalExportSource,
         byte_limit: usize,
     ) {
-        let Some(charge) = body_charge(&route).filter(|n| *n <= byte_limit - self.bytes) else {
+        let Some(charge) = retained_route_bytes(&route, size_of::<FrozenLocalRow>())
+            .filter(|n| *n <= byte_limit - self.bytes)
+        else {
             return;
         };
         let rows = self.rows.entry(peer).or_default();
@@ -100,12 +102,12 @@ impl FrozenLocalRows {
 /// Charge the actual backing capacity, even when another member shares it.
 /// Local injection and its export policy use the unicast attributes below.
 /// A different attribute layout cannot be retained without a known charge.
-fn body_charge(route: &Route) -> Option<usize> {
+pub(in crate::manager) fn retained_route_bytes(route: &Route, shell_bytes: usize) -> Option<usize> {
     if route.received_as_path.is_some() {
         return None;
     }
     let attrs = &route.attributes;
-    let mut bytes = size_of::<FrozenLocalRow>()
+    let mut bytes = shell_bytes
         + 2 * size_of::<usize>()
         + size_of::<AttrSet>()
         + attrs.capacity() * size_of::<PathAttribute>();

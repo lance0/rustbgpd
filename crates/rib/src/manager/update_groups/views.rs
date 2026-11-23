@@ -570,6 +570,54 @@ impl RibManager {
                     .is_some_and(crate::manager::helpers::unicast_deferral_exempt))
     }
 
+    /// Read the policy snapshot at registration. Live distribution accounts
+    /// subsequent evaluations even when the receiver is waiting for a page.
+    pub(in crate::manager) fn start_initial_replay_policy(&mut self, peer: PeerId, gid: usize) {
+        let group = &self.group_ribs[&gid];
+        debug_assert!(!group.per_client_best);
+        let permits = group.plain_permit_count(peer, None);
+        let mut rows = Vec::with_capacity(1 + group.single_best_denials.labels.len());
+        if permits != 0 {
+            rows.push((
+                group.permit_policy_label.as_deref().map(str::to_owned),
+                PolicyAction::Permit,
+                permits,
+            ));
+        }
+        for (label, (total, by_source)) in &group.single_best_denials.labels {
+            let count = total - by_source.get(&peer).copied().unwrap_or_default();
+            if count != 0 {
+                rows.push((
+                    label.as_deref().map(str::to_owned),
+                    PolicyAction::Deny,
+                    count,
+                ));
+            }
+        }
+        self.bump_export_counters(peer, &rows);
+    }
+
+    /// The same reconciliation as a one-turn join, scoped to this replay
+    /// page or intervening change. Repeated keys only publish new denials.
+    pub(in crate::manager) fn apply_initial_replay_page_policy(
+        &mut self,
+        peer: PeerId,
+        gid: usize,
+        prefixes: &HashSet<Prefix>,
+    ) {
+        let group = &self.group_ribs[&gid];
+        if !group.has_policy_filtered_routes() && !self.policy_filtered_routes.contains_key(&peer) {
+            return;
+        }
+        let current = group
+            .policy_filtered_for_member_with_checkpoint(peer, prefixes, &mut || {
+                self.replacement_checkpoint(false);
+            })
+            .into_iter()
+            .collect();
+        self.update_policy_filtered_routes_for_prefixes(peer, prefixes, &current);
+    }
+
     /// Reconstruct a joining member's export counters from the group's
     /// staged residue: one permit per `adv(m)` slot (labelled by its
     /// retained decision attribution — the lane entry's where the member

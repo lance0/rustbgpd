@@ -9743,6 +9743,8 @@ impl RibManager {
         changed: &HashSet<Prefix>,
         targets: &HashSet<PeerId>,
     ) {
+        self.loc_rib
+            .record_targeted_replay_changes(targets, changed);
         self.distribute_changes_inner(
             changed,
             changed,
@@ -10127,6 +10129,7 @@ impl RibManager {
             .filter(|&peer| {
                 !RELEASING
                     && !draining
+                    && !self.is_initial_member_replay(peer)
                     && self.grouped_member_of(peer).is_some()
                     && ((self.outbound_channel_full(peer)
                         && (stages_change || evpn_feeds.contains_key(&peer)))
@@ -10222,6 +10225,29 @@ impl RibManager {
                         break 'member;
                     }
                     let member_of = self.grouped_member_of(peer);
+                    if self.is_initial_member_replay(peer) {
+                        if RELEASING
+                            || self.force_outbound_peers.contains(&peer)
+                            || self.dirty_peers.contains(&peer)
+                        {
+                            self.abort_initial_member_replay(peer);
+                            self.mark_outbound_dirty(peer);
+                        } else {
+                            // The replay scan delivers current winners and repairs against
+                            // actual admission. The live pass owns its policy evaluations.
+                            if let Some(gid) = member_of
+                                && let Some(stage) = group_stage.get(&gid)
+                            {
+                                self.apply_group_policy_counters(peer, &stage.evals);
+                                self.apply_initial_replay_page_policy(peer, gid, best_changed);
+                                if !self.record_initial_replay_changes(peer, stage) {
+                                    self.abort_initial_member_replay(peer);
+                                    self.mark_outbound_dirty(peer);
+                                }
+                            }
+                            break 'member;
+                        }
+                    }
                     let evpn_group_owned = self.evpn_grouped_member_of(peer).is_some();
                     // For dirty peers, compute full prefix set from Loc-RIB + AdjRibOut
                     if self.evpn_recovery_reset_pending(peer) {

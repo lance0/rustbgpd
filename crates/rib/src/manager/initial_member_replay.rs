@@ -1,0 +1,328 @@
+//! Replay a published single-best group through the registration lane. A full
+//! writer parks with its exact admitted-key proof and its scan position intact.
+
+mod changes;
+
+use std::collections::{HashMap, HashSet, VecDeque};
+
+use changes::ReplayChanges;
+use tokio::sync::mpsc;
+
+use super::distribution::OutboundCommitBatch;
+use super::update_groups::admitted_recovery::Key;
+use super::{PeerId, RibManager};
+use crate::fast_hash::FastSet;
+use crate::loc_rib::{REGISTRATION_PAGE_SIZE, RegistrationScanStatus};
+use crate::update::{ExactExportKey, OutboundRouteUpdate, RouteQueryKey, route_query_key};
+
+enum Phase {
+    PrepareProof(Option<RouteQueryKey>),
+    Send,
+}
+
+struct Replay {
+    gid: usize,
+    table_stamp: u64,
+    session: u64,
+    sender: mpsc::Sender<OutboundRouteUpdate>,
+    phase: Phase,
+    changes: ReplayChanges,
+}
+
+#[derive(Default)]
+pub(super) struct InitialMemberReplays {
+    members: HashMap<PeerId, Replay>,
+    ready: VecDeque<PeerId>,
+    blocked: VecDeque<PeerId>,
+    registration_due: bool,
+    #[cfg(test)]
+    pub(super) min_routes: Option<usize>,
+}
+
+impl InitialMemberReplays {
+    pub(super) fn runnable(&self) -> bool {
+        !self.ready.is_empty()
+    }
+
+    pub(super) fn parked(&self) -> bool {
+        !self.blocked.is_empty()
+    }
+}
+
+impl RibManager {
+    pub(super) fn is_initial_member_replay(&self, peer: PeerId) -> bool {
+        self.initial_member_replays.members.contains_key(&peer)
+    }
+
+    pub(super) fn start_initial_member_replay(&mut self, peer: PeerId) -> bool {
+        let Some(gid) = self.grouped_member_of(peer) else {
+            return false;
+        };
+        let group = &self.group_ribs[&gid];
+        if self.initial_member_replays.members.len() >= super::peer_lifecycle::MAX_JOIN_COHORT
+            || group.evpn_table_stamp == 0
+            || self.dirty_peers.contains(&peer)
+            || self.outbound_prefix_limits.contains_key(&peer)
+            || self.retain_initial_group_admitted(peer)
+            || self.peer_orf_pending.contains_key(&peer)
+        {
+            return false;
+        }
+        let table_stamp = group.evpn_table_stamp;
+        if !matches!(
+            self.pending_group_admitted
+                .begin_initial_replay(peer, group.table.len()),
+            Ok(true)
+        ) {
+            return false;
+        }
+        self.refresh_group_recovery_gauges();
+        self.loc_rib.start_member_replay_scan(peer);
+        self.initial_member_replays.members.insert(
+            peer,
+            Replay {
+                gid,
+                table_stamp,
+                session: self.outbound_session_ids[&peer],
+                sender: self.outbound_peers[&peer].clone(),
+                phase: Phase::PrepareProof(None),
+                changes: ReplayChanges::default(),
+            },
+        );
+        self.initial_member_replays.ready.push_back(peer);
+        self.set_initial_group_admitted_counts(peer, [0; 6]);
+        self.start_initial_replay_policy(peer, gid);
+        let families = self.peer_sendable_families[&peer]
+            .iter()
+            .copied()
+            .chain(
+                self.registered_withheld_families(peer)
+                    .iter()
+                    .map(|(family, _)| *family),
+            )
+            .collect::<Vec<_>>();
+        for family in families {
+            self.owe_eor(peer, family);
+        }
+        true
+    }
+
+    pub(super) fn abort_initial_member_replay(&mut self, peer: PeerId) -> bool {
+        if self.initial_member_replays.members.remove(&peer).is_none() {
+            return false;
+        }
+        self.initial_member_replays.ready.retain(|p| *p != peer);
+        self.initial_member_replays.blocked.retain(|p| *p != peer);
+        self.loc_rib.stop_member_replay_scan(peer);
+        self.refresh_eor_retry(peer);
+        true
+    }
+
+    pub(super) fn wake_initial_member_replay(&mut self) -> bool {
+        let Some(peer) = self.initial_member_replays.blocked.pop_front() else {
+            return false;
+        };
+        if !self.outbound_channel_gone(peer)
+            && (self.outbound_channel_full(peer) || self.outbound_operation_live(peer))
+        {
+            self.initial_member_replays.blocked.push_back(peer);
+            return false;
+        }
+        self.initial_member_replays.ready.push_back(peer);
+        true
+    }
+
+    pub(super) fn service_initial_member_replay(&mut self) -> bool {
+        if self.initial_member_replays.registration_due
+            && (self.first_group_build.is_some() || !self.pending_initial_registrations.is_empty())
+        {
+            self.initial_member_replays.registration_due = false;
+            return false;
+        }
+        let Some(peer) = self.initial_member_replays.ready.pop_front() else {
+            return false;
+        };
+        self.initial_member_replays.registration_due = true;
+        self.advance_initial_member_replay(peer);
+        true
+    }
+
+    fn recover_initial_member_replay(&mut self, peer: PeerId) {
+        self.abort_initial_member_replay(peer);
+        self.mark_outbound_dirty(peer);
+    }
+
+    fn advance_initial_member_replay(&mut self, peer: PeerId) {
+        // The ingest owner publishes accumulated Loc-RIB changes to the group at
+        // its window boundary. Never consume their repairs against the old table.
+        if !self.pending_distribute_changed.is_empty()
+            || !self.pending_distribute_affected.is_empty()
+        {
+            self.initial_member_replays.ready.push_back(peer);
+            return;
+        }
+        let Some(job) = self.initial_member_replays.members.get(&peer) else {
+            return;
+        };
+        if job.sender.is_closed()
+            || self.outbound_session_ids.get(&peer) != Some(&job.session)
+            || !self
+                .outbound_peers
+                .get(&peer)
+                .is_some_and(|tx| tx.same_channel(&job.sender))
+        {
+            self.abort_initial_member_replay(peer);
+            return;
+        }
+        let gid = job.gid;
+        if self.grouped_member_of(peer) != Some(gid)
+            || self
+                .group_ribs
+                .get(&gid)
+                .is_none_or(|g| g.evpn_table_stamp != job.table_stamp)
+            || self.dirty_peers.contains(&peer)
+            || self.loc_rib.member_replay_scan_status(peer) == RegistrationScanStatus::Overflow
+            || self
+                .pending_group_admitted
+                .initial_replay_sparse_len(peer)
+                .is_none_or(|rows| rows > REGISTRATION_PAGE_SIZE)
+        {
+            self.recover_initial_member_replay(peer);
+            return;
+        }
+        if self.outbound_channel_full(peer) || self.outbound_operation_live(peer) {
+            self.initial_member_replays.blocked.push_back(peer);
+            return;
+        }
+        if let Phase::PrepareProof(after) = job.phase {
+            self.prepare_initial_member_proof_page(peer, gid, after);
+            return;
+        }
+        if !job.changes.has_pending()
+            && self.loc_rib.member_replay_scan_status(peer) == RegistrationScanStatus::Ready
+        {
+            if !self.pending_route_batches.is_empty() {
+                self.initial_member_replays.ready.push_back(peer);
+                return;
+            }
+            self.abort_initial_member_replay(peer);
+            self.complete_initial_selection_replay(peer);
+            self.retire_completed_initial_group_admitted(peer);
+            self.settle_free_eor(peer);
+            return;
+        }
+        self.send_initial_member_page(peer, gid);
+    }
+
+    fn prepare_initial_member_proof_page(
+        &mut self,
+        peer: PeerId,
+        gid: usize,
+        after: Option<RouteQueryKey>,
+    ) {
+        let table = &self.group_ribs[&gid].table;
+        let mut last = None;
+        // The ordered iterator revisits the one single-best row at its inclusive seek.
+        let mut visits = usize::from(after.is_some());
+        let remaining = REGISTRATION_PAGE_SIZE - visits;
+        let keys = table.iter_ordered_from(after).take(remaining).map(|row| {
+            last = Some(route_query_key(row));
+            visits += 1;
+            Key::Unicast(row.prefix, row.path_id)
+        });
+        if !self
+            .pending_group_admitted
+            .extend_initial_replay_universe(peer, keys)
+        {
+            self.recover_initial_member_replay(peer);
+            return;
+        }
+        #[cfg(test)]
+        super::slice_timing::record_work("initial_member_replay_visits", visits);
+        self.initial_member_replays
+            .members
+            .get_mut(&peer)
+            .expect("live replay")
+            .phase = if visits == REGISTRATION_PAGE_SIZE {
+            Phase::PrepareProof(last)
+        } else {
+            Phase::Send
+        };
+        self.initial_member_replays.ready.push_back(peer);
+    }
+
+    fn send_initial_member_page(&mut self, peer: PeerId, gid: usize) {
+        let Ok(mut operation) = self.begin_outbound_operation(peer, 1) else {
+            self.initial_member_replays.blocked.push_back(peer);
+            return;
+        };
+        if self.initial_member_replays.members[&peer]
+            .changes
+            .has_pending()
+        {
+            self.send_initial_replay_change(peer, operation);
+            return;
+        }
+        let page = self.loc_rib.take_member_replay_page(peer);
+        #[cfg(test)]
+        super::slice_timing::record_work(
+            "initial_member_replay_visits",
+            page.bucket_visits + page.repairs,
+        );
+        let Some(admitted) = self.pending_group_admitted.get(&peer) else {
+            self.recover_initial_member_replay(peer);
+            return;
+        };
+        let group = &self.group_ribs[&gid];
+        let changes = &self.initial_member_replays.members[&peer].changes;
+        let mut routes = Vec::new();
+        let mut actions = Vec::new();
+        for prefix in &page.keys {
+            // Grouped single-best outbound identities use path ID zero,
+            // including when the received winner has its own Add-Path ID.
+            let key = ExactExportKey::Unicast(*prefix, 0);
+            if admitted.contains(&key) || changes.owns_absent(prefix) {
+                continue;
+            }
+            if let Some(entry) = group.adv_entry_for(peer, prefix, 0, None) {
+                routes.push(entry.route.clone());
+                actions.push(entry.nh.cloned());
+            }
+        }
+        if !routes.is_empty() {
+            let batch = OutboundCommitBatch {
+                slot: operation.slot(),
+                force_unicast_replay: true,
+                unicast_otc_prechecked: true,
+                ..OutboundCommitBatch::with_unicast(routes.into(), actions.into())
+            };
+            if !self.commit_initial_member_batch(peer, batch, FastSet::default()) {
+                return;
+            }
+        }
+        self.apply_initial_replay_page_policy(
+            peer,
+            gid,
+            &page.keys.into_iter().collect::<HashSet<_>>(),
+        );
+        self.initial_member_replays.ready.push_back(peer);
+    }
+
+    fn commit_initial_member_batch(
+        &mut self,
+        peer: PeerId,
+        batch: OutboundCommitBatch,
+        prior: FastSet<ExactExportKey>,
+    ) -> bool {
+        if self
+            .try_send_and_commit_outbound_update_with_group_prior(peer, batch, prior, None)
+            .is_err()
+            || self.group_recovery_fallback(peer).is_some()
+        {
+            self.recover_initial_member_replay(peer);
+            return false;
+        }
+        self.advance_advertised_pages();
+        true
+    }
+}

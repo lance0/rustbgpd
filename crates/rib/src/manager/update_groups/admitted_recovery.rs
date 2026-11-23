@@ -398,6 +398,7 @@ enum State {
 struct Record {
     peer: PeerId,
     state: State,
+    initial_replay: bool,
     keys: AdmittedKeys,
     snapshot: Option<SnapshotHandle>,
     words: Words,
@@ -990,6 +991,11 @@ impl AdmittedRecovery {
             self.optional_share_attempts += 1;
         }
         let index = self.index(peer).map_err(|_| self.missing_proof(peer))?;
+        // A replay builds its own ordered universe in pages. It is never
+        // shared or replaced, even before its first successful admission.
+        if self.records[index].initial_replay {
+            return Ok(None);
+        }
         if self.records[index].masked != 0 || !self.records[index].keys.0.is_empty() {
             return Ok(self.records[index].snapshot);
         }
@@ -1018,6 +1024,7 @@ impl AdmittedRecovery {
                 keys,
                 shape,
                 slot_source,
+                false,
                 checkpoint,
             )
         });
@@ -1044,6 +1051,7 @@ impl AdmittedRecovery {
         keys: A,
         shape: (usize, usize),
         slot_source: Option<&AdjRibOut>,
+        initial_replay: bool,
         checkpoint: &mut impl FnMut(bool),
     ) -> Result<Option<SnapshotHandle>, Failure> {
         if let Some(handle) = self.records[index].snapshot {
@@ -1116,9 +1124,11 @@ impl AdmittedRecovery {
                 attempted_daemon_bytes: daemon,
             });
         }
-        for _ in 0..actual_words {
-            checkpoint(false);
-            self.records[index].words.push(0);
+        if !initial_replay {
+            for _ in 0..actual_words {
+                checkpoint(false);
+                self.records[index].words.push(0);
+            }
         }
         self.used -= size_of::<Words>();
         // The mask precedes the key/pool allocations. Pool growth is the last
@@ -1943,6 +1953,7 @@ impl AdmittedRecovery {
             Record {
                 peer,
                 state,
+                initial_replay: false,
                 keys: AdmittedKeys(Keys::new()),
                 snapshot: None,
                 words: Words::new(),
@@ -1981,6 +1992,77 @@ impl AdmittedRecovery {
             };
         }
         self.insert_record(peer, State::Complete, checkpoint)
+    }
+
+    /// Prepay the two empty buffers of a private snapshot. Neither initialization
+    /// nor retirement visits the table; each preparation page appends its own keys
+    /// and unset mask words. The group never receives this snapshot's handle.
+    pub(in crate::manager) fn begin_initial_replay(
+        &mut self,
+        peer: PeerId,
+        table_rows: usize,
+    ) -> Result<bool, Failure> {
+        let Ok(index) = self.index(peer) else {
+            return Ok(false);
+        };
+        let record = &self.records[index];
+        if record.state != State::Complete || record.entries() != 0 || record.snapshot.is_some() {
+            return Ok(false);
+        }
+        let handle = self.attach_snapshot_with_checkpoint(
+            index,
+            None,
+            table_rows,
+            std::iter::empty(),
+            (table_rows, 0),
+            None,
+            true,
+            &mut |_| {},
+        )?;
+        self.records[index].initial_replay = handle.is_some();
+        Ok(handle.is_some())
+    }
+
+    /// Group churn can shrink the table or add a prefix behind the walk. Such
+    /// keys stay in the ordinary sparse overlay when first admitted.
+    pub(in crate::manager) fn extend_initial_replay_universe(
+        &mut self,
+        peer: PeerId,
+        keys: impl Iterator<Item = Key>,
+    ) -> bool {
+        let Ok(index) = self.index(peer) else {
+            return false;
+        };
+        let record = &self.records[index];
+        let Some(snapshot) = record
+            .snapshot
+            .filter(|_| record.initial_replay)
+            .and_then(|handle| self.snapshot_index(handle))
+        else {
+            return false;
+        };
+        let record = &mut self.records[index];
+        let universe = &mut self.snapshots[snapshot].keys;
+        for key in keys {
+            if universe.len() == universe.capacity() {
+                break;
+            }
+            if universe.last().is_some_and(|last| key <= *last)
+                || record.keys.0.binary_search(&key).is_ok()
+            {
+                continue;
+            }
+            if universe.len().is_multiple_of(64) {
+                record.words.push(0);
+            }
+            universe.push(key);
+        }
+        true
+    }
+
+    pub(in crate::manager) fn initial_replay_sparse_len(&self, peer: PeerId) -> Option<usize> {
+        let record = &self.records[self.index(peer).ok()?];
+        record.initial_replay.then_some(record.keys.0.len())
     }
 
     fn grow_keys(
@@ -2042,6 +2124,7 @@ impl AdmittedRecovery {
             .try_grow(0)
             .expect("empty pinned SmallVec deallocation cannot fail");
         record.masked = 0;
+        record.initial_replay = false;
         let snapshot = record.snapshot.take();
         self.used -= bytes;
         checkpoint(true);
@@ -2211,8 +2294,13 @@ impl AdmittedRecovery {
         keys: &[Key],
         cursor: &mut Option<usize>,
         key: Key,
+        paged: bool,
         checkpoint: &mut impl FnMut(bool),
     ) -> Option<usize> {
+        // Two repairs can be at opposite ends of the whole replay universe.
+        if paged {
+            return keys.binary_search(&key).ok();
+        }
         let position = cursor.get_or_insert_with(|| {
             keys.partition_point(|prior| {
                 checkpoint(false);
@@ -2295,12 +2383,23 @@ impl AdmittedRecovery {
             if previous.is_some_and(|prior| prior >= key) {
                 return Err(self.fail(index, self.missing_proof(peer), checkpoint));
             }
-            let admitted = if let Some(position) =
-                Self::sorted_match(universe, &mut base_cursor, key, checkpoint)
-            {
+            let admitted = if let Some(position) = Self::sorted_match(
+                universe,
+                &mut base_cursor,
+                key,
+                record.initial_replay,
+                checkpoint,
+            ) {
                 record.words[position / 64] & (1_u64 << (position % 64)) != 0
             } else {
-                Self::sorted_match(&record.keys.0, &mut sparse_cursor, key, checkpoint).is_some()
+                Self::sorted_match(
+                    &record.keys.0,
+                    &mut sparse_cursor,
+                    key,
+                    record.initial_replay,
+                    checkpoint,
+                )
+                .is_some()
             };
             if !admitted {
                 return Err(self.fail(index, self.missing_proof(peer), checkpoint));
@@ -2343,8 +2442,13 @@ impl AdmittedRecovery {
         let mut base_cursor = None;
         for key in withdrawals.clone() {
             checkpoint(false);
-            if let Some(position) = Self::sorted_match(universe, &mut base_cursor, key, checkpoint)
-            {
+            if let Some(position) = Self::sorted_match(
+                universe,
+                &mut base_cursor,
+                key,
+                record.initial_replay,
+                checkpoint,
+            ) {
                 record.words[position / 64] &= !(1_u64 << (position % 64));
                 record.masked -= 1;
             }
@@ -2689,6 +2793,94 @@ mod tests {
             visits < 100,
             "range count must not walk the unrelated 4096-key universe: {visits}"
         );
+    }
+
+    #[test]
+    fn initial_replay_pages_preserve_actual_membership_and_credit() {
+        let mut ledger = AdmittedRecovery::new();
+        let who = peer(1);
+        let rows = 4_096;
+        let key = slot_key;
+        ledger.insert_empty(who).unwrap();
+        assert!(ledger.begin_initial_replay(who, rows).unwrap());
+        let seed_charge = ledger.bytes();
+        // An ordinary announcement before the preparation cursor sees this
+        // identity stays sparse. Preparation must not mirror it in the mask.
+        ledger
+            .apply_admitted(who, [key(17)].into_iter(), [].into_iter())
+            .unwrap();
+        for start in (0..rows).step_by(63) {
+            assert!(ledger.extend_initial_replay_universe(
+                who,
+                (start..(start + 63).min(rows)).map(|n| key(u32::try_from(n).unwrap()))
+            ));
+        }
+        let prepared = ledger.get(&who).unwrap();
+        assert_eq!(prepared.iter().collect::<Vec<_>>(), [key(17).into()]);
+        // Unordered partial admission, including one prefix added behind the
+        // cursor after preparation. Non-admitted snapshot positions stay clear.
+        let announce = [key(4095), key(2), key(17), key(4096)];
+        ledger.reserve_admitted(who, announce.into_iter()).unwrap();
+        let charge = ledger.bytes();
+        assert!(charge >= seed_charge);
+        ledger.fail_next_allocation_for_test();
+        ledger
+            .apply_reserved_admitted_with_checkpoint(
+                who,
+                [key(4095), key(2), key(4096)].into_iter(),
+                [].into_iter(),
+                &mut |_| {},
+            )
+            .unwrap();
+        let mut visits = 0;
+        ledger
+            .apply_reserved_admitted_with_checkpoint(
+                who,
+                [].into_iter(),
+                [key(2), key(4095)].into_iter(),
+                &mut |_| visits += 1,
+            )
+            .unwrap();
+        assert!(visits < 64, "two withdrawals scanned {visits} keys");
+        let view = ledger.get(&who).unwrap();
+        assert_eq!(
+            view.iter().collect::<Vec<_>>(),
+            [key(17).into(), key(4096).into()]
+        );
+        assert_eq!(ledger.initial_replay_sparse_len(who), Some(2));
+        assert_eq!(ledger.bytes(), charge);
+        assert_retained_credit(&ledger);
+        assert!(ledger.remove(&who));
+        assert_retained_credit(&ledger);
+        assert_eq!(ledger.bytes(), size_of::<AdmittedRecovery>());
+    }
+
+    #[test]
+    fn initial_replay_refusal_leaves_the_empty_seed_for_fallback() {
+        let who = peer(1);
+        for fault in 0..3 {
+            let mut ledger = AdmittedRecovery::new();
+            ledger.insert_empty(who).unwrap();
+            let before = ledger.bytes();
+            ledger.allocation_countdown = Some(fault);
+            assert_eq!(
+                ledger.begin_initial_replay(who, 256).unwrap_err().cause,
+                FailureCause::AllocationFailure
+            );
+            assert_eq!(ledger.bytes(), before);
+            assert!(ledger.get(&who).unwrap().is_empty());
+            assert_eq!(ledger.initial_replay_sparse_len(who), None);
+            assert_retained_credit(&ledger);
+        }
+        let mut ledger = AdmittedRecovery::with_test_limits(4096, DAEMON_LIMIT_BYTES);
+        ledger.insert_empty(who).unwrap();
+        let before = ledger.bytes();
+        assert_eq!(
+            ledger.begin_initial_replay(who, 100_000).unwrap_err().cause,
+            FailureCause::PeerLimit
+        );
+        assert_eq!(ledger.bytes(), before);
+        assert!(ledger.get(&who).unwrap().is_empty());
     }
 
     #[test]
@@ -3534,7 +3726,7 @@ mod tests {
             let mut comparisons = 0;
             for (position, key) in raw.iter().copied().enumerate() {
                 assert_eq!(
-                    AdmittedRecovery::sorted_match(&raw, &mut cursor, key, &mut |force| {
+                    AdmittedRecovery::sorted_match(&raw, &mut cursor, key, false, &mut |force| {
                         assert!(!force);
                         comparisons += 1;
                     }),
@@ -3551,7 +3743,7 @@ mod tests {
             comparisons = 0;
             for (position, key) in raw.iter().copied().enumerate().skip(raw.len() - 2) {
                 assert_eq!(
-                    AdmittedRecovery::sorted_match(&raw, &mut cursor, key, &mut |force| {
+                    AdmittedRecovery::sorted_match(&raw, &mut cursor, key, false, &mut |force| {
                         assert!(!force);
                         comparisons += 1;
                     }),
