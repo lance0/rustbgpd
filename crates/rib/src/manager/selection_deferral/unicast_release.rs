@@ -666,7 +666,7 @@ impl RibManager {
         if let Some(pass) = &mut walk.distribution {
             if walk.rejection_retirement.is_none() {
                 self.selection_release_staging = Some(HashSet::new());
-                let done = self.poll_unicast_release_distribution(pass);
+                let done = self.poll_unicast_release_distribution(pass, false);
                 debug_assert!(
                     self.selection_release_staging
                         .as_ref()

@@ -11216,7 +11216,7 @@ impl RibManager {
                         .get(&peer)
                         .and_then(|vantage| self.orr.spf.get(vantage))
                         .map(|spf| (&self.orr.topology, spf));
-                    let per_client_best = self.peer_per_client_best.contains(&peer);
+                    let per_client_best = self.private_per_client_best(peer);
                     let rtc_filter = self.rtc_export_filter(peer, sendable.as_ref());
                     let common_recovery_fallback = is_dirty
                         && member_of.is_none()

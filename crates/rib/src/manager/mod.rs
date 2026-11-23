@@ -1226,6 +1226,9 @@ pub struct RibManager {
     /// Large route batches that are being processed in chunks.
     pending_route_batches: VecDeque<PendingRoutesReceived>,
     source_departure: Option<Box<source_departure::SourceDeparture>>,
+    /// Departure units run in the current actor turn, for poll-shape tests.
+    #[cfg(test)]
+    departure_units_this_turn: usize,
     /// The ingest permit of the session message being dispatched, for the
     /// batch it queues to take. Empty between dispatches.
     dispatching_ingest_permit: Option<crate::ingest_budget::IngestPermit>,
@@ -3268,6 +3271,8 @@ impl RibManager {
             replacement_readiness_receipts: Vec::new(),
             pending_route_batches: VecDeque::new(),
             source_departure: None,
+            #[cfg(test)]
+            departure_units_this_turn: 0,
             dispatching_ingest_permit: None,
             pending_evpn_fanout: None,
             flowspec_validation: flowspec_validation::ValidationState::default(),
@@ -8085,11 +8090,34 @@ impl RibManager {
                     );
                     return self;
                 }
-                self.poll_source_departure_turn();
+                // While nothing admissible waits, run consecutive departure
+                // units for a short budget. The first queued message, a lost
+                // notice lane or the budget ends the turn.
+                let started = std::time::Instant::now();
+                let budget = source_departure::QUIET_LOOP_BUDGET.min(self.flush_poll_budget);
+                loop {
+                    let departed = self.poll_source_departure_turn();
+                    #[cfg(test)]
+                    {
+                        self.departure_units_this_turn += 1;
+                    }
+                    if !departed
+                        || self.source_departure.is_none()
+                        || self.dampening_history.notice_failed()
+                        || !self.source_departure_quiet()
+                        || started.elapsed() >= budget
+                    {
+                        break;
+                    }
+                }
                 self.drain_readiness_queries(None);
                 #[cfg(test)]
                 if let Some(check) = self.actor_turn_check {
                     check(&self);
+                }
+                #[cfg(test)]
+                {
+                    self.departure_units_this_turn = 0;
                 }
                 tokio::task::yield_now().await;
                 continue;

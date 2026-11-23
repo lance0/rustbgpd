@@ -159,6 +159,7 @@ fn assert_initial(receiver: &mut mpsc::Receiver<OutboundRouteUpdate>, shape: Sha
 thread_local! {
     // Only run_actor calls this observer, on the current-thread test executor.
     static SAW_DEPARTURE: Cell<bool> = const { Cell::new(false) };
+    static MOST_UNITS_PER_TURN: Cell<usize> = const { Cell::new(0) };
     static WINNER_DURING_DEPARTURE: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -166,6 +167,11 @@ fn observe_winner(manager: &RibManager) {
     if manager.source_departure.is_some() {
         SAW_DEPARTURE.set(true);
     }
+    MOST_UNITS_PER_TURN.set(
+        MOST_UNITS_PER_TURN
+            .get()
+            .max(manager.departure_units_this_turn),
+    );
     if manager.source_departure.is_some()
         && manager
             .loc_rib
@@ -224,6 +230,8 @@ struct PollCounts {
     inspected: usize,
     emitted: usize,
     envelope: usize,
+    envelopes: usize,
+    polls: usize,
 }
 
 fn register_source_only(manager: &mut RibManager) -> mpsc::Receiver<OutboundRouteUpdate> {
@@ -250,7 +258,70 @@ fn register_source_only(manager: &mut RibManager) -> mpsc::Receiver<OutboundRout
     no_exports
 }
 
-async fn departure(shape: Shape, count: u8, rows: u32) -> PollCounts {
+#[derive(Clone, Copy)]
+enum ProbeArrival {
+    Prequeued,
+    AfterEmpty,
+    AfterYield,
+    /// Sent synchronously at the third quiet unit, inside a budget loop.
+    InQuietLoop,
+}
+
+thread_local! {
+    static ON_EMPTY: Cell<Option<Box<dyn FnOnce()>>> = const { Cell::new(None) };
+    static PROBE_SENT: Cell<bool> = const { Cell::new(false) };
+    static QUIET_COUNTDOWN: Cell<Option<(usize, mpsc::Sender<RibUpdate>)>> = const { Cell::new(None) };
+}
+
+pub(in crate::manager) fn after_empty_fifo() {
+    if let Some(send) = ON_EMPTY.take() {
+        send();
+    }
+    if let Some((left, tx)) = QUIET_COUNTDOWN.take() {
+        if left == 0 {
+            send_probe(&tx);
+        } else {
+            QUIET_COUNTDOWN.set(Some((left - 1, tx)));
+        }
+    }
+}
+
+fn send_probe(tx: &mpsc::Sender<RibUpdate>) {
+    tx.try_send(announce(OTHER, probe_prefix())).unwrap();
+    PROBE_SENT.set(true);
+}
+
+fn queue_probe(arrival: ProbeArrival, tx: mpsc::Sender<RibUpdate>) {
+    PROBE_SENT.set(false);
+    match arrival {
+        ProbeArrival::Prequeued => {
+            send_probe(&tx);
+            // Keep a fenced FIFO head waiting through the last withdrawal.
+            tx.try_send(down(SOURCE)).unwrap();
+        }
+        ProbeArrival::AfterEmpty => ON_EMPTY.set(Some(Box::new(move || send_probe(&tx)))),
+        ProbeArrival::InQuietLoop => QUIET_COUNTDOWN.set(Some((2, tx))),
+        ProbeArrival::AfterYield => {
+            let (signal, ready) = oneshot::channel();
+            ON_EMPTY.set(Some(Box::new(move || signal.send(()).unwrap())));
+            tokio::spawn(async move {
+                ready.await.unwrap();
+                send_probe(&tx);
+            });
+        }
+    }
+}
+
+/// A producer sharing this current-thread executor runs only after the actor
+/// yields. One unit per turn keeps that seam for every unit.
+fn pace_for_arrival(manager: &mut RibManager, arrival: ProbeArrival) {
+    MOST_UNITS_PER_TURN.set(0);
+    if matches!(arrival, ProbeArrival::AfterYield) {
+        manager.flush_poll_budget = Duration::ZERO;
+    }
+}
+
+async fn departure(shape: Shape, count: u8, rows: u32, arrival: ProbeArrival) -> PollCounts {
     let (tx, rx) = mpsc::channel(16);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     manager.outbound_row_credit_override = None;
@@ -274,20 +345,24 @@ async fn departure(shape: Shape, count: u8, rows: u32) -> PollCounts {
         assert_initial(rx, shape, rows);
     }
     assert!(manager.dirty_peers.is_empty());
+    pace_for_arrival(&mut manager, arrival);
     WINNER_DURING_DEPARTURE.set(false);
     manager.actor_turn_check = Some(observe_winner);
-    // Queue both events before the actor starts: no read probe, sleep, or task race.
     tx.try_send(down(SOURCE)).unwrap();
-    tx.try_send(announce(OTHER, probe_prefix())).unwrap();
-    drop(tx);
+    queue_probe(arrival, tx);
     let mut actor = Box::pin(manager.run_actor());
     let mut streams: Vec<Vec<_>> = (0..count).map(|_| Vec::new()).collect();
-    let (mut most, mut total, mut most_sent) = (0, 0, 0);
+    let (mut most, mut total, mut most_sent, mut polls) = (0, 0, 0, 0);
     take_receiver_rows();
     let end = poll_fn(|cx| {
+        polls += 1;
+        // The bound holds while admissible work waits; a fenced head is not.
+        let waiting = PROBE_SENT.get() && !WINNER_DURING_DEPARTURE.get();
         let result = actor.as_mut().poll(cx);
         let work = take_receiver_rows();
-        most = most.max(work);
+        if waiting {
+            most = most.max(work);
+        }
         total += work;
         let mut sent = 0;
         for (receiver, stream) in receivers.iter_mut().zip(&mut streams) {
@@ -296,7 +371,9 @@ async fn departure(shape: Shape, count: u8, rows: u32) -> PollCounts {
                 stream.push(update);
             }
         }
-        most_sent = most_sent.max(sent);
+        if waiting {
+            most_sent = most_sent.max(sent);
+        }
         result
     })
     .await;
@@ -339,7 +416,13 @@ async fn departure(shape: Shape, count: u8, rows: u32) -> PollCounts {
         "{shape:?} K={count}: {most_sent} withdrawals delivered in one physical actor poll"
     );
     assert!(end.dirty_peers.is_empty());
-    poll_counts(shape, count, rows, &streams, (most, total, most_sent))
+    poll_counts(
+        shape,
+        count,
+        rows,
+        &streams,
+        (most, total, most_sent, polls),
+    )
 }
 
 fn poll_counts(
@@ -347,32 +430,31 @@ fn poll_counts(
     count: u8,
     rows: u32,
     streams: &[Vec<OutboundRouteUpdate>],
-    counts: (usize, usize, usize),
+    counts: (usize, usize, usize, usize),
 ) -> PollCounts {
-    let (most, total, most_sent) = counts;
+    let (most, total, most_sent, polls) = counts;
+    let withdrawal_sizes = streams
+        .iter()
+        .flatten()
+        .map(|update| update.unicast_withdrawals().count() + update.flowspec_withdraw.len())
+        .filter(|&rows| rows != 0);
+    let envelopes = withdrawal_sizes.clone().count();
     eprintln!(
-        "{shape:?} K={count} rows={rows} max_inspected_per_poll={most} max_withdrawals_per_poll={most_sent} total_inspected={total} total_withdrawals={}",
-        streams
-            .iter()
-            .flatten()
-            .map(|update| update.unicast_withdrawals().count() + update.flowspec_withdraw.len())
-            .sum::<usize>()
+        "{shape:?} K={count} rows={rows} queued_max_inspected_per_poll={most} queued_max_withdrawals_per_poll={most_sent} total_inspected={total} physical_polls={polls} withdrawal_envelopes={envelopes} total_withdrawals={}",
+        withdrawal_sizes.clone().sum::<usize>()
     );
     PollCounts {
         inspected: most,
         emitted: most_sent,
-        envelope: streams
-            .iter()
-            .flatten()
-            .map(|update| update.unicast_withdrawals().count() + update.flowspec_withdraw.len())
-            .max()
-            .unwrap(),
+        envelope: withdrawal_sizes.max().unwrap(),
+        envelopes,
+        polls,
     }
 }
 
 async fn check_sizes(shape: Shape) {
-    let small = Box::pin(departure(shape, 8, ROWS)).await;
-    let large = Box::pin(departure(shape, 32, ROWS)).await;
+    let small = Box::pin(departure(shape, 8, ROWS, ProbeArrival::Prequeued)).await;
+    let large = Box::pin(departure(shape, 32, ROWS, ProbeArrival::Prequeued)).await;
     assert!(
         large.inspected <= small.inspected,
         "{shape:?} maximum inspected rows grew {} -> {}",
@@ -412,11 +494,64 @@ async fn grouped_departure_chunks_an_uneven_member_tail_and_keeps_private_walks_
     // 256 / 109 = 2 receivers per poll, with one receiver on the last page.
     // The extra source-only private registration in both fixtures cannot
     // disqualify the first fixture. A sendable private receiver must.
-    let grouped = Box::pin(departure(Shape::Grouped, 5, 109)).await;
+    let grouped = pressured_departure(Shape::Grouped, 5, 109);
     assert_eq!((grouped.envelope, grouped.emitted), (109, 218));
-    let mixed = Box::pin(departure(Shape::Mixed, 5, 109)).await;
+    let mixed = pressured_departure(Shape::Mixed, 5, 109);
     assert!(mixed.envelope <= 16);
     assert!(mixed.inspected <= 16 * 8 && mixed.emitted <= 16 * 8);
+}
+
+/// Drive a departure unit by unit while an admissible UPDATE stays queued,
+/// so every unit runs under FIFO pressure.
+fn pressured_departure(shape: Shape, count: u8, rows: u32) -> PollCounts {
+    let (tx, rx) = mpsc::channel(16);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.outbound_row_credit_override = None;
+    super::distribution_window::untimed_window(&mut manager);
+    for source in [SOURCE, OTHER] {
+        register_test_peer(&mut manager, peer_v4(source), 0);
+    }
+    let _no_exports = register_source_only(&mut manager);
+    let mut receivers: Vec<_> = (0..count)
+        .map(|index| {
+            let receiver = match shape {
+                Shape::Mixed if index == count - 1 => Shape::Private,
+                Shape::Mixed => Shape::Grouped,
+                other => other,
+            };
+            join(&mut manager, index, receiver)
+        })
+        .collect();
+    seed(&mut manager, shape, rows);
+    for rx in &mut receivers {
+        assert_initial(rx, shape, rows);
+    }
+    tx.try_send(announce(OTHER, probe_prefix())).unwrap();
+    manager.handle_update(down(SOURCE));
+    assert!(manager.source_departure.is_some());
+    take_receiver_rows();
+    let (mut envelope, mut emitted, mut inspected, mut polls) = (0, 0, 0, 0);
+    while manager.source_departure.is_some() {
+        manager.advance_source_departure();
+        polls += 1;
+        inspected = inspected.max(take_receiver_rows());
+        let mut sent = 0;
+        for receiver in &mut receivers {
+            while let Ok(update) = receiver.try_recv().map(delivered) {
+                let rows = update.unicast_withdrawals().count();
+                envelope = envelope.max(rows);
+                sent += rows;
+            }
+        }
+        emitted = emitted.max(sent);
+    }
+    PollCounts {
+        inspected,
+        emitted,
+        envelope,
+        envelopes: 0,
+        polls,
+    }
 }
 
 /// With one key page there is no later key boundary. All 32 members must
@@ -424,7 +559,45 @@ async fn grouped_departure_chunks_an_uneven_member_tail_and_keeps_private_walks_
 /// before the first page starts.
 #[tokio::test(start_paused = true)]
 async fn a_single_key_page_with_many_group_members_admits_the_waiting_update() {
-    Box::pin(departure(Shape::Grouped, 32, 16)).await;
+    Box::pin(departure(Shape::Grouped, 32, 16, ProbeArrival::Prequeued)).await;
+}
+
+// A synchronous sender can arrive inside the quiet poll itself. A producer
+// sharing the current-thread executor also needs a yield before it can enqueue.
+#[tokio::test(start_paused = true)]
+async fn a_late_update_reaches_the_loc_rib_before_the_last_withdrawal() {
+    for shape in [Shape::Private, Shape::FlowSpec, Shape::Grouped] {
+        for (members, arrival) in [
+            (8, ProbeArrival::AfterEmpty),
+            (32, ProbeArrival::AfterYield),
+        ] {
+            // All 64 keys fit in one quiet page, but the departure has enough
+            // work to pace. A first empty observation still needs an admission seam.
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                Box::pin(departure(shape, members, 64, arrival)),
+            )
+            .await
+            .expect("late producer must run during the small departure");
+            let run = Box::pin(departure(shape, members, ROWS, arrival));
+            let counts = tokio::time::timeout(Duration::from_secs(5), run)
+                .await
+                .expect("empty FIFO observation must wake the producer");
+            if shape != Shape::Grouped {
+                // A fixed 16-key page needs one withdrawal envelope per receiver
+                // and at least one delivery poll per eight receivers per page.
+                let narrow_envelopes = usize::from(members) * usize::try_from(ROWS / 16).unwrap();
+                assert!(
+                    counts.envelopes < narrow_envelopes,
+                    "{shape:?} fixed-width withdrawals"
+                );
+                assert!(
+                    counts.polls < narrow_envelopes / 8,
+                    "{shape:?} fixed-width poll count"
+                );
+            }
+        }
+    }
 }
 
 const STABLE: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 3);
@@ -790,15 +963,34 @@ async fn wire_update_checks_the_whole_head_before_dispatching_during_departure()
         assert_eq!(message.announced.len(), 17);
         WINNER_DURING_DEPARTURE.set(false);
         SAW_DEPARTURE.set(false);
-        manager.actor_turn_check = Some(observe_winner);
+        manager.actor_turn_check = Some(if conflicting_tail {
+            |manager| {
+                observe_winner(manager);
+                if manager.source_departure.is_some() {
+                    assert!(
+                        manager
+                            .loc_rib
+                            .get(&Prefix::V4(prefix(DEPARTING + 16)))
+                            .is_none(),
+                        "FIFO follower bypassed the fenced head"
+                    );
+                }
+            }
+        } else {
+            observe_winner
+        });
         tx.try_send(down(SOURCE)).unwrap();
         tx.try_send(RibUpdate::WireRoutesReceived(message)).unwrap();
+        let follower = Prefix::V4(prefix(DEPARTING + 16));
+        tx.try_send(announce(OTHER, prefix(DEPARTING + 16)))
+            .unwrap();
         drop(tx);
         let end = Box::pin(manager.run_actor()).await;
         assert!(SAW_DEPARTURE.get());
         assert_eq!(WINNER_DURING_DEPARTURE.get(), !conflicting_tail);
         let mut remaining = expected_rows(DEPARTING);
-        let expected: BTreeSet<_> = keys.into_iter().map(Prefix::V4).collect();
+        let mut expected: BTreeSet<_> = keys.into_iter().map(Prefix::V4).collect();
+        assert!(expected.insert(follower));
         let mut announced = BTreeSet::new();
         let mut overlapped = false;
         while let Ok(update) = output.try_recv().map(delivered) {
@@ -818,7 +1010,7 @@ async fn wire_update_checks_the_whole_head_before_dispatching_during_departure()
             overlapped, !conflicting_tail,
             "wire ordering for a head with conflicting tail={conflicting_tail}"
         );
-        assert_eq!(end.loc_rib.len(), 17);
+        assert_eq!(end.loc_rib.len(), 18);
     }
 }
 
@@ -902,7 +1094,9 @@ impl PartialGroupWitness {
 
 #[tokio::test(start_paused = true)]
 async fn a_grouped_departure_publishes_the_entire_key_page_before_dispatching_an_update() {
-    const MEMBERS: u8 = 32;
+    // More members than one quiet delivery unit covers at this page width,
+    // so a partially delivered group is observable between units.
+    const MEMBERS: u8 = 40;
     let (tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     for source in [SOURCE, OTHER] {
@@ -933,6 +1127,8 @@ async fn a_grouped_departure_publishes_the_entire_key_page_before_dispatching_an
     manager.actor_turn_check = Some(|manager| {
         PARTIAL_GROUP.with_borrow_mut(|state| state.as_mut().unwrap().observe(manager));
     });
+    // Observe each unit: a quiet turn could otherwise deliver the whole page.
+    manager.flush_poll_budget = Duration::ZERO;
     let end = tokio::time::timeout(Duration::from_secs(5), Box::pin(manager.run_actor()))
         .await
         .expect("no partial group publication was observed to unblock the FIFO producer");
@@ -958,6 +1154,11 @@ fn rs_body_tag(source: Ipv4Addr) -> u32 {
 /// for member 1 to an alternate suppressed for member 0. These are separate
 /// family stages regardless of the order of keys in the source's hash table.
 fn rs_stage_routes(source: Ipv4Addr) -> RibUpdate {
+    rs_stage_routes_suppressing(source, if source == SOURCE { 65_101 } else { 65_100 })
+}
+
+/// [`rs_stage_routes`] with the IPv6 control community naming `suppressed_asn`.
+fn rs_stage_routes_suppressing(source: Ipv4Addr, suppressed_asn: u32) -> RibUpdate {
     let departing = source == SOURCE;
     let mut routes = Vec::new();
     for index in 0..RS_STAGE_ROWS {
@@ -981,10 +1182,7 @@ fn rs_stage_routes(source: Ipv4Addr) -> RibUpdate {
         ));
         v6.attributes = AttrSet::new(vec![
             PathAttribute::LocalPref(preference),
-            PathAttribute::Communities(vec![
-                rs_body_tag(source),
-                if departing { 65_101 } else { 65_100 },
-            ]),
+            PathAttribute::Communities(vec![rs_body_tag(source), suppressed_asn]),
         ]);
         if departing {
             routes.push(v4);
@@ -1068,6 +1266,10 @@ async fn rs_control_departure(refusals_per_family: u16) {
     }
     SAW_DEPARTURE.set(false);
     manager.actor_turn_check = Some(observe_winner);
+    // Measure one departure unit per actor turn. The second PeerDown is a
+    // fenced head, so nothing admissible waits and the pages run wide.
+    manager.flush_poll_budget = Duration::ZERO;
+    tx.try_send(down(SOURCE)).unwrap();
     tx.try_send(down(SOURCE)).unwrap();
     drop(tx);
     take_receiver_rows();
@@ -1103,9 +1305,10 @@ async fn rs_control_departure(refusals_per_family: u16) {
     eprintln!(
         "RS-control plain-to-tagged departure: refusals_per_family={refusals_per_family} K=3 rows_per_family={RS_STAGE_ROWS} max_inspected_per_poll={peak}"
     );
+    let unit = crate::manager::source_departure::QUIET_UNIT_RECEIVER_KEYS;
     assert!(
-        peak > 0 && peak <= POLL_LIMIT,
-        "{peak} physical receiver-key inspections in one poll, limit {POLL_LIMIT}"
+        peak > 0 && peak <= unit,
+        "{peak} receiver-key inspections in one quiet unit, limit {unit}"
     );
 }
 
@@ -1209,4 +1412,143 @@ fn a_teardown_during_a_live_departure_stays_synchronous() {
         manager.advance_source_departure();
     }
     assert!(manager.loc_rib.is_empty());
+}
+
+/// An UPDATE that lands while consecutive quiet units run in one actor turn
+/// ends that turn and reaches the Loc-RIB before the departure finishes.
+#[tokio::test(start_paused = true)]
+async fn an_update_queued_inside_a_quiet_budget_loop_applies_before_the_departure_ends() {
+    for shape in [Shape::Private, Shape::Grouped, Shape::FlowSpec] {
+        Box::pin(departure(shape, 8, ROWS, ProbeArrival::InQuietLoop)).await;
+        assert!(
+            MOST_UNITS_PER_TURN.get() > 1,
+            "{shape:?}: no actor turn ran consecutive quiet departure units"
+        );
+    }
+}
+
+/// Three RS-control members whose departing winner is suppressed for member
+/// 0 and whose alternate is suppressed for member 1, with the source gone.
+fn rs_departure_fixture() -> (
+    mpsc::Sender<RibUpdate>,
+    RibManager,
+    Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+) {
+    let (tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    // Unlimited credit and no distribution window keep receivers out of the
+    // owing and dirty sets, so the lifted pressure really makes a poll quiet.
+    manager.outbound_row_credit_override = None;
+    super::distribution_window::untimed_window(&mut manager);
+    for source in [SOURCE, OTHER] {
+        register_test_peer(&mut manager, peer_v4(source), 0);
+    }
+    let mut outputs: Vec<_> = (0..3)
+        .map(|index| join(&mut manager, index, Shape::RsControl))
+        .collect();
+    // The departing winner is suppressed for member 0 and its alternate for
+    // member 1, so a count restored on the wrong page lands on a member that
+    // a narrow page does not visit first.
+    for (source, suppressed) in [(SOURCE, 65_100), (OTHER, 65_101)] {
+        manager.handle_update(rs_stage_routes_suppressing(source, suppressed));
+        drain_route_chunks(&mut manager);
+    }
+    for output in &mut outputs {
+        drain_rs_stage(output, SOURCE);
+    }
+    manager.handle_update(down(SOURCE));
+    assert!(manager.source_departure.is_some());
+    (tx, manager, outputs)
+}
+
+fn assert_rs_departure_counts(
+    manager: &RibManager,
+    outputs: &mut [mpsc::Receiver<OutboundRouteUpdate>],
+) {
+    let tagged = usize::from(RS_STAGE_ROWS);
+    for (index, output) in outputs.iter_mut().enumerate() {
+        drain_rs_stage(output, OTHER);
+        let peer = peer_v4(Ipv4Addr::new(192, 0, 2, u8::try_from(index + 1).unwrap()));
+        assert_eq!(
+            manager.grouped_advertised_unicast_lens(peer),
+            Some([0, if index == 1 { 0 } else { tagged }]),
+            "member {index} RS counts after the departure"
+        );
+    }
+}
+
+/// An RS-control group restores member counts in one poll and emits to the
+/// same members in the next. A FIFO change between them must not widen the
+/// emission past the restored page.
+#[test]
+fn rs_restore_and_emission_cover_one_member_page_across_a_pressure_change() {
+    let (tx, mut manager, mut outputs) = rs_departure_fixture();
+    let (mut pinned, mut flips, mut quiet_emissions) = (false, 0, 0);
+    while manager.source_departure.is_some() {
+        // Open each page quiet so it is wide. Deliver under pressure, so a
+        // member page is narrow, then lift the pressure before its emission.
+        let pressure = manager.departure_page_open() && !pinned;
+        let queued = !manager.rx.is_empty();
+        if pressure && !queued {
+            tx.try_send(announce(OTHER, probe_prefix())).unwrap();
+        } else if !pressure && queued {
+            manager.rx.try_recv().unwrap();
+        }
+        quiet_emissions += usize::from(pinned && manager.source_departure_quiet());
+        manager.advance_source_departure();
+        let now_pinned = manager.departure_rs_restore_pinned();
+        flips += usize::from(now_pinned && !pinned);
+        pinned = now_pinned;
+    }
+    assert!(
+        flips > 1,
+        "expected several RS restore polls under pressure"
+    );
+    assert!(
+        quiet_emissions > 0,
+        "no pinned emission ran without FIFO pressure"
+    );
+    assert_rs_departure_counts(&manager, &mut outputs);
+}
+
+/// A quiet RS restore can be followed by an independent UPDATE before its
+/// emission. The pinned emission then runs while that UPDATE waits, so the
+/// restore page must already fit the pressured receiver-key budget.
+#[test]
+fn rs_restore_page_stays_within_the_pressured_limit_when_an_update_arrives_before_emission() {
+    let (tx, mut manager, mut outputs) = rs_departure_fixture();
+    take_receiver_rows();
+    let (mut queued_peak, mut queued_sent, mut armed) = (0, 0, false);
+    let mut seen: Vec<(BTreeSet<Prefix>, BTreeSet<Prefix>)> = vec![Default::default(); 3];
+    while manager.source_departure.is_some() {
+        let waiting = !manager.rx.is_empty();
+        manager.advance_source_departure();
+        let rows = take_receiver_rows();
+        let mut sent = 0;
+        for (output, (announced, withdrawn)) in outputs.iter_mut().zip(&mut seen) {
+            let (more_announced, more_withdrawn) = drain_rs_stage(output, OTHER);
+            sent += more_announced.len() + more_withdrawn.len();
+            announced.extend(more_announced);
+            withdrawn.extend(more_withdrawn);
+        }
+        if waiting {
+            queued_peak = queued_peak.max(rows);
+            queued_sent = queued_sent.max(sent);
+        }
+        if !armed && manager.departure_rs_restore_pinned() {
+            assert!(!waiting, "the first RS restore must run quiet");
+            tx.try_send(announce(OTHER, probe_prefix())).unwrap();
+            armed = true;
+        }
+    }
+    assert!(armed, "no RS restore poll ran");
+    assert!(
+        queued_peak <= POLL_LIMIT,
+        "{queued_peak} receiver-keys in one poll while an UPDATE waited, limit {POLL_LIMIT}"
+    );
+    assert!(
+        queued_sent > 0 && queued_sent <= POLL_LIMIT,
+        "{queued_sent} rows emitted in one poll while an UPDATE waited, limit {POLL_LIMIT}"
+    );
+    assert_rs_departure_counts(&manager, &mut outputs);
 }
