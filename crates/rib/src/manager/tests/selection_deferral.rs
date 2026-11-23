@@ -323,6 +323,7 @@ async fn departing_established_waiter_releases_after_plain_or_gr_teardown() {
                 restart_time: 60,
                 stale_routes_time: 60,
                 gr_families: vec![FAMILY],
+                peer_notification_gr: false,
                 peer_llgr_capable: false,
                 peer_llgr_families: vec![],
                 llgr_stale_time: 0,

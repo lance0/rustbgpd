@@ -667,7 +667,7 @@ impl RibManager {
         let successor = self.label_successor(peer);
         if self.gr_peers.remove(&peer).is_some() {
             self.gr_stale_deadlines.remove(&peer);
-            self.gr_stale_routes_time.remove(&peer);
+            self.gr_stale_timers.remove(&peer);
             self.llgr_peer_config.remove(&peer);
             info!(%peer, "peer down during graceful restart — aborting GR");
             self.clear_gr_gauges(peer, successor);
@@ -2333,9 +2333,9 @@ impl RibManager {
                             peer_llgr_families: context.peer_llgr_families.clone(),
                             local_llgr_stale_time: context.local_llgr_stale_time,
                             stale_routes_time: self
-                                .gr_stale_routes_time
+                                .gr_stale_timers
                                 .get(&peer)
-                                .copied()
+                                .map(|timer| timer.seconds)
                                 .or_else(|| {
                                     self.llgr_peer_config
                                         .get(&peer)
@@ -2352,7 +2352,7 @@ impl RibManager {
                     if awaiting.is_empty() {
                         self.gr_peers.remove(&peer);
                         self.gr_stale_deadlines.remove(&peer);
-                        self.gr_stale_routes_time.remove(&peer);
+                        self.gr_stale_timers.remove(&peer);
                     }
                 }
                 let mut retained: Vec<(Afi, Safi)> = Vec::new();
@@ -2369,7 +2369,8 @@ impl RibManager {
                     }
                 }
                 self.with_selection_readiness(|manager| {
-                    manager.mark_gr_retention_with_readiness(peer, &retained);
+                    // PeerUp carries no terminal cause. N alone cannot establish a graceful end.
+                    manager.mark_gr_retention_with_readiness(peer, &retained, false);
                 });
                 if let Some(llgr_config) = llgr_config {
                     self.enter_llgr_phase(peer, &llgr_only, &llgr_config, None);
@@ -2702,14 +2703,17 @@ impl RibManager {
             .unwrap_or_default();
 
         if self.gr_peers.contains_key(&peer) {
-            if let Some(srt) = self.gr_stale_routes_time.get(&peer).copied().or_else(|| {
-                self.llgr_peer_config
-                    .get(&peer)
-                    .map(|config| config.stale_routes_time)
-            }) {
-                self.gr_stale_routes_time.insert(peer, srt);
-                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(srt);
-                self.gr_stale_deadlines.insert(peer, deadline);
+            if let Some(srt) = self
+                .gr_stale_timers
+                .get(&peer)
+                .map(|timer| timer.seconds)
+                .or_else(|| {
+                    self.llgr_peer_config
+                        .get(&peer)
+                        .map(|config| config.stale_routes_time)
+                })
+            {
+                self.arm_gr_timer(peer, srt, srt);
             }
             // Partial GR: families absent from the GR capability entered
             // LLGR at session down while the rest were still in GR. All of
@@ -2734,10 +2738,8 @@ impl RibManager {
                 .llgr_peer_config
                 .get(&peer)
                 .map_or(360, |c| c.stale_routes_time);
-            self.gr_stale_routes_time.insert(peer, srt);
             self.gr_peers.insert(peer, llgr_families);
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(srt);
-            self.gr_stale_deadlines.insert(peer, deadline);
+            self.arm_gr_timer(peer, srt, srt);
             info!(%peer, stale_routes_time = srt, "peer re-established during LLGR — waiting for End-of-RIB");
         }
         for (afi, safi) in unlisted_families {
@@ -2754,8 +2756,10 @@ impl RibManager {
             && self.gr_peers.contains_key(&peer)
         {
             if context.local_llgr_stale_time > 0 && !context.peer_llgr_families.is_empty() {
-                let stale_routes_time =
-                    self.gr_stale_routes_time.get(&peer).copied().unwrap_or(360);
+                let stale_routes_time = self
+                    .gr_stale_timers
+                    .get(&peer)
+                    .map_or(360, |timer| timer.seconds);
                 self.llgr_peer_config.insert(
                     peer,
                     super::helpers::LlgrPeerConfig {

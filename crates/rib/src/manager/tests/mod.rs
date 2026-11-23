@@ -1654,6 +1654,7 @@ fn gr_with_llgr(
         restart_time,
         stale_routes_time: 360,
         gr_families,
+        peer_notification_gr: false,
         peer_llgr_capable: true,
         peer_llgr_families: llgr_families
             .into_iter()

@@ -886,6 +886,7 @@ fn llgr(run: &mut Run, family: Family, cycles: &[u64]) {
             restart_time: 1,
             stale_routes_time: 1,
             gr_families: vec![(afi, safi)],
+            peer_notification_gr: false,
             peer_llgr_capable: true,
             peer_llgr_families: llgr_families.clone(),
             llgr_stale_time: 3600,

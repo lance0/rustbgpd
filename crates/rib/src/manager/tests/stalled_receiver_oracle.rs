@@ -1332,6 +1332,7 @@ impl Harness {
                         restart_time: 120,
                         stale_routes_time: 360,
                         gr_families: families.clone(),
+                        peer_notification_gr: false,
                         peer_llgr_capable: false,
                         peer_llgr_families: vec![],
                         llgr_stale_time: 0,

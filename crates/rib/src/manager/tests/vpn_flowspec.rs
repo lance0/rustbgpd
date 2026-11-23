@@ -1222,6 +1222,7 @@ async fn synthetic_vpn_gr_retention_and_expiry_cover_both_afis() {
             restart_time: 120,
             stale_routes_time: 360,
             gr_families,
+            peer_notification_gr: false,
             peer_llgr_capable: false,
             peer_llgr_families: vec![],
             llgr_stale_time: 3600,

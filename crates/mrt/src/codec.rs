@@ -4065,6 +4065,7 @@ mod tests {
             restart_time: 120,
             stale_routes_time: 360,
             gr_families: vec![(rustbgpd_wire::Afi::Ipv6, rustbgpd_wire::Safi::Unicast)],
+            peer_notification_gr: false,
             peer_llgr_capable: false,
             peer_llgr_families: vec![],
             llgr_stale_time: 0,

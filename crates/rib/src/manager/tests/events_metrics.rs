@@ -1358,6 +1358,7 @@ fn graceful_restart_zeroes_all_adj_rib_out_family_gauges() {
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: Vec::new(),
         llgr_stale_time: 0,

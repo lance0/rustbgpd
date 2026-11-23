@@ -314,6 +314,7 @@ async fn mrt_peer_metadata_retained_during_gr() {
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
         llgr_stale_time: 0,
@@ -2009,7 +2010,7 @@ fn mrt_evpn_slab_preserves_sparse_retention_checkpoints() {
     let family = (Afi::L2Vpn, Safi::Evpn);
     let mut checkpoints = 0;
     assert_eq!(
-        rib.mark_stale_evpn_with_checkpoint(family, &mut || checkpoints += 1),
+        rib.mark_stale_evpn_with_checkpoint(family, false, &mut || checkpoints += 1),
         Vec::new(),
     );
     assert!(checkpoints >= 2 * SLOTS);

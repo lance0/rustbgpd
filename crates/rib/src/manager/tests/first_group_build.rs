@@ -242,6 +242,7 @@ fn gr_writer_fixture(
         restart_time: 10,
         stale_routes_time: 30,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
         llgr_stale_time: 0,
@@ -1207,6 +1208,7 @@ async fn two_session_ends_behind_one_writer_replay_in_admission_order() {
             restart_time: 10,
             stale_routes_time: 30,
             gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            peer_notification_gr: false,
             peer_llgr_capable: false,
             peer_llgr_families: vec![],
             llgr_stale_time: 0,
@@ -2628,6 +2630,7 @@ fn restarted_source_behind_a_writer(
         restart_time: 10,
         stale_routes_time: 30,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: llgr,
         peer_llgr_families: if llgr {
             vec![rustbgpd_wire::LlgrFamily {
