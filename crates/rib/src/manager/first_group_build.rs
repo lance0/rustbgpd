@@ -835,7 +835,16 @@ impl RibManager {
         {
             // The terminal planner declined the ensure. The command is
             // finished; only physical retirement can own this table now.
-            debug_assert!(self.optional_destination_retirement.is_none());
+            self.retire_declined_reload_destination(unused);
+        }
+    }
+
+    /// Never drop a declined table in the commit turn. A retirement that the
+    /// terminal command started keeps its owner; the scan slot, which this
+    /// command emptied and which nothing refills inside it, retires the
+    /// declined table by page instead.
+    fn retire_declined_reload_destination(&mut self, mut unused: Box<FirstGroupBuild>) {
+        if self.optional_destination_retirement.is_none() {
             self.optional_destination_retirement = Some(Box::new(OptionalDestinationRetirement {
                 inventory: OptionalInventoryRetirement::default(),
                 detached: Some(DetachedDestination {
@@ -845,7 +854,13 @@ impl RibManager {
                     withdrawn: BTreeSet::new(),
                 }),
             }));
+            return;
         }
+        debug_assert!(self.first_group_build.is_none());
+        unused.reload = None;
+        unused.writer = None;
+        unused.phase = FirstGroupPhase::Retiring;
+        self.first_group_build = Some(unused);
     }
 
     fn finish_first_group_build(&mut self, mut job: Box<FirstGroupBuild>) {
