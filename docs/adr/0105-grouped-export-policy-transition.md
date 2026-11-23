@@ -504,7 +504,9 @@ A receiver whose writer refuses the retry retains its recovery obligation.
 Unrelated dirty peers keep their place on the RIB resync tick. This amendment
 supersedes the terminal global retry described in sections 3 and 5 and in
 the evidence review below. The outbound convergence query and dirty gauges
-continue to count every pending peer.
+continue to count every pending peer. A content-equal single-peer replacement
+that leaves the peer's update-group membership unchanged is a no-op; an
+ungrouped peer no longer takes a full resync for it.
 
 ## Context
 

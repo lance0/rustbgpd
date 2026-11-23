@@ -3132,6 +3132,17 @@ impl RibManager {
                 // it receives the reply. Finish this cohort's output first.
                 let materialized_routes = inventory.announce.len();
                 manager.finish_clean_policy_transition_commit();
+                // The clean readiness check admits no member with dirty, forced
+                // or owed work, and the actor fence admits only reads until this
+                // commit, so no mover can owe a resync here. The pass below still
+                // settles End-of-RIB and helper-stale withdrawals for the movers.
+                debug_assert!(
+                    pending.replacements.iter().all(|replacement| {
+                        !manager.dirty_peers.contains(&replacement.peer)
+                            && !manager.force_outbound_peers.contains(&replacement.peer)
+                    }),
+                    "a clean cohort mover owes a resync at commit"
+                );
                 manager.distribute_scoped_resync(
                     pending.replacements.iter().map(|replacement| replacement.peer),
                     HashMap::new(),

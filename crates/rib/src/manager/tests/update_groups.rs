@@ -21057,6 +21057,7 @@ async fn discarding_a_paced_preparation_retires_its_hold_withdrawals() {
 }
 
 mod cancelled_prestage;
+mod cohort_mover_retry;
 mod competing_policy_destination;
 mod distinct_reload_controls;
 mod distinct_reload_scope_receipt;
