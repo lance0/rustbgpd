@@ -1960,6 +1960,11 @@ async fn sealing(
 ) -> Sealing {
     let (mut manager, primary, mut receivers) = cold_build_with_policy_members(per_family, 1);
     let incumbent = receiver(1);
+    if matches!(feed, Passing::Bursts(..)) {
+        // Each small UPDATE between bursts must get its own receive turn.
+        // Coalescing them would make that turn count depend on the 5 ms window.
+        manager.distribution_window_limits.messages = 1;
+    }
     let mut policy_reply = clear_policy(&mut manager, incumbent);
     if session_end {
         primary
