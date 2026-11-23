@@ -2029,6 +2029,7 @@ impl RibManager {
         self.peer_is_ebgp.remove(&peer);
         self.peer_local_roles.remove(&peer);
         self.peer_export_encoders.remove(&peer);
+        self.clear_group_rejections(peer);
         if let Some(keys) = self.peer_unexportable.remove(&peer)
             && self.unicast_release.rejections.len() != 0
         {

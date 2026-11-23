@@ -656,6 +656,9 @@ pub(in crate::manager) struct GroupRibOut {
     /// (v4-unicast, v6-unicast, vpnv4, vpnv6) for the BMP stat-17
     /// family counts.
     source_counts: AddrMap<PeerId, [usize; 4]>,
+    /// Refused slots otherwise visible to each member, in the same family order.
+    /// Keep zero rows while refusals remain: staging can make them visible again.
+    visible_rejections: AddrMap<PeerId, [usize; 4]>,
     /// Running column sums of `source_counts`, so a per-family count stays
     /// O(1) instead of walking every source. Maintained at the only two
     /// sites that move a slot.
@@ -701,8 +704,8 @@ pub(in crate::manager) struct GroupRibOut {
     /// `[v4, v6]`: total blocked staged winners plus their per-source
     /// split — the winner term of the Decision 4 count synthesis's
     /// OTC subtraction (the synthesis reports the backstop's outcome,
-    /// not the raw table). Rebuilt from the residue map at its one
-    /// mutation seam ([`Self::record_otc_blocked`]); kept zero for
+    /// not the raw table). Updated with each residue mutation in
+    /// [`Self::record_otc_blocked`]. Kept zero for
     /// plain groups, whose in-walk gate rejects blocked routes before
     /// the table — their residue names never-staged routes, so
     /// subtracting it would double-count.
@@ -871,6 +874,7 @@ impl GroupRibOut {
         release_hash_map(&mut self.evpn_policy_denied, checkpoint);
         crate::adj_rib_out::release_sharded_map(&mut self.source_attrs, checkpoint);
         release_hash_map(&mut self.source_counts, checkpoint);
+        release_hash_map(&mut self.visible_rejections, checkpoint);
         for (_, paths) in self.policy_filtered.iter_mut() {
             release_hash_map(paths, checkpoint);
         }
@@ -939,6 +943,7 @@ impl GroupRibOut {
             source_attrs: ShardedMap::default(),
             source_control_passthrough,
             source_counts: AddrMap::default(),
+            visible_rejections: AddrMap::default(),
             family_totals: [0; 4],
             tombstones: HashSet::new(),
             vpn_tombstones: HashSet::new(),
@@ -1003,29 +1008,81 @@ impl GroupRibOut {
         self.owns_evpn = enabled;
     }
 
+    /// Returns the first count slot that had drifted from the residue map,
+    /// after rebuilding the counts from that map.
     fn record_otc_blocked<S: std::hash::BuildHasher>(
         &mut self,
         prefixes: &HashSet<Prefix, S>,
         blocked: &[Route],
         checkpoint: &mut impl FnMut(),
-    ) {
-        self.otc_blocked.replace_for(prefixes, blocked, checkpoint);
-        // Rebuild the count aggregates from the refreshed map — one
-        // mutation seam keeps them exact, at O(blocked residue) per
-        // pass (zero in the overwhelmingly common no-OTC case). Only
-        // a per-client-best group's residue describes STAGED winners;
-        // a plain group's names routes its in-walk gate kept out of
-        // the table, so its aggregates stay zero and the count
-        // synthesis provably subtracts nothing.
-        self.otc_blocked_totals = [0; 2];
-        self.otc_blocked_sources.clear();
-        if self.per_client_best {
-            for route in self.otc_blocked.values() {
+    ) -> Option<usize> {
+        let mut drifted = None;
+        if !self.otc_blocked.is_empty() {
+            for prefix in prefixes {
                 checkpoint();
+                let old = match &mut self.otc_blocked {
+                    OtcBlocked::Ordinary(map) => map.remove(prefix),
+                    OtcBlocked::Optional(map) => map.remove(prefix),
+                };
+                if self.per_client_best
+                    && let Some(old) = old
+                {
+                    let slot = Self::count_slot(prefix);
+                    let total = self.otc_blocked_totals[slot].checked_sub(1);
+                    let source = self
+                        .otc_blocked_sources
+                        .get_mut(&old.peer)
+                        .and_then(|counts| {
+                            counts[slot] = counts[slot].checked_sub(1)?;
+                            Some(*counts)
+                        });
+                    if let (Some(total), Some(counts)) = (total, source) {
+                        self.otc_blocked_totals[slot] = total;
+                        if counts == [0; 2] {
+                            self.otc_blocked_sources.remove(&old.peer);
+                        }
+                    } else {
+                        debug_assert!(false, "OTC-blocked winner counts drifted at slot {slot}");
+                        drifted.get_or_insert(slot);
+                    }
+                }
+            }
+        }
+        if let OtcBlocked::Ordinary(map) = &mut self.otc_blocked {
+            let capacity = map.len().saturating_add(blocked.len());
+            ensure_map_capacity_with_checkpoint(map, capacity, checkpoint);
+        }
+        for route in blocked {
+            checkpoint();
+            // Both staging paths record at most one path-0 winner per scoped prefix.
+            debug_assert_eq!(route.path_id, 0);
+            debug_assert!(prefixes.contains(&route.prefix));
+            let prior = match &mut self.otc_blocked {
+                OtcBlocked::Ordinary(map) => map.insert(route.prefix, route.clone()),
+                OtcBlocked::Optional(map) => map.insert(route.prefix, route.clone()),
+            };
+            debug_assert!(prior.is_none());
+            if self.per_client_best {
                 let slot = Self::count_slot(&route.prefix);
                 self.otc_blocked_totals[slot] += 1;
                 self.otc_blocked_sources.entry(route.peer).or_default()[slot] += 1;
             }
+        }
+        if drifted.is_some() {
+            self.rebuild_otc_blocked_counts(checkpoint);
+        }
+        drifted
+    }
+
+    /// Recount the per-client-best winner terms from the residue map.
+    fn rebuild_otc_blocked_counts(&mut self, checkpoint: &mut impl FnMut()) {
+        self.otc_blocked_totals = [0; 2];
+        self.otc_blocked_sources.clear();
+        for route in self.otc_blocked.values() {
+            checkpoint();
+            let slot = Self::count_slot(&route.prefix);
+            self.otc_blocked_totals[slot] += 1;
+            self.otc_blocked_sources.entry(route.peer).or_default()[slot] += 1;
         }
     }
 
@@ -1050,16 +1107,26 @@ impl GroupRibOut {
         prefixes: Option<&HashSet<Prefix>>,
         checkpoint: &mut impl FnMut(),
     ) -> Vec<Route> {
-        let mut blocked: Vec<Route> = self
-            .otc_blocked
-            .values()
-            .inspect(|_| checkpoint())
-            .filter(|route| {
-                route.peer != member
-                    && prefixes.is_none_or(|prefixes| prefixes.contains(&route.prefix))
-            })
-            .cloned()
-            .collect();
+        let mut blocked: Vec<Route> = match prefixes {
+            // Scanning a sparse winner map visits buckets left behind by withdrawals.
+            Some(scope) if scope.len() <= self.otc_blocked.capacity() => scope
+                .iter()
+                .inspect(|_| checkpoint())
+                .filter_map(|prefix| self.otc_blocked.get(prefix))
+                .filter(|route| route.peer != member)
+                .cloned()
+                .collect(),
+            _ => self
+                .otc_blocked
+                .values()
+                .inspect(|_| checkpoint())
+                .filter(|route| {
+                    route.peer != member
+                        && prefixes.is_none_or(|scope| scope.contains(&route.prefix))
+                })
+                .cloned()
+                .collect(),
+        };
         // ADR-0126: the member sourcing a staged winner receives the
         // lane runner-up instead (adv(m)), so ITS blocked entry at that
         // slot is the runner-up when that carries OTC — derived from
@@ -4112,6 +4179,8 @@ impl RibManager {
         };
         let mut vpn_announce: Vec<VpnRibRoute> = Vec::new();
         let mut vpn_withdraw: Vec<VpnRibRouteKey> = Vec::new();
+        let mut refused_delta = [0isize; 2];
+        let rejected = self.peer_unexportable.get(&peer);
         let mut count_delta = [0i64; 2];
         let mut permit_rows: Vec<(Option<String>, PolicyAction, u64)> = Vec::new();
         // A dirty member cannot take the wire delta (its advertised
@@ -4135,10 +4204,15 @@ impl RibManager {
                     continue;
                 }
                 let rts = route.extended_communities();
-                match (
-                    old.matches_any_with_checkpoint(rts, &mut matching),
-                    new.matches_any_with_checkpoint(rts, &mut matching),
-                ) {
+                let was_visible = old.matches_any_with_checkpoint(rts, &mut matching);
+                let visible = new.matches_any_with_checkpoint(rts, &mut matching);
+                if was_visible != visible
+                    && rejected.is_some_and(|keys| keys.contains(&ExactExportKey::Vpn(route.key())))
+                {
+                    let slot = GroupRibOut::vpn_count_slot(&route.nlri.key()) - 2;
+                    refused_delta[slot] += if visible { 1 } else { -1 };
+                }
+                match (was_visible, visible) {
                     (false, true) if !is_dirty => {
                         // Newly passing: announce the staged route
                         // verbatim; the per-peer restage would record a
@@ -4167,6 +4241,17 @@ impl RibManager {
                     }
                     _ => {}
                 }
+            }
+        }
+        if let Some(counts) = self
+            .group_ribs
+            .get_mut(&gid)
+            .and_then(|g| g.visible_rejections.get_mut(&peer))
+        {
+            for (count, delta) in counts[2..].iter_mut().zip(refused_delta) {
+                *count = count
+                    .checked_add_signed(delta)
+                    .expect("refused VPN view delta is exact");
             }
         }
         if is_dirty {
@@ -4299,6 +4384,7 @@ impl RibManager {
             return;
         };
         group.members.remove(&peer);
+        group.visible_rejections.remove(&peer);
         group.remove_rs_member(peer, &mut || checkpoint());
         group.vpn_member_counts.remove(&peer);
         group.dirty_members.remove(&peer);

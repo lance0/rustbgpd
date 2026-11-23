@@ -305,6 +305,8 @@ pub(in crate::manager) struct OutboundCommitBatch {
     pub(in crate::manager) defer_grouped_refresh_prior: bool,
     /// Explicit family replay re-emits even a wire-equivalent action change.
     pub(in crate::manager) force_unicast_replay: bool,
+    /// Unicast candidates came from a clean, member-scoped source-departure stage.
+    pub(in crate::manager) staged_departure_group: Option<usize>,
     pub(in crate::manager) announce_source_exclusion: Option<PeerId>,
     pub(in crate::manager) shared_group_encode: Option<Arc<crate::update::SharedGroupEncode>>,
     /// Staging's exact-export snapshot ([`UnicastDistributionResult`]); the
@@ -1385,15 +1387,26 @@ impl PendingCleanPolicyTransition {
     }
 }
 
+/// The last decision for an exact key in the commit. A clean grouped
+/// departure has already resolved whether this candidate exists for the peer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExactOverlayChange {
+    Withdrawn,
+    Accepted,
+    Refused,
+}
+
 fn stage_exact_export_overlay_change(
     rejected: Option<&HashSet<crate::update::ExactExportKey>>,
-    changes: &mut HashMap<crate::update::ExactExportKey, bool>,
+    changes: &mut HashMap<crate::update::ExactExportKey, ExactOverlayChange>,
     key: crate::update::ExactExportKey,
-    next: bool,
+    next: ExactOverlayChange,
 ) -> bool {
     let original = rejected.is_some_and(|rejected| rejected.contains(&key));
-    let previous = changes.get(&key).copied().unwrap_or(original);
-    if original == next {
+    let previous = changes
+        .get(&key)
+        .map_or(original, |change| *change == ExactOverlayChange::Refused);
+    if original == (next == ExactOverlayChange::Refused) {
         changes.remove(&key);
     } else {
         changes.insert(key, next);
@@ -1405,7 +1418,7 @@ impl ExactExportOverlayDecision {
     fn reconcile(
         &mut self,
         rejected: Option<&HashSet<crate::update::ExactExportKey>>,
-        changes: &mut HashMap<crate::update::ExactExportKey, bool>,
+        changes: &mut HashMap<crate::update::ExactExportKey, ExactOverlayChange>,
         key: &crate::update::ExactExportKey,
         result: &Result<crate::update::ExactExportResult, crate::update::ExactExportError>,
         source_excluded: bool,
@@ -1413,12 +1426,21 @@ impl ExactExportOverlayDecision {
     ) -> bool {
         match (source_excluded, result) {
             (true, _) | (false, Ok(_)) => {
-                stage_exact_export_overlay_change(rejected, changes, key.clone(), false);
+                let change = if source_excluded {
+                    ExactOverlayChange::Withdrawn
+                } else {
+                    ExactOverlayChange::Accepted
+                };
+                stage_exact_export_overlay_change(rejected, changes, key.clone(), change);
                 true
             }
             (false, Err(error)) => {
-                let newly_rejected =
-                    !stage_exact_export_overlay_change(rejected, changes, key.clone(), true);
+                let newly_rejected = !stage_exact_export_overlay_change(
+                    rejected,
+                    changes,
+                    key.clone(),
+                    ExactOverlayChange::Refused,
+                );
                 if newly_rejected && previously_advertised {
                     self.owed_withdrawals.insert(key.clone());
                 }
@@ -1434,7 +1456,7 @@ impl ExactExportOverlayDecision {
 #[inline(never)]
 fn reconcile_exact_export_overlay(
     rejected: Option<&HashSet<crate::update::ExactExportKey>>,
-    changes: &mut HashMap<crate::update::ExactExportKey, bool>,
+    changes: &mut HashMap<crate::update::ExactExportKey, ExactOverlayChange>,
     candidate_keys: &[crate::update::ExactExportKey],
     probe_results: &[Result<crate::update::ExactExportResult, crate::update::ExactExportError>],
     source_excluded: &[bool],
@@ -4108,6 +4130,7 @@ impl RibManager {
             unicast_otc_prechecked,
             defer_grouped_refresh_prior,
             force_unicast_replay: _,
+            staged_departure_group,
             announce_source_exclusion,
             mut shared_group_encode,
             // Taken above for this commit's probes.
@@ -4284,7 +4307,7 @@ impl RibManager {
                     rejected,
                     &mut overlay_changes,
                     crate::update::ExactExportKey::Unicast(*prefix, *path_id),
-                    false,
+                    ExactOverlayChange::Withdrawn,
                 )
             });
             flowspec_withdraw.retain(|key| {
@@ -4292,7 +4315,7 @@ impl RibManager {
                     rejected,
                     &mut overlay_changes,
                     crate::update::ExactExportKey::FlowSpec(key.clone()),
-                    false,
+                    ExactOverlayChange::Withdrawn,
                 )
             });
             evpn_withdraw.retain(|key| {
@@ -4300,7 +4323,7 @@ impl RibManager {
                     rejected,
                     &mut overlay_changes,
                     crate::update::ExactExportKey::Evpn(*key),
-                    false,
+                    ExactOverlayChange::Withdrawn,
                 )
             });
             bgpls_withdraw.retain(|key| {
@@ -4308,7 +4331,7 @@ impl RibManager {
                     rejected,
                     &mut overlay_changes,
                     crate::update::ExactExportKey::BgpLs(key.clone()),
-                    false,
+                    ExactOverlayChange::Withdrawn,
                 )
             });
             vpn_withdraw.retain(|key| {
@@ -4316,7 +4339,7 @@ impl RibManager {
                     rejected,
                     &mut overlay_changes,
                     crate::update::ExactExportKey::Vpn(key.clone()),
-                    false,
+                    ExactOverlayChange::Withdrawn,
                 )
             });
             labeled_withdraw.retain(|key| {
@@ -4324,7 +4347,7 @@ impl RibManager {
                     rejected,
                     &mut overlay_changes,
                     crate::update::ExactExportKey::Labeled(*key),
-                    false,
+                    ExactOverlayChange::Withdrawn,
                 )
             });
             rtc_withdraw.retain(|key| {
@@ -4332,7 +4355,7 @@ impl RibManager {
                     rejected,
                     &mut overlay_changes,
                     crate::update::ExactExportKey::Rtc(key.clone()),
-                    false,
+                    ExactOverlayChange::Withdrawn,
                 )
             });
         }
@@ -5108,7 +5131,7 @@ impl RibManager {
                     self.peer_unexportable.get(&peer),
                     &mut overlay_changes,
                     key,
-                    false,
+                    ExactOverlayChange::Withdrawn,
                 );
                 if !originally_rejected && seen.insert((route.prefix, route.path_id)) {
                     withdraw.to_mut().push((route.prefix, route.path_id));
@@ -5187,14 +5210,17 @@ impl RibManager {
         if frozen_backstop {
             self.mark_selection_partial_recovery(peer);
         }
-        for (key, rejected) in overlay_changes {
+        for (key, change) in overlay_changes {
             checkpoint();
-            self.unicast_release.rejections.record(peer, &key, rejected);
-            if rejected {
-                self.peer_unexportable.entry(peer).or_default().insert(key);
-            } else if let Some(overlay) = self.peer_unexportable.get_mut(&peer) {
-                overlay.remove(&key);
-            }
+            let visible = staged_departure_group
+                .filter(|_| matches!(key, ExactExportKey::Unicast(_, 0)))
+                .map(|gid| (gid, change != ExactOverlayChange::Withdrawn));
+            self.set_exact_export_rejection_with_view(
+                peer,
+                key,
+                change == ExactOverlayChange::Refused,
+                visible,
+            );
         }
         if let Some(snapshot) = &exact_export_snapshot {
             for (key, error) in exact_rejections {
@@ -5221,13 +5247,6 @@ impl RibManager {
             .flat_map(HashMap::values)
             .cloned()
             .collect();
-        if self
-            .peer_unexportable
-            .get(&peer)
-            .is_some_and(HashSet::is_empty)
-        {
-            self.peer_unexportable.remove(&peer);
-        }
         // Recompute grouped projections after the sparse overlay mutation;
         // these counts drive both metrics and query/BMP truth.
         let grouped_unicast_count = self.grouped_advertised_count(peer);
@@ -12056,6 +12075,12 @@ impl RibManager {
                                 OutboundCommitBatch {
                                     local_sources: unicast.local_sources,
                                     force_unicast_replay: is_force,
+                                    staged_departure_group: member_of.filter(|gid| {
+                                        RELEASING
+                                            && self.source_departure.is_some()
+                                            && !resync
+                                            && group_stage.contains_key(gid)
+                                    }),
                                     unicast_otc_prechecked,
                                     announce_source_exclusion,
                                     shared_group_encode,

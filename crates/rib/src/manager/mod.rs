@@ -6705,10 +6705,14 @@ impl RibManager {
                     }
                 };
                 if !keep {
+                    self.adjust_group_rejection(*peer, key, false, None);
                     self.unicast_release.rejections.record(*peer, key, false);
                 }
                 keep
             });
+            if rejected.is_empty() {
+                self.clear_group_rejections(*peer);
+            }
             !rejected.is_empty()
         });
         self.peer_unexportable = overlay;
@@ -6963,19 +6967,25 @@ impl RibManager {
         {
             self.test_exact_export_liveness_reads += reads.get();
         }
-        self.peer_unexportable.retain(|peer, rejected| {
+        let mut overlay = std::mem::take(&mut self.peer_unexportable);
+        overlay.retain(|peer, rejected| {
             checkpoint();
             rejected.retain(|key| {
                 checkpoint();
                 let identity = key.nlri_identity();
                 let keep = !rejected_withdrawn.contains(&identity) || live.contains(&identity);
                 if !keep {
+                    self.adjust_group_rejection(*peer, key, false, None);
                     self.unicast_release.rejections.record(*peer, key, false);
                 }
                 keep
             });
+            if rejected.is_empty() {
+                self.clear_group_rejections(*peer);
+            }
             !rejected.is_empty()
         });
+        self.peer_unexportable = overlay;
         retire_hash_set(&mut live, &mut checkpoint);
         retire_hash_set(&mut rejected_withdrawn, &mut checkpoint);
         retire_hash_set(&mut withdrawn, &mut checkpoint);

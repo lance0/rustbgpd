@@ -21062,3 +21062,67 @@ mod distinct_reload_controls;
 mod distinct_reload_scope_receipt;
 mod distinct_reload_work;
 mod optional_eviction_writer;
+
+/// Removing interest in a refused route must not subtract it from the
+/// remaining route's count. Regaining interest reprobes the refused route.
+#[test]
+fn rtc_membership_changes_keep_refused_vpn_counts_exact_after_resync() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let ip = Ipv4Addr::new(10, 252, 2, 1);
+    let peer = peer_v4(ip);
+    let mut families = vpn_sendable();
+    families.push((Afi::Ipv4, Safi::RtConstrain));
+    let mut receiver = register_direct_peer_with_families(&mut manager, peer, families);
+    assert!(manager.vpn_grouped_member_of(peer).is_some());
+    let interest = make_rtc_rib_route(ip, 200, 100);
+    manager.handle_rtc_routes_received(
+        peer,
+        vec![make_rtc_rib_route(ip, 100, 100), interest.clone()],
+        vec![],
+    );
+    let source = Ipv4Addr::new(192, 0, 2, 252);
+    let mut visible = make_vpn_rib_route_with_rts(source, 1, vec![rt(100)]);
+    let mut refused = make_vpn_rib_route_with_rts(source, 2, vec![rt(200)]);
+    visible.origin_type = crate::route::RouteOrigin::Ebgp;
+    refused.origin_type = crate::route::RouteOrigin::Ebgp;
+    let key = crate::update::ExactExportKey::Vpn(refused.key());
+    let encoder = super::exportability::MockExactExportEncoder::accepting(1);
+    encoder.set_profile(1, [key.clone()]);
+    manager.peer_export_encoders.insert(peer, encoder);
+    manager.handle_vpn_routes_received(peer_v4(source), vec![visible.clone(), refused], vec![]);
+
+    let check = |manager: &RibManager| {
+        assert_eq!(manager.grouped_vpn_advertised_count(peer), Some(1));
+        assert_eq!(manager.grouped_vpn_advertised_lens(peer), Some([1, 0]));
+    };
+    let mut wire = HashSet::new();
+    let mut drain = |receiver: &mut mpsc::Receiver<OutboundRouteUpdate>| {
+        while let Ok(update) = receiver.try_recv() {
+            for key in update.vpn_withdraw {
+                wire.remove(&key);
+            }
+            wire.extend(update.vpn_announce.iter().map(VpnRibRoute::key));
+        }
+        assert_eq!(wire, HashSet::from([visible.key()]));
+    };
+    check(&manager);
+    drain(&mut receiver);
+    for dirty in [false, true] {
+        assert!(manager.peer_unexportable[&peer].contains(&key));
+        if dirty {
+            assert!(manager.mark_outbound_dirty(peer));
+        }
+        manager.handle_rtc_routes_received(peer, vec![], vec![interest.key()]);
+        if dirty {
+            assert!(manager.dirty_peers.contains(&peer));
+            manager.resync_dirty_peers_bounded();
+        }
+        assert!(!manager.dirty_peers.contains(&peer));
+        check(&manager);
+        drain(&mut receiver);
+        manager.handle_rtc_routes_received(peer, vec![interest.clone()], vec![]);
+        check(&manager);
+        drain(&mut receiver);
+    }
+}

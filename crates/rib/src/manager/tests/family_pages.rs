@@ -461,16 +461,12 @@ fn vpn_grouped_pages_apply_rtc_split_horizon_and_encoder_rejections() {
     .unwrap();
     assert_eq!(second_page.total, 1);
     assert_eq!(second_page.routes[0].nlri.key(), filtered.nlri.key());
-    manager
-        .peer_unexportable
-        .entry(first)
-        .or_default()
-        .insert(ExactExportKey::Vpn(accepted.key()));
+    manager.set_exact_export_rejection(first, ExactExportKey::Vpn(accepted.key()), true);
     assert_eq!(
         vpn_page(&mut manager, scope, None, None, 10).unwrap().total,
         0
     );
-    manager.peer_unexportable.get_mut(&first).unwrap().clear();
+    manager.set_exact_export_rejection(first, ExactExportKey::Vpn(accepted.key()), false);
     let before = vpn_page(&mut manager, scope, None, None, 10).unwrap();
     let source = PageSource::of(accepted.peer);
     let after = (accepted.nlri.key(), source, accepted.path_id);

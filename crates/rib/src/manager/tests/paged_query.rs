@@ -1028,11 +1028,11 @@ fn grouped_pages_match_snapshot_with_split_horizon_and_exact_rejection() {
     receive_direct(&mut manager, target, vec![own_route.clone()], vec![]);
 
     let rejected = &external_routes[500];
-    manager
-        .peer_unexportable
-        .entry(target)
-        .or_default()
-        .insert(ExactExportKey::Unicast(rejected.prefix, rejected.path_id));
+    manager.set_exact_export_rejection(
+        target,
+        ExactExportKey::Unicast(rejected.prefix, rejected.path_id),
+        true,
+    );
     assert!(
         manager.grouped_member_of(target).is_some(),
         "identical peers share a grouped advertised view"
@@ -1087,11 +1087,11 @@ fn grouped_family_and_unfiltered_continuations_reuse_total_without_count_walk() 
         })
         .collect();
     receive_direct(&mut manager, peer_v4(source), routes.clone(), vec![]);
-    manager
-        .peer_unexportable
-        .entry(target)
-        .or_default()
-        .insert(ExactExportKey::Unicast(routes[1].prefix, routes[1].path_id));
+    manager.set_exact_export_rejection(
+        target,
+        ExactExportKey::Unicast(routes[1].prefix, routes[1].path_id),
+        true,
+    );
 
     let scope = RouteQueryScope::Advertised { peer: target };
     manager
@@ -1197,14 +1197,11 @@ fn grouped_high_exclusion_pages_match_snapshot_and_terminal_empty_view() {
 
     // Exact-export rejection leaves a terminal zero-row member view even
     // though the shared group table remains populated by every source row.
-    manager
-        .peer_unexportable
-        .entry(target)
-        .or_default()
-        .insert(ExactExportKey::Unicast(
-            external_route.prefix,
-            external_route.path_id,
-        ));
+    manager.set_exact_export_rejection(
+        target,
+        ExactExportKey::Unicast(external_route.prefix, external_route.path_id),
+        true,
+    );
     manager.advance_advertised_pages();
     let page = direct_page(&mut manager, scope, None, 1);
     assert_eq!(page.total, 0);
@@ -1386,11 +1383,7 @@ fn scope_generations_cover_other_peer_group_overlay_and_peer_recreate() {
         .and_then(|mut routes| routes.next())
         .map(|route| ExactExportKey::Unicast(route.prefix, route.path_id))
         .unwrap();
-    manager
-        .peer_unexportable
-        .entry(target)
-        .or_default()
-        .insert(rejected);
+    manager.set_exact_export_rejection(target, rejected, true);
     manager.advance_advertised_pages();
     assert_eq!(
         direct_page_at(
@@ -2576,11 +2569,7 @@ fn typed_grouped_route_pages_match_full_scan_with_member_overlays() {
         })
         .collect();
     receive_direct(&mut manager, peer_v4(source), routes.clone(), vec![]);
-    manager
-        .peer_unexportable
-        .entry(target)
-        .or_default()
-        .insert(ExactExportKey::Unicast(routes[3].prefix, 0));
+    manager.set_exact_export_rejection(target, ExactExportKey::Unicast(routes[3].prefix, 0), true);
     assert!(manager.grouped_member_of(target).is_some());
     let scope = RouteQueryScope::Advertised { peer: target };
     for selection in [

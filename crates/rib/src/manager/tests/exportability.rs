@@ -1786,10 +1786,8 @@ fn clean_group_overlay_blocks_fast_path_and_retains_unrelated_family() {
     let unrelated_key = ExactExportKey::FlowSpec(
         make_flowspec_route(Ipv4Addr::new(198, 51, 100, 45)).selection_key(),
     );
-    manager.peer_unexportable.insert(
-        target,
-        HashSet::from([route_key.clone(), unrelated_key.clone()]),
-    );
+    manager.set_exact_export_rejection(target, route_key.clone(), true);
+    manager.set_exact_export_rejection(target, unrelated_key.clone(), true);
     let deltas = [crate::manager::update_groups::GroupDelta {
         local_source: None,
         prefix: route.prefix,
@@ -3638,11 +3636,7 @@ fn lifecycle_sweeps_prune_dead_rejections_and_keep_live_ones() {
             Some(encoder),
             false,
         );
-        manager
-            .peer_unexportable
-            .get_mut(&target)
-            .unwrap()
-            .insert(overlay_key(900));
+        manager.set_exact_export_rejection(target, overlay_key(900), true);
         event(&mut manager, bystander);
         if manager.peer_unexportable.get(&target) != Some(&HashSet::from([overlay_key(0)])) {
             wrong.push(case);
@@ -3745,4 +3739,94 @@ fn lifecycle_sweep_keeps_an_added_rejection_and_a_cleared_one_stays_cleared() {
         .collect();
     assert!(announced.contains(&Prefix::V4(overlay_prefix(0))));
     assert!(!announced.contains(&Prefix::V4(overlay_prefix(9))));
+}
+
+/// A refusal can move between VPN families with the same total. Compare each
+/// family projection to the target's delivered keys across the swap.
+#[test]
+fn grouped_vpn_refusal_counts_follow_the_delivered_family() {
+    use super::lifecycle::test_peer_up;
+    let mut manager = test_manager();
+    let source = Ipv4Addr::new(198, 51, 100, 30);
+    register_test_peer(&mut manager, peer_v4(source), 0);
+    let peer = peer_v4(Ipv4Addr::new(192, 0, 2, 30));
+    let v4 = make_vpn_rib_route(source, 30, 1030, 100);
+    let v6 = make_vpn6_rib_route_with_rts(source, 1, vec![rt(100)]);
+    let encoder = MockExactExportEncoder::accepting(1);
+    manager.handle_update(RibUpdate::SetPeerExportEncoder {
+        peer,
+        session_id: 1,
+        encoder: encoder.clone(),
+    });
+    let (out, mut rx) = mpsc::channel(32);
+    let mut up = test_peer_up(peer, 1, out);
+    if let RibUpdate::PeerUp {
+        sendable_families, ..
+    } = &mut up
+    {
+        *sendable_families = vec![(Afi::Ipv4, Safi::MplsVpn), (Afi::Ipv6, Safi::MplsVpn)];
+    }
+    manager.handle_update(up);
+    assert!(manager.vpn_grouped_member_of(peer).is_some());
+
+    let mut wire = HashSet::new();
+    for (generation, refused, visible) in [(1, &v6, &v4), (2, &v4, &v6)] {
+        encoder.set_profile(generation, [ExactExportKey::Vpn(refused.key())]);
+        let mut announced = vec![v4.clone(), v6.clone()];
+        for route in &mut announced {
+            AttrSet::edit(&mut route.attributes, |attrs| {
+                attrs.push(PathAttribute::Communities(vec![
+                    u32::try_from(generation).unwrap(),
+                ]));
+            });
+        }
+        manager.handle_update(RibUpdate::VpnRoutesReceived {
+            peer: peer_v4(source),
+            session_id: 0,
+            announced,
+            withdrawn: vec![],
+        });
+        drain_route_chunks(&mut manager);
+        while let Ok(update) = rx.try_recv() {
+            let update = delivered(update);
+            for key in update.vpn_withdraw {
+                assert!(wire.remove(&key), "withdrew an unadvertised key");
+            }
+            wire.extend(update.vpn_announce.iter().map(VpnRibRoute::key));
+        }
+        assert_eq!(wire, HashSet::from([visible.key()]));
+        assert_eq!(manager.grouped_vpn_advertised_count(peer), Some(1));
+        let (reply, mut result) = oneshot::channel();
+        manager.handle_update(RibUpdate::QueryVpnRoutesPage {
+            scope: RouteQueryScope::Advertised { peer },
+            after: None,
+            filter: None,
+            expected_version: None,
+            page_size: 2,
+            reply,
+        });
+        let page = result.try_recv().unwrap().unwrap();
+        assert_eq!(page.total, 1);
+        let queried: HashSet<_> = page.routes.iter().map(VpnRibRoute::key).collect();
+        assert_eq!(queried, wire);
+        for (afi, label) in [
+            (Afi::Ipv4, "l3vpn_ipv4_unicast"),
+            (Afi::Ipv6, "l3vpn_ipv6_unicast"),
+        ] {
+            let expected = u32::from(visible.key().afi_safi().0 == afi);
+            assert_eq!(
+                bmp_advertised(&mut manager, peer, (afi, Safi::MplsVpn)),
+                u64::from(expected)
+            );
+            let gauge = gauge_metric_value(
+                &manager.metrics,
+                "bgp_rib_adj_out_prefixes",
+                &[("peer", &peer.label()), ("family", label)],
+            );
+            assert!(
+                (gauge - f64::from(expected)).abs() < f64::EPSILON,
+                "{label} gauge {gauge}"
+            );
+        }
+    }
 }
