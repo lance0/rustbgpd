@@ -313,6 +313,36 @@ impl GroupCaptureDraft {
     }
 }
 
+impl GroupCaptureDraft {
+    /// A member served by a cohort capture, indexed on the cohort's pool.
+    /// The first shared member's draft spans the cohort's two walks; later
+    /// members' drafts begin after them and report none.
+    pub(super) fn sealed_shared(
+        self,
+        keys: usize,
+        handle: Option<super::update_groups::admitted_recovery::SnapshotHandle>,
+        member_charge_bytes: usize,
+        daemon_bytes: usize,
+    ) {
+        GROUP_CAPTURE.with_borrow_mut(|active| {
+            let Some((callback, work)) = active else {
+                return;
+            };
+            work.fresh_captures += 1;
+            callback(GroupCaptureBenchEvent::ProofSealed {
+                strategy: "indexed",
+                pool_reused: handle.is_some() && handle == self.hint,
+                keys,
+                slots: self.slots,
+                walks: work.walks - self.work.0,
+                projections: work.projections - self.work.1,
+                member_charge_bytes,
+                daemon_bytes,
+            });
+        });
+    }
+}
+
 pub(super) fn record_group_capture_refusal(
     error: super::update_groups::admitted_recovery::Failure,
 ) {

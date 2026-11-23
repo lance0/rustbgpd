@@ -350,10 +350,16 @@ struct AdjRibOutCommitStats {
     /// Owing peers visited by the owed-row trim and cap scans.
     #[cfg(test)]
     owed_peer_scans: usize,
-    /// Captures of a member's admitted keys from its group's table (two
-    /// walks of the table each).
+    /// Captures of a member's admitted keys from its group's table: two
+    /// walks of the table each, or a share of one cohort capture's two.
     #[cfg(test)]
     group_table_captures: usize,
+    /// Rows those captures projected, a cohort's shared walks counted once.
+    #[cfg(test)]
+    group_capture_projections: usize,
+    /// Control members a cohort capture checked at control-tagged rows.
+    #[cfg(test)]
+    group_capture_target_checks: usize,
     /// EVPN passes that logged their keys for the cursors.
     #[cfg(test)]
     owed_evpn_logs: usize,

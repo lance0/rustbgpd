@@ -193,6 +193,19 @@ pub(in crate::manager) struct FullCaptureOutcome {
     pub(in crate::manager) mismatches: usize,
 }
 
+/// A cohort capture's members, each in exactly one list.
+#[derive(Debug)]
+pub(in crate::manager) struct CohortCapture {
+    /// The pool every shared member references.
+    pub(in crate::manager) handle: Option<SnapshotHandle>,
+    /// Populated and still `Capturing`: the caller seals each.
+    pub(in crate::manager) shared: Vec<PeerId>,
+    /// Still `Capturing` and empty: the caller captures each on its own.
+    pub(in crate::manager) individual: Vec<PeerId>,
+    /// Failed; the caller records each refusal.
+    pub(in crate::manager) failed: Vec<(PeerId, Failure)>,
+}
+
 type Words = SmallVec<[u64; 0]>;
 type Snapshots = SmallVec<[Snapshot; 0]>;
 type SlotPositions = SmallVec<[u32; 0]>;
@@ -1492,6 +1505,244 @@ impl AdmittedRecovery {
             #[cfg(any(test, feature = "bench-internals"))]
             mismatches: shape.mismatches,
         })
+    }
+
+    /// One walk of a cohort's base projection, with each row's excluded
+    /// members. Same bench witness as [`Self::walk_full_old`].
+    fn walk_cohort<P, X, C>(
+        table: &AdjRibOut,
+        project: &P,
+        exclude: &X,
+        checkpoint: &mut C,
+        mut visit: impl FnMut(usize, Key, &[usize], &mut C) -> Result<(), Failure>,
+    ) -> Result<(), Failure>
+    where
+        P: Fn(&Route) -> Option<Key>,
+        X: Fn(&Route, &mut dyn FnMut(usize)),
+        C: FnMut(bool),
+    {
+        #[cfg(feature = "bench-internals")]
+        let observed = crate::manager::bench_support::grouped_walk_observed();
+        let mut excluded = SmallVec::<[usize; 4]>::new();
+        let mut result = Ok(());
+        for slot in 0..table.unicast_slot_count() {
+            checkpoint(false);
+            let Some(route) = table.unicast_slot(slot) else {
+                continue;
+            };
+            let Some(key) = project(route) else {
+                continue;
+            };
+            excluded.clear();
+            exclude(route, &mut |member| excluded.push(member));
+            result = visit(slot, key, &excluded, checkpoint);
+            if result.is_err() {
+                break;
+            }
+        }
+        #[cfg(feature = "bench-internals")]
+        if observed && result.is_ok() {
+            crate::manager::bench_support::record_completed_grouped_walk(table.len());
+        }
+        result
+    }
+
+    /// OLD for several fresh members of one unicast-only group from two walks
+    /// of its table, instead of two per member. Each member's projection must
+    /// be `project` minus the rows `exclude` names its index for, every row at
+    /// its own key; the caller's predicate establishes that. Every member is
+    /// `Capturing` and empty. A member the shared indexed pool cannot
+    /// represent, or every member when the pool is unusable, is returned
+    /// untouched for its own capture. Shared members' records are charged as
+    /// their own captures would be; the base mask is one charged scratch.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "shape, attachment, population and rollback of one cohort share one ownership boundary"
+    )]
+    pub(in crate::manager) fn capture_cohort_old_with_checkpoint<P, X>(
+        &mut self,
+        members: &[PeerId],
+        hint: Option<SnapshotHandle>,
+        table: &AdjRibOut,
+        project: P,
+        exclude: X,
+        checkpoint: &mut impl FnMut(bool),
+    ) -> CohortCapture
+    where
+        P: Fn(&Route) -> Option<Key>,
+        X: Fn(&Route, &mut dyn FnMut(usize)),
+    {
+        let mut capture = CohortCapture {
+            handle: None,
+            shared: Vec::new(),
+            individual: members.to_vec(),
+            failed: Vec::new(),
+        };
+        let snapshot = hint
+            .and_then(|handle| self.snapshot_index(handle))
+            .map(|index| &self.snapshots[index]);
+        if table.vpn_len() != 0 || snapshot.is_some_and(|snapshot| !snapshot.indexed) {
+            return capture;
+        }
+        // Shape: the base count and pool additions, and what each member drops.
+        let (mut count, mut additions) = (0_usize, 0_usize);
+        let mut dropped = vec![(0_usize, 0_usize); members.len()];
+        let (mut mismatches, mut comparisons) = (0, 0);
+        let shape = Self::walk_cohort(
+            table,
+            &project,
+            &exclude,
+            checkpoint,
+            |slot, key, excluded, checkpoint| {
+                count += 1;
+                let sparse = match snapshot {
+                    Some(snapshot) => Self::indexed_position(
+                        snapshot,
+                        Some(slot),
+                        key,
+                        &mut mismatches,
+                        &mut comparisons,
+                        checkpoint,
+                    )
+                    .map_err(|()| Self::overflow())?
+                    .is_none(),
+                    None => false,
+                };
+                additions += usize::from(sparse);
+                for &member in excluded {
+                    dropped[member].0 += 1;
+                    dropped[member].1 += usize::from(sparse);
+                }
+                Ok(())
+            },
+        );
+        if shape.is_err() {
+            return capture;
+        }
+        // Charge the scratch base mask before any member attaches, so a
+        // refusal leaves every member to its own capture.
+        let pool_keys = snapshot.map_or(table.len(), |snapshot| snapshot.keys.len());
+        let mut hint = snapshot.map(|snapshot| snapshot.handle);
+        let Ok(words) = Self::shared_words(pool_keys) else {
+            return capture;
+        };
+        let scratch = words * size_of::<u64>();
+        let Some(daemon) = self.used.checked_add(scratch) else {
+            return capture;
+        };
+        let mut template = Words::new();
+        if daemon > self.daemon_limit
+            || !self.allocation_permitted()
+            || template.try_grow(words).is_err()
+        {
+            return capture;
+        }
+        self.used = daemon;
+        self.peak = self.peak.max(daemon);
+        template.extend(std::iter::repeat_n(0, words));
+
+        // Attach every member that the shared indexed pool represents.
+        let mut shared = Vec::new();
+        capture.individual.clear();
+        for (member, &peer) in members.iter().enumerate() {
+            let (gone, gone_sparse) = dropped[member];
+            let shape = (count - gone, additions - gone_sparse);
+            match self.share_group_capture_with_checkpoint(peer, hint, table, shape, checkpoint) {
+                Ok(Some(handle)) if hint.is_none_or(|hint| hint == handle) => {
+                    hint = Some(handle);
+                    shared.push((member, peer, shape.0));
+                }
+                Ok(Some(_)) => {
+                    // Not the cohort's pool: undo the attachment.
+                    if let Ok(index) = self.index(peer) {
+                        self.free_keys(index, checkpoint);
+                    }
+                    capture.individual.push(peer);
+                }
+                Ok(None) | Err(_) => capture.individual.push(peer),
+            }
+        }
+        capture.handle = hint.filter(|_| !shared.is_empty());
+        // Population: the base mask once, each member's dropped rows as its
+        // own bits, and sparse additions pushed to the members that keep them.
+        let mut by_member = vec![None; members.len()];
+        for &(member, peer, _) in &shared {
+            by_member[member] = self.index(peer).ok();
+        }
+        let pool = capture
+            .handle
+            .and_then(|handle| self.snapshot_index(handle));
+        let population = pool.map_or(Ok(()), |pool| {
+            let snapshot = &self.snapshots[pool];
+            let records = &mut self.records;
+            let entries = &mut self.entries;
+            let (mut mismatches, mut comparisons) = (0, 0);
+            Self::walk_cohort(
+                table,
+                &project,
+                &exclude,
+                checkpoint,
+                |slot, key, excluded, checkpoint| {
+                    let position = Self::indexed_position(
+                        snapshot,
+                        Some(slot),
+                        key,
+                        &mut mismatches,
+                        &mut comparisons,
+                        checkpoint,
+                    )
+                    .map_err(|()| Self::overflow())?;
+                    if let Some(position) = position {
+                        let bit = 1_u64 << (position % 64);
+                        template[position / 64] |= bit;
+                        for index in excluded.iter().filter_map(|&member| by_member[member]) {
+                            records[index].words[position / 64] |= bit;
+                        }
+                        return Ok(());
+                    }
+                    for (member, index) in by_member.iter().enumerate() {
+                        let Some(index) = *index else {
+                            continue;
+                        };
+                        if excluded.contains(&member) {
+                            continue;
+                        }
+                        let keys = &mut records[index].keys.0;
+                        if keys.len() == keys.capacity() {
+                            return Err(Self::overflow());
+                        }
+                        keys.push(key);
+                        *entries += 1;
+                    }
+                    Ok(())
+                },
+            )
+        });
+        for (member, peer, expected) in shared {
+            let index = by_member[member].expect("a shared member holds a record");
+            if population.is_ok() {
+                let record = &mut self.records[index];
+                let mut masked = 0;
+                for (word, base) in record.words.iter_mut().zip(&template) {
+                    checkpoint(false);
+                    *word = base & !*word;
+                    masked += word.count_ones() as usize;
+                }
+                record.masked = masked;
+                self.entries += masked;
+                if self.records[index].entries() == expected {
+                    capture.shared.push(peer);
+                    continue;
+                }
+            }
+            let error = self.fail(index, self.missing_proof(peer), checkpoint);
+            capture.failed.push((peer, error));
+        }
+        checkpoint(true);
+        drop(template);
+        self.used -= scratch;
+        checkpoint(true);
+        capture
     }
 
     /// An attached empty proof's universe takes precedence over a group hint.

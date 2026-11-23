@@ -202,11 +202,15 @@ def proofs(raw, peers, rows):
         require(kind in (("indexed", "built"), ("indexed", "reused"), ("flat", "none")),
                 f"unknown proof strategy {kind}")
         kinds[kind] = kinds.get(kind, 0) + 1
-        # Both strategies size the proof in one walk and populate it in a second.
-        require(count(proof, "walks") == 2 and count(proof, "projections") == 2 * rows
+        # A capture sizes its proof in one walk and populates it in a second.
+        # A cohort capture's later members are served by its first member's
+        # two walks and make none of their own.
+        walks = count(proof, "walks")
+        require(walks in (0, 2) and count(proof, "projections") == walks * rows
                 and count(proof, "keys") == rows,
                 f"capture made {proof['walks']} walks, {proof['projections']} projections and {proof['keys']} keys; "
-                f"expected 2, {2 * rows} and {rows}")
+                f"expected 2 (0 when served by a cohort), {2 * rows} and {rows}")
+        require(walks or kind == ("indexed", "reused"), "a cohort-served proof must reuse the cohort's pool")
         # Vacant slab slots depend on the table's reuse order, not on this fixture.
         require(count(proof, "slots") >= rows, "fewer slab slots than occupied rows")
         require(0 < count(proof, "member_charge_bytes") <= member_limit
@@ -271,7 +275,9 @@ def grade(raw, host, shape, peak):
         require(value == expected, f"{key}: observed {value}, expected {expected}")
     walks = count(raw, "walks")
     projections = count(raw, "projections")
-    require(walks == 2 * peers, f"{walks} completed walks for {peers} fresh captures, expected exactly {2 * peers}")
+    walking = sum(1 for proof in raw["proofs"] if count(proof, "walks"))
+    require(0 < walking and walks == 2 * walking,
+            f"{walks} completed walks for {walking} walking of {peers} fresh captures, expected exactly {2 * walking}")
     require(count(raw, "group_capture_walks") == walks,
             f"{walks - raw['group_capture_walks']} walks outside a sealed grouped capture")
     require(projections == walks * rows,
