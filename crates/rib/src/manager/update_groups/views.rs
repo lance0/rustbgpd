@@ -58,6 +58,26 @@ impl GroupRibOut {
 }
 
 impl RibManager {
+    /// Test oracle for the maintained refused-view counters: recount the
+    /// member's overlay against the current view, as the readers used to.
+    #[cfg(test)]
+    fn assert_refused_view_counts(&self, peer: PeerId, group: &GroupRibOut, reader: &str) {
+        let filter = self.rtc_export_filter(peer, self.peer_sendable_families.get(&peer));
+        let rs_control = self.rs_control_context(peer);
+        let mut expected = [0_usize; 4];
+        for key in self.peer_unexportable.get(&peer).into_iter().flatten() {
+            if let Some(slot) = group.visible_rejected_slot(peer, key, rs_control, filter.as_ref())
+            {
+                expected[slot] += 1;
+            }
+        }
+        assert_eq!(
+            group.rejected_counts(peer),
+            expected,
+            "refused-view counts drifted for {peer} at {reader}"
+        );
+    }
+
     /// Only the overlay writer changes the refused set. The group tracks its
     /// intersection with the staged post-backstop view separately.
     pub(in crate::manager) fn set_exact_export_rejection(
@@ -888,6 +908,8 @@ impl RibManager {
                     .sum(),
             );
         }
+        #[cfg(test)]
+        self.assert_refused_view_counts(peer, group, "count");
         let [v4, v6, _, _] = group.rejected_counts(peer);
         Some(group.advertised_count_for(peer).saturating_sub(v4 + v6))
     }
@@ -914,6 +936,8 @@ impl RibManager {
                 lens[usize::from(afi == Afi::Ipv6)] = usize::try_from(count).unwrap_or(usize::MAX);
             }
         }
+        #[cfg(test)]
+        self.assert_refused_view_counts(peer, group, "unicast_lens");
         let [v4, v6, _, _] = group.rejected_counts(peer);
         Some([lens[0].saturating_sub(v4), lens[1].saturating_sub(v6)])
     }
@@ -935,6 +959,8 @@ impl RibManager {
                 lens[usize::from(afi == Afi::Ipv6)] = usize::try_from(count).unwrap_or(usize::MAX);
             }
         }
+        #[cfg(test)]
+        self.assert_refused_view_counts(peer, group, "vpn_lens");
         let [_, _, v4, v6] = group.rejected_counts(peer);
         Some([lens[0].saturating_sub(v4), lens[1].saturating_sub(v6)])
     }
@@ -949,6 +975,8 @@ impl RibManager {
         if let Some(counts) = self.initial_group_admitted_counts(peer) {
             return Some(counts[2] + counts[3]);
         }
+        #[cfg(test)]
+        self.assert_refused_view_counts(peer, group, "vpn_count");
         let [_, _, v4, v6] = group.rejected_counts(peer);
         Some(group.vpn_advertised_count_for(peer).saturating_sub(v4 + v6))
     }
@@ -982,6 +1010,8 @@ impl RibManager {
             );
         }
         let mut counts = group.family_counts_for(peer);
+        #[cfg(test)]
+        self.assert_refused_view_counts(peer, group, "family_counts");
         let rejected = group.rejected_counts(peer);
         for ((afi, safi), count) in &mut counts {
             let slot = usize::from(*afi == Afi::Ipv6) + 2 * usize::from(*safi == Safi::MplsVpn);
