@@ -10071,19 +10071,19 @@ impl RibManager {
         // moves under a full member. Unless it is forced or fed, that member
         // reaches the empty-pass exit with no send that could miss.
         let stages_change = !best_changed.is_empty() || !all_affected.is_empty();
-        let mut speculative_group_admitted = Vec::new();
-        for &peer in &peers {
-            if !RELEASING
-                && !draining
-                && self.grouped_member_of(peer).is_some()
-                && ((self.outbound_channel_full(peer)
-                    && (stages_change || evpn_feeds.contains_key(&peer)))
-                    || self.force_outbound_peers.contains(&peer))
-                && self.capture_group_admitted_keys(peer)
-            {
-                speculative_group_admitted.push(peer);
-            }
-        }
+        let capturing: Vec<PeerId> = peers
+            .iter()
+            .copied()
+            .filter(|&peer| {
+                !RELEASING
+                    && !draining
+                    && self.grouped_member_of(peer).is_some()
+                    && ((self.outbound_channel_full(peer)
+                        && (stages_change || evpn_feeds.contains_key(&peer)))
+                        || self.force_outbound_peers.contains(&peer))
+            })
+            .collect();
+        let speculative_group_admitted = self.capture_group_admitted_keys_batch(&capturing);
         #[cfg(feature = "bench-internals")]
         let capture_pass_done = capture_phase.map(super::bench_support::GroupCapturePhase::finish);
         let mut staged_here = if draining || RELEASING {

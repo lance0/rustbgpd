@@ -216,18 +216,22 @@ class GroupedOldReceipt(unittest.TestCase):
             (peers, 1, "INVALID"),  # One walk per capture.
             (4 * peers, 4, "INVALID"),  # Four walks per capture.
             (0, 0, "INVALID"),
+            (2, None, "PASS"),  # One cohort capture: the first proof walks, the rest are served.
+            (4, None, "INVALID"),  # Two walks outside the cohort's sealed proof.
         ):
             with self.subTest(walks=walks):
                 raw = copy.deepcopy(self.raw)
                 raw.update(walks=walks, group_capture_walks=walks, projections=walks * rows)
-                for proof in raw["proofs"]:
-                    proof.update(walks=per_capture, projections=per_capture * rows)
+                for i, proof in enumerate(raw["proofs"]):
+                    each = per_capture if per_capture is not None else 2 * (i == 0)
+                    proof.update(walks=each, projections=each * rows)
                 self.assertEqual(self.check(raw)[0], verdict)
         for field, value, why in (
             ("raw/projections", 2 * peers * rows - 1, "projections disagree"),
             ("raw/group_capture_walks", 2 * peers - 2, "2 walks outside a sealed grouped capture"),
             ("raw/proofs/2/walks", 1, "capture made 1 walks"),
             ("raw/proofs/2/projections", 2 * rows + 1, "capture made 2 walks"),
+            ("raw/proofs/2/walks", 0, "walks for 3 walking of 4"),
         ):
             with self.subTest(field=field):
                 verdict, detail = self.seeded(field, value)

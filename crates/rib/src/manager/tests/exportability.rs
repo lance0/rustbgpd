@@ -200,7 +200,7 @@ impl ReusableExactExportEncoder {
         })
     }
 
-    fn with_limits(
+    pub(super) fn with_limits(
         owner_id: u64,
         wire_profile: u64,
         encoded_len: usize,

@@ -2065,3 +2065,26 @@ resyncs, operator soft refreshes and peer refresh answers for its unheld
 families. When selection stages EVPN, the resync tick takes over the rebuild.
 It diffs against the receiver's admitted rows before its EVPN End-of-RIB.
 This supersedes the in-hold refresh limitation in the EVPN row-cursor amendment.
+
+## Amendment (2026-11-23): fresh unicast members of one ordinary pass share the capture walks
+
+The ordinary pass captures OLD before staging for every grouped member that
+is clean, has no proof and has a full writer or is forced. Captured one by
+one, each member walked the group table twice, so a route-server group whose
+writers were all full paid two walks per member in one actor turn.
+
+For a member of a group without per-client-best lanes or VPN rows, the group
+projection has two member-dependent terms that read existing group state:
+the rows it sourced, and, for an RFC 7947 control member, the rows in the
+group's control index (`rs_tagged`) that suppress toward it. Such members now
+share one capture of the group's member-independent projection: one walk
+counts it and records each member's excluded rows, a second builds the base
+mask once and marks each member's exclusions, and each member's mask is the
+base minus its marks. Each member still owns its own record on the shared
+indexed pool, charged as its own capture would be; the base mask is a charged
+scratch released before the pass continues. A member with a regroup baseline,
+an exact-export rejection, an outbound prefix limit or a control context the
+index does not hold, and any member the shared pool cannot represent, takes
+its own capture in the same pass. ORF, ORR and Add-Path send peers are never
+grouped. A test oracle compares every shared proof with the member's own
+projection. No timing qualification has been run on this change.
