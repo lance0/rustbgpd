@@ -158,6 +158,17 @@ fn staged_hits_reuse_ir_and_preserve_existing_counter_instances() {
 }
 
 #[test]
+fn same_policies_uses_shared_ir_then_content() {
+    let source = rpol_chain();
+    let fork = source.fork_for_install();
+    assert!(source.same_policies(&fork) && fork.same_policies(&source));
+    // A clone has no compiled IR yet, so only the content comparison can match.
+    let clone = source.clone();
+    assert!(source.same_policies(&clone));
+    assert!(!source.same_policies(&PolicyChain::new(Vec::new())));
+}
+
+#[test]
 fn concurrent_evaluation_and_reads_agree_on_totals() {
     let chain = Arc::new(rpol_chain());
     let threads = 4;

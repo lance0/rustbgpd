@@ -1759,6 +1759,18 @@ impl PolicyChain {
         self.with_compiled_ir(OnceLock::from(Arc::clone(self.hit_counters())))
     }
 
+    /// Content equality with a fast path: handles made by [`share`](Self::share)
+    /// or [`fork_for_install`](Self::fork_for_install) reuse one compiled IR,
+    /// which identifies the same policies. Compiles neither chain.
+    #[must_use]
+    pub fn same_policies(&self, other: &Self) -> bool {
+        self.compiled
+            .get()
+            .zip(other.compiled.get())
+            .is_some_and(|(a, b)| Arc::ptr_eq(a, b))
+            || self == other
+    }
+
     /// Reuse a resolved chain's immutable IR for a new installation. Evaluations
     /// through this handle start at zero and cannot affect the source's counters.
     #[must_use]

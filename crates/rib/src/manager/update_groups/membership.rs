@@ -802,8 +802,11 @@ impl RibManager {
         let mut key = self.eligible_first_group_key(peer, record)?;
         let expected = self.update_groups.group_key(gid)?;
         key.chain = expected.chain;
-        (&key == expected && record.export_policy.as_ref() == policy)
-            .then(|| (record.session_id, record.outbound_tx.clone()))
+        let same_policy = match (record.export_policy.as_ref(), policy) {
+            (Some(current), Some(staged)) => current.same_policies(staged),
+            (current, staged) => current.is_none() && staged.is_none(),
+        };
+        (&key == expected && same_policy).then(|| (record.session_id, record.outbound_tx.clone()))
     }
 
     /// Defer a cold registration and start building when its slot is free.

@@ -481,7 +481,7 @@ impl UpdateGroupRegistry {
             key.chain = Some(
                 self.chains
                     .iter()
-                    .position(|chain| chain.as_ref() == Some(policy))?,
+                    .position(|chain| chain.as_ref().is_some_and(|c| c.same_policies(policy)))?,
             );
         }
         self.groups.iter().position(|existing| existing == key)
