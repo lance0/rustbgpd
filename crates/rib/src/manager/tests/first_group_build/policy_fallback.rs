@@ -251,6 +251,34 @@ fn policy_founder_uses_authoritative_order_for_multiple_errors() {
 }
 
 #[test]
+fn peer_context_policy_founder_never_starts_a_paced_build() {
+    let (mut manager, _tx, inventory) = fixture(1200);
+    // receiver(1) is 198.51.100.1. A group evaluation has no peer address, so
+    // sharing a staged table would permit what this session's chain rejects.
+    let chain = rpol_chain(
+        "policy p { term t { if peer.address == 198.51.100.1 { reject } } term r { accept } }",
+        &rustbgpd_policy::datasets::DatasetBindings::new(),
+    );
+    assert!(chain.requires_peer_context());
+    let mut rx = start_policy(&mut manager, chain);
+    assert!(
+        manager.first_group_build.is_none(),
+        "a peer-context chain must not start a paced group build"
+    );
+    finish(&mut manager);
+    assert!(manager.first_group_build.is_none());
+    assert!(manager.grouped_member_of(receiver(1)).is_none());
+    let announced = std::iter::from_fn(|| rx.try_recv().ok())
+        .map(|update| update.announce.len())
+        .sum::<usize>();
+    assert_eq!(announced, 0, "every route is rejected for this peer");
+    assert_eq!(
+        retained_policy_rejection_keys(&manager, receiver(1)).len(),
+        inventory.len()
+    );
+}
+
+#[test]
 fn policy_founder_with_two_errors_falls_back_after_its_first_page() {
     use crate::loc_rib::REGISTRATION_PAGE_SIZE;
     use crate::manager::slice_timing::group_work;
