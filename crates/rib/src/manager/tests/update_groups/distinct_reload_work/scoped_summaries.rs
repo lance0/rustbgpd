@@ -463,3 +463,68 @@ fn group_reevaluation_serves_unrelated_peer_between_shared_old_keys() {
     );
     drop(held);
 }
+
+/// A dataset reevaluation freezes the reevaluated group's
+/// members while an unrelated writer stays live.
+#[test]
+fn reevaluation_freezes_target_group_while_unrelated_writer_is_live() {
+    let (mut manager, members) = occupied_groups(false);
+    let [first, second, _incumbent, outside] = members;
+    let requested = [&first, &second, &outside].map(|member| peer_v4(member.addr));
+    let held = [requested[0], requested[1]].map(|peer| hold_writer_capacity(&manager, peer));
+    let mut expected = requested.map(|peer| manager.neighbor_rib_snapshot(peer));
+    assert!(
+        expected
+            .iter()
+            .all(|row| !row.outbound_resync.advertised_count_pending)
+    );
+    expected[2].outbound_resync.advertised_count_pending = true;
+    let (summary_tx, summary_rx) = mpsc::channel(1);
+    manager.summary_rx = Some(summary_rx);
+    manager.flush_poll_budget = std::time::Duration::ZERO;
+    let (reply, response) = oneshot::channel();
+    let writers = Mutex::new(Some(([first.output, second.output, outside.output], reply)));
+    let response = Mutex::new(Some(response));
+    let observed = Arc::new(AtomicBool::new(false));
+    manager.replacement_readiness_test_hook = Some(Arc::new({
+        let observed = Arc::clone(&observed);
+        move |stage| {
+            if stage != "capture_old_cohort_key" {
+                return;
+            }
+            if let Some((outputs, reply)) = writers.lock().unwrap().take() {
+                drop(outputs);
+                summary_tx
+                    .try_send(RibSummaryQuery::NeighborRibSnapshots {
+                        peers: requested.to_vec(),
+                        comparison: None,
+                        include_retained: false,
+                        reply,
+                    })
+                    .unwrap();
+            } else if let Some(mut pending) = response.lock().unwrap().take() {
+                let rows = pending
+                    .try_recv()
+                    .expect("served during reevaluation capture")
+                    .snapshots;
+                assert_eq!(
+                    rows, expected,
+                    "reevaluated group frozen, outside peer live"
+                );
+                observed.store(true, Ordering::Relaxed);
+            }
+        }
+    }));
+    let (reply, mut result) = oneshot::channel();
+    manager.handle_update(RibUpdate::ReevaluatePeerExportPolicies {
+        peers: vec![requested[0]],
+        swaps: None,
+        reply,
+    });
+    assert_eq!(result.try_recv().unwrap(), Ok(()));
+    assert!(
+        observed.load(Ordering::Relaxed),
+        "must reach the interior assertion"
+    );
+    drop(held);
+}
