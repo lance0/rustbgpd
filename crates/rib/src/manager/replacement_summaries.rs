@@ -158,9 +158,9 @@ impl RibManager {
         work: impl FnOnce(&mut Self) -> T,
     ) -> T {
         if self.summary_rx.is_some() && !self.unicast_release_partial() {
-            super::with_executor_handoff(|| self.with_replacement_readiness(work))
+            super::with_executor_handoff(|| self.with_export_policy_readiness(work))
         } else {
-            self.with_replacement_readiness(work)
+            self.with_export_policy_readiness(work)
         }
     }
 
@@ -287,9 +287,9 @@ impl RibManager {
         // A nested scope has already moved the receiver into the shared context.
         // Embedders without the new lane retain their original queue behavior.
         if self.summary_rx.is_none() || self.unicast_release_partial() {
-            return self.with_replacement_readiness(work);
+            return self.with_export_policy_readiness(work);
         }
-        self.with_replacement_readiness(|manager| {
+        self.with_export_policy_readiness(|manager| {
             #[cfg(feature = "bench-internals")]
             tracing::info!(target: "replacement_summary", operation, phase = "enter", "replacement summary scope");
             let started = std::time::Instant::now();

@@ -1755,7 +1755,10 @@ struct ReplacementReadinessContext {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ReadinessOwnerKind {
+    /// Frozen-count work such as an initial export or route refresh.
     Replacement,
+    /// An export-policy command using the same frozen-count checkpoints.
+    PolicyTransition,
     SelectionRelease,
     PeerTeardown,
     /// Table-sized work inside ordinary ingest. It answers under the actor
@@ -1763,6 +1766,7 @@ enum ReadinessOwnerKind {
     /// every owner it answers stalled once its own age, counted from the
     /// start of a pending policy transition if there is one, passes the
     /// healthy bound; the loop applies that bound to the transition only.
+    /// An age inherited from a transition reports the transition's stall.
     Ingest,
 }
 
@@ -1784,6 +1788,9 @@ struct ReplacementReadiness {
     /// Selection release and source teardown publish completed prefix changes;
     /// replacement ownership always keeps its original frozen count.
     kind: ReadinessOwnerKind,
+    /// An ingest or teardown owner begun under a pending policy transition
+    /// counts that transition's age, so its stall belongs to the transition.
+    transition_age: bool,
     started: tokio::time::Instant,
     /// Tokio's clock, so a test can hold the service budget still with a
     /// paused clock; outside a paused runtime it reads the system clock.
@@ -2109,21 +2116,24 @@ fn service_replacement_readiness_with_origin(
             ReadinessOwnerKind::PeerTeardown => {
                 ("peer_teardown", RibReadinessError::PeerTeardownStalled)
             }
-            ReadinessOwnerKind::Replacement => (
+            ReadinessOwnerKind::Replacement => {
+                ("policy_transition_fence", RibReadinessError::WorkStalled)
+            }
+            ReadinessOwnerKind::PolicyTransition => (
                 "policy_transition_fence",
                 RibReadinessError::PolicyTransitionStalled,
             ),
-            ReadinessOwnerKind::Ingest => {
-                ("actor_loop", RibReadinessError::PolicyTransitionStalled)
-            }
+            ReadinessOwnerKind::Ingest => ("actor_loop", RibReadinessError::IngestStalled),
         };
         readiness
             .metrics
             .observe_rib_readiness_query_wait(seam, enqueued.elapsed());
-        let result = if readiness.started.elapsed() >= MAX_HEALTHY_POLICY_TRANSITION_AGE {
-            Err(stalled)
-        } else {
+        let result = if readiness.started.elapsed() < MAX_HEALTHY_POLICY_TRANSITION_AGE {
             Ok(readiness.count)
+        } else if readiness.transition_age {
+            Err(RibReadinessError::PolicyTransitionStalled)
+        } else {
+            Err(stalled)
         };
         #[cfg(feature = "bench-internals")]
         {
@@ -3531,11 +3541,22 @@ impl RibManager {
     }
 
     fn begin_replacement_readiness(&mut self) -> bool {
+        if let Some(pending) = &self.pending_clean_policy_transition {
+            self.begin_readiness_owner_kind(pending.elapsed(), ReadinessOwnerKind::PolicyTransition)
+        } else {
+            self.begin_readiness_owner_kind(
+                std::time::Duration::ZERO,
+                ReadinessOwnerKind::Replacement,
+            )
+        }
+    }
+
+    fn with_export_policy_readiness<T>(&mut self, work: impl FnOnce(&mut Self) -> T) -> T {
         let age = self.pending_clean_policy_transition.as_ref().map_or(
             std::time::Duration::ZERO,
             distribution::PendingCleanPolicyTransition::elapsed,
         );
-        self.begin_readiness_owner(age, false)
+        self.with_replacement_readiness_age(age, work)
     }
 
     fn with_replacement_readiness_age<T>(
@@ -3607,7 +3628,7 @@ impl RibManager {
             if selection_release {
                 ReadinessOwnerKind::SelectionRelease
             } else {
-                ReadinessOwnerKind::Replacement
+                ReadinessOwnerKind::PolicyTransition
             },
         )
     }
@@ -3637,6 +3658,11 @@ impl RibManager {
                 metrics: self.metrics.clone(),
                 count: self.completed_loc_rib_count(),
                 kind,
+                transition_age: self.pending_clean_policy_transition.is_some()
+                    && matches!(
+                        kind,
+                        ReadinessOwnerKind::Ingest | ReadinessOwnerKind::PeerTeardown
+                    ),
                 started,
                 last_service: tokio::time::Instant::now(),
                 budget: self.flush_poll_budget.min(FLUSH_POLL_BUDGET),
@@ -3726,7 +3752,10 @@ impl RibManager {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if context.kind == ReadinessOwnerKind::Replacement {
+            if matches!(
+                context.kind,
+                ReadinessOwnerKind::Replacement | ReadinessOwnerKind::PolicyTransition
+            ) {
                 return;
             }
             context.count = self.completed_loc_rib_count();

@@ -6293,7 +6293,7 @@ impl RibManager {
             Result<crate::update::ExportPolicyCohortOutcome, String>,
         >,
     ) {
-        let terminal = self.with_replacement_readiness(|manager| {
+        let terminal = self.with_export_policy_readiness(|manager| {
             let readiness = manager.replacement_readiness.clone();
             let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
             let mut replacements = replacements;
@@ -6376,7 +6376,7 @@ impl RibManager {
                 replacements = replacements.len(),
                 "skipping abandoned authoritative export-policy batch: caller dropped the reply"
             );
-            self.with_replacement_readiness(|manager| {
+            self.with_export_policy_readiness(|manager| {
                 let mut replacements = replacements;
                 while let Some(replacement) = replacements.pop() {
                     manager.replacement_checkpoint(true);

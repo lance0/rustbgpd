@@ -4777,7 +4777,7 @@ core-probe deadline, the error is `UNAVAILABLE`. The miss may be transient, an
 actor busy for example in the short tail of a configuration reload, or
 persistent, a wedged actor; a caller may retry once and should treat a
 repeated miss as a failure. A closed actor channel, a dropped reply, or a
-stalled export-policy transition or selection release returns `INTERNAL`.
+stalled RIB readiness owner returns `INTERNAL`.
 `GetHealth` follows the same daemon gate as HTTP `/readyz`: once coordinated
 shutdown begins, or a runtime-config settlement arms its recovery fence, it
 returns `UNAVAILABLE` without querying the actors, with a
@@ -4828,6 +4828,16 @@ selection-deferral release shares that bound and returns
 `503 not ready: RIB selection-deferral release stalled` once it runs for 30
 seconds; readiness returns when the release finishes. It does not require
 peers or routes to exist.
+
+The readiness checkpoint of an ordinary ingest operation returns
+`503 not ready: RIB ingest stalled` at the same 30-second ownership limit.
+Other synchronous work holding a fixed Loc-RIB count, such as a standalone
+initial table export, route refresh or detached peer cleanup, returns
+`503 not ready: RIB work stalled`. A helper running inside another owner
+inherits that owner's start time and reason. Ingest or peer teardown that starts
+while a policy transition is pending counts from the transition's start and
+returns the transition's reason. After the owner finishes, the next
+probe reports the current owner's state, or `200 ready` on a healthy actor loop.
 
 Authoritative export-policy replacement and rollback service this same RIB
 readiness lane between construction, per-peer work, and cleanup steps. These
