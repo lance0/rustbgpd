@@ -4292,6 +4292,92 @@ fn frozen_group_local_witness_ends_on_actual_replacement() {
     );
 }
 
+/// A member regrouped during the hold has no captured row, and its new group
+/// table never held the ordinary route. Its regroup baseline is the admitted
+/// row, so readback and explain use it rather than the new group's view.
+#[test]
+fn regrouped_member_reads_back_its_baseline_row_during_the_hold() {
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24));
+    let observer = PeerId::from_addr(v4(4));
+    let mut manager = restart_unicast_manager(false);
+    let mut output =
+        deferred_unicast_peer(&mut manager, observer, DeferredUnicastMode::Single, false);
+    inject(&mut manager, local_route(prefix, 23));
+    assert!(
+        deferred_unicast_drain(&mut output)
+            .iter()
+            .any(|batch| !batch.announce.is_empty())
+    );
+    let _waiter = connect_restart_waiter(&mut manager);
+    let before = manager.grouped_member_of(observer).unwrap();
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::ReplacePeerExportPolicy {
+        peer: observer,
+        export_policy: deferred_unicast_policy(false, true),
+        reply,
+    });
+    response.try_recv().unwrap().unwrap();
+    // The RTBH sibling wins selection; the destination policy denies it.
+    inject(&mut manager, deferred_unicast_local(prefix, 71, 50));
+    manager.distribute_resync_request();
+    let after = manager.grouped_member_of(observer).unwrap();
+    assert_ne!(after, before, "the member moved to another group");
+    assert!(
+        manager.group_ribs[&after].table.get(&prefix, 0).is_none(),
+        "the destination group never held the ordinary row"
+    );
+    assert!(!manager.has_frozen_group_locals(observer));
+    assert!(manager.dirty_peers.contains(&observer));
+    assert!(manager.selection_partial_caught_up(observer));
+    assert!(
+        manager.pending_regroup_baseline[&observer]
+            .unicast
+            .contains_key(&(prefix, 0))
+    );
+    assert!(
+        deferred_unicast_drain(&mut output)
+            .iter()
+            .all(|batch| batch.unicast_withdrawals().next().is_none()),
+        "the member keeps its admitted row on the wire"
+    );
+
+    let page = query(&mut manager, prefix, 23, None, 10).unwrap();
+    assert_eq!(
+        row(&page, observer).disposition,
+        RouteExportDisposition::Committed
+    );
+    let explanation = source_less_explain(&mut manager, observer, prefix);
+    assert_eq!(
+        (
+            explanation.decision,
+            explanation.already_advertised,
+            explanation.route_peer,
+            explanation.route_path_id,
+        ),
+        (
+            crate::update::ExplainDecision::Advertise,
+            true,
+            Some(LOCAL_PEER),
+            Some(23)
+        ),
+        "{explanation:?}"
+    );
+
+    let mut changed = local_route(prefix, 23);
+    AttrSet::edit(&mut changed.attributes, |attrs| {
+        attrs.push(PathAttribute::Med(71));
+    });
+    inject(&mut manager, changed);
+    let page = query(&mut manager, prefix, 23, None, 10).unwrap();
+    assert_eq!(
+        (
+            row(&page, observer).disposition,
+            row(&page, observer).reason.as_str()
+        ),
+        (RouteExportDisposition::Pending, "selection_deferred")
+    );
+}
+
 /// A route-server client's wire row is the selected row after its own
 /// control-community scrub, so readback and explain compare in that form:
 /// grouped single-best and per-client-best members, and a private
