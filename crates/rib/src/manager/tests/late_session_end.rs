@@ -1112,6 +1112,41 @@ fn llgr_restart_end(session_id: u64) -> RibUpdate {
     }
 }
 
+/// The replacement's OPEN does not list a family the reconnect completed:
+/// its routes go at the replacement's `PeerUp`, not at End-of-RIB.
+/// Mutation-red: skipping the unlisted-family removal keeps the IPv4 route.
+#[test]
+fn superseded_completed_family_unlisted_by_replacement_is_removed() {
+    let v4_route = make_route(
+        Ipv4Prefix::new(Ipv4Addr::new(10, 0, 1, 0), 24),
+        Ipv4Addr::new(192, 0, 2, 1),
+    );
+    let v6_route = ipv6_route_from_peer();
+    let mut manager = test_manager();
+    peer_up(&mut manager, 1);
+    manager.handle_update(restart_end_for(1, DUAL_STACK.to_vec()));
+    manager.handle_update(reconnect_context(2, DUAL_STACK.to_vec(), vec![]));
+    peer_up_superseding(&mut manager, 2, Some(1));
+    announce_routes(&mut manager, 2, vec![v4_route.clone(), v6_route.clone()]);
+    end_of_rib(&mut manager, 2);
+    manager.handle_update(reconnect_context(
+        3,
+        vec![(Afi::Ipv6, Safi::Unicast)],
+        vec![],
+    ));
+    peer_up_superseding(&mut manager, 3, Some(2));
+    assert!(
+        manager.loc_rib.get(&v4_route.prefix).is_none(),
+        "replacement kept a completed family its OPEN does not list"
+    );
+    assert!(
+        manager
+            .loc_rib
+            .get(&v6_route.prefix)
+            .is_some_and(|r| r.is_stale)
+    );
+}
+
 /// IPv6 is listed only in the LLGR capability. Returns whether the IPv4
 /// route is selected, and whether the IPv6 route is selected and LLGR-stale,
 /// after the replacement registers, with the reconnect's restart end
