@@ -1594,3 +1594,37 @@ fn unfiltered_departure_forced_checkpoints_stay_flat_in_prefixes_per_member() {
         "forced allocation checkpoints grew {small} -> {large} with prefixes per member"
     );
 }
+
+/// An owning iterator can be empty yet still hold an allocation, as when a
+/// producer reserves for a member and `retain` then excludes every entry.
+/// Dropping that buffer is work the forced checkpoints must still bracket.
+#[test]
+fn an_empty_owning_iterator_still_brackets_its_drop_with_forced_checkpoints() {
+    use crate::manager::PolicyFilteredRouteKey;
+
+    let key = PolicyFilteredRouteKey {
+        target_peer: peer_v4(Ipv4Addr::new(192, 0, 2, 1)),
+        source_peer: peer_v4(SOURCE),
+        prefix: Prefix::V4(prefix(0)),
+        path_id: 0,
+    };
+    let mut excluded = Vec::with_capacity(4_096);
+    excluded.push(key);
+    excluded.retain(|_| false);
+    assert!(excluded.is_empty() && excluded.capacity() >= 4_096);
+    let mut routes = HashSet::new();
+    let work = super::work_scaling::checkpoints_in(|| {
+        crate::manager::extend_policy_filtered_routes_with_readiness(
+            &mut routes,
+            excluded.into_iter(),
+            &None,
+        );
+    });
+    assert!(
+        work.get("policy_filtered_allocation")
+            .copied()
+            .unwrap_or_default()
+            >= 2,
+        "an allocated empty iterator was dropped without its forced checkpoints: {work:?}"
+    );
+}

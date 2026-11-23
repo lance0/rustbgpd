@@ -11107,9 +11107,9 @@ impl RibManager {
                                         &effective_prefixes,
                                         &mut || checkpoint(),
                                     );
-                                super::extend_policy_filtered_routes_with_readiness(
+                                super::extend_policy_filtered_routes_from_scratch(
                                     &mut current_policy_filtered_routes,
-                                    filtered.drain(..),
+                                    &mut filtered,
                                     &readiness,
                                 );
                                 super::retire_vec(&mut filtered, &mut || checkpoint());
@@ -11323,9 +11323,9 @@ impl RibManager {
                                 is_force,
                                 &mut || checkpoint(),
                             );
-                            super::extend_policy_filtered_routes_with_readiness(
+                            super::extend_policy_filtered_routes_from_scratch(
                                 &mut current_policy_filtered_routes,
-                                unicast.policy_filtered.drain(..),
+                                &mut unicast.policy_filtered,
                                 &readiness,
                             );
                         } else if per_client_best {
@@ -11380,9 +11380,9 @@ impl RibManager {
                                 is_force,
                                 &mut || checkpoint(),
                             );
-                            super::extend_policy_filtered_routes_with_readiness(
+                            super::extend_policy_filtered_routes_from_scratch(
                                 &mut current_policy_filtered_routes,
-                                unicast.policy_filtered.drain(..),
+                                &mut unicast.policy_filtered,
                                 &readiness,
                             );
                         } else if let Some((orr_topology, orr_spf)) = orr_ctx {
@@ -11420,9 +11420,9 @@ impl RibManager {
                                 is_force,
                                 &mut || checkpoint(),
                             );
-                            super::extend_policy_filtered_routes_with_readiness(
+                            super::extend_policy_filtered_routes_from_scratch(
                                 &mut current_policy_filtered_routes,
-                                unicast.policy_filtered.drain(..),
+                                &mut unicast.policy_filtered,
                                 &readiness,
                             );
                         } else {
@@ -11458,9 +11458,9 @@ impl RibManager {
                                 is_force,
                                 &mut || checkpoint(),
                             );
-                            super::extend_policy_filtered_routes_with_readiness(
+                            super::extend_policy_filtered_routes_from_scratch(
                                 &mut current_policy_filtered_routes,
-                                unicast.policy_filtered.drain(..),
+                                &mut unicast.policy_filtered,
                                 &readiness,
                             );
                         }
