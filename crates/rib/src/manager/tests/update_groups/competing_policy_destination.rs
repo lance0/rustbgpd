@@ -84,6 +84,20 @@ fn acknowledge_founders_destination(manager: &mut RibManager, peer: PeerId) {
     );
 }
 
+// These direct fixtures own the actor and must drive any accepted build
+// after the preceding founder releases its slot.
+fn finish_replayed_reload(manager: &mut RibManager, member: PeerId, source: usize) {
+    assert!(manager.accepted_reload_build());
+    for _ in 0..32 {
+        assert_eq!(manager.grouped_member_of(member), Some(source));
+        manager.advance_first_group_build();
+        if !manager.accepted_reload_build() {
+            return;
+        }
+    }
+    panic!("replayed authoritative reload did not settle");
+}
+
 async fn distinct_cold_destination(command: Command, acknowledge: bool) {
     let (mut manager, members, mut receivers) = direct_clean_transition_manager(2, 0, None);
     manager.outbound_row_credit_override = None;
@@ -155,6 +169,9 @@ async fn distinct_cold_destination(command: Command, acknowledge: bool) {
         .take_first_group_deferred_intent()
         .expect("oldest command released");
     manager.handle_update(intent);
+    if matches!(command, Command::Batch | Command::Restore) {
+        finish_replayed_reload(&mut manager, members[0], old);
+    }
     while manager.pending_clean_policy_transition.is_some() {
         step_parked_transition(&mut manager);
     }
@@ -347,7 +364,9 @@ async fn policy_removal_waits_for_a_different_plain_registration_profile() {
     let intent = manager
         .take_first_group_deferred_intent()
         .expect("single-stack cohort waits for the dual-stack founder");
+    let source = manager.grouped_member_of(members[0]).unwrap();
     manager.handle_update(intent);
+    finish_replayed_reload(&mut manager, members[0], source);
     assert_eq!(result.try_recv().unwrap(), Ok(Vec::new()));
     assert_ne!(
         manager.grouped_member_of(peer),
