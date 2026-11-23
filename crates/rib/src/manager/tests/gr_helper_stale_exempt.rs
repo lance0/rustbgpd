@@ -192,6 +192,7 @@ fn clean_end_of(manager: &mut RibManager, address: Ipv4Addr, session_id: u64) {
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: vec![FAMILY],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
         llgr_stale_time: 0,

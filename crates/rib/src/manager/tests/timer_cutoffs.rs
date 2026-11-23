@@ -40,6 +40,7 @@ fn graceful_restart(llgr_stale_time: u32) -> RibUpdate {
         restart_time: 2,
         stale_routes_time: 360,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: llgr_stale_time > 0,
         peer_llgr_families: if llgr_stale_time > 0 {
             vec![rustbgpd_wire::LlgrFamily {
@@ -316,6 +317,7 @@ async fn coincident_timers_all_fire_under_sustained_ingress() {
         restart_time: 2,
         stale_routes_time: 360,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
         llgr_stale_time: 0,
@@ -390,6 +392,7 @@ async fn exhausted_timer_fires_before_an_earlier_branch_keeps_draining() {
         restart_time: 11,
         stale_routes_time: 360,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
         llgr_stale_time: 0,
@@ -627,6 +630,7 @@ pub(super) fn restart(
         restart_time,
         stale_routes_time,
         gr_families: ipv4_sendable(),
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: Vec::new(),
         llgr_stale_time: 0,
@@ -991,6 +995,7 @@ fn llgr_end(address: Ipv4Addr) -> RibUpdate {
         restart_time: 0,
         stale_routes_time: 360,
         gr_families: Vec::new(),
+        peer_notification_gr: false,
         peer_llgr_capable: true,
         peer_llgr_families: vec![rustbgpd_wire::LlgrFamily {
             afi: Afi::Ipv4,

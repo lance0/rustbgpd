@@ -38,6 +38,14 @@ fn extend_llgr_affected<K: Eq + Hash>(
     );
 }
 
+/// A peer's configured End-of-RIB wait and the upper bound on routes that
+/// have already survived a reset with the RFC 8538 N bit exchanged.
+#[derive(Default)]
+pub(super) struct GrStaleTimer {
+    pub(super) seconds: u64,
+    inherited_deadline: Option<tokio::time::Instant>,
+}
+
 /// Deadline registry with a cached minimum. The actor loop probes the
 /// nearest GR / LLGR / refresh deadline on every iteration; with the cache
 /// that probe is O(1) while the registry is untouched, and the only full
@@ -286,6 +294,18 @@ impl RibManager {
         out
     }
 
+    pub(super) fn arm_gr_timer(&mut self, peer: PeerId, stale_routes_time: u64, wait: u64) {
+        let timer = self.gr_stale_timers.entry(peer).or_default();
+        timer.seconds = stale_routes_time;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(wait);
+        self.gr_stale_deadlines.insert(
+            peer,
+            timer
+                .inherited_deadline
+                .map_or(deadline, |cap| cap.min(deadline)),
+        );
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "GR peer-up carries negotiated restart and LLGR session state together"
@@ -297,6 +317,7 @@ impl RibManager {
         restart_time: u16,
         stale_routes_time: u64,
         gr_families: Vec<(Afi, Safi)>,
+        peer_notification_gr: bool,
         peer_llgr_capable: bool,
         peer_llgr_families: Vec<rustbgpd_wire::LlgrFamily>,
         llgr_stale_time: u32,
@@ -339,8 +360,7 @@ impl RibManager {
         // the LLGR phase at once instead of being withdrawn.
         // `retained` is deduplicated: marking a family stale twice would
         // treat its routes as left over from a previous restart and delete
-        // them (RFC 4724 §4.1), so a peer that lists a family twice must not
-        // lose it.
+        // them without the N bit (RFC 4724 §4.2).
         let llgr_active = peer_llgr_capable && llgr_stale_time > 0;
         // A family with a zero Long-Lived Stale Time has no LLGR period, and
         // with no GR entry either, nothing retains it (RFC 9494 §4.2).
@@ -361,7 +381,7 @@ impl RibManager {
             .collect();
 
         self.with_selection_readiness(|manager| {
-            manager.mark_gr_retention_with_readiness(peer, &retained);
+            manager.mark_gr_retention_with_readiness(peer, &retained, peer_notification_gr);
         });
         // No RTC membership rebuild here even when routes were deleted:
         // `clear_outbound_peer_state` below drops this peer's
@@ -380,12 +400,9 @@ impl RibManager {
             // no GR timer runs. Drop GR state a previous cycle left behind.
             self.gr_peers.remove(&peer);
             self.gr_stale_deadlines.remove(&peer);
-            self.gr_stale_routes_time.remove(&peer);
+            self.gr_stale_timers.remove(&peer);
         } else {
-            let deadline = tokio::time::Instant::now()
-                + std::time::Duration::from_secs(u64::from(restart_time));
-            self.gr_stale_deadlines.insert(peer, deadline);
-            self.gr_stale_routes_time.insert(peer, stale_routes_time);
+            self.arm_gr_timer(peer, stale_routes_time, u64::from(restart_time));
             self.gr_peers
                 .insert(peer, gr_families.into_iter().collect());
         }
@@ -424,8 +441,23 @@ impl RibManager {
         &mut self,
         peer: PeerId,
         retained: &[(Afi, Safi)],
+        retain_gr_stale: bool,
     ) {
         const EVPN: (Afi, Safi) = (Afi::L2Vpn, Safi::Evpn);
+        // A second reset must not renew the End-of-RIB wait for previously
+        // stale routes (RFC 8538 §§4.1, 9). All GR families use the peer timer.
+        if let Some(timer) = self.gr_stale_timers.get_mut(&peer) {
+            timer.inherited_deadline = if retain_gr_stale
+                && self.ribs.get(&peer).is_some_and(|rib| {
+                    retained
+                        .iter()
+                        .any(|&family| rib.gr_stale_family_len(family) != 0)
+                }) {
+                self.gr_stale_deadlines.get(&peer).copied()
+            } else {
+                None
+            };
+        }
         let readiness = self.replacement_readiness.clone();
         let mut mark = || super::replacement_readiness_checkpoint_at(&readiness, "gr_mark", false);
         let mut inventory =
@@ -471,54 +503,44 @@ impl RibManager {
         ];
 
         if let Some(rib) = self.ribs.get_mut(&peer) {
-            // RFC 4724 helper retention: mark GR-covered families stale.
-            // Every mark helper returns the keys of routes that were
-            // ALREADY GR-stale from a previous restart and were deleted
-            // (RFC 4724 §4.1: no retention across consecutive restarts) —
-            // collect them so the recompute below withdraws them
-            // downstream. LLGR-stale routes are the RFC 9494 exception:
-            // the helpers retain them unchanged across consecutive resets,
-            // bounded by their surviving per-family original-LLST deadline
-            // in `llgr_stale_deadlines`. Each helper is a family-scoped
-            // no-op for non-matching tuples. EVPN has a single family
-            // tuple, so its mark call is hoisted out of the loop and made
-            // once when (L2Vpn, Evpn) is among the GR-preserved families.
+            // Without N, withdraw keys already GR-stale at the preceding
+            // restart (RFC 4724 §4.2). LLGR keeps its own deadline in either case.
             for &family in retained {
                 extend_llgr_affected(
                     &mut affected,
-                    rib.mark_stale_with_checkpoint(family, &mut mark),
+                    rib.mark_stale_with_checkpoint(family, retain_gr_stale, &mut mark),
                     &mut inventory,
                 );
                 extend_llgr_affected(
                     &mut fs_affected,
-                    rib.mark_stale_flowspec_with_checkpoint(family, &mut mark),
+                    rib.mark_stale_flowspec_with_checkpoint(family, retain_gr_stale, &mut mark),
                     &mut inventory,
                 );
                 extend_llgr_affected(
                     &mut vpn_affected,
-                    rib.mark_stale_vpn_with_checkpoint(family, &mut mark),
+                    rib.mark_stale_vpn_with_checkpoint(family, retain_gr_stale, &mut mark),
                     &mut inventory,
                 );
                 extend_llgr_affected(
                     &mut labeled_affected,
-                    rib.mark_stale_labeled_with_checkpoint(family, &mut mark),
+                    rib.mark_stale_labeled_with_checkpoint(family, retain_gr_stale, &mut mark),
                     &mut inventory,
                 );
                 extend_llgr_affected(
                     &mut bgpls_affected,
-                    rib.mark_stale_bgpls_with_checkpoint(family, &mut mark),
+                    rib.mark_stale_bgpls_with_checkpoint(family, retain_gr_stale, &mut mark),
                     &mut inventory,
                 );
                 extend_llgr_affected(
                     &mut rtc_affected,
-                    rib.mark_stale_rtc_with_checkpoint(family, &mut mark),
+                    rib.mark_stale_rtc_with_checkpoint(family, retain_gr_stale, &mut mark),
                     &mut inventory,
                 );
             }
             if retained.contains(&EVPN) {
                 extend_llgr_affected(
                     &mut evpn_affected,
-                    rib.mark_stale_evpn_with_checkpoint(EVPN, &mut mark),
+                    rib.mark_stale_evpn_with_checkpoint(EVPN, retain_gr_stale, &mut mark),
                     &mut inventory,
                 );
             }
@@ -938,7 +960,7 @@ impl RibManager {
             .into_iter()
             .collect();
         self.gr_stale_deadlines.remove(&peer);
-        self.gr_stale_routes_time.remove(&peer);
+        self.gr_stale_timers.remove(&peer);
         let peer_label = Self::owned_label(peer);
         if let Some(peer_label) = &peer_label {
             self.metrics.record_gr_timer_expired(peer_label);

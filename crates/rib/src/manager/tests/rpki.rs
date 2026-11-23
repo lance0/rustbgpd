@@ -1892,6 +1892,7 @@ async fn aspa_revalidation_keeps_each_route_session_context_across_gr_reconnect(
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
         llgr_stale_time: 0,

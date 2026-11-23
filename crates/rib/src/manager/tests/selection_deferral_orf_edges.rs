@@ -124,6 +124,7 @@ fn setup(
             restart_time: 120,
             stale_routes_time: 360,
             gr_families: vec![V4, V6],
+            peer_notification_gr: false,
             peer_llgr_capable: false,
             peer_llgr_families: vec![],
             llgr_stale_time: 0,

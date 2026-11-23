@@ -132,6 +132,7 @@ async fn llgr_add_path_cycle_diagnostic() {
                 restart_time: 1,
                 stale_routes_time: 1,
                 gr_families: vec![family],
+                peer_notification_gr: false,
                 peer_llgr_capable: true,
                 peer_llgr_families: llgr_families.clone(),
                 llgr_stale_time: 3600,

@@ -1038,9 +1038,8 @@ pub struct RibManager {
     gr_peers: HashMap<PeerId, HashSet<(Afi, Safi)>>,
     /// Deadlines for sweeping stale routes per GR peer.
     gr_stale_deadlines: graceful_restart::DeadlineMap<PeerId>,
-    /// Configured stale-routes-time per GR peer (seconds), used to reset
-    /// the timer on `PeerUp` during graceful restart.
-    gr_stale_routes_time: HashMap<PeerId, u64>,
+    /// Configured End-of-RIB wait and any deadline inherited across resets.
+    gr_stale_timers: HashMap<PeerId, graceful_restart::GrStaleTimer>,
     /// Peers currently in LLGR stale phase (RFC 9494), keyed by peer address.
     /// Value is the set of (AFI, SAFI) families in LLGR.
     llgr_peers: HashMap<PeerId, HashSet<(Afi, Safi)>>,
@@ -3313,7 +3312,7 @@ impl RibManager {
             refresh_stale_counts: HashMap::new(),
             gr_peers: HashMap::new(),
             gr_stale_deadlines: graceful_restart::DeadlineMap::default(),
-            gr_stale_routes_time: HashMap::new(),
+            gr_stale_timers: HashMap::new(),
             llgr_peers: HashMap::new(),
             llgr_stale_deadlines: graceful_restart::DeadlineMap::default(),
             llgr_peer_config: HashMap::new(),
@@ -6472,6 +6471,7 @@ impl RibManager {
                 restart_time,
                 stale_routes_time,
                 gr_families,
+                peer_notification_gr,
                 peer_llgr_capable,
                 peer_llgr_families,
                 llgr_stale_time,
@@ -6483,6 +6483,7 @@ impl RibManager {
                     restart_time,
                     stale_routes_time,
                     gr_families,
+                    peer_notification_gr,
                     peer_llgr_capable,
                     peer_llgr_families,
                     llgr_stale_time,

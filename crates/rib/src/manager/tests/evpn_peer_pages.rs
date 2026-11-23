@@ -293,6 +293,7 @@ async fn evpn_pages_invalidate_across_gr_retention_and_eor_sweep() {
         360,
         evpn_sendable(),
         false,
+        false,
         vec![],
         0
     ));
