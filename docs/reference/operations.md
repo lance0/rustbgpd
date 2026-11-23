@@ -2576,13 +2576,16 @@ answers readiness on its ordinary lane using the last complete count.
 Source-peer removal, and an injection lease expiry batch withdrawing the
 expired owners' local routes, use changing-count checkpoints under
 `peer_teardown` and fail closed after the same bound with `RIB peer teardown
-stalled`. Ordinary ingest at this limit reports `RIB ingest stalled` under the
+stalled`. Readiness counts include only completed unicast prefix mutations;
+general queries and primary mutations remain queued until teardown completes.
+Ordinary ingest at this limit reports `RIB ingest stalled` under the
 `actor_loop` seam. Standalone frozen-count work such as route refresh reports
 `RIB work stalled` under `policy_transition_fence`. These metric labels identify
 where a probe was served. The HTTP reason identifies which operation held
 the checkpoint. Nested helpers keep the outer owner's reason and age until
-it finishes. Readiness counts include only completed unicast prefix mutations; general queries and
-primary mutations remain queued until teardown completes. Use the poll-duration histogram to distinguish many
+it finishes. Ingest or teardown work that starts while a policy transition is
+pending counts from the transition's start and reports `RIB export-policy
+transition stalled`. Use the poll-duration histogram to distinguish many
 bounded polls from one long O(table) snapshot or finalization poll; the
 retained terminal duration still describes the previous completed transition
 while one is active.
