@@ -722,6 +722,10 @@ impl RibManager {
             }
         }
 
+        #[cfg(feature = "bench-internals")]
+        if let Some(probe) = &self.departure_probe {
+            probe.selection_finished(true);
+        }
         #[cfg(test)]
         crate::orr::rebuild_growth::record_owned_set(
             "changed_keys_flowspec",

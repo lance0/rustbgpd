@@ -732,6 +732,10 @@ impl RibManager {
         for record in self.live_sessions.get_mut(&peer).into_iter().flatten() {
             record.evpn_end_of_rib = false;
         }
+        #[cfg(feature = "bench-internals")]
+        if let Some(probe) = &self.departure_probe {
+            probe.source_detaching(peer);
+        }
         self.unicast_prefix_peers.retire_peer(peer);
         let Some(rib) = self.ribs.remove(&peer) else {
             return;

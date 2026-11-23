@@ -33,7 +33,12 @@ RETIREMENT_DISPATCH = (
     "mod recovery_retirement;\n",
     '    if mode == "recovery-retirement" {\n        recovery_retirement::main(&args[2..]);\n        return;\n    }\n',
 )
-COMPONENT_DISPATCH = (*SCAN_DISPATCH, *RETIREMENT_DISPATCH)
+# The source-departure cell needs bench-only RIB probes the fixed controls lack.
+DEPARTURE_DISPATCH = (
+    "mod source_departure;\nmod source_departure_receivers;\n",
+    '    if mode == "source-departure" {\n        source_departure::main(&args[2..]);\n        return;\n    }\n',
+)
+COMPONENT_DISPATCH = (*SCAN_DISPATCH, *RETIREMENT_DISPATCH, *DEPARTURE_DISPATCH)
 RETIREMENT_SOURCE = "crates/rib/src/manager/distribution/vpn.rs"
 RETIREMENT_LIMIT = 12 * 1024**3
 RETIREMENT_ORDER = ("old-drop", "candidate", "candidate", "old-drop")
@@ -1248,9 +1253,14 @@ def conclude(root: Path, schema: str, summary, driver_exit: int | None = None) -
 def memory_dispatch_snippets(source: str) -> tuple[str, ...]:
     require(all(source.count(block) == 1 for block in SCAN_DISPATCH),
             "component dispatch anchor drift")
-    retirement = tuple(source.count(block) for block in RETIREMENT_DISPATCH)
-    require(retirement in ((0, 0), (1, 1)), "partial or duplicate retirement dispatch")
-    return COMPONENT_DISPATCH if retirement == (1, 1) else SCAN_DISPATCH
+    blocks = SCAN_DISPATCH
+    for name, optional in (("retirement", RETIREMENT_DISPATCH),
+                           ("source-departure", DEPARTURE_DISPATCH)):
+        counts = tuple(source.count(block) for block in optional)
+        require(counts in ((0, 0), (1, 1)), f"partial or duplicate {name} dispatch")
+        if counts == (1, 1):
+            blocks = (*blocks, *optional)
+    return blocks
 
 
 def normalize_memory_entrypoint(path: Path) -> None:

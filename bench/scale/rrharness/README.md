@@ -7,7 +7,7 @@ harness.
 
 ## What it measures
 
-Drives the real `RibManager` run loop directly (no TCP/transport) on a
+The flood and churn cells drive the real `RibManager` run loop directly on a
 dedicated OS thread named `ribmgr` under a current-thread tokio runtime, with N
 registered route-reflector-client outbound peers whose bounded channels are
 drained by trivial consumer tasks. Route injection is via
@@ -426,3 +426,82 @@ rrharness recovery-memory peer-down 4 smoke-vpn --correctness-only
 rrharness recovery-memory widen 4 smoke-mixed --correctness-only
 rrharness recovery-memory widen 4 smoke-vpn --correctness-only
 ```
+
+## Source departure
+
+One source owns every initial winner. After all receivers have the initial
+table, the driver queues two messages on the primary RIB lane in succession:
+the source's non-GR departure and an unrelated IPv4 UPDATE from a second
+source. The receivers decode the production session encoder's BGP frames
+over TCP loopback. Registration and ingress use RIB session messages directly.
+
+| Shape | Receivers | Sole winners | Modes |
+| --- | ---: | ---: | --- |
+| Smoke | 8 | 1,024 | Grouped unicast, neighbor-set-private unicast, private FlowSpec |
+| Standard | 150 | 37,000 | All three modes |
+| Large | 700 | 400,000 | Neighbor-set-private unicast, subject to memory preflight |
+
+The actor-side observer dates the probe when the Loc-RIB selects it from the
+expected source. Comparing that timestamp with publication of the last
+withdrawal establishes order independently of when the loopback readers run.
+End-to-end convergence uses the receivers' decoded tables. Source detach and
+selection, the longest physical actor poll, the most measured withdrawal rows
+published within one poll, and the fenced scope's memory peak are reported
+separately. The per-poll row count is a lower bound on receiver-keys inspected;
+the inspected-key bar itself belongs to the RIB's work-count tests.
+
+Timing each poll costs two clock reads and an uncontended lock, so it grows with
+the poll count. The paced candidate polls far more often than the parent: the
+cost is negligible at 150 × 37,000 but about 0.1–0.4 s of candidate convergence
+at 700 × 400,000.
+
+Each trial starts with an exact seeded table and no receiver debt. A large
+departure can spend a fast receiver's row credit before the next UPDATE. The
+receipt records any resulting refusals and recovery work, so their cost is
+visible even when the final table is exact.
+
+Build `cargo build --locked --profile scale -p rrharness` on each product
+revision with the same harness and observer changes applied. Run both binaries
+through the same copy of the Python driver, with a fresh output directory
+for each arm:
+
+```sh
+python3 bench/scale/source_departure.py --binary "$parent_binary" \
+  --arm parent --shape smoke --output "$results/parent"
+python3 bench/scale/source_departure.py --binary "$candidate_binary" \
+  --arm candidate --shape smoke --output "$results/candidate"
+```
+
+The smoke runs two repetitions per mode; standard and large default to one,
+and `--repetitions N` sets any shape. The negative control, `--break-witness`,
+changes the prefix the observer watches while sending the original probe. In
+every mode a complete receiver table must still fail the missing Loc-RIB witness
+check. Each such trial is recorded as `CONTROL`, and the run exits 4, distinct
+from a real `FAIL` (1); any other control outcome is `INVALID` (2).
+
+For a large trial, pass `--shape large --reference <standard-receipt.json>`.
+The preflight scales the same binary's highest passing standard private-unicast
+cgroup peak by the receiver-row ratio and adds 25%. It compares that estimate
+with the scope and ancestor limits and host available memory less 4 GiB.
+The default scope limit is 64 GiB and swap is disabled. A missing reference
+or insufficient headroom records a skip before starting the binary. Each
+repetition has its own scope and receipt. The caller controls the host lock,
+trial order and compiler exclusion for a timed campaign.
+
+For a timed campaign, put each driver run under one root as `aa-1`, `aa-2`, ...
+(parent binary in pairs), `abba-1` ... `abba-4n` (parent, candidate,
+candidate, parent) and `confirmation-1` ... `confirmation-2n` (parent,
+candidate). Then grade it:
+
+```sh
+python3 bench/scale/source_departure_summary.py "$results"
+```
+
+Each mode gets PASS, FAIL or INVALID with a one-line reason, and `summary.json`
+keeps the ratios. A cell FAILs when the candidate mean UPDATE-to-Loc-RIB delay
+exceeds half the parent's in ABBA or in confirmation. Convergence and cgroup
+peak FAIL only when ABBA and confirmation both exceed max(1.02, A/A + 0.01).
+Means span every run and repetition in a stage. Any failed trial, swap use, wrong
+application order, inexact inventory or a candidate poll publishing more than
+256 rows is a FAIL. A skipped or invalid trial, a missing mode, a misordered
+schedule or identical arm binaries make the cell or campaign INVALID.

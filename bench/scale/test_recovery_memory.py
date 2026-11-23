@@ -1929,8 +1929,9 @@ class RecoveryScanTests(unittest.TestCase):
     def test_memory_entrypoint_missing_duplicate_or_mutated_anchor_fails_closed(self):
         original = "".join(receipt.COMPONENT_DISPATCH)
         for block in receipt.COMPONENT_DISPATCH:
+            mutated = block.replace("recovery_", "wrong_").replace("source_departure", "wrong")
             for broken in (original.replace(block, ""), original + block,
-                           original.replace(block, block.replace("recovery_", "wrong_"))):
+                           original.replace(block, mutated)):
                 with self.subTest(block=block, broken=broken):
                     path = self.root / "main.rs"
                     path.write_text(broken)
