@@ -487,7 +487,7 @@ export-policy evaluation per overlapped changed prefix.
 ## References
 
 - RFC 7947 §2.3 (path hiding; §2.3.2.1 per-client views as deltas over a
-  global Loc-RIB; §2.3.3 Add-Path send-only) —
+  global Loc-RIB; §2.3.2.2.2 Add-Path send-only) —
   <https://www.rfc-editor.org/rfc/rfc7947>
 - BIRD User's Guide: `secondary` (first filter-accepted route from a
   `sorted` table; `sorted` incompatible with `deterministic med`) —

@@ -762,11 +762,8 @@ pub(in crate::manager) struct GroupRibOut {
     /// Manager-unique revision of the paired EVPN route and received-input table.
     pub(in crate::manager) evpn_table_stamp: u64,
     pub(in crate::manager) llgr: Vec<(Afi, Safi)>,
-    /// ADR-0126 staging mode: `true` stages the first export-permitted
-    /// candidate (winner walk + runner-up lane) instead of
-    /// Loc-RIB-best-or-nothing. Derived from the group key's
-    /// `per_client_best` bit (Decision 1) — group-uniform like every
-    /// other snapshot field here.
+    /// ADR-0126 per-client best. The shared walk stages a winner and a
+    /// distinct-source runner-up that pass policy and OTC for the group's role.
     pub(in crate::manager) per_client_best: bool,
     /// Keys whose staged entry, next-hop override or source-control input
     /// changed since a prestaged clean-transition inventory began walking

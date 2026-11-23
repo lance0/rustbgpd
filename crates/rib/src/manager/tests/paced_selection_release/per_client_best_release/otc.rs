@@ -89,7 +89,7 @@ fn paced_release(family: (Afi, Safi)) {
     );
     lab.send(1, vec![middle]);
     let held = receive(&mut lab);
-    assert!(held.announced.is_empty());
+    assert_eq!(held.announced, []);
     assert_eq!(held.markers, 0);
     lab.end_hold();
     drain_unicast_release(&mut lab.manager);
@@ -141,7 +141,7 @@ fn synchronous_rerank(family: (Afi, Safi)) {
     lab.manager.distribute_changes(&keys, &keys);
     let delta = receive(&mut lab);
     assert_eq!(delta.announced, [identity(&alternate)]);
-    assert!(delta.withdrawn.is_empty());
+    assert_eq!(delta.withdrawn, []);
     assert_eq!(delta.blocked, [(prefix, blocked.peer)]);
     assert_eq!(lab.manager.actual_unicast_advertised_count(client(0)), 1);
 }
@@ -174,7 +174,7 @@ fn steady(family: (Afi, Safi), private: bool) {
         .withdraw(&mut lab.manager, alternate.peer, 1, vec![alternate.prefix]);
     let gone = receive(&mut lab);
     assert_eq!(gone.withdrawn, [(alternate.prefix, 0)]);
-    assert!(gone.announced.is_empty());
+    assert_eq!(gone.announced, []);
     assert!(gone.blocked.is_empty(), "repeated the same rejection");
     assert_eq!(lab.manager.actual_unicast_advertised_count(client(0)), 0);
 }
@@ -254,7 +254,7 @@ fn otc_fallback_member_control_and_split_horizon_select_the_same_wire_and_explai
                 [identity(expected)],
                 "client {n}, private {private}"
             );
-            assert!(delta.withdrawn.is_empty());
+            assert_eq!(delta.withdrawn, []);
             let rejected: Vec<_> = (n < 2)
                 .then_some((blocked.prefix, blocked.peer))
                 .into_iter()

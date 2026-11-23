@@ -460,6 +460,18 @@ pub(in crate::manager) fn sort_evpn_announcements(
 }
 
 impl OutboundCommitBatch {
+    /// Merge private PCB diagnostics with the separately captured pre-commit denials.
+    fn take_otc_diagnostics(
+        &mut self,
+        mut backstop: Vec<crate::route::Route>,
+    ) -> Vec<crate::route::Route> {
+        if backstop.is_empty() {
+            return std::mem::take(&mut self.otc_blocked);
+        }
+        backstop.append(&mut self.otc_blocked);
+        backstop
+    }
+
     fn unicast_withdrawals(&self) -> &[(Prefix, u32)] {
         debug_assert!(self.shared_withdraw.is_none() || self.withdraw.is_empty());
         self.shared_withdraw.as_deref().unwrap_or(&self.withdraw)
@@ -3745,20 +3757,23 @@ impl RibManager {
 
         let local_role = self.peer_local_roles.get(&peer).copied().flatten();
         let has_pcb_otc = !batch.otc_blocked.is_empty();
-        if otc_reconcile_prefixes.is_some() {
-            batch.otc_blocked.extend(
-                batch
-                    .unicast
-                    .announce
-                    .iter()
-                    .inspect(|_| checkpoint())
-                    .filter(|route| {
-                        batch.announce_source_exclusion != Some(route.peer)
-                            && otc_egress_blocked(route, local_role)
-                    })
-                    .cloned(),
-            );
-        }
+        // Capture backstop denials before equality suppression. Ordinary credit
+        // and close admission still see the resulting wire rows and PCB skips.
+        let backstop_otc = if otc_reconcile_prefixes.is_some() {
+            batch
+                .unicast
+                .announce
+                .iter()
+                .inspect(|_| checkpoint())
+                .filter(|route| {
+                    batch.announce_source_exclusion != Some(route.peer)
+                        && otc_egress_blocked(route, local_role)
+                })
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
         // Validate the trust boundary before consuming any durable pending
         // state (OTC diagnostics or the rejected-route overlay). A failed
         // precommit leaves those structures intact for the retry.
@@ -3840,7 +3855,7 @@ impl RibManager {
                             checkpoint();
                             !prefixes.contains(prefix)
                         })
-                    }) && !batch.otc_blocked.iter().any(|route| {
+                    }) && !batch.otc_blocked.iter().chain(&backstop_otc).any(|route| {
                         checkpoint();
                         prefixes.contains(&route.prefix)
                             && (self
@@ -3868,7 +3883,7 @@ impl RibManager {
                 self.reconcile_peer_otc_blocked(
                     peer,
                     prefixes,
-                    std::mem::take(&mut batch.otc_blocked),
+                    batch.take_otc_diagnostics(backstop_otc),
                 );
             }
 
@@ -3931,7 +3946,7 @@ impl RibManager {
                 return self.outbound_commit_failed(peer, failure);
             }
         };
-        let otc_reconcile = std::mem::take(&mut batch.otc_blocked);
+        let otc_reconcile = batch.take_otc_diagnostics(backstop_otc);
         // Partial admission cannot fall back to unknown OLD while selection
         // keeps ordinary rows frozen. Reserve before another family advances
         // its admission; the later reservation only sees a filtered subset.

@@ -1,5 +1,6 @@
 use super::super::conditional_advertisement::ConditionalGate;
 use super::super::helpers::unicast_deferral_exempt;
+use super::super::update_groups::release_fallback::DiagnosticHead;
 use super::super::update_groups::{
     GroupEvalAccumulator, PerClientBestPrefixStage, PolicyLabel, RunnerUp, capture_source_attrs,
     may_suppress,
@@ -4052,7 +4053,6 @@ impl PcbWalk {
             return false;
         }
         modified.path_id = 0;
-        use crate::manager::update_groups::release_fallback::DiagnosticHead;
         let suppressible = may_suppress(candidate.communities(), candidate.large_communities());
         let entry = |route, nh, label| RunnerUp {
             route,

@@ -837,7 +837,7 @@ async fn agrees_with_single_best_when_policy_permits_the_best() {
     handle.await.unwrap();
 }
 
-/// An export denial or a policy-added NO_ADVERTISE wins before the OTC
+/// An export denial or a policy-added `NO_ADVERTISE` wins before the OTC
 /// check. With no export policy the same input has only the OTC exclusion.
 #[tokio::test]
 async fn otc_fallback_preserves_policy_denials_and_no_policy_explain() {
@@ -851,7 +851,7 @@ async fn otc_fallback_preserves_policy_denials_and_no_policy_explain() {
             .unwrap();
         let mut marked = best_route();
         AttrSet::edit(&mut marked.attributes, |attrs| {
-            attrs.push(PathAttribute::OnlyToCustomer(65001))
+            attrs.push(PathAttribute::OnlyToCustomer(65001));
         });
         announce_from(&tx, SOURCE_A, vec![marked]).await;
         let prefix = Prefix::V4(prefix());

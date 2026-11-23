@@ -509,6 +509,15 @@ mod tests {
         }
     }
 
+    fn before_otc_ids(list: &RsFallback, members: [PeerId; 3], context: Control) -> [u32; 3] {
+        members.map(|peer| {
+            list.first_before_otc(peer, Some(context))
+                .unwrap()
+                .route
+                .path_id
+        })
+    }
+
     #[test]
     fn large_fallback_resolves_shared_context_once_and_retires_by_page() {
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 1), 32);
@@ -568,15 +577,7 @@ mod tests {
         let expected = members.map(|peer| resolve(&list, peer).0);
         assert_eq!(expected, [Some(1003), Some(1001), Some(1001)]);
         assert!(resolve(&list, members[1]).1 > FALLBACK_PAGE);
-        let before_otc = |list: &RsFallback| {
-            members.map(|peer| {
-                list.first_before_otc(peer, Some(context))
-                    .unwrap()
-                    .route
-                    .path_id
-            })
-        };
-        assert_eq!(before_otc(&list), [1003, 1000, 1000]);
+        assert_eq!(before_otc_ids(&list, members, context), [1003, 1000, 1000]);
         let mut prep = Preparation::default();
         let mut visits = 0;
         let mut polls = 0;
@@ -599,7 +600,7 @@ mod tests {
             "one walk for three members sharing an ASN pair"
         );
         list.prepared = Some(Arc::new(prep.contexts));
-        assert_eq!(before_otc(&list), [1003, 1000, 1000]);
+        assert_eq!(before_otc_ids(&list, members, context), [1003, 1000, 1000]);
         for (peer, expected) in members.into_iter().zip(expected) {
             let (slot, checks) = resolve(&list, peer);
             assert_eq!(slot, expected);
