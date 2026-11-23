@@ -2650,7 +2650,7 @@ impl RibManager {
             if force && let Some(observer) = &observer {
                 observer("common_capture");
             }
-            super::replacement_readiness_checkpoint(&readiness, force);
+            super::counted_checkpoint(&readiness, "capture_group_admitted", force);
         };
         if let Err(error) = self
             .pending_group_admitted
