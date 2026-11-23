@@ -285,3 +285,70 @@ fn otc_fallback_member_control_and_split_horizon_select_the_same_wire_and_explai
         }
     }
 }
+
+/// The preferred path changes OTC state in place, from the same source and
+/// path ID. The client moves between it and the eligible alternate with one
+/// implicit replace each way, and loses the prefix only when no eligible path
+/// remains.
+fn switch_back(family: (Afi, Safi), private: bool) {
+    let mut lab = Lab::warm(family);
+    join(&mut lab, BgpRole::Peer, private);
+    receive(&mut lab);
+    let alternate = path(family, 1, SOURCE, 100, vec![]);
+    lab.send(1, vec![alternate.clone()]);
+    assert_eq!(receive(&mut lab).announced, [identity(&alternate)]);
+    let clean = path(family, 1, OTHER_SOURCE, 190, vec![]);
+    let blocked = marked(clean.clone(), PathAttribute::OnlyToCustomer(64512));
+    lab.send(1, vec![blocked.clone()]);
+    let delta = receive(&mut lab);
+    assert_eq!(delta.announced, [], "private {private}");
+    assert_eq!(delta.withdrawn, [], "private {private}");
+    assert_eq!(delta.blocked, [(alternate.prefix, blocked.peer)]);
+
+    lab.send(1, vec![clean.clone()]);
+    let delta = receive(&mut lab);
+    assert_eq!(delta.announced, [identity(&clean)], "private {private}");
+    assert_eq!(delta.withdrawn, [], "private {private}");
+    assert_eq!(delta.blocked, [], "private {private}");
+    assert_eq!(lab.manager.actual_unicast_advertised_count(client(0)), 1);
+
+    // The diagnostic edge was cleared, so the next block reports again.
+    lab.send(1, vec![blocked.clone()]);
+    let delta = receive(&mut lab);
+    assert_eq!(delta.announced, [identity(&alternate)], "private {private}");
+    assert_eq!(delta.withdrawn, [], "private {private}");
+    assert_eq!(delta.blocked, [(alternate.prefix, blocked.peer)]);
+
+    lab.sent
+        .withdraw(&mut lab.manager, alternate.peer, 1, vec![alternate.prefix]);
+    let delta = receive(&mut lab);
+    assert_eq!(
+        delta.withdrawn,
+        [(alternate.prefix, 0)],
+        "private {private}"
+    );
+    assert_eq!(delta.announced, [], "private {private}");
+    assert_eq!(lab.manager.actual_unicast_advertised_count(client(0)), 0);
+
+    lab.send(1, vec![clean.clone()]);
+    let delta = receive(&mut lab);
+    assert_eq!(delta.announced, [identity(&clean)], "private {private}");
+    assert_eq!(delta.withdrawn, [], "private {private}");
+}
+
+#[test]
+fn pcb_otc_switch_back_grouped_ipv4() {
+    switch_back(V4, false);
+}
+#[test]
+fn pcb_otc_switch_back_grouped_ipv6() {
+    switch_back(V6, false);
+}
+#[test]
+fn pcb_otc_switch_back_private_ipv4() {
+    switch_back(V4, true);
+}
+#[test]
+fn pcb_otc_switch_back_private_ipv6() {
+    switch_back(V6, true);
+}

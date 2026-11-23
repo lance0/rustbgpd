@@ -4964,3 +4964,109 @@ async fn injected_route_is_rpki_validated_on_insert() {
     drop(tx);
     handle.await.unwrap();
 }
+
+/// Add-Path does not use the per-client-best OTC skip. A higher-ranked
+/// path carrying OTC keeps its rank toward a local Customer and is withheld
+/// at commit, so a lower clean path neither takes its place at cap 1 nor
+/// moves to its key at cap 2. The diagnostic names the withheld rank, never
+/// the path-ID-zero row of the per-client-best arm. Red proof: applying
+/// that arm's OTC skip to every multipath walk sends the clean path at cap
+/// 1 and gives it the first key at cap 2.
+#[test]
+fn add_path_otc_blocked_path_keeps_its_rank() {
+    use rustbgpd_wire::Ipv6Prefix;
+    use std::collections::BTreeSet;
+
+    let v4 = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 170, 0), 24));
+    let v6 = Prefix::V6(Ipv6Prefix::new("2001:db8:170::".parse().unwrap(), 48));
+    let marked_source = Ipv4Addr::new(198, 51, 100, 171);
+    let clean_source = Ipv4Addr::new(198, 51, 100, 172);
+    for send_max in [1, 2] {
+        let (_tx, rx) = mpsc::channel(8);
+        let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+        let target = PeerId::from_addr("192.0.2.170".parse().unwrap());
+        manager.handle_update(RibUpdate::SetPeerExportContext {
+            peer: target,
+            session_id: 0,
+            local_role: Some(rustbgpd_wire::BgpRole::Customer),
+        });
+        let (outbound_tx, mut out_rx) = mpsc::channel(64);
+        let mut registration = dual_stack_add_path_peer_up(target, 0, outbound_tx);
+        if let RibUpdate::PeerUp {
+            add_path_send_max, ..
+        } = &mut registration
+        {
+            *add_path_send_max = send_max;
+        }
+        manager.handle_update(registration);
+        while out_rx.try_recv().is_ok() {}
+
+        for (source, local_pref) in [(marked_source, 200), (clean_source, 100)] {
+            let mut routes = Vec::new();
+            for prefix in [v4, v6] {
+                let mut route = make_route_with_lp(
+                    Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 32),
+                    source,
+                    local_pref,
+                );
+                route.prefix = prefix;
+                if matches!(prefix, Prefix::V6(_)) {
+                    route.next_hop = IpAddr::V6("2001:db8:ffff::1".parse().unwrap());
+                }
+                routes.push(if source == marked_source {
+                    with_otc(route, 64512)
+                } else {
+                    route
+                });
+            }
+            register_test_peer(&mut manager, peer_v4(source), 0);
+            manager.handle_update(RibUpdate::RoutesReceived {
+                session_id: 0,
+                peer: peer_v4(source),
+                announced: routes,
+                withdrawn: vec![],
+                flowspec_announced: vec![],
+                flowspec_withdrawn: vec![],
+                evpn_announced: vec![],
+                evpn_withdrawn: vec![],
+                validated_with: None,
+            });
+            drain_route_chunks(&mut manager);
+        }
+
+        let mut announced = BTreeSet::new();
+        let mut blocked = BTreeSet::new();
+        while let Ok(update) = out_rx.try_recv() {
+            announced.extend(
+                update
+                    .announce
+                    .iter()
+                    .map(|r| (r.prefix, r.peer, r.path_id)),
+            );
+            blocked.extend(
+                update
+                    .otc_blocked
+                    .iter()
+                    .map(|r| (r.prefix, r.peer, r.path_id)),
+            );
+        }
+        let held: BTreeSet<_> = manager.adj_ribs_out[&target]
+            .iter()
+            .map(|r| (r.prefix, r.peer, r.path_id))
+            .collect();
+        let rows = |peer: Ipv4Addr, path_id: u32| -> BTreeSet<_> {
+            [v4, v6]
+                .into_iter()
+                .map(|prefix| (prefix, peer_v4(peer), path_id))
+                .collect()
+        };
+        let expected = if send_max == 1 {
+            BTreeSet::new()
+        } else {
+            rows(clean_source, 2)
+        };
+        assert_eq!(announced, expected, "send_max {send_max}");
+        assert_eq!(held, expected, "send_max {send_max}");
+        assert_eq!(blocked, rows(marked_source, 1), "send_max {send_max}");
+    }
+}
