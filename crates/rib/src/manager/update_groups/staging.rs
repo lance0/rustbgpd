@@ -633,7 +633,13 @@ impl RibManager {
                     if group
                         .table
                         .get(&route.prefix, route.path_id)
-                        .is_some_and(|old| crate::manager::helpers::routes_equal(old, &route))
+                        .is_some_and(|old| {
+                            crate::manager::helpers::routes_equal_for_target(
+                                old,
+                                &route,
+                                group.is_ebgp,
+                            )
+                        })
                     {
                         let action = group.nh_override((route.prefix, route.path_id));
                         if action != nh {

@@ -24,8 +24,8 @@ use tracing::{debug, info, warn};
 use super::eor_hold::EorTrigger;
 use super::helpers::{
     LOCAL_PEER, bgpls_route_family, bgpls_routes_equal, evpn_routes_equal, gauge_val,
-    labeled_route_family, labeled_routes_equal, prefix_family, routes_equal, rtc_routes_equal,
-    should_suppress_ibgp_inner, unicast_deferral_exempt, unicast_route_family,
+    labeled_route_family, labeled_routes_equal, prefix_family, routes_equal_for_target,
+    rtc_routes_equal, should_suppress_ibgp_inner, unicast_deferral_exempt, unicast_route_family,
     unicast_routes_equal, validate_route_aspa, validate_route_rpki, vpn_route_family,
     vpn_routes_equal,
 };
@@ -3548,6 +3548,7 @@ impl RibManager {
             return false;
         }
         let rs_control = self.rs_control_context(peer);
+        let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
         let prior: crate::fast_hash::FastMap<_, _> = clean_stage
             .into_iter()
             .flat_map(|stage| stage.prior_slots(peer, rs_control))
@@ -3606,7 +3607,7 @@ impl RibManager {
                     old.or_else(|| rewritten.as_ref().map(|(route, action)| (route, *action)));
                 !old.is_some_and(|(old, old_action)| {
                     old_action != new_action.as_ref()
-                        && routes_equal(old, route)
+                        && routes_equal_for_target(old, route, target_is_ebgp)
                         && snapshot.unicast_next_hop_actions_equal(
                             route,
                             old_action,

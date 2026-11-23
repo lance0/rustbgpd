@@ -463,6 +463,111 @@ fn mutate_staged(manager: &mut RibManager, staged: [[Prefix; 3]; 2], expected: &
 }
 
 #[tokio::test]
+async fn paced_first_group_replays_latest_reflected_source_router_id() {
+    use super::lifecycle::test_session_routes_received;
+    use crate::route::RouteOrigin;
+
+    let (_primary, input) = mpsc::channel(32);
+    let cluster = Some(Ipv4Addr::new(198, 51, 100, 254));
+    let mut manager = RibManager::new(input, dummy_query_rx(), None, cluster, BgpMetrics::new());
+    manager.first_group_build_min_routes = 1;
+    let source = peer_v4(SOURCE);
+    let source_up = |session, router_id, tx| {
+        let mut up = test_peer_up(source, session, tx);
+        let RibUpdate::PeerUp {
+            peer_router_id,
+            is_ebgp,
+            ..
+        } = &mut up
+        else {
+            unreachable!()
+        };
+        *peer_router_id = router_id;
+        *is_ebgp = false;
+        up
+    };
+    let learned = |prefix, router_id| {
+        let mut r = route(prefix, SOURCE, 100);
+        r.origin_type = RouteOrigin::Ibgp;
+        r.peer_router_id = router_id;
+        r
+    };
+    let (old_tx, _old_rx) = mpsc::channel(32);
+    manager.handle_update(source_up(1, SOURCE, old_tx));
+    let table: Vec<_> = (0..1200).map(|i| prefixes(i)[0]).collect();
+    manager.handle_update(test_session_routes_received(
+        source,
+        1,
+        table
+            .iter()
+            .map(|&prefix| learned(prefix, SOURCE))
+            .collect(),
+    ));
+    drain_route_chunks(&mut manager);
+
+    let founder = receiver(1);
+    let mut replay = join(&mut manager, founder, 1, &DUAL[..1]);
+    manager.advance_pending_initial_registration();
+    let walked = table
+        .into_iter()
+        .find(|&p| manager.first_group_contains(p))
+        .expect("the first private page has an iBGP row to reflect");
+
+    // Down and re-advertisement occur before the next builder turn. The
+    // builder still holds the original row when it repairs the same prefix.
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: source,
+        session_id: 1,
+    });
+    drain_source_departure(&mut manager);
+    assert!(manager.loc_rib.get(&walked).is_none());
+    let current_id = Ipv4Addr::new(203, 0, 113, 91);
+    let (new_tx, _new_rx) = mpsc::channel(32);
+    manager.handle_update(source_up(2, current_id, new_tx));
+    let reannounce = || test_session_routes_received(source, 2, vec![learned(walked, current_id)]);
+    manager.handle_update(reannounce());
+    drain_route_chunks(&mut manager);
+    assert_eq!(
+        manager.loc_rib.get(&walked).unwrap().peer_router_id,
+        current_id
+    );
+    assert!(manager.first_group_contains(walked));
+    assert!(replay.is_empty());
+
+    finish(&mut manager);
+    let update = replay.try_recv().expect("initial reflected route");
+    assert_eq!(update.announce.len(), 1);
+    let row = &update.announce[0];
+    assert_eq!(
+        (row.prefix, row.peer, row.origin_type),
+        (walked, source, RouteOrigin::Ibgp)
+    );
+    assert_eq!(row.originator_id(), None);
+    assert_eq!(
+        row.peer_router_id, current_id,
+        "input for the reflected ORIGINATOR_ID"
+    );
+    assert_eq!(update.end_of_rib, []);
+    let eor = replay.try_recv().expect("initial EoR");
+    assert_eq!(eor.end_of_rib, DUAL[..1]);
+    let gid = manager.grouped_member_of(founder).unwrap();
+    let group = manager.group_ribs.get_mut(&gid).unwrap();
+    let installed = group.table.get(&walked, 0).unwrap();
+    assert_eq!(installed.peer_router_id, current_id);
+
+    // The transition inventory records every group table write.
+    group.inventory_log = Some(crate::fast_hash::ShardedMap::default());
+    manager.handle_update(reannounce());
+    drain_route_chunks(&mut manager);
+    let writes = manager.group_ribs[&gid].inventory_log.as_ref().unwrap();
+    assert!(writes.is_empty(), "unchanged source ID rewrote a group row");
+    assert!(
+        replay.is_empty(),
+        "unchanged source ID must not send another UPDATE"
+    );
+}
+
+#[tokio::test]
 async fn imports_during_unpublished_build_reach_both_joiners_before_eor() {
     let (mut manager, tx, mut expected) = fixture(2048);
     let founder = receiver(1);

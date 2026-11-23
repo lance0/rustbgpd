@@ -120,6 +120,26 @@ pub(super) fn routes_equal(a: &crate::route::Route, b: &crate::route::Route) -> 
         && (Arc::ptr_eq(&a.attributes, &b.attributes) || a.attributes == b.attributes)
 }
 
+/// An admitted iBGP-learned row sent to an iBGP peer is reflected. Transport
+/// adds a cluster and supplies the source BGP Identifier only for a missing
+/// `ORIGINATOR_ID` (RFC 4456 section 8).
+pub(super) fn routes_equal_for_target(
+    old: &crate::route::Route,
+    new: &crate::route::Route,
+    target_is_ebgp: bool,
+) -> bool {
+    use crate::route::RouteOrigin::Ibgp;
+    routes_equal(old, new)
+        && (target_is_ebgp
+            || match (old.origin_type, new.origin_type) {
+                (Ibgp, Ibgp) => {
+                    old.peer_router_id == new.peer_router_id || old.originator_id().is_some()
+                }
+                (Ibgp, _) | (_, Ibgp) => false,
+                _ => true,
+            })
+}
+
 pub(super) fn unicast_routes_equal(
     a: &crate::route::Route,
     old_action: Option<&rustbgpd_policy::NextHopAction>,
@@ -134,9 +154,10 @@ pub(super) fn unicast_routes_equal_for_profile(
     old_action: Option<&rustbgpd_policy::NextHopAction>,
     new: &crate::route::Route,
     new_action: Option<&rustbgpd_policy::NextHopAction>,
+    target_is_ebgp: bool,
     snapshot: Option<&dyn crate::update::ExactExportSnapshot>,
 ) -> bool {
-    routes_equal(old, new)
+    routes_equal_for_target(old, new, target_is_ebgp)
         && (old_action == new_action
             || snapshot.is_some_and(|profile| {
                 profile.unicast_next_hop_actions_equal(new, old_action, new_action)
@@ -457,6 +478,33 @@ impl AspaInvalidHopSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_identifier_only_affects_synthesized_unicast_originators() {
+        use crate::route::RouteOrigin::Ibgp;
+        use rustbgpd_wire::{Ipv4Prefix, PathAttribute};
+
+        let mut old = crate::test_support::make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+            Ipv4Addr::new(192, 0, 2, 1),
+        );
+        let mut new = old.clone();
+        new.peer_router_id = Ipv4Addr::new(192, 0, 2, 2);
+        assert!(routes_equal_for_target(&old, &new, false), "eBGP source");
+        old.origin_type = Ibgp;
+        new.origin_type = Ibgp;
+        assert!(routes_equal_for_target(&old, &new, true), "eBGP target");
+        assert!(!routes_equal_for_target(&old, &new, false), "reflected");
+
+        old.attributes = crate::attr_set::AttrSet::new(vec![PathAttribute::OriginatorId(
+            Ipv4Addr::new(192, 0, 2, 3),
+        )]);
+        new.attributes = Arc::clone(&old.attributes);
+        assert!(
+            routes_equal_for_target(&old, &new, false),
+            "already carries ORIGINATOR_ID"
+        );
+    }
 
     #[test]
     fn afi_safi_label_marks_impossible_pairs_as_unsupported() {
