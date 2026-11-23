@@ -38,10 +38,11 @@ fn owe_withdrawal(
     );
 }
 
+/// Withdrawn keys, and announced prefixes with their communities.
+type Wire = (Vec<(Prefix, u32)>, Vec<(Prefix, Vec<u32>)>);
+
 /// The withdrawals and announcements (with communities) a receiver holds now.
-fn drain_wire(
-    receiver: &mut mpsc::Receiver<OutboundRouteUpdate>,
-) -> (Vec<(Prefix, u32)>, Vec<(Prefix, Vec<u32>)>) {
+fn drain_wire(receiver: &mut mpsc::Receiver<OutboundRouteUpdate>) -> Wire {
     let (mut withdrawn, mut announced) = (Vec::new(), Vec::new());
     while let Ok(update) = receiver.try_recv().map(delivered) {
         withdrawn.extend(update.unicast_withdrawals().copied());
