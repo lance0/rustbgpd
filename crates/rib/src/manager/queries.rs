@@ -3055,12 +3055,14 @@ impl RibManager {
 
     /// Whether `peer` is a grouped member whose admitted unicast state is
     /// unknown: it missed delivery or its channel closed, and it retains no
-    /// regroup baseline. Closed channels lose retry flags before `PeerDown`.
+    /// regroup baseline, or its initial replay holds changes its writer has
+    /// not accepted. Closed channels lose retry flags before `PeerDown`.
     /// Its group view is then desired state, and no per-key record says
     /// which entries changed after the missed send, so unicast export explain
     /// and the advertised listing both refuse until the resync completes.
     fn grouped_unicast_admission_unknown(&self, peer: PeerId) -> bool {
         self.private_unicast_admission_incomplete(peer)
+            || self.initial_member_replay_changes_pending(peer)
             || (self.grouped_member_of(peer).is_some()
                 && (self.dirty_peers.contains(&peer)
                     || self.outbound_channel_gone(peer)

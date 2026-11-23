@@ -54,6 +54,16 @@ impl RibManager {
         self.initial_member_replays.members.contains_key(&peer)
     }
 
+    /// A queued change is already in the group table but not yet accepted by
+    /// the member's writer, so its admission proof no longer describes the
+    /// advertised attributes of that key.
+    pub(super) fn initial_member_replay_changes_pending(&self, peer: PeerId) -> bool {
+        self.initial_member_replays
+            .members
+            .get(&peer)
+            .is_some_and(|replay| replay.changes.has_pending())
+    }
+
     pub(super) fn start_initial_member_replay(&mut self, peer: PeerId) -> bool {
         let Some(gid) = self.grouped_member_of(peer) else {
             return false;

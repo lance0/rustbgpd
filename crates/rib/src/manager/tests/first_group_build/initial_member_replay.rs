@@ -472,3 +472,105 @@ async fn dual_stack_member_replays_both_families_before_either_marker() {
     assert!(!manager.dirty_peers.contains(&peer));
     assert!(rx.is_empty());
 }
+
+// While a page's latch is held, changes to admitted keys are already in the
+// group table but wait in the member's ordered queue. The admission proof
+// still names both keys, so the advertised listing and export explain must
+// refuse rather than show the unsent replacement or drop the withdrawn row.
+#[tokio::test(start_paused = true)]
+async fn queued_changes_to_admitted_keys_hide_the_group_view_until_sent() {
+    use crate::update::{ExplainAdvertisedRouteError, RoutePageError, RouteQueryScope};
+
+    fn listing(manager: &mut RibManager, peer: PeerId) -> Result<Vec<Route>, RoutePageError> {
+        let (reply, mut response) = oneshot::channel();
+        let scope = RouteQueryScope::Advertised { peer };
+        manager.handle_query_routes_page_versioned(scope, None, None, None, 10_000, reply);
+        response.try_recv().unwrap().map(|page| page.routes)
+    }
+    fn explain(
+        manager: &mut RibManager,
+        peer: PeerId,
+        prefix: Prefix,
+    ) -> Result<crate::update::ExplainAdvertisedRoute, ExplainAdvertisedRouteError> {
+        let (reply, mut response) = oneshot::channel();
+        manager.handle_update(RibUpdate::ExplainAdvertisedRoute {
+            peer,
+            prefix,
+            rd: None,
+            labeled: false,
+            source: None,
+            reply,
+        });
+        response.try_recv().unwrap()
+    }
+
+    let (mut manager, _tx, _) = replay_fixture();
+    let peer = receiver(1);
+    let mut rx = member(&mut manager, peer, 1, false, false);
+    let first = first_page(&mut manager, &mut rx);
+    let (replaced, withdrawn) = (first.announce[0].prefix, first.announce[1].prefix);
+    let sent = listing(&mut manager, peer).expect("clean partial replay lists its pages");
+    assert!(sent.iter().any(|row| row.prefix == withdrawn));
+    assert!(
+        sent.iter()
+            .any(|row| row.prefix == replaced && row.peer == peer_v4(SOURCE))
+    );
+
+    manager.handle_update(test_routes_received(
+        peer_v4(OTHER),
+        vec![route(replaced, OTHER, 200)],
+    ));
+    drain_route_chunks(&mut manager);
+    let mut remove = test_routes_received(peer_v4(SOURCE), Vec::new());
+    let RibUpdate::RoutesReceived { withdrawn: w, .. } = &mut remove else {
+        unreachable!()
+    };
+    w.push((withdrawn, 0));
+    manager.handle_update(remove);
+    drain_route_chunks(&mut manager);
+    assert!(manager.is_initial_member_replay(peer));
+    assert!(manager.initial_member_replay_changes_pending(peer));
+    assert!(rx.try_recv().is_err(), "the held writer accepted nothing");
+
+    match listing(&mut manager, peer) {
+        Err(RoutePageError::ResyncInProgress) => {}
+        Ok(rows) => panic!(
+            "listing read the unsent group view: replaced row source {:?}, withdrawn row listed {}",
+            rows.iter()
+                .find(|row| row.prefix == replaced)
+                .map(|row| row.peer),
+            rows.iter().any(|row| row.prefix == withdrawn),
+        ),
+        Err(error) => panic!("unexpected listing error {error:?}"),
+    }
+    for prefix in [replaced, withdrawn] {
+        assert!(
+            matches!(
+                explain(&mut manager, peer, prefix),
+                Err(ExplainAdvertisedRouteError::FailedPrecondition(_))
+            ),
+            "explain of {prefix} read the unsent group view"
+        );
+    }
+
+    // Once the writer accepts both changes, the group view is admitted again.
+    drop(first);
+    for _ in 0..16 {
+        if !manager.initial_member_replay_changes_pending(peer) {
+            break;
+        }
+        manager.wake_initial_member_replay();
+        manager.advance_pending_initial_registration();
+        while rx.try_recv().is_ok() {}
+    }
+    assert!(!manager.initial_member_replay_changes_pending(peer));
+    let current = listing(&mut manager, peer).expect("sent changes are listed");
+    assert!(current.iter().all(|row| row.prefix != withdrawn));
+    assert!(
+        current
+            .iter()
+            .any(|row| row.prefix == replaced && row.peer == peer_v4(OTHER))
+    );
+    let explained = explain(&mut manager, peer, replaced).expect("explain resumes");
+    assert_eq!(explained.route_peer, Some(peer_v4(OTHER)));
+}
