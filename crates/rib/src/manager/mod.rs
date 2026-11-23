@@ -357,6 +357,9 @@ struct AdjRibOutCommitStats {
     /// Rows those captures projected, a cohort's shared walks counted once.
     #[cfg(test)]
     group_capture_projections: usize,
+    /// Control members a cohort capture checked at control-tagged rows.
+    #[cfg(test)]
+    group_capture_target_checks: usize,
     /// EVPN passes that logged their keys for the cursors.
     #[cfg(test)]
     owed_evpn_logs: usize,

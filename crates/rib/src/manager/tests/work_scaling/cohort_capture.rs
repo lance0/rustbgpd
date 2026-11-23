@@ -494,3 +494,215 @@ fn a_later_cohort_captures_its_own_table_version() {
     fleet.heal();
     fleet.assert_exact(no_suppression);
 }
+
+/// An announce-to-none row (`0:RS`) with a target override
+/// toward member 2 (`RS:asn(2)`) names every control member in the group's
+/// index, but only the others are suppressed. Member 2 must keep the row in
+/// its cohort proof.
+#[test]
+fn announce_to_none_override_keeps_the_overridden_member() {
+    let mut fleet = fleet(SMALL, true, None);
+    for receiver in &mut fleet.receivers {
+        receiver.read();
+    }
+    let IpAddr::V4(next_hop) = external().addr() else {
+        unreachable!("test peers are IPv4")
+    };
+    let none = Prefix::V4(prefix(3, 0));
+    let mut route = make_route(prefix(3, 0), next_hop);
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.push(PathAttribute::Communities(vec![
+            RS_AS,
+            (RS_AS << 16) | asn(2),
+        ]));
+    });
+    fleet
+        .manager
+        .handle_update(test_routes_received(external(), vec![route]));
+    drain_route_chunks(&mut fleet.manager);
+    fleet.heal();
+    assert!(fleet.receivers[2].admitted.contains_key(&none));
+    assert!(!fleet.receivers[3].admitted.contains_key(&none));
+    for index in 0..SMALL {
+        fleet.fill(index);
+    }
+    let rows = fleet.rows();
+    let projections = fleet.projections();
+    fleet.announce(external(), 0, 9, 1);
+    let writers = fleet.writers.clone();
+    fleet.assert_all_missed_with_proof(&writers);
+    assert_eq!(fleet.projections() - projections, 2 * rows);
+    let proof = fleet
+        .manager
+        .pending_group_admitted
+        .get(&writers[2])
+        .unwrap();
+    assert!(proof.contains(&ExactExportKey::Unicast(none, 0)));
+    fleet.heal();
+    fleet.assert_exact(|index| match index {
+        1 => vec![tagged(), none],
+        2 => Vec::new(),
+        _ => vec![none],
+    });
+}
+
+/// Members with an outbound prefix limit below their
+/// visible rows admit only part of the table, so each takes its own capture.
+#[test]
+fn prefix_limited_members_take_their_own_capture() {
+    use super::super::outbound_prefix_limits::{apply, limit_config, prepare};
+    let mut fleet = fleet(SMALL, false, None);
+    for receiver in &mut fleet.receivers {
+        receiver.read();
+    }
+    let neighbors: Vec<_> = fleet
+        .writers
+        .iter()
+        .map(|&peer| (peer, Some(79_u32), None))
+        .collect();
+    prepare(&mut fleet.manager, 1, limit_config(&neighbors, &[])).expect("preflight passes");
+    apply(&mut fleet.manager, 1, true).expect("activation passes");
+    drain_route_chunks(&mut fleet.manager);
+    fleet.heal();
+    // Every member is at its limit; these rows stage but no member admits them.
+    fleet.announce(external(), 0, 4, 5);
+    fleet.heal();
+    for peer in &fleet.writers {
+        assert!(fleet.manager.outbound_prefix_limits.contains_key(peer));
+        assert!(
+            fleet.manager.grouped_member_of(*peer).is_some(),
+            "{peer} grouped"
+        );
+    }
+    for index in 0..SMALL {
+        fleet.fill(index);
+    }
+    let rows = fleet.rows();
+    let projections = fleet.projections();
+    // The trigger row is beyond every member's limit, so the members may
+    // stay clean; each capture is still sealed (and, if a cohort served it,
+    // checked by the oracle) before staging.
+    fleet.announce(external(), 0, 9, 1);
+    assert_eq!(
+        fleet.projections() - projections,
+        2 * SMALL * rows,
+        "every limited member captures alone"
+    );
+    fleet.heal();
+    for (index, receiver) in fleet.receivers.iter().enumerate() {
+        assert_eq!(receiver.admitted.len(), 79, "member {index} at its limit");
+        assert!(receiver.unknown_withdrawals.is_empty(), "member {index}");
+    }
+}
+
+/// Rows tagged `0:asn(1)` name one control member each, so the cohort checks
+/// that member alone at each of them: target checks are flat in the number
+/// of control members, not one per member per tagged row.
+#[test]
+fn sparsely_targeted_rows_check_only_their_named_member() {
+    const TAGGED: usize = 16;
+    let mut checks = Vec::new();
+    for k in [SMALL, LARGE] {
+        let mut fleet = fleet(k, true, None);
+        for receiver in &mut fleet.receivers {
+            receiver.read();
+        }
+        let IpAddr::V4(next_hop) = external().addr() else {
+            unreachable!("test peers are IPv4")
+        };
+        let hidden: Vec<Prefix> = std::iter::once(tagged())
+            .chain((0..TAGGED).map(|index| Prefix::V4(prefix(5, index))))
+            .collect();
+        let routes = (0..TAGGED)
+            .map(|index| {
+                let mut route = make_route(prefix(5, index), next_hop);
+                AttrSet::edit(&mut route.attributes, |attrs| {
+                    attrs.push(PathAttribute::Communities(vec![asn(1)]));
+                });
+                route
+            })
+            .collect();
+        fleet
+            .manager
+            .handle_update(test_routes_received(external(), routes));
+        drain_route_chunks(&mut fleet.manager);
+        fleet.heal();
+        for index in 0..k {
+            fleet.fill(index);
+        }
+        let before = fleet
+            .manager
+            .adj_rib_out_commit_stats
+            .group_capture_target_checks;
+        let rows = fleet.rows();
+        let projections = fleet.projections();
+        fleet.announce(external(), 0, 9, 1);
+        let writers = fleet.writers.clone();
+        fleet.assert_all_missed_with_proof(&writers);
+        assert_eq!(fleet.projections() - projections, 2 * rows, "k={k}");
+        checks.push(
+            fleet
+                .manager
+                .adj_rib_out_commit_stats
+                .group_capture_target_checks
+                - before,
+        );
+        fleet.heal();
+        fleet.assert_exact(|index| {
+            if index == 1 {
+                hidden.clone()
+            } else {
+                Vec::new()
+            }
+        });
+    }
+    // Two walks of TAGGED + 1 rows, each naming member 1 only.
+    assert_eq!(checks, [2 * (TAGGED + 1); 2], "target checks at k = 8, 32");
+}
+
+/// The large announce-to-none form (`RS:0:0`) names every control member
+/// through the index's all-members flag: every proof drops the row.
+#[test]
+fn large_announce_to_none_drops_the_row_for_every_member() {
+    let mut fleet = fleet(SMALL, true, None);
+    for receiver in &mut fleet.receivers {
+        receiver.read();
+    }
+    let IpAddr::V4(next_hop) = external().addr() else {
+        unreachable!("test peers are IPv4")
+    };
+    let none = Prefix::V4(prefix(6, 0));
+    let mut route = make_route(prefix(6, 0), next_hop);
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.push(PathAttribute::LargeCommunities(vec![
+            rustbgpd_wire::LargeCommunity {
+                global_admin: RS_AS,
+                local_data1: 0,
+                local_data2: 0,
+            },
+        ]));
+    });
+    fleet
+        .manager
+        .handle_update(test_routes_received(external(), vec![route]));
+    drain_route_chunks(&mut fleet.manager);
+    fleet.heal();
+    for index in 0..SMALL {
+        fleet.fill(index);
+    }
+    fleet.announce(external(), 0, 9, 1);
+    let writers = fleet.writers.clone();
+    fleet.assert_all_missed_with_proof(&writers);
+    for peer in &writers {
+        let proof = fleet.manager.pending_group_admitted.get(peer).unwrap();
+        assert!(!proof.contains(&ExactExportKey::Unicast(none, 0)), "{peer}");
+    }
+    fleet.heal();
+    fleet.assert_exact(|index| {
+        if index == 1 {
+            vec![tagged(), none]
+        } else {
+            vec![none]
+        }
+    });
+}

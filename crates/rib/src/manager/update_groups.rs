@@ -2640,12 +2640,16 @@ impl RibManager {
     ) -> Vec<PeerId> {
         let mut captured = Vec::new();
         let mut cohorts: Vec<(usize, Vec<PeerId>)> = Vec::new();
+        let mut cohort_of: HashMap<usize, usize> = HashMap::new();
         for &peer in peers {
             match self.shared_capture_group(peer) {
-                Some(gid) => match cohorts.iter_mut().find(|(group, _)| *group == gid) {
-                    Some((_, members)) => members.push(peer),
-                    None => cohorts.push((gid, vec![peer])),
-                },
+                Some(gid) => {
+                    let cohort = *cohort_of.entry(gid).or_insert_with(|| {
+                        cohorts.push((gid, Vec::new()));
+                        cohorts.len() - 1
+                    });
+                    cohorts[cohort].1.push(peer);
+                }
                 None => {
                     if self.capture_group_admitted_keys(peer) {
                         captured.push(peer);
@@ -2764,9 +2768,20 @@ impl RibManager {
                 Some((member, peer, rs))
             })
             .collect();
+        // Control members by each ASN a target can name them by
+        // (`RsTargets::names`): their own and the route server's.
+        let mut named: HashMap<u32, Vec<usize>> = HashMap::new();
+        for (position, &(_, _, (rs_asn, member_asn))) in controlled.iter().enumerate() {
+            named.entry(member_asn).or_default().push(position);
+            if rs_asn != member_asn {
+                named.entry(rs_asn).or_default().push(position);
+            }
+        }
         let local_role = group.local_role;
         #[cfg(test)]
         let projections = std::cell::Cell::new(0_usize);
+        #[cfg(test)]
+        let target_checks = std::cell::Cell::new(0_usize);
         let projected: &GroupRibOut = group;
         // A member that is not the row's source keeps the staged route at its
         // own key, unless RFC 7947 control suppresses it toward that member:
@@ -2788,9 +2803,22 @@ impl RibManager {
             let Some(targets) = projected.rs_tagged.get(&key) else {
                 return;
             };
-            for &(member, peer, rs) in &controlled {
+            // Visit only the members the row's targets name, each once.
+            let mut candidates = smallvec::SmallVec::<[usize; 8]>::new();
+            if targets.all {
+                candidates.extend(0..controlled.len());
+            } else {
+                for asn in &targets.asns {
+                    candidates.extend(named.get(asn).into_iter().flatten().copied());
+                }
+                candidates.sort_unstable();
+                candidates.dedup();
+            }
+            for position in candidates {
+                #[cfg(test)]
+                target_checks.set(target_checks.get() + 1);
+                let (member, peer, rs) = controlled[position];
                 if peer != staged.peer
-                    && targets.names(rs)
                     && projected
                         .adv_entry_post_backstop_for(peer, &key.0, key.1, Some(rs))
                         .is_none()
@@ -2809,11 +2837,9 @@ impl RibManager {
                 exclude,
                 &mut checkpoint,
             );
-        if let Some(handle) = capture.handle {
-            group.recovery_snapshot = Some(handle);
-        }
         #[cfg(test)]
         {
+            self.adj_rib_out_commit_stats.group_capture_target_checks += target_checks.get();
             self.adj_rib_out_commit_stats.group_capture_projections += projections.get();
             self.adj_rib_out_commit_stats.group_table_captures += capture.shared.len();
         }
@@ -2846,6 +2872,13 @@ impl RibManager {
                 );
             }
             captured.push(peer);
+        }
+        // Like a member's own capture, publish the pool hint once a proof
+        // on it is sealed.
+        if !captured.is_empty()
+            && let Some(group) = self.group_ribs.get_mut(&gid)
+        {
+            group.recovery_snapshot = capture.handle;
         }
         self.refresh_group_recovery_gauges();
         for peer in capture.individual {
