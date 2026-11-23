@@ -3723,11 +3723,21 @@ a route for the prefix.
 | `outbound_prefix_limit` | Withheld | The peer's outbound prefix limit is reached. |
 | `exact_export_rejected:<reason>` | Withheld | The session's encoder refuses the route's exact wire form, for example `exact_export_rejected:missing_ipv6_next_hop`. A bare `exact_export_rejected` means a fresh probe no longer reproduces the refusal. |
 | `export_rule` | Withheld | Another export gate stops the route, such as split horizon, `NO_ADVERTISE`, LLGR, an ORF filter, OTC or conditional advertisement. |
-| `selection_deferred` | Pending | Graceful Restart selection deferral holds injected unicast other than local `/32`, `/128` or BLACKHOLE `65535:666` routes. A row already admitted before the hold, unchanged since, reports `COMMITTED`. |
+| `selection_deferred` | Pending | Graceful Restart selection deferral holds injected unicast other than local `/32`, `/128` or BLACKHOLE `65535:666` routes. An exact match to the peer's retained admitted row reports `COMMITTED`. |
 | `outbound_resync` | Pending | Outbound delivery to the peer is resynchronizing. |
 | `orf_pending` | Pending | The peer negotiated ORF and has not sent its first ROUTE-REFRESH. |
 | `not_yet_committed` | Pending | The route is staged but the Adj-RIB-Out does not hold it yet. |
 | `not_established` | Not established | The peer has no Established session. |
+
+During a hold, an ordinary local route can remain in a grouped single-best or
+per-client-best peer's Adj-RIB-Out after the group table removes it.
+Read-back and `ExplainAdvertisedRoute` use that peer's retained export, including
+its source and next-hop action. A changed export stays pending. The RIB retains
+up to 4,096 grouped member rows and 4 MiB of charged row data per held unicast
+address family. When a hold starts, the RIB inspects at most 4,096 local prefixes
+per newly held unicast family across all members, including unsuccessful lookups.
+If it lacks the admitted row, the disposition stays pending and explain can report
+that the advertised state is resynchronizing.
 
 New reason codes may be added. `explain_code` gives the stop code of the
 [export explain](#explain-one-advertised-route-decision) ladder behind a

@@ -1938,6 +1938,7 @@ impl RibManager {
         reason = "outbound teardown keeps per-registration cleanup and detached table retirement in their existing ownership order"
     )]
     pub(super) fn clear_outbound_peer_state(&mut self, peer: PeerId) {
+        self.forget_peer_frozen_group_locals(peer);
         // A superseded handle's outbound series under the shared label are
         // its successor's: Adj-RIB-Out sizes, prefix capacity, update group
         // and refresh state are left as the successor last published them.
@@ -2946,6 +2947,7 @@ impl RibManager {
             // Actor IDs can be reused on reconnect. Retire the predecessor's
             // charged owner while its channel/session maps still identify it.
             self.retire_evpn_recovery(peer);
+            self.forget_peer_frozen_group_locals(peer);
         }
         self.initialize_outbound_registration_gauges(peer);
         self.outbound_peers.insert(peer, outbound_tx);

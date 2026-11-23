@@ -5783,6 +5783,21 @@ impl RibManager {
                 self.adj_rib_out_commit_stats.local_source_withdraw_visits +=
                     local_source_withdraw_visits;
             }
+            if unicast_changed && self.has_frozen_group_locals(peer) {
+                let withdrawals = withdraw
+                    .iter()
+                    .map(|&(prefix, path_id)| (path_id == 0).then_some(prefix));
+                let announcements = announce.iter().map(|route| {
+                    (route.path_id == 0 && announce_source_exclusion != Some(route.peer))
+                        .then_some(route.prefix)
+                });
+                for prefix in withdrawals.chain(announcements) {
+                    self.replacement_checkpoint(false);
+                    if prefix.is_some_and(|prefix| self.forget_frozen_group_local(peer, &prefix)) {
+                        break;
+                    }
+                }
+            }
             if !queued_exempt_withdrawals.is_empty() {
                 self.record_hold_exempt_withdrawn(
                     super::HoldWithdrawOwner::Peer(peer),
