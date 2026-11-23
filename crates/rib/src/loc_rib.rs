@@ -404,7 +404,8 @@ impl LocRib {
             // Changes to just-serviced keys rejoin behind older outstanding repairs.
             for key in scan.repairs.drain(..count) {
                 #[cfg(test)]
-                REGISTRATION_VISITS.update(|(buckets, repairs)| (buckets, repairs + 1));
+                REGISTRATION_VISITS
+                    .with(|visits| visits.update(|(buckets, repairs)| (buckets, repairs + 1)));
                 scan.queued.remove(&key);
                 page.keys.push(key);
             }
@@ -420,7 +421,8 @@ impl LocRib {
             let count = (end - scan.bucket).min(REGISTRATION_PAGE_SIZE - page.bucket_visits);
             for index in scan.bucket..scan.bucket + count {
                 #[cfg(test)]
-                REGISTRATION_VISITS.update(|(buckets, repairs)| (buckets + 1, repairs));
+                REGISTRATION_VISITS
+                    .with(|visits| visits.update(|(buckets, repairs)| (buckets + 1, repairs)));
                 if let Some((key, _)) = shard.get_bucket(index)
                     && (scan.displaced.is_none() || !scan.queued.contains(key))
                 {
