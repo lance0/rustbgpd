@@ -314,6 +314,15 @@ fn register_growth_peer(
 }
 
 #[test]
+fn registration_of_rr_non_client_uses_the_authoritative_group_build() {
+    let mut manager = staging_manager();
+    manager.cluster_id = Some(Ipv4Addr::LOCALHOST);
+    manager.first_group_build_min_routes = 0;
+    let _receiver = register_growth_peer(&mut manager, MEMBER, 1);
+    assert!(manager.grouped_member_of(MEMBER).is_some());
+}
+
+#[test]
 fn registration_with_local_role_uses_the_authoritative_group_build() {
     let mut manager = staging_manager();
     manager.first_group_build_min_routes = 0;
@@ -7072,7 +7081,7 @@ fn snapshot_empty_admission_falls_back_to_flat(attach_empty: bool) {
         .chain(std::iter::once(
             Key::try_from(&ExactExportKey::Vpn(vpn_route(1, OTHER1).key())).unwrap(),
         ));
-    manager.prepare_empty_group_recovery_admission(MEMBER, initial.clone());
+    manager.prepare_empty_group_recovery_admission(MEMBER, initial.clone().map(Some));
     assert!(manager.group_ribs[&GID].recovery_snapshot.is_some());
     manager
         .pending_group_admitted
@@ -7090,7 +7099,7 @@ fn snapshot_empty_admission_falls_back_to_flat(attach_empty: bool) {
             .chain(std::iter::once(
                 Key::try_from(&ExactExportKey::Vpn(vpn_route(1, OTHER1).key())).unwrap(),
             ));
-        manager.prepare_empty_group_recovery_admission(OTHER2, old);
+        manager.prepare_empty_group_recovery_admission(OTHER2, old.map(Some));
         // A previously rejected envelope can leave reserved sparse capacity
         // on a still-empty proof; none of these candidates proves admission.
         manager

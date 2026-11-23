@@ -14359,6 +14359,105 @@ async fn evpn_refused_arc_retirement(
 }
 
 #[test]
+fn detached_admission_ledger_preserves_live_unrelated_initial_proof() {
+    use crate::update::RibSummaryQuery;
+
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.flush_poll_budget = Duration::ZERO;
+    let [mover, retained, closing] = [1, 2, 3].map(|n| peer_v4(Ipv4Addr::new(192, 0, 2, n)));
+    let _mover_rx =
+        register_direct_peer_with_policy(&mut manager, mover, Some(peer_context_chain()));
+    let _retained_rx = register_direct_peer(&mut manager, retained);
+    let closing_rx = register_direct_peer(&mut manager, closing);
+    manager.peer_export_encoders.insert(
+        mover,
+        super::exportability::MockExactExportEncoder::accepting(1),
+    );
+    assert!(manager.grouped_member_of(mover).is_none());
+    assert!(manager.grouped_member_of(retained).is_some());
+    assert!(manager.grouped_member_of(closing).is_some());
+    let sessions = manager.live_sessions.get_mut(&retained).unwrap();
+    sessions.last_mut().unwrap().selection_initial_pending = true;
+    assert!(manager.retain_initial_group_admitted(retained));
+    let without_proof = manager.neighbor_rib_snapshot(retained);
+    assert!(without_proof.outbound_resync.advertised_count_pending);
+    manager
+        .pending_group_admitted
+        .insert_empty(retained)
+        .unwrap();
+    manager.pending_group_admitted.insert_empty(mover).unwrap();
+    let expected = manager.neighbor_rib_snapshot(retained);
+    assert!(!expected.outbound_resync.advertised_count_pending);
+    let before_close = manager.neighbor_rib_snapshot(closing);
+    assert!(!before_close.outbound_resync.advertised_count_pending);
+
+    let (tx, rx) = mpsc::channel(1);
+    manager.summary_rx = Some(rx);
+    let (reply, response) = oneshot::channel::<crate::NeighborRibSnapshotResponse>();
+    let response = Mutex::new(response);
+    let injected = Mutex::new(Some((closing_rx, reply)));
+    let visits = Arc::new(AtomicUsize::new(0));
+    let reserved = Arc::new(AtomicUsize::new(0));
+    manager.replacement_readiness_test_hook = Some(Arc::new({
+        let visits = Arc::clone(&visits);
+        let reserved = Arc::clone(&reserved);
+        move |stage| match stage {
+            "summary_proof_record" => {
+                visits.fetch_add(1, Ordering::Relaxed);
+            }
+            "reserved_admission_proof" => {
+                let before = reserved.fetch_add(1, Ordering::Relaxed);
+                if let Some((receiver, reply)) = injected.lock().unwrap().take() {
+                    drop(receiver);
+                    tx.try_send(RibSummaryQuery::NeighborRibSnapshots {
+                        peers: vec![retained, closing],
+                        comparison: None,
+                        include_retained: false,
+                        reply,
+                    })
+                    .unwrap();
+                } else if before == 1 {
+                    let rows = response
+                        .lock()
+                        .unwrap()
+                        .try_recv()
+                        .expect("served inside the reserved-ledger cut")
+                        .snapshots;
+                    assert_eq!(rows[0], expected);
+                    assert!(rows[1].outbound_resync.advertised_count_pending);
+                }
+            }
+            _ => {}
+        }
+    }));
+    manager.with_scoped_replacement_summary_reads(
+        "apply",
+        crate::manager::replacement_summaries::ReplacementSummaryScope {
+            peers: HashSet::from([mover]),
+            ..Default::default()
+        },
+        |manager| {
+            let route = make_route(
+                Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 9), 32),
+                Ipv4Addr::new(198, 51, 100, 7),
+            );
+            let batch =
+                OutboundCommitBatch::with_unicast(Arc::new(vec![route]), Arc::new(vec![None]));
+            manager
+                .try_send_and_commit_outbound_update(mover, batch)
+                .unwrap();
+            assert!(reserved.load(Ordering::Relaxed) >= 2);
+        },
+    );
+    assert_eq!(
+        visits.load(Ordering::Relaxed),
+        2,
+        "reserve and commit share one proof membership snapshot"
+    );
+}
+
+#[test]
 fn batch_retirement_preserves_another_route_vector_owner() {
     let UnicastCleanupFixture {
         mut manager,

@@ -267,11 +267,7 @@ impl RibManager {
         let mut keys = Vec::with_capacity(new.table.len());
         self.replacement_checkpoint(true);
         for route in new.table.iter() {
-            crate::manager::replacement_readiness_checkpoint_at(
-                &self.replacement_readiness,
-                "shared_inventory",
-                false,
-            );
+            self.replacement_checkpoint_at("shared_inventory", false);
             keys.push((route.prefix, route.path_id));
         }
         self.replacement_checkpoint(true);
@@ -319,11 +315,7 @@ impl RibManager {
         // touch the maps once per flip instead of twice per route.
         let mut run: Option<(PeerId, Option<&str>, u64)> = None;
         for &(prefix, path_id) in keys {
-            crate::manager::replacement_readiness_checkpoint_at(
-                &self.replacement_readiness,
-                "shared_inventory",
-                false,
-            );
+            self.replacement_checkpoint_at("shared_inventory", false);
             let key = (prefix, path_id);
             let Some(route) = new.table.get(&prefix, path_id) else {
                 inventory_degraded(source, destination, Some(key), "destination table drift");
@@ -471,11 +463,7 @@ impl RibManager {
             crate::manager::POLICY_TRANSITION_ROUTE_SLICE,
         );
         for slot in prestaged.cursor..end {
-            crate::manager::replacement_readiness_checkpoint_at(
-                &self.replacement_readiness,
-                "shared_inventory",
-                false,
-            );
+            self.replacement_checkpoint_at("shared_inventory", false);
             let Some(route) = new.table.unicast_slot(slot) else {
                 continue;
             };
@@ -698,11 +686,7 @@ impl RibManager {
             return PrestagedInventoryOutcome::Degraded;
         }
         let checkpoint = || {
-            crate::manager::replacement_readiness_checkpoint_at(
-                &self.replacement_readiness,
-                "shared_inventory",
-                false,
-            );
+            self.replacement_checkpoint_at("shared_inventory", false);
         };
         self.reconcile_prestaged_transition_rows(prestaged, dirty, old, new);
         let mut inventory = CleanPolicyTransitionInventoryBuilder {
@@ -987,26 +971,11 @@ impl RibManager {
         self.compute_update_group_membership_for_policy(peer, chain.as_ref(), None)
     }
 
-    pub(in crate::manager) fn compute_update_group_membership_with_receipt(
-        &mut self,
-        peer: PeerId,
-        receipt: &mut crate::manager::AuthoritativeTransitionReceipt,
-    ) -> GroupMembership {
-        let chain = self.export_policy_for(peer).cloned();
-        let membership =
-            self.compute_update_group_membership_for_policy(peer, chain.as_ref(), Some(receipt));
-        match membership {
-            GroupMembership::Grouped(_) => receipt.membership_grouped += 1,
-            _ => receipt.membership_ungrouped += 1,
-        }
-        membership
-    }
-
     /// Classify a prospective policy without changing the peer's installed
     /// policy or runtime membership. Registry IDs are append-only; the
     /// enclosing operation retains prospective IDs until it commits or
     /// discards them. No group table or wire state is touched here.
-    fn compute_update_group_membership_for_policy(
+    pub(in crate::manager) fn compute_update_group_membership_for_policy(
         &mut self,
         peer: PeerId,
         chain: Option<&PolicyChain>,

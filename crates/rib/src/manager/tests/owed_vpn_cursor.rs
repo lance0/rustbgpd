@@ -1218,6 +1218,102 @@ fn a_dataset_swap_behind_a_vpn_cursor_withdraws_a_row_already_sent() {
     assert_eq!(wire.count(P4, unread), (0, 0), "never sent");
 }
 
+/// A dataset reevaluation stages a private target's VPN keys inside the
+/// replacement summary scope. A request naming an unrelated peer is answered
+/// from current state between those keys, not after the pass.
+#[test]
+fn a_vpn_dataset_reevaluation_serves_an_unrelated_neighbor_between_keys() {
+    use crate::update::RibSummaryQuery;
+    use rustbgpd_policy::datasets::{DatasetBindings, DatasetData, DatasetHandle, DatasetKind};
+    use rustbgpd_policy::rpol::RpolFile;
+    use rustbgpd_policy::sets::{PrefixSet, PrefixSetEntry, SetStore};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    const ROWS: u32 = 8;
+    let allowed = |rows: &[u32]| {
+        DatasetData::Prefix(PrefixSet::new(rows.iter().map(|&index| {
+            let VpnPrefix::V4 { addr, len } = key(P4, index).prefix else {
+                unreachable!()
+            };
+            PrefixSetEntry {
+                prefix: Prefix::V4(Ipv4Prefix::new(addr, len)),
+                ge: None,
+                le: None,
+            }
+        })))
+    };
+    let handle = Arc::new(DatasetHandle::new(
+        "allowed",
+        DatasetKind::Prefix,
+        allowed(&(0..ROWS).collect::<Vec<_>>()),
+    ));
+    let mut bindings = DatasetBindings::new();
+    bindings.insert(Arc::clone(&handle));
+    let compiled = RpolFile::parse(
+        "dataset prefix-set allowed\n\
+         policy p { term pass { if route.prefix in allowed { accept } reject } }",
+    )
+    .unwrap()
+    .compile_policy_bound("p", &[], &mut SetStore::new(), &bindings)
+    .unwrap()
+    .unwrap();
+    let chain = PolicyChain::from_named(vec![rustbgpd_policy::NamedPolicy::from_rpol(
+        "p".to_string(),
+        Arc::new(compiled),
+    )]);
+    let mut manager = manager(4096);
+    sources_up(&mut manager);
+    let target = receiver(0);
+    let outside = receiver(1);
+    let mut target_rx = up_with(&mut manager, target, 0, 4096, &[P4], 0, Some(chain));
+    let _outside_rx = up(&mut manager, outside, 0, 4096, &[P4], 0);
+    received(&mut manager, P4, &all(ROWS), &[]);
+    while target_rx.try_recv().is_ok() {}
+    let expected = manager.neighbor_rib_snapshot(outside);
+    let prior = handle.pin();
+    assert!(handle.refresh(allowed(&[0, 1])).is_some());
+
+    let (summary_tx, summary_rx) = mpsc::channel(1);
+    manager.summary_rx = Some(summary_rx);
+    let (reply, response) = oneshot::channel();
+    let request = std::sync::Mutex::new(Some(RibSummaryQuery::NeighborRibSnapshots {
+        peers: vec![outside],
+        comparison: None,
+        include_retained: false,
+        reply,
+    }));
+    let response = std::sync::Mutex::new(Some(response));
+    let served = Arc::new(AtomicBool::new(false));
+    manager.replacement_readiness_test_hook = Some(Arc::new({
+        let served = Arc::clone(&served);
+        move |stage| {
+            if stage != crate::manager::distribution::VPN_STAGE_KEY {
+                return;
+            }
+            if let Some(query) = request.lock().unwrap().take() {
+                summary_tx.try_send(query).unwrap();
+            } else if let Some(mut pending) = response.lock().unwrap().take() {
+                let rows = pending
+                    .try_recv()
+                    .expect("served between staged VPN keys")
+                    .snapshots;
+                assert_eq!(rows, vec![expected.clone()]);
+                served.store(true, Ordering::Relaxed);
+            }
+        }
+    }));
+    let (reply, mut result) = oneshot::channel();
+    manager.handle_update(RibUpdate::ReevaluatePeerExportPolicies {
+        peers: vec![target],
+        swaps: Some(vec![crate::update::DatasetSwap {
+            handle: Arc::clone(&handle),
+            prior,
+        }]),
+        reply,
+    });
+    result.try_recv().unwrap().unwrap();
+    assert!(served.load(Ordering::Relaxed), "VPN staging was exercised");
+}
+
 /// Contract 12 (an RT-Constrain membership change mid-walk): a private
 /// receiver that negotiated RT-Constrain is interested in RT 1, a step
 /// into its walk of rows tagged RT 1 or RT 2; it then swaps its interest

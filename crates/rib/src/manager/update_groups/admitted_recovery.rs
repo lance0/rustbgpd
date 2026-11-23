@@ -544,6 +544,20 @@ impl AdmittedRecovery {
         })
     }
 
+    /// Lend out the ledger without visiting its OLD keys. Complete records
+    /// keep their shared snapshot alive until their handle is released.
+    pub(in crate::manager) fn complete_peers(
+        &self,
+        mut visit: impl FnMut(),
+    ) -> std::collections::HashSet<PeerId> {
+        self.records
+            .iter()
+            .inspect(|_| visit())
+            .filter(|record| record.state == State::Complete)
+            .map(|record| record.peer)
+            .collect()
+    }
+
     #[cfg(test)]
     #[expect(
         clippy::trivially_copy_pass_by_ref,

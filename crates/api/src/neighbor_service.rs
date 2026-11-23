@@ -191,7 +191,8 @@ impl NeighborService {
         self
     }
 
-    /// Attach the summary lane served from frozen values during RIB replacement.
+    /// Attach the lane that serves neighbor reads during RIB replacement.
+    /// The command's affected peers retain entry values and other rows are live.
     #[must_use]
     pub fn with_rib_summary_queries(mut self, tx: mpsc::Sender<RibSummaryQuery>) -> Self {
         self.rib_summary_tx = Some(tx);
