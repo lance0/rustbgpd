@@ -1740,6 +1740,7 @@ mod first_group_build;
 mod first_group_writers;
 mod flowspec;
 mod flowspec_advertised;
+mod flowspec_departure_commit;
 mod gr_helper_stale_exempt;
 mod gr_llgr;
 mod hold_release_owed_drain;

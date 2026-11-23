@@ -8,7 +8,7 @@ use rustbgpd_wire::{FlowSpecComponent, FlowSpecPrefix};
 use super::exportability::ReusableExactExportEncoder;
 use super::lifecycle::{test_peer_up, test_routes_received};
 use super::*;
-use crate::manager::source_departure::take_receiver_rows;
+use crate::manager::source_departure::{take_flowspec_withdrawal_work, take_receiver_rows};
 
 const SOURCE: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 1);
 const OTHER: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 2);
@@ -315,6 +315,7 @@ fn queue_probe(arrival: ProbeArrival, tx: mpsc::Sender<RibUpdate>) {
 /// A producer sharing this current-thread executor runs only after the actor
 /// yields. One unit per turn keeps that seam for every unit.
 fn pace_for_arrival(manager: &mut RibManager, arrival: ProbeArrival) {
+    take_flowspec_withdrawal_work();
     MOST_UNITS_PER_TURN.set(0);
     if matches!(arrival, ProbeArrival::AfterYield) {
         manager.flush_poll_budget = Duration::ZERO;
@@ -454,7 +455,24 @@ fn poll_counts(
 
 async fn check_sizes(shape: Shape) {
     let small = Box::pin(departure(shape, 8, ROWS, ProbeArrival::Prequeued)).await;
+    let small_work = take_flowspec_withdrawal_work();
     let large = Box::pin(departure(shape, 32, ROWS, ProbeArrival::Prequeued)).await;
+    if shape == Shape::FlowSpec {
+        let large_work = take_flowspec_withdrawal_work();
+        eprintln!(
+            "FlowSpec (staging clones, preflight probes, removals): K=8 {small_work:?}, K=32 {large_work:?}"
+        );
+        for (members, counts, (clones, probes, removed)) in
+            [(8, &small, small_work), (32, &large, large_work)]
+        {
+            // Each receiver advertised all D rules. Its first probe must hit on
+            // every page; the writer independently consumed every withdrawal.
+            assert!(counts.envelopes > members, "fixture needs multiple pages");
+            assert_eq!(clones, 0, "K={members}: staged owned withdrawal keys");
+            assert_eq!(probes, counts.envelopes, "K={members}: full-page probes");
+            assert_eq!(removed, members * usize::try_from(ROWS).unwrap());
+        }
+    }
     assert!(
         large.inspected <= small.inspected,
         "{shape:?} maximum inspected rows grew {} -> {}",
@@ -482,6 +500,110 @@ async fn private_source_departure_yields_to_an_unrelated_update() {
 #[tokio::test(start_paused = true)]
 async fn flowspec_source_departure_yields_to_an_unrelated_update() {
     check_sizes(Shape::FlowSpec).await;
+}
+
+#[test]
+fn sparse_flowspec_departure_moves_only_advertised_identities_and_charges_their_rows() {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = peer_v4(Ipv4Addr::new(192, 0, 2, 1));
+    let (tx, mut writer) = mpsc::channel(8);
+    let mut up = test_peer_up(peer, 1, tx);
+    let RibUpdate::PeerUp {
+        sendable_families, ..
+    } = &mut up
+    else {
+        unreachable!()
+    };
+    *sendable_families = vec![
+        (Afi::Ipv4, Safi::FlowSpec),
+        (Afi::Ipv6, Safi::FlowSpec),
+        (Afi::Ipv4, Safi::FlowSpecVpn),
+        (Afi::Ipv6, Safi::FlowSpecVpn),
+    ];
+    manager.handle_update(up);
+    while writer.try_recv().is_ok() {}
+
+    // The components are valid for either AFI; only the AFI and RD distinguish the keys.
+    let rule = |afi, rd| {
+        let mut route = make_flowspec_route(SOURCE);
+        route.rule.components = vec![FlowSpecComponent::IpProtocol(vec![
+            rustbgpd_wire::NumericMatch {
+                end_of_list: true,
+                and_bit: false,
+                lt: false,
+                gt: false,
+                eq: true,
+                value: 6,
+            },
+        ])];
+        route.afi = afi;
+        route.rd = rd;
+        route
+    };
+    let rd = |n| Some(RouteDistinguisher([0, 0, 0xfb, 0xf4, 0, 0, 0, n]));
+    let page: HashSet<_> = [Afi::Ipv4, Afi::Ipv6]
+        .into_iter()
+        .flat_map(|afi| [None, rd(1), rd(2)].map(|rd| rule(afi, rd).selection_key()))
+        .collect();
+    let stored = [
+        rule(Afi::Ipv4, None),
+        rule(Afi::Ipv4, rd(2)),
+        rule(Afi::Ipv6, rd(1)),
+    ];
+    let expected: HashSet<_> = stored.iter().map(FlowSpecRoute::selection_key).collect();
+    let first_hit = 1 + page.iter().position(|key| expected.contains(key)).unwrap();
+    let untouched = rule(Afi::Ipv6, rd(3));
+    let unaffected_key = untouched.selection_key();
+    let advertised = manager
+        .adj_ribs_out
+        .entry(peer)
+        .or_insert_with(|| AdjRibOut::new(peer));
+    for route in stored.into_iter().chain([untouched]) {
+        advertised.insert_flowspec(route);
+    }
+    let components: HashMap<_, _> = advertised
+        .advertised_flowspec_keys()
+        .map(|key| (key.clone(), key.rule.components.as_ptr()))
+        .collect();
+    assert_eq!(manager.loc_rib.flowspec_len(), 0);
+    take_flowspec_withdrawal_work();
+    manager.distribute_flowspec_departure_page(&page, &[peer]);
+    assert_eq!(manager.outbound_credit_rows(peer), expected.len());
+    let update = delivered(writer.try_recv().unwrap());
+    assert!(update.flowspec_announce.is_empty());
+    assert_eq!(update.flowspec_withdraw.len(), expected.len());
+    for key in &update.flowspec_withdraw {
+        assert_eq!(
+            key.rule.components.as_ptr(),
+            components[key],
+            "the writer must receive the advertised component allocation"
+        );
+    }
+    assert_eq!(
+        update.flowspec_withdraw.into_iter().collect::<HashSet<_>>(),
+        expected
+    );
+    assert_eq!(
+        take_flowspec_withdrawal_work(),
+        (0, first_hit, expected.len())
+    );
+    let advertised = &manager.adj_ribs_out[&peer];
+    assert_eq!(advertised.flowspec_len(), 1);
+    assert!(advertised.get_flowspec(&unaffected_key).is_some());
+    assert_eq!(advertised.family_lens().flowspec, [0, 0]);
+    assert_eq!(advertised.family_lens().flowspec_vpn, [0, 1]);
+
+    // The table is nonempty, but the same page now has an empty intersection.
+    manager.distribute_flowspec_departure_page(&page, &[peer]);
+    assert_eq!(take_flowspec_withdrawal_work(), (0, page.len(), 0));
+    assert_eq!(manager.outbound_credit_rows(peer), 0);
+    assert!(writer.try_recv().is_err());
+    assert!(
+        manager.adj_ribs_out[&peer]
+            .get_flowspec(&unaffected_key)
+            .is_some()
+    );
 }
 
 #[tokio::test(start_paused = true)]
