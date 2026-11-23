@@ -196,8 +196,23 @@ impl RibManager {
             && keys.saturating_mul(self.outbound_peers.len()) > RECEIVER_ROWS_PER_POLL
     }
 
-    // Membership and capabilities are fenced for the departure. Mixed or
-    // multipath exporters retain narrow pages for their exceptional lanes.
+    /// A private receiver that selects its own winner among all candidates,
+    /// as the private export walk decides it.
+    pub(in crate::manager) fn private_per_client_best(&self, peer: PeerId) -> bool {
+        self.peer_per_client_best.contains(&peer)
+    }
+
+    /// The private export walk ranks this receiver's candidates by its ORR
+    /// vantage when that vantage resolved in the current SPF results.
+    pub(in crate::manager) fn orr_vantage_resolved(&self, peer: PeerId) -> bool {
+        self.peer_orr_vantage
+            .get(&peer)
+            .is_some_and(|vantage| self.orr.spf.contains_key(vantage))
+    }
+
+    // Membership and capabilities are fenced for the departure. Mixed,
+    // multipath, per-client-best and ORR exporters retain narrow pages for
+    // their per-receiver candidate walks.
     fn departure_exporters(&self, peers: &[PeerId], afi: Afi) -> Exporters {
         let family = (afi, Safi::Unicast);
         let mut kind = None;
@@ -221,7 +236,9 @@ impl RibManager {
                 None if !self
                     .peer_add_path_send_families
                     .get(&peer)
-                    .is_some_and(|families| families.contains(&family)) =>
+                    .is_some_and(|families| families.contains(&family))
+                    && !self.private_per_client_best(peer)
+                    && !self.orr_vantage_resolved(peer) =>
                 {
                     Exporters::Private
                 }
