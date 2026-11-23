@@ -56,7 +56,7 @@ fn hash_of<Q: std::hash::Hash + ?Sized>(key: &Q) -> u64 {
 #[inline]
 fn rehash_entry<K: std::hash::Hash, V>(entry: &(K, V)) -> u64 {
     #[cfg(test)]
-    crate::test_support::REHASHED_KEYS.update(|n| n + 1);
+    crate::test_support::REHASHED_KEYS.with(|count| count.set(count.get() + 1));
     hash_of(&entry.0)
 }
 

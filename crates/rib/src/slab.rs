@@ -81,7 +81,8 @@ impl<T> RouteSlab<T> {
         if segment.len() == segment.capacity() {
             // Double like a `Vec`, but never past one segment.
             #[cfg(test)]
-            crate::test_support::GROWING_SLAB_SLOTS.update(|n| n + segment.len());
+            crate::test_support::GROWING_SLAB_SLOTS
+                .with(|count| count.set(count.get() + segment.len()));
             segment.reserve_exact(segment.capacity().max(4).min(SEGMENT - segment.len()));
         }
         segment.push(Some(value));
@@ -114,7 +115,8 @@ impl<T> RouteSlab<T> {
                 let grown = want.max((2 * segment.capacity()).min(SEGMENT));
                 checkpoint();
                 #[cfg(test)]
-                crate::test_support::GROWING_SLAB_SLOTS.update(|n| n + segment.len());
+                crate::test_support::GROWING_SLAB_SLOTS
+                    .with(|count| count.set(count.get() + segment.len()));
                 segment.reserve_exact(grown - segment.len());
                 checkpoint();
             }
