@@ -28,6 +28,19 @@ use crate::update::RibUpdate;
 /// the waiting command sooner under input that does not stop.
 pub(super) const BEHIND_TURNS_BEFORE_SEAL: u16 = 64;
 
+#[cfg(any(test, feature = "bench-internals"))]
+thread_local! {
+    static RELOAD_BUILD_PAGES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Private destination pages that accepted authoritative reloads staged on
+/// this thread. A synchronous reload stages none.
+#[cfg(feature = "bench-internals")]
+#[must_use]
+pub fn authoritative_reload_build_pages() -> usize {
+    RELOAD_BUILD_PAGES.with(std::cell::Cell::get)
+}
+
 struct Waiter {
     session_id: u64,
     sender: mpsc::Sender<OutboundRouteUpdate>,
@@ -764,6 +777,8 @@ impl RibManager {
         if !page.keys.is_empty() {
             let prefixes = page.keys.into_iter().collect();
             job.table = if job.reload.is_some() {
+                #[cfg(any(test, feature = "bench-internals"))]
+                RELOAD_BUILD_PAGES.with(|pages| pages.set(pages.get() + 1));
                 self.stage_private_group_page(job.gid, job.table, &prefixes, true)
             } else {
                 self.stage_first_group_page(job.gid, job.table, &prefixes)

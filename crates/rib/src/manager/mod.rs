@@ -27,6 +27,8 @@ mod eor_hold;
 mod evpn_recovery;
 mod export_chains;
 mod first_group_build;
+#[cfg(feature = "bench-internals")]
+pub use first_group_build::authoritative_reload_build_pages;
 mod first_group_order;
 mod flowspec_validation;
 mod graceful_restart;

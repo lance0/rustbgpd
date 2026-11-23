@@ -128,7 +128,9 @@ async fn capture(members: &mut [Member; 2], tag: u32, withdraw: Option<u8>) -> [
     [first, second]
 }
 
-async fn reload_and_restore(filler: u32) -> Vec<[Delta; 2]> {
+// The current-thread test runtime runs the spawned actor on this thread, so
+// the thread-local page count belongs to this test alone.
+async fn reload_and_restore(filler: u32) -> (Vec<[Delta; 2]>, Vec<usize>) {
     let (primary, rx) = mpsc::channel(64);
     let (query, queries) = mpsc::channel(8);
     let actor = tokio::spawn(
@@ -170,6 +172,7 @@ async fn reload_and_restore(filler: u32) -> Vec<[Delta; 2]> {
         .unwrap();
     assert_eq!(count.await.unwrap(), usize::try_from(filler + 3).unwrap());
     let mut phases = vec![capture(&mut members, OLD, None).await];
+    let mut pages = Vec::new();
     for (target, withdrawn) in [(NEW, 1), (OLD, 2)] {
         let source = group(&primary, peers[0]).await.unwrap();
         assert!(source.starts_with("group:"));
@@ -193,6 +196,7 @@ async fn reload_and_restore(filler: u32) -> Vec<[Delta; 2]> {
                 reply: rollback,
             }
         };
+        let before = rustbgpd_rib::authoritative_reload_build_pages();
         primary.try_send(command).unwrap();
         if target == NEW {
             assert_eq!(applied.await.unwrap().unwrap(), Vec::<PeerId>::new());
@@ -202,6 +206,7 @@ async fn reload_and_restore(filler: u32) -> Vec<[Delta; 2]> {
                 [peers[1], peers[0]].map(|peer| PeerExportPolicyRestoreReceipt::Restored { peer })
             );
         }
+        pages.push(rustbgpd_rib::authoritative_reload_build_pages() - before);
         let destination = group(&primary, peers[0]).await.unwrap();
         assert_ne!(destination, source);
         assert_eq!(group(&primary, peers[1]).await.unwrap(), destination);
@@ -209,13 +214,23 @@ async fn reload_and_restore(filler: u32) -> Vec<[Delta; 2]> {
     }
     drop((members, primary, query));
     actor.await.unwrap();
-    phases
+    (phases, pages)
 }
 
 #[tokio::test]
 async fn authoritative_reload_and_restore_match_synchronous_receiver_updates() {
-    let synchronous = Box::pin(reload_and_restore(0)).await;
-    let paged = Box::pin(reload_and_restore(10_000)).await;
+    let (synchronous, unpaged) = Box::pin(reload_and_restore(0)).await;
+    let (paged, paged_pages) = Box::pin(reload_and_restore(10_000)).await;
+    assert_eq!(
+        unpaged,
+        [0, 0],
+        "below the threshold both commands stay synchronous"
+    );
+    // 10,003 winners need more than one 1,024-visit page in each direction.
+    assert!(
+        paged_pages.iter().all(|&count| count > 1),
+        "forward and restore must build privately across pages: {paged_pages:?}"
+    );
     assert_eq!(
         paged, synchronous,
         "decoded path attributes and NLRI on each real TCP receiver"
