@@ -4397,6 +4397,14 @@ impl RibManager {
         );
     }
     pub(super) fn neighbor_rib_snapshot(&self, peer: PeerId) -> NeighborRibSnapshot {
+        self.neighbor_rib_snapshot_with_proof(peer, None)
+    }
+
+    pub(super) fn neighbor_rib_snapshot_with_proof(
+        &self,
+        peer: PeerId,
+        initial_proof: Option<bool>,
+    ) -> NeighborRibSnapshot {
         NeighborRibSnapshot {
             peer,
             advertised_count: self.actual_unicast_advertised_count(peer),
@@ -4408,13 +4416,17 @@ impl RibManager {
             outbound: self.peer_outbound_state(peer),
             remote_asn: self.peer_asn.get(&peer).copied(),
             gr_retention: self.gr_retention_snapshot(peer),
-            outbound_resync: self.outbound_resync_state(peer),
+            outbound_resync: self.outbound_resync_state(peer, initial_proof),
         }
     }
 
     /// The count is pending under the same rule the advertised listing uses
     /// to leave the group view: an unsettled grouped member.
-    fn outbound_resync_state(&self, peer: PeerId) -> crate::update::OutboundResyncState {
+    fn outbound_resync_state(
+        &self,
+        peer: PeerId,
+        initial_proof: Option<bool>,
+    ) -> crate::update::OutboundResyncState {
         let pending = self.dirty_peers.contains(&peer);
         crate::update::OutboundResyncState {
             pending,
@@ -4428,7 +4440,9 @@ impl RibManager {
                     && (pending
                         || self.outbound_channel_gone(peer)
                         || (self.retain_initial_group_admitted(peer)
-                            && self.initial_group_admitted(peer).is_none()))),
+                            && !initial_proof.unwrap_or_else(|| {
+                                self.pending_group_admitted.get(&peer).is_some()
+                            })))),
             recovery_fallback: self
                 .group_recovery_fallback(peer)
                 .map(super::update_groups::RecoveryFallbackCause::as_str),

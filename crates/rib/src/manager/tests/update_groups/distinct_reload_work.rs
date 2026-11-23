@@ -1,5 +1,7 @@
 //! A distinct policy reload sends one authoritative command per singleton group.
 
+mod scoped_summaries;
+
 use super::*;
 
 const ROWS: usize = 257;

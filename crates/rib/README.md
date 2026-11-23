@@ -10,23 +10,28 @@ Single-task ownership — `RibManager` runs as one tokio task with no
 `Arc<RwLock>`. All RIB mutations flow through an `mpsc` channel as
 `RibUpdate` messages.
 
-The daemon also installs a bounded `RibSummaryQuery` lane for export-policy
-counters and the RIB portion of neighbor status. Synchronous policy replacement,
-rollback, and dataset reevaluation answer this lane from one temporary projection
-captured before their outbound-state mutations. Nested helpers reuse the same
-values; after completion, reads use current actor state. On the daemon's
-multi-thread runtime, one `block_in_place` scope hands the executor to sibling
-tasks so completed replies can run while synchronous RIB work continues.
-Current-thread embedders retain synchronous execution. Route queries and
-mutations remain fenced. The projection owns numeric counters and small status
-rows, not route tables or shared policy counters.
+The daemon installs a bounded `RibSummaryQuery` lane for the RIB portion
+of neighbor status. During synchronous export-policy replacement, rollback
+and dataset reevaluation, the command's named peers and the members of their
+source and destination update groups retain their entry rows. Other peers
+show current state at dispatch. Group comparisons use entry memberships and
+keys if both peers are captured, and current memberships and keys otherwise.
+Nested helpers share their command's view. After
+completion, reads use current actor state. The temporary projection stores
+neighbor rows and comparison inputs. Export policy term hits use the
+separate [published roster](../../docs/adr/0136-owner-published-counter-reads.md).
+
+On the daemon's multi-thread runtime, a `block_in_place` scope hands the
+executor to sibling tasks so completed replies can run during synchronous
+RIB work. Current-thread embedders retain synchronous execution. General
+route queries and mutations stay queued.
 
 Initial table export also services the dedicated readiness lane at bounded
 checkpoints through inventory, replay, staging, commit, and owned route cleanup.
 The exact Loc-RIB count remains fixed because this work only changes outbound
 state. The same executor handoff lets health replies complete during export;
 standalone export leaves general and summary queries and mutations queued.
-Nested export retains the existing owner’s frozen-summary contract, age, and
+Nested export retains the existing owner’s per-peer read boundary, age, and
 stalled-transition verdict. This covers both
 initial registration and negotiated Add-Path limit replay. Family replays
 take the same owner: peer ROUTE-REFRESH responses, deferred refresh retries,

@@ -4181,7 +4181,7 @@ fn a_deferral_after_the_tombstones_retire_copies_the_withdrawals_again() {
     // A's session closed its receiver mid-pass.
     drop(receivers.remove(0));
     assert!(manager.outbound_channel_gone(a));
-    manager.defer_unsent_outbound_pass(a, Some(gid), &stages, &mut deferred, &|| {});
+    manager.defer_unsent_outbound_pass(a, Some(gid), &stages, &mut deferred);
     assert!(!manager.group_ribs[&gid].dirty_members.contains(&a));
     assert!(manager.group_ribs[&gid].tombstones.contains(&key));
     // C's inline resync settles with no dirty member left.
@@ -4189,7 +4189,7 @@ fn a_deferral_after_the_tombstones_retire_copies_the_withdrawals_again() {
     assert!(manager.group_ribs[&gid].tombstones.is_empty(), "retired");
     // B, clean with no proof, then misses the pass's send.
     assert!(!manager.pending_group_admitted.contains_key(&b));
-    manager.defer_unsent_outbound_pass(b, Some(gid), &stages, &mut deferred, &|| {});
+    manager.defer_unsent_outbound_pass(b, Some(gid), &stages, &mut deferred);
     assert!(manager.group_ribs[&gid].dirty_members.contains(&b));
     assert!(
         manager.group_ribs[&gid].tombstones.contains(&key),

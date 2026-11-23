@@ -1204,6 +1204,8 @@ pub struct RibManager {
     readiness_rx: Option<mpsc::Receiver<RibReadinessQuery>>,
     /// Dedicated lane for summaries with frozen replacement projections.
     summary_rx: Option<mpsc::Receiver<RibSummaryQuery>>,
+    /// Source and destination groups whose members read captured summaries.
+    replacement_summary_groups: Option<HashSet<usize>>,
     /// Readiness and frozen values are shared across synchronous replacement
     /// helpers. Canonical RIB state remains actor-owned.
     replacement_readiness: Option<Arc<ReplacementReadinessContext>>,
@@ -1741,6 +1743,7 @@ impl Wake for ReadinessWake {
 }
 
 struct ReplacementReadinessContext {
+    live_waiting: AtomicBool,
     wake: Arc<ReadinessWake>,
     state: Mutex<ReplacementReadiness>,
 }
@@ -1810,8 +1813,21 @@ fn replacement_readiness_checkpoint_at(
     stage: &'static str,
     force: bool,
 ) {
+    checkpoint_with_summary_reader(readiness, Some(stage), force, None);
+}
+
+#[expect(
+    clippy::ref_option,
+    reason = "checkpoint callers borrow the optional owner"
+)]
+fn checkpoint_with_summary_reader(
+    readiness: &Option<Arc<ReplacementReadinessContext>>,
+    stage: Option<&'static str>,
+    force: bool,
+    live: Option<&RibManager>,
+) {
     #[cfg(test)]
-    if let Some(context) = readiness {
+    if let (Some(context), Some(stage)) = (readiness, stage) {
         let observer = context
             .state
             .lock()
@@ -1822,30 +1838,24 @@ fn replacement_readiness_checkpoint_at(
             observer(stage);
         }
     }
-    #[cfg(all(not(test), not(feature = "bench-internals")))]
-    let _ = stage;
     #[cfg(feature = "bench-internals")]
-    replacement_readiness_checkpoint_tagged(readiness, force, Some(stage), false);
+    replacement_readiness_checkpoint_tagged(readiness, force, stage, false, live);
     #[cfg(not(feature = "bench-internals"))]
     {
-        slice_timing::checkpoint(Some(stage));
-        replacement_readiness_checkpoint_untimed(readiness, force);
+        slice_timing::checkpoint(stage);
+        replacement_readiness_checkpoint_untimed(readiness, force, live);
     }
 }
 
 /// The readiness checkpoint of one row checked against a deferred family's
 /// gate. Test builds name its stage so a work contract can count the rows;
 /// every other build takes the plain checkpoint.
-#[expect(
-    clippy::ref_option,
-    reason = "callbacks borrow the actor's optional shared fence handle without creating another owner"
-)]
 #[inline]
-fn gate_row_checkpoint(readiness: &Option<Arc<ReplacementReadinessContext>>) {
+fn gate_row_checkpoint(manager: &RibManager) {
     #[cfg(test)]
-    replacement_readiness_checkpoint_at(readiness, distribution::GATE_ROW_SCAN, false);
+    manager.replacement_checkpoint_at(distribution::GATE_ROW_SCAN, false);
     #[cfg(not(test))]
-    replacement_readiness_checkpoint(readiness, false);
+    manager.replacement_checkpoint(false);
 }
 
 /// The readiness checkpoint of one item of a table-sized unit whose loop has
@@ -1873,15 +1883,15 @@ fn counted_checkpoint(
 
 /// [`counted_checkpoint`] stage: one Loc-RIB row collected for a new update
 /// group's table build.
+#[cfg(test)]
 const GROUP_TABLE_BUILD_ROW: &str = "group_table_build_row";
 /// One Loc-RIB row collected for a new update group's table build.
-#[expect(
-    clippy::ref_option,
-    reason = "callbacks borrow the actor's optional shared fence handle without creating another owner"
-)]
 #[inline]
-fn group_build_row_checkpoint(readiness: &Option<Arc<ReplacementReadinessContext>>) {
-    counted_checkpoint(readiness, GROUP_TABLE_BUILD_ROW, false);
+fn group_build_row_checkpoint(manager: &RibManager) {
+    #[cfg(test)]
+    manager.replacement_checkpoint_at(GROUP_TABLE_BUILD_ROW, false);
+    #[cfg(not(test))]
+    manager.replacement_checkpoint(false);
 }
 
 /// [`counted_checkpoint`] stage: one stride of a departing member's EVPN
@@ -1921,6 +1931,7 @@ fn replacement_readiness_cleanup_checkpoint(
         false,
         Some(stage),
         progress == crate::adj_rib_out::RetirementProgress::Progress,
+        None,
     );
     #[cfg(not(feature = "bench-internals"))]
     {
@@ -1942,7 +1953,7 @@ fn replacement_readiness_checkpoint(
     force: bool,
 ) {
     slice_timing::checkpoint(None);
-    replacement_readiness_checkpoint_untimed(readiness, force);
+    replacement_readiness_checkpoint_untimed(readiness, force, None);
 }
 
 #[cfg(not(feature = "bench-internals"))]
@@ -1954,6 +1965,7 @@ fn replacement_readiness_checkpoint(
 fn replacement_readiness_checkpoint_untimed(
     readiness: &Option<Arc<ReplacementReadinessContext>>,
     force: bool,
+    live: Option<&RibManager>,
 ) {
     let Some(context) = readiness else {
         return;
@@ -1972,7 +1984,7 @@ fn replacement_readiness_checkpoint_untimed(
             readiness.last_opportunity = now;
         }
     }
-    service_replacement_readiness(context, force);
+    service_replacement_readiness_with_origin(context, force, live);
 }
 
 #[cfg(feature = "bench-internals")]
@@ -1984,7 +1996,7 @@ fn replacement_readiness_checkpoint(
     readiness: &Option<Arc<ReplacementReadinessContext>>,
     force: bool,
 ) {
-    replacement_readiness_checkpoint_tagged(readiness, force, None, false);
+    replacement_readiness_checkpoint_tagged(readiness, force, None, false, None);
 }
 
 #[cfg(feature = "bench-internals")]
@@ -1997,6 +2009,7 @@ fn replacement_readiness_checkpoint_tagged(
     force: bool,
     stage: Option<&'static str>,
     progress: bool,
+    live: Option<&RibManager>,
 ) {
     slice_timing::checkpoint(stage);
     let Some(context) = readiness else {
@@ -2025,26 +2038,33 @@ fn replacement_readiness_checkpoint_tagged(
     service_replacement_readiness_with_origin(
         context,
         force,
+        live,
         !force && progress && bench_support::retirement_body_stage(stage),
     );
 }
 
-#[cfg(not(feature = "bench-internals"))]
-use self::service_replacement_readiness_with_origin as service_replacement_readiness;
-
-// Existing unit controls invoke the untagged service seam directly. It cannot
-// supply evidence of service at a productive cleanup checkpoint.
-#[cfg(all(test, feature = "bench-internals"))]
+#[cfg(test)]
 fn service_replacement_readiness(context: &ReplacementReadinessContext, force: bool) {
-    service_replacement_readiness_with_origin(context, force, false);
+    service_replacement_readiness_with_origin(
+        context,
+        force,
+        None,
+        #[cfg(feature = "bench-internals")]
+        false,
+    );
 }
 
 fn service_replacement_readiness_with_origin(
     context: &ReplacementReadinessContext,
     force: bool,
+    live: Option<&RibManager>,
     #[cfg(feature = "bench-internals")] cleanup_body: bool,
 ) {
-    if !force && !context.wake.pending.load(Ordering::Acquire) {
+    if !force
+        && !context.wake.pending.load(Ordering::Acquire)
+        && !(live.is_some_and(|manager| manager.replacement_summary_groups.is_some())
+            && context.live_waiting.load(Ordering::Relaxed))
+    {
         return;
     }
     let mut readiness = context
@@ -2121,7 +2141,10 @@ fn service_replacement_readiness_with_origin(
         context.wake.wake_by_ref();
     }
     if let Some(summaries) = readiness.summaries.as_mut() {
-        let count = summaries.drain(&mut cx);
+        let count = summaries.drain(&mut cx, live);
+        context
+            .live_waiting
+            .store(summaries.waiting_for_live.is_some(), Ordering::Relaxed);
         if count == QUERY_BUDGET_PER_CHUNK {
             context.wake.wake_by_ref();
         }
@@ -2581,19 +2604,17 @@ impl PolicyFilteredBucket {
 /// scratch vector's buffer in place. An empty scratch vector neither allocates
 /// nor drops anything, so it skips the forced checkpoints that bracket that
 /// work; this is the common case on every staged prefix of every member.
-#[expect(
-    clippy::ref_option,
-    reason = "inventory work borrows its existing readiness owner"
-)]
 fn extend_policy_filtered_routes_from_scratch(
     routes: &mut HashSet<PolicyFilteredRouteKey>,
     scratch: &mut Vec<PolicyFilteredRouteKey>,
-    readiness: &Option<Arc<ReplacementReadinessContext>>,
+    manager: &RibManager,
 ) {
     if scratch.is_empty() {
         return;
     }
-    extend_policy_filtered_routes_with_readiness(routes, scratch.drain(..), readiness);
+    extend_policy_filtered_routes_with_checkpoint(routes, scratch.drain(..), |stage, force| {
+        manager.replacement_checkpoint_at(stage, force)
+    });
 }
 
 /// A prefix can contribute many rejected source/path identities. Grow an
@@ -2605,18 +2626,28 @@ fn extend_policy_filtered_routes_from_scratch(
 )]
 fn extend_policy_filtered_routes_with_readiness(
     routes: &mut HashSet<PolicyFilteredRouteKey>,
-    mut incoming: impl ExactSizeIterator<Item = PolicyFilteredRouteKey>,
+    incoming: impl ExactSizeIterator<Item = PolicyFilteredRouteKey>,
     readiness: &Option<Arc<ReplacementReadinessContext>>,
+) {
+    extend_policy_filtered_routes_with_checkpoint(routes, incoming, |stage, force| {
+        replacement_readiness_checkpoint_at(readiness, stage, force);
+    });
+}
+
+fn extend_policy_filtered_routes_with_checkpoint(
+    routes: &mut HashSet<PolicyFilteredRouteKey>,
+    mut incoming: impl ExactSizeIterator<Item = PolicyFilteredRouteKey>,
+    mut checkpoint: impl FnMut(&'static str, bool),
 ) {
     let required = routes.len().saturating_add(incoming.len());
     if required > routes.capacity() {
-        replacement_readiness_checkpoint_at(readiness, "policy_filtered_allocation", true);
+        checkpoint("policy_filtered_allocation", true);
         let mut replacement = HashSet::with_capacity(required);
-        replacement_readiness_checkpoint_at(readiness, "policy_filtered_allocation", true);
+        checkpoint("policy_filtered_allocation", true);
         #[cfg(test)]
         let capacity = replacement.capacity();
         for key in routes.drain() {
-            replacement_readiness_checkpoint_at(readiness, "policy_filtered_rebuild", false);
+            checkpoint("policy_filtered_rebuild", false);
             replacement.insert(key);
             #[cfg(test)]
             assert_eq!(
@@ -2625,14 +2656,14 @@ fn extend_policy_filtered_routes_with_readiness(
                 "policy-filtered inventory grew during old-key rebuild"
             );
         }
-        replacement_readiness_checkpoint_at(readiness, "policy_filtered_allocation", true);
+        checkpoint("policy_filtered_allocation", true);
         drop(std::mem::replace(routes, replacement));
-        replacement_readiness_checkpoint_at(readiness, "policy_filtered_allocation", true);
+        checkpoint("policy_filtered_allocation", true);
     }
     #[cfg(test)]
     let capacity = routes.capacity();
     for key in incoming.by_ref() {
-        replacement_readiness_checkpoint_at(readiness, "policy_filtered_input", false);
+        checkpoint("policy_filtered_input", false);
         routes.insert(key);
         #[cfg(test)]
         assert_eq!(
@@ -2641,9 +2672,9 @@ fn extend_policy_filtered_routes_with_readiness(
             "policy-filtered inventory grew during candidate insertion"
         );
     }
-    replacement_readiness_checkpoint_at(readiness, "policy_filtered_allocation", true);
+    checkpoint("policy_filtered_allocation", true);
     drop(incoming);
-    replacement_readiness_checkpoint_at(readiness, "policy_filtered_allocation", true);
+    checkpoint("policy_filtered_allocation", true);
 }
 
 #[expect(
@@ -2654,13 +2685,22 @@ fn retire_policy_filtered_routes_with_readiness(
     routes: &mut HashSet<PolicyFilteredRouteKey>,
     readiness: &Option<Arc<ReplacementReadinessContext>>,
 ) {
-    replacement_readiness_checkpoint_at(readiness, "policy_filtered_retirement", true);
+    retire_policy_filtered_routes_with_checkpoint(routes, |force| {
+        replacement_readiness_checkpoint_at(readiness, "policy_filtered_retirement", force);
+    });
+}
+
+fn retire_policy_filtered_routes_with_checkpoint(
+    routes: &mut HashSet<PolicyFilteredRouteKey>,
+    mut checkpoint: impl FnMut(bool),
+) {
+    checkpoint(true);
     for _ in routes.drain() {
-        replacement_readiness_checkpoint_at(readiness, "policy_filtered_retirement", false);
+        checkpoint(false);
     }
-    replacement_readiness_checkpoint_at(readiness, "policy_filtered_retirement", true);
+    checkpoint(true);
     drop(std::mem::take(routes));
-    replacement_readiness_checkpoint_at(readiness, "policy_filtered_retirement", true);
+    checkpoint(true);
 }
 
 enum PendingRouteChunk {
@@ -3274,6 +3314,7 @@ impl RibManager {
             release_primary_reads: VecDeque::new(),
             readiness_rx: None,
             summary_rx: None,
+            replacement_summary_groups: None,
             replacement_readiness: None,
             #[cfg(test)]
             replacement_readiness_test_hook: None,
@@ -3488,6 +3529,7 @@ impl RibManager {
         let entered = tokio::time::Instant::now();
         let started = entered - age;
         self.replacement_readiness = Some(Arc::new(ReplacementReadinessContext {
+            live_waiting: AtomicBool::new(false),
             wake: Arc::new(ReadinessWake {
                 pending: AtomicBool::new(true),
             }),
@@ -3599,11 +3641,11 @@ impl RibManager {
     }
 
     fn replacement_checkpoint_at(&self, stage: &'static str, force: bool) {
-        replacement_readiness_checkpoint_at(&self.replacement_readiness, stage, force);
+        checkpoint_with_summary_reader(&self.replacement_readiness, Some(stage), force, Some(self));
     }
 
     fn replacement_checkpoint(&self, force: bool) {
-        replacement_readiness_checkpoint(&self.replacement_readiness, force);
+        checkpoint_with_summary_reader(&self.replacement_readiness, None, force, Some(self));
     }
 
     /// Aggregate capacity evidence within the owning command, never per route.
@@ -7064,82 +7106,109 @@ impl RibManager {
             return;
         }
         let readiness = &self.replacement_readiness;
-        let checkpoint = || replacement_readiness_checkpoint(readiness, false);
-        let allocation_checkpoint = || replacement_readiness_checkpoint(readiness, true);
-        let retained_checkpoint = || {
-            #[cfg(test)]
-            replacement_readiness_checkpoint_at(readiness, "policy_filtered_retained", false);
-            #[cfg(not(test))]
-            checkpoint();
-        };
-        let peer_routes = self.policy_filtered_routes.entry(target_peer).or_default();
-        let refresh = |keys: &mut PolicyFilteredBucket| {
-            keys.retain(
-                |key| {
+        let update = |peer_routes: &mut BTreeMap<Prefix, PolicyFilteredBucket>, live| {
+            let checkpoint = || checkpoint_with_summary_reader(readiness, None, false, live);
+            let allocation_checkpoint =
+                || checkpoint_with_summary_reader(readiness, None, true, live);
+            let retained_checkpoint = || {
+                #[cfg(test)]
+                checkpoint_with_summary_reader(
+                    readiness,
+                    Some("policy_filtered_retained"),
+                    false,
+                    live,
+                );
+                #[cfg(not(test))]
+                checkpoint();
+            };
+            let refresh = |keys: &mut PolicyFilteredBucket| {
+                keys.retain(
+                    |key| {
+                        retained_checkpoint();
+                        current.contains(key)
+                    },
+                    &allocation_checkpoint,
+                )
+            };
+            // Walk whichever side is smaller: a clean transition passes the
+            // whole table as scope for every member, while the history usually
+            // holds a few prefixes.
+            if prefixes.len() <= peer_routes.len() {
+                for prefix in prefixes {
                     retained_checkpoint();
-                    current.contains(key)
-                },
-                &allocation_checkpoint,
-            )
-        };
-        // Walk whichever side is smaller: a clean transition passes the
-        // whole table as scope for every member, while the history usually
-        // holds a few prefixes.
-        if prefixes.len() <= peer_routes.len() {
-            for prefix in prefixes {
-                retained_checkpoint();
-                if peer_routes
-                    .get_mut(prefix)
-                    .is_some_and(|keys| !refresh(keys))
-                {
-                    allocation_checkpoint();
-                    drop(peer_routes.remove(prefix));
-                    allocation_checkpoint();
+                    if peer_routes
+                        .get_mut(prefix)
+                        .is_some_and(|keys| !refresh(keys))
+                    {
+                        allocation_checkpoint();
+                        drop(peer_routes.remove(prefix));
+                        allocation_checkpoint();
+                    }
                 }
+            } else {
+                peer_routes.retain(|prefix, keys| {
+                    retained_checkpoint();
+                    !prefixes.contains(prefix) || refresh(keys)
+                });
             }
-        } else {
-            peer_routes.retain(|prefix, keys| {
-                retained_checkpoint();
-                !prefixes.contains(prefix) || refresh(keys)
+            allocation_checkpoint();
+            let mut incoming: Vec<_> = current.iter().inspect(|_| checkpoint()).copied().collect();
+            allocation_checkpoint();
+            incoming.sort_unstable_by(|left, right| {
+                checkpoint();
+                left.prefix.cmp(&right.prefix)
             });
-        }
-        allocation_checkpoint();
-        let mut incoming: Vec<_> = current.iter().inspect(|_| checkpoint()).copied().collect();
-        allocation_checkpoint();
-        incoming.sort_unstable_by(|left, right| {
-            checkpoint();
-            left.prefix.cmp(&right.prefix)
-        });
-        allocation_checkpoint();
-        let mut newly_filtered = Vec::with_capacity(incoming.len());
-        allocation_checkpoint();
-        for group in incoming.chunk_by(|left, right| {
-            checkpoint();
-            left.prefix == right.prefix
-        }) {
-            retained_checkpoint();
-            match peer_routes.entry(group[0].prefix) {
-                std::collections::btree_map::Entry::Vacant(slot) if group.len() == 1 => {
-                    checkpoint();
-                    slot.insert(PolicyFilteredBucket::One(group[0]));
-                    newly_filtered.push(group[0]);
+            allocation_checkpoint();
+            let mut newly_filtered = Vec::with_capacity(incoming.len());
+            allocation_checkpoint();
+            for group in incoming.chunk_by(|left, right| {
+                checkpoint();
+                left.prefix == right.prefix
+            }) {
+                retained_checkpoint();
+                match peer_routes.entry(group[0].prefix) {
+                    std::collections::btree_map::Entry::Vacant(slot) if group.len() == 1 => {
+                        checkpoint();
+                        slot.insert(PolicyFilteredBucket::One(group[0]));
+                        newly_filtered.push(group[0]);
+                    }
+                    entry => entry
+                        .or_insert_with(|| PolicyFilteredBucket::Many(HashSet::new()))
+                        .insert_group(
+                            group,
+                            &mut newly_filtered,
+                            &checkpoint,
+                            &allocation_checkpoint,
+                        ),
                 }
-                entry => entry
-                    .or_insert_with(|| PolicyFilteredBucket::Many(HashSet::new()))
-                    .insert_group(
-                        group,
-                        &mut newly_filtered,
-                        &checkpoint,
-                        &allocation_checkpoint,
-                    ),
             }
-        }
-        retire_vec(&mut incoming, &mut || checkpoint());
-        if peer_routes.is_empty() {
-            allocation_checkpoint();
-            self.policy_filtered_routes.remove(&target_peer);
-            allocation_checkpoint();
-        }
+            retire_vec(&mut incoming, &mut || checkpoint());
+            newly_filtered
+        };
+        let newly_filtered = if self.replacement_summary_groups.is_some() {
+            let mut peer_routes = self
+                .policy_filtered_routes
+                .remove(&target_peer)
+                .unwrap_or_default();
+            let newly_filtered = update(&mut peer_routes, Some(self));
+            if peer_routes.is_empty() {
+                self.replacement_checkpoint(true);
+                drop(peer_routes);
+                self.replacement_checkpoint(true);
+            } else {
+                self.policy_filtered_routes.insert(target_peer, peer_routes);
+            }
+            newly_filtered
+        } else {
+            let peer_routes = self.policy_filtered_routes.entry(target_peer).or_default();
+            let newly_filtered = update(peer_routes, None);
+            if peer_routes.is_empty() {
+                self.replacement_checkpoint(true);
+                drop(self.policy_filtered_routes.remove(&target_peer));
+                self.replacement_checkpoint(true);
+            }
+            newly_filtered
+        };
         let mut newly_filtered = newly_filtered.into_iter();
         // Resolved only when an event is published.
         let target_peer_scope = if newly_filtered.as_slice().is_empty() {
