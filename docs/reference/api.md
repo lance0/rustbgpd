@@ -4834,7 +4834,9 @@ The readiness checkpoint of an ordinary ingest operation returns
 Other synchronous work holding a fixed Loc-RIB count, such as a standalone
 initial table export, route refresh or detached peer cleanup, returns
 `503 not ready: RIB work stalled`. A helper running inside another owner
-inherits that owner's start time and reason. After the owner finishes, the next
+inherits that owner's start time and reason. Ingest or peer teardown that starts
+while a policy transition is pending counts from the transition's start and
+returns the transition's reason. After the owner finishes, the next
 probe reports the current owner's state, or `200 ready` on a healthy actor loop.
 
 Authoritative export-policy replacement and rollback service this same RIB

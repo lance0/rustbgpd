@@ -1116,3 +1116,24 @@ async fn ingest_readiness_stall_identifies_the_owner_until_it_finishes() {
     manager.drain_readiness_queries(None);
     assert_eq!(cleared.try_recv().unwrap(), Ok(0));
 }
+
+#[tokio::test(start_paused = true)]
+async fn ingest_and_teardown_under_a_pending_transition_report_the_transition() {
+    let (mut manager, readiness) = readiness_manager();
+    manager.pending_clean_policy_transition =
+        Some(crate::manager::distribution::PendingCleanPolicyTransition::new(Vec::new(), None));
+    tokio::time::advance(super::super::MAX_HEALTHY_POLICY_TRANSITION_AGE).await;
+    for teardown in [false, true] {
+        let mut stalled = super::update_groups::queue_replacement_readiness(&readiness);
+        if teardown {
+            manager.with_peer_teardown_readiness(|manager| manager.replacement_checkpoint(true));
+        } else {
+            manager.with_ingest_readiness(|manager| manager.replacement_checkpoint(true));
+        }
+        assert_eq!(
+            stalled.try_recv().unwrap(),
+            Err(crate::RibReadinessError::PolicyTransitionStalled)
+        );
+    }
+    manager.pending_clean_policy_transition = None;
+}

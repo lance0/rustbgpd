@@ -1767,6 +1767,7 @@ enum ReadinessOwnerKind {
     /// every owner it answers stalled once its own age, counted from the
     /// start of a pending policy transition if there is one, passes the
     /// healthy bound; the loop applies that bound to the transition only.
+    /// An age inherited from a transition reports the transition's stall.
     Ingest,
 }
 
@@ -1788,6 +1789,9 @@ struct ReplacementReadiness {
     /// Selection release and source teardown publish completed prefix changes;
     /// replacement ownership always keeps its original frozen count.
     kind: ReadinessOwnerKind,
+    /// An ingest or teardown owner begun under a pending policy transition
+    /// counts that transition's age, so its stall belongs to the transition.
+    transition_age: bool,
     started: tokio::time::Instant,
     /// Tokio's clock, so a test can hold the service budget still with a
     /// paused clock; outside a paused runtime it reads the system clock.
@@ -2125,10 +2129,12 @@ fn service_replacement_readiness_with_origin(
         readiness
             .metrics
             .observe_rib_readiness_query_wait(seam, enqueued.elapsed());
-        let result = if readiness.started.elapsed() >= MAX_HEALTHY_POLICY_TRANSITION_AGE {
-            Err(stalled)
-        } else {
+        let result = if readiness.started.elapsed() < MAX_HEALTHY_POLICY_TRANSITION_AGE {
             Ok(readiness.count)
+        } else if readiness.transition_age {
+            Err(RibReadinessError::PolicyTransitionStalled)
+        } else {
+            Err(stalled)
         };
         #[cfg(feature = "bench-internals")]
         {
@@ -3653,6 +3659,11 @@ impl RibManager {
                 metrics: self.metrics.clone(),
                 count: self.completed_loc_rib_count(),
                 kind,
+                transition_age: self.pending_clean_policy_transition.is_some()
+                    && matches!(
+                        kind,
+                        ReadinessOwnerKind::Ingest | ReadinessOwnerKind::PeerTeardown
+                    ),
                 started,
                 last_service: tokio::time::Instant::now(),
                 budget: self.flush_poll_budget.min(FLUSH_POLL_BUDGET),
