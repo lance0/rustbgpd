@@ -929,8 +929,10 @@ impl AdmittedRecovery {
             peer,
             hint,
             table.len().saturating_add(table.vpn_len()),
-            table
-                .iter()
+            // Slab insertion order depends on the changed-prefix set. Start the
+            // ordered trie walk only when a new snapshot needs its keys.
+            std::iter::once_with(|| table.iter_unicast_in_key_order())
+                .flatten()
                 .map(|route| Key::Unicast(route.prefix, route.path_id))
                 .chain(table.iter_vpn().map(|route| {
                     let key = route.key();

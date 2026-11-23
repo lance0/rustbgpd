@@ -1249,11 +1249,26 @@ fn singleton_move(how: SingletonMove, fleet: usize) -> Work {
     work
 }
 
+#[test]
+fn per_peer_policy_move_repeats_the_same_work() {
+    for fleet in [16, 64] {
+        let first = singleton_move(SingletonMove::PerPeer, fleet);
+        eprintln!("{fleet} peers: {} checkpoints", first[ALL]);
+        for _ in 0..3 {
+            assert_eq!(
+                singleton_move(SingletonMove::PerPeer, fleet),
+                first,
+                "{fleet} peers"
+            );
+        }
+    }
+}
+
 /// Checkpoints that 48 unrelated registered peers (16 to 64) may add to an
 /// authoritative batch of one. Measured: 576 on every run.
 const SINGLETON_BATCH_ALLOWANCE: usize = 640;
-/// The same budget for the per-peer command. Measured: 515 to 762 between runs.
-const SINGLETON_PER_PEER_ALLOWANCE: usize = 1_024;
+/// The per-peer move adds 672 checkpoints (14 per extra peer).
+const SINGLETON_PER_PEER_ALLOWANCE: usize = 688;
 
 /// The peer manager sends a remainder peer that is alone in its export pair
 /// to the RIB as an authoritative batch of one, not as the per-peer command.

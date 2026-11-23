@@ -945,6 +945,14 @@ impl AdjRibOut {
         self.routes.iter()
     }
 
+    /// Advertised routes in (prefix, path ID) order for the sorted recovery universe.
+    pub(crate) fn iter_unicast_in_key_order(&self) -> impl Iterator<Item = &Route> {
+        self.prefix_path_ids
+            .iter_from(None)
+            .flat_map(|(_, cell)| self.handles(*cell))
+            .filter_map(|handle| self.routes.get(handle))
+    }
+
     /// Unicast slab slots (occupied + vacant). Handles are stable while a
     /// route stays staged, so a walk over `0..unicast_slot_count()` that
     /// resumes across mutations visits every untouched route exactly once,
@@ -1866,6 +1874,11 @@ mod tests {
                     .map(|route| (route.path_id, route.next_hop))
                     .collect::<std::collections::BTreeMap<_, _>>(),
                 expected,
+            );
+            assert!(
+                rib.iter_unicast_in_key_order()
+                    .map(|route| route.path_id)
+                    .eq(expected.keys().copied())
             );
             for (path_id, next_hop) in expected {
                 assert_eq!(rib.get(&prefix, path_id).unwrap().next_hop, next_hop);
