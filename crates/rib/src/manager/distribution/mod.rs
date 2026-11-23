@@ -207,6 +207,9 @@ const MAX_SHARED_UNICAST_PROBE_COHORTS: usize = 8;
 /// deferred family's gate, so a work contract can count those rows.
 #[cfg(test)]
 pub(in crate::manager) const GATE_ROW_SCAN: &str = "gate_row_scan";
+/// Test stage: one key that a private receiver's VPN staging visits.
+#[cfg(test)]
+pub(in crate::manager) const VPN_STAGE_KEY: &str = "vpn_stage_key";
 
 #[cfg(test)]
 thread_local! {
