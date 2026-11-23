@@ -152,6 +152,9 @@ evaluated: `no_advertise`, `no_export`, and `rs_control` run after `llgr`
 `conditional_advertisement`; `no_advertise` runs again after `export_policy`
 for a policy-added NO_ADVERTISE. The Add-Path `add_path_send_max` limit runs
 after `export_policy`, on the policy-compacted rank walk, and before `otc`.
+For per-client best, a higher-ranked candidate can pass export policy and
+still be skipped because it carries OTC. The explanation identifies the
+rejected candidate and the eligible alternate selected for that member.
 The `conditional_advertisement` rung always sits immediately before
 `export_policy`; it stops a route with `conditional_advertisement_suppressed`
 or `conditional_advertisement_eval_error` while an attached

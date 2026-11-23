@@ -2553,6 +2553,7 @@ impl RibManager {
                 lazy_group_prior: None,
             });
         let selection_noop = matches!(replay_kind, FamilyReplayKind::SelectionRelease)
+            && unicast.pcb_otc_blocked.is_empty()
             && announce.is_empty()
             && unicast.withdraw.is_empty()
             && fs_announce.is_empty()
@@ -2568,6 +2569,12 @@ impl RibManager {
             && rtc_announce.is_empty()
             && rtc_withdraw.is_empty();
         let admission = if selection_noop {
+            if member_of.is_none()
+                && self.private_per_client_best(peer)
+                && self.peer_otc_blocked.contains_key(&peer)
+            {
+                self.reconcile_peer_otc_blocked(peer, &all_prefixes, Vec::new());
+            }
             super::retire_hash_set(&mut group_prior, &mut || self.replacement_checkpoint(false));
             Ok(false)
         } else {
@@ -2575,6 +2582,7 @@ impl RibManager {
                 peer,
                 OutboundCommitBatch {
                     local_sources: unicast.local_sources,
+                    otc_blocked: unicast.pcb_otc_blocked,
                     force_unicast_replay: !matches!(
                         replay_kind,
                         FamilyReplayKind::SelectionRelease

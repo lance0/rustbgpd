@@ -16,6 +16,9 @@ def split_once(text, anchor):
     return text.split(anchor, 1)
 
 
+NOOP_RECONCILE = "            if completed && let Some(prefixes) = otc_reconcile_prefixes {"
+
+
 def instrument(files, here):
     original = files
     files = dict(files)
@@ -121,9 +124,16 @@ def instrument(files, here):
          "        for route in group.table.iter_evpn() {\n            super::terminal_debt::count(\"current\", 1);\n            checkpoint();")
 
     path = manager + "distribution/mod.rs"
-    edit(path, "            if completed\n                && let (Some(prefixes), Some(blocked))",
-         "            if completed { self.bench_terminal_event(peer, \"complete_noop\", 0); }\n"
-         "            if completed\n                && let (Some(prefixes), Some(blocked))")
+    # The suppressed no-op commit's completion, before its OTC reconcile. A
+    # comparison's parent may predate the reconcile's current form, so exactly
+    # one of the two forms must match, once.
+    noop = (NOOP_RECONCILE, "            if completed\n                && let (Some(prefixes), Some(blocked))")
+    text = files[path].decode()
+    if sorted(text.count(form) for form in noop) != [0, 1]:
+        raise ValueError(f"private derivation anchor drift: {noop[0]!r}")
+    anchor = next(form for form in noop if form in text)
+    edit(path, anchor,
+         "            if completed { self.bench_terminal_event(peer, \"complete_noop\", 0); }\n" + anchor)
     edit(path, "        let update = OutboundRouteUpdate {\n            exact_export_snapshot,",
          "        let terminal_rows = evpn_announce.len() + evpn_withdraw.len();\n"
          "        let update = OutboundRouteUpdate {\n            exact_export_snapshot,")

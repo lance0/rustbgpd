@@ -1058,10 +1058,9 @@ pub struct RibManager {
     /// Effective family-local Add-Path caps, including peer Paths-Limit.
     peer_add_path_send_limits: HashMap<PeerId, HashMap<(Afi, Safi), u32>>,
     /// Route-server clients with RFC 7947 §2.3.2 per-client best-path
-    /// enabled: unicast export stages the first export-policy-permitted
-    /// candidate (path-hiding mitigation) at `path_id 0` instead of the
-    /// Loc-RIB best. Families with negotiated Add-Path send take the
-    /// multipath path instead.
+    /// enabled. Unicast export stages the first candidate permitted by policy
+    /// and OTC egress at `path_id 0`. Negotiated Add-Path send takes precedence
+    /// for its families.
     peer_per_client_best: HashSet<PeerId>,
     /// Peers with RFC 1997 `NO_EXPORT`/`NO_EXPORT_SUBCONFED` egress
     /// enforcement enabled (config `interpret_rfc1997`, default

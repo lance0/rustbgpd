@@ -1,7 +1,6 @@
 //! RFC 7947 §2.3.2 per-client best-path (route-server path-hiding
-//! mitigation): the fourth distribution mode stages the first
-//! export-policy-permitted candidate at `path_id 0` instead of the
-//! Loc-RIB best. These tests pin the §2.3 scenario itself, the
+//! mitigation) stages the first candidate permitted by policy and OTC
+//! egress at `path_id 0`. These tests pin the §2.3 scenario itself, the
 //! churn/stability contract (the `OpenBGPd` `rde evaluate all` bug
 //! class: spurious 2nd-best withdrawals / re-advertisements), the
 //! single-best presentation shape, and the refresh/GShut replays.
@@ -834,6 +833,145 @@ async fn agrees_with_single_best_when_policy_permits_the_best() {
     assert_eq!(plain_dump.announce[0].path_id, 0);
     assert_eq!(pcb_dump.announce[0].path_id, 0);
 
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// An export denial or a policy-added `NO_ADVERTISE` wins before the OTC
+/// check. With no export policy the same input has only the OTC exclusion.
+#[tokio::test]
+async fn otc_fallback_preserves_policy_denials_and_no_policy_explain() {
+    for private in [false, true] {
+        let (tx, rx) = mpsc::channel(64);
+        let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+        manager.test_force_ungrouped = private;
+        let handle = tokio::spawn(manager.run());
+        tx.send(registering_peer_up(peer_v4(SOURCE_A), 0))
+            .await
+            .unwrap();
+        let mut marked = best_route();
+        AttrSet::edit(&mut marked.attributes, |attrs| {
+            attrs.push(PathAttribute::OnlyToCustomer(65001));
+        });
+        announce_from(&tx, SOURCE_A, vec![marked]).await;
+        let prefix = Prefix::V4(prefix());
+        for (n, chain, expected) in [
+            (1, Some(deny_tagged_chain()), "per_client_all_denied"),
+            (
+                2,
+                Some(super::unicast::no_advertise_addition_chain(false)),
+                "no_advertise_policy_suppressed",
+            ),
+            (3, None, "otc_egress_blocked"),
+        ] {
+            let target = peer_v4(Ipv4Addr::new(192, 0, 2, n));
+            tx.send(RibUpdate::SetPeerExportContext {
+                peer: target,
+                session_id: 0,
+                local_role: Some(rustbgpd_wire::BgpRole::Peer),
+            })
+            .await
+            .unwrap();
+            let mut out = client_peer_up(&tx, target, chain, true).await;
+            sync(&tx).await;
+            let mut blocked = Vec::new();
+            while let Ok(update) = out.try_recv() {
+                assert!(update.announce.is_empty());
+                assert!(update.unicast_withdrawals().next().is_none());
+                blocked.extend(update.otc_blocked.iter().map(|route| route.peer));
+            }
+            let explain = query_explain_advertised_route(&tx, target, prefix).await;
+            assert_eq!(explain.update_group_id.is_none(), private);
+            assert_eq!(explain.decision, crate::update::ExplainDecision::Deny);
+            assert_eq!(
+                explain.gates.last().unwrap().code,
+                expected,
+                "private {private}, client {n}"
+            );
+            if n == 3 {
+                assert_eq!(blocked, [peer_v4(SOURCE_A)]);
+                tx.send(registering_peer_up(peer_v4(SOURCE_B), 0))
+                    .await
+                    .unwrap();
+                announce_from(&tx, SOURCE_B, vec![runner_up_route()]).await;
+                sync(&tx).await;
+                let result = query_explain_advertised_route(&tx, target, prefix).await;
+                assert_eq!(result.route_peer, Some(peer_v4(SOURCE_B)));
+                assert_eq!(result.decision, crate::update::ExplainDecision::Advertise);
+                assert!(result.already_advertised);
+            } else {
+                assert!(
+                    blocked.is_empty(),
+                    "the earlier policy decision owns this rejection"
+                );
+            }
+        }
+        drop(tx);
+        handle.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn otc_fallback_private_rearms_diagnostic_while_alternate_stays_advertised() {
+    let (tx, rx) = mpsc::channel(64);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.test_force_ungrouped = true;
+    let handle = tokio::spawn(manager.run());
+    for source in [SOURCE_A, SOURCE_B] {
+        tx.send(registering_peer_up(peer_v4(source), 0))
+            .await
+            .unwrap();
+    }
+    let target = peer_v4(Ipv4Addr::new(192, 0, 2, 3));
+    tx.send(RibUpdate::SetPeerExportContext {
+        peer: target,
+        session_id: 0,
+        local_role: Some(rustbgpd_wire::BgpRole::Peer),
+    })
+    .await
+    .unwrap();
+    let mut out = client_peer_up(&tx, target, Some(deny_tagged_chain()), true).await;
+    drain_eor(&mut out).await;
+    announce_from(&tx, SOURCE_B, vec![runner_up_route()]).await;
+    let alternate = next_outbound(&mut out).await;
+    assert_eq!(alternate.announce[0].peer, peer_v4(SOURCE_B));
+
+    // Only the better path changes. Policy denial clears the OTC diagnostic
+    // edge without a wire delta, so the next block must report it again.
+    for denied in [false, true, false] {
+        let mut best = ebgp_route(
+            prefix(),
+            SOURCE_A,
+            vec![65001],
+            if denied {
+                vec![DENIED_COMMUNITY]
+            } else {
+                vec![]
+            },
+        );
+        AttrSet::edit(&mut best.attributes, |attrs| {
+            attrs.push(PathAttribute::OnlyToCustomer(65001));
+        });
+        announce_from(&tx, SOURCE_A, vec![best]).await;
+        sync(&tx).await;
+        let mut blocked = Vec::new();
+        while let Ok(update) = out.try_recv() {
+            assert!(update.announce.is_empty());
+            assert!(update.unicast_withdrawals().next().is_none());
+            blocked.extend(
+                update
+                    .otc_blocked
+                    .iter()
+                    .map(|route| (route.peer, route.path_id)),
+            );
+        }
+        let expected = (!denied).then_some((peer_v4(SOURCE_A), 0));
+        assert!(blocked.into_iter().eq(expected));
+    }
+    assert_eq!(
+        collect_advertised_routes(&tx, target).await[0].peer,
+        peer_v4(SOURCE_B)
+    );
     drop(tx);
     handle.await.unwrap();
 }

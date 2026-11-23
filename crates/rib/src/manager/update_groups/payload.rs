@@ -141,10 +141,9 @@ impl PriorGroupSlots {
 /// best-path order that the member did not source and whose SOURCE control
 /// communities do not suppress toward it — the per-peer walk, which drops
 /// suppressed candidates before ranking. `fallback` is the walk's ordered
-/// candidate list after the winner, retained only where some walked
-/// candidate carries a suppression-form community; without it (or without
-/// rs-control) the slot is ADR-0126's `adv(m)` — the winner, else the lane
-/// runner-up — and a suppressed slot resolves to nothing.
+/// rank-ordered alternatives where control communities or OTC diagnostics
+/// require them. OTC-marked diagnostic rows in a blocking-role list
+/// cannot supply the member's advertised slot.
 pub(in crate::manager) fn resolve_member_slot<'a>(
     member: PeerId,
     rs_control: Option<(u32, u32)>,
@@ -172,6 +171,7 @@ pub(in crate::manager) fn resolve_member_slot<'a>(
             }
             fallback
                 .iter()
+                .filter(|row| !fallback.blocks(row))
                 .map(RunnerUp::adv_entry)
                 .find(|entry| entry.route.peer != member && eligible(entry))
         }
@@ -215,7 +215,8 @@ pub(in crate::manager) fn rs_fallback_equal(
     match (old, new) {
         (None, None) => true,
         (Some(old), Some(new)) => {
-            old.len() == new.len()
+            old.same_selection_mode(new)
+                && old.len() == new.len()
                 && old
                     .iter()
                     .zip(new.iter())
@@ -393,10 +394,8 @@ pub(in crate::manager) struct PerClientBestPrefixStage {
     /// scratch every pass — no stale second-best by construction
     /// (ADR-0126 Decision 6).
     pub(in crate::manager) runner_up: Option<RunnerUp>,
-    /// Every permitted candidate the walk visited after the winner, in
-    /// best-path order — the RFC 7947 per-member fallback
-    /// ([`GroupRibOut::rs_fallback`]). `None` unless a walked candidate
-    /// carries a suppression-form community ([`may_suppress`]).
+    /// Ranked alternatives for member-specific control communities and OTC diagnostics.
+    /// Wire selection uses only eligible rows.
     pub(in crate::manager) rs_fallback: Option<super::RsFallback>,
     /// Full list comparison, when the release evaluated it across actor turns.
     pub(super) release_fallback_equal: Option<bool>,

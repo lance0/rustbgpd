@@ -771,16 +771,7 @@ impl RibManager {
             } else {
                 group.rs_adjust_after_commit(&rs_touched, &mut checkpoint);
             }
-            if let Some(slot) =
-                group.record_otc_blocked(prefixes, &out.otc_blocked, &mut checkpoint)
-            {
-                tracing::error!(
-                    group = gid,
-                    slot,
-                    counter = "otc_blocked_totals",
-                    "OTC-blocked winner counts drifted; rebuilt from the residue map"
-                );
-            }
+            group.record_otc_blocked(prefixes, &out.otc_blocked, &mut checkpoint);
             if !paged_pcb_denials {
                 group.record_policy_filtered(prefixes, &labeled_filtered, &mut checkpoint);
             }

@@ -2314,11 +2314,7 @@ fn pcb_family_counts_lane_term_is_per_family() {
     );
 }
 
-/// The advertised iterators yield adv(m): the lane route at the
-/// winner's prefix for source(w) — `path_id` 0, nothing else changed
-/// — while a member sourcing nothing sees the staged table
-/// unchanged. Covers the unordered iterator, the ordered variant
-/// (prefix ordering preserved), and the materialized wrapper.
+/// All three advertised-route views expose the member's eligible alternate.
 #[test]
 fn pcb_advertised_iterators_substitute_lane_entry() {
     let mut m = staging_manager();
@@ -2501,6 +2497,20 @@ fn pcb_join_counters_replay_lane_permit() {
     });
     let mut m = staging_manager();
     m.group_ribs.insert(PCB_GID, group);
+
+    // An OTC diagnostic may coexist with p2's eligible slot, or stand alone
+    // at p3. Neither diagnostic adds a replayed policy permit.
+    let group = m.group_ribs.get_mut(&PCB_GID).unwrap();
+    group.local_role = Some(BgpRole::Peer);
+    let p3 = prefix(3);
+    group.record_otc_blocked(
+        &HashSet::from([p2, p3]),
+        &[
+            with_otc_attr(route(p2, OTHER2)),
+            with_otc_attr(route(p3, OTHER2)),
+        ],
+        &mut || {},
+    );
 
     // MEMBER sourced p1's winner: replay = p2's staged permit plus
     // p1's lane permit, both under the chain-default sentinel.
@@ -5685,13 +5695,10 @@ fn drain_wire(
     wire
 }
 
-/// No in-walk gate (ADR-0126 Decision 5): a blocked winner stays
-/// staged in the table and the pass RECORDS it — into the pass
-/// output and, committed, the persistent residue — including on a
-/// later equality-suppressed restage. `source(w)` never sees its
-/// own winner in the residue derivation.
+/// A diagnostic for the higher-ranked marked route coexists with the
+/// eligible path in the table, including on an equality-suppressed restage.
 #[test]
-fn pcb_otc_blocked_winner_stays_staged_and_residue_recorded() {
+fn pcb_otc_blocked_candidate_reported_beside_staged_alternate() {
     let mut m = staging_manager();
     let p = prefix(1);
     seed(&mut m, with_otc_attr(cand(p, OTHER1, 300)));
@@ -5702,26 +5709,9 @@ fn pcb_otc_blocked_winner_stays_staged_and_residue_recorded() {
     let out = stage_pcb(&mut m, &[p]);
 
     assert_eq!(out.deltas.len(), 1);
-    assert!(
-        out.deltas[0].new.is_some(),
-        "blocked winner is staged, not withdrawn"
-    );
     let group = m.group_ribs.get(&PCB_GID).unwrap();
-    let staged = group
-        .table
-        .get(&p, 0)
-        .expect("blocked winner stays in the table");
-    assert_eq!(staged.peer, OTHER1);
-    assert!(
-        staged.attributes.iter().any(|attr| {
-            matches!(
-                attr,
-                PathAttribute::OnlyToCustomer(_) | PathAttribute::OnlyToCustomerPartial(_)
-            )
-        }),
-        "the staged form keeps the OTC attribute"
-    );
-    assert_eq!(lane_source(&m, p), Some(OTHER2.addr()));
+    assert_eq!(group.table.get(&p, 0).unwrap().peer, OTHER2);
+    assert_eq!(lane_source(&m, p), None);
     assert_eq!(out.otc_blocked.len(), 1);
     assert_eq!(out.otc_blocked[0].peer, OTHER1);
     let blocked = group.otc_blocked_for_member(MEMBER, None);
@@ -5743,13 +5733,10 @@ fn pcb_otc_blocked_winner_stays_staged_and_residue_recorded() {
     assert_eq!(group.otc_blocked_for_member(MEMBER, None).len(), 1);
 }
 
-/// A blocked runner-up is DERIVED from the lane at consumption
-/// (both slots share the `(prefix, 0)` residue key, so it is never
-/// stored): only `source(w)` — whose adv(m) is the runner-up —
-/// sees it, prefix scoping applies, and with BOTH slots blocked
-/// each member sees exactly blocked(adv(m)).
+/// Only the best path's source needs the blocked second path's diagnostic.
+/// A member can receive at most one diagnostic per logical slot.
 #[test]
-fn pcb_otc_blocked_runner_up_derived_toward_winner_source() {
+fn pcb_otc_blocked_second_path_reported_toward_winner_source() {
     let mut m = staging_manager();
     let p = prefix(1);
     seed(&mut m, cand(p, OTHER1, 300));
@@ -5759,7 +5746,8 @@ fn pcb_otc_blocked_runner_up_derived_toward_winner_source() {
 
     let out = stage_pcb(&mut m, &[p]);
 
-    assert!(out.otc_blocked.is_empty(), "a clean winner records nothing");
+    assert_eq!(out.otc_blocked.len(), 1);
+    assert_eq!(out.otc_blocked[0].peer, OTHER2);
     let group = m.group_ribs.get(&PCB_GID).unwrap();
     assert!(
         group.otc_blocked_for_member(MEMBER, None).is_empty(),
@@ -5781,8 +5769,7 @@ fn pcb_otc_blocked_runner_up_derived_toward_winner_source() {
         "prefix scoping applies to the lane term"
     );
 
-    // Both slots blocked: winner rides the residue map, runner-up
-    // the lane — per member exactly blocked(adv(m)).
+    // Both paths are marked. Each member reports its first non-own source.
     seed(&mut m, with_otc_attr(cand(p, OTHER1, 300)));
     let out = stage_pcb(&mut m, &[p]);
     assert_eq!(out.otc_blocked.len(), 1);
@@ -5805,14 +5792,7 @@ fn pcb_otc_blocked_runner_up_derived_toward_winner_source() {
     );
 }
 
-/// The scoped lane query returns exactly the unscoped result
-/// restricted to the scope, whichever side it iterates (staged
-/// scope smaller or larger than the lane), for every member shape
-/// — including a prefix whose winner AND runner-up are both
-/// blocked (residue arm + lane arm overlap). Every scoped call
-/// also runs the `assert_scoped_visit_bound` tripwire: restoring
-/// the per-member full lane scan makes the one-prefix scopes here
-/// visit the whole lane and panics the bound.
+/// Scoped diagnostic queries must agree with a full walk for all member shapes.
 #[test]
 fn pcb_otc_blocked_scoped_query_matches_unscoped_across_scope_shapes() {
     let mut m = staging_manager();
@@ -5824,13 +5804,11 @@ fn pcb_otc_blocked_scoped_query_matches_unscoped_across_scope_shapes() {
     m.group_ribs
         .insert(PCB_GID, per_client_best_customer_group());
     stage_pcb(&mut m, &staged);
-    // Overlap cell: prefix 2's winner turns blocked too, so its
-    // residue entry (toward everyone but the source) coexists with
-    // its blocked lane entry (toward the winner source).
+    // Prefix 2 now has a distinct rejection toward the winner's source.
     seed(&mut m, with_otc_attr(cand(prefix(2), OTHER1, 300)));
     stage_pcb(&mut m, &[prefix(2)]);
     let group = m.group_ribs.get(&PCB_GID).unwrap();
-    assert_eq!(group.runner_up.len(), 3);
+    assert_eq!(group.runner_up.len(), 0);
 
     let view = |routes: Vec<Route>| {
         let mut view: Vec<(Prefix, PeerId)> = routes
@@ -5842,8 +5820,7 @@ fn pcb_otc_blocked_scoped_query_matches_unscoped_across_scope_shapes() {
     };
     for member in [MEMBER, OTHER1, OTHER2] {
         let unscoped = view(group.otc_blocked_for_member(member, None));
-        // Probe branch: scopes smaller than the lane, hitting and
-        // missing entries.
+        // Smaller scopes exercise keyed hits and misses.
         for scope in [
             HashSet::from([prefix(1)]),
             HashSet::from([prefix(2)]),
@@ -5861,7 +5838,7 @@ fn pcb_otc_blocked_scoped_query_matches_unscoped_across_scope_shapes() {
                 "member {member} scope {scope:?}"
             );
         }
-        // Scan branch: a scope wider than the lane covers it all.
+        // A wider scope covers the entire residue.
         let wide: HashSet<Prefix> = (1..=4).map(prefix).collect();
         assert_eq!(
             view(group.otc_blocked_for_member(member, Some(&wide))),
@@ -5931,13 +5908,8 @@ fn pcb_policy_filtered_scoped_query_matches_full_residue() {
     }
 }
 
-/// Backstop parity through the REAL commit path: a delivered clean
-/// winner replaced by an OTC-carrying one is stripped at the
-/// pre-commit backstop and converted to exactly the withdraw the
-/// ungrouped per-client-best path emits for identical inputs —
-/// while the group table keeps the blocked winner — and the
-/// refresh/join replays of the steady blocked state are silent on
-/// both sides.
+/// Replacing the only route with a marked path withdraws the old advertisement
+/// and reports the rejection once across steady state, refresh and join.
 #[test]
 fn pcb_otc_transition_emission_matches_ungrouped_per_client_best() {
     let p = prefix(1);
@@ -5960,11 +5932,8 @@ fn pcb_otc_transition_emission_matches_ungrouped_per_client_best() {
         passes.push(drain_wire(&mut rx));
         if grouped {
             let group = m.group_ribs.get(&PCB_GID).unwrap();
-            assert_eq!(
-                group.table.get(&p, 0).map(|r| r.peer),
-                Some(OTHER1),
-                "the blocked winner stays staged behind the stripped emissions"
-            );
+            assert!(group.table.get(&p, 0).is_none());
+            assert_eq!(group.otc_blocked_for_member(MEMBER, None).len(), 1);
         }
         passes
     };
@@ -6085,11 +6054,8 @@ fn pcb_otc_fresh_blocked_prefix_matches_private_silence() {
     );
 }
 
-/// Lane variant through the real path: a blocked runner-up
-/// substituting toward `source(w)` is stripped/suppressed exactly
-/// like the ungrouped outcome (which stages the same route as the
-/// member's first non-own permitted candidate), and its diagnostic is the
-/// LANE route. A fresh blocked slot has no admitted key to withdraw.
+/// A member that sources the clean winner receives the blocked alternative's
+/// diagnostic. Its never-advertised slot has no withdrawal to send.
 #[test]
 fn pcb_otc_blocked_lane_substitution_matches_ungrouped_toward_winner_source() {
     let p = prefix(1);
@@ -6128,12 +6094,8 @@ fn pcb_otc_blocked_lane_substitution_matches_ungrouped_toward_winner_source() {
 }
 
 /// The Decision 4 count synthesis reports the backstop's outcome:
-/// `advertised_count_for` and `family_counts_for` agree with a
-/// brute-force fold over `adv_entry_post_backstop` for every
-/// member — across a blocked winner with a clean lane, a clean
-/// winner with a blocked lane, a laneless blocked winner, and a
-/// clean control — and stay in agreement as blocked slots flip
-/// clean (the residue rebuild and the lane decrement seams).
+/// Counts agree with a direct fold over each member's eligible slots as
+/// candidates gain or lose OTC.
 #[test]
 fn pcb_otc_counts_agree_with_post_backstop_fold() {
     let mut m = staging_manager();
@@ -6180,19 +6142,15 @@ fn pcb_otc_counts_agree_with_post_backstop_fold() {
         }
     };
     assert_agreement(&m);
-    // Hand-computed over the four staged slots. MEMBER: p1 and p4
-    // blocked winners suppressed, p2 own-sourced with a blocked
-    // lane suppressed — only p3. OTHER1: its own p1 slot
-    // substitutes the CLEAN lane entry, p2's clean winner counts,
-    // p3/p4 own-sourced with no lane. OTHER2: p1/p4 suppressed,
-    // p2 and p3 clean winners count.
+    // MEMBER receives p1's eligible alternate plus p3. OTHER1 receives
+    // p1/p2, and OTHER2 receives p2/p3 after split horizon.
     let group = m.group_ribs.get(&PCB_GID).unwrap();
-    assert_eq!(group.advertised_count_for(MEMBER), 1);
+    assert_eq!(group.advertised_count_for(MEMBER), 2);
     assert_eq!(group.advertised_count_for(OTHER1), 2);
     assert_eq!(group.advertised_count_for(OTHER2), 2);
     assert_eq!(
         group.family_counts_for(MEMBER),
-        vec![((Afi::Ipv4, Safi::Unicast), 1)]
+        vec![((Afi::Ipv4, Safi::Unicast), 2)]
     );
 
     // p2's runner-up flips clean: the blocked-lane row retires and
@@ -6201,7 +6159,7 @@ fn pcb_otc_counts_agree_with_post_backstop_fold() {
     let _ = stage_pcb(&mut m, &[p2]);
     assert_agreement(&m);
     let group = m.group_ribs.get(&PCB_GID).unwrap();
-    assert_eq!(group.advertised_count_for(MEMBER), 2);
+    assert_eq!(group.advertised_count_for(MEMBER), 3);
 
     // p1's winner flips clean: the residue rebuild drops its row;
     // only p4's laneless blocked winner stays suppressed.
@@ -6219,7 +6177,7 @@ fn pcb_otc_counts_agree_with_post_backstop_fold() {
 /// clean winners and a clean substitution flow unchanged. The
 /// ordered variant and the materialized wrapper agree.
 #[test]
-fn pcb_advertised_iterators_skip_backstop_stripped_slots() {
+fn pcb_advertised_iterators_return_eligible_alternate() {
     let mut m = staging_manager();
     let (p1, p2, p3, p4) = (prefix(1), prefix(2), prefix(3), prefix(4));
     seed(&mut m, with_otc_attr(cand(p1, OTHER1, 300)));
@@ -6246,11 +6204,11 @@ fn pcb_advertised_iterators_skip_backstop_stripped_slots() {
         rows.sort();
         rows
     };
-    assert_eq!(rows(MEMBER), vec![(p3, OTHER1)]);
+    assert_eq!(rows(MEMBER), vec![(p1, OTHER2), (p3, OTHER1)]);
     assert_eq!(
         rows(OTHER1),
         vec![(p1, OTHER2), (p2, MEMBER)],
-        "source(w)'s clean lane substitution stays visible"
+        "the source of the marked path receives the eligible alternate"
     );
     assert_eq!(rows(OTHER2), vec![(p2, MEMBER), (p3, OTHER1)]);
 
@@ -6259,16 +6217,13 @@ fn pcb_advertised_iterators_skip_backstop_stripped_slots() {
         .unwrap()
         .map(|r| (r.prefix, r.peer))
         .collect();
-    assert_eq!(ordered, vec![(p3, OTHER1)]);
+    assert_eq!(ordered, vec![(p1, OTHER2), (p3, OTHER1)]);
     let materialized = m.grouped_advertised_routes(OTHER1).unwrap();
     assert_eq!(materialized.len(), 2);
 }
 
-/// Seam-interplay pin: a slot that is BOTH exact-export-rejected
-/// and OTC-blocked subtracts ONCE. The synthesis's OTC term
-/// already removed it, so the rejection overlay must skip it — in
-/// the count and in the per-family BMP stat 17 synthesis alike —
-/// while a rejected CLEAN slot still subtracts.
+/// An exact-export rejection on an absent slot cannot reduce the advertised
+/// count. A refusal on a newly eligible path takes effect immediately.
 #[test]
 fn pcb_rejected_and_otc_blocked_slot_subtracts_once() {
     let mut m = staging_manager();
@@ -6289,9 +6244,7 @@ fn pcb_rejected_and_otc_blocked_slot_subtracts_once() {
         Some(vec![((Afi::Ipv4, Safi::Unicast), 1)])
     );
 
-    // Rejecting the blocked slot changes nothing: the route was
-    // never on the member's wire and the OTC term already
-    // subtracted it.
+    // The absent slot contributes nothing to the advertised count.
     m.set_exact_export_rejection(MEMBER, ExactExportKey::Unicast(p1, 0), true);
     assert_eq!(
         m.grouped_advertised_count(MEMBER),
@@ -6320,12 +6273,9 @@ fn pcb_rejected_and_otc_blocked_slot_subtracts_once() {
     assert_eq!(m.grouped_family_counts(MEMBER), Some(vec![]));
 }
 
-/// The subtraction is role-gated: under a non-blocking role (none
-/// here; Provider and internal peers take the same RFC 9234
-/// predicate) OTC-carrying winners and substitutions flow through
-/// every query and count unchanged.
+/// A non-blocking role can advertise marked winners and substitutions.
 #[test]
-fn pcb_otc_subtraction_is_role_gated() {
+fn pcb_otc_eligibility_is_role_gated() {
     let mut m = staging_manager();
     let (p1, p2) = (prefix(1), prefix(2));
     seed(&mut m, with_otc_attr(cand(p1, OTHER1, 300)));
@@ -6397,16 +6347,8 @@ fn plain_group_otc_residue_subtracts_nothing_from_counts() {
     assert_eq!(rows, vec![p2]);
 }
 
-/// Grouped-vs-ungrouped parity for the operator-facing query
-/// surfaces under RFC 9234 — the missing OTC × query × BMP
-/// intersection: with a blocked winner, a blocked lane
-/// substitution toward `source(w)`, and a clean control prefix,
-/// the grouped member's advertised-routes query, advertised
-/// count, and per-family stat 17 synthesis all equal the
-/// ungrouped per-client-best path's post-backstop Adj-RIB-Out.
-/// The announced wire agrees too (withdraw parity modulo the
-/// pinned fresh-blocked defensive withdraw is covered by the
-/// dedicated backstop tests above).
+/// Group and private advertised routes, counts and family counts agree
+/// across a marked top candidate, a member-sourced winner and a clean control.
 #[test]
 fn pcb_otc_query_surfaces_match_ungrouped_post_backstop() {
     let (p1, p2, p3) = (prefix(1), prefix(2), prefix(3));
@@ -6444,7 +6386,7 @@ fn pcb_otc_query_surfaces_match_ungrouped_post_backstop() {
     let oracle_rib = ungrouped.adj_ribs_out.get(&MEMBER).unwrap();
     let mut oracle: Vec<(Prefix, PeerId)> = oracle_rib.iter().map(|r| (r.prefix, r.peer)).collect();
     oracle.sort();
-    assert_eq!(oracle, vec![(p3, OTHER1)]);
+    assert_eq!(oracle, vec![(p1, OTHER2), (p3, OTHER1)]);
 
     let mut rows: Vec<(Prefix, PeerId)> = grouped
         .grouped_advertised_routes(MEMBER)
@@ -6475,8 +6417,7 @@ fn pcb_otc_query_surfaces_match_ungrouped_post_backstop() {
 
 /// A SINGLE-BEST group reaching the backstop with an OTC-blocked
 /// announce is still a bug — its in-walk gate must reject before
-/// the shared table commit; only per-client-best groups defer to
-/// the backstop.
+/// the shared table commit.
 #[cfg(debug_assertions)]
 #[test]
 #[should_panic(expected = "single-best group staging must reject OTC")]
