@@ -4767,4 +4767,42 @@ mod tests {
         ledger.remove(&peer(3));
         assert_eq!(ledger.bytes(), size_of::<AdmittedRecovery>());
     }
+
+    #[test]
+    fn group_snapshot_holds_every_add_path_key_across_slot_reuse() {
+        let mut table = AdjRibOut::new(peer(250));
+        for n in (0..8_u32).rev() {
+            for path_id in [9, 1, 7, 3, 0] {
+                let mut route = slot_route(n);
+                route.path_id = path_id;
+                table.insert(route);
+                let mut route = crate::test_support::make_v6_route(
+                    Ipv6Prefix::new(Ipv6Addr::from(0x2001_0db8_u128 << 96 | u128::from(n)), 128),
+                    Ipv6Addr::LOCALHOST,
+                );
+                route.path_id = path_id;
+                table.insert(route);
+            }
+        }
+        let reused = slot_route(5).prefix;
+        assert!(table.withdraw(&reused, 3));
+        let mut route = slot_route(5);
+        route.path_id = 4;
+        table.insert(route);
+        let mut expected: Vec<_> = table
+            .iter()
+            .map(|route| Key::Unicast(route.prefix, route.path_id))
+            .collect();
+        expected.sort_unstable();
+        assert_eq!(expected.len(), 80);
+        let mut ledger = AdmittedRecovery::new();
+        ledger.insert_empty(peer(1)).unwrap();
+        ledger
+            .share_group_capture_with_checkpoint(peer(1), None, &table, (80, 0), &mut |_| {})
+            .unwrap()
+            .expect("a complete Add-Path universe shares a snapshot");
+        assert_eq!(ledger.snapshots[0].keys.as_slice(), expected.as_slice());
+        ledger.remove(&peer(1));
+        assert_eq!(ledger.bytes(), size_of::<AdmittedRecovery>());
+    }
 }
