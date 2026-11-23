@@ -191,8 +191,12 @@ impl SourceDeparture {
 }
 
 impl RibManager {
-    /// Registration and policy changes wait behind the departure. Only retain
-    /// session settings here. Credit, admitted routes and export gates stay live.
+    /// Receiver session settings retained for the live departure. Its pages,
+    /// the `FlowSpec` recompute and the selection-release pass all read them
+    /// while it runs. The copy stays valid only because every writer of these
+    /// inputs (registration, session teardown, family and endpoint changes)
+    /// waits behind the departure until it ends. Credit, admitted routes,
+    /// export policy and export gates stay live.
     pub(super) fn departure_receiver_settings(
         &mut self,
         peer: PeerId,

@@ -1609,3 +1609,208 @@ fn rs_restore_page_stays_within_the_pressured_limit_when_an_update_arrives_befor
     );
     assert_rs_departure_counts(&manager, &mut outputs);
 }
+
+const SECOND_SOURCE: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 3);
+
+fn departure_manager() -> (mpsc::Sender<RibUpdate>, RibManager) {
+    let (tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.outbound_row_credit_override = None;
+    super::distribution_window::untimed_window(&mut manager);
+    (tx, manager)
+}
+
+fn private_session_up(
+    peer: PeerId,
+    session_id: u64,
+    asn: u32,
+    flowspec: bool,
+) -> (Vec<RibUpdate>, mpsc::Receiver<OutboundRouteUpdate>) {
+    let encoder = RibUpdate::SetPeerExportEncoder {
+        peer,
+        session_id,
+        encoder: ReusableExactExportEncoder::new(1, 1),
+    };
+    let (outbound_tx, receiver) = mpsc::channel(4096);
+    let mut up = test_peer_up(peer, session_id, outbound_tx);
+    let RibUpdate::PeerUp {
+        export_policy,
+        peer_asn,
+        sendable_families,
+        ..
+    } = &mut up
+    else {
+        unreachable!()
+    };
+    *peer_asn = asn;
+    // Deny all of 10/8 (not only the /8 itself) toward AS 65099.
+    let mut chain = super::update_groups::peer_context_chain();
+    chain.policies[0].policy.entries[0].le = Some(32);
+    *export_policy = Some(chain);
+    if flowspec {
+        sendable_families.extend(ipv4_flowspec_sendable());
+    }
+    (vec![encoder, up], receiver)
+}
+
+fn drain_delivered(rx: &mut mpsc::Receiver<OutboundRouteUpdate>) -> Vec<OutboundRouteUpdate> {
+    std::iter::from_fn(|| rx.try_recv().ok().map(delivered)).collect()
+}
+
+/// The per-departure receiver settings must not survive into a
+/// later departure after the receiver re-registers with a different ASN.
+#[test]
+fn departure_settings_do_not_outlive_their_departure() {
+    const ROWS: u32 = 512;
+    let first_rows = |i: u32| Ipv4Prefix::new(Ipv4Addr::from(0xac10_0000 + i), 32);
+    let second_rows = |i: u32| Ipv4Prefix::new(Ipv4Addr::from(0x0a02_0000 + i), 32);
+    let alt = Ipv4Addr::new(198, 51, 100, 4);
+    let (_tx, mut manager) = departure_manager();
+    for source in [SOURCE, SECOND_SOURCE, alt] {
+        register_test_peer(&mut manager, peer_v4(source), 0);
+    }
+    // Receiver 0's first session is AS 65099, which the private policy
+    // denies for 10/8 only. Receivers 1..3 are ordinary private receivers.
+    let r0 = peer_v4(Ipv4Addr::new(192, 0, 2, 1));
+    let (updates, mut rx0) = private_session_up(r0, 1, 65_099, false);
+    for update in updates {
+        manager.handle_update(update);
+    }
+    let mut others: Vec<_> = (1..4)
+        .map(|index| join(&mut manager, index, Shape::Private))
+        .collect();
+    manager.handle_update(test_routes_received(
+        peer_v4(SOURCE),
+        (0..ROWS)
+            .map(|i| make_route(first_rows(i), SOURCE))
+            .collect(),
+    ));
+    manager.handle_update(test_routes_received(
+        peer_v4(SECOND_SOURCE),
+        (0..ROWS)
+            .map(|i| make_route_with_lp(second_rows(i), SECOND_SOURCE, 200))
+            .collect(),
+    ));
+    manager.handle_update(test_routes_received(
+        peer_v4(alt),
+        (0..ROWS)
+            .map(|i| make_route_with_lp(second_rows(i), alt, 100))
+            .collect(),
+    ));
+    drain_route_chunks(&mut manager);
+    let initial: usize = drain_delivered(&mut rx0)
+        .iter()
+        .map(|u| u.announce.len())
+        .sum();
+    assert_eq!(initial, ROWS as usize, "AS 65099 sees only 172.16/16");
+    for rx in &mut others {
+        drain_delivered(rx);
+    }
+
+    // Departure 1 prepares settings for receiver 0 (AS 65099).
+    manager.handle_update(down(SOURCE));
+    assert!(manager.source_departure.is_some());
+    while manager.source_departure.is_some() {
+        manager.poll_source_departure_turn();
+    }
+    let withdrawn: usize = drain_delivered(&mut rx0)
+        .iter()
+        .map(|u| u.unicast_withdrawals().count())
+        .sum();
+    assert_eq!(withdrawn, ROWS as usize);
+
+    // Receiver 0 reconnects as AS 65100: 10/8 is now exported to it.
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: r0,
+        session_id: 1,
+    });
+    let (updates, mut rx0) = private_session_up(r0, 2, 65_100, false);
+    for update in updates {
+        manager.handle_update(update);
+    }
+    assert_eq!(manager.current_session_id(r0), Some(2));
+    let initial: usize = drain_delivered(&mut rx0)
+        .iter()
+        .map(|u| u.announce.len())
+        .sum();
+    assert_eq!(initial, ROWS as usize, "AS 65100 sees 10.2/16");
+
+    // Departure 2: every 10.2 key falls back to the alternate source, which
+    // receiver 0 (AS 65100) must receive as a replacement, never a withdrawal.
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: peer_v4(SECOND_SOURCE),
+        session_id: 0,
+    });
+    assert!(manager.source_departure.is_some());
+    let mut stream = Vec::new();
+    while manager.source_departure.is_some() {
+        manager.poll_source_departure_turn();
+        stream.extend(drain_delivered(&mut rx0));
+    }
+    let mut replaced = BTreeSet::new();
+    let mut withdrawn = 0;
+    for update in &stream {
+        withdrawn += update.unicast_withdrawals().count();
+        for route in update.announce.iter() {
+            assert_eq!(route.peer, peer_v4(alt));
+            assert!(replaced.insert(route.prefix));
+        }
+    }
+    assert_eq!(withdrawn, 0, "receiver 0 lost alternates to stale settings");
+    assert_eq!(replaced.len(), ROWS as usize);
+}
+
+/// A receiver replacement queued mid-departure (new session, new
+/// negotiated families) must not apply until the departure has finished,
+/// because the departure retains that receiver's export settings.
+#[test]
+fn a_receiver_replacement_waits_behind_the_departure() {
+    const RECEIVERS: u8 = 4;
+    const ROWS: u32 = 512;
+    let (tx, mut manager) = departure_manager();
+    register_test_peer(&mut manager, peer_v4(SOURCE), 0);
+    let mut receivers: Vec<_> = (0..RECEIVERS)
+        .map(|index| join(&mut manager, index, Shape::Private))
+        .collect();
+    seed(&mut manager, Shape::Private, ROWS);
+    for rx in &mut receivers {
+        assert_initial(rx, Shape::Private, ROWS);
+    }
+    let r0 = peer_v4(Ipv4Addr::new(192, 0, 2, 1));
+    let before = manager.peer_sendable_families[&r0].clone();
+
+    manager.handle_update(down(SOURCE));
+    assert!(manager.source_departure.is_some());
+    // Run one unit so receiver settings are retained, then queue a
+    // replacement session with different negotiated families.
+    manager.poll_source_departure_turn();
+    assert!(manager.source_departure.is_some());
+    let (updates, _rx0) = private_session_up(r0, 2, 65_100, true);
+    for update in updates {
+        tx.try_send(update).unwrap();
+    }
+    let mut turns = 0;
+    while manager.source_departure.is_some() {
+        manager.poll_source_departure_turn();
+        turns += 1;
+        assert_eq!(
+            manager.current_session_id(r0),
+            Some(1),
+            "replacement applied while the departure retained receiver settings"
+        );
+        assert_eq!(manager.peer_sendable_families[&r0], before);
+    }
+    assert!(turns > 1);
+    let first = drain_delivered(&mut receivers[0]);
+    assert_departed(&first, Shape::Private, ROWS, false);
+    // The replacement stayed queued and does change the cached inputs.
+    while let Some(update) = manager
+        .primary_lookahead
+        .take()
+        .or_else(|| manager.rx.try_recv().ok())
+    {
+        manager.handle_update(update);
+    }
+    assert_eq!(manager.current_session_id(r0), Some(2));
+    assert_ne!(manager.peer_sendable_families[&r0], before);
+}
