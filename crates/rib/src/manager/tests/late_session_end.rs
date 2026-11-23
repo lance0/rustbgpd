@@ -1037,6 +1037,7 @@ async fn supersede_mark_keeps_llgr_stale_routes() {
     announce_routes(&mut manager, 2, vec![v6.clone()]);
     let llgr_key = (peer(), Afi::Ipv4, Safi::Unicast);
     let original_deadline = manager.llgr_stale_deadlines[&llgr_key];
+    tokio::time::advance(Duration::from_secs(30)).await;
     manager.handle_update(reconnect_context(3, DUAL_STACK.to_vec(), llgr));
     peer_up_superseding(&mut manager, 3, Some(2));
     assert!(held(&manager, 1).is_some_and(|(_, llgr, selected)| llgr && selected));
