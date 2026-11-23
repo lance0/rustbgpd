@@ -451,6 +451,165 @@ fn refused_vpn_marker_resyncs_only_after_missing_rows_pass_export() {
     }
 }
 
+/// Labeled and `FlowSpec` receivers hold their table privately: a release
+/// owes it whole to each of `receivers`, joined while the gate was armed.
+fn private_release(
+    family: Family,
+    receivers: u8,
+) -> (
+    RibManager,
+    ExactExportKey,
+    Vec<(PeerId, mpsc::Receiver<OutboundRouteUpdate>)>,
+) {
+    let afi_safi = family.afi_safi();
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(
+        rx,
+        dummy_query_rx(),
+        None,
+        Some(Ipv4Addr::new(10, 255, 0, 254)),
+        BgpMetrics::new(),
+    )
+    .with_selection_deferral(SelectionDeferralConfig {
+        timeout: Duration::from_mins(1),
+        waiters: vec![SelectionDeferralWaiterConfig {
+            peer: peer_v4(WAITER).into(),
+            families: vec![afi_safi],
+        }],
+    });
+    let source = connect(
+        &mut manager,
+        SOURCE,
+        SOURCE_SESSION,
+        &[afi_safi],
+        false,
+        false,
+    );
+    drop(source);
+    let key = family.receive(&mut manager);
+    let waiter = connect(&mut manager, WAITER, 11, &[afi_safi], true, false);
+    drop(waiter);
+    let outputs = (0..receivers)
+        .map(|n| {
+            let address = Ipv4Addr::new(192, 0, 2, 100 + n);
+            let mut output = connect(&mut manager, address, 16, &[afi_safi], false, false);
+            assert!(drain(&mut output).is_empty(), "{family:?}");
+            (peer_v4(address), output)
+        })
+        .collect();
+    (manager, key, outputs)
+}
+
+fn release_waiter(manager: &mut RibManager, family: (Afi, Safi)) {
+    manager.handle_update(RibUpdate::EndOfRib {
+        peer: peer_v4(WAITER),
+        session_id: 11,
+        afi: family.0,
+        safi: family.1,
+    });
+}
+
+fn fill_writer(manager: &RibManager, peer: PeerId) {
+    let writer = &manager.outbound_peers[&peer];
+    while writer.try_send(OutboundRouteUpdate::default()).is_ok() {}
+}
+
+/// Each receiver's row, once, then its one marker, with no table rebuilt.
+fn assert_row_then_marker(
+    family: Family,
+    received: Vec<OutboundRouteUpdate>,
+    key: &ExactExportKey,
+) {
+    let afi_safi = family.afi_safi();
+    let mut rows = Vec::new();
+    let mut markers = 0;
+    for update in received {
+        rows.extend(announced(&update));
+        if update.end_of_rib.contains(&afi_safi) {
+            markers += 1;
+            assert_eq!(
+                rows,
+                std::slice::from_ref(key),
+                "marker before its row: {family:?}"
+            );
+        }
+    }
+    assert_eq!((rows.len(), markers), (1, 1), "{family:?}");
+}
+
+// The release visits only a bounded page of receivers per turn. A later
+// receiver's owed drain sends its row first, while the pending visit still
+// holds the marker. A full writer at that visit refuses only the marker.
+#[test]
+fn refused_private_release_marker_retries_after_its_drain() {
+    for family in [Family::Labeled(Afi::Ipv4), Family::FlowSpec(Afi::Ipv4)] {
+        let afi_safi = family.afi_safi();
+        let (mut manager, key, mut outputs) = private_release(family, 17);
+        let builds = manager.adj_rib_out_commit_stats.resync_builds;
+        release_waiter(&mut manager, afi_safi);
+        let mut parked = HashSet::new();
+        while outputs
+            .iter()
+            .any(|(peer, _)| manager.eor.release_pending(*peer, afi_safi))
+        {
+            assert!(manager.resync_tick_pending(), "{family:?}");
+            manager.resync_dirty_peers_bounded();
+            for (peer, _) in &outputs {
+                if !manager.owes(*peer, afi_safi)
+                    && manager.eor.release_pending(*peer, afi_safi)
+                    && parked.insert(*peer)
+                {
+                    fill_writer(&manager, *peer);
+                }
+            }
+        }
+        assert!(!parked.is_empty(), "no visit followed a finished drain");
+        for peer in &parked {
+            assert!(manager.eor_pending(*peer).contains(&afi_safi));
+            assert!(!manager.dirty_peers.contains(peer), "{family:?}");
+        }
+        let mut received: Vec<_> = outputs.iter_mut().map(|(_, rx)| drain(rx)).collect();
+        drain_resync_ticks(&mut manager);
+        for ((peer, rx), mut updates) in outputs.iter_mut().zip(received.drain(..)) {
+            updates.extend(drain(rx));
+            assert_row_then_marker(family, updates, &key);
+            assert!(!manager.dirty_peers.contains(peer));
+        }
+        assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
+    }
+}
+
+// A receiver whose writer is full when the release reaches it still owes the
+// whole family: the marker waits for the owed drain, which sends it behind
+// the row once the writer has room.
+#[test]
+fn private_release_marker_waits_for_its_owed_drain() {
+    for family in [Family::Labeled(Afi::Ipv4), Family::FlowSpec(Afi::Ipv4)] {
+        let afi_safi = family.afi_safi();
+        let (mut manager, key, mut outputs) = private_release(family, 1);
+        let (peer, rx) = &mut outputs[0];
+        let peer = *peer;
+        fill_writer(&manager, peer);
+        let builds = manager.adj_rib_out_commit_stats.resync_builds;
+        release_waiter(&mut manager, afi_safi);
+        drain_resync_ticks(&mut manager);
+        assert!(manager.owes(peer, afi_safi), "{family:?}");
+        assert!(manager.eor_pending(peer).contains(&afi_safi));
+        assert!(!manager.dirty_peers.contains(&peer));
+        let mut updates = drain(rx);
+        assert!(
+            updates.iter().all(
+                |update| announced(update).is_empty() && !update.end_of_rib.contains(&afi_safi)
+            )
+        );
+        drain_resync_ticks(&mut manager);
+        updates.extend(drain(rx));
+        assert_row_then_marker(family, updates, &key);
+        assert!(!manager.owes(peer, afi_safi) && !manager.dirty_peers.contains(&peer));
+        assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
+    }
+}
+
 #[test]
 #[expect(
     clippy::too_many_lines,
