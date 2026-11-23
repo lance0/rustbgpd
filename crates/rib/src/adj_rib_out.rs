@@ -727,10 +727,7 @@ impl AdjRibOut {
     }
 
     pub(crate) fn has_local_export_sources(&self) -> bool {
-        match &self.local_export_sources {
-            LocalSources::Hashed(table) => !table.is_empty(),
-            LocalSources::Ordered(table) => !table.is_empty(),
-        }
+        !self.local_export_sources.is_empty()
     }
 
     /// Every admitted key's original local provenance.
