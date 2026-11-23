@@ -7140,7 +7140,7 @@ fn snapshot_empty_admission_falls_back_to_flat(attach_empty: bool) {
         .chain(std::iter::once(
             Key::try_from(&ExactExportKey::Vpn(vpn_route(1, OTHER1).key())).unwrap(),
         ));
-    manager.prepare_empty_group_recovery_admission(MEMBER, initial.clone());
+    manager.prepare_empty_group_recovery_admission(MEMBER, initial.clone().map(Some));
     assert!(manager.group_ribs[&GID].recovery_snapshot.is_some());
     manager
         .pending_group_admitted
@@ -7158,7 +7158,7 @@ fn snapshot_empty_admission_falls_back_to_flat(attach_empty: bool) {
             .chain(std::iter::once(
                 Key::try_from(&ExactExportKey::Vpn(vpn_route(1, OTHER1).key())).unwrap(),
             ));
-        manager.prepare_empty_group_recovery_admission(OTHER2, old);
+        manager.prepare_empty_group_recovery_admission(OTHER2, old.map(Some));
         // A previously rejected envelope can leave reserved sparse capacity
         // on a still-empty proof; none of these candidates proves admission.
         manager

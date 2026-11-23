@@ -793,3 +793,52 @@ on a session. The `CORE_READINESS_DEADLINE` and `health` / `GetHealth` rows
 above describe the earlier behavior. Neighbor snapshots remain on the
 operator and ordinary lanes, and the detached collection selected in the
 2026-10-10 amendment is unchanged.
+
+## Amendment (2026-11-23) — per-peer freshness during export-policy replacement
+
+The RIB portion of `ListNeighbors` and `GetNeighborState` uses a per-peer
+read boundary during synchronous export-policy changes. Before changing
+outbound state, the RIB captures a row for each named peer and every member
+of its source and prospective destination update groups. This includes group
+members that keep their policy. Dataset reevaluation uses the named peers
+and their existing groups. Each apply or restore command gets its own entry
+view, including paced commands that follow a deferred reply.
+
+At checkpoints, a request receives those captured rows for the affected
+peers. For every other peer the RIB reads its current row. For example, a
+writer that closes during the command can make `prefixes_sent_pending` true
+for an unrelated grouped peer while a mover still reports its entry value.
+A list can therefore contain observations from different times. Its requested
+row order, peer identities and separately returned GR/LLGR retention rows
+retain their existing meaning. After the outer command completes, every row
+uses current state.
+
+Only a checkpoint that lends the RIB to the reader can read a current row.
+Some checkpoints serve readiness alone, for example while a helper holds
+part of the RIB mutably. A request that needs a current row, a mixed
+comparison or the retained roster waits there for the next checkpoint that
+can read it. Later requests on the lane keep their order and wait behind it.
+VPN distribution during dataset reevaluation reads at each receiver and
+staged key. EVPN group staging still has only readiness checkpoints, and
+production builds do not enable group-owned EVPN tables.
+
+A group comparison uses entry memberships and keys when both peers are in
+the captured set. If either peer is outside it, the RIB reads both
+memberships and keys at dispatch. The primary neighbor's own row still
+follows its per-peer read boundary, so its `update_group` label can be older
+than the comparison. Use `update_group_comparison` for the pair's verdict,
+membership classifications and differences.
+
+On a distinct-chain reload with one mover per command and singleton source
+groups, a move to an empty destination captures one neighbor row. Moving
+into an occupied group also captures its members. Capture cost depends on
+these groups and the cost of each row. A list read still materializes all
+requested rows. While a recovery helper temporarily owns the admission
+ledger, live reads need to know which peers have complete admission proofs.
+On first use in a command, the RIB walks the recovery records and keeps
+those peer identities for this purpose.
+
+The general RIB query remains queued through synchronous replacement and
+returns its aggregate from one actor turn. The readiness lane retains the
+Loc-RIB count and owner-age checks. Export policy term hits use their
+separate [published roster](0136-owner-published-counter-reads.md).
