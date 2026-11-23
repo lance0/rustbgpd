@@ -4010,42 +4010,372 @@ fn late_session_gets_only_the_rtbh_path_beside_a_frozen_ordinary_path() {
         // The RTBH sibling wins selection but this receiver's policy denies
         // it, so the ordinary row stays frozen on the observer's wire.
         let frozen = row(&page, observer);
-        if manager.grouped_member_of(observer).is_some() {
-            // The joiner replays the observer's group table, which no longer
-            // holds the ordinary row: readback cannot prove the frozen copy.
-            assert_eq!(
-                manager.grouped_member_of(late),
-                manager.grouped_member_of(observer)
-            );
-            assert_eq!(
-                frozen.disposition,
-                RouteExportDisposition::Pending,
-                "{mode:?}: never COMMITTED without the admitted row"
-            );
-        } else {
-            assert_eq!(
-                frozen.disposition,
-                RouteExportDisposition::Committed,
-                "{mode:?}"
-            );
-            let explanation = source_less_explain(&mut manager, observer, prefix);
-            assert_eq!(
-                (
-                    explanation.decision,
-                    explanation.already_advertised,
-                    explanation.route_peer,
-                    explanation.route_path_id,
-                ),
-                (
-                    crate::update::ExplainDecision::Advertise,
-                    true,
-                    Some(LOCAL_PEER),
-                    Some(23)
-                ),
-                "{mode:?}: explain the frozen row, not the denied RTBH: {explanation:?}"
+        if let Some(group) = manager.grouped_member_of(observer) {
+            assert_eq!(manager.grouped_member_of(late), Some(group));
+            assert!(
+                manager.group_ribs[&group].table.get(&prefix, 0).is_none(),
+                "{mode:?}: the group has withdrawn its ordinary row"
             );
         }
+        assert_eq!(
+            frozen.disposition,
+            RouteExportDisposition::Committed,
+            "{mode:?}"
+        );
+        let explanation = source_less_explain(&mut manager, observer, prefix);
+        assert_eq!(
+            (
+                explanation.decision,
+                explanation.already_advertised,
+                explanation.route_peer,
+                explanation.route_path_id,
+            ),
+            (
+                crate::update::ExplainDecision::Advertise,
+                true,
+                Some(LOCAL_PEER),
+                Some(23)
+            ),
+            "{mode:?}: explain the frozen row, not the denied RTBH: {explanation:?}"
+        );
+
+        assert_changed_ordinary_path_across_release(&mut manager, mode, prefix, observer, late);
     }
+}
+
+fn assert_changed_ordinary_path_across_release(
+    manager: &mut RibManager,
+    mode: DeferredUnicastMode,
+    prefix: Prefix,
+    observer: PeerId,
+    late: PeerId,
+) {
+    let mut replacement = local_route(prefix, 23);
+    AttrSet::edit(&mut replacement.attributes, |attrs| {
+        attrs.push(PathAttribute::Med(71));
+    });
+    inject(manager, replacement);
+    let changed = query(manager, prefix, 23, None, 10).unwrap();
+    assert_eq!(
+        (
+            row(&changed, observer).disposition,
+            row(&changed, observer).reason.as_str()
+        ),
+        (RouteExportDisposition::Pending, "selection_deferred"),
+        "{mode:?}"
+    );
+    assert_deferred_explain(
+        &source_less_explain(manager, observer, prefix),
+        &format!("{mode:?} MED"),
+    );
+
+    withdraw(manager, prefix, 71);
+    let waiter = peer_v4(Ipv4Addr::new(192, 0, 2, 1));
+    for (afi, safi) in deferred_unicast_families() {
+        manager.handle_update(RibUpdate::EndOfRib {
+            peer: waiter,
+            session_id: 77,
+            afi,
+            safi,
+        });
+    }
+    drain_unicast_release(manager);
+    drain_resync_ticks(manager);
+    assert!(!manager.selection_deferred(prefix_family(&prefix)));
+    assert!(!manager.has_frozen_group_locals(observer));
+    assert!(manager.deferred_selection_keys.is_cleared());
+    let released = query(manager, prefix, 23, None, 10).unwrap();
+    for peer in [observer, late] {
+        assert_eq!(
+            row(&released, peer).disposition,
+            RouteExportDisposition::Committed,
+            "{mode:?}: released peer {peer}"
+        );
+        let explanation = source_less_explain(manager, peer, prefix);
+        assert_eq!(
+            (
+                explanation.decision,
+                explanation.already_advertised,
+                explanation.route_path_id
+            ),
+            (crate::update::ExplainDecision::Advertise, true, Some(23)),
+            "{mode:?}: released peer {peer}"
+        );
+    }
+}
+
+#[test]
+fn frozen_group_local_capture_shares_prefix_visits_across_members() {
+    for k in [8_u8, 32] {
+        let mut manager = restart_unicast_manager(false);
+        let limit = 37;
+        manager.set_frozen_local_visit_limit(limit);
+        let peers: Vec<_> = (4..4 + k).map(|n| PeerId::from_addr(v4(n))).collect();
+        let mut receivers: Vec<_> = peers
+            .iter()
+            .map(|&peer| {
+                deferred_unicast_peer(&mut manager, peer, DeferredUnicastMode::Single, false)
+            })
+            .collect();
+        for n in 0..k {
+            let v4 = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, n), 32));
+            let v6 = Prefix::V6(Ipv6Prefix::new(
+                Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, u16::from(n)),
+                128,
+            ));
+            for prefix in [v4, v6] {
+                inject(&mut manager, local_route(prefix, 23));
+            }
+            for rx in &mut receivers {
+                let _ = deferred_unicast_drain(rx);
+            }
+        }
+        for peer in &peers {
+            assert!(manager.grouped_member_of(*peer).is_some());
+            assert_eq!(
+                manager.adj_ribs_out[peer].local_export_sources().len(),
+                2 * usize::from(k)
+            );
+        }
+        let _waiter = connect_restart_waiter(&mut manager);
+        assert_eq!(
+            manager.frozen_local_visits(),
+            [limit; 2],
+            "K={k}: all admitted host routes reject frozen capture"
+        );
+        assert!(
+            peers
+                .iter()
+                .all(|peer| !manager.has_frozen_group_locals(*peer))
+        );
+    }
+}
+
+#[test]
+fn frozen_group_local_budget_refusal_keeps_wire_and_recovery_proof() {
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24));
+    let observer = PeerId::from_addr(v4(4));
+    let mut manager = restart_unicast_manager(false);
+    manager.set_frozen_local_byte_limit(1);
+    let mut output =
+        deferred_unicast_peer(&mut manager, observer, DeferredUnicastMode::Single, true);
+    inject(&mut manager, local_route(prefix, 23));
+    assert!(
+        deferred_unicast_drain(&mut output)
+            .iter()
+            .any(|batch| !batch.announce.is_empty())
+    );
+    let _waiter = connect_restart_waiter(&mut manager);
+    inject(&mut manager, deferred_unicast_local(prefix, 71, 50));
+    let late = PeerId::from_addr(v4(5));
+    let _late = deferred_unicast_peer(&mut manager, late, DeferredUnicastMode::Single, true);
+    assert!(manager.pending_group_admitted.get(&observer).is_some_and(|proof| proof.contains(&crate::update::ExactExportKey::Unicast(prefix, 0))));
+    assert!(manager.frozen_group_local_row(observer, &prefix).is_none());
+    assert!(
+        deferred_unicast_drain(&mut output)
+            .iter()
+            .all(|batch| batch.unicast_withdrawals().next().is_none())
+    );
+    let page = query(&mut manager, prefix, 23, None, 10).unwrap();
+    assert_eq!(
+        (
+            row(&page, observer).disposition,
+            row(&page, observer).reason.as_str()
+        ),
+        (RouteExportDisposition::Pending, "selection_deferred")
+    );
+}
+
+#[test]
+fn frozen_group_local_desired_replacement_is_not_an_admitted_body() {
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24));
+    let observer = PeerId::from_addr(v4(4));
+    let sibling = PeerId::from_addr(v4(5));
+    let mut manager = restart_unicast_manager(false);
+    let mut output =
+        deferred_unicast_peer(&mut manager, observer, DeferredUnicastMode::Single, false);
+    let mut other =
+        deferred_unicast_peer(&mut manager, sibling, DeferredUnicastMode::Single, false);
+    inject(&mut manager, local_route(prefix, 23));
+    let _ = deferred_unicast_drain(&mut output);
+    let _ = deferred_unicast_drain(&mut other);
+    let sender = &manager.outbound_peers[&observer];
+    let permits: Vec<_> = (0..sender.capacity())
+        .map(|_| sender.clone().try_reserve_owned().unwrap())
+        .collect();
+    let mut changed = local_route(prefix, 23);
+    AttrSet::edit(&mut changed.attributes, |attrs| {
+        attrs.push(PathAttribute::Med(71));
+    });
+    inject(&mut manager, changed);
+    assert!(manager.dirty_peers.contains(&observer));
+    assert!(
+        deferred_unicast_drain(&mut other)
+            .iter()
+            .any(|packet| !packet.announce.is_empty())
+    );
+    let _waiter = connect_restart_waiter(&mut manager);
+    drop(permits);
+    manager.distribute_resync_request();
+    assert!(manager.selection_partial_caught_up(observer));
+    assert!(manager.frozen_group_local_row(observer, &prefix).is_none());
+    assert!(
+        deferred_unicast_drain(&mut output)
+            .iter()
+            .all(|packet| packet.announce.is_empty()
+                && packet.unicast_withdrawals().next().is_none())
+    );
+    let group = &manager.group_ribs[&manager.grouped_member_of(observer).unwrap()];
+    assert_eq!(
+        group.table.local_export_source(&prefix, 0).unwrap().path_id,
+        23
+    );
+    assert!(
+        group
+            .table
+            .get(&prefix, 0)
+            .unwrap()
+            .attributes
+            .iter()
+            .any(|attr| matches!(attr, PathAttribute::Med(71)))
+    );
+    let page = query(&mut manager, prefix, 23, None, 10).unwrap();
+    assert_eq!(
+        (
+            row(&page, observer).disposition,
+            row(&page, observer).reason.as_str()
+        ),
+        (RouteExportDisposition::Pending, "selection_deferred")
+    );
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::ExplainAdvertisedRoute {
+        peer: observer,
+        prefix,
+        rd: None,
+        labeled: false,
+        source: None,
+        reply,
+    });
+    assert!(matches!(
+        response.try_recv().unwrap(),
+        Err(crate::update::ExplainAdvertisedRouteError::FailedPrecondition(_))
+    ));
+}
+
+#[test]
+fn frozen_group_local_witness_ends_on_actual_replacement() {
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24));
+    let observer = PeerId::from_addr(v4(4));
+    let mut manager = restart_unicast_manager(false);
+    let mut output =
+        deferred_unicast_peer(&mut manager, observer, DeferredUnicastMode::Single, false);
+    inject(&mut manager, local_route(prefix, 23));
+    let _ = deferred_unicast_drain(&mut output);
+    let _waiter = connect_restart_waiter(&mut manager);
+    assert!(manager.frozen_group_local_row(observer, &prefix).is_some());
+    inject(&mut manager, deferred_unicast_local(prefix, 71, 50));
+    assert!(
+        deferred_unicast_drain(&mut output)
+            .iter()
+            .flat_map(|batch| batch.announce.iter())
+            .any(|route| route.communities().contains(&DEFERRED_BLACKHOLE))
+    );
+    assert!(!manager.has_frozen_group_locals(observer));
+    withdraw(&mut manager, prefix, 71);
+    let page = query(&mut manager, prefix, 23, None, 10).unwrap();
+    assert_eq!(
+        (
+            row(&page, observer).disposition,
+            row(&page, observer).reason.as_str()
+        ),
+        (RouteExportDisposition::Pending, "selection_deferred")
+    );
+}
+
+/// A member regrouped during the hold has no captured row, and its new group
+/// table never held the ordinary route. Its regroup baseline is the admitted
+/// row, so readback and explain use it rather than the new group's view.
+#[test]
+fn regrouped_member_reads_back_its_baseline_row_during_the_hold() {
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24));
+    let observer = PeerId::from_addr(v4(4));
+    let mut manager = restart_unicast_manager(false);
+    let mut output =
+        deferred_unicast_peer(&mut manager, observer, DeferredUnicastMode::Single, false);
+    inject(&mut manager, local_route(prefix, 23));
+    assert!(
+        deferred_unicast_drain(&mut output)
+            .iter()
+            .any(|batch| !batch.announce.is_empty())
+    );
+    let _waiter = connect_restart_waiter(&mut manager);
+    let before = manager.grouped_member_of(observer).unwrap();
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::ReplacePeerExportPolicy {
+        peer: observer,
+        export_policy: deferred_unicast_policy(false, true),
+        reply,
+    });
+    response.try_recv().unwrap().unwrap();
+    // The RTBH sibling wins selection; the destination policy denies it.
+    inject(&mut manager, deferred_unicast_local(prefix, 71, 50));
+    manager.distribute_resync_request();
+    let after = manager.grouped_member_of(observer).unwrap();
+    assert_ne!(after, before, "the member moved to another group");
+    assert!(
+        manager.group_ribs[&after].table.get(&prefix, 0).is_none(),
+        "the destination group never held the ordinary row"
+    );
+    assert!(!manager.has_frozen_group_locals(observer));
+    assert!(manager.dirty_peers.contains(&observer));
+    assert!(manager.selection_partial_caught_up(observer));
+    assert!(
+        manager.pending_regroup_baseline[&observer]
+            .unicast
+            .contains_key(&(prefix, 0))
+    );
+    assert!(
+        deferred_unicast_drain(&mut output)
+            .iter()
+            .all(|batch| batch.unicast_withdrawals().next().is_none()),
+        "the member keeps its admitted row on the wire"
+    );
+
+    let page = query(&mut manager, prefix, 23, None, 10).unwrap();
+    assert_eq!(
+        row(&page, observer).disposition,
+        RouteExportDisposition::Committed
+    );
+    let explanation = source_less_explain(&mut manager, observer, prefix);
+    assert_eq!(
+        (
+            explanation.decision,
+            explanation.already_advertised,
+            explanation.route_peer,
+            explanation.route_path_id,
+        ),
+        (
+            crate::update::ExplainDecision::Advertise,
+            true,
+            Some(LOCAL_PEER),
+            Some(23)
+        ),
+        "{explanation:?}"
+    );
+
+    let mut changed = local_route(prefix, 23);
+    AttrSet::edit(&mut changed.attributes, |attrs| {
+        attrs.push(PathAttribute::Med(71));
+    });
+    inject(&mut manager, changed);
+    let page = query(&mut manager, prefix, 23, None, 10).unwrap();
+    assert_eq!(
+        (
+            row(&page, observer).disposition,
+            row(&page, observer).reason.as_str()
+        ),
+        (RouteExportDisposition::Pending, "selection_deferred")
+    );
 }
 
 /// A route-server client's wire row is the selected row after its own

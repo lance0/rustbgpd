@@ -20,6 +20,7 @@ use super::RibManager;
 use super::eor_hold::EorTrigger;
 use super::evpn_recovery::EvpnCompleteFeed;
 
+mod frozen_local;
 mod inventory;
 mod rejections;
 mod unicast_release;
@@ -153,6 +154,8 @@ impl DeferredSelectionKeyCharge for crate::route::RtcRibRouteKey {
 
 #[derive(Debug, Default)]
 pub(super) struct DeferredSelectionKeys {
+    // Keep the per-family readback ledgers out of the RIB actor future.
+    frozen_locals: Box<frozen_local::FrozenLocalRows>,
     unicast: BTreeSet<rustbgpd_wire::Prefix>,
     flowspec: ShardedMap<crate::route::FlowSpecKey, ()>,
     evpn: ShardedMap<rustbgpd_wire::EvpnRouteKey, ()>,
@@ -220,6 +223,7 @@ impl DeferredSelectionKeys {
             && self.retained_key_bytes_by_family.is_empty()
             && self.retained_key_bytes == 0
             && self.retired_unicast_bytes == [0; 2]
+            && self.frozen_locals.is_cleared()
     }
 
     /// Insert distinct typed identities until the process-wide ledger limit is
@@ -290,8 +294,9 @@ impl DeferredSelectionKeys {
         }
     }
 
-    fn complete_family_release(&mut self, family: (Afi, Safi)) {
+    fn complete_family_release(&mut self, family: (Afi, Safi), checkpoint: &mut impl FnMut()) {
         if matches!(family, (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast)) {
+            self.frozen_locals.clear_family(family.0, checkpoint);
             self.retired_unicast_bytes[usize::from(family.0 == Afi::Ipv6)] = 0;
         }
         self.overflowed_families.remove(&family);
@@ -1562,7 +1567,7 @@ impl RibManager {
                 manager.cancel_rearmed_release(family);
             }
             manager.suspend_conditional_advertisement_families(&families);
-            manager.retain_selection_group_admission();
+            manager.retain_selection_group_admission(&families);
             let readiness = manager.replacement_readiness.clone();
             let mut checkpoint =
                 || super::replacement_readiness_checkpoint_at(&readiness, "selection_arm", false);
@@ -2368,7 +2373,11 @@ impl RibManager {
         }
         // Overflow state and logical byte budget stay sticky until every
         // typed store and RTC side effect for the family has completed.
-        self.deferred_selection_keys.complete_family_release(family);
+        let readiness = &self.replacement_readiness;
+        self.deferred_selection_keys
+            .complete_family_release(family, &mut || {
+                super::replacement_readiness_checkpoint(readiness, false);
+            });
         // A collision Stage must send the table before the later release.
         // A direct release builds missing clean feeds on its paced peer visits.
         let feeds = if stage_only && family == (Afi::L2Vpn, Safi::Evpn) {
@@ -2783,7 +2792,7 @@ mod ledger_tests {
             charge * 2,
             "removing typed keys must not reclaim budget before complete family release"
         );
-        ledger.complete_family_release(family_a);
+        ledger.complete_family_release(family_a, &mut || {});
         assert_eq!(ledger.retained_key_bytes, charge);
         assert!(!ledger.retained_key_bytes_by_family.contains_key(&family_a));
 

@@ -3399,7 +3399,7 @@ impl RibManager {
     }
 
     /// Capture actual admission before dormant-to-active staging can dirty it.
-    pub(super) fn retain_selection_group_admission(&mut self) {
+    pub(super) fn retain_selection_group_admission(&mut self, newly_held: &HashSet<(Afi, Safi)>) {
         let peers: Vec<_> = self
             .outbound_peers
             .keys()
@@ -3411,6 +3411,7 @@ impl RibManager {
                     .any(|held| held)
             })
             .collect();
+        let mut visits = self.frozen_group_local_visit_budget(newly_held);
         for peer in peers {
             self.replacement_checkpoint(false);
             // Freeze known clean counts before a bounded capture can refuse;
@@ -3439,6 +3440,7 @@ impl RibManager {
                 .flatten()
             });
             self.capture_group_admitted_keys(peer);
+            self.capture_frozen_group_locals(peer, &mut visits);
             let families = self.selection_receiver_held_families(peer);
             if let Some(session) = self.outbound_session_ids.get(&peer).copied()
                 && let Some(record) = self.newest_live_session_mut(peer, session)
@@ -4589,6 +4591,7 @@ impl RibManager {
     }
 
     fn leave_group_without_gauge_refresh(&mut self, gid: usize, peer: PeerId) {
+        self.forget_peer_frozen_group_locals(peer);
         // A withdrawal the group queued to this member may not have
         // reached it; the member's own hold ledger keeps it for a flap after
         // the move. A session teardown has already deregistered the peer and
