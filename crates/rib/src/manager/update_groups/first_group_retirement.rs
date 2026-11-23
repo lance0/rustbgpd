@@ -1,9 +1,33 @@
-use super::GroupRibOut;
+use std::collections::BTreeMap;
+
+use super::{GroupRibOut, PeerId, PolicyRows};
 
 impl GroupRibOut {
+    pub(in crate::manager) fn first_group_policy_evaluated(
+        &self,
+        prefix: &rustbgpd_wire::Prefix,
+    ) -> bool {
+        #[cfg(test)]
+        crate::manager::slice_timing::record_work("first_group_evaluated_lookups", 1);
+        self.table.get(prefix, 0).is_some() || self.policy_filtered.get(prefix).is_some()
+    }
+
+    /// Select bounded-growth sidecars before any staged route can enter them.
+    pub(in crate::manager) fn prepare_policy_first_group(&mut self) {
+        debug_assert!(self.table.is_empty());
+        self.table
+            .prepare_first_group_next_hops(self.export_chain.as_ref().expect("policy first group"));
+        self.policy_filtered = PolicyRows::Ordered(BTreeMap::new());
+        if !self.source_control_passthrough {
+            self.source_attrs = PolicyRows::Ordered(BTreeMap::new());
+        }
+    }
+
     pub(in crate::manager) fn empty_first_group_table(&self) -> Self {
-        Self::new(
-            None,
+        let mut empty = Self::new(
+            self.export_chain
+                .as_ref()
+                .map(rustbgpd_policy::PolicyChain::fork_for_install),
             self.is_ebgp,
             self.interpret_rfc1997,
             self.is_rr_client,
@@ -12,27 +36,44 @@ impl GroupRibOut {
             self.llgr.clone(),
             false,
             0,
-        )
+        );
+        if empty.export_chain.is_some() {
+            empty.prepare_policy_first_group();
+        }
+        empty
     }
 
-    /// Retire an unpublished single-best unicast group with no policy, role,
-    /// or members. Its only populated sidecars are keyed by route or source.
-    /// Charge a slot even if a mid-build withdrawal already removed its row.
-    pub(in crate::manager) fn retire_first_group_page(&mut self, budget: usize) -> bool {
+    /// Release the counters and policy input owned by an advertised slot.
+    pub(super) fn retire_first_group_slot(&mut self) -> Option<PeerId> {
+        #[cfg(test)]
+        crate::manager::slice_timing::record_work("first_group_retired_slots", 1);
+        let (source, prefix) = self.table.retire_first_group_slot()?;
+        self.dec_source(source, &prefix);
+        if !self.source_control_passthrough {
+            self.source_attrs.remove(&(prefix, 0));
+        }
+        Some(source)
+    }
+
+    /// Retire one physical slot (even a hole) or one denied prefix per unit.
+    pub(in crate::manager) fn retire_first_group_page(&mut self, mut budget: usize) -> bool {
         debug_assert!(self.members.is_empty() && !self.per_client_best);
-        debug_assert!(self.export_chain.is_none() && self.local_role.is_none());
-        debug_assert!(self.policy_filtered.is_empty() && self.otc_blocked.is_empty());
-        for _ in 0..budget {
-            if self.table.first_group_retirement_finished() {
-                break;
+        debug_assert!(self.local_role.is_none() && self.otc_blocked.is_empty());
+        while !self.table.first_group_retirement_finished() {
+            if budget == 0 {
+                return false;
             }
-            if let Some((source, prefix)) = self.table.retire_first_group_slot() {
-                self.dec_source(source, &prefix);
+            budget -= 1;
+            self.retire_first_group_slot();
+        }
+        debug_assert!(self.source_counts.is_empty() && self.source_attrs.is_empty());
+        match &mut self.policy_filtered {
+            PolicyRows::Ordered(map) => PolicyRows::retire_ordered(map, &mut budget),
+            PolicyRows::Sharded(map) => {
+                debug_assert!(map.is_empty());
+                true
             }
         }
-        let finished = self.table.first_group_retirement_finished();
-        debug_assert!(!finished || self.source_counts.is_empty());
-        finished
     }
 }
 
@@ -190,6 +231,8 @@ mod tests {
 
     #[test]
     fn retirement_charges_withdrawn_slots_and_releases_bodies_and_indexes_in_pages() {
+        use crate::manager::slice_timing::take_first_group_retirement_work;
+
         let mut group = GroupRibOut::new(
             None,
             false,
@@ -218,16 +261,20 @@ mod tests {
         for (prefix, _) in &keys[5..] {
             group.apply_delta(&delta(*prefix, None));
         }
+        take_first_group_retirement_work();
         assert!(!group.retire_first_group_page(0));
+        assert_eq!(take_first_group_retirement_work(), [0, 0, 0]);
         assert!(
             !group.retire_first_group_page(2),
             "two holes consume this page"
         );
+        assert_eq!(take_first_group_retirement_work(), [2, 0, 0]);
         assert_eq!(group.table.len(), 5);
         assert!(
             !group.retire_first_group_page(2),
             "one more hole, then one body"
         );
+        assert_eq!(take_first_group_retirement_work(), [2, 0, 0]);
         assert_eq!(group.table.len(), 4);
         for (index, (prefix, attrs)) in keys.iter().enumerate() {
             assert_eq!(attrs.strong_count(), usize::from(index < 4));
@@ -238,7 +285,9 @@ mod tests {
             );
         }
         assert!(group.retire_first_group_page(4));
+        assert_eq!(take_first_group_retirement_work(), [4, 0, 0]);
         assert!(group.retire_first_group_page(0));
+        assert_eq!(take_first_group_retirement_work(), [0, 0, 0]);
         assert!(keys.iter().all(|(_, attrs)| attrs.strong_count() == 0));
         assert_eq!(group.table.local_export_sources().len(), 0);
         assert!(group.source_counts.is_empty());

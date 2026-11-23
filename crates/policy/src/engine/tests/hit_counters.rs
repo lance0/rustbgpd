@@ -134,6 +134,41 @@ fn replaced_chain_instance_starts_from_zero() {
 }
 
 #[test]
+fn staged_hits_reuse_ir_and_preserve_existing_counter_instances() {
+    let source = rpol_chain();
+    let mut staged = source.fork_for_install();
+    assert!(Arc::ptr_eq(
+        &source.compiled_shared(),
+        &staged.compiled_shared()
+    ));
+    let clean = route(v4_prefix([10, 0, 0, 0], 24), RpkiValidation::NotFound);
+    let invalid = route(v4_prefix([10, 0, 1, 0], 24), RpkiValidation::Invalid);
+    let _ = staged.evaluate(&clean);
+    let _ = staged.evaluate(&invalid);
+    let original = staged.share();
+    let discarded = PolicyHitCounters::for_chain(staged.compiled());
+    let _ = staged.compiled().evaluate_counting(&invalid, &discarded);
+    assert!(staged.exclude_staged_evaluations(&discarded));
+    assert_ne!(original.hit_counters().id(), staged.hit_counters().id());
+    assert_eq!(source.hit_counters().evals(), 0);
+    assert_eq!(original.hit_counters().evals(), 2);
+    assert_eq!(original.hit_counters().snapshot(), [vec![1, 1, 1]]);
+    assert_eq!(staged.hit_counters().evals(), 1);
+    assert_eq!(staged.hit_counters().snapshot(), [vec![0, 1, 1]]);
+}
+
+#[test]
+fn same_policies_uses_shared_ir_then_content() {
+    let source = rpol_chain();
+    let fork = source.fork_for_install();
+    assert!(source.same_policies(&fork) && fork.same_policies(&source));
+    // A clone has no compiled IR yet, so only the content comparison can match.
+    let clone = source.clone();
+    assert!(source.same_policies(&clone));
+    assert!(!source.same_policies(&PolicyChain::new(Vec::new())));
+}
+
+#[test]
 fn concurrent_evaluation_and_reads_agree_on_totals() {
     let chain = Arc::new(rpol_chain());
     let threads = 4;

@@ -600,6 +600,31 @@ impl PolicyHitCounters {
         }
     }
 
+    /// Start a fresh counter identity containing only evaluations that still
+    /// contribute to the private build. An error cannot be subtracted because
+    /// doing so may require reconstructing the previous last error.
+    pub(crate) fn excluding(&self, superseded: &Self, chain: &CompiledChain) -> Option<Self> {
+        if superseded.eval_errors() != 0 || self.labels != superseded.labels {
+            return None;
+        }
+        let mut fresh = Self::for_chain(chain);
+        *fresh.evals.get_mut() = self.evals().checked_sub(superseded.evals())?;
+        *fresh.eval_errors.get_mut() = self.eval_errors();
+        *fresh.last_error.get_mut().ok()? = self.last_error();
+        for ((target, total), excluded) in fresh
+            .policies
+            .iter_mut()
+            .flatten()
+            .zip(self.policies.iter().flatten())
+            .zip(superseded.policies.iter().flatten())
+        {
+            *target.get_mut() = total
+                .load(Ordering::Relaxed)
+                .checked_sub(excluded.load(Ordering::Relaxed))?;
+        }
+        Some(fresh)
+    }
+
     /// Process-wide identity of this counter instance, unique and increasing
     /// in creation order. Equal ids name the same monotonic counters.
     #[must_use]
