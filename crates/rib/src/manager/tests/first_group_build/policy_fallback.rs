@@ -249,3 +249,45 @@ fn policy_founder_uses_authoritative_order_for_multiple_errors() {
         2
     );
 }
+
+#[test]
+fn policy_founder_with_two_errors_falls_back_after_its_first_page() {
+    use crate::loc_rib::REGISTRATION_PAGE_SIZE;
+    use crate::manager::slice_timing::group_work;
+
+    let (mut manager, _tx, inventory) = fixture(4096);
+    let chain = rpol_chain(
+        "policy p { term t { set med route.origin-as; accept } }",
+        &rustbgpd_policy::datasets::DatasetBindings::new(),
+    );
+    // Every fourth winner has no origin AS, so any page evaluates several errors.
+    let broken: Vec<_> = inventory
+        .keys()
+        .step_by(4)
+        .map(|&prefix| route_without_origin_as(prefix, 160))
+        .collect();
+    let errors = broken.len() as u64;
+    manager.handle_update(test_routes_received(peer_v4(OTHER), broken));
+    drain_route_chunks(&mut manager);
+    let before = group_work();
+    let _rx = start_policy(&mut manager, chain);
+    assert!(manager.first_group_build.is_some());
+    reach_fallback(&mut manager);
+    let discovered = group_work()
+        .get("first_group_discovery")
+        .copied()
+        .unwrap_or(0)
+        - before.get("first_group_discovery").copied().unwrap_or(0);
+    assert!(
+        discovered <= REGISTRATION_PAGE_SIZE,
+        "fell back after {discovered} bucket visits of {} routes",
+        inventory.len()
+    );
+    finish(&mut manager);
+    let hits = manager
+        .export_policy_for(receiver(1))
+        .unwrap()
+        .hit_counters();
+    assert_eq!(hits.evals(), inventory.len() as u64);
+    assert_eq!(hits.eval_errors(), errors);
+}

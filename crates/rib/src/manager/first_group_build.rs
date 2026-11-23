@@ -620,6 +620,18 @@ impl RibManager {
             let prefixes = page.keys.into_iter().collect();
             job.table = self.stage_first_group_page(job.gid, job.table, &prefixes);
         }
+        // Errors are never subtracted, so a second one already decides the
+        // fallback at publication. Stop before staging the rest of the table.
+        if job.policy.is_some()
+            && job
+                .table
+                .export_chain
+                .as_ref()
+                .is_some_and(|chain| chain.hit_counters().eval_errors() > 1)
+        {
+            self.fallback_policy_first_group(job);
+            return;
+        }
         if self.loc_rib.registration_scan_status() != RegistrationScanStatus::Ready
             || !self.pending_route_batches.is_empty()
         {
