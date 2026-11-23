@@ -325,6 +325,7 @@ async fn bgpls_gr_stale_topology_keeps_orr_vantages_resolved() {
         restart_time: 2,
         stale_routes_time: 5,
         gr_families: vec![(Afi::BgpLs, Safi::BgpLs)],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
         llgr_stale_time: 0,

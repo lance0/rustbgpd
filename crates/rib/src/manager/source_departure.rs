@@ -480,6 +480,19 @@ impl RibManager {
 #[cfg(test)]
 thread_local! {
     static RECEIVER_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static FLOWSPEC_WITHDRAWAL_WORK: std::cell::Cell<(usize, usize, usize)> =
+        const { std::cell::Cell::new((0, 0, 0)) };
+}
+
+#[cfg(test)]
+pub(super) fn count_flowspec_withdrawal(clones: usize, probes: usize, removals: usize) {
+    let (staged, lookups, removed) = FLOWSPEC_WITHDRAWAL_WORK.get();
+    FLOWSPEC_WITHDRAWAL_WORK.set((staged + clones, lookups + probes, removed + removals));
+}
+
+#[cfg(test)]
+pub(super) fn take_flowspec_withdrawal_work() -> (usize, usize, usize) {
+    FLOWSPEC_WITHDRAWAL_WORK.take()
 }
 
 #[cfg(test)]

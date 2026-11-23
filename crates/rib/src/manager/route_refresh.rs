@@ -490,7 +490,7 @@ impl RibManager {
                 info!(%peer, "graceful restart complete — all End-of-RIB received");
                 self.gr_peers.remove(&peer);
                 self.gr_stale_deadlines.remove(&peer);
-                self.gr_stale_routes_time.remove(&peer);
+                self.gr_stale_timers.remove(&peer);
                 self.llgr_peer_config.remove(&peer);
                 self.metrics.set_gr_active(&peer_label, false);
                 self.metrics.set_gr_stale_routes(&peer_label, 0);
@@ -611,6 +611,7 @@ impl RibManager {
         let queued = self.primary_backlog().min(MAX_JOIN_COHORT - 1);
         if queued == 0
             || !matches!(family, (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast))
+            || self.is_initial_member_replay(leader)
             || self.selection_peer_convergence_held(leader, family)
             || self.test_ingest_stall.is_some()
             || !self.pending_route_batches.is_empty()
@@ -650,6 +651,7 @@ impl RibManager {
             };
             if (*afi, *safi) != family
                 || peers.contains(peer)
+                || self.is_initial_member_replay(*peer)
                 || self.release_marker_pending(*peer, family)
                 || self.outbound_session_ids.get(peer) != Some(session_id)
                 || self.grouped_member_of(*peer) != Some(gid)
@@ -873,6 +875,7 @@ impl RibManager {
             ));
         }
         if families.is_empty()
+            || self.is_initial_member_replay(peer)
             || !replay.is_valid()
             || families.iter().any(|&(afi, safi)| {
                 !matches!((afi, safi), (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast))
@@ -1114,6 +1117,10 @@ impl RibManager {
                 // RFC 5291 §6: a peer ROUTE-REFRESH lifts the initial-
                 // advertisement gate. Internal recovery may only observe it.
                 self.lift_orf_gate(peer, family);
+                if self.is_initial_member_replay(peer) {
+                    self.defer_refresh_answer(peer, family, suppress_eor);
+                    return FamilyReplayOutcome::Deferred;
+                }
                 // Without an admitted proof, the resync owns the tombstone
                 // and regroup withdrawals. Let it commit them before BoRR,
                 // while the receiver still holds those routes.
@@ -1130,6 +1137,13 @@ impl RibManager {
             FamilyReplayKind::PrefixLimitRecovery
             | FamilyReplayKind::OperatorReplay
             | FamilyReplayKind::SelectionRelease => {
+                if self.is_initial_member_replay(peer) {
+                    if matches!(replay_kind, FamilyReplayKind::SelectionRelease) {
+                        self.abort_initial_member_replay(peer);
+                        self.mark_outbound_dirty(peer);
+                    }
+                    return FamilyReplayOutcome::Deferred;
+                }
                 let orf_pending = self
                     .peer_orf_pending
                     .get(&peer)
@@ -2721,6 +2735,9 @@ impl RibManager {
         operation: Option<&mut OutboundOperation>,
     ) {
         self.replacement_checkpoint(true);
+        if self.is_initial_member_replay(peer) {
+            return;
+        }
         let Some(families) = self.pending_refresh.remove(&peer) else {
             return;
         };
@@ -2797,6 +2814,7 @@ impl RibManager {
                 self.pending_refresh_suppress_eor
                     .retain(|(owed, _)| *owed != peer);
             } else if !self.dirty_peers.contains(&peer)
+                && !self.is_initial_member_replay(peer)
                 && !self.outbound_operation_live(peer)
                 && !self.outbound_channel_full(peer)
             {
@@ -2815,7 +2833,9 @@ impl RibManager {
     /// Whether a deferred refresh response waits for the resync timer.
     pub(super) fn deferred_refresh_pending(&self) -> bool {
         self.pending_refresh.keys().any(|peer| {
-            !self.dirty_peers.contains(peer) && !self.refresh_waits_for_registration(*peer)
+            !self.dirty_peers.contains(peer)
+                && !self.is_initial_member_replay(*peer)
+                && !self.refresh_waits_for_registration(*peer)
         })
     }
 

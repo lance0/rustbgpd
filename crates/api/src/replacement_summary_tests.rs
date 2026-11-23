@@ -787,6 +787,7 @@ async fn down_dynamic_neighbor_retention_row_lasts_until_sweep() {
             restart_time: 120,
             stale_routes_time: 360,
             gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            peer_notification_gr: false,
             peer_llgr_capable: false,
             peer_llgr_families: vec![],
             llgr_stale_time: 0,

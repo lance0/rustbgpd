@@ -1694,3 +1694,369 @@ async fn aligned_next_hops_past_the_memo_slots_share_one_set_per_outcome() {
         "one aligned set per distinct import outcome"
     );
 }
+
+async fn rr_client(
+    tx: &mpsc::Sender<RibUpdate>,
+    address: Ipv4Addr,
+    session_id: u64,
+    identifier: Ipv4Addr,
+    add_path: bool,
+) -> (PeerSession, TcpStream) {
+    // The FSM negotiates from the configuration it was built with.
+    let mut client = if add_path {
+        let mut peer = PeerConfig::new(65001, 65001, Ipv4Addr::new(10, 0, 0, 1));
+        peer.families = vec![(Afi::Ipv4, Safi::Unicast)];
+        peer.add_path_send = true;
+        peer.add_path_send_max = 2;
+        make_test_session_with_peer_config(peer)
+    } else {
+        make_test_session_with_rib(65001, 65001).0
+    };
+    client.peer_ip = address.into();
+    client.rib_tx = tx.clone();
+    client.session_identity = SessionIdentity::primary(session_id);
+    client.config.cluster_id = Some(Ipv4Addr::new(10, 0, 0, 1));
+    client.config.route_reflector_client = true;
+    client.config.peer.graceful_restart = true;
+    let (socket, remote) = connected_stream_pair().await;
+    client.test_install_stream(socket);
+    let mut open = notification_gr_open(false);
+    open.my_as = 65001;
+    open.bgp_identifier = identifier;
+    for capability in &mut open.capabilities {
+        match capability {
+            Capability::FourOctetAs { asn } => *asn = 65001,
+            Capability::GracefulRestart {
+                restart_state,
+                families,
+                ..
+            } => {
+                *restart_state = session_id == 2;
+                families[0].forwarding_preserved = *restart_state;
+            }
+            _ => {}
+        }
+    }
+    if add_path {
+        open.capabilities
+            .push(Capability::AddPath(vec![rustbgpd_wire::AddPathFamily {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                send_receive: AddPathMode::Receive,
+            }]));
+    }
+    client.drive_fsm(Event::ManualStart).await;
+    client.drive_fsm(Event::OpenReceived(open)).await;
+    client.drive_fsm(Event::KeepaliveReceived).await;
+    assert_eq!(client.fsm.state(), SessionState::Established);
+    assert_eq!(
+        client
+            .publish_export_profile()
+            .add_path_send((Afi::Ipv4, Safi::Unicast)),
+        add_path
+    );
+    (client, remote)
+}
+
+async fn selected_source_row(tx: &mpsc::Sender<RibUpdate>) -> Route {
+    let (reply, done) = oneshot::channel();
+    tx.send(RibUpdate::QueryBestRoutes {
+        deadline: tokio::time::Instant::now() + Duration::from_secs(3),
+        reply,
+    })
+    .await
+    .unwrap();
+    let [row]: [Route; 1] = done.await.unwrap().try_into().expect("one retained prefix");
+    row
+}
+
+async fn reflected_wire_ids(
+    sink: &mut PeerSession,
+    wire: &mut TcpStream,
+    add_path: bool,
+) -> Vec<Ipv4Addr> {
+    let mut ids = Vec::new();
+    while let Ok(update) = sink.outbound_rx.try_recv() {
+        assert!(
+            update.unicast_withdrawals().next().is_none(),
+            "retained route was withdrawn"
+        );
+        if update.announce.is_empty() {
+            continue;
+        }
+        assert_eq!(update.announce.len(), 1);
+        sink.send_route_update(update);
+        let parsed = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Message::Update(frame) = read_single_bgp_message(wire).await {
+                    break frame.parse(true, add_path, &[]).unwrap();
+                }
+            }
+        })
+        .await
+        .expect("reflected UPDATE on writer socket");
+        let [entry] = parsed.announced[..] else {
+            panic!("one reflected NLRI: {:?}", parsed.announced);
+        };
+        assert_eq!(
+            entry.prefix,
+            Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)
+        );
+        if !add_path {
+            assert_eq!(entry.path_id, 0);
+        }
+        let actual = parsed
+            .attributes
+            .iter()
+            .filter_map(|attr| match attr {
+                PathAttribute::OriginatorId(id) => Some(*id),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual.len(), 1, "one ORIGINATOR_ID on the wire");
+        ids.push(actual[0]);
+    }
+    ids
+}
+
+async fn update_group(tx: &mpsc::Sender<RibUpdate>, peer: PeerId) -> String {
+    let (reply, result) = oneshot::channel();
+    tx.send(RibUpdate::QueryPeerUpdateGroup { peer, reply })
+        .await
+        .unwrap();
+    result.await.unwrap()
+}
+
+fn assert_receiver_group(group: &str, private: bool, add_path: bool) {
+    if add_path {
+        assert_eq!(group, "add_path_send");
+    } else if private {
+        assert_eq!(group, "slow_peer");
+    } else {
+        assert!(group.starts_with("group:"), "{group}");
+    }
+}
+
+async fn reconnect_reflected_source(private: bool, add_path: bool) {
+    let old = Ipv4Addr::new(192, 0, 2, 10);
+    let new = Ipv4Addr::new(192, 0, 2, 11);
+    for carried in [None, Some(Ipv4Addr::new(192, 0, 2, 99))] {
+        let (tx, rx) = mpsc::channel(64);
+        let (_qtx, qrx) = mpsc::channel(8);
+        let manager = rustbgpd_rib::RibManager::new(
+            rx,
+            qrx,
+            None,
+            Some(Ipv4Addr::new(10, 0, 0, 1)),
+            BgpMetrics::new(),
+        );
+        let task = tokio::spawn(manager.run());
+        let sink_addr = Ipv4Addr::new(10, 0, 0, 3);
+        let (mut sink, mut wire) = rr_client(&tx, sink_addr, 7, sink_addr, add_path).await;
+        let peer = sink.rib_peer();
+        if private {
+            tx.send(RibUpdate::PeerSlowState {
+                peer,
+                session_id: 7,
+                slow: true,
+            })
+            .await
+            .unwrap();
+        }
+        assert_receiver_group(&update_group(&tx, peer).await, private, add_path);
+
+        let source_addr = Ipv4Addr::new(10, 0, 0, 2);
+        let announce = || {
+            rr_attribute_update(
+                65001,
+                carried
+                    .into_iter()
+                    .map(PathAttribute::OriginatorId)
+                    .collect(),
+            )
+        };
+        let (mut first, _source_wire) = rr_client(&tx, source_addr, 1, old, false).await;
+        first.process_update(announce()).await;
+        assert_eq!(selected_source_row(&tx).await.peer_router_id, old);
+        assert_eq!(
+            reflected_wire_ids(&mut sink, &mut wire, add_path).await,
+            [carried.unwrap_or(old)]
+        );
+
+        first.drive_fsm(Event::TcpConnectionFails).await;
+        assert!(
+            selected_source_row(&tx).await.is_stale,
+            "GR retained the original row"
+        );
+        let (mut second, _replacement_wire) = rr_client(&tx, source_addr, 2, new, false).await;
+        assert!(
+            selected_source_row(&tx).await.is_stale,
+            "replacement OPEN retained the original row"
+        );
+        assert!(
+            reflected_wire_ids(&mut sink, &mut wire, add_path)
+                .await
+                .iter()
+                .all(|id| *id == carried.unwrap_or(old))
+        );
+
+        second.process_update(announce()).await;
+        let current = selected_source_row(&tx).await;
+        assert!(!current.is_stale);
+        assert_eq!(current.peer_router_id, new);
+        let ids = reflected_wire_ids(&mut sink, &mut wire, add_path).await;
+        if let Some(existing) = carried {
+            assert!(
+                ids.is_empty(),
+                "the received ORIGINATOR_ID {existing} is unchanged on the wire: {ids:?}"
+            );
+        } else {
+            assert_eq!(ids, [new], "the receiver must learn its new ORIGINATOR_ID");
+        }
+        second.process_update(announce()).await;
+        assert_eq!(selected_source_row(&tx).await.peer_router_id, new);
+        assert!(
+            reflected_wire_ids(&mut sink, &mut wire, add_path)
+                .await
+                .is_empty(),
+            "unchanged source identity enqueued a duplicate UPDATE"
+        );
+        let late_addr = Ipv4Addr::new(10, 0, 0, 4);
+        let (mut late, mut late_wire) = rr_client(&tx, late_addr, 8, late_addr, add_path).await;
+        assert_receiver_group(&update_group(&tx, late.rib_peer()).await, false, add_path);
+        assert_eq!(
+            reflected_wire_ids(&mut late, &mut late_wire, add_path).await,
+            [carried.unwrap_or(new)],
+            "initial replay must use the current ORIGINATOR_ID"
+        );
+        task.abort();
+    }
+}
+
+#[tokio::test]
+async fn installed_group_reflects_current_source_identifier_on_wire() {
+    Box::pin(reconnect_reflected_source(false, false)).await;
+}
+
+#[tokio::test]
+async fn private_peer_reflects_current_source_identifier_on_wire() {
+    Box::pin(reconnect_reflected_source(true, false)).await;
+}
+
+/// Add-Path send peers stay private and stage through the multipath path.
+#[tokio::test]
+async fn add_path_peer_reflects_current_source_identifier_on_wire() {
+    Box::pin(reconnect_reflected_source(false, true)).await;
+}
+
+async fn ebgp_sink(
+    tx: &mpsc::Sender<RibUpdate>,
+    address: Ipv4Addr,
+    session_id: u64,
+) -> (PeerSession, TcpStream) {
+    let (mut sink, _unused) = make_test_session_with_rib(65001, 65002);
+    sink.peer_ip = address.into();
+    sink.rib_tx = tx.clone();
+    sink.session_identity = SessionIdentity::primary(session_id);
+    sink.config.cluster_id = Some(Ipv4Addr::new(10, 0, 0, 1));
+    let (socket, remote) = connected_stream_pair().await;
+    sink.test_install_stream(socket);
+    let mut open = notification_gr_open(false);
+    open.bgp_identifier = address;
+    sink.drive_fsm(Event::ManualStart).await;
+    sink.drive_fsm(Event::OpenReceived(open)).await;
+    sink.drive_fsm(Event::KeepaliveReceived).await;
+    assert_eq!(sink.fsm.state(), SessionState::Established);
+    (sink, remote)
+}
+
+async fn ebgp_wire_announcements(sink: &mut PeerSession, wire: &mut TcpStream) -> usize {
+    let mut announced = 0;
+    while let Ok(update) = sink.outbound_rx.try_recv() {
+        if update.announce.is_empty() {
+            continue;
+        }
+        sink.send_route_update(update);
+        let parsed = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Message::Update(frame) = read_single_bgp_message(wire).await {
+                    break frame.parse(true, false, &[]).unwrap();
+                }
+            }
+        })
+        .await
+        .expect("UPDATE on eBGP writer socket");
+        assert!(
+            !parsed.attributes.iter().any(|attr| matches!(
+                attr,
+                PathAttribute::OriginatorId(_) | PathAttribute::ClusterList(_)
+            )),
+            "eBGP export carries no reflector attributes"
+        );
+        announced += parsed.announced.len();
+    }
+    announced
+}
+
+async fn ebgp_receiver_source_identifier(private: bool) {
+    let old = Ipv4Addr::new(192, 0, 2, 10);
+    let new = Ipv4Addr::new(192, 0, 2, 11);
+    let (tx, rx) = mpsc::channel(64);
+    let (_qtx, qrx) = mpsc::channel(8);
+    let manager = rustbgpd_rib::RibManager::new(
+        rx,
+        qrx,
+        None,
+        Some(Ipv4Addr::new(10, 0, 0, 1)),
+        BgpMetrics::new(),
+    );
+    let task = tokio::spawn(manager.run());
+    let sink_addr = Ipv4Addr::new(10, 0, 0, 5);
+    let (mut sink, mut wire) = ebgp_sink(&tx, sink_addr, 7).await;
+    let peer = sink.rib_peer();
+    if private {
+        tx.send(RibUpdate::PeerSlowState {
+            peer,
+            session_id: 7,
+            slow: true,
+        })
+        .await
+        .unwrap();
+    }
+    let group = update_group(&tx, peer).await;
+    if private {
+        assert_eq!(group, "slow_peer");
+    } else {
+        assert!(group.starts_with("group:"), "{group}");
+    }
+    let source_addr = Ipv4Addr::new(10, 0, 0, 2);
+    let announce = || rr_attribute_update(65001, vec![]);
+    let (mut first, _w1) = rr_client(&tx, source_addr, 1, old, false).await;
+    first.process_update(announce()).await;
+    assert_eq!(selected_source_row(&tx).await.peer_router_id, old);
+    assert_eq!(ebgp_wire_announcements(&mut sink, &mut wire).await, 1);
+    first.drive_fsm(Event::TcpConnectionFails).await;
+    assert!(selected_source_row(&tx).await.is_stale);
+    let (mut second, _w2) = rr_client(&tx, source_addr, 2, new, false).await;
+    let _ = ebgp_wire_announcements(&mut sink, &mut wire).await;
+    second.process_update(announce()).await;
+    let current = selected_source_row(&tx).await;
+    assert!(!current.is_stale);
+    assert_eq!(current.peer_router_id, new);
+    assert_eq!(
+        ebgp_wire_announcements(&mut sink, &mut wire).await,
+        0,
+        "a source identifier change must not re-send an identical eBGP UPDATE"
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn grouped_ebgp_receiver_ignores_source_identifier_change() {
+    Box::pin(ebgp_receiver_source_identifier(false)).await;
+}
+
+#[tokio::test]
+async fn private_ebgp_receiver_ignores_source_identifier_change() {
+    Box::pin(ebgp_receiver_source_identifier(true)).await;
+}

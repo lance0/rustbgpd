@@ -627,4 +627,4 @@ on the same interface, is still refused with `duplicate_link_local_address`.
   <https://www.rfc-editor.org/rfc/rfc4271#section-6.8>
 - FRR source: <https://github.com/FRRouting/frr>
 - GoBGP source: <https://github.com/osrg/gobgp>
-- BIRD source and documentation: <https://gitlab.nic.cz/labs/bird>
+- BIRD source and documentation: <https://bird.nic.cz/>

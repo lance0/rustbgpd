@@ -1634,9 +1634,8 @@ fn build_initial_table_join(routes: usize) -> InitialTableJoinState {
     manager.bench_assert_empty_source_group(&[PeerId::from_ipv4(Ipv4Addr::new(198, 51, 100, 1))]);
     manager.bench_reset_adj_rib_out_fanout_receipt();
 
-    // Two synchronous envelopes are expected: one route-bearing dump and one
-    // EoR. Channel allocation and encoder construction remain outside the
-    // timed PeerUp call.
+    // Keep the original two-slot writer. Drain admitted pages between actor
+    // steps so writer work stays outside the measured join.
     let (sender, receiver) = mpsc::channel(2);
     let encoder = fanout_bench_export_encoder();
     let snapshot = encoder.snapshot();
@@ -1663,7 +1662,39 @@ fn build_initial_table_join(routes: usize) -> InitialTableJoinState {
     }
 }
 
-fn assert_initial_table_join_receipt(state: &mut InitialTableJoinState, routes: usize) {
+fn finish_initial_table_join(state: &mut InitialTableJoinState, routes: usize) -> Duration {
+    let mut pages = 0;
+    let mut eors = 0;
+    let elapsed = state.manager.bench_finish_initial_replays(|| {
+        while let Ok(update) = state.receiver.try_recv() {
+            assert_eq!(eors, 0, "unexpected output after End-of-RIB");
+            if update.end_of_rib.is_empty() {
+                pages += 1;
+                if routes == 65_536 {
+                    assert!(
+                        update.announce.len() <= 1024,
+                        "large join must send bounded pages"
+                    );
+                }
+                assert_initial_page(
+                    update,
+                    &mut state.expected_inventory,
+                    state.snapshot_evidence,
+                );
+            } else {
+                assert!(
+                    state.expected_inventory.is_empty(),
+                    "missing initial routes before End-of-RIB"
+                );
+                assert_initial_eor(&update);
+                eors += 1;
+            }
+        }
+    });
+    assert_eq!(eors, 1);
+    if routes == 4096 {
+        assert_eq!(pages, 1, "small join uses one batch");
+    }
     state
         .manager
         .bench_assert_empty_source_group(&[PeerId::from_ipv4(Ipv4Addr::new(198, 51, 100, 1))]);
@@ -1679,8 +1710,8 @@ fn assert_initial_table_join_receipt(state: &mut InitialTableJoinState, routes: 
     );
     assert_eq!(receipt.dirty_peers, 0);
     assert_eq!(
-        receipt.exact_probe_batches, 1,
-        "the initial inventory must traverse one real exact-export batch"
+        receipt.exact_probe_batches, pages,
+        "each initial page must traverse one real exact-export batch"
     );
     assert_eq!(
         receipt.exact_probe_candidates, routes,
@@ -1691,9 +1722,9 @@ fn assert_initial_table_join_receipt(state: &mut InitialTableJoinState, routes: 
         "every production probe must report a nonzero encoded UPDATE length"
     );
     assert_eq!(receipt.exact_probe_cache_reuses, 0);
-    assert_eq!(receipt.successful_commits, 1);
-    assert_eq!(receipt.successful_enqueues, 1);
-    assert_eq!(receipt.family_gauge_writes, 1);
+    assert_eq!(receipt.successful_commits, pages);
+    assert_eq!(receipt.successful_enqueues, pages);
+    assert_eq!(receipt.family_gauge_writes, pages);
     assert_eq!(receipt.last_family_gauge_write_mask, 0x01);
     assert_eq!(
         receipt.first_peer_family_values,
@@ -1708,26 +1739,26 @@ fn assert_initial_table_join_receipt(state: &mut InitialTableJoinState, routes: 
         ],
         "the committed Adj-RIB-Out inventory must match the pre-seeded table exactly"
     );
+    elapsed
+}
 
-    let initial = state
-        .receiver
-        .try_recv()
-        .expect("initial-table join must enqueue one route-bearing envelope");
-    assert_eq!(initial.announce.len(), routes);
-    assert_eq!(initial.next_hop_override.len(), routes);
+fn assert_initial_page(
+    initial: OutboundRouteUpdate,
+    remaining: &mut HashSet<(Prefix, u32)>,
+    snapshot_evidence: FanoutBenchExportSnapshotEvidence,
+) {
+    assert!(!initial.announce.is_empty(), "empty initial page");
+    assert_eq!(initial.next_hop_override.len(), initial.announce.len());
     assert!(
         initial.next_hop_override.iter().all(Option::is_none),
         "the no-policy fixture must not carry any next-hop override"
     );
-    let actual_inventory = initial
-        .announce
-        .iter()
-        .map(|route| (route.prefix, route.path_id))
-        .collect::<HashSet<_>>();
-    assert_eq!(
-        actual_inventory, state.expected_inventory,
-        "the initial envelope must contain exactly the deterministic seed inventory"
-    );
+    for route in initial.announce.iter() {
+        assert!(
+            remaining.remove(&(route.prefix, route.path_id)),
+            "unexpected or duplicate initial route"
+        );
+    }
     assert!(initial.announce_source_exclusion.is_none());
     assert!(initial.unicast_withdrawals().next().is_none());
     assert!(initial.end_of_rib.is_empty());
@@ -1752,14 +1783,12 @@ fn assert_initial_table_join_receipt(state: &mut InitialTableJoinState, routes: 
         .expect("route-bearing initial dump must retain the real session snapshot");
     assert_eq!(
         fanout_bench_export_snapshot_evidence(snapshot.as_ref()),
-        Some(state.snapshot_evidence),
+        Some(snapshot_evidence),
         "the envelope must retain the authoritative transport-session snapshot"
     );
+}
 
-    let eor = state
-        .receiver
-        .try_recv()
-        .expect("initial-table inventory must be followed by one EoR envelope");
+fn assert_initial_eor(eor: &OutboundRouteUpdate) {
     assert!(eor.exact_export_snapshot.is_none());
     assert!(eor.announce_source_exclusion.is_none());
     assert!(eor.announce.is_empty());
@@ -1782,13 +1811,6 @@ fn assert_initial_table_join_receipt(state: &mut InitialTableJoinState, routes: 
     assert!(eor.otc_blocked.is_empty());
     assert!(!eor.request_refresh_all_negotiated);
     assert!(eor.shared_group_encode.is_none());
-    assert!(
-        matches!(
-            state.receiver.try_recv(),
-            Err(mpsc::error::TryRecvError::Empty)
-        ),
-        "one initial-table join must enqueue exactly one inventory and one EoR envelope"
-    );
 }
 
 fn bench_initial_table_peer_join(c: &mut Criterion) {
@@ -1810,9 +1832,9 @@ fn bench_initial_table_peer_join(c: &mut Criterion) {
                             .manager
                             .bench_join_route_reflector_peer(0, sender, encoder);
                         accumulated += started.elapsed();
-                        // Production-path and queue inspection deliberately
-                        // stay outside the accumulated join duration.
-                        assert_initial_table_join_receipt(&mut state, routes);
+                        // Include producer turns through End-of-RIB. Receiver
+                        // inspection and fixture assertions stay outside the timer.
+                        accumulated += finish_initial_table_join(&mut state, routes);
                     }
                     accumulated
                 });
@@ -1824,6 +1846,30 @@ fn bench_initial_table_peer_join(c: &mut Criterion) {
 
 /// Joiners timed per `initial_table_group_join` iteration.
 const GROUP_JOINERS: usize = 4;
+
+/// Drain and acknowledge the initial pages from every joining receiver.
+fn finish_group_joins(
+    manager: &mut RibManager,
+    receivers: &mut [mpsc::Receiver<OutboundRouteUpdate>],
+    routes: usize,
+) -> Duration {
+    let mut progress = vec![(0, false); receivers.len()];
+    let elapsed = manager.bench_finish_initial_replays(|| {
+        for (rx, (rows, ended)) in receivers.iter_mut().zip(&mut progress) {
+            while let Ok(update) = rx.try_recv() {
+                assert!(!*ended, "unexpected output after End-of-RIB");
+                *rows += update.announce.len();
+                if !update.end_of_rib.is_empty() {
+                    assert_eq!(*rows, routes, "every initial row precedes End-of-RIB");
+                    assert_initial_eor(&update);
+                    *ended = true;
+                }
+            }
+        }
+    });
+    assert!(progress.iter().all(|&(_, ended)| ended));
+    elapsed
+}
 
 /// `sources` eBGP sources each announcing the same `routes` prefixes (a
 /// multi-homed table: one Loc-RIB best, `sources` Adj-RIB-In paths per
@@ -1857,14 +1903,7 @@ fn build_group_join(sources: u8, routes: usize) -> RibManager {
     );
     let (sender, mut receiver) = mpsc::channel(2);
     manager.bench_join_route_reflector_peer(0, sender, fanout_bench_export_encoder());
-    assert_eq!(
-        receiver
-            .try_recv()
-            .expect("founding member dump")
-            .announce
-            .len(),
-        routes
-    );
+    finish_group_joins(&mut manager, std::slice::from_mut(&mut receiver), routes);
     manager
 }
 
@@ -1891,17 +1930,16 @@ fn bench_initial_table_group_join(c: &mut Criterion) {
                             })
                             .collect();
                         let mut receivers = Vec::with_capacity(GROUP_JOINERS);
-                        for (index, sender, receiver, encoder) in joiners {
+                        for (index, sender, mut receiver, encoder) in joiners {
                             let started = Instant::now();
                             manager.bench_join_route_reflector_peer(index, sender, encoder);
                             accumulated += started.elapsed();
+                            accumulated += finish_group_joins(
+                                &mut manager,
+                                std::slice::from_mut(&mut receiver),
+                                routes,
+                            );
                             receivers.push(receiver);
-                        }
-                        for mut receiver in receivers {
-                            let dump = receiver.try_recv().expect("joiner dump");
-                            assert_eq!(dump.announce.len(), routes);
-                            let eor = receiver.try_recv().expect("joiner EoR");
-                            assert_eq!(eor.end_of_rib, vec![(Afi::Ipv4, Safi::Unicast)]);
                         }
                         manager.bench_assert_empty_source_group(
                             &(1..=sources)
@@ -1958,12 +1996,7 @@ fn bench_initial_table_deferred_group_join(c: &mut Criterion) {
                         let started = Instant::now();
                         manager.bench_complete_deferred_registrations();
                         accumulated += started.elapsed();
-                        for mut receiver in receivers {
-                            let dump = receiver.try_recv().expect("joiner dump");
-                            assert_eq!(dump.announce.len(), routes);
-                            let eor = receiver.try_recv().expect("joiner EoR");
-                            assert_eq!(eor.end_of_rib, vec![(Afi::Ipv4, Safi::Unicast)]);
-                        }
+                        accumulated += finish_group_joins(&mut manager, &mut receivers, routes);
                         manager.bench_assert_empty_source_group(&[PeerId::from_ipv4(
                             Ipv4Addr::new(192, 0, 2, 1),
                         )]);
@@ -2923,11 +2956,11 @@ fn bench_route_refresh_group_member(c: &mut Criterion) {
                                     sender,
                                     fanout_bench_export_encoder(),
                                 );
-                                assert_eq!(
-                                    receiver.try_recv().expect("joiner dump").announce.len(),
-                                    routes
+                                finish_group_joins(
+                                    &mut manager,
+                                    std::slice::from_mut(&mut receiver),
+                                    routes,
                                 );
-                                receiver.try_recv().expect("joiner EoR");
                                 (index, receiver)
                             })
                             .collect();
@@ -2997,11 +3030,11 @@ fn bench_grouped_dirty_resync(c: &mut Criterion) {
                             sender,
                             fanout_bench_export_encoder(),
                         );
-                        assert_eq!(
-                            receiver.try_recv().expect("joiner dump").announce.len(),
-                            routes
+                        finish_group_joins(
+                            &mut manager,
+                            std::slice::from_mut(&mut receiver),
+                            routes,
                         );
-                        receiver.try_recv().expect("joiner EoR");
                         receiver
                     })
                     .collect();

@@ -3604,6 +3604,8 @@ pub enum RibUpdate {
         stale_routes_time: u64,
         /// All families from the peer's Graceful Restart capability.
         gr_families: Vec<(Afi, Safi)>,
+        /// Both speakers exchanged the RFC 8538 N bit on the ending session.
+        peer_notification_gr: bool,
         /// Whether the peer supports Long-Lived Graceful Restart (RFC 9494).
         peer_llgr_capable: bool,
         /// Per-family LLGR stale times from the peer's capability.

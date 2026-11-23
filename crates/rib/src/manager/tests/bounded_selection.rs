@@ -160,6 +160,7 @@ fn graceful_restart(peer: PeerId, llgr: bool) -> RibUpdate {
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: vec![VPN, LABELED],
+        peer_notification_gr: false,
         peer_llgr_capable: llgr,
         peer_llgr_families: if llgr {
             [VPN, LABELED].map(llgr_family).to_vec()

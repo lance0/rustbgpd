@@ -1674,6 +1674,7 @@ impl PeerSession {
                                     .min(self.config.gr_peer_restart_time_max),
                                 stale_routes_time: self.config.gr_stale_routes_time,
                                 gr_families,
+                                peer_notification_gr: neg.peer_notification_gr,
                                 peer_llgr_capable: neg.peer_llgr_capable,
                                 peer_llgr_families: neg.peer_llgr_families.clone(),
                                 llgr_stale_time: self.config.llgr_stale_time,

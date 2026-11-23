@@ -615,6 +615,7 @@ async fn graceful_restart_clears_stale_orf_gate() {
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
         llgr_stale_time: 0,
@@ -694,6 +695,7 @@ async fn graceful_restart_clears_orf_filter() {
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
         llgr_stale_time: 0,
@@ -785,6 +787,7 @@ async fn gr_flap_and_reup(
         restart_time: 120,
         stale_routes_time: 360,
         gr_families,
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
         llgr_stale_time: 0,
@@ -815,27 +818,6 @@ async fn gr_flap_and_reup(
     .await
     .unwrap();
     out_rx
-}
-
-/// Drain outbound updates until one carries an `EoR` for `family`; return
-/// every update seen, including the `EoR`-bearing one. Panics if no such
-/// `EoR` arrives within 5 s.
-async fn drain_until_eor(
-    out_rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
-    family: (Afi, Safi),
-) -> Vec<OutboundRouteUpdate> {
-    let mut updates = Vec::new();
-    loop {
-        let update = tokio::time::timeout(Duration::from_secs(5), out_rx.recv())
-            .await
-            .expect("EoR-bearing update should arrive")
-            .expect("outbound channel open");
-        let done = update.end_of_rib.contains(&family);
-        updates.push(delivered(update));
-        if done {
-            return updates;
-        }
-    }
 }
 
 /// Prefixes announced across `updates`. Announces inside the `EoR`-bearing
@@ -1265,6 +1247,7 @@ async fn peer_down_clears_gr_deferred_eor() {
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: vec![family],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
         llgr_stale_time: 0,

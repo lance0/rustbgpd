@@ -33,6 +33,7 @@ mod first_group_order;
 mod flowspec_validation;
 mod graceful_restart;
 mod helpers;
+mod initial_member_replay;
 mod lease_expiry;
 mod outbound_credit;
 mod outbound_owing;
@@ -991,6 +992,7 @@ pub struct RibManager {
     /// registers the peer's CURRENT last live session, so a session
     /// superseded or failed over while queued resolves to its survivor.
     pending_initial_registrations: VecDeque<PeerId>,
+    initial_member_replays: Box<initial_member_replay::InitialMemberReplays>,
     first_group_build: Option<Box<first_group_build::FirstGroupBuild>>,
     /// Accepted command's readiness age, frozen reads and terminal table handoff.
     authoritative_reload: Option<Box<first_group_build::AuthoritativeReload>>,
@@ -1042,9 +1044,8 @@ pub struct RibManager {
     gr_peers: HashMap<PeerId, HashSet<(Afi, Safi)>>,
     /// Deadlines for sweeping stale routes per GR peer.
     gr_stale_deadlines: graceful_restart::DeadlineMap<PeerId>,
-    /// Configured stale-routes-time per GR peer (seconds), used to reset
-    /// the timer on `PeerUp` during graceful restart.
-    gr_stale_routes_time: HashMap<PeerId, u64>,
+    /// Configured End-of-RIB wait and any deadline inherited across resets.
+    gr_stale_timers: HashMap<PeerId, graceful_restart::GrStaleTimer>,
     /// Peers currently in LLGR stale phase (RFC 9494), keyed by peer address.
     /// Value is the set of (AFI, SAFI) families in LLGR.
     llgr_peers: HashMap<PeerId, HashSet<(Afi, Safi)>>,
@@ -3296,6 +3297,7 @@ impl RibManager {
             pending_refresh_suppress_eor: HashSet::new(),
             deferred_refresh_cursor: None,
             pending_initial_registrations: VecDeque::new(),
+            initial_member_replays: Box::default(),
             first_group_build: None,
             authoritative_reload: None,
             paced_policy_destination: None,
@@ -3318,7 +3320,7 @@ impl RibManager {
             refresh_stale_counts: HashMap::new(),
             gr_peers: HashMap::new(),
             gr_stale_deadlines: graceful_restart::DeadlineMap::default(),
-            gr_stale_routes_time: HashMap::new(),
+            gr_stale_timers: HashMap::new(),
             llgr_peers: HashMap::new(),
             llgr_stale_deadlines: graceful_restart::DeadlineMap::default(),
             llgr_peer_config: HashMap::new(),
@@ -4733,6 +4735,10 @@ impl RibManager {
     /// message makes it runnable and the next event loop turn arms this timer
     /// again.
     fn resync_timer_pending(&self) -> bool {
+        self.initial_member_replays.parked() || self.data_resync_pending()
+    }
+
+    fn data_resync_pending(&self) -> bool {
         self.resync_tick_pending_unowed()
             || self.owing_runnable()
             || self.owing_latch_pending()
@@ -4800,6 +4806,13 @@ impl RibManager {
     /// state and the dirty flag are committed/cleared only after a successful
     /// send, and withheld peers are not touched at all.
     fn resync_dirty_peers(&mut self, include_markers: bool) -> bool {
+        let replay_woke = self.wake_initial_member_replay();
+        if (replay_woke || self.initial_member_replays.parked())
+            && !self.data_resync_pending()
+            && !(include_markers && (self.marker_release_pending() || self.marker_retry_pending()))
+        {
+            return replay_woke;
+        }
         // Owing peers keep the tick at the backlog cadence to see returned
         // credit; while none of them can progress and nothing else waits, a
         // tick is a cheap scan with no executor handoff.
@@ -4812,13 +4825,13 @@ impl RibManager {
             // Polling for returned credit at the backlog cadence; owed work
             // that waits only on a latch keeps the ordinary interval, and
             // the latch release wakes the tick.
-            return self.owing_runnable();
+            return self.owing_runnable() || replay_woke;
         }
         // A whole member replay can outlive the tick's peer-stride budget.
         // Activate its existing interior checkpoints on every timer arm.
         self.with_resync_readiness(|manager| {
             manager.resync_dirty_peers_with_readiness(include_markers)
-        })
+        }) || replay_woke
     }
 
     fn with_resync_readiness<T>(&mut self, work: impl FnOnce(&mut Self) -> T) -> T {
@@ -4988,6 +5001,9 @@ impl RibManager {
     /// registration — the synchronous path never skipped it either; its
     /// sends fail harmlessly and the session's `PeerDown` cleans up.
     fn advance_pending_initial_registration(&mut self) {
+        if self.service_initial_member_replay() {
+            return;
+        }
         self.retire_abandoned_destination_prestage();
         while let Some(peer) = self.pending_initial_registrations.pop_front() {
             let waiting = self
@@ -6492,6 +6508,7 @@ impl RibManager {
                 restart_time,
                 stale_routes_time,
                 gr_families,
+                peer_notification_gr,
                 peer_llgr_capable,
                 peer_llgr_families,
                 llgr_stale_time,
@@ -6503,6 +6520,7 @@ impl RibManager {
                     restart_time,
                     stale_routes_time,
                     gr_families,
+                    peer_notification_gr,
                     peer_llgr_capable,
                     peer_llgr_families,
                     llgr_stale_time,
@@ -8474,7 +8492,8 @@ impl RibManager {
                 // work already armed the ordinary interval: credit returns
                 // without telling the RIB, so the tick is what notices it.
                 if !resync_armed && self.resync_timer_pending() {
-                    let interval = if self.owing_runnable() {
+                    let interval = if self.owing_runnable() || self.initial_member_replays.parked()
+                    {
                         DIRTY_RESYNC_BACKLOG_INTERVAL
                     } else {
                         DIRTY_RESYNC_INTERVAL
@@ -8680,6 +8699,7 @@ impl RibManager {
             // deferred registrations kept the loop off its select below
             // pulls the tick forward here, between work units.
             if resync_armed && std::pin::pin!(latch_released.notified()).enable() {
+                self.wake_initial_member_replay();
                 let soon = now + DIRTY_RESYNC_BACKLOG_INTERVAL;
                 if resync_sleep.deadline() > soon {
                     resync_sleep.as_mut().reset(soon);
@@ -8855,7 +8875,10 @@ impl RibManager {
 
             // Private construction alternates with queued primary work. Ordinary
             // registrations retain their existing priority behind queued imports.
-            if self.first_group_build.is_some() || !self.pending_initial_registrations.is_empty() {
+            if self.first_group_build.is_some()
+                || !self.pending_initial_registrations.is_empty()
+                || self.initial_member_replays.runnable()
+            {
                 if registration_primary_due && self.drain_ready_updates().await {
                     registration_primary_due = false;
                     continue;
@@ -8865,7 +8888,9 @@ impl RibManager {
                 if !self.pending_route_batches.is_empty()
                     || (accept_primary && self.primary_backlog() > 0)
                 {
-                    self.advance_busy_first_group(&mut registration_search);
+                    if !self.service_initial_member_replay() {
+                        self.advance_busy_first_group(&mut registration_search);
+                    }
                 } else {
                     self.advance_pending_initial_registration();
                 }
@@ -8981,6 +9006,7 @@ impl RibManager {
                     () = conditional_sleep.as_mut(), if has_conditional_timer && wake_conditional => {}
                     () = registration_wait_sleep.as_mut(), if has_registration_wait_timer => {}
                     () = latch_released.notified(), if resync_armed => {
+                        self.wake_initial_member_replay();
                         // A whole-table operation drained: work deferred
                         // behind it runs at the backlog cadence, not at the
                         // next full resync interval.

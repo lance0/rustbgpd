@@ -8681,6 +8681,7 @@ fn forced_resync_does_not_outlive_registration(end: ForcedSessionEnd, ungrouped:
                 restart_time: 120,
                 stale_routes_time: 360,
                 gr_families: ipv4_sendable(),
+                peer_notification_gr: false,
                 peer_llgr_capable: false,
                 peer_llgr_families: vec![],
                 llgr_stale_time: 0,
@@ -12136,6 +12137,7 @@ async fn graceful_restart_end_of_rib_leaves_dirty_members_to_the_resync_tick() {
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
         llgr_stale_time: 0,
@@ -20588,6 +20590,7 @@ fn seed_overlap_restart(manager: &mut RibManager, sentinel: Ipv4Prefix) {
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: ipv4_sendable(),
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
         llgr_stale_time: 0,
@@ -20741,6 +20744,7 @@ fn overlap_events(
 }
 
 fn check_overlap_founder(
+    initial_pages: Vec<OutboundRouteUpdate>,
     receiver: &mut mpsc::Receiver<OutboundRouteUpdate>,
     base: &OverlapInventory,
     victim: Prefix,
@@ -20749,7 +20753,8 @@ fn check_overlap_founder(
 ) {
     let mut inventory = OverlapInventory::new();
     let mut ends = 0;
-    while let Ok(update) = receiver.try_recv().map(delivered) {
+    let rest = std::iter::from_fn(|| receiver.try_recv().ok().map(delivered));
+    for update in initial_pages.into_iter().chain(rest) {
         for &(prefix, _) in update.unicast_withdrawals() {
             inventory.remove(&prefix);
         }
@@ -20945,6 +20950,12 @@ async fn check_policy_during_overflow(policy: OverlapPolicy) {
     tx.try_send(update(180)).unwrap();
     let actor = tokio::spawn(actor);
     response.await;
+    // Each delivered page releases the founder's slot for the next page.
+    let family = (Afi::Ipv4, Safi::Unicast);
+    let (first_pages, second_pages) = tokio::join!(
+        drain_until_eor(&mut first, family),
+        drain_until_eor(&mut second, family),
+    );
     drop(query_tx);
     drop(tx);
     let manager = actor.await.unwrap();
@@ -20970,8 +20981,9 @@ async fn check_policy_during_overflow(policy: OverlapPolicy) {
     assert!(manager.loc_rib.get(&sentinel).is_none());
     assert_eq!(manager.loc_rib.get(&marker).unwrap().local_pref(), 180);
     assert!(roster.load().for_peer(members[0]).is_none());
-    check_overlap_founder(&mut first, &base, victim, sentinel, marker);
-    check_overlap_founder(&mut second, &base, victim, sentinel, marker);
+    for (pages, rx) in [(first_pages, &mut first), (second_pages, &mut second)] {
+        check_overlap_founder(pages, rx, &base, victim, sentinel, marker);
+    }
 }
 
 #[tokio::test]

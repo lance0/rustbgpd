@@ -467,6 +467,7 @@ pub async fn run(family: Family, output: &Path, options: &Options) -> Result<boo
                 restart_time: 3600,
                 stale_routes_time: 3600,
                 gr_families: families.clone(),
+                peer_notification_gr: false,
                 peer_llgr_capable: false,
                 peer_llgr_families: vec![],
                 llgr_stale_time: 0,

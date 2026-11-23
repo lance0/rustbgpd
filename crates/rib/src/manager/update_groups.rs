@@ -709,6 +709,8 @@ pub(in crate::manager) struct GroupRibOut {
     /// empty ([`Self::record_policy_filtered`] removes whole prefixes),
     /// so outer emptiness remains "no denials".
     policy_filtered: PolicyRows<Prefix, AddrMap<(PeerId, u32), Option<PolicyLabel>>>,
+    /// Denial totals by source and label for a single-best member's initial replay.
+    single_best_denials: policy_rows::SingleBestDenials,
     /// Default-Permit label for every staged unicast and VPN entry.
     /// Export-chain identity is group-uniform and immutable, and a chain
     /// Permit is always attributed to the shared chain sentinel, so retaining
@@ -878,7 +880,11 @@ impl GroupRibOut {
         release_hash_map(&mut self.visible_rejections, checkpoint);
         self.policy_filtered
             .release_with(checkpoint, |(_, mut paths), checkpoint| {
-                release_hash_map(&mut paths, checkpoint);
+                if self.per_client_best {
+                    release_hash_map(&mut paths, checkpoint);
+                } else {
+                    self.single_best_denials.retire_prefix(paths, checkpoint);
+                }
             });
         crate::adj_rib_out::release_sharded_map(&mut self.vpn_policy_denied, checkpoint);
         self.otc_blocked.retire_with(checkpoint);
@@ -949,6 +955,7 @@ impl GroupRibOut {
             members: HashSet::new(),
             dirty_members: HashSet::new(),
             policy_filtered: PolicyRows::default(),
+            single_best_denials: policy_rows::SingleBestDenials::default(),
             permit_policy_label,
             vpn_policy_denied: ShardedMap::default(),
             otc_blocked: OtcBlocked::Ordinary(FastMap::default()),
@@ -2093,6 +2100,10 @@ impl GroupRibOut {
         &mut self,
         prefix: Prefix,
     ) -> AddrMap<(PeerId, u32), Option<PolicyLabel>> {
+        debug_assert!(
+            self.per_client_best,
+            "only PCB release pages denial histories"
+        );
         self.policy_filtered.remove(&prefix).unwrap_or_default()
     }
 
@@ -2121,14 +2132,25 @@ impl GroupRibOut {
             if let Some(mut denials) = self.policy_filtered.remove(prefix) {
                 #[cfg(test)]
                 super::slice_timing::record_work("group_denials_removed", denials.len());
-                crate::adj_rib_out::release_hash_map(&mut denials, checkpoint);
+                if self.per_client_best {
+                    crate::adj_rib_out::release_hash_map(&mut denials, checkpoint);
+                } else {
+                    self.single_best_denials.retire_prefix(denials, checkpoint);
+                }
             }
         }
         for (key, label) in current {
             checkpoint();
-            self.policy_filtered
+            let old = self
+                .policy_filtered
                 .get_or_default(key.prefix)
                 .insert((key.source_peer, key.path_id), label.clone());
+            if !self.per_client_best {
+                if let Some(prior) = old {
+                    self.single_best_denials.remove(key.source_peer, prior);
+                }
+                self.single_best_denials.add(key.source_peer, label.clone());
+            }
             #[cfg(test)]
             super::slice_timing::record_work("group_denials_written", 1);
         }
@@ -3037,6 +3059,13 @@ impl RibManager {
         use admitted_recovery::Key;
         if self
             .pending_group_admitted
+            .initial_replay_sparse_len(peer)
+            .is_some()
+        {
+            return;
+        }
+        if self
+            .pending_group_admitted
             .get(&peer)
             .is_none_or(|proof| !proof.is_empty())
         {
@@ -3098,6 +3127,9 @@ impl RibManager {
     /// Keep actual admission across omitted initial rows or a frozen old view.
     /// Complete family recovery retires this proof independently of marker grace.
     pub(super) fn retain_initial_group_admitted(&self, peer: PeerId) -> bool {
+        if self.is_initial_member_replay(peer) {
+            return true;
+        }
         self.outbound_session_ids
             .get(&peer)
             .is_some_and(|session_id| {
@@ -3508,6 +3540,7 @@ impl RibManager {
                     .is_some_and(|families| families.contains(&family))
         });
         if !still_held
+            && !self.is_initial_member_replay(peer)
             && !release_pending
             && !self.selection_resync_held(peer)
             && let Some(session_id) = self.outbound_session_ids.get(&peer).copied()

@@ -109,7 +109,8 @@ impl RibManager {
         }
         // Owed keys were recorded against the old ownership. Capture admitted
         // OLD before marking dirty so regroup recovery retains its withdrawals.
-        if self.drop_peer_owing(peer) {
+        let replaying = self.abort_initial_member_replay(peer);
+        if self.drop_peer_owing(peer) || replaying {
             self.mark_outbound_dirty(peer);
         }
         let prev_gid = match previous {
@@ -822,6 +823,22 @@ impl RibManager {
             return None;
         }
         self.pending_registration_key(peer, record)
+    }
+
+    pub(in crate::manager) fn eligible_initial_member_replay(&self, peer: PeerId) -> bool {
+        #[cfg(test)]
+        let threshold = self
+            .initial_member_replays
+            .min_routes
+            .unwrap_or(super::super::INITIAL_DUMP_DEFER_MIN_ROUTES);
+        #[cfg(not(test))]
+        let threshold = super::super::INITIAL_DUMP_DEFER_MIN_ROUTES;
+        self.loc_rib.len() >= threshold.max(crate::loc_rib::REGISTRATION_PAGE_SIZE + 1)
+            && self
+                .live_sessions
+                .get(&peer)
+                .and_then(|sessions| sessions.last())
+                .is_some_and(|record| self.eligible_first_group_key(peer, record).is_some())
     }
 
     pub(in crate::manager) fn current_first_group_waiter(

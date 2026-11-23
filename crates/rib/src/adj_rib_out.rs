@@ -1413,20 +1413,30 @@ impl AdjRibOut {
 
     /// Remove a `FlowSpec` route by rule. Returns `true` if it existed.
     pub fn remove_flowspec(&mut self, key: &FlowSpecKey) -> bool {
-        let removed = self.flowspec_routes.remove(key).is_some();
+        self.take_flowspec_key(key).is_some()
+    }
+
+    /// Move the advertised key into a withdrawal without cloning its components.
+    pub(crate) fn take_flowspec_key(&mut self, key: &FlowSpecKey) -> Option<FlowSpecKey> {
+        let (removed, _) = self.flowspec_routes.remove_entry(key)?;
         track(
             &mut self.second_family.flowspec,
-            key.afi == Afi::Ipv6 && key.rd.is_none(),
+            removed.afi == Afi::Ipv6 && removed.rd.is_none(),
             false,
-            removed,
+            true,
         );
         track(
-            &mut self.second_family.flowspec_vpn[usize::from(key.afi == Afi::Ipv6)],
-            key.rd.is_some(),
+            &mut self.second_family.flowspec_vpn[usize::from(removed.afi == Afi::Ipv6)],
+            removed.rd.is_some(),
             false,
-            removed,
+            true,
         );
-        removed
+        Some(removed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn advertised_flowspec_keys(&self) -> impl Iterator<Item = &FlowSpecKey> {
+        self.flowspec_routes.keys()
     }
 
     /// Look up a `FlowSpec` route by rule.
