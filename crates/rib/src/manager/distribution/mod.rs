@@ -3301,7 +3301,7 @@ impl RibManager {
         &self,
         peer: PeerId,
         failure: OutboundCommitFailure,
-    ) -> Result<(), OutboundCommitFailure> {
+    ) -> Result<bool, OutboundCommitFailure> {
         let label = peer.label();
         match failure {
             OutboundCommitFailure::WriterUnavailable => {
@@ -3582,8 +3582,11 @@ impl RibManager {
             None,
             None,
         )
+        .map(|_| ())
     }
 
+    /// On success, report whether the committed envelope carried any route
+    /// rows after export filtering, including withdrawals.
     #[expect(
         clippy::too_many_lines,
         clippy::too_many_arguments,
@@ -3598,7 +3601,7 @@ impl RibManager {
         otc_reconcile_prefixes: Option<&HashSet<Prefix>>,
         group_stage: Option<&super::update_groups::GroupStageOutput>,
         evpn_stage: Option<&super::update_groups::EvpnGroupStageOutput>,
-    ) -> Result<(), OutboundCommitFailure> {
+    ) -> Result<bool, OutboundCommitFailure> {
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
         let gate_row = || super::gate_row_checkpoint(&readiness);
@@ -3858,7 +3861,7 @@ impl RibManager {
                 if eligible_was_caught_up && self.selection_resync_held(peer) {
                     self.set_selection_partial_caught_up(peer, true);
                 }
-                Ok(())
+                Ok(false)
             } else {
                 self.outbound_commit_failed(
                     peer,
@@ -5980,7 +5983,7 @@ impl RibManager {
         if eligible_was_caught_up && self.selection_resync_held(peer) {
             self.set_selection_partial_caught_up(peer, true);
         }
-        Ok(())
+        Ok(has_committed_route_payload)
     }
 
     pub(in crate::manager) fn replace_peer_export_policy_synchronously(

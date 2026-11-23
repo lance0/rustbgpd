@@ -4493,7 +4493,7 @@ impl RibManager {
                     None,
                     None,
                 ),
-            (Ok(_), None) => Ok(()),
+            (Ok(_), None) => Ok(false),
         };
         export_memo.retire_with(&mut checkpoint);
         if let Err(failure) = sent {
