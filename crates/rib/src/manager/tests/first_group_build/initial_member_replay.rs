@@ -407,3 +407,27 @@ async fn one_credit_wakeup_finds_the_ready_writer_behind_a_stalled_member() {
     assert!(slow.is_empty());
     drop(held);
 }
+
+// Several writers can return credit before the actor observes one coalesced
+// release notification. Each released writer must resume on that wakeup
+// rather than wait for a later resync tick.
+#[tokio::test(start_paused = true)]
+async fn one_release_notification_resumes_every_released_writer() {
+    let (mut manager, _tx, _) = replay_fixture();
+    let mut first = member(&mut manager, receiver(1), 1, false, false);
+    let first_held = first_page(&mut manager, &mut first);
+    manager.advance_pending_initial_registration();
+    let mut second = member(&mut manager, receiver(2), 1, false, false);
+    let second_held = first_page(&mut manager, &mut second);
+    manager.advance_pending_initial_registration();
+    assert!(!manager.initial_member_replays.runnable());
+    assert!(manager.initial_member_replays.parked());
+
+    drop(first_held);
+    drop(second_held);
+    assert!(manager.wake_initial_member_replay());
+    manager.advance_pending_initial_registration();
+    manager.advance_pending_initial_registration();
+    assert!(first.try_recv().is_ok(), "first released writer resumed");
+    assert!(second.try_recv().is_ok(), "second released writer resumed");
+}

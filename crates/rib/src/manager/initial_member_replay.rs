@@ -119,8 +119,10 @@ impl RibManager {
     }
 
     pub(super) fn wake_initial_member_replay(&mut self) -> bool {
-        // The release notification is shared. Check each parked member once
-        // so a stalled writer cannot consume another member's wakeup.
+        // The release notification is shared and coalesces releases that land
+        // while the actor is busy. Check each parked member once and resume
+        // every released writer, so none waits for a later resync tick.
+        let mut woke = false;
         for _ in 0..self.initial_member_replays.blocked.len() {
             let peer = self
                 .initial_member_replays
@@ -131,11 +133,12 @@ impl RibManager {
                 || (!self.outbound_channel_full(peer) && !self.outbound_operation_live(peer))
             {
                 self.initial_member_replays.ready.push_back(peer);
-                return true;
+                woke = true;
+                continue;
             }
             self.initial_member_replays.blocked.push_back(peer);
         }
-        false
+        woke
     }
 
     pub(super) fn service_initial_member_replay(&mut self) -> bool {
