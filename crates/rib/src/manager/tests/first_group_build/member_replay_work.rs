@@ -13,6 +13,12 @@ struct ReplayWork {
 }
 
 async fn cold_join(pages: u16, with_policy: bool) -> ReplayWork {
+    cold_join_holding(pages, with_policy, false).await
+}
+
+/// `hold_last` keeps the newest envelope, and its operation latch, alive
+/// across the next actor poll so the replay parks behind its own writer.
+async fn cold_join_holding(pages: u16, with_policy: bool, hold_last: bool) -> ReplayWork {
     const TAG: u32 = 0xfde8_0007;
     let (mut manager, tx, _) = fixture(0);
     manager.initial_member_replays.min_routes = Some(1);
@@ -54,6 +60,7 @@ async fn cold_join(pages: u16, with_policy: bool) -> ReplayWork {
     let mut work = ReplayWork::default();
     let mut seen = HashSet::new();
     let mut markers = 0;
+    let mut held = None;
     poll_fn(|cx| {
         let before = visits();
         let result = actor.as_mut().poll(cx);
@@ -61,16 +68,20 @@ async fn cold_join(pages: u16, with_policy: bool) -> ReplayWork {
         work.peak = work.peak.max(delta);
         work.total += delta;
         work.polls += usize::from(delta > 0);
+        held = None;
         while let Ok(update) = rx.try_recv() {
             for row in update.announce.iter() {
                 assert_eq!(markers, 0);
                 assert!(seen.insert(row.prefix), "duplicate {:?}", row.prefix);
                 assert_eq!(row.communities().contains(&TAG), with_policy);
             }
-            for family in update.end_of_rib {
-                assert_eq!(family, (Afi::Ipv4, Safi::Unicast));
+            for family in &update.end_of_rib {
+                assert_eq!(*family, (Afi::Ipv4, Safi::Unicast));
                 assert_eq!(seen.len(), rows, "early End-of-RIB");
                 markers += 1;
+            }
+            if hold_last {
+                held = Some(update);
             }
         }
         if markers != 0 && tx.take().is_some() {
@@ -101,5 +112,28 @@ async fn initial_member_replay_bounds_visits_per_physical_poll() {
             "{work:?}"
         );
         assert!(work.polls >= 2 * usize::from(pages), "{work:?}");
+    }
+}
+
+// Every page parks its writer until the transport drops the page's latch.
+// Resuming must continue at the member's cursor: a replay that rescans from
+// the first bucket after each pause still sends each row once, but its total
+// work grows with the square of the table.
+#[tokio::test]
+async fn paused_initial_member_replay_resumes_at_its_cursor() {
+    for pages in [8, 32] {
+        let work = cold_join_holding(pages, false, true).await;
+        let rows = usize::from(pages) * REGISTRATION_PAGE_SIZE;
+        // One proof visit and at most two bucket visits per row, plus one
+        // inclusive seek per proof page.
+        assert!(
+            work.total <= 3 * rows + usize::from(pages),
+            "pages={pages}: {work:?}"
+        );
+        assert!(
+            work.peak <= REGISTRATION_PAGE_SIZE,
+            "pages={pages}: {work:?}"
+        );
+        eprintln!("held pages={pages}: {work:?}");
     }
 }

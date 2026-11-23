@@ -431,3 +431,44 @@ async fn one_release_notification_resumes_every_released_writer() {
     assert!(first.try_recv().is_ok(), "first released writer resumed");
     assert!(second.try_recv().is_ok(), "second released writer resumed");
 }
+
+// A dual-stack member is eligible. Both families share one universe, cursor
+// and End-of-RIB obligation set; neither marker may precede the last page.
+#[tokio::test(start_paused = true)]
+async fn dual_stack_member_replays_both_families_before_either_marker() {
+    let (mut manager, tx, expected) = fixture(V4_ROWS);
+    manager.initial_member_replays.min_routes = Some(1);
+    let families = [FAMILY, (Afi::Ipv6, Safi::Unicast)];
+    let peer = receiver(1);
+    let (out, mut rx) = mpsc::channel(1);
+    let mut up = test_peer_up(peer, 7, out);
+    let RibUpdate::PeerUp {
+        sendable_families,
+        is_ebgp,
+        route_reflector_client,
+        ..
+    } = &mut up
+    else {
+        unreachable!()
+    };
+    *sendable_families = families.to_vec();
+    *is_ebgp = false;
+    *route_reflector_client = true;
+    manager.handle_update(up);
+    for _ in 0..256 {
+        if manager.is_initial_member_replay(peer) {
+            break;
+        }
+        manager.advance_pending_initial_registration();
+    }
+    assert!(
+        manager.is_initial_member_replay(peer),
+        "dual-stack join is paced"
+    );
+    let actor = tokio::spawn(manager.run_actor());
+    assert_initial(&mut rx, &expected, &families).await;
+    drop(tx);
+    let manager = actor.await.unwrap();
+    assert!(!manager.dirty_peers.contains(&peer));
+    assert!(rx.is_empty());
+}
