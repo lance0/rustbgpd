@@ -128,6 +128,26 @@ impl RibManager {
         }
         let next = operation(message);
         let kind = next.actor_turn_kind();
+        if self.accepted_reload_build() {
+            // Only ordinary unicast can pass this accepted command. Even
+            // a request submitted on the primary lane stays behind it.
+            let unicast = match next {
+                RibUpdate::WireRoutesReceived(batch) => {
+                    batch.evpn_announced.is_empty() && batch.evpn_withdrawn.is_empty()
+                }
+                RibUpdate::RoutesReceived {
+                    evpn_announced,
+                    evpn_withdrawn,
+                    ..
+                } => evpn_announced.is_empty() && evpn_withdrawn.is_empty(),
+                _ => false,
+            };
+            return if unicast && plain_route_input(next) {
+                Intake::Apply
+            } else {
+                Intake::Hold
+            };
+        }
         let room = self.first_group_deferred_intents.len()
             < self.rx.max_capacity().min(MAX_DEFERRED_INTENTS);
         // A late writer may rebuild the evicted table. Keep its original

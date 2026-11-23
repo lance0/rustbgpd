@@ -38,6 +38,8 @@ pub(super) struct FirstGroupBuild {
     pub(super) peer: PeerId,
     phase: FirstGroupPhase,
     writer: Option<Box<RibUpdate>>,
+    // An accepted reload retains ownership even if its acknowledgement closes.
+    reload: Option<Box<ReloadSource>>,
     // The FIFO head needs a different cold table. The founder retains this
     // one until publication or the last physical retirement page.
     other_destination_waits: bool,
@@ -48,6 +50,44 @@ pub(super) struct FirstGroupBuild {
     behind_turns: u16,
     policy: Option<Box<FirstGroupPolicy>>,
     table: GroupRibOut,
+}
+
+/// Lives from acceptance to the terminal reply, even when the build must retire
+/// before fallback. The destination leaves the scan slot only on the commit turn.
+pub(super) struct AuthoritativeReload {
+    pub(super) started: tokio::time::Instant,
+    pub(super) summary: Option<super::replacement_summaries::SummaryProjection>,
+    destination: Option<Box<FirstGroupBuild>>,
+}
+
+struct ReloadSource {
+    gid: usize,
+    sessions: Vec<(PeerId, Waiter)>,
+    vrp: Option<std::sync::Weak<rustbgpd_rpki::VrpTable>>,
+    aspa: Option<std::sync::Weak<rustbgpd_rpki::AspaTable>>,
+}
+
+fn same_snapshot<T>(
+    start: Option<&std::sync::Weak<T>>,
+    current: Option<&std::sync::Arc<T>>,
+) -> bool {
+    match (start, current) {
+        (Some(start), Some(current)) => {
+            std::ptr::eq(start.as_ptr(), std::sync::Arc::as_ptr(current))
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn authoritative_replacements(
+    command: &RibUpdate,
+) -> &[crate::update::PeerExportPolicyReplacement] {
+    match command {
+        RibUpdate::ReplacePeerExportPoliciesAuthoritatively { replacements, .. }
+        | RibUpdate::RestorePeerExportPoliciesAuthoritatively { replacements, .. } => replacements,
+        _ => unreachable!("accepted authoritative replacement"),
+    }
 }
 
 /// Per-policy state is proportional to chain size and the existing repair
@@ -163,24 +203,112 @@ impl RibManager {
         session_id: u64,
         sender: mpsc::Sender<OutboundRouteUpdate>,
     ) {
+        let table = self.first_group_table(peer, gid);
+        let job = self.open_first_group_scan(peer, gid, table);
+        job.phase = FirstGroupPhase::Scanning(Some(Waiter { session_id, sender }));
+    }
+
+    fn open_first_group_scan(
+        &mut self,
+        peer: PeerId,
+        gid: usize,
+        table: GroupRibOut,
+    ) -> &mut FirstGroupBuild {
         debug_assert!(self.first_group_slot_available());
         self.loc_rib.start_registration_scan();
-        let table = self.first_group_table(peer, gid);
         let policy = table
             .export_chain
             .as_ref()
             .map(|chain| FirstGroupPolicy::start(chain, &mut self.loc_rib));
-        self.first_group_build = Some(Box::new(FirstGroupBuild {
+        self.first_group_build.insert(Box::new(FirstGroupBuild {
             gid,
             peer,
-            phase: FirstGroupPhase::Scanning(Some(Waiter { session_id, sender })),
+            phase: FirstGroupPhase::Scanning(None),
             writer: None,
+            reload: None,
             other_destination_waits: false,
             prepare_source: None,
             behind_turns: 0,
             table,
             policy,
-        }));
+        }))
+    }
+
+    pub(super) fn accept_authoritative_replacement(&mut self, command: RibUpdate) {
+        let accepted = tokio::time::Instant::now();
+        let replacements = authoritative_replacements(&command);
+        #[cfg(test)]
+        let threshold = self.first_group_build_min_routes;
+        #[cfg(not(test))]
+        let threshold = super::INITIAL_DUMP_DEFER_MIN_ROUTES;
+        if self.loc_rib.len() >= threshold
+            && self.pending_clean_policy_transition.is_none()
+            && !self.unicast_release_partial()
+            && self.first_group_slot_available()
+            && let Some((source, gid)) = self.reload_build_pair(replacements)
+            && let Some(sessions) = replacements
+                .iter()
+                .map(|r| {
+                    let sender = self.outbound_peers.get(&r.peer)?;
+                    let &session_id = self.outbound_session_ids.get(&r.peer)?;
+                    (!sender.is_closed()).then(|| {
+                        (
+                            r.peer,
+                            Waiter {
+                                session_id,
+                                sender: sender.clone(),
+                            },
+                        )
+                    })
+                })
+                .collect()
+        {
+            self.authoritative_reload = Some(Box::new(AuthoritativeReload {
+                started: accepted,
+                summary: None,
+                destination: None,
+            }));
+            self.capture_reload_summaries(replacements.iter().map(|r| r.peer), gid);
+            let first = &replacements[0];
+            let table = self.reload_group_table(source, first.export_policy.as_ref());
+            let source = Box::new(ReloadSource {
+                gid: source,
+                sessions,
+                vrp: self.vrp_table.as_ref().map(std::sync::Arc::downgrade),
+                aspa: self.aspa_table.as_ref().map(std::sync::Arc::downgrade),
+            });
+            let job = self.open_first_group_scan(first.peer, gid, table);
+            job.writer = Some(Box::new(command));
+            job.reload = Some(source);
+        } else {
+            self.finish_authoritative_replacement(command);
+        }
+    }
+
+    pub(super) fn accepted_reload_build(&self) -> bool {
+        self.authoritative_reload.is_some()
+    }
+
+    fn reload_source_is_current(&mut self, job: &FirstGroupBuild, source: &ReloadSource) -> bool {
+        same_snapshot(source.vrp.as_ref(), self.vrp_table.as_ref())
+            && same_snapshot(source.aspa.as_ref(), self.aspa_table.as_ref())
+            && source.sessions.iter().all(|(peer, waiter)| {
+                self.outbound_session_ids.get(peer) == Some(&waiter.session_id)
+                    && self.outbound_peers.get(peer).is_some_and(|sender| {
+                        !sender.is_closed() && waiter.sender.same_channel(sender)
+                    })
+            })
+            && self.reload_build_pair(authoritative_replacements(
+                job.writer.as_deref().expect("accepted reload"),
+            )) == Some((source.gid, job.gid))
+    }
+
+    pub(super) fn take_authoritative_destination(&mut self, gid: usize) -> Option<GroupRibOut> {
+        self.authoritative_reload
+            .as_mut()?
+            .destination
+            .take_if(|job| job.gid == gid)
+            .map(|job| job.table)
     }
 
     pub(super) fn registration_waits_for_first_group(&self, peer: PeerId) -> bool {
@@ -544,14 +672,18 @@ impl RibManager {
     // while this job is building. GR and collision handling consult that queue.
     pub(super) fn advance_first_group_build(&mut self) {
         let mut job = self.first_group_build.take().expect("active first group");
-        if job.writer.as_deref().is_some_and(|writer| match writer {
-            RibUpdate::ReplacePeerExportPoliciesAuthoritatively { reply, .. } => reply.is_closed(),
-            RibUpdate::ApplyPacedExportPolicies { reply, .. } => reply.is_closed(),
-            RibUpdate::PrepareExportPolicyDestination { reply, .. } => {
-                reply.is_closed() || !self.prepare_source_is_current(&job)
-            }
-            _ => false,
-        }) {
+        if job.reload.is_none()
+            && job.writer.as_deref().is_some_and(|writer| match writer {
+                RibUpdate::ReplacePeerExportPoliciesAuthoritatively { reply, .. } => {
+                    reply.is_closed()
+                }
+                RibUpdate::ApplyPacedExportPolicies { reply, .. } => reply.is_closed(),
+                RibUpdate::PrepareExportPolicyDestination { reply, .. } => {
+                    reply.is_closed() || !self.prepare_source_is_current(&job)
+                }
+                _ => false,
+            })
+        {
             self.release_first_group_writer(job);
             return;
         }
@@ -570,8 +702,9 @@ impl RibManager {
         // Input can keep discovery waiting behind repairs for as long as it
         // lasts. Count the turns on which it does so while a retained
         // session end or another destination's command waits for this build.
-        let keeps_waiting =
-            job.other_destination_waits || (job.writer.is_some() && self.session_end_retained());
+        let keeps_waiting = job.reload.is_some()
+            || job.other_destination_waits
+            || (job.writer.is_some() && self.session_end_retained());
         if keeps_waiting && self.loc_rib.registration_scan_behind() {
             job.behind_turns = job.behind_turns.saturating_add(1);
         }
@@ -584,8 +717,14 @@ impl RibManager {
         if !current
             || self.group_ribs.contains_key(&job.gid)
             || self.loc_rib.registration_scan_status() == RegistrationScanStatus::Overflow
+            || (job.reload.is_some()
+                && (outrun || self.loc_rib.registration_scan_rewinds() >= BEHIND_TURNS_BEFORE_SEAL))
             || (outrun && job.other_destination_waits)
         {
+            if job.reload.is_some() {
+                self.retire_reload_build(job);
+                return;
+            }
             self.clear_first_group_commit_frontier();
             // Input that passed a retained session end can overflow the
             // repair log on every attempt. Give the retry every turn so the
@@ -603,6 +742,12 @@ impl RibManager {
         if outrun {
             self.seal_first_group_commit_frontier();
         }
+        self.advance_first_group_page(job);
+    }
+
+    /// Stage one bounded page. A completed scan can publish only after all
+    /// admitted routes and their distribution have reached the commit frontier.
+    fn advance_first_group_page(&mut self, mut job: Box<FirstGroupBuild>) {
         let mut page = self.loc_rib.take_registration_page();
         #[cfg(test)]
         {
@@ -618,7 +763,11 @@ impl RibManager {
         }
         if !page.keys.is_empty() {
             let prefixes = page.keys.into_iter().collect();
-            job.table = self.stage_first_group_page(job.gid, job.table, &prefixes);
+            job.table = if job.reload.is_some() {
+                self.stage_private_group_page(job.gid, job.table, &prefixes, true)
+            } else {
+                self.stage_first_group_page(job.gid, job.table, &prefixes)
+            };
         }
         // Errors are never subtracted, so a second one already decides the
         // fallback at publication. Stop before staging the rest of the table.
@@ -631,6 +780,11 @@ impl RibManager {
         {
             self.fallback_policy_first_group(job);
             return;
+        }
+        // Once discovery ends, drain a finite ingress frontier. A steady
+        // stream can otherwise leave a small repair backlog on *every* page.
+        if job.reload.is_some() && self.loc_rib.registration_discovery_finished() {
+            self.capture_first_group_commit_frontier();
         }
         if self.loc_rib.registration_scan_status() != RegistrationScanStatus::Ready
             || !self.pending_route_batches.is_empty()
@@ -647,12 +801,51 @@ impl RibManager {
             self.clear_first_group_commit_frontier();
             // The command is still an intent. Classify against the *current*
             // registrations and effective inputs at this commit boundary.
-            if !self.prepare_source_is_current(&job) || !self.writer_needs_group(writer, job.gid) {
+            if let Some(source) = &job.reload {
+                if !self.reload_source_is_current(&job, source) {
+                    self.retire_reload_build(job);
+                    return;
+                }
+            } else if !self.prepare_source_is_current(&job)
+                || !self.writer_needs_group(writer, job.gid)
+            {
                 self.release_first_group_writer(job);
                 return;
             }
         }
         self.finish_first_group_build(job);
+    }
+
+    fn commit_authoritative_reload(
+        &mut self,
+        command: RibUpdate,
+        destination: Option<Box<FirstGroupBuild>>,
+    ) {
+        self.authoritative_reload
+            .as_mut()
+            .expect("accepted reload")
+            .destination = destination;
+        self.advance_advertised_pages();
+        self.finish_authoritative_replacement(command);
+        if let Some(unused) = self
+            .authoritative_reload
+            .take()
+            .expect("accepted reload")
+            .destination
+        {
+            // The terminal planner declined the ensure. The command is
+            // finished; only physical retirement can own this table now.
+            debug_assert!(self.optional_destination_retirement.is_none());
+            self.optional_destination_retirement = Some(Box::new(OptionalDestinationRetirement {
+                inventory: OptionalInventoryRetirement::default(),
+                detached: Some(DetachedDestination {
+                    gid: unused.gid,
+                    group: OptionalGroupRetirement::with_refusal(unused.table, None),
+                    interned_policy: None,
+                    withdrawn: BTreeSet::new(),
+                }),
+            }));
+        }
     }
 
     fn finish_first_group_build(&mut self, mut job: Box<FirstGroupBuild>) {
@@ -668,6 +861,13 @@ impl RibManager {
             return;
         }
         job.stop_scan(&mut self.loc_rib);
+        if job.reload.is_some() {
+            // Preserve the cold/uncertain inventory decision. Only the existing
+            // cohort ensure may consume this table, in this exclusive turn.
+            let writer = job.writer.take().expect("accepted reload");
+            self.commit_authoritative_reload(*writer, Some(job));
+            return;
+        }
         let gid = job.gid;
         let peer = job.peer;
         if let Some(table) = self.publish_first_group(gid, job.table) {
@@ -728,6 +928,10 @@ impl RibManager {
     /// The current policy inputs cannot reproduce a private evaluation.
     /// Retire its pages, then let the same session use ordinary registration.
     fn fallback_policy_first_group(&mut self, mut job: Box<FirstGroupBuild>) {
+        if job.reload.is_some() {
+            self.retire_reload_build(job);
+            return;
+        }
         debug_assert!(job.writer.is_none() && job.table.export_chain.is_some());
         if let FirstGroupPhase::Scanning(Some(founder)) = &job.phase
             && let Some(record) = self
@@ -743,6 +947,15 @@ impl RibManager {
         job.stop_scan(&mut self.loc_rib);
         job.phase = FirstGroupPhase::Retiring;
         self.retire_first_group_page(job);
+    }
+
+    /// One attempt per accepted command. Finish previously admitted route
+    /// chunks, then dispose the uninstalled table before the exact fallback.
+    fn retire_reload_build(&mut self, mut job: Box<FirstGroupBuild>) {
+        self.seal_first_group_commit_frontier();
+        job.stop_scan(&mut self.loc_rib);
+        job.phase = FirstGroupPhase::Retiring;
+        self.first_group_build = Some(job);
     }
 
     fn retire_first_group_page(&mut self, mut job: Box<FirstGroupBuild>) {
@@ -772,6 +985,17 @@ impl RibManager {
             }
             return;
         };
+        if job.reload.is_some() {
+            if !self.first_group_commit_frontier_reached() {
+                self.first_group_build = Some(job);
+                return;
+            }
+            self.clear_first_group_commit_frontier();
+            let writer = job.writer.take().expect("accepted reload");
+            drop(job);
+            self.commit_authoritative_reload(*writer, None);
+            return;
+        }
         if !self.prepare_source_is_current(&job)
             || !self.writer_needs_group(writer, job.gid)
             || self.group_ribs.contains_key(&job.gid)

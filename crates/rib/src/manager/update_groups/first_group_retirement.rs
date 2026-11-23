@@ -58,7 +58,10 @@ impl GroupRibOut {
     /// Retire one physical slot (even a hole) or one denied prefix per unit.
     pub(in crate::manager) fn retire_first_group_page(&mut self, mut budget: usize) -> bool {
         debug_assert!(self.members.is_empty() && !self.per_client_best);
-        debug_assert!(self.local_role.is_none() && self.otc_blocked.is_empty());
+        debug_assert!(
+            !crate::manager::distribution::otc_role_blocks(self.local_role)
+                && self.otc_blocked.is_empty()
+        );
         while !self.table.first_group_retirement_finished() {
             if budget == 0 {
                 return false;

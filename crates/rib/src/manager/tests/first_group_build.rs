@@ -2985,6 +2985,10 @@ async fn labeled_input_passing_a_retained_session_end_reaches_a_paused_cursor_re
     }
 }
 
+mod authoritative_metadata;
+mod authoritative_order;
+mod authoritative_reload;
+mod authoritative_scope;
 mod policy_fallback;
 mod policy_oracle;
 mod policy_work;

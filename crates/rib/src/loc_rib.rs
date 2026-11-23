@@ -28,6 +28,13 @@ const ORDERED_JOURNAL_MIN_CAP: usize = 64;
 pub(crate) const REGISTRATION_PAGE_SIZE: usize = 1024;
 const REGISTRATION_REPAIR_LIMIT: usize = 4096;
 
+#[cfg(test)]
+thread_local! {
+    /// Physical (bucket probes, repair pops), independently of the page's reported budget.
+    pub(crate) static REGISTRATION_VISITS: std::cell::Cell<(usize, usize)> =
+        const { std::cell::Cell::new((0, 0)) };
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum RegistrationScanStatus {
     Scanning,
@@ -50,6 +57,7 @@ struct RegistrationScan {
     shard: usize,
     bucket: usize,
     discovery_finished: bool,
+    rewinds: u16,
     repair_due: bool,
     repairs: VecDeque<Prefix>,
     // Only policy founders need the previous winner of each queued repair.
@@ -290,6 +298,7 @@ impl LocRib {
                         // Earlier shards are complete. A split of the original
                         // single table always rewinds its only cursor, shard 0.
                         scan.bucket = 0;
+                        scan.rewinds = scan.rewinds.saturating_add(1);
                     }
                     scan.record(prefix, previous.map(|(route, _)| route));
                 }
@@ -348,6 +357,18 @@ impl LocRib {
             .status()
     }
 
+    pub(crate) fn registration_discovery_finished(&self) -> bool {
+        self.registration_scan
+            .as_ref()
+            .is_some_and(|scan| scan.discovery_finished)
+    }
+
+    pub(crate) fn registration_scan_rewinds(&self) -> u16 {
+        self.registration_scan
+            .as_ref()
+            .map_or(0, |scan| scan.rewinds)
+    }
+
     /// Repairs own every turn, and discovery waits for the changes to slow.
     pub(crate) fn registration_scan_behind(&self) -> bool {
         self.registration_scan
@@ -382,6 +403,8 @@ impl LocRib {
             page.keys.reserve_exact(count);
             // Changes to just-serviced keys rejoin behind older outstanding repairs.
             for key in scan.repairs.drain(..count) {
+                #[cfg(test)]
+                REGISTRATION_VISITS.update(|(buckets, repairs)| (buckets, repairs + 1));
                 scan.queued.remove(&key);
                 page.keys.push(key);
             }
@@ -396,6 +419,8 @@ impl LocRib {
             let end = shard.num_buckets();
             let count = (end - scan.bucket).min(REGISTRATION_PAGE_SIZE - page.bucket_visits);
             for index in scan.bucket..scan.bucket + count {
+                #[cfg(test)]
+                REGISTRATION_VISITS.update(|(buckets, repairs)| (buckets + 1, repairs));
                 if let Some((key, _)) = shard.get_bucket(index)
                     && (scan.displaced.is_none() || !scan.queued.contains(key))
                 {
