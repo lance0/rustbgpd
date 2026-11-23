@@ -5,7 +5,7 @@ use super::{
     Afi, ExactExportKey, FastMap, GroupEvalAccumulator, GroupRibOut, HashSet, NextHopAction,
     PolicyAction, PolicyLabel, Prefix, RibManager, Route, RouteQueryKey, RtcMembership, Safi,
     VpnAddressFamily, VpnRibRoute, VpnRibRouteKey, VpnRouteKey, bump_counter_row, route_query_key,
-    rt_passes, vpn_routes_equal,
+    rt_passes, vpn_routes_equal_for_target,
 };
 
 /// The overlay may be detached while its keys retire, so a drifted counter
@@ -385,7 +385,7 @@ impl RibManager {
                 && let Some(base) = baseline
                 && base
                     .get(&route.nlri.key())
-                    .is_some_and(|old| vpn_routes_equal(old, route))
+                    .is_some_and(|old| vpn_routes_equal_for_target(old, route, group.is_ebgp))
             {
                 continue;
             }

@@ -27,7 +27,7 @@ use super::helpers::{
     labeled_route_family, labeled_routes_equal, prefix_family, routes_equal_for_target,
     rtc_routes_equal, should_suppress_ibgp_inner, unicast_deferral_exempt, unicast_route_family,
     unicast_routes_equal, validate_route_aspa, validate_route_rpki, vpn_route_family,
-    vpn_routes_equal,
+    vpn_routes_equal_for_target,
 };
 use super::update_groups::GroupMembership;
 use super::{
