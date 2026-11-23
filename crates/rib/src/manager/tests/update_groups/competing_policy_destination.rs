@@ -185,6 +185,143 @@ async fn distinct_cold_destination(command: Command, acknowledge: bool) {
     assert_eq!(manager.group_ribs[&target].table.len(), 2051);
 }
 
+fn marker_from(peer: PeerId, prefix: Ipv4Prefix) -> RibUpdate {
+    let IpAddr::V4(address) = peer.addr() else {
+        unreachable!()
+    };
+    super::super::lifecycle::test_routes_received(
+        peer,
+        vec![make_route_with_lp(prefix, address, 170)],
+    )
+}
+
+fn assert_replayed_marker_delivery(
+    receiver: &mut mpsc::Receiver<OutboundRouteUpdate>,
+    independent: Ipv4Prefix,
+    stale: Ipv4Prefix,
+    tag: Option<u32>,
+) {
+    let mut seen = false;
+    while let Ok(update) = receiver.try_recv() {
+        for row in update.announce.iter() {
+            assert_ne!(row.prefix, Prefix::V4(stale), "route from ended session");
+            if row.prefix == Prefix::V4(independent) {
+                assert_eq!(row.communities(), tag.as_slice());
+                seen = true;
+            }
+        }
+    }
+    assert!(
+        seen,
+        "surviving receiver did not receive the unrelated marker"
+    );
+}
+
+#[tokio::test]
+async fn replayed_reload_keeps_later_routes_behind_retained_session_and_policy_changes() {
+    for (late_end, older_policy) in [(false, false), (true, false), (false, true)] {
+        let (mut manager, members, mut receivers) = direct_clean_transition_manager(2, 0, None);
+        let (primary, rx) = mpsc::channel(8);
+        manager.rx = rx;
+        manager.outbound_row_credit_override = None;
+        distribute_direct_routes(&mut manager, OVERLAP_SOURCE, (0..2050).map(overlap_prefix));
+        for rx in &mut receivers {
+            while rx.try_recv().is_ok() {}
+        }
+        manager.first_group_build_min_routes = 1;
+        let _founder = join_overlap_founder(&mut manager, 1);
+        let target = community_chain(0xfde8_2415);
+        let applied = Command::Batch.submit(&mut manager, &members, &target);
+        let down = RibUpdate::PeerDown {
+            peer: members[0],
+            session_id: 0,
+        };
+        primary
+            .try_send(if late_end {
+                RibUpdate::LateSessionEnd(Box::new(down))
+            } else {
+                down
+            })
+            .unwrap();
+        assert!(manager.drain_ready_updates().await);
+        let (reply, mut policy_response) = oneshot::channel();
+        if older_policy {
+            // The surviving receiver must remove its tag before it sees new input.
+            primary
+                .try_send(RibUpdate::ReplacePeerExportPolicy {
+                    peer: members[1],
+                    export_policy: None,
+                    reply,
+                })
+                .unwrap();
+            assert!(manager.drain_ready_updates().await);
+        }
+        assert!(manager.session_end_retained());
+        while manager.first_group_build.is_some() {
+            manager.advance_first_group_build();
+        }
+        let accepted = manager.take_first_group_deferred_intent().unwrap();
+        assert!(matches!(
+            accepted,
+            RibUpdate::ReplacePeerExportPoliciesAuthoritatively { .. }
+        ));
+        manager.handle_update(accepted);
+        manager.advance_first_group_build();
+        assert!(manager.accepted_reload_build() && manager.session_end_retained());
+        assert_eq!(manager.current_session_id(members[0]), Some(0));
+
+        let independent = overlap_prefix(2050);
+        let stale = overlap_prefix(2051);
+        let source = peer_v4(OVERLAP_SOURCE);
+        primary.try_send(marker_from(source, independent)).unwrap();
+        if !older_policy {
+            assert!(manager.drain_ready_updates().await);
+            drain_route_chunks(&mut manager);
+            assert_eq!(
+                manager.loc_rib.get(&Prefix::V4(independent)).unwrap().peer,
+                source
+            );
+            let old = receivers[1]
+                .try_recv()
+                .expect("unrelated marker before reload commit");
+            assert!(old.announce.iter().any(|row| {
+                row.prefix == Prefix::V4(independent) && row.communities() == [OVERLAP_TAG]
+            }));
+        }
+        primary.try_send(marker_from(members[0], stale)).unwrap();
+        // Exercise admission and normal chunk application while the old session
+        // still exists: a later teardown could hide the bad transient installation.
+        while manager.drain_ready_updates().await {}
+        assert!(manager.accepted_reload_build() && manager.session_end_retained());
+        assert!(manager.loc_rib.get(&Prefix::V4(stale)).is_none());
+        if older_policy {
+            assert!(manager.loc_rib.get(&Prefix::V4(independent)).is_none());
+        }
+        assert!(manager.primary_lookahead.as_ref().is_some_and(|head| {
+            head.session_peer() == Some(if older_policy { source } else { members[0] })
+        }));
+
+        drop(primary);
+        let manager = Box::pin(manager.run_actor()).await;
+        applied.await;
+        assert!(manager.current_session_id(members[0]).is_none());
+        assert!(manager.loc_rib.get(&Prefix::V4(stale)).is_none());
+        assert_eq!(
+            manager.loc_rib.get(&Prefix::V4(independent)).unwrap().peer,
+            source
+        );
+        if older_policy {
+            assert_eq!(policy_response.try_recv().unwrap(), Ok(()));
+        }
+        assert_replayed_marker_delivery(
+            &mut receivers[1],
+            independent,
+            stale,
+            (!older_policy).then_some(0xfde8_2415),
+        );
+    }
+}
+
 #[tokio::test]
 async fn distinct_clean_destination_waits_for_founder_and_paced_prepare() {
     for acknowledged in [false, true] {

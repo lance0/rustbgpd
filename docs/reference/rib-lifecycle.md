@@ -786,7 +786,9 @@ changed sessions to the RIB, which moves them by one of three paths.
   the route or permit it with up to two literal standard-community additions.
   Each construction page visits at most 1,024 Loc-RIB buckets and repair
   keys combined. Other peers' UPDATEs can install under the old policy
-  between pages. Affected neighbor summaries retain their command-entry
+  between pages. A retained session end still precedes later UPDATEs from
+  that peer. Retained policy and family changes also keep their place ahead
+  of later UPDATEs. Affected neighbor summaries retain their command-entry
   values while unrelated neighbor summaries stay live. General RIB reads
   wait for commit. The RIB accounts for changed winners before publishing
   the destination. Inventory comparison, membership and outbound commit

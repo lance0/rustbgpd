@@ -129,24 +129,7 @@ impl RibManager {
         let next = operation(message);
         let kind = next.actor_turn_kind();
         if self.accepted_reload_build() {
-            // Only ordinary unicast can pass this accepted command. Even
-            // a request submitted on the primary lane stays behind it.
-            let unicast = match next {
-                RibUpdate::WireRoutesReceived(batch) => {
-                    batch.evpn_announced.is_empty() && batch.evpn_withdrawn.is_empty()
-                }
-                RibUpdate::RoutesReceived {
-                    evpn_announced,
-                    evpn_withdrawn,
-                    ..
-                } => evpn_announced.is_empty() && evpn_withdrawn.is_empty(),
-                _ => false,
-            };
-            return if unicast && plain_route_input(next) {
-                Intake::Apply
-            } else {
-                Intake::Hold
-            };
+            return self.reload_route_intake(next);
         }
         let room = self.first_group_deferred_intents.len()
             < self.rx.max_capacity().min(MAX_DEFERRED_INTENTS);
@@ -219,6 +202,35 @@ impl RibManager {
             return behind_writer;
         }
         Intake::Apply
+    }
+
+    fn reload_route_intake(&self, next: &RibUpdate) -> Intake {
+        let peer = match next {
+            RibUpdate::WireRoutesReceived(batch)
+                if batch.evpn_announced.is_empty() && batch.evpn_withdrawn.is_empty() =>
+            {
+                batch.peer
+            }
+            RibUpdate::RoutesReceived {
+                peer,
+                evpn_announced,
+                evpn_withdrawn,
+                ..
+            } if evpn_announced.is_empty() && evpn_withdrawn.is_empty() => *peer,
+            _ => return Intake::Hold,
+        };
+        // A replayed reload can leave previously admitted commands behind it.
+        // Only another session's teardown can be passed by ordinary unicast.
+        // An older policy or family change can affect any source's exports.
+        let can_pass = plain_route_input(next)
+            && self.first_group_deferred_intents.iter().all(|intent| {
+                session_end(intent) && intent.session_peer().is_some_and(|ended| ended != peer)
+            });
+        if can_pass {
+            Intake::Apply
+        } else {
+            Intake::Hold
+        }
     }
 
     fn first_group_writer_affects_peer(
