@@ -2396,6 +2396,7 @@ impl RibManager {
         let record = LiveSessionRecord {
             session_id,
             registration_wait_since: None,
+            registration_policy_fallback: false,
             source_context,
             peer_scope,
             peer_group: self
@@ -2846,9 +2847,9 @@ impl RibManager {
         let actor_busy =
             self.primary_backlog() > 0 || !self.pending_initial_registrations.is_empty();
         let dump_expensive = self.loc_rib.len() >= self.initial_dump_defer_min_routes;
-        let candidate = self.first_group_candidate(peer);
+        let cold_group = self.defer_first_group_registration(peer);
         if (actor_busy && dump_expensive)
-            || candidate.is_some()
+            || cold_group
             || self.registration_waits_for_first_group(peer)
             || self.registration_waits_for_optional_destination(peer)
         {
@@ -2859,11 +2860,6 @@ impl RibManager {
                     "deferring outbound registration behind queued actor work"
                 );
                 self.pending_initial_registrations.push_back(peer);
-            }
-            if let Some((gid, session, sender)) = candidate
-                && self.claim_registration_slot(gid)
-            {
-                self.start_first_group(peer, gid, session, sender);
             }
         } else {
             self.complete_outbound_registration(peer);
@@ -2904,6 +2900,7 @@ impl RibManager {
         };
         // This session's registration wait ends here.
         record.registration_wait_since = None;
+        record.registration_policy_fallback = false;
         let orf_refresh = std::mem::take(&mut record.registration_orf_refresh);
         let session_id = record.session_id;
         let outbound_tx = record.outbound_tx.clone();

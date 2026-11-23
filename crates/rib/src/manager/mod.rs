@@ -2206,6 +2206,8 @@ pub(super) struct LiveSessionRecord {
     /// `PeerUp`, or the collision failback that handed an earlier-registered
     /// survivor the registration again. `None` once its registration installs.
     registration_wait_since: Option<tokio::time::Instant>,
+    /// This waiting session must rebuild from authoritative policy inputs after invalidation.
+    registration_policy_fallback: bool,
     source_context: Option<Arc<crate::update::PeerSourceContext>>,
     /// Interned scope of `source_context`'s interface, resolved at
     /// registration; `DEFAULT` for a numbered neighbor.
@@ -4828,13 +4830,10 @@ impl RibManager {
                 self.pending_initial_registrations.push_back(peer);
                 return;
             }
-            if let Some((gid, session_id, sender)) = self.first_group_candidate(peer) {
+            if self.defer_first_group_registration(peer) {
                 // Rotate the queue so another group's warm registration can
                 // proceed while this cold table is being staged.
                 self.pending_initial_registrations.push_back(peer);
-                if self.claim_registration_slot(gid) {
-                    self.start_first_group(peer, gid, session_id, sender);
-                }
                 if self.first_group_build.is_some() {
                     self.advance_first_group_build();
                 }
@@ -5577,6 +5576,14 @@ impl RibManager {
                         .iter_mut()
                         .find(|record| record.session_id == session_id)
                 }) {
+                    if self
+                        .first_group_build
+                        .as_ref()
+                        .is_some_and(|job| job.founded_by(peer, record))
+                        && record.export_policy != export_policy
+                    {
+                        record.registration_policy_fallback = true;
+                    }
                     record.export_policy = export_policy;
                 }
             }

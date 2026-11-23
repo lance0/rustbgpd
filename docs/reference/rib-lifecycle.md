@@ -42,8 +42,8 @@ finishes the unit it is in, and one unit can be a whole table.
 | Shape | [Session comes up](#session-comes-up) | [Steady state](#steady-state) | [Receiver falls behind](#receiver-falls-behind) | [Refresh, ORF, RTC](#refresh-orf-and-rt-constrain) | [Policy change](#policy-or-config-change) | [Restart](#restart) | [Session ends](#session-ends) |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Plain unicast, grouped | Table build **paced**; initial table **one turn** (both in the [receipt](../perf/first-group-build-registration-2026-11.md)) | **paced** by read gate and window | Resync **one turn** per member | **one turn** per request; queued requests share it | Nothing filtered: **bounded turns**, updates held until commit. Otherwise one shared turn | **paced** between batches; input held inside a batch | **one turn** |
-| Export policy | Table build and initial table together in **one turn**; not measured | As plain | As plain | As plain | As plain | As plain; not measured with policy | One turn |
-| Configured role | As export policy; not measured | As plain; not measured | As plain; not measured | As plain; not measured | As plain if nothing is OTC-blocked; not measured | As plain; not measured | One turn; not measured |
+| Group-shareable export policy | Single-best unicast table build **paced**; initial table **one turn** | As plain | As plain | As plain | As plain | As plain; not measured with policy | One turn |
+| Configured role | Table build and initial table together in **one turn**; not measured | As plain; not measured | As plain; not measured | As plain; not measured | As plain if nothing is OTC-blocked; not measured | As plain; not measured | One turn; not measured |
 | Route-server per-client best | Table build and own initial table together in **one turn**; not measured | Window; per-client ranking not measured | As plain; not measured | One turn per request, never shared | Shared cohort **one turn**; other members **paced** by command; not measured | **paced** between batches, as plain; a crowded prefix alone | One turn; not measured |
 | Kept private: ORF, ORR, conditional advertisement, peer-context policy, slow-peer isolation | Initial table **one turn** per receiver; not measured | Window; work grows with receivers | **paced** row cursor; fallback resync one turn | One turn per request | Members **paced** by command, a whole-table resync each; not measured | **paced** row cursor | One turn |
 | Add-Path send | As kept private; not measured | As kept private | As kept private; not measured with several paths | One turn per request | As kept private | As kept private; not measured with several paths | One turn |
@@ -102,10 +102,9 @@ What backs each **paced** and **bounded turns** mark:
   and the work counts in tests named under
   [Session comes up](#session-comes-up). At 1M routes, during the first
   policy-free plain-unicast group build, unrelated UPDATE latency fell from
-  2,209 ms to 0.60 ms. Sessions with export policy, a configured role,
-  per-client-best, or mixed families can still take the synchronous build
-  path. The initial table that follows is still one turn; the receipt
-  times it too, for this shape only.
+  2,209 ms to 0.60 ms. The same receipt times the single-turn initial
+  replay for that policy-free shape. The group-shareable export-policy row
+  uses the work-count and synchronous-result tests described below.
 - *Steady state.* The read-gate test named under
   [Steady state](#steady-state) and the window thresholds. It bounds the
   input ahead of another peer's update, not the cost of one pass.
@@ -146,7 +145,8 @@ What backs each **paced** and **bounded turns** mark:
 
 ### Worked example: a route-server client joins a 1M-route table
 
-A dual-stack route-server client with an export policy reaches Established
+A dual-stack route-server client with route-server control and an export
+policy reaches Established
 while the Loc-RIB holds one million best routes.
 
 1. **Registration is queued.** With 10,000 or more best routes and other
@@ -157,8 +157,7 @@ while the Loc-RIB holds one million best routes.
    established client has the same chain and profile, this client is the
    first member and the RIB builds the group's table from the whole
    Loc-RIB, both families, with export policy evaluated per route. The
-   paced build does not apply: it covers only sessions with no export
-   policy, no role, no route-server control and no per-client best.
+   route-server control on this session keeps it on the synchronous path.
 3. **Its initial table follows in the same turn.** Without returning to
    its queues, the RIB replays the group table to the client, less the
    client's own routes, as one whole-table operation, then sends
@@ -258,7 +257,7 @@ flowchart TD
     J -->|"private"| V["Own table, one turn"]
     E --> F["First member: build group table"]
     E -->|"later member or queued joiner"| T
-    F --> N["Plain unicast: paced turns. Other shapes: in the replay turn"]
+    F --> N["Eligible single-best unicast: paced turns. Other shapes: in the replay turn"]
     N --> T["Replay group table, one turn"]
     T --> X["End-of-RIB per family"]
     V --> X
@@ -266,7 +265,7 @@ flowchart TD
 
 A new session registers at once on a quiet or small RIB. On a large busy
 one an ordinary registration waits behind queued input. A session
-eligible for the paced build (plain unicast, first member of its group)
+eligible for the paced build (single-best unicast, first member of its group)
 is deferred on any large RIB, busy or quiet, and builds the group table
 in paced turns that run between queued input. A later member skips the
 build. Every session then gets its table in one turn; for a first member
@@ -303,10 +302,11 @@ if needed. Any other session keeps its own Adj-RIB-Out.
 
 **First member of a group.** The group has no table yet.
 
-- *Paced build.* `prospective_first_group` in
+- *Paced build.* `defer_first_group_registration` in
   [`membership.rs`](../../crates/rib/src/manager/update_groups/membership.rs)
-  admits a session that negotiated only IPv4 or IPv6 unicast and has no
-  export policy, no role, no route-server control and no per-client best.
+  admits a session that negotiated only IPv4 or IPv6 unicast, with an
+  optional group-shareable export policy. Roles, route-server control and
+  per-client best each exclude a session.
   It also refuses an iBGP non-client on a route reflector and any family
   still inside a restart selection hold.
   [`first_group_build.rs`](../../crates/rib/src/manager/first_group_build.rs)
@@ -325,6 +325,17 @@ if needed. Any other session keeps its own Adj-RIB-Out.
     refresh sweep, End-of-RIB, an RPKI table update) still overflows it:
     the partial table is retired, 1,024 slots a turn, and the build starts
     again.
+  - For a policy build, the repair log keeps the first displaced winner of
+    each queued key. The builder uses it to correct private term-hit counts
+    before publishing. A change to the founder's export policy, a referenced
+    dataset generation change, or an ambiguous evaluation-error history sends
+    the founder through synchronous registration. Error history is ambiguous
+    when a repair supersedes an error or several errors make the last
+    reported error depend on scan order.
+    [The registration oracle](../../crates/rib/src/manager/tests/first_group_build/policy_oracle.rs)
+    compares the staged routes, denials and policy counters with synchronous
+    registration. [The work-count test](../../crates/rib/src/manager/tests/first_group_build/policy_work.rs)
+    records the construction work within each actor poll.
   - Tests: `registration_finishes_discovery_and_repairs_under_continuing_changes`
     and `registration_coalesces_repairs_and_invalidates_on_the_first_excess_key`
     in [`loc_rib.rs`](../../crates/rib/src/loc_rib.rs) bound a turn's work;
@@ -338,8 +349,7 @@ if needed. Any other session keeps its own Adj-RIB-Out.
     16,378-route messages on 16,384 routes.
   - Measured: at 1M routes, during the first policy-free plain-unicast
     group build, unrelated UPDATE latency fell from 2,209 ms to 0.60 ms.
-    Sessions with export policy, a configured role, per-client-best, or
-    mixed families can still take the synchronous build path
+    That measurement covers construction for a session without export policy
     ([receipt](../perf/first-group-build-registration-2026-11.md): one
     iBGP route-reflector client, IPv4 unicast, in-process harness, one
     concurrent UPDATE).
@@ -349,7 +359,7 @@ if needed. Any other session keeps its own Adj-RIB-Out.
     longer discards its work while it waits.
 - *One-turn build.* Every other grouped session takes `ensure_group_table`:
   a walk of the whole Loc-RIB that stages every family the group owns.
-  That includes every session with export policy, a role, route-server
+  That includes grouped sessions with a configured role, route-server
   control or per-client best, and any session that also negotiated VPN,
   EVPN or another non-unicast family. It runs inside the registration
   turn: `install_registration_state` reaches it through `join_group`, and

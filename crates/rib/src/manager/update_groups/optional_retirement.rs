@@ -3,7 +3,7 @@
 use super::policy_transition::retire_inventory_vec;
 use super::{
     AddrMap, BatchedMemberSupplement, BatchedTransitionCounters, FastMap, GroupRibOut,
-    NextHopAction, PeerId, PolicyLabel, Prefix, Route, ShardedMap,
+    NextHopAction, PeerId, PolicyLabel, PolicyRows, Prefix, Route, ShardedMap,
 };
 
 /// An optional preparation can be discarded before ever gaining a member.
@@ -287,14 +287,9 @@ impl OptionalGroupRetirement {
                 return false;
             }
             *budget -= 1;
-            if let Some((source, prefix)) = self.group.table.retire_first_group_slot() {
-                self.group.dec_source(source, &prefix);
-                if let Some(scratch) = &mut self.rejected {
-                    scratch.pending_source = Some(source);
-                }
-                if !self.group.source_control_passthrough {
-                    self.group.source_attrs.remove(&(prefix, 0));
-                }
+            let source = self.group.retire_first_group_slot();
+            if let Some(scratch) = &mut self.rejected {
+                scratch.pending_source = source;
             }
         }
         if let Some(scratch) = &mut self.rejected {
@@ -307,7 +302,11 @@ impl OptionalGroupRetirement {
         debug_assert!(self.group.source_counts.is_empty() && self.group.source_attrs.is_empty());
         // The single-best stager replaces each prefix's entire denial map
         // with at most one (source, path ID) and its Arc<str> policy label.
-        if !self.denials.drain(&mut self.group.policy_filtered, budget) {
+        let denials_retired = match &mut self.group.policy_filtered {
+            PolicyRows::Sharded(map) => self.denials.drain(map, budget),
+            PolicyRows::Ordered(map) => PolicyRows::retire_ordered(map, budget),
+        };
+        if !denials_retired {
             return false;
         }
         match &mut self.group.otc_blocked {
