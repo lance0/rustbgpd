@@ -1340,7 +1340,7 @@ impl RibManager {
                 regrouped = true;
             }
         }
-        for peer in dirty {
+        for &peer in &dirty {
             let mut feed = evpn_feeds.remove(&peer);
             self.mark_outbound_dirty_with_evpn_feed(peer, &mut feed);
             if let Some(feed) = feed {
@@ -1348,7 +1348,7 @@ impl RibManager {
             }
         }
         if regrouped {
-            self.distribute_changes_with_evpn_feeds(evpn_feeds, true);
+            self.distribute_scoped_resync(dirty, evpn_feeds, true);
         }
     }
 

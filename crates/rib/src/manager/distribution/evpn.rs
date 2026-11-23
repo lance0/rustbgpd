@@ -937,8 +937,14 @@ impl RibManager {
         owned_groups.sort_unstable();
         owned_groups.dedup();
         let owned_pass = !owned_groups.is_empty();
+        let mut retries = Vec::new();
         for gid in owned_groups {
-            self.distribute_owned_evpn_group(gid, &changed_keys, &mut checkpoint);
+            self.distribute_owned_evpn_group(
+                gid,
+                &changed_keys,
+                Some(&mut retries),
+                &mut checkpoint,
+            );
         }
         let mut fanout = PendingEvpnFanout {
             keys: changed_keys,
@@ -955,10 +961,8 @@ impl RibManager {
             return;
         }
         self.evpn_fanout_step(&mut fanout, None);
-        if owned_pass && !self.dirty_peers.is_empty() {
-            // All group OLD consumers have finished before the existing
-            // mixed-family recovery pass can settle a missed admission.
-            self.distribute_resync_request();
+        if !retries.is_empty() {
+            self.distribute_scoped_resync(retries, HashMap::new(), false);
         }
     }
 
@@ -1077,9 +1081,9 @@ impl RibManager {
         if let Some(gid) = self.evpn_grouped_member_of(peer) {
             // A targeted caller must not advance a shared table while its
             // other members still need the displaced actual OLD values.
-            self.distribute_owned_evpn_group(gid, keys, checkpoint);
-            if !self.dirty_peers.is_empty() {
-                self.distribute_resync_request();
+            self.distribute_owned_evpn_group(gid, keys, None, checkpoint);
+            if self.dirty_peers.contains(&peer) {
+                self.distribute_scoped_resync([peer], HashMap::new(), false);
             }
             return;
         }
@@ -1181,6 +1185,7 @@ impl RibManager {
         &mut self,
         gid: usize,
         keys: &HashSet<rustbgpd_wire::EvpnRouteKey>,
+        retries: Option<&mut Vec<PeerId>>,
         checkpoint: &mut impl FnMut(),
     ) {
         // A member that is refused, or that retains a recovery proof, costs
@@ -1199,10 +1204,10 @@ impl RibManager {
         });
         if table_sized {
             self.with_ingest_readiness(|manager| {
-                manager.owned_evpn_group_pass(gid, keys, checkpoint);
+                manager.owned_evpn_group_pass(gid, keys, retries, checkpoint);
             });
         } else {
-            self.owned_evpn_group_pass(gid, keys, checkpoint);
+            self.owned_evpn_group_pass(gid, keys, retries, checkpoint);
         }
     }
 
@@ -1214,6 +1219,7 @@ impl RibManager {
         &mut self,
         gid: usize,
         keys: &HashSet<rustbgpd_wire::EvpnRouteKey>,
+        mut retries: Option<&mut Vec<PeerId>>,
         checkpoint: &mut impl FnMut(),
     ) {
         // A member whose complete feed is current at the stamp this staging
@@ -1266,6 +1272,25 @@ impl RibManager {
                 continue;
             }
             if self.dirty_peers.contains(&peer) || self.force_outbound_peers.contains(&peer) {
+                // Keep actual OLD for every dirty member. Only a change to its
+                // own export needs a full retry in this fanout's turn.
+                if let Some(retries) = retries.as_deref_mut() {
+                    let filter = self.member_rt_filter(peer);
+                    if stage.deltas.iter().any(|delta| {
+                        checkpoint();
+                        delta
+                            .for_member(
+                                &self.group_ribs[&gid],
+                                peer,
+                                self.cluster_id,
+                                filter.as_ref(),
+                                self.peer_unexportable.get(&peer),
+                            )
+                            .is_some()
+                    }) {
+                        retries.push(peer);
+                    }
+                }
                 self.capture_shared_evpn_before_deltas(peer, &stage.deltas);
                 self.mark_outbound_dirty_inner(peer, false);
                 continue;

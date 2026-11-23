@@ -1946,7 +1946,7 @@ impl RibManager {
     /// Pending peers wait until release has updated both selection and the
     /// shared group tables; their existing resync obligation covers the delta.
     pub(super) fn selection_release_resync_pending(&self, peer: PeerId) -> bool {
-        (self.selection_release_staging || self.release_resync_waits(peer))
+        (self.selection_release_staging.is_some() || self.release_resync_waits(peer))
             && (self.dirty_peers.contains(&peer) || self.force_outbound_peers.contains(&peer))
     }
 
@@ -1955,21 +1955,28 @@ impl RibManager {
     fn run_released_selection_resyncs(
         &mut self,
         family: (Afi, Safi),
+        mut targets: HashSet<PeerId>,
         feeds: HashMap<PeerId, EvpnCompleteFeed>,
     ) -> HashSet<PeerId> {
         let mut pending = HashSet::new();
-        let mut has_resync = false;
         for &peer in self.dirty_peers.iter().chain(&self.force_outbound_peers) {
             self.replacement_checkpoint(false);
-            if self.resync_pending(peer) {
-                has_resync = true;
+            if self.resync_pending(peer)
+                && (targets.contains(&peer)
+                    || self
+                        .peer_sendable_families
+                        .get(&peer)
+                        .is_some_and(|f| f.contains(&family)))
+            {
+                targets.insert(peer);
                 if self.eor.owes(peer, family) {
                     pending.insert(peer);
                 }
             }
         }
-        if has_resync || !feeds.is_empty() {
-            self.distribute_changes_with_evpn_feeds(feeds, false);
+        targets.extend(feeds.keys().copied());
+        if !targets.is_empty() {
+            self.distribute_scoped_resync(targets, feeds, false);
             pending.retain(|&peer| {
                 self.replacement_checkpoint(false);
                 !self.resync_pending(peer)
@@ -2076,9 +2083,9 @@ impl RibManager {
         // Only synchronous transition/completion dispatch calls this function.
         // Its callees do not dispatch mutations; readiness checkpoints serve
         // reads, so they cannot reenter it. This scope has no await or early return.
-        debug_assert!(!self.selection_release_staging);
+        debug_assert!(self.selection_release_staging.is_none());
         self.wake_selection_partial_recovery(family);
-        self.selection_release_staging = true;
+        self.selection_release_staging = Some(HashSet::new());
         // A receiver that holds this family in its own Adj-RIB-Out owes it
         // whole from here: the release pass stages nothing toward it, and
         // the owed-key drain sends it one receiver per resync tick, with the
@@ -2383,8 +2390,11 @@ impl RibManager {
         } else {
             HashMap::new()
         };
-        self.selection_release_staging = false;
-        self.run_released_selection_resyncs(family, feeds)
+        let targets = self
+            .selection_release_staging
+            .take()
+            .expect("family staging active");
+        self.run_released_selection_resyncs(family, targets, feeds)
     }
 }
 

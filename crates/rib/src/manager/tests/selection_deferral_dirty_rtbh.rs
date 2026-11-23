@@ -1490,7 +1490,7 @@ fn refused_partial_admission_proof_keeps_actual_inventory_and_counts_until_relea
     manager
         .pending_group_admitted
         .fail_next_allocation_for_test();
-    manager.distribute_resync_request_to_targets(&HashSet::from([observer]));
+    manager.distribute_scoped_resync([observer], HashMap::new(), false);
     assert!(
         manager.pending_group_admitted.get(&observer).is_none(),
         "the actual proof reservation was refused"
@@ -1636,7 +1636,7 @@ fn private_vpn_only_handoff_refuses_unproved_unicast_admission() {
     manager
         .pending_group_admitted
         .fail_next_allocation_for_test();
-    manager.distribute_resync_request_to_targets(&HashSet::from([observer]));
+    manager.distribute_scoped_resync([observer], HashMap::new(), false);
     assert!(manager.pending_group_admitted.get(&observer).is_none());
     let mut wire = std::collections::HashMap::new();
     apply_wire(&mut rx, &mut wire);
@@ -1769,7 +1769,7 @@ fn refused_private_handoff_withdraws_removed_old_unicast_and_vpn_at_release() {
     manager
         .pending_group_admitted
         .fail_next_allocation_for_test();
-    manager.distribute_resync_request_to_targets(&HashSet::from([observer]));
+    manager.distribute_scoped_resync([observer], HashMap::new(), false);
     assert!(
         manager.pending_group_admitted.get(&observer).is_none(),
         "proof reservation must really refuse"
@@ -2000,7 +2000,7 @@ async fn assert_removed_rtbh_after_proof_refusal(
     manager
         .pending_group_admitted
         .fail_next_allocation_for_test();
-    manager.distribute_resync_request_to_targets(&HashSet::from([observer]));
+    manager.distribute_scoped_resync([observer], HashMap::new(), false);
     assert!(manager.pending_group_admitted.get(&observer).is_none());
     assert!(manager.group_recovery_fallback(observer).is_some());
     assert!(apply_wire(&mut rx, &mut wire).is_empty());
@@ -3058,7 +3058,7 @@ fn assert_refused_proof_rtbh_replacement(add_path: bool, held_counts: bool) {
     manager
         .pending_group_admitted
         .fail_next_allocation_for_test();
-    manager.distribute_resync_request_to_targets(&HashSet::from([observer]));
+    manager.distribute_scoped_resync([observer], HashMap::new(), false);
     assert_eq!(
         counter_metric_value(
             &manager.metrics,
@@ -3227,7 +3227,7 @@ fn refused_replacement_salvage_visits(prefixes: u8) -> usize {
     manager
         .pending_group_admitted
         .fail_next_allocation_for_test();
-    manager.distribute_resync_request_to_targets(&HashSet::from([observer]));
+    manager.distribute_scoped_resync([observer], HashMap::new(), false);
     assert!(manager.group_recovery_fallback(observer).is_some());
     manager.refused_replacement_salvage_visits
 }
@@ -3404,7 +3404,7 @@ fn held_empty_view_resync_flushes_the_markers_the_hold_does_not_hold() {
 
     assert!(manager.selection_partial_caught_up(observer));
     let empty_stagings = manager.outbound_stagings(observer);
-    manager.distribute_resync_request_to_targets(&HashSet::from([observer]));
+    manager.distribute_scoped_resync([observer], HashMap::new(), false);
     assert_eq!(
         manager.outbound_stagings(observer),
         empty_stagings,

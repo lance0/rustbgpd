@@ -16,20 +16,26 @@ fn counter_metric_value(metrics: &BgpMetrics, name: &str) -> f64 {
 /// A still-gated BGP-LS family must not influence already-released unicast
 /// ORR selection. The topology becomes visible only when the BGP-LS gate
 /// itself releases.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn selection_deferral_hides_bgpls_topology_until_family_release() {
     let feed = Ipv4Addr::new(10, 9, 9, 9);
     let feed_peer = peer_v4(feed);
     let family = (Afi::BgpLs, Safi::BgpLs);
     let (tx, rx) = mpsc::channel(64);
-    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
-        .with_selection_deferral(SelectionDeferralConfig {
-            timeout: Duration::from_mins(1),
-            waiters: vec![SelectionDeferralWaiterConfig {
-                peer: feed_peer.into(),
-                families: vec![family],
-            }],
-        });
+    let mut manager = RibManager::new(
+        rx,
+        dummy_query_rx(),
+        None,
+        Some(Ipv4Addr::new(10, 255, 0, 1)),
+        BgpMetrics::new(),
+    )
+    .with_selection_deferral(SelectionDeferralConfig {
+        timeout: Duration::from_mins(1),
+        waiters: vec![SelectionDeferralWaiterConfig {
+            peer: feed_peer.into(),
+            families: vec![family],
+        }],
+    });
     super::arm_selection_waiter(&mut manager, feed_peer, &[family]);
     let handle = tokio::spawn(manager.run());
 
@@ -76,11 +82,20 @@ async fn selection_deferral_hides_bgpls_topology_until_family_release() {
     .await
     .unwrap();
     let client = peer_v4(Ipv4Addr::new(10, 0, 0, 2));
-    let _client_rx = orr_client_peer_up(&tx, client, Some(vantage_at_node_a())).await;
+    let mut client_rx = orr_client_peer_up(&tx, client, Some(vantage_at_node_b())).await;
+    for source in [ORR_SRC_X, ORR_SRC_Y] {
+        register_orr_source(&tx, source).await;
+    }
+    announce_divergent_bests(&tx).await;
+    assert_eq!(
+        drain_final_unicast(&mut client_rx)[&orr_prefix_key()].next_hop,
+        orr_nh_x(),
+    );
     let gated = query_orr_status(&tx).await;
     assert_eq!(gated.topology_nodes, 0);
     assert!(!gated.vantages[0].resolved);
 
+    let before_release = tokio::time::Instant::now();
     tx.send(RibUpdate::EndOfRib {
         peer: feed_peer,
         session_id: 1,
@@ -93,6 +108,12 @@ async fn selection_deferral_hides_bgpls_topology_until_family_release() {
     let released = query_orr_status(&tx).await;
     assert_eq!(released.topology_nodes, 4);
     assert!(released.vantages[0].resolved);
+    assert_eq!(tokio::time::Instant::now(), before_release);
+    assert_eq!(
+        drain_final_unicast(&mut client_rx)[&orr_prefix_key()].next_hop,
+        orr_nh_y(),
+        "the BGP-LS release must update the unicast-only client's winner before a timer tick",
+    );
 
     drop(tx);
     handle.await.unwrap();

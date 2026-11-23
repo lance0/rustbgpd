@@ -3441,7 +3441,7 @@ impl RibManager {
                         Ok(())
                     } else {
                         full_pass = Some("member");
-                        manager.reevaluate_peer_export_policies_synchronously(peers)
+                        manager.reevaluate_peer_export_policies_synchronously(peers, swaps)
                     }
                 }
             };
@@ -3714,6 +3714,7 @@ impl RibManager {
     fn reevaluate_peer_export_policies_synchronously(
         &mut self,
         peers: &[PeerId],
+        swaps: Option<&[DatasetSwap]>,
     ) -> Result<(), RibCommandError> {
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
@@ -3726,17 +3727,39 @@ impl RibManager {
                 "peer {peer} not registered for outbound updates"
             )));
         }
-        let groups: HashSet<usize> = peers
+        let mut targets: HashSet<_> = peers.iter().inspect(|_| checkpoint()).copied().collect();
+        let mut groups: HashSet<_> = peers
             .iter()
             .inspect(|_| checkpoint())
             .filter_map(|peer| self.grouped_member_of(*peer))
             .collect();
-        let mut targets: HashSet<PeerId> =
-            peers.iter().inspect(|_| checkpoint()).copied().collect();
+        // A partially named group keeps its committed table unless this
+        // dataset change can affect the group's effective export chain.
+        // Without swap identities every referenced dataset can have changed.
+        groups.retain(|gid| {
+            self.group_ribs.get(gid).is_some_and(|group| {
+                (group.members.len() <= targets.len()
+                    && group.members.iter().all(|p| {
+                        checkpoint();
+                        targets.contains(p)
+                    }))
+                    || group.export_chain.as_ref().is_some_and(|chain| {
+                        chain.compiled().referenced_datasets().any(|slot| {
+                            swaps.is_none_or(|swaps| {
+                                swaps.iter().any(|swap| slot.name == *swap.handle.name())
+                            })
+                        })
+                    })
+            })
+        });
         for gid in &groups {
-            if let Some(group) = self.group_ribs.get(gid) {
-                targets.extend(group.members.iter().inspect(|_| checkpoint()).copied());
-            }
+            targets.extend(
+                self.group_ribs[gid]
+                    .members
+                    .iter()
+                    .inspect(|_| checkpoint())
+                    .copied(),
+            );
         }
         let mut evpn_feeds = HashMap::new();
         for &gid in &groups {
@@ -3792,9 +3815,20 @@ impl RibManager {
             });
             crate::manager::retire_hash_set(&mut keys, &mut || checkpoint());
         }
-        for peer in targets {
+        for &peer in &targets {
             checkpoint();
             let mut feed = evpn_feeds.remove(&peer);
+            if let Some(gid) = self.evpn_grouped_member_of(peer)
+                && !groups.contains(&gid)
+                && !self.selection_deferred((Afi::L2Vpn, Safi::Evpn))
+                && !self.complete_feed_deferred(peer)
+            {
+                // The shared table stayed put, so it still supplies actual OLD for a clean member.
+                let clean = !self.dirty_peers.contains(&peer)
+                    && !self.group_ribs[&gid].dirty_members.contains(&peer);
+                self.capture_shared_evpn_admitted(peer);
+                feed = self.prepare_complete_evpn_feed(peer, gid, Some(gid), clean);
+            }
             self.mark_outbound_dirty_with_evpn_feed(peer, &mut feed);
             if let Some(feed) = feed {
                 evpn_feeds.insert(peer, feed);
@@ -3873,7 +3907,7 @@ impl RibManager {
             memo.retire_with(&mut || checkpoint());
             self.refresh_lane_gauge();
         }
-        self.distribute_changes_with_evpn_feeds(evpn_feeds, false);
+        self.distribute_scoped_resync(targets, evpn_feeds, false);
         Ok(())
     }
 
@@ -4334,7 +4368,8 @@ impl RibManager {
             if !key_stable {
                 manager.mark_outbound_dirty_with_evpn_feed(peer, &mut evpn_feed);
             }
-            manager.distribute_changes_with_evpn_feeds(
+            manager.distribute_scoped_resync(
+                [peer],
                 evpn_feed.into_iter().map(|feed| (peer, feed)).collect(),
                 true,
             );
@@ -4438,7 +4473,8 @@ impl RibManager {
                 None
             };
             manager.mark_outbound_dirty_with_evpn_feed(peer, &mut evpn_feed);
-            manager.distribute_changes_with_evpn_feeds(
+            manager.distribute_scoped_resync(
+                [peer],
                 evpn_feed.into_iter().map(|feed| (peer, feed)).collect(),
                 true,
             );
