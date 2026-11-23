@@ -280,7 +280,8 @@ impl RibManager {
         prefixes: &HashSet<Prefix>,
     ) -> GroupRibOut {
         let replace_existing = table.export_chain.is_some();
-        self.stage_private_group_page(gid, table, prefixes, replace_existing)
+        let mut memo = crate::manager::distribution::ExportMemo::default();
+        self.stage_private_group_page(gid, table, prefixes, replace_existing, &mut memo)
     }
 
     pub(in crate::manager) fn stage_private_group_page(
@@ -289,16 +290,16 @@ impl RibManager {
         table: GroupRibOut,
         prefixes: &HashSet<Prefix>,
         replace_existing: bool,
+        memo: &mut crate::manager::distribution::ExportMemo,
     ) -> GroupRibOut {
         let std::collections::hash_map::Entry::Vacant(slot) = self.group_ribs.entry(gid) else {
             return table;
         };
         slot.insert(table);
-        let mut memo = crate::manager::distribution::ExportMemo::default();
         self.stage_group_prefixes_inner(
             gid,
             prefixes,
-            &mut memo,
+            memo,
             false,
             None,
             Staging::Private { replace_existing },

@@ -6,6 +6,7 @@ use rustbgpd_policy::{PolicyChain, PolicyHitCounters};
 use rustbgpd_wire::Prefix;
 use tokio::sync::mpsc;
 
+use super::distribution::ExportMemo;
 use super::update_groups::{
     GroupRibOut, OptionalGroupRetirement, OptionalInventoryRetirement, RejectedBatchedInventory,
 };
@@ -78,6 +79,20 @@ struct ReloadSource {
     sessions: Vec<(PeerId, Waiter)>,
     vrp: Option<std::sync::Weak<rustbgpd_rpki::VrpTable>>,
     aspa: Option<std::sync::Weak<rustbgpd_rpki::AspaTable>>,
+    memo: ExportMemo,
+}
+
+impl ReloadSource {
+    fn page_memo(&mut self) -> &mut ExportMemo {
+        // Keep common modified attributes shared across discovery and repair.
+        // Each single-best page can add at most one source per key. Resetting
+        // above one page bounds both retention and drop at two pages of sources,
+        // each with at most two nonempty outcomes from the admitted static terms.
+        if self.memo.len() > REGISTRATION_PAGE_SIZE {
+            self.memo = ExportMemo::default();
+        }
+        &mut self.memo
+    }
 }
 
 fn same_snapshot<T>(
@@ -179,6 +194,9 @@ impl FirstGroupBuild {
     }
 
     fn stop_scan(&mut self, loc_rib: &mut crate::loc_rib::LocRib) {
+        if let Some(reload) = &mut self.reload {
+            reload.memo = ExportMemo::default();
+        }
         let displaced = loc_rib.stop_registration_scan();
         if let Some(policy) = &mut self.policy {
             policy.retiring = displaced;
@@ -289,6 +307,7 @@ impl RibManager {
                 sessions,
                 vrp: self.vrp_table.as_ref().map(std::sync::Arc::downgrade),
                 aspa: self.aspa_table.as_ref().map(std::sync::Arc::downgrade),
+                memo: ExportMemo::default(),
             });
             let job = self.open_first_group_scan(first.peer, gid, table);
             job.writer = Some(Box::new(command));
@@ -776,10 +795,16 @@ impl RibManager {
         }
         if !page.keys.is_empty() {
             let prefixes = page.keys.into_iter().collect();
-            job.table = if job.reload.is_some() {
+            job.table = if let Some(reload) = &mut job.reload {
                 #[cfg(any(test, feature = "bench-internals"))]
                 RELOAD_BUILD_PAGES.with(|pages| pages.set(pages.get() + 1));
-                self.stage_private_group_page(job.gid, job.table, &prefixes, true)
+                self.stage_private_group_page(
+                    job.gid,
+                    job.table,
+                    &prefixes,
+                    true,
+                    reload.page_memo(),
+                )
             } else {
                 self.stage_first_group_page(job.gid, job.table, &prefixes)
             };
@@ -1049,6 +1074,11 @@ impl RibManager {
             .map(|(session_id, sender)| Waiter { session_id, sender });
         job.phase = FirstGroupPhase::Scanning(founder);
         self.first_group_build = Some(job);
+    }
+
+    #[cfg(test)]
+    pub(super) fn reload_memo_sources(&self) -> Option<usize> {
+        Some(self.first_group_build.as_ref()?.reload.as_ref()?.memo.len())
     }
 
     #[cfg(test)]

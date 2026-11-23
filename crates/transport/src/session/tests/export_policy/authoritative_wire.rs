@@ -236,3 +236,5 @@ async fn authoritative_reload_and_restore_match_synchronous_receiver_updates() {
         "decoded path attributes and NLRI on each real TCP receiver"
     );
 }
+
+mod exact_probe_work;

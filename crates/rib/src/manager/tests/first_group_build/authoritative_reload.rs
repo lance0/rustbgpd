@@ -1,4 +1,6 @@
 //! Cold authoritative replacement: physical actor polls and the synchronous export oracle.
+mod memo_capacity;
+
 use std::future::{Future, poll_fn};
 
 use super::*;
