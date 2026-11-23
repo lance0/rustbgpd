@@ -553,8 +553,15 @@ impl RibManager {
                 let group = pass.staged.keys().next().copied();
                 // RS count restoration and the following emission cover the
                 // page pinned in the phase, even if pressure changes between polls.
+                // An UPDATE can arrive between them, so the restore takes the
+                // pressured page size even while quiet.
+                let rs_group = group
+                    .and_then(|gid| self.group_ribs.get(&gid))
+                    .is_some_and(GroupRibOut::has_rs_members);
                 let members = if pass.denials.is_some() {
                     1
+                } else if rs_group {
+                    pass.member_limit(maximum)
                 } else if quiet_departure
                     && let Some(keys) = pass.departure.as_ref().filter(|keys| keys.wide)
                 {

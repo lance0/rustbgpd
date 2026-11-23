@@ -1427,11 +1427,13 @@ async fn an_update_queued_inside_a_quiet_budget_loop_applies_before_the_departur
     }
 }
 
-/// An RS-control group restores member counts in one poll and emits to the
-/// same members in the next. A FIFO change between them must not widen the
-/// emission past the restored page.
-#[test]
-fn rs_restore_and_emission_cover_one_member_page_across_a_pressure_change() {
+/// Three RS-control members whose departing winner is suppressed for member
+/// 0 and whose alternate is suppressed for member 1, with the source gone.
+fn rs_departure_fixture() -> (
+    mpsc::Sender<RibUpdate>,
+    RibManager,
+    Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+) {
     let (tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     // Unlimited credit and no distribution window keep receivers out of the
@@ -1456,6 +1458,31 @@ fn rs_restore_and_emission_cover_one_member_page_across_a_pressure_change() {
     }
     manager.handle_update(down(SOURCE));
     assert!(manager.source_departure.is_some());
+    (tx, manager, outputs)
+}
+
+fn assert_rs_departure_counts(
+    manager: &RibManager,
+    outputs: &mut [mpsc::Receiver<OutboundRouteUpdate>],
+) {
+    let tagged = usize::from(RS_STAGE_ROWS);
+    for (index, output) in outputs.iter_mut().enumerate() {
+        drain_rs_stage(output, OTHER);
+        let peer = peer_v4(Ipv4Addr::new(192, 0, 2, u8::try_from(index + 1).unwrap()));
+        assert_eq!(
+            manager.grouped_advertised_unicast_lens(peer),
+            Some([0, if index == 1 { 0 } else { tagged }]),
+            "member {index} RS counts after the departure"
+        );
+    }
+}
+
+/// An RS-control group restores member counts in one poll and emits to the
+/// same members in the next. A FIFO change between them must not widen the
+/// emission past the restored page.
+#[test]
+fn rs_restore_and_emission_cover_one_member_page_across_a_pressure_change() {
+    let (tx, mut manager, mut outputs) = rs_departure_fixture();
     let (mut pinned, mut flips, mut quiet_emissions) = (false, 0, 0);
     while manager.source_departure.is_some() {
         // Open each page quiet so it is wide. Deliver under pressure, so a
@@ -1481,14 +1508,47 @@ fn rs_restore_and_emission_cover_one_member_page_across_a_pressure_change() {
         quiet_emissions > 0,
         "no pinned emission ran without FIFO pressure"
     );
-    let tagged = usize::from(RS_STAGE_ROWS);
-    for (index, output) in outputs.iter_mut().enumerate() {
-        drain_rs_stage(output, OTHER);
-        let peer = peer_v4(Ipv4Addr::new(192, 0, 2, u8::try_from(index + 1).unwrap()));
-        assert_eq!(
-            manager.grouped_advertised_unicast_lens(peer),
-            Some([0, if index == 1 { 0 } else { tagged }]),
-            "member {index} RS counts after the departure"
-        );
+    assert_rs_departure_counts(&manager, &mut outputs);
+}
+
+/// A quiet RS restore can be followed by an independent UPDATE before its
+/// emission. The pinned emission then runs while that UPDATE waits, so the
+/// restore page must already fit the pressured receiver-key budget.
+#[test]
+fn rs_restore_page_stays_within_the_pressured_limit_when_an_update_arrives_before_emission() {
+    let (tx, mut manager, mut outputs) = rs_departure_fixture();
+    take_receiver_rows();
+    let (mut queued_peak, mut queued_sent, mut armed) = (0, 0, false);
+    let mut seen: Vec<(BTreeSet<Prefix>, BTreeSet<Prefix>)> = vec![Default::default(); 3];
+    while manager.source_departure.is_some() {
+        let waiting = !manager.rx.is_empty();
+        manager.advance_source_departure();
+        let rows = take_receiver_rows();
+        let mut sent = 0;
+        for (output, (announced, withdrawn)) in outputs.iter_mut().zip(&mut seen) {
+            let (more_announced, more_withdrawn) = drain_rs_stage(output, OTHER);
+            sent += more_announced.len() + more_withdrawn.len();
+            announced.extend(more_announced);
+            withdrawn.extend(more_withdrawn);
+        }
+        if waiting {
+            queued_peak = queued_peak.max(rows);
+            queued_sent = queued_sent.max(sent);
+        }
+        if !armed && manager.departure_rs_restore_pinned() {
+            assert!(!waiting, "the first RS restore must run quiet");
+            tx.try_send(announce(OTHER, probe_prefix())).unwrap();
+            armed = true;
+        }
     }
+    assert!(armed, "no RS restore poll ran");
+    assert!(
+        queued_peak <= POLL_LIMIT,
+        "{queued_peak} receiver-keys in one poll while an UPDATE waited, limit {POLL_LIMIT}"
+    );
+    assert!(
+        queued_sent > 0 && queued_sent <= POLL_LIMIT,
+        "{queued_sent} rows emitted in one poll while an UPDATE waited, limit {POLL_LIMIT}"
+    );
+    assert_rs_departure_counts(&manager, &mut outputs);
 }
