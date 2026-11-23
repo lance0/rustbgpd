@@ -2589,6 +2589,12 @@ fn extend_policy_filtered_routes_with_readiness(
     mut incoming: impl ExactSizeIterator<Item = PolicyFilteredRouteKey>,
     readiness: &Option<Arc<ReplacementReadinessContext>>,
 ) {
+    // The forced checkpoints bracket allocation and the drain's drop. Nothing
+    // allocates or drops for a prefix with no filtered candidate, which is
+    // the common case on every staged prefix of every member.
+    if incoming.len() == 0 {
+        return;
+    }
     let required = routes.len().saturating_add(incoming.len());
     if required > routes.capacity() {
         replacement_readiness_checkpoint_at(readiness, "policy_filtered_allocation", true);

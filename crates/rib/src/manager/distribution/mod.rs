@@ -12399,8 +12399,12 @@ impl RibManager {
                 stage.retire_with(&mut |force| self.replacement_checkpoint_at("retirement", force));
             }
             crate::adj_rib_out::release_hash_map(&mut staged_here, &mut || checkpoint());
+            // A departure stages one bounded page per delivery unit. Its
+            // memos repeat the same shape, so record ordinary passes only.
             #[cfg(feature = "bench-internals")]
-            export_memo.record_replacement_capacities(self);
+            if !(RELEASING && self.source_departure.is_some()) {
+                export_memo.record_replacement_capacities(self);
+            }
             export_memo.retire_with(&mut || self.replacement_checkpoint_at("retirement", false));
             crate::adj_rib_out::release_hash_map(&mut local_rs_verdicts, &mut || checkpoint());
             self.release_speculative_group_admitted_keys(&speculative_group_admitted);
