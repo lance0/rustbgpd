@@ -989,18 +989,21 @@ fn deleting_a_clean_otc_blocked_key_emits_no_unknown_withdrawal() {
             Vec::<(Prefix, u32)>::new()
         );
     }
-    assert_eq!(
-        manager.group_ribs[&manager.grouped_member_of(member).unwrap()]
-            .table
-            .len(),
-        1
-    );
+    let gid = manager.grouped_member_of(member).unwrap();
+    let group = &manager.group_ribs[&gid];
+    assert!(group.table.get(&Prefix::V4(prefix(1)), 0).is_none());
+    assert_eq!(group.otc_blocked_for_member(member, None).len(), 1);
     source_update(&mut manager, &[], &[1]);
+    assert!(
+        manager.group_ribs[&gid]
+            .otc_blocked_for_member(member, None)
+            .is_empty()
+    );
     while let Ok(update) = receiver.try_recv().map(delivered) {
         assert!(update.announce.is_empty());
         assert!(
             update.unicast_withdrawals().next().is_none(),
-            "the staged OTC route was never admitted"
+            "the blocked route was never admitted"
         );
     }
 }

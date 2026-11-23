@@ -10,7 +10,7 @@ question about any operation is: how long is the longest single turn, and
 what waits behind it? The answer depends on the shape of the session. This
 page gives it per shape and per stage.
 
-It describes v0.84.0, read from the code in November 2026.
+It describes v0.84.0 and changes on main through November 23, 2026.
 rustbgpd is public alpha overall; nothing here is a compatibility promise.
 The [stability guide](stability.md) says which route-server and
 route-reflector surfaces carry the narrow v1 contract and which families
@@ -41,16 +41,16 @@ finishes the unit it is in, and one unit can be a whole table.
 
 | Shape | [Session comes up](#session-comes-up) | [Steady state](#steady-state) | [Receiver falls behind](#receiver-falls-behind) | [Refresh, ORF, RTC](#refresh-orf-and-rt-constrain) | [Policy change](#policy-or-config-change) | [Restart](#restart) | [Session ends](#session-ends) |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Plain unicast, grouped | Table build **paced**; initial table **one turn** (both in the [receipt](../perf/first-group-build-registration-2026-11.md)) | **paced** by read gate and window | Resync **one turn** per member | **one turn** per request; queued requests share it | Nothing filtered: **bounded turns**, updates held until commit. Otherwise one shared turn | **paced** between batches; input held inside a batch | **one turn** |
-| Group-shareable export policy | Single-best unicast table build **paced**; initial table **one turn** | As plain | As plain | As plain | As plain | As plain; not measured with policy | One turn |
-| Configured role | Table build and initial table together in **one turn**; not measured | As plain; not measured | As plain; not measured | As plain; not measured | As plain if nothing is OTC-blocked; not measured | As plain; not measured | One turn; not measured |
-| Route-server per-client best | Table build and own initial table together in **one turn**; not measured | Window; per-client ranking not measured | As plain; not measured | One turn per request, never shared | Shared cohort **one turn**; other members **paced** by command; not measured | **paced** between batches, as plain; a crowded prefix alone | One turn; not measured |
-| Kept private: ORF, ORR, conditional advertisement, peer-context policy, slow-peer isolation | Initial table **one turn** per receiver; not measured | Window; work grows with receivers | **paced** row cursor; fallback resync one turn | One turn per request | Members **paced** by command, a whole-table resync each; not measured | **paced** row cursor | One turn |
-| Add-Path send | As kept private; not measured | As kept private | As kept private; not measured with several paths | One turn per request | As kept private | As kept private; not measured with several paths | One turn |
-| Dual-stack (IPv4 and IPv6 unicast) | As its row above; one table holds both families | As its row above | As above, per family | Per family | As its row above | Each family released separately | One turn covers both |
-| Unicast plus EVPN or VPN | Table build and initial table together in **one turn**; not measured | EVPN fanout in **bounded turns**; later input waits for it | EVPN and private VPN **paced** cursor; grouped VPN: member resync one turn | One turn; RT change walks the group VPN table | Members **paced** by command; not measured | Unicast as plain; VPN and EVPN selection one turn, private rows by cursor | One turn |
-| Labeled unicast | Initial table one turn; not measured | One message at a time; not measured | **paced** cursor per AFI; fallback resync one turn | One turn; not measured | Members **paced** by command; not measured | Selection one turn; rows by cursor; not timed | One turn; not measured |
-| Group member holding a private family | Private family built in the initial-table turn | Private family staged per receiver | EVPN or labeled cursor; far behind: a capture of the group table | As the family's row | Members **paced** by command; not measured | Private family follows from the resync ticks | One turn |
+| Plain unicast, grouped | Table build **paced**; initial table **one turn** (both in the [receipt](../perf/first-group-build-registration-2026-11.md)) | **paced** by read gate and window | Resync **one turn** per member | **one turn** per request; queued requests share it | Nothing filtered: **bounded turns**, updates held until commit. Otherwise one shared turn | **paced** between batches; input held inside a batch | Selection **one turn**. Large fanout **paced** |
+| Group-shareable export policy | Single-best unicast table build **paced**; initial table **one turn** | As plain | As plain | As plain | As plain | As plain; not measured with policy | As plain. Policy shape not measured |
+| Configured role | Table build and initial table together in **one turn**; not measured | As plain; not measured | As plain; not measured | As plain; not measured | As plain if nothing is OTC-blocked; not measured | As plain; not measured | As plain. Role shape not measured |
+| Route-server per-client best | Table build and own initial table together in **one turn**; not measured | Window; per-client ranking not measured | As plain; not measured | One turn per request, never shared | Shared cohort **one turn**; other members **paced** by command; not measured | **paced** between batches, as plain; a crowded prefix alone | Selection **one turn**. Large fanout uses narrow key pages |
+| Kept private: ORF, ORR, conditional advertisement, peer-context policy, slow-peer isolation | Initial table **one turn** per receiver; not measured | Window; work grows with receivers | **paced** row cursor; fallback resync one turn | One turn per request | Members **paced** by command, a whole-table resync each; not measured | **paced** row cursor | Large fanout **paced**. Private single-best measured |
+| Add-Path send | As kept private; not measured | As kept private | As kept private; not measured with several paths | One turn per request | As kept private | As kept private; not measured with several paths | Large fanout uses narrow key pages. Not measured |
+| Dual-stack (IPv4 and IPv6 unicast) | As its row above; one table holds both families | As its row above | As above, per family | Per family | As its row above | Each family released separately | One selection turn, separate unicast pages per AFI |
+| Unicast plus EVPN or VPN | Table build and initial table together in **one turn**; not measured | EVPN fanout in **bounded turns**; later input waits for it | EVPN and private VPN **paced** cursor; grouped VPN: member resync one turn | One turn; RT change walks the group VPN table | Members **paced** by command; not measured | Unicast as plain; VPN and EVPN selection one turn, private rows by cursor | Large unicast fanout **paced**. EVPN and VPN in teardown turn |
+| Labeled unicast | Initial table one turn; not measured | One message at a time; not measured | **paced** cursor per AFI; fallback resync one turn | One turn; not measured | Members **paced** by command; not measured | Selection one turn; rows by cursor; not timed | Labeled routes in teardown turn. Not measured |
+| Group member holding a private family | Private family built in the initial-table turn | Private family staged per receiver | EVPN or labeled cursor; far behind: a capture of the group table | As the family's row | Members **paced** by command; not measured | Private family follows from the resync ticks | By family. Large unicast and FlowSpec fanout **paced** |
 
 How to read the rows:
 
@@ -142,6 +142,12 @@ What backs each **paced** and **bounded turns** mark:
   [known issues](known-issues.md): 150 private receivers, 150,000 rows, in
   the transport harness; the longest unrelated-peer gap was 0.38–0.52 s
   (86–94 s for one turn before the fix).
+- *Session ends.* The [departure tests](../../crates/rib/src/manager/tests/source_departure.rs)
+  admit an independent UPDATE between pages for grouped unicast, private
+  unicast and FlowSpec. The [departure receipt](https://github.com/lance0/rustbgpd/pull/3933)
+  measures private single-path convergence at 150 receivers × 37,000 routes.
+  The initial teardown turn and the limits on admission are described under
+  [Session ends](#session-ends).
 
 ### Worked example: a route-server client joins a 1M-route table
 
@@ -239,7 +245,8 @@ table, and hands updates to each session over a bounded channel.
   [`tests/outbound_owing.rs`](../../crates/rib/src/manager/tests/outbound_owing.rs).
 - **Background owners.** A paced group build, a restart release (between
   its batches) and a policy pre-stage each take alternate turns with the
-  primary queue.
+  primary queue. During a [large source departure](#session-ends), only an
+  independent unicast UPDATE at the head of that queue can pass between pages.
 
 The loop is `run_actor` in
 [`manager/mod.rs`](../../crates/rib/src/manager/mod.rs). The
@@ -600,16 +607,26 @@ cannot take a group update is marked dirty, and the group keeps what the
 member missed. The resync tick then resends the member its table as a diff
 against what it holds: one whole-table operation outside the credit.
 
-A route-change event (UPDATE ingest, a source going down, route injection,
-graceful-restart and LLGR sweeps, an End-of-RIB stale purge) does not
-rebuild a dirty member inline: its pass leaves the member dirty, adds the
-pass's withdrawals to what the group keeps for it, and the resync tick
-rebuilds it. Explicit recovery retries the receivers affected by the
-operation. A policy replacement gives its affected peers a retry before
-replying. A refresh retries the requesting peer, and RT-Constrain and ORR
-retry the receivers whose export view changed. Unrelated dirty peers stay
-on the resync tick. The first tick comes about 1 s after the member goes
-dirty. A member whose channel is still full can wait another tick.
+Before an ordinary pass changes a group's unicast table, it records the
+previously admitted keys for clean members whose writers are full. Eligible
+members of the same group share two table walks. Each member's mask excludes
+its own routes and any rows suppressed toward it by route-server controls.
+Per-client-best groups, VPN rows, members with an outbound prefix limit or
+exact export rejections, and members needing a separate baseline can still
+require an individual capture. With 8 or 32 eligible members, the test
+counted two visits per group row. Copying masks and recording exclusions
+still cost work per member. [Grouped capture tests](../../crates/rib/src/manager/tests/work_scaling/cohort_capture.rs)
+and [work-count receipt](https://github.com/lance0/rustbgpd/pull/3932).
+
+Route changes, validation changes, GR and LLGR sweeps, and End-of-RIB
+leave dirty grouped members for the resync tick and record withdrawals
+they missed. Explicit recovery retries the receivers affected by the
+operation. A policy replacement retries its affected peers before replying.
+A refresh retries the requester. RT-Constrain and ORR changes retry the
+receivers whose export view changed. An unrelated dirty member waits for
+the tick, normally about one second after it went dirty. A full writer
+can leave even a retried member pending. [Recovery scope tests](../../crates/rib/src/manager/tests/work_scaling/unrelated_resyncs.rs)
+and [policy retry contract](../adr/0105-grouped-export-policy-transition.md).
 
 **The resync tick.** Owed-key drains, deferred refresh answers and dirty
 receivers share one 25 ms poll budget per tick, and each lane takes at
@@ -747,19 +764,18 @@ changed sessions to the RIB, which moves them by one of three paths.
   so several strides can run in one poll
   (`commit_flush_uses_full_poll_budget_before_parking` in
   [`tests/update_groups.rs`](../../crates/rib/src/manager/tests/update_groups.rs)).
-  The strides are not caps on a poll. Whole-table work remains in three
-  places: two snapshot steps, each one walk of a table in one poll (the
-  Loc-RIB's prefixes when the destination group is new, and the
-  destination table's keys when no pre-staged inventory can be used:
+  The strides are not caps on a poll. Two snapshot steps can still walk a
+  whole table in one poll (the Loc-RIB's prefixes when the destination
+  group is new, and the destination table's keys when no pre-staged
+  inventory can be used:
   `begin_policy_transition_group` and
   `begin_clean_policy_transition_inventory` in
-  [`policy_transition.rs`](../../crates/rib/src/manager/update_groups/policy_transition.rs)),
-  and the last commit poll, which also runs
-  one distribution pass that retries every peer still owed updates for
-  any other reason. From the first poll to the commit or the fallback,
-  route input, timers and resync work stay queued; readiness is answered
-  at every poll, and a bounded number of reads between the polls before
-  commit. Other peers' updates therefore wait for the whole transition,
+  [`policy_transition.rs`](../../crates/rib/src/manager/update_groups/policy_transition.rs)).
+  The last commit poll settles pending End-of-RIB markers and helper-stale
+  withdrawals for the movers. From the first poll to the commit or the
+  fallback, route input, timers and resync work stay queued. The RIB
+  answers readiness at every poll and a bounded number of reads between
+  polls before commit. Other peers' updates therefore wait for the whole transition,
   in bounded turns.
 - **Shared cohort in one turn.** A cohort the clean path refuses goes to
   one authoritative batch command. Members that can still move together
@@ -782,6 +798,25 @@ changed sessions to the RIB, which moves them by one of three paths.
   in
   [`tests/evpn_policy_pacing.rs`](../../crates/rib/src/manager/tests/evpn_policy_pacing.rs)).
   Not measured at any stated scale.
+
+During shared replacement and rollback, the RIB builds the set of denied
+prefixes only if a prepared peer needs it. If all source keys survive in
+the destination, it skips the reverse source walk for withdrawals. Equal
+table lengths alone do not establish that the keys survived. On 8 and 32
+singleton groups with distinct chains and surviving keys, the two denial
+iterators and the reverse walk each visited zero rows in both directions.
+[Reload work counts and controls](https://github.com/lance0/rustbgpd/pull/3922).
+
+During a synchronous replacement or restore, the RIB portion of a neighbor
+list or detail read reports command-entry values for the named peers and
+members of their source and prospective destination groups. Other peers
+report current values at a checkpoint that can read the RIB. A list can
+therefore combine observations from different times. A group comparison
+reads both memberships from one view. General RIB queries wait behind the
+command. With singleton source groups and empty destinations, one move
+captured one neighbor row at 8, 32 and 128 distinct chains. An occupied
+destination also contributes its members. [Read contract](../adr/0132-operator-read-path.md)
+and [summary capture receipt](https://github.com/lance0/rustbgpd/pull/3934).
 
 The [reload matrix](reload-matrix.md) says which configuration changes
 reach this path and which reset sessions instead.
@@ -873,19 +908,21 @@ any family other than unicast, at any stated scale.
 
 ```mermaid
 flowchart TD
-    A["Session ends: down, or graceful restart"] --> B{"Paced group build holds a policy change for this peer?"}
-    B -->|"no"| D["Teardown turn"]
-    B -->|"yes"| C["End waits in an ordered window of eight"]
-    C -->|"policy change commits"| D
-    D --> E["Collect the peer's route keys"]
-    E --> F["Recompute best path, distribute withdrawals"]
-    F --> G["Drop outbound state, leave the group"]
-    G --> H["Retire tables, collect attributes"]
+    A["Session end"] --> B{"Build holds a policy change for this peer?"}
+    B -->|"yes"| C["Wait in the ordered window"]
+    C --> D{"End type"}
+    B -->|"no"| D
+    D -->|"graceful restart"| R["Keep routes stale"]
+    D -->|"ordinary loss"| E["Select replacement paths and remove peer state"]
+    E -->|"large non-GR unicast or FlowSpec fanout"| F["Deliver a page to its receivers"]
+    F --> G["Check the next input before another page"]
+    E -->|"other fanout"| H["Distribute in teardown"]
 ```
 
-A session end normally runs at once as one turn sized by the peer's routes;
-behind a paced group build that holds a policy change for the same peer it
-waits, in order, while other peers' route input keeps flowing.
+A session end can wait behind a policy change for the same peer. Once
+teardown starts, the RIB removes the source and selects replacement paths.
+A large ordinary unicast or FlowSpec departure can continue delivering
+those changes across actor turns.
 
 **Which end.** A plain `PeerDown` removes the peer's routes. A graceful
 restart end keeps them as stale and starts the restart timer instead
@@ -896,39 +933,52 @@ remains fails the registration over to the survivor
 (`handle_peer_down` and `classify_session_teardown` in
 [`peer_lifecycle.rs`](../../crates/rib/src/manager/peer_lifecycle.rs)).
 
-**The teardown turn.** `peer_down_teardown` does all of this in one turn:
+**The teardown turn.** An ordinary non-GR `PeerDown` detaches the source's
+Adj-RIB-In, collects the affected keys, recomputes best paths and removes
+its outbound state and group membership. Selection and cleanup still grow
+with the source table. During cleanup of 1,230,000 keys on a hosted VM,
+unicast readiness checkpoints were under 2 ms apart and in-process replies
+arrived within 50 ms. The corresponding VPN figures were under 10 ms and
+within 82 ms. These figures cover cleanup only.
+[Teardown implementation](../../crates/rib/src/manager/peer_lifecycle.rs)
+and [cleanup receipt](../perf/peer-teardown-cleanup-readiness-7ff33596-2026-10-16.md).
 
-1. Collects every key the peer announced, in every family.
-2. Recomputes best path for those keys and runs one distribution pass,
-   which stages withdrawals and replacement routes toward every other
-   peer; a receiver that cannot take them yet gets them later from the
-   resync tick ([Receiver falls behind](#receiver-falls-behind)).
-3. Drops the peer's outbound state: its owed rows, its private Adj-RIB-Out,
-   its group membership. If it was the last member, the group's table is
-   retired in the same turn.
-4. Frees the peer's Adj-RIB-In and collects unused attributes.
+**Delivery after source loss.** The actor adds the counts of affected
+unicast prefixes and FlowSpec keys and multiplies by the outbound peer count
+at teardown. When the product exceeds 256 and no other departure is active,
+it distributes those families in pages. Smaller fanouts and a teardown
+during an active departure use synchronous distribution. EVPN, BGP-LS, VPN, labeled
+unicast and RT-Constrain keep their existing teardown paths. This
+threshold applies to ordinary loss outside graceful restart.
+[Admission and page sizing](../../crates/rib/src/manager/source_departure.rs).
 
-The turn grows with the routes the peer announced, plus the table it was
-sent if that table is retired. A peer that announced a full table is a
-table-sized turn. The readiness lane is served at checkpoints throughout;
-route updates, operator reads and timers wait.
+- While a primary UPDATE waits, private unicast and FlowSpec pages take up
+  to 16 keys. A plain grouped unicast roster can stage up to 256 keys.
+  An independent, unicast-only UPDATE from another peer at the head of
+  the primary queue can run once the staged page finishes its receiver
+  pass. A conflicting head stays in place and holds later messages.
+- On an empty queue, or behind a head already known to conflict, the
+  actor can run consecutive delivery units for a nominal 10 ms. It divides
+  65,536 by the receiver count to size a quiet page, with a minimum of one
+  key and a maximum of 256. Dirty, forced, owing or helper-stale receivers
+  keep the narrow schedule. Mixed rosters, Add-Path send, per-client best and resolved ORR
+  keep narrow unicast key pages. The actor checks the queue between units.
+  The late-arrival tests check the new best route before the last
+  withdrawal for private unicast, grouped unicast and FlowSpec.
+  [Actor tests](../../crates/rib/src/manager/tests/source_departure.rs).
+- An empty staging buffer for policy-filtered candidates needs no forced
+  checkpoint around allocation or release. Owned buffers and nonempty
+  filtered work keep those checkpoints. In the 150-receiver, 37,000-route
+  private-unicast departure, the measured change took convergence from
+  3.05 s to 2.54 s against the preceding paced implementation, about 1.24×
+  the earlier single-turn baseline. The test with eight private receivers
+  holds the forced allocation checkpoint count flat from 256 to 1,024
+  prefixes per receiver. Grouped unicast and private FlowSpec have separate
+  measurements. A dual-stack route server with export policy remains unmeasured.
+  [Checkpoint evidence and convergence receipt](https://github.com/lance0/rustbgpd/pull/3933).
 
-- Measured: readiness during the cleanup phases, removing 1,230,000 keys
-  on a hosted VM. Unicast: longest gap between checkpoints under 2 ms,
-  in-process readiness replies within 50 ms. VPN: under 10 ms and within
-  82 ms
-  ([receipt](../perf/peer-teardown-cleanup-readiness-7ff33596-2026-10-16.md)).
-  That receipt times cleanup, not the recompute and withdrawal pass.
-- Tests: `peer_down_burst_work_is_linear` in
-  [`tests/work_scaling.rs`](../../crates/rib/src/manager/tests/work_scaling.rs)
-  pins that a burst of session ends does work linear in the group's size,
-  not members times withdrawals.
-- Not measured: how long an unrelated peer's update waits behind the end
-  of a full-table peer, at any shape.
-
-**What waits behind it.** Normally nothing waits on a session end; it runs
-when it reaches the head of the primary queue. The exception is a paced
-first-member build with a claimed export-policy change:
+**When the end itself waits.** A paced first-member build can hold a
+session end behind a claimed export-policy change:
 
 - A policy change that needs the table under construction is parked until
   the table is ready. A session end for a peer that change names must run

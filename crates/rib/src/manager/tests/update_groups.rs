@@ -12562,9 +12562,14 @@ fn source_peer_down_preserves_nested_owner_kind_identity_and_age() {
     use crate::update::RibReadinessError;
     for (kind, expected) in [
         (
-            ReadinessOwnerKind::Replacement,
+            ReadinessOwnerKind::PolicyTransition,
             RibReadinessError::PolicyTransitionStalled,
         ),
+        (
+            ReadinessOwnerKind::Replacement,
+            RibReadinessError::WorkStalled,
+        ),
+        (ReadinessOwnerKind::Ingest, RibReadinessError::IngestStalled),
         (
             ReadinessOwnerKind::SelectionRelease,
             RibReadinessError::SelectionReleaseStalled,
@@ -14831,7 +14836,7 @@ async fn replay_readiness_member_ages(ages: &[u64], owner: ReplayReadinessOwner)
                 Err(crate::update::RibReadinessError::PolicyTransitionStalled)
             }
             ReplayReadinessOwner::Fresh if ages[member] >= 30 => {
-                Err(crate::update::RibReadinessError::PolicyTransitionStalled)
+                Err(crate::update::RibReadinessError::WorkStalled)
             }
             ReplayReadinessOwner::Fresh => Ok(3),
         };
@@ -15143,9 +15148,7 @@ async fn dirty_resync_timer_member_ages(ages: &[Duration]) {
         if ages[index] >= super::super::MAX_HEALTHY_POLICY_TRANSITION_AGE {
             assert!(matches!(
                 response,
-                Ok(Err(
-                    crate::update::RibReadinessError::PolicyTransitionStalled
-                ))
+                Ok(Err(crate::update::RibReadinessError::WorkStalled))
             ));
         } else {
             assert!(

@@ -701,7 +701,9 @@ fn readiness_failure_reason(error: CoreReadinessError) -> ReadinessProbeFailureR
             ReadinessProbeFailureReason::RibUnavailable
         }
         CoreReadinessError::RibTimedOut => ReadinessProbeFailureReason::RibTimeout,
-        CoreReadinessError::RibPolicyTransitionStalled
+        CoreReadinessError::RibIngestStalled
+        | CoreReadinessError::RibWorkStalled
+        | CoreReadinessError::RibPolicyTransitionStalled
         | CoreReadinessError::RibSelectionReleaseStalled
         | CoreReadinessError::RibPeerTeardownStalled => ReadinessProbeFailureReason::RibStalled,
         CoreReadinessError::DaemonUnavailable(_) | CoreReadinessError::GrpcServerDown => {
@@ -1607,6 +1609,8 @@ pub(crate) mod tests {
             (CoreReadinessError::RibUnavailable, R::RibUnavailable),
             (CoreReadinessError::RibDroppedReply, R::RibUnavailable),
             (CoreReadinessError::RibTimedOut, R::RibTimeout),
+            (CoreReadinessError::RibIngestStalled, R::RibStalled),
+            (CoreReadinessError::RibWorkStalled, R::RibStalled),
             (
                 CoreReadinessError::RibPolicyTransitionStalled,
                 R::RibStalled,
@@ -1654,6 +1658,56 @@ pub(crate) mod tests {
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.ends_with("ready\n"));
         assert_eq!(readiness_failure_rows(&metrics).await, Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn readyz_distinguishes_rib_owner_stalls_then_recovers() {
+        use rustbgpd_rib::{RibReadinessError, RibReadinessQuery};
+
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (query_tx, _query_rx) = mpsc::channel(1);
+        let (readiness_tx, mut readiness_rx) = mpsc::channel(1);
+        let probe = CoreReadinessProbe::new(peer_tx, query_tx).with_rib_readiness(readiness_tx);
+        let metrics = BgpMetrics::new();
+        let addr = start_server_with_metrics(metrics.clone(), probe, None).await;
+
+        for (answer, status, body) in [
+            (
+                Err(RibReadinessError::IngestStalled),
+                "HTTP/1.1 503 Service Unavailable",
+                "not ready: RIB ingest stalled\n",
+            ),
+            (Ok(0), "HTTP/1.1 200 OK", "ready\n"),
+            (
+                Err(RibReadinessError::WorkStalled),
+                "HTTP/1.1 503 Service Unavailable",
+                "not ready: RIB work stalled\n",
+            ),
+            (Ok(0), "HTTP/1.1 200 OK", "ready\n"),
+            (
+                Err(RibReadinessError::PolicyTransitionStalled),
+                "HTTP/1.1 503 Service Unavailable",
+                "not ready: RIB export-policy transition stalled\n",
+            ),
+            (Ok(0), "HTTP/1.1 200 OK", "ready\n"),
+        ] {
+            let (response, ()) = tokio::join!(request(addr, "/readyz"), async {
+                let Some(PeerManagerCommand::Ping { reply }) = peer_rx.recv().await else {
+                    panic!("expected a peer manager readiness ping");
+                };
+                reply.send(()).unwrap();
+                let RibReadinessQuery::LocRibCount { reply, .. } =
+                    readiness_rx.recv().await.unwrap();
+                reply.send(answer).unwrap();
+            });
+            let (headers, response_body) = response.split_once("\r\n\r\n").unwrap();
+            assert_eq!(headers.lines().next(), Some(status));
+            assert_eq!(response_body, body);
+        }
+        assert_eq!(
+            readiness_failure_rows(&metrics).await,
+            ["bgp_readiness_probe_failures_total{reason=\"rib_stalled\"} 3"]
+        );
     }
 
     #[tokio::test]
@@ -1877,12 +1931,15 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn rib_stall_sample_publishes_gauge_without_readyz_traffic() {
         use rustbgpd_rib::RibReadinessError::{
-            PeerTeardownStalled, PolicyTransitionStalled, SelectionReleaseStalled,
+            IngestStalled, PeerTeardownStalled, PolicyTransitionStalled, SelectionReleaseStalled,
+            WorkStalled,
         };
         let (probe, mut rib_rx) = readiness_lane_probe();
         let metrics = BgpMetrics::new();
         assert_eq!(rib_stalled_line(&metrics).await, "bgp_rib_stalled 0");
         for stalled in [
+            IngestStalled,
+            WorkStalled,
             PolicyTransitionStalled,
             SelectionReleaseStalled,
             PeerTeardownStalled,

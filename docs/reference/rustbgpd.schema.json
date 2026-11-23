@@ -2500,7 +2500,7 @@
           ]
         },
         "per_client_best": {
-          "description": "RFC 7947 §2.3.2 per-client best-path for this route-server\nclient: when the Loc-RIB best is denied by this peer's export\npolicy, advertise the best export-policy-permitted candidate\ninstead of hiding the prefix (path-hiding mitigation for clients\nwithout Add-Path). Requires `route_server_client = true`.\nFamilies where the session negotiates Add-Path send use Add-Path\ninstead — the negotiated capability outranks this fallback.",
+          "description": "RFC 7947 §2.3.2 per-client best-path for this route-server\nclient. Advertise the highest-ranked candidate allowed by\nexport policy and the local role’s OTC egress rule.\nRequires `route_server_client = true`. Families with\nnegotiated Add-Path send use Add-Path.",
           "type": [
             "boolean",
             "null"

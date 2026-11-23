@@ -91,6 +91,32 @@ class DependencyChecks(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "anchor drift"):
                 self.derived_from(files, "candidate")
 
+    def test_noop_completion_event_keeps_its_input_form(self):
+        path = "crates/rib/src/manager/distribution/mod.rs"
+        current = self.files[path].decode()
+        self.assertEqual(current.count(patches.NOOP_RECONCILE), 1)
+
+        def event_precedes(derived, reconcile):
+            # rustfmt reflows the derived source; the event stays one call
+            # placed immediately ahead of the no-op commit's OTC reconcile.
+            self.assertEqual(derived.count(b'"complete_noop"'), 1)
+            event = derived.index(b'"complete_noop"')
+            self.assertEqual(derived.count(reconcile), 1)
+            self.assertLess(event, derived.index(reconcile))
+            self.assertNotIn(b"let complete", derived[event:derived.index(reconcile)])
+
+        event_precedes(self.derived("candidate")[path], b"completed && let Some(prefixes) = otc_reconcile_prefixes {")
+        # A comparison's parent input: the reconcile before its OTC rewrite.
+        older_form = "            if completed\n                && let (Some(prefixes), Some(blocked))"
+        older = current.replace(patches.NOOP_RECONCILE, older_form + " = (x, y)\n            {")
+        files = dict(self.files)
+        files[path] = older.encode()
+        event_precedes(self.derived_from(files, "candidate")[path], b"Some(blocked)) = (x, y)")
+        for text in (current.replace(patches.NOOP_RECONCILE, ""), current + older_form):
+            files[path] = text.encode()
+            with self.assertRaisesRegex(ValueError, "anchor drift"):
+                self.derived_from(files, "candidate")
+
     def test_actual_run_cell_leaves_capture_directory_creation_to_the_driver(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)

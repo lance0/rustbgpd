@@ -1266,12 +1266,9 @@ impl RibManager {
         debug_assert!(
             !speculative || (destination.members.is_empty() && !destination.per_client_best)
         );
-        // RFC 9234 OTC residue on either side means blocked staged
-        // winners (or lane runner-ups) whose per-member diagnostics and
-        // withdraw conversions belong to the pre-commit backstop this
-        // shared emission does not run — the per-member path owns those.
-        // A role-bearing fleet with no OTC-attributed routes (the
-        // rendered route-server default) carries no residue and shares.
+        // Every prefix with a reportable OTC rejection has a diagnostic map entry,
+        // even when per-client best also stages an alternate. Membership changes
+        // must reconcile each member's diagnostic through the regular path.
         if !source.otc_blocked.is_empty() || !destination.otc_blocked.is_empty() {
             return Err(None);
         }

@@ -1882,12 +1882,10 @@ define_neighbor_and_peer_group_configs! {
         per_client_best: Option<bool> {
             neighbor {
                 /// RFC 7947 §2.3.2 per-client best-path for this route-server
-                /// client: when the Loc-RIB best is denied by this peer's export
-                /// policy, advertise the best export-policy-permitted candidate
-                /// instead of hiding the prefix (path-hiding mitigation for clients
-                /// without Add-Path). Requires `route_server_client = true`.
-                /// Families where the session negotiates Add-Path send use Add-Path
-                /// instead — the negotiated capability outranks this fallback.
+                /// client. Advertise the highest-ranked candidate allowed by
+                /// export policy and the local role’s OTC egress rule.
+                /// Requires `route_server_client = true`. Families with
+                /// negotiated Add-Path send use Add-Path.
             }
             peer_group {
                 /// RFC 7947 §2.3.2 per-client best-path inherited by neighbors in

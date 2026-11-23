@@ -726,24 +726,6 @@ pub(in crate::manager) struct GroupRibOut {
     vpn_policy_denied: ShardedMap<VpnRouteKey, VpnDenialRecord>,
     /// Persistent RFC 9234 denial residue for join/resync diagnostics.
     otc_blocked: OtcBlocked,
-    /// Count aggregates beside `otc_blocked`, per unicast family
-    /// `[v4, v6]`: total blocked staged winners plus their per-source
-    /// split — the winner term of the Decision 4 count synthesis's
-    /// OTC subtraction (the synthesis reports the backstop's outcome,
-    /// not the raw table). Updated with each residue mutation in
-    /// [`Self::record_otc_blocked`]. Kept zero for
-    /// plain groups, whose in-walk gate rejects blocked routes before
-    /// the table — their residue names never-staged routes, so
-    /// subtracting it would double-count.
-    otc_blocked_totals: [usize; 2],
-    otc_blocked_sources: AddrMap<PeerId, [usize; 2]>,
-    /// Lane sibling of `otc_blocked_sources`: per-winner-source counts
-    /// of lane entries whose runner-up is OTC-blocked toward this
-    /// group — the substitution term of the same subtraction (the
-    /// member sourcing the winner receives the runner-up, so ITS
-    /// suppressed slot is the lane's, never the winner's). Maintained
-    /// entirely by [`Self::apply_lane`], exactly like `lane_counts`.
-    lane_otc_blocked_counts: AddrMap<PeerId, [usize; 2]>,
     /// Per-member advertised VPN counts `[vpnv4, vpnv6]`, maintained
     /// ONLY for RTC-negotiated groups (Φ makes the counts non-derivable
     /// from `source_counts`; design §2.4) at the emit seams: staging
@@ -758,13 +740,8 @@ pub(in crate::manager) struct GroupRibOut {
     /// winner on every staging of the prefix. Always empty for plain
     /// groups.
     runner_up: ShardedMap<Prefix, RunnerUp>,
-    /// RFC 7947 per-member fallback of a per-client-best group: every
-    /// permitted candidate the winner walk visited after the winner, in
-    /// best-path order, kept only for prefixes where a walked candidate
-    /// carries a suppression-form community. An `rs_control_communities`
-    /// member whose winner (or substitution) is suppressed toward it takes
-    /// the first eligible entry ([`Self::adv_entry_for`]), as the per-peer
-    /// walk does. Committed with the lane; always empty for plain groups.
+    /// Ranked alternatives for member-specific control-community selection and
+    /// diagnostics. A marked diagnostic row can never occupy an advertised slot.
     rs_fallback: ShardedMap<Prefix, RsFallback>,
     /// RFC 7947 control contexts `(rs_asn, member_asn)` of the members that
     /// enforce control communities.
@@ -811,11 +788,8 @@ pub(in crate::manager) struct GroupRibOut {
     /// Manager-unique revision of the paired EVPN route and received-input table.
     pub(in crate::manager) evpn_table_stamp: u64,
     pub(in crate::manager) llgr: Vec<(Afi, Safi)>,
-    /// ADR-0126 staging mode: `true` stages the first export-permitted
-    /// candidate (winner walk + runner-up lane) instead of
-    /// Loc-RIB-best-or-nothing. Derived from the group key's
-    /// `per_client_best` bit (Decision 1) — group-uniform like every
-    /// other snapshot field here.
+    /// ADR-0126 per-client best. The shared walk stages a winner and a
+    /// distinct-source runner-up that pass policy and OTC for the group's role.
     pub(in crate::manager) per_client_best: bool,
     /// Keys whose staged entry, next-hop override or source-control input
     /// changed since a prestaged clean-transition inventory began walking
@@ -908,8 +882,6 @@ impl GroupRibOut {
             });
         crate::adj_rib_out::release_sharded_map(&mut self.vpn_policy_denied, checkpoint);
         self.otc_blocked.retire_with(checkpoint);
-        release_hash_map(&mut self.otc_blocked_sources, checkpoint);
-        release_hash_map(&mut self.lane_otc_blocked_counts, checkpoint);
         release_hash_map(&mut self.vpn_member_counts, checkpoint);
         crate::adj_rib_out::release_sharded_map(&mut self.runner_up, checkpoint);
         crate::adj_rib_out::release_sharded_map(&mut self.rs_fallback, checkpoint);
@@ -980,9 +952,6 @@ impl GroupRibOut {
             permit_policy_label,
             vpn_policy_denied: ShardedMap::default(),
             otc_blocked: OtcBlocked::Ordinary(FastMap::default()),
-            otc_blocked_totals: [0; 2],
-            otc_blocked_sources: AddrMap::default(),
-            lane_otc_blocked_counts: AddrMap::default(),
             vpn_member_counts: AddrMap::default(),
             runner_up: ShardedMap::default(),
             rs_fallback: ShardedMap::default(),
@@ -1035,44 +1004,19 @@ impl GroupRibOut {
         self.owns_evpn = enabled;
     }
 
-    /// Returns the first count slot that had drifted from the residue map,
-    /// after rebuilding the counts from that map.
     fn record_otc_blocked<S: std::hash::BuildHasher>(
         &mut self,
         prefixes: &HashSet<Prefix, S>,
         blocked: &[Route],
         checkpoint: &mut impl FnMut(),
-    ) -> Option<usize> {
-        let mut drifted = None;
+    ) {
         if !self.otc_blocked.is_empty() {
             for prefix in prefixes {
                 checkpoint();
-                let old = match &mut self.otc_blocked {
+                match &mut self.otc_blocked {
                     OtcBlocked::Ordinary(map) => map.remove(prefix),
                     OtcBlocked::Optional(map) => map.remove(prefix),
                 };
-                if self.per_client_best
-                    && let Some(old) = old
-                {
-                    let slot = Self::count_slot(prefix);
-                    let total = self.otc_blocked_totals[slot].checked_sub(1);
-                    let source = self
-                        .otc_blocked_sources
-                        .get_mut(&old.peer)
-                        .and_then(|counts| {
-                            counts[slot] = counts[slot].checked_sub(1)?;
-                            Some(*counts)
-                        });
-                    if let (Some(total), Some(counts)) = (total, source) {
-                        self.otc_blocked_totals[slot] = total;
-                        if counts == [0; 2] {
-                            self.otc_blocked_sources.remove(&old.peer);
-                        }
-                    } else {
-                        debug_assert!(false, "OTC-blocked winner counts drifted at slot {slot}");
-                        drifted.get_or_insert(slot);
-                    }
-                }
             }
         }
         if let OtcBlocked::Ordinary(map) = &mut self.otc_blocked {
@@ -1089,27 +1033,6 @@ impl GroupRibOut {
                 OtcBlocked::Optional(map) => map.insert(route.prefix, route.clone()),
             };
             debug_assert!(prior.is_none());
-            if self.per_client_best {
-                let slot = Self::count_slot(&route.prefix);
-                self.otc_blocked_totals[slot] += 1;
-                self.otc_blocked_sources.entry(route.peer).or_default()[slot] += 1;
-            }
-        }
-        if drifted.is_some() {
-            self.rebuild_otc_blocked_counts(checkpoint);
-        }
-        drifted
-    }
-
-    /// Recount the per-client-best winner terms from the residue map.
-    fn rebuild_otc_blocked_counts(&mut self, checkpoint: &mut impl FnMut()) {
-        self.otc_blocked_totals = [0; 2];
-        self.otc_blocked_sources.clear();
-        for route in self.otc_blocked.values() {
-            checkpoint();
-            let slot = Self::count_slot(&route.prefix);
-            self.otc_blocked_totals[slot] += 1;
-            self.otc_blocked_sources.entry(route.peer).or_default()[slot] += 1;
         }
     }
 
@@ -1122,11 +1045,8 @@ impl GroupRibOut {
         self.otc_blocked_for_member_with_checkpoint(member, None, prefixes, &mut || {})
     }
 
-    /// The RFC 9234 backstop's per-member outcome over `prefixes` (`None` =
-    /// every staged key): the member's resolved slots the backstop strips.
-    /// `rs_control` is the member's RFC 7947 context, under which a
-    /// per-client-best slot resolves past suppressed candidates
-    /// ([`Self::adv_entry_for`]).
+    /// The first otherwise-permitted path for each member supplies its OTC
+    /// diagnostic, even when another path occupies its advertised slot.
     pub(in crate::manager) fn otc_blocked_for_member_with_checkpoint(
         &self,
         member: PeerId,
@@ -1134,139 +1054,49 @@ impl GroupRibOut {
         prefixes: Option<&HashSet<Prefix>>,
         checkpoint: &mut impl FnMut(),
     ) -> Vec<Route> {
-        let mut blocked: Vec<Route> = match prefixes {
-            // Scanning a sparse winner map visits buckets left behind by withdrawals.
+        let diagnostic = |head: &Route| {
+            let list = self
+                .per_client_best
+                .then(|| self.rs_fallback.get(&head.prefix))
+                .flatten();
+            let Some(list) = list else {
+                return (head.peer != member).then(|| head.clone());
+            };
+            if list.diagnostic_head == release_fallback::DiagnosticHead::Marked
+                && head.peer != member
+            {
+                return Some(head.clone());
+            }
+            if list.diagnostic_head == release_fallback::DiagnosticHead::Winner {
+                let winner = self.table.get(&head.prefix, 0)?;
+                let (communities, large) = self.source_control((head.prefix, 0));
+                if winner.peer != member
+                    && !super::distribution::rs_control::rs_control_suppressed(
+                        communities,
+                        large,
+                        rs_control,
+                    )
+                {
+                    return None;
+                }
+            }
+            let first = list.first_before_otc(member, rs_control)?;
+            list.blocks(first).then(|| first.route.clone())
+        };
+        match prefixes {
             Some(scope) if scope.len() <= self.otc_blocked.capacity() => scope
                 .iter()
                 .inspect(|_| checkpoint())
                 .filter_map(|prefix| self.otc_blocked.get(prefix))
-                .filter(|route| route.peer != member)
-                .cloned()
+                .filter_map(diagnostic)
                 .collect(),
             _ => self
                 .otc_blocked
                 .values()
                 .inspect(|_| checkpoint())
-                .filter(|route| {
-                    route.peer != member
-                        && prefixes.is_none_or(|scope| scope.contains(&route.prefix))
-                })
-                .cloned()
+                .filter(|route| prefixes.is_none_or(|scope| scope.contains(&route.prefix)))
+                .filter_map(diagnostic)
                 .collect(),
-        };
-        // ADR-0126: the member sourcing a staged winner receives the
-        // lane runner-up instead (adv(m)), so ITS blocked entry at that
-        // slot is the runner-up when that carries OTC — derived from
-        // the lane here rather than stored (both slots share the
-        // `(prefix, 0)` residue key). `local_role` is group-uniform
-        // (snapshot on this group), so one verdict covers every member;
-        // the own-source filter above already withholds the winner from
-        // `source(w)`. Together the two terms reproduce the pre-commit
-        // backstop's per-member outcome, blocked(adv(m)), exactly.
-        if self.per_client_best {
-            #[cfg(any(test, feature = "bench-internals"))]
-            let mut visits = 0_usize;
-            let lane_blocked = |entry: &RunnerUp| {
-                entry.winner_source == member
-                    && super::distribution::otc_egress_blocked(&entry.route, self.local_role)
-            };
-            match prefixes {
-                // The staged scope is the small side on the churn hot
-                // path: probe the lane per staged prefix instead of
-                // scanning the whole lane per member, keeping the pass
-                // at O(members × staged) rather than O(members × lane).
-                Some(prefixes) if prefixes.len() <= self.runner_up.len() => {
-                    for prefix in prefixes {
-                        checkpoint();
-                        #[cfg(any(test, feature = "bench-internals"))]
-                        {
-                            visits += 1;
-                        }
-                        if let Some(entry) = self.runner_up.get(prefix)
-                            && lane_blocked(entry)
-                        {
-                            blocked.push(entry.route.clone());
-                        }
-                    }
-                }
-                // Resync (`None`): the whole table IS the scope, so the
-                // lane scan is the small side by definition. A `Some`
-                // scope wider than the lane keeps the scan for the same
-                // reason.
-                _ => {
-                    for (prefix, entry) in self.runner_up.iter() {
-                        checkpoint();
-                        #[cfg(any(test, feature = "bench-internals"))]
-                        {
-                            visits += 1;
-                        }
-                        if prefixes.is_none_or(|prefixes| prefixes.contains(prefix))
-                            && lane_blocked(entry)
-                        {
-                            blocked.push(entry.route.clone());
-                        }
-                    }
-                }
-            }
-            #[cfg(any(test, feature = "bench-internals"))]
-            assert_scoped_visit_bound(
-                visits,
-                prefixes.map_or(usize::MAX, HashSet::len),
-                self.runner_up.len(),
-            );
-            // Nothing is ever blocked toward a role OTC cannot block, such
-            // as the route-server role of an IXP fleet: skip the re-resolve.
-            if rs_control.is_some() && super::distribution::otc_role_blocks(self.local_role) {
-                self.resolve_otc_blocked_for_rs_member(
-                    member,
-                    rs_control,
-                    prefixes,
-                    &mut blocked,
-                    checkpoint,
-                );
-            }
-        }
-        blocked
-    }
-
-    /// rs-control refinement of a per-client-best member's OTC residue: the
-    /// backstop sees the member's RESOLVED slot. A slot differs from the
-    /// winner/lane projection only where a candidate is suppressed toward
-    /// the member, so the candidates are the projected keys plus the
-    /// fallback-list keys in scope, each re-resolved.
-    fn resolve_otc_blocked_for_rs_member(
-        &self,
-        member: PeerId,
-        rs_control: Option<(u32, u32)>,
-        prefixes: Option<&HashSet<Prefix>>,
-        blocked: &mut Vec<Route>,
-        checkpoint: &mut impl FnMut(),
-    ) {
-        let mut keys: Vec<Prefix> = blocked.iter().map(|route| route.prefix).collect();
-        if !self.rs_fallback.is_empty() {
-            match prefixes {
-                Some(prefixes) if prefixes.len() <= self.rs_fallback.len() => {
-                    keys.extend(prefixes.iter().copied().filter(|prefix| {
-                        checkpoint();
-                        self.rs_fallback.contains_key(prefix)
-                    }));
-                }
-                _ => keys.extend(self.rs_fallback.keys().copied().filter(|prefix| {
-                    checkpoint();
-                    prefixes.is_none_or(|prefixes| prefixes.contains(prefix))
-                })),
-            }
-        }
-        keys.sort_unstable();
-        keys.dedup();
-        blocked.clear();
-        for prefix in keys {
-            checkpoint();
-            if let Some(entry) = self.adv_entry_for(member, &prefix, 0, rs_control)
-                && super::distribution::otc_egress_blocked(entry.route, self.local_role)
-            {
-                blocked.push(entry.route.clone());
-            }
         }
     }
 
@@ -1389,38 +1219,21 @@ impl GroupRibOut {
     /// row increments, the outgoing entry's decrements — so a
     /// winner-source flip under an unchanged runner-up moves the count
     /// even though no [`LaneDelta`] was encoded.
-    /// `lane_otc_blocked_counts` rides the same transitions for
-    /// entries the RFC 9234 backstop suppresses (`local_role` is a
-    /// group-uniform snapshot, so the verdict never changes under an
-    /// unmoved entry).
     fn apply_lane(&mut self, prefix: Prefix, entry: Option<RunnerUp>) {
         let slot = Self::count_slot(&prefix);
         let outgoing = match entry {
             Some(entry) => {
                 self.lane_counts.entry(entry.winner_source).or_default()[slot] += 1;
-                if super::distribution::otc_egress_blocked(&entry.route, self.local_role) {
-                    self.lane_otc_blocked_counts
-                        .entry(entry.winner_source)
-                        .or_default()[slot] += 1;
-                }
                 self.runner_up.insert(prefix, entry)
             }
             None => self.runner_up.remove(&prefix),
         };
-        if let Some(old) = outgoing {
-            if let Some(counts) = self.lane_counts.get_mut(&old.winner_source) {
-                counts[slot] = counts[slot].saturating_sub(1);
-                if counts.iter().all(|&n| n == 0) {
-                    self.lane_counts.remove(&old.winner_source);
-                }
-            }
-            if super::distribution::otc_egress_blocked(&old.route, self.local_role)
-                && let Some(counts) = self.lane_otc_blocked_counts.get_mut(&old.winner_source)
-            {
-                counts[slot] = counts[slot].saturating_sub(1);
-                if counts.iter().all(|&n| n == 0) {
-                    self.lane_otc_blocked_counts.remove(&old.winner_source);
-                }
+        if let Some(old) = outgoing
+            && let Some(counts) = self.lane_counts.get_mut(&old.winner_source)
+        {
+            counts[slot] = counts[slot].saturating_sub(1);
+            if counts.iter().all(|&n| n == 0) {
+                self.lane_counts.remove(&old.winner_source);
             }
         }
     }
@@ -2017,37 +1830,7 @@ impl GroupRibOut {
             .filter(|entry| !super::distribution::otc_egress_blocked(entry.route, self.local_role))
     }
 
-    /// Per-family count of `member`'s `adv(m)` slots the RFC 9234
-    /// backstop suppresses: the blocked staged winners it does not
-    /// source plus its blocked lane substitutions — the subtraction
-    /// the count synthesis applies so it reports the backstop's
-    /// outcome. Zero for plain groups: the aggregates are only
-    /// maintained where the residue describes staged winners.
-    fn otc_suppressed_counts(&self, member: PeerId) -> [usize; 2] {
-        if !self.per_client_best {
-            return [0; 2];
-        }
-        let own = self
-            .otc_blocked_sources
-            .get(&member)
-            .copied()
-            .unwrap_or_default();
-        let lane = self
-            .lane_otc_blocked_counts
-            .get(&member)
-            .copied()
-            .unwrap_or_default();
-        [
-            self.otc_blocked_totals[0].saturating_sub(own[0]) + lane[0],
-            self.otc_blocked_totals[1].saturating_sub(own[1]) + lane[1],
-        ]
-    }
-
-    /// Number of unicast routes `member` currently has advertised: the
-    /// group table minus the member's own-sourced entries plus its
-    /// lane substitutions, minus the slots the RFC 9234 backstop
-    /// suppresses (the family-summed count of
-    /// [`Self::adv_entry_post_backstop`], ADR-0126 Decision 4). O(1).
+    /// Group table minus the member's own routes, plus eligible lane substitutions.
     pub(in crate::manager) fn advertised_count_for(&self, member: PeerId) -> usize {
         let own = self
             .source_counts
@@ -2057,9 +1840,8 @@ impl GroupRibOut {
             .lane_counts
             .get(&member)
             .map_or(0, |counts| counts[0] + counts[1]);
-        let otc = self.otc_suppressed_counts(member);
         let rs = self.rs_adjust_for(member);
-        let count = (self.table.len().saturating_sub(own) + lane).saturating_sub(otc[0] + otc[1]);
+        let count = self.table.len().saturating_sub(own) + lane;
         usize::try_from(i64::try_from(count).unwrap_or(i64::MAX) + rs[0] + rs[1]).unwrap_or(0)
     }
 
@@ -2153,8 +1935,7 @@ impl GroupRibOut {
 
     /// Per-family synthesized advertised counts for a member (BMP RFC
     /// 8671 stat type 17 input): table minus own-sourced plus the
-    /// member's lane substitutions minus its RFC 9234
-    /// backstop-suppressed slots, per unicast slot (ADR-0126
+    /// member's eligible lane substitutions, per unicast slot (ADR-0126
     /// Decision 4). Zero-count families omitted.
     pub(in crate::manager) fn family_counts_for(&self, member: PeerId) -> Vec<((Afi, Safi), u64)> {
         const FAMILIES: [(Afi, Safi); 4] = [
@@ -2166,7 +1947,6 @@ impl GroupRibOut {
         let totals = self.family_totals;
         let own = self.source_counts.get(&member).copied().unwrap_or_default();
         let lane = self.lane_counts.get(&member).copied().unwrap_or_default();
-        let otc = self.otc_suppressed_counts(member);
         let rs = self.rs_adjust_for(member);
         // RTC group: the VPN slots come from the maintained per-member
         // counters (Φ-filtered), not the table synthesis.
@@ -2183,8 +1963,7 @@ impl GroupRibOut {
                 let count = match (slot, rtc_vpn) {
                     (2 | 3, Some(counts)) => counts[slot - 2].max(0).unsigned_abs(),
                     (0 | 1, _) => {
-                        let synthesized = (totals[slot].saturating_sub(own[slot]) + lane[slot])
-                            .saturating_sub(otc[slot]);
+                        let synthesized = totals[slot].saturating_sub(own[slot]) + lane[slot];
                         u64::try_from(i64::try_from(synthesized).unwrap_or(i64::MAX) + rs[slot])
                             .unwrap_or(0)
                     }

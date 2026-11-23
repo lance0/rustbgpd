@@ -12,7 +12,28 @@ use crate::manager::distribution::rs_control::rs_control_suppressed;
 pub(in crate::manager) const FALLBACK_PAGE: usize = 128;
 type Control = (u32, u32);
 type Slots = [Option<usize>; 2];
-type Projections = BTreeMap<Control, Slots>;
+#[derive(Clone, Copy, Debug, Default)]
+struct Selections {
+    eligible: Slots,
+    before_otc: Slots,
+}
+
+#[derive(Debug, Default)]
+struct Projections {
+    eligible: BTreeMap<Control, Slots>,
+    // Only contexts whose first choice differs before the OTC check need a second pair.
+    before_otc: BTreeMap<Control, Slots>,
+}
+
+/// Where to start the pre-OTC selection. An unconditional marked head already
+/// lives in the group's diagnostic map, so it needs no fallback allocation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(in crate::manager) enum DiagnosticHead {
+    #[default]
+    Winner,
+    Marked,
+    List,
+}
 
 /// Small fallbacks occupy one vector. Overflow pages grow independently so
 /// no append moves a completed page of route payloads.
@@ -22,10 +43,22 @@ pub(in crate::manager) struct FallbackRows {
     rest: BTreeMap<usize, Vec<RunnerUp>>,
     len: usize,
     has_next_hop: bool,
+    // Present only for a mixed list. Its marked candidates participate in diagnostics.
+    pub(in crate::manager) otc_role: Option<rustbgpd_wire::BgpRole>,
+    pub(in crate::manager) diagnostic_head: DiagnosticHead,
+    first_other_source: Option<usize>,
 }
 
 impl FallbackRows {
     pub(in crate::manager) fn push(&mut self, entry: RunnerUp) {
+        if self.first_other_source.is_none()
+            && self
+                .first
+                .first()
+                .is_some_and(|row| row.route.peer != entry.route.peer)
+        {
+            self.first_other_source = Some(self.len);
+        }
         self.has_next_hop |= entry.nh.is_some();
         if self.len < FALLBACK_PAGE {
             self.first.push(entry);
@@ -102,8 +135,43 @@ impl RsFallback {
         self.rows.has_next_hop
     }
 
+    pub(super) fn same_selection_mode(&self, other: &Self) -> bool {
+        self.otc_role == other.otc_role && self.diagnostic_head == other.diagnostic_head
+    }
+
+    pub(super) fn blocks(&self, entry: &RunnerUp) -> bool {
+        super::super::distribution::otc_egress_blocked(&entry.route, self.otc_role)
+    }
+
     pub(super) fn prepared_slots(&self, context: Control) -> Option<Slots> {
-        self.prepared.as_ref()?.get(&context).copied()
+        self.prepared.as_ref()?.eligible.get(&context).copied()
+    }
+
+    pub(super) fn first_before_otc(
+        &self,
+        member: PeerId,
+        context: Option<Control>,
+    ) -> Option<&RunnerUp> {
+        let slots = match context {
+            None => Some([Some(0), self.first_other_source]),
+            Some(ctx) => self.prepared.as_ref().and_then(|map| {
+                map.before_otc
+                    .get(&ctx)
+                    .or_else(|| map.eligible.get(&ctx))
+                    .copied()
+            }),
+        };
+        if let Some(slots) = slots {
+            return slots
+                .into_iter()
+                .flatten()
+                .map(|index| &self[index])
+                .find(|row| row.route.peer != member);
+        }
+        self.iter().find(|row| {
+            let (communities, large) = source_control_input(row.source_attrs.as_ref());
+            row.route.peer != member && !rs_control_suppressed(communities, large, context)
+        })
     }
 }
 
@@ -114,7 +182,7 @@ struct Preparation {
     #[cfg(test)]
     visits: usize,
     next: usize,
-    slots: Slots,
+    slots: Selections,
 }
 
 impl Preparation {
@@ -150,12 +218,13 @@ impl Preparation {
                 return false;
             }
             *budget -= 1;
-            let Some(context) = context(member).filter(|key| !self.contexts.contains_key(key))
+            let Some(context) =
+                context(member).filter(|key| !self.contexts.eligible.contains_key(key))
             else {
                 self.member += 1;
                 continue;
             };
-            while self.next < entries.len() && self.slots[1].is_none() {
+            while self.next < entries.len() && self.slots.eligible[1].is_none() {
                 if *budget == 0 {
                     return false;
                 }
@@ -167,18 +236,34 @@ impl Preparation {
                 {
                     self.visits += 1;
                 }
-                if self.slots[0].is_some_and(|first| entries[first].route.peer == entry.route.peer)
-                {
+                let (communities, large) = source_control_input(entry.source_attrs.as_ref());
+                if rs_control_suppressed(communities, large, Some(context)) {
                     continue;
                 }
-                let (communities, large) = source_control_input(entry.source_attrs.as_ref());
-                if !rs_control_suppressed(communities, large, Some(context)) {
-                    let slot = usize::from(self.slots[0].is_some());
-                    self.slots[slot] = Some(index);
+                let add = |slots: &mut Slots| {
+                    if slots[0].is_none() {
+                        slots[0] = Some(index);
+                    } else if slots[1].is_none()
+                        && slots[0]
+                            .is_some_and(|first| entries[first].route.peer != entry.route.peer)
+                    {
+                        slots[1] = Some(index);
+                    }
+                };
+                if entries.otc_role.is_some() {
+                    add(&mut self.slots.before_otc);
+                }
+                if !entries.blocks(entry) {
+                    add(&mut self.slots.eligible);
                 }
             }
-            self.contexts.insert(context, self.slots);
-            self.slots = [None; 2];
+            self.contexts.eligible.insert(context, self.slots.eligible);
+            if entries.otc_role.is_some() && self.slots.before_otc != self.slots.eligible {
+                self.contexts
+                    .before_otc
+                    .insert(context, self.slots.before_otc);
+            }
+            self.slots = Selections::default();
             self.next = 0;
             self.member += 1;
         }
@@ -229,6 +314,7 @@ impl RibManager {
         let mut budget = FALLBACK_PAGE;
         if stage.release_fallback_equal.is_none() {
             if let (Some(before), Some(after)) = (old.as_deref(), new.as_deref())
+                && before.same_selection_mode(after)
                 && before.len() == after.len()
             {
                 while progress.compared < before.len() && budget > 0 {
@@ -307,12 +393,17 @@ impl RibManager {
         }
         let mut budget = FALLBACK_PAGE - progress.retired_rows.retire_page();
         for map in &mut progress.retired_contexts {
-            while budget > 0 && map.pop_first().is_some() {
-                budget -= 1;
+            for slots in [&mut map.eligible, &mut map.before_otc] {
+                while budget > 0 && slots.pop_first().is_some() {
+                    budget -= 1;
+                }
             }
         }
         progress.retired_rows.is_empty()
-            && progress.retired_contexts.iter().all(Projections::is_empty)
+            && progress
+                .retired_contexts
+                .iter()
+                .all(|map| map.eligible.is_empty() && map.before_otc.is_empty())
     }
 }
 
@@ -418,6 +509,15 @@ mod tests {
         }
     }
 
+    fn before_otc_ids(list: &RsFallback, members: [PeerId; 3], context: Control) -> [u32; 3] {
+        members.map(|peer| {
+            list.first_before_otc(peer, Some(context))
+                .unwrap()
+                .route
+                .path_id
+        })
+    }
+
     #[test]
     fn large_fallback_resolves_shared_context_once_and_retires_by_page() {
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 1), 32);
@@ -447,6 +547,12 @@ mod tests {
         for id in 0..=u32::try_from(FALLBACK_PAGE * 2).unwrap() {
             rows.push(entry(first, id, true));
         }
+        rows.otc_role = Some(rustbgpd_wire::BgpRole::Peer);
+        let mut marked = entry(first, 1000, false);
+        AttrSet::edit(&mut marked.route.attributes, |attrs| {
+            attrs.push(PathAttribute::OnlyToCustomer(64512));
+        });
+        rows.push(marked);
         rows.push(entry(first, 1001, false));
         rows.push(entry(first, 1002, false));
         rows.push(entry(second, 1003, false));
@@ -471,6 +577,7 @@ mod tests {
         let expected = members.map(|peer| resolve(&list, peer).0);
         assert_eq!(expected, [Some(1003), Some(1001), Some(1001)]);
         assert!(resolve(&list, members[1]).1 > FALLBACK_PAGE);
+        assert_eq!(before_otc_ids(&list, members, context), [1003, 1000, 1000]);
         let mut prep = Preparation::default();
         let mut visits = 0;
         let mut polls = 0;
@@ -493,6 +600,7 @@ mod tests {
             "one walk for three members sharing an ASN pair"
         );
         list.prepared = Some(Arc::new(prep.contexts));
+        assert_eq!(before_otc_ids(&list, members, context), [1003, 1000, 1000]);
         for (peer, expected) in members.into_iter().zip(expected) {
             let (slot, checks) = resolve(&list, peer);
             assert_eq!(slot, expected);
@@ -508,6 +616,6 @@ mod tests {
             rows.retire_page();
             retired.push(before - rows.len());
         }
-        assert_eq!(retired, [4, FALLBACK_PAGE, FALLBACK_PAGE]);
+        assert_eq!(retired, [5, FALLBACK_PAGE, FALLBACK_PAGE]);
     }
 }

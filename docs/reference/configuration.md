@@ -1100,7 +1100,7 @@ complete atomic block. There is no probe or automatic legacy fallback.
 | `gr_eor_grace_time`    | u16      | no       | 0 (off) | Planned-restart End-of-RIB grace window toward this static neighbor (seconds, at most the effective `gr_restart_time`); see [End-of-RIB grace window](#planned-restart-end-of-rib-grace-window) |
 | `route_server_client`  | bool     | no       | false   | Transparent route-server mode for eBGP peers (see below) |
 | `send_non_transitive_extended_communities` | bool | no | false | Permit non-transitive Extended Communities to cross a plain eBGP boundary. iBGP and `route_server_client` sessions always preserve them. Inherits from the peer-group |
-| `per_client_best`      | bool     | no       | false   | RFC 7947 §2.3.2 per-client best-path for route-server clients: when export policy denies the Loc-RIB best toward this peer, advertise the best *permitted* candidate instead of hiding the prefix. Requires `route_server_client = true`; inherits from the peer-group (see below) |
+| `per_client_best`      | bool     | no       | false   | RFC 7947 §2.3.2 per-client best-path for route-server clients: advertise the best candidate allowed by export policy and the OTC egress rule of the local `role`. Requires `route_server_client = true`; inherits from the peer-group (see below) |
 | `next_hop_ownership`   | string   | no       | --      | ADR-0107 pre-policy NEXT_HOP ownership enforcement for route-server clients (RFC 7948 §4.8). `"strict_peer"` accepts a unicast announcement only when its complete wire next-hop identity is the advertising session's own address; non-conforming announcements are rejected before import policy (fail-closed, treat-as-withdraw). Requires `route_server_client = true`; inherits from the peer-group (see below) |
 | `interpret_rfc1997`    | bool     | no       | (derived) | Honor RFC 1997 `NO_EXPORT`/`NO_EXPORT_SUBCONFED` at egress: routes received with either community are not advertised to this neighbor when it is eBGP. Default: `true` unless `route_server_client = true` (route servers pass communities through transparently and let members enforce them). Inherits from the peer-group; set explicitly to override either default (see below) |
 | `rs_control_communities` | bool   | no       | (derived) | Interpret RFC 7947 §2.3.2 / RFC 8195 route-server control communities set by this member: per-target announce suppression, announce-only overrides, and prepend toward a target, keyed on the *target* peer's ASN. Acted-on control communities are scrubbed from this session's outbound announcements. Default: `true` when `route_server_client = true`, `false` otherwise. Inherits from the peer-group; set explicitly to override either default (see below) |
@@ -3023,7 +3023,11 @@ names:
 - **`per_client_best = true`** (the BIRD-`secondary` equivalent) for
   clients without Add-Path: the server walks its candidate paths in
   best-path order and advertises the first one the member's export
-  policy permits, at the ordinary single-path wire shape.
+  policy and OTC egress rule permit, using ordinary single-path encoding.
+  For a local `peer`, `customer` or `rs-client` role, a candidate already
+  carrying OTC is skipped. A clean alternate sent to a Peer receives the
+  local ASN in OTC on export. If the last eligible candidate disappears,
+  the server withdraws its prior advertisement.
 
 ```toml
 [[neighbors]]
