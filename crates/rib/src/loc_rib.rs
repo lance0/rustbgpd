@@ -39,6 +39,7 @@ pub(crate) struct RegistrationPage {
     pub(crate) keys: Vec<Prefix>,
     pub(crate) bucket_visits: usize,
     pub(crate) repairs: usize,
+    pub(crate) displaced: Vec<Route>,
 }
 
 /// There is one private group build. Only it needs a cursor and a repair log.
@@ -51,12 +52,14 @@ struct RegistrationScan {
     discovery_finished: bool,
     repair_due: bool,
     repairs: VecDeque<Prefix>,
+    // Only policy founders need the previous winner of each queued repair.
+    displaced: Option<VecDeque<Option<Route>>>,
     queued: FastSet<Prefix>,
     overflow: bool,
 }
 
 impl RegistrationScan {
-    fn record(&mut self, key: Prefix) {
+    fn record(&mut self, key: Prefix, previous: Option<&Route>) {
         if self.overflow {
             return;
         }
@@ -64,6 +67,9 @@ impl RegistrationScan {
             self.overflow = !self.queued.contains(&key);
         } else if self.queued.insert(key) {
             self.repairs.push_back(key);
+            if let Some(displaced) = &mut self.displaced {
+                displaced.push_back(previous.cloned());
+            }
         }
     }
 
@@ -265,7 +271,8 @@ impl LocRib {
             // would never be redistributed to single-best downstream
             // peers or FIB install candidates. Mirrors the
             // `recompute_evpn` payload comparison below.
-            let changed = self.routes.get(&prefix).is_none_or(|(old, _)| {
+            let previous = self.routes.get(&prefix);
+            let changed = previous.is_none_or(|(old, _)| {
                 best_path_cmp(old, &new_best) != std::cmp::Ordering::Equal
                     || old.next_hop != new_best.next_hop
                     || old.link_local_next_hop != new_best.link_local_next_hop
@@ -284,7 +291,7 @@ impl LocRib {
                         // single table always rewinds its only cursor, shard 0.
                         scan.bucket = 0;
                     }
-                    scan.record(prefix);
+                    scan.record(prefix, previous.map(|(route, _)| route));
                 }
                 let was_absent = self
                     .routes
@@ -298,13 +305,14 @@ impl LocRib {
             }
             changed
         } else {
-            let removed = self.routes.remove(&prefix).is_some();
+            let previous = self.routes.remove(&prefix);
+            let removed = previous.is_some();
             let v6 = matches!(prefix, Prefix::V6(_));
             track(&mut self.second_family.unicast, v6, false, removed);
             if removed {
                 if let Some(scan) = &mut self.registration_scan {
                     // Removing a bucket leaves other entries in place.
-                    scan.record(prefix);
+                    scan.record(prefix, previous.as_ref().map(|(route, _)| route));
                 }
                 self.note_membership_change(prefix);
             }
@@ -320,8 +328,17 @@ impl LocRib {
         self.registration_scan = Some(Box::default());
     }
 
-    pub(crate) fn stop_registration_scan(&mut self) {
-        self.registration_scan = None;
+    pub(crate) fn track_displaced_registration_winners(&mut self) {
+        let scan = self.registration_scan.as_mut().expect("fresh private scan");
+        debug_assert!(scan.repairs.is_empty());
+        scan.displaced = Some(VecDeque::new());
+    }
+
+    pub(crate) fn stop_registration_scan(&mut self) -> VecDeque<Option<Route>> {
+        self.registration_scan
+            .take()
+            .and_then(|scan| scan.displaced)
+            .unwrap_or_default()
     }
 
     pub(crate) fn registration_scan_status(&self) -> RegistrationScanStatus {
@@ -347,6 +364,7 @@ impl LocRib {
             keys: Vec::new(),
             bucket_visits: 0,
             repairs: 0,
+            displaced: Vec::new(),
         };
         if scan.overflow {
             return page;
@@ -367,6 +385,9 @@ impl LocRib {
                 scan.queued.remove(&key);
                 page.keys.push(key);
             }
+            if let Some(displaced) = &mut scan.displaced {
+                page.displaced.extend(displaced.drain(..count).flatten());
+            }
             page.repairs = count;
             return page;
         }
@@ -375,7 +396,11 @@ impl LocRib {
             let end = shard.num_buckets();
             let count = (end - scan.bucket).min(REGISTRATION_PAGE_SIZE - page.bucket_visits);
             for index in scan.bucket..scan.bucket + count {
-                if let Some((key, _)) = shard.get_bucket(index) {
+                if let Some((key, _)) = shard.get_bucket(index)
+                    && (scan.displaced.is_none() || !scan.queued.contains(key))
+                {
+                    // A queued policy repair owns the displaced winner. Discovery
+                    // must not stage the replacement before the repair accounts for it.
                     page.keys.push(*key);
                 }
             }

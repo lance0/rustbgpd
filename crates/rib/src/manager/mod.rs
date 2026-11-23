@@ -1038,9 +1038,8 @@ pub struct RibManager {
     gr_peers: HashMap<PeerId, HashSet<(Afi, Safi)>>,
     /// Deadlines for sweeping stale routes per GR peer.
     gr_stale_deadlines: graceful_restart::DeadlineMap<PeerId>,
-    /// Configured stale-routes-time per GR peer (seconds), used to reset
-    /// the timer on `PeerUp` during graceful restart.
-    gr_stale_routes_time: HashMap<PeerId, u64>,
+    /// Configured End-of-RIB wait and any deadline inherited across resets.
+    gr_stale_timers: HashMap<PeerId, graceful_restart::GrStaleTimer>,
     /// Peers currently in LLGR stale phase (RFC 9494), keyed by peer address.
     /// Value is the set of (AFI, SAFI) families in LLGR.
     llgr_peers: HashMap<PeerId, HashSet<(Afi, Safi)>>,
@@ -2238,6 +2237,8 @@ pub(super) struct LiveSessionRecord {
     /// `PeerUp`, or the collision failback that handed an earlier-registered
     /// survivor the registration again. `None` once its registration installs.
     registration_wait_since: Option<tokio::time::Instant>,
+    /// This waiting session must rebuild from authoritative policy inputs after invalidation.
+    registration_policy_fallback: bool,
     source_context: Option<Arc<crate::update::PeerSourceContext>>,
     /// Interned scope of `source_context`'s interface, resolved at
     /// registration; `DEFAULT` for a numbered neighbor.
@@ -3311,7 +3312,7 @@ impl RibManager {
             refresh_stale_counts: HashMap::new(),
             gr_peers: HashMap::new(),
             gr_stale_deadlines: graceful_restart::DeadlineMap::default(),
-            gr_stale_routes_time: HashMap::new(),
+            gr_stale_timers: HashMap::new(),
             llgr_peers: HashMap::new(),
             llgr_stale_deadlines: graceful_restart::DeadlineMap::default(),
             llgr_peer_config: HashMap::new(),
@@ -4987,13 +4988,10 @@ impl RibManager {
                 self.pending_initial_registrations.push_back(peer);
                 return;
             }
-            if let Some((gid, session_id, sender)) = self.first_group_candidate(peer) {
+            if self.defer_first_group_registration(peer) {
                 // Rotate the queue so another group's warm registration can
                 // proceed while this cold table is being staged.
                 self.pending_initial_registrations.push_back(peer);
-                if self.claim_registration_slot(gid) {
-                    self.start_first_group(peer, gid, session_id, sender);
-                }
                 if self.first_group_build.is_some() {
                     self.advance_first_group_build();
                 }
@@ -5736,6 +5734,14 @@ impl RibManager {
                         .iter_mut()
                         .find(|record| record.session_id == session_id)
                 }) {
+                    if self
+                        .first_group_build
+                        .as_ref()
+                        .is_some_and(|job| job.founded_by(peer, record))
+                        && record.export_policy != export_policy
+                    {
+                        record.registration_policy_fallback = true;
+                    }
                     record.export_policy = export_policy;
                 }
             }
@@ -6465,6 +6471,7 @@ impl RibManager {
                 restart_time,
                 stale_routes_time,
                 gr_families,
+                peer_notification_gr,
                 peer_llgr_capable,
                 peer_llgr_families,
                 llgr_stale_time,
@@ -6476,6 +6483,7 @@ impl RibManager {
                     restart_time,
                     stale_routes_time,
                     gr_families,
+                    peer_notification_gr,
                     peer_llgr_capable,
                     peer_llgr_families,
                     llgr_stale_time,

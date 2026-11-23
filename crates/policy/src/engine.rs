@@ -1756,16 +1756,33 @@ impl PolicyChain {
     /// semantics exist for.
     #[must_use]
     pub fn share(&self) -> Self {
-        // `hit_counters()` materializes the compiled IR too.
-        let hits = Arc::clone(self.hit_counters());
+        self.with_compiled_ir(OnceLock::from(Arc::clone(self.hit_counters())))
+    }
+
+    /// Content equality with a fast path: handles made by [`share`](Self::share)
+    /// or [`fork_for_install`](Self::fork_for_install) reuse one compiled IR,
+    /// which identifies the same policies. Compiles neither chain.
+    #[must_use]
+    pub fn same_policies(&self, other: &Self) -> bool {
+        self.compiled
+            .get()
+            .zip(other.compiled.get())
+            .is_some_and(|(a, b)| Arc::ptr_eq(a, b))
+            || self == other
+    }
+
+    /// Reuse a resolved chain's immutable IR for a new installation. Evaluations
+    /// through this handle start at zero and cannot affect the source's counters.
+    #[must_use]
+    pub fn fork_for_install(&self) -> Self {
+        self.with_compiled_ir(OnceLock::new())
+    }
+
+    fn with_compiled_ir(&self, hits: OnceLock<Arc<PolicyHitCounters>>) -> Self {
         Self {
             policies: self.policies.clone(),
-            compiled: self
-                .compiled
-                .get()
-                .map(Arc::clone)
-                .map_or_else(OnceLock::new, OnceLock::from),
-            hits: OnceLock::from(hits),
+            compiled: OnceLock::from(self.compiled_shared()),
+            hits,
             fingerprint: self
                 .fingerprint
                 .get()
@@ -1989,6 +2006,18 @@ impl PolicyChain {
     pub fn hit_counters(&self) -> &Arc<PolicyHitCounters> {
         self.hits
             .get_or_init(|| Arc::new(PolicyHitCounters::for_chain(self.compiled())))
+    }
+
+    /// Give a staged chain a fresh counter instance after excluding evaluations
+    /// of superseded inputs. Existing handles retain their original counters.
+    /// Returns false if the discarded evaluations cannot be reconstructed.
+    #[must_use]
+    pub fn exclude_staged_evaluations(&mut self, superseded: &PolicyHitCounters) -> bool {
+        let Some(fresh) = self.hit_counters().excluding(superseded, self.compiled()) else {
+            return false;
+        };
+        self.hits = OnceLock::from(Arc::new(fresh));
+        true
     }
 
     /// The hit counters if this instance already created them, without

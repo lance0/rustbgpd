@@ -198,3 +198,10 @@ mod tests {
         assert_ne!(flowspec.peer_router_id, Ipv4Addr::UNSPECIFIED);
     }
 }
+
+thread_local! {
+    /// Existing entries hashed when a sharded map grows or splits.
+    pub(crate) static REHASHED_KEYS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Initialized route-body slots exposed to relocation by slab growth.
+    pub(crate) static GROWING_SLAB_SLOTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}

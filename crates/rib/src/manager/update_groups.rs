@@ -53,10 +53,12 @@ mod first_group_retirement;
 mod membership;
 mod mutation_target;
 mod optional_retirement;
+mod policy_rows;
 use optional_retirement::OtcBlocked;
 pub(in crate::manager) use optional_retirement::{
     OptionalGroupRetirement, RejectedBatchedInventory,
 };
+use policy_rows::PolicyRows;
 mod payload;
 pub(in crate::manager) mod release_fallback;
 pub(in crate::manager) use release_fallback::{ReleaseFallback, RsFallback};
@@ -468,6 +470,23 @@ impl UpdateGroupRegistry {
         self.chains.len() - 1
     }
 
+    /// Read-only lookahead for a waiting registration. Only the founder
+    /// that takes the build slot may allocate a chain or group identity.
+    fn existing_registration_group(
+        &self,
+        key: &mut GroupKey,
+        policy: Option<&PolicyChain>,
+    ) -> Option<usize> {
+        if let Some(policy) = policy {
+            key.chain = Some(
+                self.chains
+                    .iter()
+                    .position(|chain| chain.as_ref().is_some_and(|c| c.same_policies(policy)))?,
+            );
+        }
+        self.groups.iter().position(|existing| existing == key)
+    }
+
     /// Look up (or create) the group for a key, returning its id.
     fn group_for(&mut self, key: GroupKey) -> usize {
         if let Some(idx) = self.groups.iter().position(|g| *g == key) {
@@ -653,7 +672,7 @@ pub(in crate::manager) struct GroupRibOut {
     /// staged route: policy may have stripped a control community (deciding
     /// post-policy leaks a source-prohibited route) or added one (spurious
     /// steering). Proven passthrough groups leave this map empty.
-    source_attrs: ShardedMap<(Prefix, u32), Arc<AttrSet>>,
+    source_attrs: PolicyRows<(Prefix, u32), Arc<AttrSet>>,
     /// Group-uniform proof that export policy preserves the standard and
     /// large communities used by RFC 7947 control. Such groups derive the
     /// control input from their staged route and keep `source_attrs` empty.
@@ -689,7 +708,7 @@ pub(in crate::manager) struct GroupRibOut {
     /// readers restamp the concrete member. Inner maps are never left
     /// empty ([`Self::record_policy_filtered`] removes whole prefixes),
     /// so outer emptiness remains "no denials".
-    policy_filtered: ShardedMap<Prefix, AddrMap<(PeerId, u32), Option<PolicyLabel>>>,
+    policy_filtered: PolicyRows<Prefix, AddrMap<(PeerId, u32), Option<PolicyLabel>>>,
     /// Default-Permit label for every staged unicast and VPN entry.
     /// Export-chain identity is group-uniform and immutable, and a chain
     /// Permit is always attributed to the shared chain sentinel, so retaining
@@ -834,8 +853,8 @@ impl GroupRibOut {
     /// and RFC 7947 fallback lists. A grouped join scopes its inventory to these.
     pub(in crate::manager) fn residue_prefixes(&self) -> impl Iterator<Item = Prefix> + '_ {
         self.policy_filtered
-            .keys()
-            .copied()
+            .iter()
+            .map(|(&prefix, _)| prefix)
             .chain(self.otc_blocked.values().map(|route| route.prefix))
             .chain(self.runner_up.keys().copied())
             // An rs-control member's resolved slot (and its OTC verdict) can
@@ -853,13 +872,14 @@ impl GroupRibOut {
         self.table.retire_with(checkpoint);
         release_hash_map(&mut self.evpn_inputs, checkpoint);
         release_hash_map(&mut self.evpn_policy_denied, checkpoint);
-        crate::adj_rib_out::release_sharded_map(&mut self.source_attrs, checkpoint);
+        self.source_attrs
+            .release_with(checkpoint, |row, _| drop(row));
         release_hash_map(&mut self.source_counts, checkpoint);
         release_hash_map(&mut self.visible_rejections, checkpoint);
-        for (_, paths) in self.policy_filtered.iter_mut() {
-            release_hash_map(paths, checkpoint);
-        }
-        crate::adj_rib_out::release_sharded_map(&mut self.policy_filtered, checkpoint);
+        self.policy_filtered
+            .release_with(checkpoint, |(_, mut paths), checkpoint| {
+                release_hash_map(&mut paths, checkpoint);
+            });
         crate::adj_rib_out::release_sharded_map(&mut self.vpn_policy_denied, checkpoint);
         self.otc_blocked.retire_with(checkpoint);
         release_hash_map(&mut self.vpn_member_counts, checkpoint);
@@ -919,7 +939,7 @@ impl GroupRibOut {
             recovery_snapshot: None,
             evpn_inputs: FastMap::default(),
             evpn_policy_denied: FastMap::default(),
-            source_attrs: ShardedMap::default(),
+            source_attrs: PolicyRows::default(),
             source_control_passthrough,
             source_counts: AddrMap::default(),
             visible_rejections: AddrMap::default(),
@@ -928,7 +948,7 @@ impl GroupRibOut {
             vpn_tombstones: HashSet::new(),
             members: HashSet::new(),
             dirty_members: HashSet::new(),
-            policy_filtered: ShardedMap::default(),
+            policy_filtered: PolicyRows::default(),
             permit_policy_label,
             vpn_policy_denied: ShardedMap::default(),
             otc_blocked: OtcBlocked::Ordinary(FastMap::default()),
@@ -1126,13 +1146,20 @@ impl GroupRibOut {
 
     fn insert_source_attrs(&mut self, key: (Prefix, u32), attrs: &Arc<AttrSet>) {
         #[cfg(feature = "bench-internals")]
-        let observation =
-            tracing::enabled!(target: "rustbgpd_rib::map_growth", tracing::Level::TRACE)
-                .then(|| (self.source_attrs.capacity(), std::time::Instant::now()));
+        let observation = match &self.source_attrs {
+            PolicyRows::Sharded(map) if tracing::enabled!(target: "rustbgpd_rib::map_growth", tracing::Level::TRACE) => {
+                Some((map.capacity(), std::time::Instant::now()))
+            }
+            _ => None,
+        };
         self.source_attrs.insert(key, Arc::clone(attrs));
+        #[cfg(test)]
+        super::slice_timing::record_work("group_source_writes", 1);
         #[cfg(feature = "bench-internals")]
-        if let Some((before, started)) = observation {
-            let after = self.source_attrs.capacity();
+        if let (Some((before, started)), PolicyRows::Sharded(map)) =
+            (observation, &self.source_attrs)
+        {
+            let after = map.capacity();
             if after != before {
                 tracing::trace!(target: "rustbgpd_rib::map_growth", map = "source_attrs", before, after,
                     entries = self.source_attrs.len(), elapsed_us = started.elapsed().as_micros(),
@@ -2092,6 +2119,8 @@ impl GroupRibOut {
         for prefix in staged {
             checkpoint();
             if let Some(mut denials) = self.policy_filtered.remove(prefix) {
+                #[cfg(test)]
+                super::slice_timing::record_work("group_denials_removed", denials.len());
                 crate::adj_rib_out::release_hash_map(&mut denials, checkpoint);
             }
         }
@@ -2100,6 +2129,8 @@ impl GroupRibOut {
             self.policy_filtered
                 .get_or_default(key.prefix)
                 .insert((key.source_peer, key.path_id), label.clone());
+            #[cfg(test)]
+            super::slice_timing::record_work("group_denials_written", 1);
         }
     }
 
@@ -3399,7 +3430,7 @@ impl RibManager {
     }
 
     /// Capture actual admission before dormant-to-active staging can dirty it.
-    pub(super) fn retain_selection_group_admission(&mut self) {
+    pub(super) fn retain_selection_group_admission(&mut self, newly_held: &HashSet<(Afi, Safi)>) {
         let peers: Vec<_> = self
             .outbound_peers
             .keys()
@@ -3411,6 +3442,7 @@ impl RibManager {
                     .any(|held| held)
             })
             .collect();
+        let mut visits = self.frozen_group_local_visit_budget(newly_held);
         for peer in peers {
             self.replacement_checkpoint(false);
             // Freeze known clean counts before a bounded capture can refuse;
@@ -3439,6 +3471,7 @@ impl RibManager {
                 .flatten()
             });
             self.capture_group_admitted_keys(peer);
+            self.capture_frozen_group_locals(peer, &mut visits);
             let families = self.selection_receiver_held_families(peer);
             if let Some(session) = self.outbound_session_ids.get(&peer).copied()
                 && let Some(record) = self.newest_live_session_mut(peer, session)
@@ -4589,6 +4622,7 @@ impl RibManager {
     }
 
     fn leave_group_without_gauge_refresh(&mut self, gid: usize, peer: PeerId) {
+        self.forget_peer_frozen_group_locals(peer);
         // A withdrawal the group queued to this member may not have
         // reached it; the member's own hold ledger keeps it for a flap after
         // the move. A session teardown has already deregistered the peer and
@@ -5020,6 +5054,7 @@ impl RibManager {
         if let Some(prestage) = &self.pending_destination_prestage {
             groups.insert(prestage.destination);
         }
+        groups.extend(self.first_group_build.as_ref().map(|job| job.gid));
         groups.extend(self.prepared_destination);
         self.replacement_checkpoint(true);
         let mut chains: HashSet<usize> = HashSet::with_capacity(groups.len());

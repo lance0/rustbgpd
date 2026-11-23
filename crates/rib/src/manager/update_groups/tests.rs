@@ -678,7 +678,7 @@ fn source_attrs_grows_one_shard_per_insert() {
             delta.policy_label = group.permit_policy_label.clone();
             group.apply_delta(&delta);
         },
-        |group| group.source_attrs.capacity(),
+        |group| group.source_attrs.sharded().capacity(),
     );
 }
 
@@ -764,7 +764,7 @@ fn policy_filtered_grows_one_shard_per_insert() {
             };
             group.record_policy_filtered(&HashSet::from([prefix]), &[(key, None)], &mut || {});
         },
-        |group| group.policy_filtered.capacity(),
+        |group| group.policy_filtered.sharded().capacity(),
     );
 }
 
@@ -3481,6 +3481,7 @@ fn peer_update_group_series_follows_session_teardown() {
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: Vec::new(),
         llgr_stale_time: 0,
@@ -5302,7 +5303,10 @@ fn source_control_passthrough_keeps_dense_residue_empty() {
     });
 
     assert_eq!(
-        (group.source_attrs.len(), group.source_attrs.capacity()),
+        (
+            group.source_attrs.len(),
+            group.source_attrs.sharded().capacity()
+        ),
         (0, 0)
     );
     assert_eq!(group.source_control((p, 0)).0, &[CONTROL]);
@@ -5319,7 +5323,10 @@ fn source_control_passthrough_keeps_dense_residue_empty() {
 
     group.apply_delta(&withdraw_delta(p, Some(OTHER1)));
     assert_eq!(
-        (group.source_attrs.len(), group.source_attrs.capacity()),
+        (
+            group.source_attrs.len(),
+            group.source_attrs.sharded().capacity()
+        ),
         (0, 0)
     );
 }
@@ -7442,6 +7449,55 @@ fn rs_targets_record_thousands_of_asns_as_one_sorted_set() {
 }
 
 #[test]
+fn first_group_retirement_pages_policy_denials_and_source_attributes() {
+    use crate::manager::slice_timing::take_first_group_retirement_work;
+
+    const CONTROL: u32 = 65_001 << 16 | 7;
+    let mut group = plain_group_with_chain(Some(strip_communities_chain(vec![CONTROL])));
+    group.prepare_policy_first_group();
+    let permit = prefix(1);
+    let source = cand_with_comm(permit, OTHER1, 300, CONTROL);
+    let source_attrs = Arc::downgrade(&source.attributes);
+    let mut delta = announce_delta(permit, OTHER1, None);
+    delta.source_attrs = capture_source_attrs(&source);
+    delta.policy_label = group.permit_policy_label.clone();
+    group.apply_delta(&delta);
+    drop((source, delta));
+    assert_eq!(source_attrs.strong_count(), 1);
+
+    let label: PolicyLabel = Arc::from("deny");
+    let retained_label = Arc::downgrade(&label);
+    for p in (2..=7).map(prefix) {
+        let key = PolicyFilteredRouteKey {
+            target_peer: GROUP_FILTERED_PLACEHOLDER,
+            source_peer: OTHER2,
+            prefix: p,
+            path_id: 0,
+        };
+        group.record_policy_filtered(
+            &HashSet::from([p]),
+            &[(key, Some(label.clone()))],
+            &mut || {},
+        );
+    }
+    drop(label);
+    take_first_group_retirement_work();
+    assert!(!group.retire_first_group_page(0));
+    assert_eq!(take_first_group_retirement_work(), [0, 0, 0]);
+    assert_eq!(retained_label.strong_count(), 6);
+    assert!(!group.retire_first_group_page(1));
+    assert_eq!(take_first_group_retirement_work(), [1, 0, 0]);
+    assert_eq!(source_attrs.strong_count(), 0);
+    assert_eq!(retained_label.strong_count(), 6);
+    assert!(!group.retire_first_group_page(4));
+    assert_eq!(take_first_group_retirement_work(), [0, 4, 0]);
+    assert_eq!(retained_label.strong_count(), 2);
+    assert!(group.retire_first_group_page(2));
+    assert_eq!(take_first_group_retirement_work(), [0, 2, 0]);
+    assert_eq!(retained_label.strong_count(), 0);
+}
+
+#[test]
 fn optional_group_retirement_charges_sparse_denials_without_advertised_rows() {
     fn last_bucket<V>(map: &ShardedMap<Prefix, V>) -> (usize, Prefix) {
         let [shard] = map.shards() else {
@@ -7495,7 +7551,7 @@ fn optional_group_retirement_charges_sparse_denials_without_advertised_rows() {
         );
     }
     drop(label);
-    let (last_policy, retained_policy) = last_bucket(&group.policy_filtered);
+    let (last_policy, retained_policy) = last_bucket(group.policy_filtered.sharded());
     let OtcBlocked::Optional(blocked) = &group.otc_blocked else {
         panic!("blocking optional group")
     };

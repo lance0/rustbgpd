@@ -1066,7 +1066,11 @@ async fn notification_teardown_with_n_bit_uses_peer_graceful_restart() {
     session.notification_teardown = true;
     session.execute_actions(vec![Action::SessionDown]).await;
     match rib_rx.try_recv().unwrap() {
-        RibUpdate::PeerGracefulRestart { peer, .. } => {
+        RibUpdate::PeerGracefulRestart {
+            peer,
+            peer_notification_gr: true,
+            ..
+        } => {
             assert_eq!(peer, PeerId::from_addr(session.peer_ip));
         }
         _ => panic!("expected PeerGracefulRestart"),

@@ -179,6 +179,7 @@ fn the_rib_reap_covers_exactly_what_the_rib_writes() {
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
         llgr_stale_time: 0,
@@ -459,6 +460,7 @@ fn session_with_routes(
             restart_time: 120,
             stale_routes_time: 360,
             gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            peer_notification_gr: false,
             peer_llgr_capable: long_lived,
             peer_llgr_families: if long_lived {
                 vec![rustbgpd_wire::LlgrFamily {

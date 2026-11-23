@@ -1524,19 +1524,11 @@ impl AdjRibIn {
     }
 
     /// Mark all routes matching the given address family as stale
-    /// (RFC 4724 §4.1 helper retention on session drop).
-    ///
-    /// A route that is already *GR*-stale when a new mark arrives survived a
-    /// previous restart without ever being refreshed and is deleted instead
-    /// of re-marked (RFC 4724 §4.1: stale routes must not be retained across
-    /// consecutive restarts). An *LLGR*-stale route is the RFC 9494
-    /// exception: it is retained as-is across consecutive resets — neither
-    /// deleted nor demoted back to GR-stale — until its original per-family
-    /// Long-Lived Stale Time deadline (held by the manager) expires.
-    /// Returns the deleted prefixes so the caller can withdraw them
-    /// downstream.
+    /// (RFC 4724 §4.2, without the RFC 8538 N bit).
+    /// Returns the prefixes of previously GR-stale routes removed at this
+    /// reset. LLGR-stale routes keep their original per-family deadline.
     pub fn mark_stale(&mut self, family: (Afi, Safi)) -> Vec<Prefix> {
-        self.mark_stale_with_checkpoint(family, &mut || {})
+        self.mark_stale_with_checkpoint(family, false, &mut || {})
     }
 
     /// [`Self::mark_stale`] checkpointing every slot visited (vacancies
@@ -1544,33 +1536,18 @@ impl AdjRibIn {
     pub(crate) fn mark_stale_with_checkpoint(
         &mut self,
         family: (Afi, Safi),
+        retain_gr_stale: bool,
         checkpoint: &mut impl FnMut(),
     ) -> Vec<Prefix> {
         // Only unicast routes live in the slab (`route_matches_family`).
         if family.1 != Safi::Unicast {
             return Vec::new();
         }
-        let mut already_stale: Vec<(Prefix, u32)> =
-            Vec::with_capacity(self.gr_stale_family_len(family));
-        checkpoint();
-        already_stale.extend(
-            self.routes
-                .iter_slots()
-                .inspect(|_| checkpoint())
-                .flatten()
-                .filter(|r| r.is_stale && route_matches_family(r, family))
-                .map(|r| (r.prefix, r.path_id)),
-        );
-        let mut deleted = Vec::with_capacity(already_stale.len());
-        checkpoint();
-        for key in &already_stale {
-            checkpoint();
-            deleted.push(key.0);
-            self.llgr_stale_local_tags.remove(key);
-            self.remove_route_entry_with_checkpoint(&key.0, key.1, checkpoint);
-            checkpoint();
-        }
-        retire_llgr_keys(already_stale, checkpoint);
+        let deleted = if retain_gr_stale {
+            Vec::new()
+        } else {
+            self.sweep_stale_family_with_checkpoint(family, false, checkpoint)
+        };
         for route in self.routes.iter_slots_mut() {
             checkpoint();
             let Some(route) = route else {
@@ -2044,13 +2021,10 @@ impl AdjRibIn {
 
     /// Mark all EVPN routes as stale if `family == (L2Vpn, Evpn)`.
     ///
-    /// A route that is *already* stale (GR or LLGR) when a new mark arrives
-    /// survived a previous restart without ever being refreshed and is deleted
-    /// instead of re-marked (RFC 4724 §4.1: stale routes must not be retained
-    /// across consecutive restarts). Returns the deleted keys so the caller
-    /// can withdraw them downstream.
+    /// Without the RFC 8538 N bit, remove previously GR-stale routes and
+    /// return their keys for withdrawal. LLGR-stale routes stay in LLGR.
     pub fn mark_stale_evpn(&mut self, family: (Afi, Safi)) -> Vec<EvpnRouteKey> {
-        self.mark_stale_evpn_with_checkpoint(family, &mut || {})
+        self.mark_stale_evpn_with_checkpoint(family, false, &mut || {})
     }
 
     /// [`Self::mark_stale_evpn`] checkpointing every visited route, removal and
@@ -2058,28 +2032,17 @@ impl AdjRibIn {
     pub(crate) fn mark_stale_evpn_with_checkpoint(
         &mut self,
         family: (Afi, Safi),
+        retain_gr_stale: bool,
         checkpoint: &mut impl FnMut(),
     ) -> Vec<EvpnRouteKey> {
         if family != (Afi::L2Vpn, Safi::Evpn) {
             return Vec::new();
         }
-        let mut already_stale: Vec<EvpnRouteKey> =
-            Vec::with_capacity(self.gr_stale_family_len(family));
-        checkpoint();
-        already_stale.extend(
-            self.evpn_routes
-                .routes
-                .iter_slots()
-                .inspect(|_| checkpoint())
-                .flatten()
-                .filter(|r| r.is_stale)
-                .map(EvpnRibRoute::key),
-        );
-        for key in &already_stale {
-            checkpoint();
-            self.evpn_llgr_stale_local_tags.remove(key);
-            self.evpn_routes.remove(key);
-        }
+        let deleted = if retain_gr_stale {
+            Vec::new()
+        } else {
+            self.sweep_stale_family_evpn_with_checkpoint(family, false, checkpoint)
+        };
         // LLGR-stale routes are retained as-is (RFC 9494: consecutive resets
         // neither delete nor re-mark them; the original deadline governs).
         self.evpn_routes
@@ -2088,7 +2051,7 @@ impl AdjRibIn {
                     route.is_stale = true;
                 }
             });
-        already_stale
+        deleted
     }
 
     /// Clear the stale flag on EVPN routes (both `is_stale` and
@@ -2343,16 +2306,13 @@ impl AdjRibIn {
     // (BgpLs, BgpLsVpn) — which the GR capability lists separately, so every
     // helper filters by the exact tuple via BgpLsFamily.
 
-    /// Mark BGP-LS routes of the given family tuple as stale (RFC 4724 §4.1
+    /// Mark BGP-LS routes of the given family tuple as stale (RFC 4724 §4.2
     /// helper retention on session drop).
     ///
-    /// A route that is *already* stale (GR or LLGR) when a new mark arrives
-    /// survived a previous restart without ever being refreshed and is deleted
-    /// instead of re-marked (RFC 4724 §4.1: stale routes must not be retained
-    /// across consecutive restarts). Returns the deleted keys so the caller
-    /// can withdraw them downstream.
+    /// Without the RFC 8538 N bit, remove previously GR-stale routes and
+    /// return their keys for withdrawal. LLGR-stale routes stay in LLGR.
     pub fn mark_stale_bgpls(&mut self, family: (Afi, Safi)) -> Vec<BgpLsRouteKey> {
-        self.mark_stale_bgpls_with_checkpoint(family, &mut || {})
+        self.mark_stale_bgpls_with_checkpoint(family, false, &mut || {})
     }
 
     /// [`Self::mark_stale_bgpls`] checkpointing every visited route, removal and
@@ -2360,26 +2320,17 @@ impl AdjRibIn {
     pub(crate) fn mark_stale_bgpls_with_checkpoint(
         &mut self,
         family: (Afi, Safi),
+        retain_gr_stale: bool,
         checkpoint: &mut impl FnMut(),
     ) -> Vec<BgpLsRouteKey> {
         let Some(fam) = BgpLsFamily::from_afi_safi(family.0, family.1) else {
             return Vec::new();
         };
-        let mut already_stale: Vec<BgpLsRouteKey> =
-            Vec::with_capacity(self.gr_stale_family_len(family));
-        checkpoint();
-        already_stale.extend(
-            self.bgpls_routes
-                .iter()
-                .inspect(|_| checkpoint())
-                .filter(|(_, r)| r.is_stale && r.family == fam)
-                .map(|(k, _)| k.clone()),
-        );
-        for key in &already_stale {
-            checkpoint();
-            self.bgpls_llgr_stale_local_tags.remove(key);
-            self.bgpls_routes.remove(key);
-        }
+        let deleted = if retain_gr_stale {
+            Vec::new()
+        } else {
+            self.sweep_stale_family_bgpls_with_checkpoint(family, false, checkpoint)
+        };
         // LLGR-stale routes are retained as-is (RFC 9494: consecutive resets
         // neither delete nor re-mark them; the original deadline governs).
         self.bgpls_routes
@@ -2388,7 +2339,7 @@ impl AdjRibIn {
                     route.is_stale = true;
                 }
             });
-        already_stale
+        deleted
     }
 
     /// Clear the stale flag on BGP-LS routes of the given family tuple (both
@@ -2713,16 +2664,13 @@ impl AdjRibIn {
     // (Ipv6, MplsVpn) — which the GR capability lists separately, so every
     // helper filters by the exact tuple via VpnRibRoute::afi_safi().
 
-    /// Mark VPN routes of the given family tuple as stale (RFC 4724 §4.1
+    /// Mark VPN routes of the given family tuple as stale (RFC 4724 §4.2
     /// helper retention on session drop).
     ///
-    /// A route that is *already* stale (GR or LLGR) when a new mark arrives
-    /// survived a previous restart without ever being refreshed and is deleted
-    /// instead of re-marked (RFC 4724 §4.1: stale routes must not be retained
-    /// across consecutive restarts). Returns the deleted keys so the caller
-    /// can withdraw them downstream.
+    /// Without the RFC 8538 N bit, remove previously GR-stale routes and
+    /// return their keys for withdrawal. LLGR-stale routes stay in LLGR.
     pub fn mark_stale_vpn(&mut self, family: (Afi, Safi)) -> Vec<VpnRibRouteKey> {
-        self.mark_stale_vpn_with_checkpoint(family, &mut || {})
+        self.mark_stale_vpn_with_checkpoint(family, false, &mut || {})
     }
 
     /// [`Self::mark_stale_vpn`] checkpointing every slot visited (vacancies
@@ -2730,26 +2678,17 @@ impl AdjRibIn {
     pub(crate) fn mark_stale_vpn_with_checkpoint(
         &mut self,
         family: (Afi, Safi),
+        retain_gr_stale: bool,
         checkpoint: &mut impl FnMut(),
     ) -> Vec<VpnRibRouteKey> {
         if family.1 != Safi::MplsVpn {
             return Vec::new();
         }
-        let mut already_stale: Vec<VpnRibRouteKey> =
-            Vec::with_capacity(self.gr_stale_family_len(family));
-        checkpoint();
-        already_stale.extend(
-            self.vpn_routes
-                .iter_slots()
-                .inspect(|_| checkpoint())
-                .flatten()
-                .filter(|r| r.is_stale && r.afi_safi() == family)
-                .map(VpnRibRoute::key),
-        );
-        for key in &already_stale {
-            checkpoint();
-            self.remove_vpn_entry_with_checkpoint(key, checkpoint);
-        }
+        let deleted = if retain_gr_stale {
+            Vec::new()
+        } else {
+            self.sweep_stale_family_vpn_with_checkpoint(family, false, checkpoint)
+        };
         // LLGR-stale routes are retained as-is (RFC 9494: consecutive resets
         // neither delete nor re-mark them; the original deadline governs).
         self.vpn_routes
@@ -2758,7 +2697,7 @@ impl AdjRibIn {
                     route.is_stale = true;
                 }
             });
-        already_stale
+        deleted
     }
 
     /// Clear the stale flag on VPN routes of the given family tuple (both
@@ -3076,16 +3015,13 @@ impl AdjRibIn {
     // lists separately, so every helper filters by the exact tuple via
     // LabeledRibRoute::afi_safi().
 
-    /// Mark labeled routes of the given family tuple as stale (RFC 4724 §4.1
+    /// Mark labeled routes of the given family tuple as stale (RFC 4724 §4.2
     /// helper retention on session drop).
     ///
-    /// A route that is *already* stale (GR or LLGR) when a new mark arrives
-    /// survived a previous restart without ever being refreshed and is deleted
-    /// instead of re-marked (RFC 4724 §4.1: stale routes must not be retained
-    /// across consecutive restarts). Returns the deleted keys so the caller
-    /// can withdraw them downstream.
+    /// Without the RFC 8538 N bit, remove previously GR-stale routes and
+    /// return their keys for withdrawal. LLGR-stale routes stay in LLGR.
     pub fn mark_stale_labeled(&mut self, family: (Afi, Safi)) -> Vec<LabeledRibRouteKey> {
-        self.mark_stale_labeled_with_checkpoint(family, &mut || {})
+        self.mark_stale_labeled_with_checkpoint(family, false, &mut || {})
     }
 
     /// [`Self::mark_stale_labeled`] checkpointing every slot visited
@@ -3093,26 +3029,17 @@ impl AdjRibIn {
     pub(crate) fn mark_stale_labeled_with_checkpoint(
         &mut self,
         family: (Afi, Safi),
+        retain_gr_stale: bool,
         checkpoint: &mut impl FnMut(),
     ) -> Vec<LabeledRibRouteKey> {
         if family.1 != Safi::LabeledUnicast {
             return Vec::new();
         }
-        let mut already_stale: Vec<LabeledRibRouteKey> =
-            Vec::with_capacity(self.gr_stale_family_len(family));
-        checkpoint();
-        already_stale.extend(
-            self.labeled_routes
-                .iter_slots()
-                .inspect(|_| checkpoint())
-                .flatten()
-                .filter(|r| r.is_stale && r.afi_safi() == family)
-                .map(LabeledRibRoute::key),
-        );
-        for key in &already_stale {
-            checkpoint();
-            self.remove_labeled_entry_with_checkpoint(key, checkpoint);
-        }
+        let deleted = if retain_gr_stale {
+            Vec::new()
+        } else {
+            self.sweep_stale_family_labeled_with_checkpoint(family, false, checkpoint)
+        };
         // LLGR-stale routes are retained as-is (RFC 9494: consecutive resets
         // neither delete nor re-mark them; the original deadline governs).
         self.labeled_routes
@@ -3121,7 +3048,7 @@ impl AdjRibIn {
                     route.is_stale = true;
                 }
             });
-        already_stale
+        deleted
     }
 
     /// Clear the stale flag on labeled routes of the given family tuple (both
@@ -3416,15 +3343,12 @@ impl AdjRibIn {
     // match checks reduce to direct equality.
 
     /// Mark all RTC routes as stale if `family == (Ipv4, RtConstrain)`
-    /// (RFC 4724 §4.1 helper retention on session drop).
+    /// (RFC 4724 §4.2 helper retention on session drop).
     ///
-    /// A route that is *already* stale (GR or LLGR) when a new mark arrives
-    /// survived a previous restart without ever being refreshed and is deleted
-    /// instead of re-marked (RFC 4724 §4.1: stale routes must not be retained
-    /// across consecutive restarts). Returns the deleted keys so the caller
-    /// can withdraw them downstream.
+    /// Without the RFC 8538 N bit, remove previously GR-stale routes and
+    /// return their keys for withdrawal. LLGR-stale routes stay in LLGR.
     pub fn mark_stale_rtc(&mut self, family: (Afi, Safi)) -> Vec<RtcRibRouteKey> {
-        self.mark_stale_rtc_with_checkpoint(family, &mut || {})
+        self.mark_stale_rtc_with_checkpoint(family, false, &mut || {})
     }
 
     /// [`Self::mark_stale_rtc`] checkpointing every visited route, removal and
@@ -3432,26 +3356,17 @@ impl AdjRibIn {
     pub(crate) fn mark_stale_rtc_with_checkpoint(
         &mut self,
         family: (Afi, Safi),
+        retain_gr_stale: bool,
         checkpoint: &mut impl FnMut(),
     ) -> Vec<RtcRibRouteKey> {
         if family != RtcRibRouteKey::afi_safi() {
             return Vec::new();
         }
-        let mut already_stale: Vec<RtcRibRouteKey> =
-            Vec::with_capacity(self.gr_stale_family_len(family));
-        checkpoint();
-        already_stale.extend(
-            self.rtc_routes
-                .iter()
-                .inspect(|_| checkpoint())
-                .filter(|(_, r)| r.is_stale)
-                .map(|(k, _)| k.clone()),
-        );
-        for key in &already_stale {
-            checkpoint();
-            self.rtc_llgr_stale_local_tags.remove(key);
-            self.rtc_routes.remove(key);
-        }
+        let deleted = if retain_gr_stale {
+            Vec::new()
+        } else {
+            self.sweep_stale_family_rtc_with_checkpoint(family, false, checkpoint)
+        };
         // LLGR-stale routes are retained as-is (RFC 9494: consecutive resets
         // neither delete nor re-mark them; the original deadline governs).
         self.rtc_routes
@@ -3460,7 +3375,7 @@ impl AdjRibIn {
                     route.is_stale = true;
                 }
             });
-        already_stale
+        deleted
     }
 
     /// Clear the stale flag on RTC routes (both `is_stale` and
@@ -3676,13 +3591,10 @@ impl AdjRibIn {
 
     /// Mark `FlowSpec` routes matching the given address family as stale.
     ///
-    /// A route that is *already* stale (GR or LLGR) when a new mark arrives
-    /// survived a previous restart without ever being refreshed and is deleted
-    /// instead of re-marked (RFC 4724 §4.1: stale routes must not be retained
-    /// across consecutive restarts). Returns the deleted rules so the caller
-    /// can withdraw them downstream.
+    /// Without the RFC 8538 N bit, remove previously GR-stale routes and
+    /// return their keys for withdrawal. LLGR-stale routes stay in LLGR.
     pub fn mark_stale_flowspec(&mut self, family: (Afi, Safi)) -> Vec<FlowSpecKey> {
-        self.mark_stale_flowspec_with_checkpoint(family, &mut || {})
+        self.mark_stale_flowspec_with_checkpoint(family, false, &mut || {})
     }
 
     /// [`Self::mark_stale_flowspec`] checkpointing every visited route, removal and
@@ -3690,32 +3602,17 @@ impl AdjRibIn {
     pub(crate) fn mark_stale_flowspec_with_checkpoint(
         &mut self,
         family: (Afi, Safi),
+        retain_gr_stale: bool,
         checkpoint: &mut impl FnMut(),
     ) -> Vec<FlowSpecKey> {
         if !matches!(family.1, Safi::FlowSpec | Safi::FlowSpecVpn) {
             return Vec::new();
         }
-        let mut already_stale: Vec<FlowSpecRouteKey> =
-            Vec::with_capacity(self.gr_stale_family_len(family));
-        checkpoint();
-        already_stale.extend(
-            self.flowspec_routes
-                .iter()
-                .inspect(|_| checkpoint())
-                .filter(|(_, r)| r.is_stale && r.family() == family)
-                .map(|(k, _)| k.clone()),
-        );
-        let mut deleted = Vec::with_capacity(already_stale.len());
-        for key in &already_stale {
-            checkpoint();
-            deleted.push(key.selection_key());
-            self.flowspec_llgr_stale_local_tags.remove(key);
-            self.flowspec_routes.remove(key);
-            checkpoint();
-        }
-        // The deleted keys own rule components; release them between
-        // checkpoints rather than when this frame returns.
-        retire_llgr_keys(already_stale, checkpoint);
+        let deleted = if retain_gr_stale {
+            Vec::new()
+        } else {
+            self.sweep_stale_flowspec_family_with_checkpoint(family, false, checkpoint)
+        };
         // LLGR-stale routes are retained as-is (RFC 9494: consecutive resets
         // neither delete nor re-mark them; the original deadline governs).
         self.flowspec_routes
@@ -5471,10 +5368,12 @@ mod tests {
         rib.insert(make_route(gr_prefix, Ipv4Addr::new(10, 0, 0, 1)));
         assert_eq!(rib.mark_stale((Afi::Ipv4, Safi::Unicast)).len(), 0);
 
-        // Third drop before any refresh: the GR-stale route is deleted
-        // (RFC 4724 §4.1: no retention across consecutive restarts) but the
-        // LLGR-stale route is retained unchanged (RFC 9494: its original
-        // stale-time deadline governs), keeping flag and community coupled.
+        // N retains both. Without N, GR-stale routes are deleted while
+        // LLGR-stale routes keep their flags and community.
+        assert_eq!(
+            rib.mark_stale_with_checkpoint((Afi::Ipv4, Safi::Unicast), true, &mut || {}),
+            []
+        );
         let deleted = rib.mark_stale((Afi::Ipv4, Safi::Unicast));
         assert_eq!(deleted, vec![Prefix::V4(gr_prefix)]);
         assert_eq!(rib.len(), 1);
@@ -6037,11 +5936,15 @@ mod tests {
             &mut crate::attr_intern::AttrInternTable::new(),
         );
 
-        // Reconnect advertises a second rule; two more drops follow.
+        // Only the second rule enters GR on the next reset.
         rib.insert_flowspec(gr_route);
         assert_eq!(
             rib.mark_stale_flowspec((Afi::Ipv4, Safi::FlowSpec)).len(),
             0
+        );
+        assert_eq!(
+            rib.mark_stale_flowspec_with_checkpoint((Afi::Ipv4, Safi::FlowSpec), true, &mut || {}),
+            []
         );
         let deleted = rib.mark_stale_flowspec((Afi::Ipv4, Safi::FlowSpec));
         assert_eq!(
@@ -6424,11 +6327,14 @@ mod tests {
             &mut crate::attr_intern::AttrInternTable::new(),
         );
 
-        // Reconnect advertises a second route; two more drops follow. The
-        // GR-stale route is deleted (RFC 4724 §4.1), the LLGR-stale one is
-        // retained unchanged (RFC 9494: original deadline governs).
+        // Only the second route enters GR. A subsequent reset with N
+        // retains both routes, and a reset without N keeps only LLGR.
         let gr_key = insert_evpn_imet(&mut rib, Ipv4Addr::new(10, 0, 0, 1), 100, vec![]);
         assert_eq!(rib.mark_stale_evpn((Afi::L2Vpn, Safi::Evpn)).len(), 0);
+        assert_eq!(
+            rib.mark_stale_evpn_with_checkpoint((Afi::L2Vpn, Safi::Evpn), true, &mut || {}),
+            []
+        );
         let deleted = rib.mark_stale_evpn((Afi::L2Vpn, Safi::Evpn));
         assert_eq!(deleted, vec![gr_key]);
         assert_eq!(rib.evpn_len(), 1);
@@ -6735,11 +6641,14 @@ mod tests {
         rib.mark_stale_vpn(VPN_V4);
         rib.promote_to_llgr_stale_vpn(VPN_V4, &mut crate::attr_intern::AttrInternTable::new());
 
-        // Reconnect advertises a second route; two more drops follow. The
-        // GR-stale route is deleted (RFC 4724 §4.1), the LLGR-stale one is
-        // retained unchanged (RFC 9494: original deadline governs).
+        // Only the second route enters GR. A subsequent reset with N
+        // retains both routes, and a reset without N keeps only LLGR.
         let gr_key = insert_vpn_with(&mut rib, vpn_nlri([10, 0, 1, 0], 24, 100), vec![]);
         assert_eq!(rib.mark_stale_vpn(VPN_V4).len(), 0);
+        assert_eq!(
+            rib.mark_stale_vpn_with_checkpoint(VPN_V4, true, &mut || {}),
+            []
+        );
         let deleted = rib.mark_stale_vpn(VPN_V4);
         assert_eq!(deleted, vec![gr_key]);
         assert_eq!(rib.vpn_len(), 1);
@@ -7146,11 +7055,14 @@ mod tests {
         rib.mark_stale_labeled(LU_V4);
         rib.promote_to_llgr_stale_labeled(LU_V4, &mut crate::attr_intern::AttrInternTable::new());
 
-        // Reconnect advertises a second route; two more drops follow. The
-        // GR-stale route is deleted (RFC 4724 §4.1), the LLGR-stale one is
-        // retained unchanged (RFC 9494: original deadline governs).
+        // Only the second route enters GR. A subsequent reset with N
+        // retains both routes, and a reset without N keeps only LLGR.
         let gr_key = insert_labeled_with(&mut rib, labeled_nlri([10, 0, 1, 0], 24, 100), vec![]);
         assert_eq!(rib.mark_stale_labeled(LU_V4).len(), 0);
+        assert_eq!(
+            rib.mark_stale_labeled_with_checkpoint(LU_V4, true, &mut || {}),
+            []
+        );
         let deleted = rib.mark_stale_labeled(LU_V4);
         assert_eq!(deleted, vec![gr_key]);
         assert_eq!(rib.labeled_len(), 1);
@@ -7366,11 +7278,14 @@ mod tests {
         rib.mark_stale_bgpls(LS_BASE);
         rib.promote_to_llgr_stale_bgpls(LS_BASE, &mut crate::attr_intern::AttrInternTable::new());
 
-        // Reconnect advertises a second route; two more drops follow. The
-        // GR-stale route is deleted (RFC 4724 §4.1), the LLGR-stale one is
-        // retained unchanged (RFC 9494: original deadline governs).
+        // Only the second route enters GR. A subsequent reset with N
+        // retains both routes, and a reset without N keeps only LLGR.
         let gr_key = insert_bgpls_with(&mut rib, BgpLsFamily::LinkState, bgpls_nlri(1), vec![]);
         assert_eq!(rib.mark_stale_bgpls(LS_BASE).len(), 0);
+        assert_eq!(
+            rib.mark_stale_bgpls_with_checkpoint(LS_BASE, true, &mut || {}),
+            []
+        );
         let deleted = rib.mark_stale_bgpls(LS_BASE);
         assert_eq!(deleted, vec![gr_key]);
         assert_eq!(rib.bgpls_len(), 1);
@@ -7558,11 +7473,14 @@ mod tests {
         rib.mark_stale_rtc(RTC_FAM);
         rib.promote_to_llgr_stale_rtc(RTC_FAM, &mut crate::attr_intern::AttrInternTable::new());
 
-        // Reconnect advertises a second route; two more drops follow. The
-        // GR-stale route is deleted (RFC 4724 §4.1), the LLGR-stale one is
-        // retained unchanged (RFC 9494: original deadline governs).
+        // Only the second route enters GR. A subsequent reset with N
+        // retains both routes, and a reset without N keeps only LLGR.
         let gr_key = insert_rtc_with(&mut rib, rtc_nlri(100), vec![]);
         assert_eq!(rib.mark_stale_rtc(RTC_FAM).len(), 0);
+        assert_eq!(
+            rib.mark_stale_rtc_with_checkpoint(RTC_FAM, true, &mut || {}),
+            []
+        );
         let deleted = rib.mark_stale_rtc(RTC_FAM);
         assert_eq!(deleted, vec![gr_key]);
         assert_eq!(rib.rtc_len(), 1);

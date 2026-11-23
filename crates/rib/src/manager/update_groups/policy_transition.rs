@@ -1487,7 +1487,7 @@ impl RibManager {
             checkpoint(false);
             counters.record_lane(entry.winner_source, entry.policy_label.clone());
         }
-        for denials in destination.policy_filtered.values() {
+        for (_, denials) in destination.policy_filtered.iter() {
             checkpoint(false);
             for (&(source_peer, _), label) in denials {
                 checkpoint(false);

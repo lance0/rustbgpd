@@ -298,6 +298,12 @@ impl RibManager {
         speculative: bool,
     ) -> GroupStageOutput {
         self.replacement_checkpoint(true);
+        #[cfg(test)]
+        let growth_before = (
+            crate::test_support::REHASHED_KEYS.get(),
+            crate::test_support::GROWING_SLAB_SLOTS.get(),
+            super::super::slice_timing::checkpoint_count(),
+        );
         let mut out = GroupStageOutput::default();
         out.deltas.reserve_exact(prefixes.len());
         self.replacement_checkpoint(true);
@@ -325,6 +331,8 @@ impl RibManager {
             // hit counters, exactly like the per-peer path's handle.
             let chain = group.export_chain.as_ref().map(PolicyChain::share);
             for prefix in prefixes {
+                #[cfg(test)]
+                super::super::slice_timing::record_work("group_staged_key", 1);
                 self.replacement_checkpoint(false);
                 let old_source = group.table.get(prefix, 0).map(|r| r.peer);
                 if group.per_client_best {
@@ -608,7 +616,10 @@ impl RibManager {
                     None, // so do conditional advertisements (ADR-0137)
                     memo,
                     &mut result,
-                    false,
+                    // A private repair replaces the complete route. Wire-equal
+                    // metadata changes (for example peer_router_id) must reach
+                    // the founder's table and initial replay.
+                    speculative && chain.is_some() && old_source.is_some(),
                 );
                 // Single-best stages at most one evaluation per prefix;
                 // its decision-attribution label tags the staged entry (or
@@ -853,6 +864,26 @@ impl RibManager {
             self.replacement_checkpoint(false);
         });
         self.replacement_checkpoint(true);
+        #[cfg(test)]
+        {
+            let evals = out.evals.totals.iter().map(|(_, _, n)| n).sum::<u64>();
+            super::super::slice_timing::record_work(
+                "group_policy_evals",
+                usize::try_from(evals).unwrap(),
+            );
+            super::super::slice_timing::record_work(
+                "group_stage_checkpoints",
+                super::super::slice_timing::checkpoint_count() - growth_before.2,
+            );
+            super::super::slice_timing::record_work(
+                "group_rehashed_keys",
+                crate::test_support::REHASHED_KEYS.get() - growth_before.0,
+            );
+            super::super::slice_timing::record_work(
+                "group_growing_slab_slots",
+                crate::test_support::GROWING_SLAB_SLOTS.get() - growth_before.1,
+            );
+        }
         out
     }
 

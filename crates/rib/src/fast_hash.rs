@@ -52,6 +52,14 @@ fn hash_of<Q: std::hash::Hash + ?Sized>(key: &Q) -> u64 {
     FastState::default().hash_one(key)
 }
 
+/// Hash an existing entry when its table grows or partitions.
+#[inline]
+fn rehash_entry<K: std::hash::Hash, V>(entry: &(K, V)) -> u64 {
+    #[cfg(test)]
+    crate::test_support::REHASHED_KEYS.with(|count| count.set(count.get() + 1));
+    hash_of(&entry.0)
+}
+
 /// The shard for `hash` once a map of `N` shards is split: a multiplicative
 /// mix, then the top log2(`N`) bits. The raw top bits are hashbrown's tag
 /// and the raw low bits its bucket index, so neither is used directly.
@@ -294,8 +302,8 @@ impl<K: Eq + std::hash::Hash, V, const SPLIT: usize, const N: usize, const PRESI
         let mut shards: Box<[Shard<K, V>; N]> =
             Box::new(std::array::from_fn(|_| Shard::with_capacity(per_shard)));
         for entry in one {
-            let hash = hash_of(&entry.0);
-            shards[shard_of::<N>(hash)].insert_unique(hash, entry, |(key, _)| hash_of(key));
+            let hash = rehash_entry(&entry);
+            shards[shard_of::<N>(hash)].insert_unique(hash, entry, rehash_entry);
         }
         *self = Self::Split(shards);
     }
@@ -349,7 +357,7 @@ impl<K: Eq + std::hash::Hash, V, const SPLIT: usize, const N: usize, const PRESI
         let hash = hash_of(&key);
         match self
             .shard_mut(hash)
-            .entry(hash, |(stored, _)| *stored == key, |(k, _)| hash_of(k))
+            .entry(hash, |(stored, _)| *stored == key, rehash_entry)
         {
             hashbrown::hash_table::Entry::Occupied(mut entry) => {
                 Some(std::mem::replace(&mut entry.get_mut().1, value))
@@ -375,7 +383,7 @@ impl<K: Eq + std::hash::Hash, V, const SPLIT: usize, const N: usize, const PRESI
         let hash = hash_of(&key);
         let entry = self
             .shard_mut(hash)
-            .entry(hash, |(stored, _)| *stored == key, |(k, _)| hash_of(k))
+            .entry(hash, |(stored, _)| *stored == key, rehash_entry)
             .or_insert_with(|| (key, value()));
         &mut entry.into_mut().1
     }
@@ -466,8 +474,8 @@ fn reserve_shard<K: std::hash::Hash, V>(
     let mut entries = old.into_iter();
     for entry in entries.by_ref() {
         checkpoint();
-        let hash = hash_of(&entry.0);
-        replacement.insert_unique(hash, entry, |(key, _)| hash_of(key));
+        let hash = rehash_entry(&entry);
+        replacement.insert_unique(hash, entry, rehash_entry);
         checkpoint();
     }
     checkpoint();

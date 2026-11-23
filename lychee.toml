@@ -16,6 +16,6 @@ cache = true
 max_cache_age = "7d"
 cache_exclude_status = "429,500.."
 
-# GitLab renders blob line anchors (#L12, #L12-L18) client-side, so anchor
-# checking cannot see them. Check the tag-pinned blob page without the anchor.
-remap = ['^(https://gitlab\.nic\.cz/labs/bird/-/blob/v[^#]+)#L[0-9]+(-L[0-9]+)?$ $1']
+# BIRD's GitLab intermittently returns 403 to hosted runners. Check the same
+# ref and file in CZ.NIC's mirror. GitLab renders line anchors client-side.
+remap = ['^https://gitlab\.nic\.cz/labs/bird/-/(?:blob|raw)/([^/?#]+/[^?#]+)(?:#L[0-9]+(?:-L?[0-9]+)?)?$ https://raw.githubusercontent.com/CZ-NIC/bird/$1']

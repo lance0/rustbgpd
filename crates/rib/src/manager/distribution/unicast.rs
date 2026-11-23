@@ -46,7 +46,58 @@ pub(super) fn export_deny_attribution(
     }
 }
 
+fn single_best_policy_context<'a>(
+    best: &'a crate::route::Route,
+    aspath_str: &'a str,
+    peer: (Option<IpAddr>, Option<u32>, Option<&'a str>),
+) -> RouteContext<'a> {
+    let aspath_len = best.as_path().map_or(0, rustbgpd_wire::AsPath::len);
+    let origin_asn = best.as_path().and_then(rustbgpd_wire::AsPath::origin_asn);
+    let (peer_address, peer_asn, peer_group) = peer;
+    RouteContext {
+        prefix: Some(best.prefix),
+        next_hop: Some(best.next_hop),
+        extended_communities: best.extended_communities(),
+        communities: best.communities(),
+        large_communities: best.large_communities(),
+        as_path_str: aspath_str,
+        as_path: best.as_path(),
+        as_path_len: aspath_len,
+        origin_asn,
+        validation_state: best.validation_state,
+        aspa_state: best.aspa_state,
+        peer_address,
+        peer_asn,
+        peer_group,
+        route_type: Some(route_type(best.origin_type)),
+        family: Some(unicast_route_family(&best.prefix)),
+        evpn_route_type: None,
+        local_pref: best.local_pref_attr(),
+        med: best.med_attr(),
+    }
+}
+
 impl RibManager {
+    /// Replay the same policy inputs into the private build's superseded-hit bank.
+    pub(in crate::manager) fn count_displaced_first_group_winner(
+        old: &crate::route::Route,
+        chain: &PolicyChain,
+        hits: &rustbgpd_policy::PolicyHitCounters,
+        memo: &mut super::ExportMemo,
+    ) -> bool {
+        let as_path = chain
+            .requires_as_path_string()
+            .then(|| memo.aspath_str(old));
+        let ctx =
+            single_best_policy_context(old, as_path.as_deref().unwrap_or(""), (None, None, None));
+        let (_, evaluation) = chain
+            .compiled()
+            .evaluate_with_attribution_counting(&ctx, hits);
+        #[cfg(test)]
+        crate::manager::slice_timing::record_work("group_inverse_evals", 1);
+        evaluation.eval_error.is_none()
+    }
+
     #[expect(
         clippy::too_many_arguments,
         clippy::fn_params_excessive_bools,
@@ -2838,30 +2889,11 @@ impl RibManager {
         let aspath_str = (export_pol.is_some_and(PolicyChain::requires_as_path_string)
             || ConditionalGate::requires_as_path_string(conditional))
         .then(|| memo.aspath_str(best));
-        let aspath_len = best.as_path().map_or(0, rustbgpd_wire::AsPath::len);
-        let origin_asn = best.as_path().and_then(rustbgpd_wire::AsPath::origin_asn);
-        let (peer_address, peer_asn, peer_group) = target.ctx_peer();
-        let ctx = RouteContext {
-            prefix: Some(*prefix),
-            next_hop: Some(best.next_hop),
-            extended_communities: best.extended_communities(),
-            communities: best.communities(),
-            large_communities: best.large_communities(),
-            as_path_str: aspath_str.as_deref().unwrap_or(""),
-            as_path: best.as_path(),
-            as_path_len: aspath_len,
-            origin_asn,
-            validation_state: best.validation_state,
-            aspa_state: best.aspa_state,
-            peer_address,
-            peer_asn,
-            peer_group,
-            route_type: Some(route_type(best.origin_type)),
-            family: Some(unicast_route_family(prefix)),
-            evpn_route_type: None,
-            local_pref: best.local_pref_attr(),
-            med: best.med_attr(),
-        };
+        let ctx = single_best_policy_context(
+            best,
+            aspath_str.as_deref().unwrap_or(""),
+            target.ctx_peer(),
+        );
         // ADR-0137: conditional advertisement, last before the export
         // chain. Suppression is a silent withdraw like ORF, not a policy
         // denial: no `policy_filtered` record, no export counters.

@@ -663,7 +663,7 @@ impl RibManager {
         self.install_group_member(gid, peer);
     }
 
-    /// The group installation will select for this waiting, policy-free session.
+    /// The staging profile installation will select for this waiting session.
     /// Some per-member features, including RS control, affect replay but do not
     /// distinguish the shared unicast table.
     fn pending_registration_key(
@@ -672,22 +672,22 @@ impl RibManager {
         record: &super::super::LiveSessionRecord,
     ) -> Option<super::GroupKey> {
         record.registration_wait_since?;
-        if self.outbound_peers.contains_key(&peer) || record.export_policy.is_some() {
+        if self.outbound_peers.contains_key(&peer) {
             return None;
         }
         let input = self.update_group_classifier_input(
             peer,
-            None,
+            record.export_policy.as_ref(),
             !record.negotiated_orf_recv.is_empty() || self.peer_orf_filters.contains_key(&peer),
             false,
             Some(record),
         );
-        self.no_policy_group_key(peer, input, false)
+        self.group_key_without_chain_id(peer, input, false)
     }
 
     /// Match the actual staging profile, including the bench-only EVPN owner
-    /// dimension, for a proposed no-policy membership.
-    pub(super) fn no_policy_group_key(
+    /// dimension, before resolving the proposed policy to an interned chain.
+    pub(super) fn group_key_without_chain_id(
         &self,
         peer: PeerId,
         input: super::UpdateGroupClassifierInput,
@@ -753,7 +753,7 @@ impl RibManager {
             false,
             Some(record),
         );
-        self.no_policy_group_key(peer, input, false)
+        self.group_key_without_chain_id(peer, input, false)
             .is_some_and(|mut key| {
                 // The prepared chain was compared above, including its content if
                 // the historical intern entry has since been reclaimed.
@@ -762,36 +762,17 @@ impl RibManager {
             })
     }
 
-    pub(in crate::manager) fn registration_matches_first_group(
+    /// A founder's inputs must remain stable under the registration scan's
+    /// Loc-RIB change tracking. Other members can still join the finished table.
+    fn eligible_first_group_key(
         &self,
         peer: PeerId,
-        gid: usize,
-    ) -> bool {
-        let Some(key) = self
-            .live_sessions
-            .get(&peer)
-            .and_then(|sessions| sessions.last())
-            .and_then(|record| self.pending_registration_key(peer, record))
-        else {
-            return false;
-        };
-        self.update_groups.group_key(gid) == Some(&key)
-    }
-
-    /// Only plain registrations may start a private build.
-    pub(in crate::manager) fn prospective_first_group(
-        &mut self,
-        peer: PeerId,
-        expected_gid: Option<usize>,
-    ) -> Option<(
-        usize,
-        u64,
-        tokio::sync::mpsc::Sender<crate::update::OutboundRouteUpdate>,
-    )> {
+        record: &super::super::LiveSessionRecord,
+    ) -> Option<super::GroupKey> {
         use rustbgpd_wire::{Afi, Safi};
 
-        let record = self.live_sessions.get(&peer)?.last()?;
-        if record.local_role.is_some()
+        if record.registration_policy_fallback
+            || record.local_role.is_some()
             || record.rs_control_asn.is_some()
             || record.per_client_best
             || record.sendable_families.is_empty()
@@ -805,15 +786,71 @@ impl RibManager {
         {
             return None;
         }
-        let key = self.pending_registration_key(peer, record)?;
-        let session_id = record.session_id;
-        let sender = record.outbound_tx.clone();
-        let gid = match expected_gid {
-            Some(id) if self.update_groups.group_key(id) == Some(&key) => id,
-            Some(_) => return None,
-            None => self.update_groups.group_for(key),
+        self.pending_registration_key(peer, record)
+    }
+
+    pub(in crate::manager) fn current_first_group_waiter(
+        &self,
+        peer: PeerId,
+        gid: usize,
+        policy: Option<&PolicyChain>,
+    ) -> Option<(
+        u64,
+        tokio::sync::mpsc::Sender<crate::update::OutboundRouteUpdate>,
+    )> {
+        let record = self.live_sessions.get(&peer)?.last()?;
+        let mut key = self.eligible_first_group_key(peer, record)?;
+        let expected = self.update_groups.group_key(gid)?;
+        key.chain = expected.chain;
+        let same_policy = match (record.export_policy.as_ref(), policy) {
+            (Some(current), Some(staged)) => current.same_policies(staged),
+            (current, staged) => current.is_none() && staged.is_none(),
         };
-        Some((gid, session_id, sender))
+        (&key == expected && same_policy).then(|| (record.session_id, record.outbound_tx.clone()))
+    }
+
+    /// Defer a cold registration and start building when its slot is free.
+    /// A contender must not intern a chain just for waiting on another owner.
+    pub(in crate::manager) fn defer_first_group_registration(&mut self, peer: PeerId) -> bool {
+        #[cfg(test)]
+        let threshold = self.first_group_build_min_routes;
+        #[cfg(not(test))]
+        let threshold = super::super::INITIAL_DUMP_DEFER_MIN_ROUTES;
+        if self.loc_rib.len() < threshold {
+            return false;
+        }
+        let Some(record) = self
+            .live_sessions
+            .get(&peer)
+            .and_then(|sessions| sessions.last())
+        else {
+            return false;
+        };
+        let Some(mut key) = self.eligible_first_group_key(peer, record) else {
+            return false;
+        };
+        let existing = self
+            .update_groups
+            .existing_registration_group(&mut key, record.export_policy.as_ref());
+        if existing.is_some_and(|gid| {
+            self.group_ribs.contains_key(&gid) && !self.prestaging_destination(gid)
+        }) {
+            return false;
+        }
+        if self.claim_registration_slot(existing) {
+            let record = self.live_sessions[&peer]
+                .last()
+                .expect("registration just classified");
+            let gid = existing.unwrap_or_else(|| {
+                key.chain = record
+                    .export_policy
+                    .as_ref()
+                    .map(|chain| self.update_groups.intern_chain(chain, None));
+                self.update_groups.group_for(key)
+            });
+            self.start_first_group(peer, gid, record.session_id, record.outbound_tx.clone());
+        }
+        true
     }
 
     /// Take the pending session's eligible profile. The segmented table grows
@@ -826,8 +863,11 @@ impl RibManager {
             .update_groups
             .group_key(gid)
             .expect("registration just classified");
-        GroupRibOut::new(
-            None,
+        let mut table = GroupRibOut::new(
+            record
+                .export_policy
+                .as_ref()
+                .map(PolicyChain::fork_for_install),
             key.target_is_ebgp,
             key.interpret_rfc1997,
             key.target_is_rr_client,
@@ -836,7 +876,11 @@ impl RibManager {
             record.negotiated_llgr_families.clone(),
             false,
             0,
-        )
+        );
+        if record.export_policy.is_some() {
+            table.prepare_policy_first_group();
+        }
+        table
     }
 
     /// A table installed by an intervening join or policy preparation wins.

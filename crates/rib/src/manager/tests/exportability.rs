@@ -3658,6 +3658,7 @@ fn gr_end_of_rib_sweep_retires_only_the_unrefreshed_rejection() {
         restart_time: 120,
         stale_routes_time: 120,
         gr_families: vec![DEFERRED_UNICAST],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: Vec::new(),
         llgr_stale_time: 0,
