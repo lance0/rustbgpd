@@ -50,6 +50,8 @@ pub(super) enum EorHold {
     /// RFC 5291 §6: the marker follows the table the peer's first
     /// ROUTE-REFRESH unlocks.
     OrfTable,
+    /// Initial unicast replay still has pages to admit for this member.
+    InitialReplay,
     /// The peer's complete EVPN feed is not current.
     EvpnFeed,
     /// A dirty resync of the peer's table has not been admitted, or a
@@ -65,11 +67,12 @@ pub(super) enum EorHold {
 }
 
 impl EorHold {
-    pub(super) const ALL: [Self; 9] = [
+    pub(super) const ALL: [Self; 10] = [
         Self::Selection,
         Self::RtMembership,
         Self::Grace,
         Self::OrfTable,
+        Self::InitialReplay,
         Self::EvpnFeed,
         Self::Resync,
         Self::OwedKeys,
@@ -435,6 +438,7 @@ impl RibManager {
             }
             EorHold::Grace => self.eor_grace_held(peer, family),
             EorHold::OrfTable | EorHold::Writer => self.eor.stored(peer, family).contains(hold),
+            EorHold::InitialReplay => self.is_initial_member_replay(peer),
             EorHold::EvpnFeed => {
                 family == EVPN
                     && (self.evpn_grouped_member_of(peer).is_some()
@@ -675,6 +679,7 @@ impl RibManager {
             EorHold::Selection
             | EorHold::SourceDeparture
             | EorHold::Grace
+            | EorHold::InitialReplay
             | EorHold::EvpnFeed
             | EorHold::Resync
             | EorHold::OwedKeys => {}

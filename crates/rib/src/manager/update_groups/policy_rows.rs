@@ -4,7 +4,52 @@
 use std::collections::BTreeMap;
 use std::hash::Hash;
 
-use crate::fast_hash::ShardedMap;
+use crate::fast_hash::{AddrMap, ShardedMap};
+
+use super::{PeerId, PolicyLabel};
+
+/// Initial replay counts the group's current denials at enrollment, before
+/// a live change can replace a denial whose prefix has not been replayed.
+#[derive(Default)]
+pub(super) struct SingleBestDenials {
+    pub(super) labels: BTreeMap<Option<PolicyLabel>, (u64, BTreeMap<PeerId, u64>)>,
+}
+
+impl SingleBestDenials {
+    pub(super) fn add(&mut self, source: PeerId, label: Option<PolicyLabel>) {
+        let (total, sources) = self.labels.entry(label).or_default();
+        *total += 1;
+        *sources.entry(source).or_default() += 1;
+    }
+
+    pub(super) fn remove(&mut self, source: PeerId, label: Option<PolicyLabel>) {
+        let std::collections::btree_map::Entry::Occupied(mut entry) = self.labels.entry(label)
+        else {
+            unreachable!("counted denial label");
+        };
+        let (total, sources) = entry.get_mut();
+        *total -= 1;
+        let own = sources.get_mut(&source).expect("counted denial source");
+        *own -= 1;
+        if *own == 0 {
+            sources.remove(&source);
+        }
+        if *total == 0 {
+            entry.remove();
+        }
+    }
+
+    pub(super) fn retire_prefix(
+        &mut self,
+        denials: AddrMap<(PeerId, u32), Option<PolicyLabel>>,
+        checkpoint: &mut impl FnMut(),
+    ) {
+        for ((source, _), label) in denials {
+            checkpoint();
+            self.remove(source, label);
+        }
+    }
+}
 
 #[derive(Debug)]
 pub(super) enum PolicyRows<K, V> {
@@ -103,8 +148,15 @@ impl<K: Hash + Ord, V> PolicyRows<K, V> {
     }
 
     /// A denied prefix has no advertised slot to drive its retirement.
-    pub(super) fn retire_ordered(map: &mut BTreeMap<K, V>, budget: &mut usize) -> bool {
-        while *budget > 0 && map.pop_first().is_some() {
+    pub(super) fn retire_ordered(
+        map: &mut BTreeMap<K, V>,
+        budget: &mut usize,
+        mut retire: impl FnMut(V),
+    ) -> bool {
+        while *budget > 0
+            && let Some((_, row)) = map.pop_first()
+        {
+            retire(row);
             #[cfg(test)]
             crate::manager::slice_timing::record_work("first_group_retired_denials", 1);
             *budget -= 1;

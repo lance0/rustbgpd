@@ -40,6 +40,7 @@ fn fixture(per_family: u16) -> (RibManager, mpsc::Sender<RibUpdate>, Inventory) 
     let (tx, rx) = mpsc::channel(32);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     manager.first_group_build_min_routes = 1;
+    manager.initial_member_replays.min_routes = Some(usize::MAX);
     manager.outbound_row_credit_override = None;
     for source in [SOURCE, OTHER] {
         register_test_peer(&mut manager, peer_v4(source), 0);
@@ -3093,6 +3094,8 @@ async fn labeled_input_passing_a_retained_session_end_reaches_a_paused_cursor_re
     }
 }
 
+mod initial_member_replay;
+mod member_replay_work;
 mod policy_fallback;
 mod policy_oracle;
 mod policy_work;

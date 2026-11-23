@@ -151,3 +151,51 @@ fn registration_keeps_up_with_a_full_page_of_changes_on_sixteen_turns_in_sevente
     }
     panic!("discovery did not finish under sustained changes");
 }
+
+#[test]
+fn member_replay_tracks_changed_keys_and_keeps_each_cursor_independent() {
+    let (mut loc, mut routes) = discovered_winners(2 * REGISTRATION_PAGE_SIZE);
+    let [a, b] = [1, 2].map(|n| crate::PeerId::from_ipv4(Ipv4Addr::new(192, 0, 2, n)));
+    loc.start_member_replay_scan(a);
+    let first = loc.take_member_replay_page(a);
+    assert_eq!(first.bucket_visits, REGISTRATION_PAGE_SIZE);
+    let prefix = first.keys[0];
+    let route = routes.iter_mut().find(|r| r.prefix == prefix).unwrap();
+    route.next_hop = Ipv4Addr::new(198, 51, 100, 1).into();
+    assert!(loc.recompute(prefix, [&*route].into_iter()));
+
+    loc.start_member_replay_scan(b);
+    assert!(loc.recompute(prefix, std::iter::empty()));
+    let a_page = loc.take_member_replay_page(a);
+    assert_eq!(a_page.keys, [prefix]);
+    assert!(a_page.displaced.is_empty());
+    loc.stop_member_replay_scan(a);
+    // Finishing a different member does not consume this member's repair.
+    let discovery = loc.take_member_replay_page(b);
+    assert_eq!(discovery.bucket_visits, REGISTRATION_PAGE_SIZE);
+    assert!(!discovery.keys.contains(&prefix));
+    let repair = loc.take_member_replay_page(b);
+    assert_eq!(repair.keys, [prefix]);
+    assert!(repair.displaced.is_empty());
+    loc.stop_member_replay_scan(b);
+    // Both members coexisted with the private group scan.
+    assert_eq!(loc.take_registration_page().keys, [prefix]);
+    loc.stop_registration_scan();
+    assert!(loc.registration_scans.is_none());
+
+    // Replacing the session under the same peer begins a fresh discovery.
+    loc.start_member_replay_scan(a);
+    assert_eq!(
+        loc.member_replay_scan_status(a),
+        RegistrationScanStatus::Scanning
+    );
+    let page = loc.take_member_replay_page(a);
+    assert_eq!(page.bucket_visits, REGISTRATION_PAGE_SIZE);
+    assert_eq!(page.repairs, 0);
+    assert!(!page.keys.contains(&prefix));
+    let surviving = page.keys[0];
+    loc.record_targeted_replay_changes(&[a].into(), &[surviving].into());
+    let repair = loc.take_member_replay_page(a);
+    assert_eq!(repair.keys, [surviving]);
+    assert_eq!(repair.repairs, 1);
+}

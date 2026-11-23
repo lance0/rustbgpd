@@ -3,7 +3,7 @@
 //! Stores the single best route per prefix, selected via `best_path_cmp`.
 
 use std::cmp::Ordering;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::time::SystemTime;
 
 use rustbgpd_wire::{Afi, AsPath, EvpnRouteKey, Origin, PathAttribute, Prefix};
@@ -11,6 +11,7 @@ use rustbgpd_wire::{Afi, AsPath, EvpnRouteKey, Origin, PathAttribute, Prefix};
 // rationale (internal keys, faster hasher on the convergence hot path).
 // Aliased to the std name so the storage types read unchanged.
 
+use crate::PeerId;
 use crate::best_path::{best_path_cmp, best_path_cmp_ranked, compare_bgp_identifier, stale_rank};
 use crate::fast_hash::{FastMap as HashMap, FastSet, ShardedMap};
 use crate::prefix_map::FamilyPrefixMap;
@@ -42,7 +43,19 @@ pub(crate) struct RegistrationPage {
     pub(crate) displaced: Vec<Route>,
 }
 
-/// There is one private group build. Only it needs a cursor and a repair log.
+/// Keep the normal recompute path to one presence check when no scan is active.
+#[derive(Default)]
+struct RegistrationScans {
+    build: Option<RegistrationScan>,
+    members: BTreeMap<PeerId, RegistrationScan>,
+}
+
+impl RegistrationScans {
+    fn iter_mut(&mut self) -> impl Iterator<Item = &mut RegistrationScan> {
+        self.build.iter_mut().chain(self.members.values_mut())
+    }
+}
+
 /// Changes behind the cursor include replacements and withdrawals, so callers
 /// stage each key against the live Loc-RIB even when it now has no winner.
 #[derive(Default)]
@@ -59,6 +72,22 @@ struct RegistrationScan {
 }
 
 impl RegistrationScan {
+    fn before_write(
+        &mut self,
+        routes: &ShardedMap<Prefix, (Route, SystemTime)>,
+        prefix: Prefix,
+        previous: Option<&Route>,
+    ) {
+        if !self.discovery_finished
+            && self.bucket != 0
+            && routes.insert_may_move_buckets(&prefix, self.shard)
+        {
+            // A split of the original single table rewinds its only cursor, shard 0.
+            self.bucket = 0;
+        }
+        self.record(prefix, previous);
+    }
+
     fn record(&mut self, key: Prefix, previous: Option<&Route>) {
         if self.overflow {
             return;
@@ -120,7 +149,7 @@ pub struct LocRib {
     /// per hit) for only ~4 MiB of the ~19 MiB the Adj-RIB slab conversion
     /// saved at the 2p×100k profile shape.
     routes: ShardedMap<Prefix, (Route, SystemTime)>,
-    registration_scan: Option<Box<RegistrationScan>>,
+    registration_scans: Option<Box<RegistrationScans>>,
     /// Compact ordered prefix index for resumable listings and release walks.
     /// The lookup-hot best-path table stays hash-backed; this second index
     /// adds ordered continuation without retaining per-walk snapshots.
@@ -227,7 +256,7 @@ impl LocRib {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             routes: ShardedMap::with_capacity(capacity),
-            registration_scan: None,
+            registration_scans: None,
             ordered_prefixes: FamilyPrefixMap::default(),
             // Pre-reserve the journal floor so recompute's membership note
             // never allocates on the hot path.
@@ -282,16 +311,10 @@ impl LocRib {
                     || old.attributes != new_best.attributes
             });
             if changed {
-                if let Some(scan) = &mut self.registration_scan {
-                    if !scan.discovery_finished
-                        && scan.bucket != 0
-                        && self.routes.insert_may_move_buckets(&prefix, scan.shard)
-                    {
-                        // Earlier shards are complete. A split of the original
-                        // single table always rewinds its only cursor, shard 0.
-                        scan.bucket = 0;
+                if let Some(scans) = &mut self.registration_scans {
+                    for scan in scans.iter_mut() {
+                        scan.before_write(&self.routes, prefix, previous.map(|(route, _)| route));
                     }
-                    scan.record(prefix, previous.map(|(route, _)| route));
                 }
                 let was_absent = self
                     .routes
@@ -310,9 +333,11 @@ impl LocRib {
             let v6 = matches!(prefix, Prefix::V6(_));
             track(&mut self.second_family.unicast, v6, false, removed);
             if removed {
-                if let Some(scan) = &mut self.registration_scan {
+                if let Some(scans) = &mut self.registration_scans {
                     // Removing a bucket leaves other entries in place.
-                    scan.record(prefix, previous.as_ref().map(|(route, _)| route));
+                    for scan in scans.iter_mut() {
+                        scan.record(prefix, previous.as_ref().map(|(route, _)| route));
+                    }
                 }
                 self.note_membership_change(prefix);
             }
@@ -321,45 +346,136 @@ impl LocRib {
     }
 
     pub(crate) fn start_registration_scan(&mut self) {
-        assert!(
-            self.registration_scan.is_none(),
-            "one registration scan at a time"
-        );
-        self.registration_scan = Some(Box::default());
+        let scans = self.registration_scans.get_or_insert_with(Box::default);
+        assert!(scans.build.is_none(), "one private group build at a time");
+        scans.build = Some(RegistrationScan::default());
     }
 
     pub(crate) fn track_displaced_registration_winners(&mut self) {
-        let scan = self.registration_scan.as_mut().expect("fresh private scan");
+        let scan = self
+            .registration_scans
+            .as_mut()
+            .and_then(|scans| scans.build.as_mut())
+            .expect("fresh private scan");
         debug_assert!(scan.repairs.is_empty());
         scan.displaced = Some(VecDeque::new());
     }
 
     pub(crate) fn stop_registration_scan(&mut self) -> VecDeque<Option<Route>> {
-        self.registration_scan
-            .take()
+        let displaced = self
+            .registration_scans
+            .as_mut()
+            .and_then(|scans| scans.build.take())
             .and_then(|scan| scan.displaced)
-            .unwrap_or_default()
+            .unwrap_or_default();
+        self.release_idle_registration_scans();
+        displaced
     }
 
     pub(crate) fn registration_scan_status(&self) -> RegistrationScanStatus {
-        self.registration_scan
+        self.registration_scans
             .as_ref()
+            .and_then(|scans| scans.build.as_ref())
             .expect("registration owns a scan")
             .status()
     }
 
     /// Repairs own every turn, and discovery waits for the changes to slow.
     pub(crate) fn registration_scan_behind(&self) -> bool {
-        self.registration_scan
+        self.registration_scans
             .as_ref()
-            .is_some_and(|scan| scan.behind())
+            .and_then(|scans| scans.build.as_ref())
+            .is_some_and(RegistrationScan::behind)
     }
 
     pub(crate) fn take_registration_page(&mut self) -> RegistrationPage {
         let scan = self
-            .registration_scan
+            .registration_scans
             .as_mut()
+            .and_then(|scans| scans.build.as_mut())
             .expect("registration owns a scan");
+        let skip_queued = scan.displaced.is_some();
+        Self::take_scan_page(&self.routes, scan, skip_queued)
+    }
+
+    pub(crate) fn start_member_replay_scan(&mut self, peer: PeerId) {
+        let scans = self.registration_scans.get_or_insert_with(Box::default);
+        let previous = scans.members.insert(peer, RegistrationScan::default());
+        assert!(previous.is_none(), "replay already registered");
+    }
+
+    pub(crate) fn member_replay_scan_status(&self, peer: PeerId) -> RegistrationScanStatus {
+        self.registration_scans
+            .as_ref()
+            .expect("active replay")
+            .members[&peer]
+            .status()
+    }
+
+    pub(crate) fn member_replay_change_recorded(&self, peer: PeerId, prefix: Prefix) -> bool {
+        self.registration_scans
+            .as_ref()
+            .and_then(|scans| scans.members.get(&peer))
+            .is_some_and(|scan| scan.queued.contains(&prefix))
+    }
+
+    pub(crate) fn take_member_replay_page(&mut self, peer: PeerId) -> RegistrationPage {
+        let scan = self
+            .registration_scans
+            .as_mut()
+            .and_then(|scans| scans.members.get_mut(&peer))
+            .expect("active replay");
+        Self::take_scan_page(&self.routes, scan, true)
+    }
+
+    /// A dataset can restage a group without changing a Loc-RIB winner.
+    pub(crate) fn record_targeted_replay_changes(
+        &mut self,
+        targets: &HashSet<PeerId>,
+        changes: &HashSet<Prefix>,
+    ) {
+        let Some(scans) = &mut self.registration_scans else {
+            return;
+        };
+        for (peer, scan) in &mut scans.members {
+            if scan.overflow || !targets.contains(peer) {
+                continue;
+            }
+            if changes.len() > REGISTRATION_REPAIR_LIMIT {
+                scan.overflow = true;
+                continue;
+            }
+            for &key in changes {
+                scan.record(key, None);
+                if scan.overflow {
+                    break;
+                }
+            }
+        }
+    }
+
+    pub(crate) fn stop_member_replay_scan(&mut self, peer: PeerId) {
+        if let Some(scans) = self.registration_scans.as_mut() {
+            scans.members.remove(&peer);
+            self.release_idle_registration_scans();
+        }
+    }
+
+    fn release_idle_registration_scans(&mut self) {
+        if self
+            .registration_scans
+            .as_ref()
+            .is_some_and(|scans| scans.build.is_none() && scans.members.is_empty())
+        {
+            self.registration_scans = None;
+        }
+    }
+
+    fn take_scan_page(
+        routes: &ShardedMap<Prefix, (Route, SystemTime)>,
+        scan: &mut RegistrationScan,
+        skip_queued: bool,
+    ) -> RegistrationPage {
         let mut page = RegistrationPage {
             keys: Vec::new(),
             bucket_visits: 0,
@@ -391,16 +507,16 @@ impl LocRib {
             page.repairs = count;
             return page;
         }
-        let shards = self.routes.shards();
+        let shards = routes.shards();
         while let Some(shard) = shards.get(scan.shard) {
             let end = shard.num_buckets();
             let count = (end - scan.bucket).min(REGISTRATION_PAGE_SIZE - page.bucket_visits);
             for index in scan.bucket..scan.bucket + count {
                 if let Some((key, _)) = shard.get_bucket(index)
-                    && (scan.displaced.is_none() || !scan.queued.contains(key))
+                    && (!skip_queued || !scan.queued.contains(key))
                 {
-                    // A queued policy repair owns the displaced winner. Discovery
-                    // must not stage the replacement before the repair accounts for it.
+                    // A pending repair owns this winner for policy accounting
+                    // or delivery. The normal discovery page must not emit it first.
                     page.keys.push(*key);
                 }
             }
@@ -2329,7 +2445,13 @@ mod tests {
             loc.registration_scan_status(),
             RegistrationScanStatus::Overflow
         );
-        let scan = loc.registration_scan.as_ref().unwrap();
+        let scan = loc
+            .registration_scans
+            .as_ref()
+            .unwrap()
+            .build
+            .as_ref()
+            .unwrap();
         assert_eq!(scan.repairs.len(), REGISTRATION_REPAIR_LIMIT);
         assert_eq!(scan.queued.len(), REGISTRATION_REPAIR_LIMIT);
         assert_eq!(loc.take_registration_page().keys, []);
@@ -2339,7 +2461,16 @@ mod tests {
             loc.registration_scan_status(),
             RegistrationScanStatus::Scanning
         );
-        assert_eq!(loc.registration_scan.as_ref().unwrap().repairs, []);
+        assert_eq!(
+            loc.registration_scans
+                .as_ref()
+                .unwrap()
+                .build
+                .as_ref()
+                .unwrap()
+                .repairs,
+            []
+        );
     }
 
     /// The per-family gauges read these counts instead of walking a table:

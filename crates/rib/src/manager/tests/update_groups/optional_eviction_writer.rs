@@ -48,14 +48,14 @@ impl Received {
         }
     }
 
-    fn initial(
+    async fn initial(
         receiver: &mut mpsc::Receiver<OutboundRouteUpdate>,
         expected: &BTreeMap<Prefix, u32>,
         tags: &[u32],
     ) {
         let mut state = Self::default();
-        while let Ok(update) = receiver.try_recv().map(delivered) {
-            assert_eq!(state.ends, 0, "unexpected output following initial EoR");
+        while state.ends == 0 {
+            let update = delivered(receiver.recv().await.expect("initial table channel closed"));
             assert!(update.unicast_withdrawals().next().is_none());
             let before = state.rows.len();
             state.apply(&update);
@@ -64,11 +64,13 @@ impl Received {
                 update.announce.len(),
                 "duplicate or unexpected excluded founder row"
             );
-            if state.ends != 0 {
-                state.check(expected, tags);
-            }
         }
         assert_eq!(state.ends, 1);
+        state.check(expected, tags);
+        assert!(
+            receiver.is_empty(),
+            "unexpected output following initial EoR"
+        );
     }
 }
 
@@ -220,6 +222,14 @@ async fn late_policy_writer_uses_old_authority_until_optional_eviction_finishes(
     }
     let actor = tokio::spawn(actor);
     applied.await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(
+            Received::initial(&mut late_rx, &expected, &[NEXT_TAG]),
+            Received::initial(&mut cold, &expected, &[]),
+        );
+    })
+    .await
+    .expect("both joining receivers reach End-of-RIB");
     drop(query);
     drop(primary);
     let manager = actor.await.unwrap();
@@ -232,8 +242,7 @@ async fn late_policy_writer_uses_old_authority_until_optional_eviction_finishes(
         manager.grouped_member_of(late)
     );
     assert_ne!(manager.grouped_member_of(late).unwrap(), original);
-    Received::initial(&mut late_rx, &expected, &[NEXT_TAG]);
-    Received::initial(&mut cold, &expected, &[]);
+    assert!(late_rx.is_empty() && cold.is_empty());
 }
 
 // A family unlock or slow-state clear is normally kept in the ordered window

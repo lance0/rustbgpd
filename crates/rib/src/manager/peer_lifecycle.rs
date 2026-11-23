@@ -1938,6 +1938,7 @@ impl RibManager {
         reason = "outbound teardown keeps per-registration cleanup and detached table retirement in their existing ownership order"
     )]
     pub(super) fn clear_outbound_peer_state(&mut self, peer: PeerId) {
+        self.abort_initial_member_replay(peer);
         self.forget_peer_frozen_group_locals(peer);
         // A superseded handle's outbound series under the shared label are
         // its successor's: Adj-RIB-Out sizes, prefix capacity, update group
@@ -2956,7 +2957,10 @@ impl RibManager {
     /// re-reads the live-session record so a deferred completion always
     /// registers the CURRENT session's negotiated state.
     pub(super) fn complete_outbound_registration(&mut self, peer: PeerId) {
-        if self.install_outbound_registration(peer) {
+        let pace = self.eligible_initial_member_replay(peer);
+        if self.install_outbound_registration(peer)
+            && !(pace && self.start_initial_member_replay(peer))
+        {
             self.send_initial_table(peer);
         }
     }
@@ -3013,6 +3017,7 @@ impl RibManager {
         {
             // Actor IDs can be reused on reconnect. Retire the predecessor's
             // charged owner while its channel/session maps still identify it.
+            self.abort_initial_member_replay(peer);
             self.retire_evpn_recovery(peer);
             self.forget_peer_frozen_group_locals(peer);
         }
@@ -3257,18 +3262,14 @@ impl RibManager {
         });
     }
 
-    /// Complete a deferred registration popped by the run loop (LAN-475)
-    /// together with the queued joiners it can share one initial replay
-    /// with (LAN-1826). The leader registers exactly as before. When it
-    /// lands in a plain update group, every queued joiner whose session
-    /// would land in the same group and receive the same replay leaves the
-    /// queue and joins one synchronous turn: one group-table replay, one
-    /// exact-export probe cohort and one shared encode cell, then each
-    /// member's own registration, residue, commit and `EoR` in queue order.
-    /// Nothing else runs on the actor in between, so no live update can
-    /// overtake an unfinished member's initial table.
+    /// Register the leader and start its paced initial replay when eligible.
+    /// For a synchronous replay, queued compatible members share one export
+    /// probe and encode cell. Each commits its own updates and End-of-RIB.
     pub(super) fn complete_deferred_registration(&mut self, leader: PeerId) {
-        if !self.install_outbound_registration(leader) {
+        let pace = self.eligible_initial_member_replay(leader);
+        if !self.install_outbound_registration(leader)
+            || (pace && self.start_initial_member_replay(leader))
+        {
             return;
         }
         super::with_executor_handoff(|| {
@@ -3534,6 +3535,8 @@ impl RibManager {
         let mut replay = Vec::new();
         let mut unicast_deferral_exemptions = crate::fast_hash::FastMap::default();
         for staged in group.table.iter() {
+            #[cfg(test)]
+            super::slice_timing::record_work("initial_member_replay_visits", 1);
             checkpoint();
             // adv(m) resolves the slot ([`GroupRibOut::adv_entry`],
             // ADR-0126 Decision 4): the staged winner for a

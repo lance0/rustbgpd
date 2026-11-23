@@ -68,7 +68,9 @@ impl GroupRibOut {
         }
         debug_assert!(self.source_counts.is_empty() && self.source_attrs.is_empty());
         match &mut self.policy_filtered {
-            PolicyRows::Ordered(map) => PolicyRows::retire_ordered(map, &mut budget),
+            PolicyRows::Ordered(map) => PolicyRows::retire_ordered(map, &mut budget, |denials| {
+                self.single_best_denials.retire_prefix(denials, &mut || {});
+            }),
             PolicyRows::Sharded(map) => {
                 debug_assert!(map.is_empty());
                 true

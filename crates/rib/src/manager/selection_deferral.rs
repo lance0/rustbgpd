@@ -21,6 +21,7 @@ use super::eor_hold::EorTrigger;
 use super::evpn_recovery::EvpnCompleteFeed;
 
 mod frozen_local;
+pub(in crate::manager) use frozen_local::retained_route_bytes;
 mod inventory;
 mod rejections;
 mod unicast_release;
