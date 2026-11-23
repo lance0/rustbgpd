@@ -1057,7 +1057,9 @@ impl RibManager {
                 checkpoint();
                 group.vpn_policy_denied.insert(key, denial);
             }
-            if !group.dirty_members.is_empty() {
+            if group.dirty_members.is_empty() {
+                false
+            } else {
                 group.vpn_tombstones.extend(
                     out.deltas
                         .iter()
@@ -1068,8 +1070,6 @@ impl RibManager {
                         .map(|d| d.key),
                 );
                 true
-            } else {
-                false
             }
         });
         if dirty {

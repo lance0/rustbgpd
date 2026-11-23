@@ -3909,7 +3909,7 @@ impl RibManager {
             );
             if self.selection_deferred((Afi::L2Vpn, Safi::Evpn)) {
                 crate::manager::retire_hash_set(&mut keys, &mut || {
-                    self.replacement_checkpoint(false)
+                    self.replacement_checkpoint(false);
                 });
                 continue;
             }
@@ -4144,7 +4144,7 @@ impl RibManager {
                         Some("retirement"),
                         false,
                         live,
-                    )
+                    );
                 };
                 group.recompute_vpn_member_counts(peer, filter.as_ref(), &mut checkpoint);
                 group.dirty_members.remove(&peer);

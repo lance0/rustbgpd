@@ -129,7 +129,7 @@ impl RibManager {
             let complete_proof = proof.is_some();
             let count = if old_evpn_clean
                 && old.evpn_projection_complete_with_checkpoint(&mut || {
-                    self.replacement_checkpoint(false)
+                    self.replacement_checkpoint(false);
                 })
                 && self
                     .adj_ribs_out
@@ -428,7 +428,7 @@ impl RibManager {
                 let readiness = &self.replacement_readiness;
                 let release = |rib: &mut AdjRibOut, live| {
                     let mut checkpoint = || {
-                        crate::manager::checkpoint_with_summary_reader(readiness, None, true, live)
+                        crate::manager::checkpoint_with_summary_reader(readiness, None, true, live);
                     };
                     rib.release_unicast_with(&mut checkpoint);
                     if vpn_groupable {
@@ -581,7 +581,7 @@ impl RibManager {
                         let checkpoint = |force| {
                             crate::manager::checkpoint_with_summary_reader(
                                 readiness, None, force, live,
-                            )
+                            );
                         };
                         rib_out.reserve_unicast_with(base.unicast.len(), &mut || checkpoint(false));
                         rib_out.reserve_vpn_with(base.vpn.values(), &mut || checkpoint(false));
@@ -950,7 +950,7 @@ impl RibManager {
                 }
                 self.replacement_checkpoint(true);
                 crate::manager::retire_hash_set(&mut keys, &mut || {
-                    self.replacement_checkpoint(false)
+                    self.replacement_checkpoint(false);
                 });
                 self.replacement_checkpoint(true);
             }
@@ -968,7 +968,7 @@ impl RibManager {
                 let mut staged = self.stage_group_evpn_keys(gid, &keys);
                 staged.retire_with(&mut |force| self.replacement_checkpoint(force));
                 crate::manager::retire_hash_set(&mut keys, &mut || {
-                    self.replacement_checkpoint(false)
+                    self.replacement_checkpoint(false);
                 });
             }
             self.replacement_checkpoint(true);
@@ -977,7 +977,7 @@ impl RibManager {
             memo.retire_with(&mut || self.replacement_checkpoint(false));
             self.replacement_checkpoint(true);
             crate::manager::retire_hash_set(&mut prefixes, &mut || {
-                self.replacement_checkpoint(false)
+                self.replacement_checkpoint(false);
             });
             self.replacement_checkpoint(true);
             drop(memo);
@@ -1034,7 +1034,7 @@ impl RibManager {
         let keys = self.peer_unexportable.get(&peer);
         let install = |group: &mut GroupRibOut, live| {
             let checkpoint = |force| {
-                crate::manager::checkpoint_with_summary_reader(readiness, None, force, live)
+                crate::manager::checkpoint_with_summary_reader(readiness, None, force, live);
             };
             if group.members.is_empty() {
                 checkpoint(true);

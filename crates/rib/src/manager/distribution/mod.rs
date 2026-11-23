@@ -3806,7 +3806,7 @@ impl RibManager {
                     retirement_observer.as_deref(),
                 );
                 super::retire_hash_set(&mut group_prior, &mut || {
-                    self.replacement_checkpoint(false)
+                    self.replacement_checkpoint(false);
                 });
                 self.replacement_checkpoint(true);
                 return self.outbound_commit_failed(
@@ -3945,7 +3945,7 @@ impl RibManager {
                     retirement_observer.as_deref(),
                 );
                 super::retire_hash_set(&mut group_prior, &mut || {
-                    self.replacement_checkpoint(false)
+                    self.replacement_checkpoint(false);
                 });
                 self.replacement_checkpoint(true);
                 return self.outbound_commit_failed(peer, failure);
@@ -3989,11 +3989,11 @@ impl RibManager {
                         peer,
                         candidates
                             .inspect(|_| {
-                                super::checkpoint_with_summary_reader(readiness, None, false, live)
+                                super::checkpoint_with_summary_reader(readiness, None, false, live);
                             })
                             .flatten(),
                         &mut |force| {
-                            super::checkpoint_with_summary_reader(readiness, None, force, live)
+                            super::checkpoint_with_summary_reader(readiness, None, force, live);
                         },
                     )
                 }) {
@@ -4089,10 +4089,10 @@ impl RibManager {
                             }
                         }
                         super::retire_hash_set(&mut held, &mut || {
-                            self.replacement_checkpoint(false)
+                            self.replacement_checkpoint(false);
                         });
                         super::retire_hash_set(&mut prefixes, &mut || {
-                            self.replacement_checkpoint(false)
+                            self.replacement_checkpoint(false);
                         });
                     }
                     super::retire_vec(&mut departures, &mut || self.replacement_checkpoint(false));
@@ -4111,7 +4111,7 @@ impl RibManager {
                         retirement_observer.as_deref(),
                     );
                     super::retire_hash_set(&mut group_prior, &mut || {
-                        self.replacement_checkpoint(false)
+                        self.replacement_checkpoint(false);
                     });
                     return self.outbound_commit_failed(
                         peer,
@@ -4130,7 +4130,7 @@ impl RibManager {
                         retirement_observer.as_deref(),
                     );
                     super::retire_hash_set(&mut group_prior, &mut || {
-                        self.replacement_checkpoint(false)
+                        self.replacement_checkpoint(false);
                     });
                     return self.outbound_commit_failed(
                         peer,
@@ -4173,7 +4173,7 @@ impl RibManager {
             );
             super::retire_hash_set(&mut group_prior, &mut || self.replacement_checkpoint(false));
             super::retire_vec(&mut refused_withdrawal_prefixes, &mut || {
-                self.replacement_checkpoint(false)
+                self.replacement_checkpoint(false);
             });
             return self.outbound_commit_failed(
                 peer,
@@ -5000,31 +5000,31 @@ impl RibManager {
                     }
                     self.replacement_checkpoint(true);
                     super::retire_hash_set(&mut withdrawn, &mut || {
-                        self.replacement_checkpoint(false)
+                        self.replacement_checkpoint(false);
                     });
                     self.replacement_checkpoint(true);
                     super::retire_hash_set(&mut flowspec_withdrawn, &mut || {
-                        self.replacement_checkpoint(false)
+                        self.replacement_checkpoint(false);
                     });
                     self.replacement_checkpoint(true);
                     super::retire_hash_set(&mut evpn_withdrawn, &mut || {
-                        self.replacement_checkpoint(false)
+                        self.replacement_checkpoint(false);
                     });
                     self.replacement_checkpoint(true);
                     super::retire_hash_set(&mut bgpls_withdrawn, &mut || {
-                        self.replacement_checkpoint(false)
+                        self.replacement_checkpoint(false);
                     });
                     self.replacement_checkpoint(true);
                     super::retire_hash_set(&mut vpn_withdrawn, &mut || {
-                        self.replacement_checkpoint(false)
+                        self.replacement_checkpoint(false);
                     });
                     self.replacement_checkpoint(true);
                     super::retire_hash_set(&mut labeled_withdrawn, &mut || {
-                        self.replacement_checkpoint(false)
+                        self.replacement_checkpoint(false);
                     });
                     self.replacement_checkpoint(true);
                     super::retire_hash_set(&mut rtc_withdrawn, &mut || {
-                        self.replacement_checkpoint(false)
+                        self.replacement_checkpoint(false);
                     });
                     self.replacement_checkpoint(true);
                 }
@@ -5039,7 +5039,7 @@ impl RibManager {
         self.retain_evpn_recovery_withdrawals(peer, &mut evpn_withdraw);
         let staged_evpn_count = if self.evpn_grouped_member_of(peer).is_some() {
             sort_evpn_announcements(&mut evpn_announce, &mut || {
-                self.replacement_checkpoint(false)
+                self.replacement_checkpoint(false);
             });
             evpn_withdraw.sort_unstable();
             evpn_withdraw.dedup();
@@ -5079,7 +5079,7 @@ impl RibManager {
                     observer("evpn_count_filtered_retirement_after");
                 }
                 retire_arc_vec(next_hop_override, &mut || {
-                    self.replacement_checkpoint(false)
+                    self.replacement_checkpoint(false);
                 });
                 #[cfg(test)]
                 if let Some(observer) = &retirement_observer {
@@ -5093,7 +5093,7 @@ impl RibManager {
                     observer("evpn_count_candidate_retirement_after");
                 }
                 super::retire_vec(&mut refused_withdrawal_prefixes, &mut || {
-                    self.replacement_checkpoint(false)
+                    self.replacement_checkpoint(false);
                 });
                 return self.outbound_commit_failed(
                     peer,
@@ -5130,7 +5130,7 @@ impl RibManager {
                 observer("evpn_admission_filtered_retirement_after");
             }
             retire_arc_vec(next_hop_override, &mut || {
-                self.replacement_checkpoint(false)
+                self.replacement_checkpoint(false);
             });
             #[cfg(test)]
             if let Some(observer) = &retirement_observer {
@@ -5144,7 +5144,7 @@ impl RibManager {
                 observer("evpn_admission_candidate_retirement_after");
             }
             super::retire_vec(&mut refused_withdrawal_prefixes, &mut || {
-                self.replacement_checkpoint(false)
+                self.replacement_checkpoint(false);
             });
             return self.outbound_commit_failed(
                 peer,
@@ -5198,7 +5198,7 @@ impl RibManager {
                         peer,
                         admitted
                             .inspect(|_| {
-                                super::checkpoint_with_summary_reader(readiness, None, false, live)
+                                super::checkpoint_with_summary_reader(readiness, None, false, live);
                             })
                             .flatten(),
                         &mut |force| {
@@ -5313,7 +5313,7 @@ impl RibManager {
             }
             exact_rejections.extend(decision.new_rejections);
             super::retire_hash_set(&mut unicast_seen, &mut || {
-                self.replacement_checkpoint(false)
+                self.replacement_checkpoint(false);
             });
             super::retire_hash_set(&mut vpn_seen, &mut || self.replacement_checkpoint(false));
         }
@@ -5453,7 +5453,7 @@ impl RibManager {
             )
         };
         super::retire_vec(&mut refused_withdrawal_prefixes, &mut || {
-            self.replacement_checkpoint(false)
+            self.replacement_checkpoint(false);
         });
         #[cfg(test)]
         if let Some(observer) = &retirement_observer {
@@ -5588,7 +5588,7 @@ impl RibManager {
             let mut local_source_withdraw_visits = 0;
             let mut commit = |rib_out: &mut AdjRibOut, live: Option<&RibManager>| {
                 let tick = |stage, force| {
-                    super::checkpoint_with_summary_reader(&readiness, stage, force, live)
+                    super::checkpoint_with_summary_reader(&readiness, stage, force, live);
                 };
                 let mut checkpoint = || tick(None, false);
                 if readiness.is_some() {
@@ -5975,7 +5975,7 @@ impl RibManager {
                     let admitted = announce
                         .iter()
                         .inspect(|_| {
-                            super::checkpoint_with_summary_reader(readiness, None, false, live)
+                            super::checkpoint_with_summary_reader(readiness, None, false, live);
                         })
                         .filter(|route| announce_source_exclusion != Some(route.peer))
                         .map(|route| Key::Unicast(route.prefix, route.path_id))
@@ -5988,7 +5988,7 @@ impl RibManager {
                         admitted,
                         removed,
                         &mut |force| {
-                            super::checkpoint_with_summary_reader(readiness, None, force, live)
+                            super::checkpoint_with_summary_reader(readiness, None, force, live);
                         },
                     )
                 })
@@ -6453,10 +6453,10 @@ impl RibManager {
                         duplicate.peer
                     ));
                     super::retire_hash_set(&mut seen, &mut || {
-                        manager.replacement_checkpoint(false)
+                        manager.replacement_checkpoint(false);
                     });
                     super::retire_vec(&mut replacements, &mut || {
-                        manager.replacement_checkpoint(false)
+                        manager.replacement_checkpoint(false);
                     });
                     manager.replacement_checkpoint(true);
                     return Err(error);
@@ -6464,7 +6464,7 @@ impl RibManager {
                 super::retire_hash_set(&mut seen, &mut || manager.replacement_checkpoint(false));
                 if manager.pending_clean_policy_transition.is_some() {
                     super::retire_vec(&mut replacements, &mut || {
-                        manager.replacement_checkpoint(false)
+                        manager.replacement_checkpoint(false);
                     });
                     manager.replacement_checkpoint(true);
                     return Err(RibCommandError::internal(
@@ -6510,7 +6510,7 @@ impl RibManager {
                     }
                 }
                 super::retire_hash_set(&mut deferred, &mut || {
-                    manager.replacement_checkpoint(false)
+                    manager.replacement_checkpoint(false);
                 });
                 Ok(receipts)
             })
@@ -6750,6 +6750,10 @@ impl RibManager {
         r.total_us = u64::try_from(started.elapsed().as_micros())
             .unwrap_or(u64::MAX)
             .saturating_add(planning_us);
+        r.registration_membership_us = r
+            .registered_peer_source_membership_scan_us
+            .saturating_add(r.policy_compare_install_us)
+            .saturating_add(r.destination_membership_us);
         let phases = [
             r.precondition_us,
             r.registration_membership_us,
@@ -6835,7 +6839,7 @@ impl RibManager {
                 .saturating_add(u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX));
             receipt.failure_stage = "precondition";
             super::retire_vec(&mut replacements, &mut || {
-                self.replacement_checkpoint(false)
+                self.replacement_checkpoint(false);
             });
             self.replacement_checkpoint(true);
             return Err(RibCommandError::internal(
@@ -6854,7 +6858,7 @@ impl RibManager {
         if receipt.duplicate_peers != 0 && matches!(mode, ResidualMode::Paced { .. }) {
             receipt.failure_stage = "precondition";
             super::retire_vec(&mut replacements, &mut || {
-                self.replacement_checkpoint(false)
+                self.replacement_checkpoint(false);
             });
             self.replacement_checkpoint(true);
             return Err(RibCommandError::internal(
@@ -6989,10 +6993,6 @@ impl RibManager {
             u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX);
         receipt.present_peers = present.len();
         receipt.skipped_peers = n_skipped_unregistered;
-        receipt.registration_membership_us = receipt
-            .registered_peer_source_membership_scan_us
-            .saturating_add(receipt.policy_compare_install_us)
-            .saturating_add(receipt.destination_membership_us);
 
         // Candidate cohorts: batched movers of one source group whose
         // destinations agree. A source group with mixed or ungrouped
@@ -7726,11 +7726,11 @@ impl RibManager {
         probe_cache.retire_with(&mut || self.replacement_checkpoint_at("retirement", false));
         inventory.retire_with(&mut |force| self.replacement_checkpoint_at("retirement", force));
         super::retire_vec(&mut source_tombstones, &mut || {
-            self.replacement_checkpoint(false)
+            self.replacement_checkpoint(false);
         });
         super::retire_hash_set(&mut lagging, &mut || self.replacement_checkpoint(false));
         super::retire_hash_set(&mut filtered_scope, &mut || {
-            self.replacement_checkpoint(false)
+            self.replacement_checkpoint(false);
         });
         self.replacement_checkpoint(true);
         true
@@ -7872,10 +7872,10 @@ impl RibManager {
                                 .any(Result::is_err)
                         {
                             super::retire_vec(&mut results, &mut || {
-                                self.replacement_checkpoint(false)
+                                self.replacement_checkpoint(false);
                             });
                             super::retire_vec(&mut candidates, &mut || {
-                                self.replacement_checkpoint(false)
+                                self.replacement_checkpoint(false);
                             });
                             self.replacement_checkpoint(true);
                             return Err("shared payload exact-export probe rejected");
@@ -7901,7 +7901,7 @@ impl RibManager {
                         self.replacement_checkpoint(true);
                         super::retire_vec(&mut results, &mut || self.replacement_checkpoint(false));
                         super::retire_vec(&mut candidates, &mut || {
-                            self.replacement_checkpoint(false)
+                            self.replacement_checkpoint(false);
                         });
                         self.replacement_checkpoint(true);
                     }
@@ -7983,7 +7983,7 @@ impl RibManager {
         })();
         self.replacement_checkpoint(true);
         super::retire_vec(&mut supplement_withdraw, &mut || {
-            self.replacement_checkpoint(false)
+            self.replacement_checkpoint(false);
         });
         self.replacement_checkpoint(true);
         result
@@ -10610,7 +10610,7 @@ impl RibManager {
                                         .inspect(|_| self.replacement_checkpoint(false)),
                                 );
                                 super::retire_vec(&mut extras, &mut || {
-                                    self.replacement_checkpoint(false)
+                                    self.replacement_checkpoint(false);
                                 });
                                 Cow::Owned(prefixes)
                             }
@@ -10820,7 +10820,7 @@ impl RibManager {
                                     .is_some_and(|admitted| {
                                         admitted
                                             .iter_with_checkpoint(|force| {
-                                                self.replacement_checkpoint(force)
+                                                self.replacement_checkpoint(force);
                                             })
                                             .any(|key| {
                                                 matches!(
@@ -11105,7 +11105,7 @@ impl RibManager {
                                 self.mark_owed(peer, marks);
                                 if let Cow::Owned(prefixes) = &mut effective_prefixes {
                                     super::retire_hash_set(prefixes, &mut || {
-                                        self.replacement_checkpoint(false)
+                                        self.replacement_checkpoint(false);
                                     });
                                 }
                                 effective_prefixes = Cow::Owned(kept);
@@ -11167,7 +11167,7 @@ impl RibManager {
                                 .is_some_and(|admitted| {
                                     admitted
                                         .iter_with_checkpoint(|_| {
-                                            self.replacement_checkpoint(false)
+                                            self.replacement_checkpoint(false);
                                         })
                                         .any(|key| {
                                             matches!(
@@ -11239,26 +11239,26 @@ impl RibManager {
                             self.forced_resync_caught_up(peer, is_dirty, resync_operation.as_mut());
                         }
                         super::retire_hash_set(&mut effective_flowspec_rules, &mut || {
-                            self.replacement_checkpoint(false)
+                            self.replacement_checkpoint(false);
                         });
                         super::retire_hash_set(&mut effective_evpn_keys, &mut || {
-                            self.replacement_checkpoint(false)
+                            self.replacement_checkpoint(false);
                         });
                         super::retire_hash_set(&mut effective_bgpls_keys, &mut || {
-                            self.replacement_checkpoint(false)
+                            self.replacement_checkpoint(false);
                         });
                         super::retire_hash_set(&mut effective_l3vpn_keys, &mut || {
-                            self.replacement_checkpoint(false)
+                            self.replacement_checkpoint(false);
                         });
                         super::retire_hash_set(&mut effective_labeled_keys, &mut || {
-                            self.replacement_checkpoint(false)
+                            self.replacement_checkpoint(false);
                         });
                         super::retire_hash_set(&mut effective_rtc_keys, &mut || {
-                            self.replacement_checkpoint(false)
+                            self.replacement_checkpoint(false);
                         });
                         if let Cow::Owned(prefixes) = &mut effective_prefixes {
                             super::retire_hash_set(prefixes, &mut || {
-                                self.replacement_checkpoint(false)
+                                self.replacement_checkpoint(false);
                             });
                         }
                         self.replacement_checkpoint(true);
@@ -11952,7 +11952,7 @@ impl RibManager {
                                             &mut || {
                                                 super::checkpoint_with_summary_reader(
                                                     readiness, None, false, live,
-                                                )
+                                                );
                                             },
                                         );
                                         evpn_announce.len() + evpn_withdraw.len() - before
@@ -12207,10 +12207,10 @@ impl RibManager {
                                 }
                             }
                             super::retire_hash_set(&mut announced, &mut || {
-                                self.replacement_checkpoint(false)
+                                self.replacement_checkpoint(false);
                             });
                             super::retire_hash_set(&mut staged, &mut || {
-                                self.replacement_checkpoint(false)
+                                self.replacement_checkpoint(false);
                             });
                         }
                     }
@@ -12311,7 +12311,7 @@ impl RibManager {
                         "shared group payload must not coexist with per-peer staged unicast"
                     );
                     super::retire_vec(&mut unicast.policy_filtered, &mut || {
-                        self.replacement_checkpoint(false)
+                        self.replacement_checkpoint(false);
                     });
                     self.replacement_capacity(
                         "private_announce",
@@ -12432,7 +12432,7 @@ impl RibManager {
                                     prior.reserve(admitted.len());
                                     self.replacement_checkpoint(true);
                                     prior.extend(admitted.iter_with_checkpoint(|_| {
-                                        self.replacement_checkpoint(false)
+                                        self.replacement_checkpoint(false);
                                     }));
                                 }
                             } else if !defer_clean_group_prior
@@ -12655,43 +12655,43 @@ impl RibManager {
                         }
                     } else {
                         super::retire_vec(&mut unicast.withdraw, &mut || {
-                            self.replacement_checkpoint(false)
+                            self.replacement_checkpoint(false);
                         });
                         super::retire_vec(&mut fs_announce, &mut || {
-                            self.replacement_checkpoint(false)
+                            self.replacement_checkpoint(false);
                         });
                         super::retire_vec(&mut fs_withdraw, &mut || {
-                            self.replacement_checkpoint(false)
+                            self.replacement_checkpoint(false);
                         });
                         super::retire_vec(&mut evpn_announce, &mut || {
-                            self.replacement_checkpoint(false)
+                            self.replacement_checkpoint(false);
                         });
                         super::retire_vec(&mut evpn_withdraw, &mut || {
-                            self.replacement_checkpoint(false)
+                            self.replacement_checkpoint(false);
                         });
                         super::retire_vec(&mut bgpls_announce, &mut || {
-                            self.replacement_checkpoint(false)
+                            self.replacement_checkpoint(false);
                         });
                         super::retire_vec(&mut bgpls_withdraw, &mut || {
-                            self.replacement_checkpoint(false)
+                            self.replacement_checkpoint(false);
                         });
                         super::retire_vec(&mut vpn_announce, &mut || {
-                            self.replacement_checkpoint(false)
+                            self.replacement_checkpoint(false);
                         });
                         super::retire_vec(&mut vpn_withdraw, &mut || {
-                            self.replacement_checkpoint(false)
+                            self.replacement_checkpoint(false);
                         });
                         super::retire_vec(&mut labeled_announce, &mut || {
-                            self.replacement_checkpoint(false)
+                            self.replacement_checkpoint(false);
                         });
                         super::retire_vec(&mut labeled_withdraw, &mut || {
-                            self.replacement_checkpoint(false)
+                            self.replacement_checkpoint(false);
                         });
                         super::retire_vec(&mut rtc_announce, &mut || {
-                            self.replacement_checkpoint(false)
+                            self.replacement_checkpoint(false);
                         });
                         super::retire_vec(&mut rtc_withdraw, &mut || {
-                            self.replacement_checkpoint(false)
+                            self.replacement_checkpoint(false);
                         });
                         self.replacement_checkpoint(true);
                         drop((announce, nh_override_flags));
@@ -12751,26 +12751,26 @@ impl RibManager {
                         |force| self.replacement_checkpoint_at("policy_filtered_retirement", force),
                     );
                     super::retire_hash_set(&mut effective_flowspec_rules, &mut || {
-                        self.replacement_checkpoint(false)
+                        self.replacement_checkpoint(false);
                     });
                     super::retire_hash_set(&mut effective_evpn_keys, &mut || {
-                        self.replacement_checkpoint(false)
+                        self.replacement_checkpoint(false);
                     });
                     super::retire_hash_set(&mut effective_bgpls_keys, &mut || {
-                        self.replacement_checkpoint(false)
+                        self.replacement_checkpoint(false);
                     });
                     super::retire_hash_set(&mut effective_l3vpn_keys, &mut || {
-                        self.replacement_checkpoint(false)
+                        self.replacement_checkpoint(false);
                     });
                     super::retire_hash_set(&mut effective_labeled_keys, &mut || {
-                        self.replacement_checkpoint(false)
+                        self.replacement_checkpoint(false);
                     });
                     super::retire_hash_set(&mut effective_rtc_keys, &mut || {
-                        self.replacement_checkpoint(false)
+                        self.replacement_checkpoint(false);
                     });
                     if let Cow::Owned(prefixes) = &mut effective_prefixes {
                         super::retire_hash_set(prefixes, &mut || {
-                            self.replacement_checkpoint(false)
+                            self.replacement_checkpoint(false);
                         });
                     }
                     self.replacement_checkpoint(true);
@@ -12860,7 +12860,7 @@ impl RibManager {
                 stage.retire_with(&mut |force| self.replacement_checkpoint_at("retirement", force));
             }
             crate::adj_rib_out::release_hash_map(&mut staged_here, &mut || {
-                self.replacement_checkpoint(false)
+                self.replacement_checkpoint(false);
             });
             // A departure stages one bounded page per delivery unit. Its
             // memos repeat the same shape, so record ordinary passes only.
@@ -12870,7 +12870,7 @@ impl RibManager {
             }
             export_memo.retire_with(&mut || self.replacement_checkpoint_at("retirement", false));
             crate::adj_rib_out::release_hash_map(&mut local_rs_verdicts, &mut || {
-                self.replacement_checkpoint(false)
+                self.replacement_checkpoint(false);
             });
             self.release_speculative_group_admitted_keys(&speculative_group_admitted);
             self.replacement_checkpoint(true);

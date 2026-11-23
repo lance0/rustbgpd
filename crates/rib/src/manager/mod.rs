@@ -2060,10 +2060,10 @@ fn service_replacement_readiness_with_origin(
     live: Option<&RibManager>,
     #[cfg(feature = "bench-internals")] cleanup_body: bool,
 ) {
-    if !force
-        && !context.wake.pending.load(Ordering::Acquire)
-        && !(live.is_some_and(|manager| manager.replacement_summary_groups.is_some())
-            && context.live_waiting.load(Ordering::Relaxed))
+    if !(force
+        || context.wake.pending.load(Ordering::Acquire)
+        || (live.is_some_and(|manager| manager.replacement_summary_groups.is_some())
+            && context.live_waiting.load(Ordering::Relaxed)))
     {
         return;
     }
@@ -2515,6 +2515,95 @@ pub(super) enum PolicyFilteredBucket {
 }
 
 impl PolicyFilteredBucket {
+    #[expect(
+        clippy::ref_option,
+        reason = "checkpoints borrow the optional synchronous owner"
+    )]
+    fn update_for_prefixes(
+        peer_routes: &mut BTreeMap<Prefix, Self>,
+        prefixes: &HashSet<Prefix>,
+        current: &HashSet<PolicyFilteredRouteKey>,
+        readiness: &Option<Arc<ReplacementReadinessContext>>,
+        live: Option<&RibManager>,
+    ) -> Vec<PolicyFilteredRouteKey> {
+        let checkpoint = || checkpoint_with_summary_reader(readiness, None, false, live);
+        let allocation_checkpoint = || checkpoint_with_summary_reader(readiness, None, true, live);
+        let retained_checkpoint = || {
+            #[cfg(test)]
+            checkpoint_with_summary_reader(
+                readiness,
+                Some("policy_filtered_retained"),
+                false,
+                live,
+            );
+            #[cfg(not(test))]
+            checkpoint();
+        };
+        let refresh = |keys: &mut PolicyFilteredBucket| {
+            keys.retain(
+                |key| {
+                    retained_checkpoint();
+                    current.contains(key)
+                },
+                &allocation_checkpoint,
+            )
+        };
+        // Walk whichever side is smaller: a clean transition passes the
+        // whole table as scope for every member, while the history usually
+        // holds a few prefixes.
+        if prefixes.len() <= peer_routes.len() {
+            for prefix in prefixes {
+                retained_checkpoint();
+                if peer_routes
+                    .get_mut(prefix)
+                    .is_some_and(|keys| !refresh(keys))
+                {
+                    allocation_checkpoint();
+                    drop(peer_routes.remove(prefix));
+                    allocation_checkpoint();
+                }
+            }
+        } else {
+            peer_routes.retain(|prefix, keys| {
+                retained_checkpoint();
+                !prefixes.contains(prefix) || refresh(keys)
+            });
+        }
+        allocation_checkpoint();
+        let mut incoming: Vec<_> = current.iter().inspect(|_| checkpoint()).copied().collect();
+        allocation_checkpoint();
+        incoming.sort_unstable_by(|left, right| {
+            checkpoint();
+            left.prefix.cmp(&right.prefix)
+        });
+        allocation_checkpoint();
+        let mut newly_filtered = Vec::with_capacity(incoming.len());
+        allocation_checkpoint();
+        for group in incoming.chunk_by(|left, right| {
+            checkpoint();
+            left.prefix == right.prefix
+        }) {
+            retained_checkpoint();
+            match peer_routes.entry(group[0].prefix) {
+                std::collections::btree_map::Entry::Vacant(slot) if group.len() == 1 => {
+                    checkpoint();
+                    slot.insert(PolicyFilteredBucket::One(group[0]));
+                    newly_filtered.push(group[0]);
+                }
+                entry => entry
+                    .or_insert_with(|| PolicyFilteredBucket::Many(HashSet::new()))
+                    .insert_group(
+                        group,
+                        &mut newly_filtered,
+                        &checkpoint,
+                        &allocation_checkpoint,
+                    ),
+            }
+        }
+        retire_vec(&mut incoming, &mut || checkpoint());
+        newly_filtered
+    }
+
     #[cfg(test)]
     pub(super) fn iter(&self) -> impl Iterator<Item = &PolicyFilteredRouteKey> {
         let (one, many) = match self {
@@ -2613,7 +2702,7 @@ fn extend_policy_filtered_routes_from_scratch(
         return;
     }
     extend_policy_filtered_routes_with_checkpoint(routes, scratch.drain(..), |stage, force| {
-        manager.replacement_checkpoint_at(stage, force)
+        manager.replacement_checkpoint_at(stage, force);
     });
 }
 
@@ -7107,83 +7196,13 @@ impl RibManager {
         }
         let readiness = &self.replacement_readiness;
         let update = |peer_routes: &mut BTreeMap<Prefix, PolicyFilteredBucket>, live| {
-            let checkpoint = || checkpoint_with_summary_reader(readiness, None, false, live);
-            let allocation_checkpoint =
-                || checkpoint_with_summary_reader(readiness, None, true, live);
-            let retained_checkpoint = || {
-                #[cfg(test)]
-                checkpoint_with_summary_reader(
-                    readiness,
-                    Some("policy_filtered_retained"),
-                    false,
-                    live,
-                );
-                #[cfg(not(test))]
-                checkpoint();
-            };
-            let refresh = |keys: &mut PolicyFilteredBucket| {
-                keys.retain(
-                    |key| {
-                        retained_checkpoint();
-                        current.contains(key)
-                    },
-                    &allocation_checkpoint,
-                )
-            };
-            // Walk whichever side is smaller: a clean transition passes the
-            // whole table as scope for every member, while the history usually
-            // holds a few prefixes.
-            if prefixes.len() <= peer_routes.len() {
-                for prefix in prefixes {
-                    retained_checkpoint();
-                    if peer_routes
-                        .get_mut(prefix)
-                        .is_some_and(|keys| !refresh(keys))
-                    {
-                        allocation_checkpoint();
-                        drop(peer_routes.remove(prefix));
-                        allocation_checkpoint();
-                    }
-                }
-            } else {
-                peer_routes.retain(|prefix, keys| {
-                    retained_checkpoint();
-                    !prefixes.contains(prefix) || refresh(keys)
-                });
-            }
-            allocation_checkpoint();
-            let mut incoming: Vec<_> = current.iter().inspect(|_| checkpoint()).copied().collect();
-            allocation_checkpoint();
-            incoming.sort_unstable_by(|left, right| {
-                checkpoint();
-                left.prefix.cmp(&right.prefix)
-            });
-            allocation_checkpoint();
-            let mut newly_filtered = Vec::with_capacity(incoming.len());
-            allocation_checkpoint();
-            for group in incoming.chunk_by(|left, right| {
-                checkpoint();
-                left.prefix == right.prefix
-            }) {
-                retained_checkpoint();
-                match peer_routes.entry(group[0].prefix) {
-                    std::collections::btree_map::Entry::Vacant(slot) if group.len() == 1 => {
-                        checkpoint();
-                        slot.insert(PolicyFilteredBucket::One(group[0]));
-                        newly_filtered.push(group[0]);
-                    }
-                    entry => entry
-                        .or_insert_with(|| PolicyFilteredBucket::Many(HashSet::new()))
-                        .insert_group(
-                            group,
-                            &mut newly_filtered,
-                            &checkpoint,
-                            &allocation_checkpoint,
-                        ),
-                }
-            }
-            retire_vec(&mut incoming, &mut || checkpoint());
-            newly_filtered
+            PolicyFilteredBucket::update_for_prefixes(
+                peer_routes,
+                prefixes,
+                current,
+                readiness,
+                live,
+            )
         };
         let newly_filtered = if self.replacement_summary_groups.is_some() {
             let mut peer_routes = self
