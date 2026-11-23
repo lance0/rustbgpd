@@ -11110,9 +11110,9 @@ impl RibManager {
                                         &effective_prefixes,
                                         &mut || checkpoint(),
                                     );
-                                super::extend_policy_filtered_routes_with_readiness(
+                                super::extend_policy_filtered_routes_from_scratch(
                                     &mut current_policy_filtered_routes,
-                                    filtered.drain(..),
+                                    &mut filtered,
                                     &readiness,
                                 );
                                 super::retire_vec(&mut filtered, &mut || checkpoint());
@@ -11326,9 +11326,9 @@ impl RibManager {
                                 is_force,
                                 &mut || checkpoint(),
                             );
-                            super::extend_policy_filtered_routes_with_readiness(
+                            super::extend_policy_filtered_routes_from_scratch(
                                 &mut current_policy_filtered_routes,
-                                unicast.policy_filtered.drain(..),
+                                &mut unicast.policy_filtered,
                                 &readiness,
                             );
                         } else if per_client_best {
@@ -11383,9 +11383,9 @@ impl RibManager {
                                 is_force,
                                 &mut || checkpoint(),
                             );
-                            super::extend_policy_filtered_routes_with_readiness(
+                            super::extend_policy_filtered_routes_from_scratch(
                                 &mut current_policy_filtered_routes,
-                                unicast.policy_filtered.drain(..),
+                                &mut unicast.policy_filtered,
                                 &readiness,
                             );
                         } else if let Some((orr_topology, orr_spf)) = orr_ctx {
@@ -11423,9 +11423,9 @@ impl RibManager {
                                 is_force,
                                 &mut || checkpoint(),
                             );
-                            super::extend_policy_filtered_routes_with_readiness(
+                            super::extend_policy_filtered_routes_from_scratch(
                                 &mut current_policy_filtered_routes,
-                                unicast.policy_filtered.drain(..),
+                                &mut unicast.policy_filtered,
                                 &readiness,
                             );
                         } else {
@@ -11461,9 +11461,9 @@ impl RibManager {
                                 is_force,
                                 &mut || checkpoint(),
                             );
-                            super::extend_policy_filtered_routes_with_readiness(
+                            super::extend_policy_filtered_routes_from_scratch(
                                 &mut current_policy_filtered_routes,
-                                unicast.policy_filtered.drain(..),
+                                &mut unicast.policy_filtered,
                                 &readiness,
                             );
                         }
@@ -12402,8 +12402,12 @@ impl RibManager {
                 stage.retire_with(&mut |force| self.replacement_checkpoint_at("retirement", force));
             }
             crate::adj_rib_out::release_hash_map(&mut staged_here, &mut || checkpoint());
+            // A departure stages one bounded page per delivery unit. Its
+            // memos repeat the same shape, so record ordinary passes only.
             #[cfg(feature = "bench-internals")]
-            export_memo.record_replacement_capacities(self);
+            if !(RELEASING && self.source_departure.is_some()) {
+                export_memo.record_replacement_capacities(self);
+            }
             export_memo.retire_with(&mut || self.replacement_checkpoint_at("retirement", false));
             crate::adj_rib_out::release_hash_map(&mut local_rs_verdicts, &mut || checkpoint());
             self.release_speculative_group_admitted_keys(&speculative_group_admitted);

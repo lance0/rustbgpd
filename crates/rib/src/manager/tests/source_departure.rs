@@ -1552,3 +1552,79 @@ fn rs_restore_page_stays_within_the_pressured_limit_when_an_update_arrives_befor
     );
     assert_rs_departure_counts(&manager, &mut outputs);
 }
+
+/// Forced readiness checkpoints that bracket policy-filtered allocation in
+/// one private departure of `rows` keys toward eight receivers.
+fn private_departure_allocation_checkpoints(rows: u32) -> usize {
+    let (_tx, rx) = mpsc::channel(16);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.outbound_row_credit_override = None;
+    super::distribution_window::untimed_window(&mut manager);
+    for source in [SOURCE, OTHER] {
+        register_test_peer(&mut manager, peer_v4(source), 0);
+    }
+    let mut receivers: Vec<_> = (0..8)
+        .map(|index| join(&mut manager, index, Shape::Private))
+        .collect();
+    seed(&mut manager, Shape::Private, rows);
+    for receiver in &mut receivers {
+        assert_initial(receiver, Shape::Private, rows);
+    }
+    let work = super::work_scaling::checkpoints_in(|| {
+        manager.handle_update(down(SOURCE));
+        assert!(manager.source_departure.is_some());
+        while manager.source_departure.is_some() {
+            manager.advance_source_departure();
+        }
+    });
+    work.get("policy_filtered_allocation")
+        .copied()
+        .unwrap_or_default()
+}
+
+/// A staged prefix with no filtered candidate allocates nothing, so its
+/// receiver visit needs no forced readiness checkpoint. Departure work in
+/// forced checkpoints stays flat as each member's prefixes grow.
+#[test]
+fn unfiltered_departure_forced_checkpoints_stay_flat_in_prefixes_per_member() {
+    let small = private_departure_allocation_checkpoints(256);
+    let large = private_departure_allocation_checkpoints(1024);
+    assert_eq!(
+        small, large,
+        "forced allocation checkpoints grew {small} -> {large} with prefixes per member"
+    );
+}
+
+/// An owning iterator can be empty yet still hold an allocation, as when a
+/// producer reserves for a member and `retain` then excludes every entry.
+/// Dropping that buffer is work the forced checkpoints must still bracket.
+#[test]
+fn an_empty_owning_iterator_still_brackets_its_drop_with_forced_checkpoints() {
+    use crate::manager::PolicyFilteredRouteKey;
+
+    let key = PolicyFilteredRouteKey {
+        target_peer: peer_v4(Ipv4Addr::new(192, 0, 2, 1)),
+        source_peer: peer_v4(SOURCE),
+        prefix: Prefix::V4(prefix(0)),
+        path_id: 0,
+    };
+    let mut excluded = Vec::with_capacity(4_096);
+    excluded.push(key);
+    excluded.retain(|_| false);
+    assert!(excluded.is_empty() && excluded.capacity() >= 4_096);
+    let mut routes = HashSet::new();
+    let work = super::work_scaling::checkpoints_in(|| {
+        crate::manager::extend_policy_filtered_routes_with_readiness(
+            &mut routes,
+            excluded.into_iter(),
+            &None,
+        );
+    });
+    assert!(
+        work.get("policy_filtered_allocation")
+            .copied()
+            .unwrap_or_default()
+            >= 2,
+        "an allocated empty iterator was dropped without its forced checkpoints: {work:?}"
+    );
+}

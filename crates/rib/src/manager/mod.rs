@@ -2577,6 +2577,25 @@ impl PolicyFilteredBucket {
     }
 }
 
+/// Move a staging walk's filtered candidates into `routes`, leaving the
+/// scratch vector's buffer in place. An empty scratch vector neither allocates
+/// nor drops anything, so it skips the forced checkpoints that bracket that
+/// work; this is the common case on every staged prefix of every member.
+#[expect(
+    clippy::ref_option,
+    reason = "inventory work borrows its existing readiness owner"
+)]
+fn extend_policy_filtered_routes_from_scratch(
+    routes: &mut HashSet<PolicyFilteredRouteKey>,
+    scratch: &mut Vec<PolicyFilteredRouteKey>,
+    readiness: &Option<Arc<ReplacementReadinessContext>>,
+) {
+    if scratch.is_empty() {
+        return;
+    }
+    extend_policy_filtered_routes_with_readiness(routes, scratch.drain(..), readiness);
+}
+
 /// A prefix can contribute many rejected source/path identities. Grow an
 /// empty allocation from the exact incoming identity bound, never by
 /// reserving a populated set or assuming prefix cardinality is sufficient.
