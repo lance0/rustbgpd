@@ -813,6 +813,15 @@ row order, peer identities and separately returned GR/LLGR retention rows
 retain their existing meaning. After the outer command completes, every row
 uses current state.
 
+Only a checkpoint that lends the RIB to the reader can read a current row.
+Some checkpoints serve readiness alone, for example while a helper holds
+part of the RIB mutably. A request that needs a current row, a mixed
+comparison or the retained roster waits there for the next checkpoint that
+can read it. Later requests on the lane keep their order and wait behind it.
+VPN distribution during dataset reevaluation reads at each receiver and
+staged key. EVPN group staging still has only readiness checkpoints, and
+production builds do not enable group-owned EVPN tables.
+
 A group comparison uses entry memberships and keys when both peers are in
 the captured set. If either peer is outside it, the RIB reads both
 memberships and keys at dispatch. The primary neighbor's own row still
