@@ -9101,8 +9101,16 @@ fn distribution_skips_closed_receivers_before_peer_down() {
                 session_id: 0,
             });
             drain_source_departure(&mut manager);
-            let update = healthy_rx.try_recv().map(delivered).unwrap();
-            assert_eq!(update.unicast_withdrawals().count(), 4);
+            let mut remaining: HashSet<_> = (0..4)
+                .map(|index| Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, index, 0), 24)))
+                .collect();
+            while let Ok(update) = healthy_rx.try_recv().map(delivered) {
+                for &(prefix, path_id) in update.unicast_withdrawals() {
+                    assert_eq!(path_id, 0);
+                    assert!(remaining.remove(&prefix), "unexpected withdrawal {prefix}");
+                }
+            }
+            assert!(remaining.is_empty(), "missing withdrawals {remaining:?}");
             assert_eq!(
                 manager.outbound_peers.len(),
                 1_001,
