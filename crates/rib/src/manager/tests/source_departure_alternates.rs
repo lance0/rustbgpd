@@ -218,3 +218,47 @@ fn source_departure_add_path_replaces_or_withdraws_the_old_sender_path_id() {
     assert_eq!(read(&mut rx, &mut wire), (replacements, removals));
     assert_eq!(wire, final_table);
 }
+
+/// The largest transport envelope a receiver got, in unicast rows.
+fn largest_envelope(receiver: &mut mpsc::Receiver<OutboundRouteUpdate>) -> usize {
+    let mut largest = 0;
+    while let Ok(update) = receiver.try_recv().map(delivered) {
+        largest = largest.max(update.unicast_withdrawals().count() + update.announce.len());
+    }
+    largest
+}
+
+/// Quiet pages widen only for plain groups and single-path private peers.
+/// A per-client-best group keeps 16-key pages for its winner and lane walks.
+#[test]
+fn quiet_departure_keeps_narrow_pages_for_a_per_client_best_group() {
+    let mut manager = manager();
+    let mut best_rx = receiver(&mut manager, BEST, false);
+    let mut observer_rx = receiver(&mut manager, OBSERVER, false);
+    assert!(manager.group_ribs[&manager.grouped_member_of(peer_v4(BEST)).unwrap()].per_client_best);
+    seed(&mut manager);
+    largest_envelope(&mut best_rx);
+    largest_envelope(&mut observer_rx);
+    depart(&mut manager);
+    let largest = largest_envelope(&mut best_rx).max(largest_envelope(&mut observer_rx));
+    assert!(
+        (1..=16).contains(&largest),
+        "per-client-best departure envelope of {largest} rows"
+    );
+}
+
+/// An Add-Path sender replaces or withdraws each old path ID. Its private
+/// walks keep 16-key pages, so one page holds at most two rows per key.
+#[test]
+fn quiet_departure_keeps_narrow_pages_for_an_add_path_receiver() {
+    let mut manager = manager();
+    let mut rx = receiver(&mut manager, OBSERVER, true);
+    seed(&mut manager);
+    largest_envelope(&mut rx);
+    depart(&mut manager);
+    let largest = largest_envelope(&mut rx);
+    assert!(
+        (1..=2 * 16).contains(&largest),
+        "Add-Path departure envelope of {largest} rows"
+    );
+}

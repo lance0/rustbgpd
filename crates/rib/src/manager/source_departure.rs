@@ -12,6 +12,17 @@ const KEYS_PER_PAGE: usize = 16;
 pub(super) const MEMBERS_PER_PAGE: usize = 8;
 pub(super) const RECEIVER_ROWS_PER_POLL: usize = 256;
 const QUIET_PAGE_RECEIVER_KEYS: usize = 65_536;
+/// Receiver-keys one quiet delivery unit may visit; at about 0.4 µs per
+/// private receiver-key this keeps a single unit near 3 ms.
+pub(super) const QUIET_UNIT_RECEIVER_KEYS: usize = 8_192;
+/// Wall-clock budget for consecutive quiet units in one actor turn. It sits
+/// well below the waiting-UPDATE delay bar, leaving room for the last unit.
+pub(super) const QUIET_LOOP_BUDGET: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// Members one quiet delivery unit covers for a page of `keys` receiver-keys.
+pub(super) fn quiet_delivery_members(keys: usize) -> usize {
+    (QUIET_UNIT_RECEIVER_KEYS / keys.max(1)).max(1)
+}
 
 #[derive(Clone, Copy)]
 enum PrimaryTurn {
@@ -105,8 +116,9 @@ impl SourceDeparture {
                     .collect();
                 let best = page.intersection(&self.best).copied().collect();
                 let afi = [Afi::Ipv4, Afi::Ipv6][index];
+                let wide = self.exporters[index] != Exporters::Mixed;
                 return Some(Page::Unicast(Box::new(ReleaseDistribution::for_departure(
-                    afi, page, best, held, shared,
+                    afi, page, best, held, shared, wide,
                 ))));
             }
         }
@@ -317,13 +329,24 @@ impl RibManager {
         }));
     }
 
-    pub(super) fn advance_source_departure(&mut self) {
-        // Check again at every physical turn, including inside a pinned page.
-        let quiet = self.primary_backlog() == 0
+    /// Nothing admissible waits behind the departure. A fenced FIFO head
+    /// cannot run before the departure ends, so wider pages only bring it
+    /// forward. A lagging receiver keeps the narrow path.
+    pub(super) fn source_departure_quiet(&self) -> bool {
+        let fenced = self
+            .source_departure
+            .as_ref()
+            .is_some_and(|work| matches!(work.primary, PrimaryTurn::Fenced));
+        (fenced || self.primary_backlog() == 0)
             && self.dirty_peers.is_empty()
             && self.force_outbound_peers.is_empty()
             && self.owing_peers.is_empty()
-            && self.helper_stale_exempt.is_empty();
+            && self.helper_stale_exempt.is_empty()
+    }
+
+    pub(super) fn advance_source_departure(&mut self) {
+        // Check again at every unit, including inside a pinned page.
+        let quiet = self.source_departure_quiet();
         #[cfg(test)]
         if quiet {
             super::tests::source_departure::after_empty_fifo();
@@ -350,7 +373,7 @@ impl RibManager {
             Page::Unicast(pass) => self.poll_unicast_release_distribution(pass, quiet),
             Page::FlowSpec { keys, next } => {
                 let members = if quiet {
-                    MEMBERS_PER_PAGE
+                    quiet_delivery_members(keys.len()).max(MEMBERS_PER_PAGE)
                 } else {
                     MEMBERS_PER_PAGE.min(RECEIVER_ROWS_PER_POLL / keys.len())
                 };
@@ -373,7 +396,9 @@ impl RibManager {
         }
     }
 
-    pub(super) fn poll_source_departure_turn(&mut self) {
+    /// Run one departure unit or one primary dispatch. Returns `false` when
+    /// the turn applied primary work, which ends a quiet run of units.
+    pub(super) fn poll_source_departure_turn(&mut self) -> bool {
         // An admitted UPDATE must apply through its final route chunk before
         // another batch can stage. A noncommuting FIFO head stays in place.
         if !self.pending_route_batches.is_empty() {
@@ -383,7 +408,7 @@ impl RibManager {
                     .is_some_and(|work| work.page.is_none())
             );
             self.traced_route_chunk();
-            return;
+            return false;
         }
         let work = self
             .source_departure
@@ -399,19 +424,39 @@ impl RibManager {
                 match work.classify(update, offset) {
                     PrimaryHead::CheckFrom(offset) => {
                         work.primary = PrimaryTurn::CheckFrom(offset);
-                        return;
+                        return false;
                     }
                     PrimaryHead::Fenced => work.primary = PrimaryTurn::Fenced,
                     PrimaryHead::Independent => {
                         if let Some(update) = self.try_recv_primary() {
                             self.handle_update(update);
-                            return;
+                            return false;
                         }
                     }
                 }
             }
         }
         self.advance_source_departure();
+        true
+    }
+}
+
+#[cfg(test)]
+impl RibManager {
+    /// Whether the live departure has a page in progress.
+    pub(super) fn departure_page_open(&self) -> bool {
+        self.source_departure
+            .as_ref()
+            .is_some_and(|work| work.page.is_some())
+    }
+
+    /// Whether the open page restored RS counts for a member page that has
+    /// not yet received its emission.
+    pub(super) fn departure_rs_restore_pinned(&self) -> bool {
+        self.source_departure
+            .as_ref()
+            .and_then(|work| work.page.as_ref())
+            .is_some_and(|page| matches!(page, Page::Unicast(pass) if pass.rs_restore_pinned()))
     }
 }
 

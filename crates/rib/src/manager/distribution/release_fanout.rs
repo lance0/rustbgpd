@@ -41,7 +41,11 @@ enum Phase {
     RemoveRsCounts(usize),
     StageGroup(usize),
     Deliver,
-    DeliverAfterRsRestore,
+    /// The RS counts of members `next_member..end` are restored; their
+    /// emission must cover exactly that page whatever the FIFO does meanwhile.
+    DeliverAfterRsRestore {
+        end: usize,
+    },
     Cap(Option<PeerId>, [Option<u64>; 2]),
     Finish,
 }
@@ -50,6 +54,9 @@ struct DepartureKeys {
     // Per-ASN verdicts for the current immutable group stage, across member pages.
     rs_verdicts: HashMap<(usize, u32), bool>,
     shared: bool,
+    // Neither per-client-best nor multipath exporters: a quiet delivery unit
+    // can visit more members of this page.
+    wide: bool,
     best: HashSet<Prefix>,
     held: HashSet<Prefix>,
 }
@@ -89,6 +96,7 @@ impl ReleaseDistribution {
         best: HashSet<Prefix>,
         held: HashSet<Prefix>,
         shared: bool,
+        wide: bool,
     ) -> Self {
         Self {
             departure: Some(Box::new(DepartureKeys {
@@ -96,9 +104,15 @@ impl ReleaseDistribution {
                 best,
                 held,
                 shared,
+                wide,
             })),
             ..Self::new(afi, affected)
         }
+    }
+
+    #[cfg(test)]
+    pub(in crate::manager) fn rs_restore_pinned(&self) -> bool {
+        matches!(self.phase, Phase::DeliverAfterRsRestore { .. })
     }
 
     fn member_limit(&self, maximum: usize) -> usize {
@@ -213,9 +227,15 @@ impl RibManager {
                                         + c.keys.len().min(departure.held.len())
                                 })
                         };
-                        let Some(left) = remaining.checked_sub(cost) else {
-                            pass.phase = Phase::Classify(last);
-                            return false;
+                        // The first peer of a poll always proceeds, so an
+                        // expensive peer cannot stall the walk.
+                        let left = match remaining.checked_sub(cost) {
+                            Some(left) => left,
+                            None if last == after => 0,
+                            None => {
+                                pass.phase = Phase::Classify(last);
+                                return false;
+                            }
                         };
                         remaining = left;
                         last = Some(peer);
@@ -486,28 +506,36 @@ impl RibManager {
                 pass.staged.insert(gid, stage);
                 pass.phase = Phase::Deliver;
             }
-            Phase::Deliver | Phase::DeliverAfterRsRestore => {
-                let restored = matches!(pass.phase, Phase::DeliverAfterRsRestore);
+            Phase::Deliver | Phase::DeliverAfterRsRestore { .. } => {
+                let pinned = match pass.phase {
+                    Phase::DeliverAfterRsRestore { end } => Some(end),
+                    _ => None,
+                };
+                let restored = pinned.is_some();
                 let maximum = if pass.departure.as_ref().is_some_and(|keys| !keys.shared) {
                     super::super::source_departure::MEMBERS_PER_PAGE
                 } else {
                     RELEASE_MEMBERS_PER_POLL
                 };
                 let group = pass.staged.keys().next().copied();
-                // RS count restoration and the following emission must cover
-                // the identical members even if pressure changes between polls.
+                // RS count restoration and the following emission cover the
+                // page pinned in the phase, even if pressure changes between polls.
                 let members = if pass.denials.is_some() {
                     1
                 } else if quiet_departure
-                    && !group
-                        .and_then(|gid| self.group_ribs.get(&gid))
-                        .is_some_and(GroupRibOut::has_rs_members)
+                    && let Some(keys) = pass.departure.as_ref().filter(|keys| keys.wide)
                 {
+                    super::super::source_departure::quiet_delivery_members(
+                        pass.prefixes.len() + keys.held.len(),
+                    )
+                    .max(maximum)
+                } else if quiet_departure {
                     maximum
                 } else {
                     pass.member_limit(maximum)
                 };
-                let end = (pass.next_member + members).min(pass.current.len());
+                let end =
+                    pinned.unwrap_or_else(|| (pass.next_member + members).min(pass.current.len()));
                 let peers = &pass.current[pass.next_member..end];
                 if !peers.is_empty() {
                     if !restored
@@ -519,7 +547,7 @@ impl RibManager {
                         // Count correction and divergent emission each visit the
                         // member's keys. Keep the same stage and member page
                         // pinned across the yield between those two visits.
-                        pass.phase = Phase::DeliverAfterRsRestore;
+                        pass.phase = Phase::DeliverAfterRsRestore { end };
                         return false;
                     }
                     let mut rs_verdicts = pass
@@ -754,6 +782,7 @@ mod tests {
             changed.clone(),
             changed,
             HashSet::new(),
+            true,
             true,
         );
         let visit = |manager: &mut RibManager, pass: &mut ReleaseDistribution| {
