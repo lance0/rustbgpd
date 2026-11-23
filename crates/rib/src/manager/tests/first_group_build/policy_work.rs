@@ -22,10 +22,12 @@ struct Build {
 fn snapshot() -> Counts {
     use crate::manager::slice_timing::{checkpoints, group_work};
     let mut counts = group_work();
-    let checkpoints = checkpoints();
-    for name in ["group_staged_key", crate::manager::GROUP_TABLE_BUILD_ROW] {
-        counts.insert(name, checkpoints.get(name).copied().unwrap_or(0));
-    }
+    let build_row = crate::manager::GROUP_TABLE_BUILD_ROW;
+    counts.insert(
+        build_row,
+        checkpoints().get(build_row).copied().unwrap_or(0),
+    );
+    counts.entry("group_staged_key").or_default();
     counts
 }
 

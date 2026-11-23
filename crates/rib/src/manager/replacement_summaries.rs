@@ -1,95 +1,225 @@
-//! Temporary operator projections held only while synchronous replacement owns
-//! canonical RIB state. These contain values, never routes or shared counters.
+//! A synchronous policy command freezes the rows of its movers and their source
+//! and destination groups. Other peers use canonical state at an interior
+//! checkpoint. A mixed comparison reads both keys and memberships there.
+//! Each restore declares its own scope before changing outbound state.
 
-use super::update_groups::{GroupKey, GroupMembership, compare_update_groups};
+use super::update_groups::admitted_recovery::AdmittedRecovery;
+use super::update_groups::{GroupKey, GroupMembership, GroupRibOut, compare_update_groups};
 use super::{QUERY_BUDGET_PER_CHUNK, RibManager};
 use crate::PeerId;
-use crate::update::{
-    EffectiveDistributionMode, NeighborPolicyStats, NeighborRibSnapshot, PeerOutboundState,
-    RibSummaryQuery,
-};
+use crate::update::{NeighborRibSnapshot, RibSummaryQuery};
 use std::collections::{HashMap, HashSet};
 use std::task::{Context, Poll};
 use tokio::sync::mpsc;
+
+#[derive(Default)]
+pub(super) struct ReplacementSummaryScope {
+    pub(super) peers: HashSet<PeerId>,
+    pub(super) groups: HashSet<usize>,
+}
 
 pub(super) struct ReplacementSummaries {
     pub(super) rx: mpsc::Receiver<RibSummaryQuery>,
     post_commit_query_trace: Option<super::PostCommitQueryTrace>,
     view: SummaryProjection,
+    pub(super) waiting_for_live: Option<RibSummaryQuery>,
+    recovery_proofs: Option<HashSet<PeerId>>,
+    ledger_detached: bool,
 }
 
 struct SummaryProjection {
     neighbors: HashMap<PeerId, NeighborRibSnapshot>,
-    unknown_outbound: PeerOutboundState,
     memberships: HashMap<PeerId, GroupMembership>,
     group_keys: HashMap<usize, GroupKey>,
 }
 
 impl ReplacementSummaries {
-    pub(super) fn drain(&mut self, cx: &mut Context<'_>) -> usize {
+    pub(super) fn drain(&mut self, cx: &mut Context<'_>, live: Option<&RibManager>) -> usize {
         let mut received = 0;
         for _ in 0..QUERY_BUDGET_PER_CHUNK {
-            let Poll::Ready(Some(query)) = super::poll_readiness_query(&mut self.rx, cx) else {
+            let mut query = if let Some(query) = self.waiting_for_live.take() {
+                query
+            } else if let Poll::Ready(Some(query)) = super::poll_readiness_query(&mut self.rx, cx) {
+                query
+            } else {
                 break;
             };
+            if live.is_none() && self.requires_live_reader(&query) {
+                // Preserve FIFO while a helper temporarily holds a canonical field.
+                // The next manager-readable checkpoint services this request first.
+                let RibSummaryQuery::NeighborRibSnapshots { reply, .. } = &mut query;
+                if reply.poll_closed(cx).is_pending() {
+                    self.waiting_for_live = Some(query);
+                    break;
+                }
+            }
             received += 1;
             if let Some(trace) = self.post_commit_query_trace.take() {
                 trace.emit("summary");
             }
-            match query {
-                RibSummaryQuery::NeighborRibSnapshots {
-                    peers,
-                    comparison,
-                    include_retained,
-                    reply,
-                } => {
-                    // The capture includes every retained peer, so its
-                    // non-empty retention rows are the retained roster.
-                    let retained_candidates = if include_retained {
-                        self.view
-                            .neighbors
-                            .iter()
-                            .filter(|(_, row)| !row.gr_retention.is_empty())
-                            .map(|(peer, _)| *peer)
-                            .collect()
-                    } else {
-                        std::collections::BTreeSet::new()
-                    };
-                    super::queries::send_neighbor_rib_snapshot(
-                        reply,
-                        peers,
-                        comparison,
-                        retained_candidates,
-                        |peer| {
-                            self.view.neighbors.get(&peer).cloned().unwrap_or_else(|| {
-                                NeighborRibSnapshot {
-                                    peer,
-                                    advertised_count: 0,
-                                    policy_stats: NeighborPolicyStats::default(),
-                                    outbound: self.view.unknown_outbound.clone(),
-                                    remote_asn: None,
-                                    gr_retention: Vec::new(),
-                                    outbound_resync: crate::update::OutboundResyncState::default(),
-                                }
-                            })
-                        },
-                        |primary, comparison| {
-                            compare_update_groups(
-                                &self.view.memberships,
-                                primary,
-                                comparison,
-                                |id| self.view.group_keys.get(&id),
-                            )
-                        },
-                    );
-                }
-            }
+            self.answer(query, live);
         }
         received
+    }
+
+    fn requires_live_reader(&self, query: &RibSummaryQuery) -> bool {
+        let RibSummaryQuery::NeighborRibSnapshots {
+            peers,
+            comparison,
+            include_retained,
+            reply,
+        } = query;
+        !reply.is_closed()
+            && (*include_retained
+                || peers
+                    .iter()
+                    .any(|peer| !self.view.neighbors.contains_key(peer))
+                || comparison.is_some_and(|(left, right)| !self.pair_is_frozen(left, right)))
+    }
+
+    fn pair_is_frozen(&self, left: PeerId, right: PeerId) -> bool {
+        self.view.neighbors.contains_key(&left) && self.view.neighbors.contains_key(&right)
+    }
+
+    fn answer(&self, query: RibSummaryQuery, live: Option<&RibManager>) {
+        let RibSummaryQuery::NeighborRibSnapshots {
+            peers,
+            comparison,
+            include_retained,
+            reply,
+        } = query;
+        if reply.is_closed() {
+            return;
+        }
+        let mut retained = std::collections::BTreeSet::new();
+        if include_retained {
+            retained = live.expect("live retained roster").gr_retention_peers();
+            retained.extend(
+                self.view
+                    .neighbors
+                    .iter()
+                    .filter(|(_, row)| !row.gr_retention.is_empty())
+                    .map(|(peer, _)| *peer),
+            );
+        }
+        super::queries::send_neighbor_rib_snapshot(
+            reply,
+            peers,
+            comparison,
+            retained,
+            |peer| {
+                self.view.neighbors.get(&peer).cloned().unwrap_or_else(|| {
+                    let proof = self.ledger_detached.then(|| {
+                        self.recovery_proofs
+                            .as_ref()
+                            .expect("detached proof membership")
+                            .contains(&peer)
+                    });
+                    live.expect("live neighbor row")
+                        .neighbor_rib_snapshot_with_proof(peer, proof)
+                })
+            },
+            |left, right| {
+                if self.pair_is_frozen(left, right) {
+                    compare_update_groups(&self.view.memberships, left, right, |id| {
+                        self.view.group_keys.get(&id)
+                    })
+                } else {
+                    live.expect("live group comparison")
+                        .update_group_comparison(left, right)
+                }
+            },
+        );
     }
 }
 
 impl RibManager {
+    pub(in crate::manager) fn can_detach_summary_peer(&self, peer: PeerId) -> bool {
+        self.replacement_summary_groups.is_some()
+            && self.replacement_readiness.as_ref().is_some_and(|context| {
+                context
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .summaries
+                    .as_ref()
+                    .is_some_and(|summaries| summaries.view.neighbors.contains_key(&peer))
+            })
+    }
+
+    pub(in crate::manager) fn can_detach_summary_group(&self, gid: usize) -> bool {
+        self.replacement_summary_groups
+            .as_ref()
+            .is_some_and(|groups| groups.contains(&gid))
+    }
+
+    pub(in crate::manager) fn with_replacement_summary_preflight<T>(
+        &mut self,
+        work: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        if self.summary_rx.is_some() && !self.unicast_release_partial() {
+            super::with_executor_handoff(|| self.with_replacement_readiness(work))
+        } else {
+            self.with_replacement_readiness(work)
+        }
+    }
+
+    pub(in crate::manager) fn with_summary_recovery_ledger<T>(
+        &mut self,
+        group: Option<usize>,
+        work: impl FnOnce(
+            &mut AdmittedRecovery,
+            Option<&GroupRibOut>,
+            &Option<std::sync::Arc<super::ReplacementReadinessContext>>,
+            Option<&Self>,
+        ) -> T,
+    ) -> T {
+        let group = group.and_then(|gid| self.group_ribs.get(&gid));
+        let readiness = &self.replacement_readiness;
+        let Some(context) = self
+            .replacement_summary_groups
+            .as_ref()
+            .and(readiness.as_ref())
+        else {
+            return work(&mut self.pending_group_admitted, group, readiness, None);
+        };
+        let needs_proofs = context
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .summaries
+            .as_ref()
+            .is_some_and(|s| s.recovery_proofs.is_none());
+        let proofs = needs_proofs.then(|| {
+            self.pending_group_admitted
+                .complete_peers(|| self.replacement_checkpoint_at("summary_proof_record", false))
+        });
+        if let Some(summaries) = &mut context
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .summaries
+        {
+            if proofs.is_some() {
+                summaries.recovery_proofs = proofs;
+            }
+            summaries.ledger_detached = true;
+        }
+        let mut ledger =
+            std::mem::replace(&mut self.pending_group_admitted, AdmittedRecovery::new());
+        let result = work(&mut ledger, group, readiness, Some(self));
+        self.pending_group_admitted = ledger;
+        if let Some(summaries) = &mut context
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .summaries
+        {
+            summaries.ledger_detached = false;
+        }
+        result
+    }
+
     /// Install the bounded, type-narrow operator-summary receiver.
     #[must_use]
     pub fn with_summary_queries(mut self, rx: mpsc::Receiver<RibSummaryQuery>) -> Self {
@@ -135,9 +265,23 @@ impl RibManager {
 
     /// Capture before the first mutation and reuse that view in nested helpers.
     /// The general queue stays fenced, including queries preceding a summary.
+    #[cfg(test)]
     pub(super) fn with_replacement_summary_reads<T>(
         &mut self,
         operation: &'static str,
+        work: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        self.with_scoped_replacement_summary_reads(
+            operation,
+            ReplacementSummaryScope::default(),
+            work,
+        )
+    }
+
+    pub(super) fn with_scoped_replacement_summary_reads<T>(
+        &mut self,
+        operation: &'static str,
+        scope: ReplacementSummaryScope,
         work: impl FnOnce(&mut Self) -> T,
     ) -> T {
         // A nested scope has already moved the receiver into the shared context.
@@ -145,12 +289,13 @@ impl RibManager {
         if self.summary_rx.is_none() || self.unicast_release_partial() {
             return self.with_replacement_readiness(work);
         }
-        let run = || {
-            self.with_replacement_readiness(|manager| {
+        self.with_replacement_readiness(|manager| {
             #[cfg(feature = "bench-internals")]
             tracing::info!(target: "replacement_summary", operation, phase = "enter", "replacement summary scope");
             let started = std::time::Instant::now();
-            let view = manager.capture_replacement_summaries();
+            let view = manager.capture_affected_summaries(&scope.peers);
+            drop(scope.peers);
+            manager.replacement_summary_groups = Some(scope.groups);
             let capture_us = started.elapsed().as_micros();
             let peer_count = view.neighbors.len();
             #[cfg(feature = "bench-internals")]
@@ -172,6 +317,9 @@ impl RibManager {
                     .expect("outer summary scope owns the receiver"),
                 post_commit_query_trace: manager.post_commit_query_trace.take(),
                 view,
+                waiting_for_live: None,
+                recovery_proofs: None,
+                ledger_detached: false,
             });
             manager.replacement_checkpoint_at("summary_capture", true);
             let result = work(manager);
@@ -183,6 +331,7 @@ impl RibManager {
                 .summaries
                 .take()
                 .expect("outer summary scope retains its view");
+            manager.replacement_summary_groups = None;
             manager.summary_rx = Some(summaries.rx);
             // A frozen dispatch consumes the pending trace. Otherwise return
             // it before retirement's current-state dispatch can consume it.
@@ -205,56 +354,22 @@ impl RibManager {
                 "replacement summary scope");
             result
         })
-        };
-        // A reply sent while this synchronous actor retains its worker can
-        // strand the woken RPC in Tokio's non-stealable local scheduling slot.
-        // Hand off the executor once, retaining exclusive canonical ownership.
-        // Current-thread embedders keep their existing synchronous contract.
-        super::with_executor_handoff(run)
     }
 
-    fn capture_replacement_summaries(&self) -> SummaryProjection {
-        let mut peers = HashSet::new();
-        // Outbound registration covers mode/limit inputs. Other maps may outlive
-        // it, and startup selection waiters may precede registration entirely.
-        for peer in self
-            .outbound_peers
-            .keys()
-            .chain(self.adj_ribs_out.keys())
-            .chain(self.export_policy_counters.keys())
-            .chain(self.update_groups.members.keys())
-            // A peer in GR/LLGR retention may have no outbound registration
-            // while its session is down; its retention row must survive.
-            .chain(self.gr_peers.keys())
-            .chain(self.llgr_peers.keys())
-            .chain(self.llgr_stale_deadlines.keys().map(|(peer, _, _)| peer))
-        {
-            peers.insert(*peer);
-            self.replacement_checkpoint(false);
-        }
-        if let Some(selection) = &self.selection_deferral {
-            for peer in selection.snapshot_peers() {
-                peers.insert(peer);
-                self.replacement_checkpoint(false);
-            }
-        }
+    fn capture_affected_summaries(&self, peers: &HashSet<PeerId>) -> SummaryProjection {
         let mut neighbors = HashMap::with_capacity(peers.len());
-        for peer in peers {
-            neighbors.insert(peer, self.neighbor_rib_snapshot(peer));
-            self.replacement_checkpoint(false);
-        }
-        let unknown_outbound = PeerOutboundState {
-            update_group: String::new(),
-            effective_distribution_mode: EffectiveDistributionMode::Unknown,
-            selection_deferral: self.selection_deferral.as_ref().map_or_else(
-                Vec::new,
-                super::selection_deferral::SelectionDeferral::unknown_peer_snapshot,
-            ),
-            outbound_prefix_limits: Vec::new(),
-        };
-        let mut memberships = HashMap::with_capacity(self.update_groups.members.len());
+        let mut memberships = HashMap::with_capacity(peers.len());
         let mut group_keys = HashMap::new();
-        for (&peer, membership) in &self.update_groups.members {
+        for &peer in peers {
+            neighbors.insert(peer, self.neighbor_rib_snapshot(peer));
+            #[cfg(test)]
+            self.replacement_checkpoint_at("summary_neighbor_row", false);
+            #[cfg(not(test))]
+            self.replacement_checkpoint(false);
+            let Some(membership) = self.update_groups.membership(peer) else {
+                continue;
+            };
+
             memberships.insert(peer, membership.clone());
             if let GroupMembership::Grouped(id) = membership
                 && let Some(key) = self.update_groups.group_key(*id)
@@ -265,7 +380,6 @@ impl RibManager {
         }
         SummaryProjection {
             neighbors,
-            unknown_outbound,
             memberships,
             group_keys,
         }
@@ -405,37 +519,44 @@ mod tests {
             });
         let expected_neighbors =
             [unknown, waiter, unknown].map(|peer| manager.neighbor_rib_snapshot(peer));
-        manager.with_replacement_summary_reads("restore", |manager| {
-            // Mutating these canonical inputs cannot change the captured values.
-            manager.selection_deferral = None;
-            let (reply, mut response) = oneshot::channel();
-            tx.try_send(RibSummaryQuery::NeighborRibSnapshots {
-                peers: vec![unknown, waiter, unknown],
-                comparison: Some((unknown, waiter)),
-                reply,
-                include_retained: false,
-            })
-            .unwrap();
-            let (canceled_reply, canceled_response) = oneshot::channel();
-            drop(canceled_response);
-            tx.try_send(RibSummaryQuery::NeighborRibSnapshots {
-                peers: vec![unknown],
-                comparison: None,
-                reply: canceled_reply,
-                include_retained: false,
-            })
-            .unwrap();
-            manager.with_replacement_summary_reads("apply", |manager| {
-                manager.replacement_checkpoint(true);
-            });
-            let response = response.try_recv().unwrap();
-            assert_eq!(response.snapshots, expected_neighbors);
-            assert_eq!(
-                response.comparison.unwrap().verdict,
-                crate::UpdateGroupComparisonVerdict::Unknown
-            );
-            assert_eq!(tx.capacity(), 16);
-        });
+        manager.with_scoped_replacement_summary_reads(
+            "restore",
+            ReplacementSummaryScope {
+                peers: HashSet::from([unknown, waiter]),
+                ..Default::default()
+            },
+            |manager| {
+                // Mutating these canonical inputs cannot change the captured values.
+                manager.selection_deferral = None;
+                let (reply, mut response) = oneshot::channel();
+                tx.try_send(RibSummaryQuery::NeighborRibSnapshots {
+                    peers: vec![unknown, waiter, unknown],
+                    comparison: Some((unknown, waiter)),
+                    reply,
+                    include_retained: false,
+                })
+                .unwrap();
+                let (canceled_reply, canceled_response) = oneshot::channel();
+                drop(canceled_response);
+                tx.try_send(RibSummaryQuery::NeighborRibSnapshots {
+                    peers: vec![unknown],
+                    comparison: None,
+                    reply: canceled_reply,
+                    include_retained: false,
+                })
+                .unwrap();
+                manager.with_replacement_summary_reads("apply", |manager| {
+                    manager.replacement_checkpoint(true);
+                });
+                let response = response.try_recv().unwrap();
+                assert_eq!(response.snapshots, expected_neighbors);
+                assert_eq!(
+                    response.comparison.unwrap().verdict,
+                    crate::UpdateGroupComparisonVerdict::Unknown
+                );
+                assert_eq!(tx.capacity(), 16);
+            },
+        );
         let (reply, mut response) = oneshot::channel();
         tx.try_send(RibSummaryQuery::NeighborRibSnapshots {
             peers: Vec::new(),
@@ -451,6 +572,40 @@ mod tests {
         );
         assert!(manager.replacement_readiness.is_none());
         assert!(manager.summary_rx.is_some());
+    }
+
+    #[test]
+    fn replacement_summaries_cancel_parked_head_at_next_opaque_cut() {
+        let (_updates, rx) = mpsc::channel(1);
+        let (_general, general_rx) = mpsc::channel(1);
+        let (tx, summary_rx) = mpsc::channel(2);
+        let mut manager = RibManager::new(rx, general_rx, None, None, BgpMetrics::new())
+            .with_summary_queries(summary_rx);
+        manager.flush_poll_budget = std::time::Duration::ZERO;
+        manager.with_replacement_summary_reads("apply", |manager| {
+            let queue = |include_retained| {
+                let (reply, response) = oneshot::channel();
+                tx.try_send(RibSummaryQuery::NeighborRibSnapshots {
+                    peers: vec![],
+                    comparison: None,
+                    include_retained,
+                    reply,
+                })
+                .unwrap();
+                response
+            };
+            let first = queue(true);
+            let mut next = queue(false);
+            let context = manager.replacement_readiness.as_ref().unwrap();
+            super::super::service_replacement_readiness(context, false);
+            assert!(matches!(
+                next.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+            drop(first);
+            super::super::service_replacement_readiness(context, false);
+            assert_eq!(next.try_recv().unwrap().snapshots.len(), 0);
+        });
     }
 
     #[test]

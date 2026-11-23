@@ -474,6 +474,61 @@ impl FamilyVerdict {
     }
 }
 
+impl OutboundPrefixLimits {
+    /// Update the admitted prefixes and report each family's block count and episode transition.
+    fn apply_verdicts(
+        &mut self,
+        grouped: bool,
+        verdicts: &[FamilyVerdict],
+        mut checkpoint: impl FnMut(bool),
+    ) -> Vec<(Afi, usize, Option<bool>)> {
+        let mut episodes = Vec::new();
+        for family_verdict in verdicts {
+            checkpoint(false);
+            if grouped {
+                for prefix in &family_verdict.freed {
+                    checkpoint(false);
+                    self.grouped_remove(prefix);
+                }
+                checkpoint(true);
+                self.reserve_grouped_with_checkpoint(
+                    family_verdict.afi,
+                    family_verdict.verdict.admitted.len(),
+                    &mut || checkpoint(false),
+                );
+                checkpoint(true);
+                self.grouped_extend(
+                    family_verdict.afi,
+                    family_verdict
+                        .verdict
+                        .admitted
+                        .iter()
+                        .inspect(|_| checkpoint(false))
+                        .copied(),
+                );
+            }
+            let Some(family) = self.family_mut(family_verdict.afi) else {
+                continue;
+            };
+            let blocked = family_verdict.verdict.blocked.len();
+            // Only a recovery resync ENDS an episode: it alone re-derives the
+            // whole family and can prove nothing is still withheld. An
+            // ordinary batch either opens the episode (once) or notices that
+            // capacity became available and schedules that resync.
+            let transition = if blocked == 0 {
+                (family.blocking && family_verdict.post_usage < family_verdict.limit)
+                    .then_some(false)
+            } else {
+                let started = !family.blocking;
+                family.blocking = true;
+                started.then_some(true)
+            };
+            episodes.push((family_verdict.afi, blocked, transition));
+        }
+        episodes
+    }
+}
+
 impl RibManager {
     /// Resolve one batch against every limited family of `peer`, reading the
     /// advertised state that decides admission but mutating nothing.
@@ -599,11 +654,7 @@ impl RibManager {
                 announce
                     .iter()
                     .inspect(|_| {
-                        super::replacement_readiness_checkpoint_at(
-                            &self.replacement_readiness,
-                            "outbound_limits",
-                            false,
-                        );
+                        self.replacement_checkpoint_at("outbound_limits", false);
                     })
                     .filter(|route| announce_source_exclusion != Some(route.peer))
                     .map(|route| &route.prefix)
@@ -666,8 +717,6 @@ impl RibManager {
         next_hop_override: &mut Arc<Vec<Option<rustbgpd_policy::NextHopAction>>>,
         withdraw: &[(Prefix, u32)],
     ) -> bool {
-        let readiness = self.replacement_readiness.clone();
-        let mut checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
         let mut verdicts = self.outbound_limit_verdicts(
             peer,
             grouped,
@@ -692,7 +741,7 @@ impl RibManager {
                 .verdict
                 .blocked
                 .iter()
-                .inspect(|_| checkpoint())
+                .inspect(|_| self.replacement_checkpoint(false))
                 .copied()
         }));
         if !blocked.is_empty() {
@@ -702,7 +751,7 @@ impl RibManager {
             let kept = announce
                 .iter()
                 .zip(next_hop_override.iter())
-                .inspect(|_| checkpoint())
+                .inspect(|_| self.replacement_checkpoint(false))
                 .filter(|(route, _)| keep(route))
                 .count();
             self.replacement_checkpoint(true);
@@ -711,7 +760,7 @@ impl RibManager {
             let mut kept_next_hops = Vec::with_capacity(kept);
             self.replacement_checkpoint(true);
             for (route, next_hop) in announce.iter().zip(next_hop_override.iter()) {
-                checkpoint();
+                self.replacement_checkpoint(false);
                 if keep(route) {
                     kept_routes.push(route.clone());
                     kept_next_hops.push(next_hop.clone());
@@ -728,69 +777,37 @@ impl RibManager {
             self.replacement_checkpoint(true);
         }
 
-        // One record per family: (afi, prefixes blocked, episode transition).
-        let mut episodes: Vec<(Afi, usize, Option<bool>)> = Vec::new();
-        let Some(limits) = self.outbound_prefix_limits.get_mut(&peer) else {
-            for verdict in &mut verdicts {
-                self.replacement_checkpoint(true);
-                verdict.retire_with(&mut checkpoint);
-                self.replacement_checkpoint(true);
-            }
-            super::retire_vec(&mut verdicts, &mut checkpoint);
-            self.replacement_checkpoint(true);
-            super::retire_hash_set(&mut blocked, &mut checkpoint);
-            self.replacement_checkpoint(true);
-            return false;
+        // The read pass produced verdicts from this installed limit. Only the
+        // affected peer can detach it because its summary uses the entry row.
+        let episodes = if self.can_detach_summary_peer(peer) {
+            let mut limits = self
+                .outbound_prefix_limits
+                .remove(&peer)
+                .expect("installed limit");
+            let episodes = limits.apply_verdicts(grouped, &verdicts, |force| {
+                #[cfg(test)]
+                self.replacement_checkpoint_at("outbound_limit_commit", force);
+                #[cfg(not(test))]
+                self.replacement_checkpoint(force);
+            });
+            self.outbound_prefix_limits.insert(peer, limits);
+            episodes
+        } else {
+            let readiness = &self.replacement_readiness;
+            self.outbound_prefix_limits
+                .get_mut(&peer)
+                .expect("installed limit")
+                .apply_verdicts(grouped, &verdicts, |force| {
+                    super::replacement_readiness_checkpoint(readiness, force);
+                })
         };
-        for family_verdict in &mut verdicts {
-            checkpoint();
-            if grouped {
-                for prefix in &family_verdict.freed {
-                    checkpoint();
-                    limits.grouped_remove(prefix);
-                }
-                super::replacement_readiness_checkpoint(&readiness, true);
-                limits.reserve_grouped_with_checkpoint(
-                    family_verdict.afi,
-                    family_verdict.verdict.admitted.len(),
-                    &mut checkpoint,
-                );
-                super::replacement_readiness_checkpoint(&readiness, true);
-                limits.grouped_extend(
-                    family_verdict.afi,
-                    family_verdict
-                        .verdict
-                        .admitted
-                        .iter()
-                        .inspect(|_| checkpoint())
-                        .copied(),
-                );
-            }
-            let Some(family) = limits.family_mut(family_verdict.afi) else {
-                continue;
-            };
-            let blocked = family_verdict.verdict.blocked.len();
-            // Only a recovery resync ENDS an episode: it alone re-derives the
-            // whole family and can prove nothing is still withheld. An
-            // ordinary batch either opens the episode (once) or notices that
-            // capacity became available and schedules that resync.
-            let transition = if blocked == 0 {
-                (family.blocking && family_verdict.post_usage < family_verdict.limit)
-                    .then_some(false)
-            } else {
-                let started = !family.blocking;
-                family.blocking = true;
-                started.then_some(true)
-            };
-            episodes.push((family_verdict.afi, blocked, transition));
-        }
 
         for verdict in &mut verdicts {
             self.replacement_checkpoint(true);
-            verdict.retire_with(&mut checkpoint);
+            verdict.retire_with(&mut || self.replacement_checkpoint(false));
             self.replacement_checkpoint(true);
         }
-        super::retire_vec(&mut verdicts, &mut checkpoint);
+        super::retire_vec(&mut verdicts, &mut || self.replacement_checkpoint(false));
         self.replacement_checkpoint(true);
         let peer_label = peer.label();
         for (afi, blocked, transition) in episodes {
@@ -828,7 +845,7 @@ impl RibManager {
         // admitted truth the API reports, once that truth exists.
         let filtered = !blocked.is_empty();
         self.replacement_checkpoint(true);
-        super::retire_hash_set(&mut blocked, &mut checkpoint);
+        super::retire_hash_set(&mut blocked, &mut || self.replacement_checkpoint(false));
         self.replacement_checkpoint(true);
         filtered
     }

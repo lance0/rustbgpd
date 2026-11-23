@@ -91,8 +91,11 @@ pub enum RibReadinessQuery {
     },
 }
 
-/// Operator summaries that can be answered from a frozen pre-replacement view.
-/// Route queries and mutations deliberately cannot enter this lane.
+/// Operator summaries served at synchronous export-policy checkpoints.
+/// Named peers and members of their source and destination update groups
+/// retain their command-entry rows. Other peers return current RIB state.
+/// Group comparisons use entry memberships and keys when both peers are
+/// captured. A comparison involving any other peer reads both live.
 #[derive(Debug)]
 pub enum RibSummaryQuery {
     /// Snapshot the RIB-owned portion of neighbor state.
@@ -2540,7 +2543,8 @@ pub struct GrRetentionFamilyState {
     pub stale_routes: u64,
 }
 
-/// One actor-turn response for `NeighborService`'s RIB-owned state.
+/// RIB-owned neighbor observations in one response. During synchronous policy
+/// replacement, [`RibSummaryQuery`] selects the read boundary per peer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NeighborRibSnapshotResponse {
     /// Snapshot rows in request order.
@@ -3686,10 +3690,10 @@ pub enum RibUpdate {
         /// Response channel.
         reply: oneshot::Sender<PeerOutboundState>,
     },
-    /// Query: atomically return every RIB-owned field `NeighborService` exposes
-    /// for a set of peers, plus an optional update-group comparison.  One
-    /// actor turn avoids per-peer request amplification and mixed-generation
-    /// rows in `ListNeighbors` and `GetNeighborState`.
+    /// On the general query lane, return the peers' RIB fields and optional
+    /// update-group comparison together from one actor turn. Neighbor RPCs
+    /// using [`RibSummaryQuery`] at replacement checkpoints follow that
+    /// lane's per-peer read boundary.
     QueryNeighborRibSnapshots {
         /// Peers to snapshot, in the desired response order.
         peers: Vec<PeerId>,

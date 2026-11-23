@@ -1,5 +1,5 @@
 use crate::PeerId;
-use crate::manager::{replacement_readiness_checkpoint, retire_vec};
+use crate::manager::{ReplacementReadinessContext, checkpoint_with_summary_reader, retire_vec};
 use crate::update::ExactExportKey;
 
 use super::payload::PriorGroupSlots;
@@ -30,6 +30,31 @@ impl RibManager {
             .expect("group staged above still exists")
     }
 
+    /// Every member of a detached group reads its captured row during the
+    /// commit. Other readers can still borrow the rest of the RIB.
+    pub(super) fn with_staged_group<T>(
+        &mut self,
+        gid: usize,
+        commit: impl FnOnce(
+            &mut GroupRibOut,
+            &Option<std::sync::Arc<ReplacementReadinessContext>>,
+            Option<&Self>,
+        ) -> T,
+    ) -> T {
+        if self.can_detach_summary_group(gid) {
+            let mut group = self.group_ribs.remove(&gid).expect("group staged above");
+            let result = commit(&mut group, &self.replacement_readiness, Some(self));
+            self.group_ribs.insert(gid, group);
+            result
+        } else {
+            commit(
+                Self::staged_group_mut(&mut self.group_ribs, gid),
+                &self.replacement_readiness,
+                None,
+            )
+        }
+    }
+
     /// Subtract the prior projection before a stage, then restore the new one.
     /// A release supplies one member page. Other stages visit only peers with
     /// an overlay. Neither walk depends on the number of retained refusals.
@@ -47,12 +72,14 @@ impl RibManager {
         }
         // The projection reads the group while its member counters change.
         let mut counters = std::mem::take(&mut group.visible_rejections);
+        let group = &self.group_ribs[&gid];
+        let live = self.can_detach_summary_group(gid).then_some(&*self);
         let empty = super::super::RtcMembership::default();
         let rtc = group.rtc_negotiated();
         let checkpoint = || {
             #[cfg(test)]
             crate::manager::source_departure::inspect_receiver_row();
-            replacement_readiness_checkpoint(&self.replacement_readiness, false);
+            checkpoint_with_summary_reader(&self.replacement_readiness, None, false, live);
         };
         let adjust = |peer: PeerId, counts: &mut [usize; 4]| {
             let Some(rejected) = self.peer_unexportable.get(&peer) else {
@@ -97,7 +124,7 @@ impl RibManager {
                 adjust(*peer, counts);
             }
         }
-        group.visible_rejections = counters;
+        Self::staged_group_mut(&mut self.group_ribs, gid).visible_rejections = counters;
     }
 
     pub(in crate::manager) fn adjust_staged_unicast_rejections<S: std::hash::BuildHasher>(
@@ -304,11 +331,9 @@ impl RibManager {
             // hit counters, exactly like the per-peer path's handle.
             let chain = group.export_chain.as_ref().map(PolicyChain::share);
             for prefix in prefixes {
-                super::super::counted_checkpoint(
-                    &self.replacement_readiness,
-                    "group_staged_key",
-                    false,
-                );
+                #[cfg(test)]
+                super::super::slice_timing::record_work("group_staged_key", 1);
+                self.replacement_checkpoint(false);
                 let old_source = group.table.get(prefix, 0).map(|r| r.peer);
                 if group.per_client_best {
                     // ADR-0126 Decision 2: first-permitted winner walk
@@ -701,106 +726,135 @@ impl RibManager {
         if adjust_rejections {
             self.adjust_staged_unicast_rejections(gid, None, prefixes, false);
         }
-        let readiness = &self.replacement_readiness;
-        let mut checkpoint = || replacement_readiness_checkpoint(readiness, false);
-        let group = Self::staged_group_mut(&mut self.group_ribs, gid);
-        // Keys whose rs-control count correction this commit may move.
-        let rs_touched: Vec<(Prefix, u32)> = if group.has_rs_members() {
-            let keys: crate::fast_hash::FastSet<(Prefix, u32)> = out
-                .deltas
-                .iter()
-                .map(|delta| (delta.prefix, delta.path_id))
-                .chain(lane_updates.iter().map(|(prefix, _, _)| (*prefix, 0)))
-                .chain(
-                    out.rs_transitions
-                        .iter()
-                        .map(|transition| (transition.prefix, transition.path_id)),
-                )
-                .inspect(|_| checkpoint())
-                .collect();
-            keys.into_iter().collect()
-        } else {
-            Vec::new()
-        };
-        if !paged_members {
-            group.rs_adjust_before_commit(&rs_touched, &mut checkpoint);
-        }
-        for delta in &out.deltas {
-            checkpoint();
-            if speculative {
-                if delta.new.is_some() && delta.old_source.is_none() {
-                    group.table.prepare_first_group_insert();
-                }
-                if delta.local_source.is_some() {
-                    group.table.prepare_first_group_local_sources();
-                }
+        let dirty = self.with_staged_group(gid, |group, readiness, live| {
+            let mut checkpoint = || {
+                checkpoint_with_summary_reader(
+                    readiness,
+                    cfg!(test).then_some("staged_table_commit"),
+                    false,
+                    live,
+                );
+            };
+            // Keys whose rs-control count correction this commit may move.
+            let rs_touched: Vec<(Prefix, u32)> = if group.has_rs_members() {
+                let keys: crate::fast_hash::FastSet<(Prefix, u32)> = out
+                    .deltas
+                    .iter()
+                    .map(|delta| (delta.prefix, delta.path_id))
+                    .chain(lane_updates.iter().map(|(prefix, _, _)| (*prefix, 0)))
+                    .chain(
+                        out.rs_transitions
+                            .iter()
+                            .map(|transition| (transition.prefix, transition.path_id)),
+                    )
+                    .inspect(|_| checkpoint())
+                    .collect();
+                keys.into_iter().collect()
+            } else {
+                Vec::new()
+            };
+            if !paged_members {
+                group.rs_adjust_before_commit(&rs_touched, &mut checkpoint);
             }
-            group.apply_delta(delta);
-        }
-        // Lane commits live in this commit block ON PURPOSE: the
-        // `join_group` table-build pass discards the returned output
-        // but must still leave a fully populated lane behind.
-        for (prefix, entry, rs_fallback) in lane_updates {
-            checkpoint();
-            group.apply_lane(prefix, entry);
-            group.apply_rs_fallback(prefix, rs_fallback);
-        }
-        group.commit_rs_transitions(&out.rs_transitions, &mut checkpoint);
-        if paged_members {
-            group.reindex_rs_keys(&rs_touched, &mut checkpoint);
-        } else {
-            group.rs_adjust_after_commit(&rs_touched, &mut checkpoint);
-        }
-        if let Some(slot) = group.record_otc_blocked(prefixes, &out.otc_blocked, &mut checkpoint) {
-            tracing::error!(
-                group = gid,
-                slot,
-                counter = "otc_blocked_totals",
-                "OTC-blocked winner counts drifted; rebuilt from the residue map"
-            );
-        }
-        if !paged_pcb_denials {
-            group.record_policy_filtered(prefixes, &labeled_filtered, &mut checkpoint);
-        }
-        // The release delivers each staged delta to dirty members as well.
-        // Their page records these same tombstones and source-flip withdrawals.
-        if !paged_members && !group.dirty_members.is_empty() {
             for delta in &out.deltas {
                 checkpoint();
-                if delta.new.is_none() {
-                    group.tombstones.insert((delta.prefix, delta.path_id));
+                if speculative {
+                    if delta.new.is_some() && delta.old_source.is_none() {
+                        group.table.prepare_first_group_insert();
+                    }
+                    if delta.local_source.is_some() {
+                        group.table.prepare_first_group_local_sources();
+                    }
                 }
+                group.apply_delta(delta);
             }
-            // A member ALREADY dirty when a source flip stages onto it
-            // never reaches the per-member matrix (its pass takes the
-            // resync arm), so its member-scoped withdraw of the displaced
-            // route would be lost: the key stays IN the table (invisible
-            // to tombstones) and the resync announces table ∖ own-sourced.
-            // Record it as an extra (over-)withdraw at staging; the
-            // resync's `member_retains` guard drops it if the source
-            // flips back before the resync runs.
-            let dirty: Vec<PeerId> = group
-                .dirty_members
-                .iter()
-                .map(|member| {
-                    checkpoint();
-                    *member
-                })
-                .collect();
-            replacement_readiness_checkpoint(readiness, true);
-            for member in dirty {
+            // Lane commits live in this commit block ON PURPOSE: the
+            // `join_group` table-build pass discards the returned output
+            // but must still leave a fully populated lane behind.
+            for (prefix, entry, rs_fallback) in lane_updates {
                 checkpoint();
+                group.apply_lane(prefix, entry);
+                group.apply_rs_fallback(prefix, rs_fallback);
+            }
+            group.commit_rs_transitions(&out.rs_transitions, &mut checkpoint);
+            if paged_members {
+                group.reindex_rs_keys(&rs_touched, &mut checkpoint);
+            } else {
+                group.rs_adjust_after_commit(&rs_touched, &mut checkpoint);
+            }
+            if let Some(slot) =
+                group.record_otc_blocked(prefixes, &out.otc_blocked, &mut checkpoint)
+            {
+                tracing::error!(
+                    group = gid,
+                    slot,
+                    counter = "otc_blocked_totals",
+                    "OTC-blocked winner counts drifted; rebuilt from the residue map"
+                );
+            }
+            if !paged_pcb_denials {
+                group.record_policy_filtered(prefixes, &labeled_filtered, &mut checkpoint);
+            }
+            // The release delivers each staged delta to dirty members as well.
+            // Their page records these same tombstones and source-flip withdrawals.
+            if !paged_members && !group.dirty_members.is_empty() {
+                for delta in &out.deltas {
+                    checkpoint();
+                    if delta.new.is_none() {
+                        group.tombstones.insert((delta.prefix, delta.path_id));
+                    }
+                }
+                // A member ALREADY dirty when a source flip stages onto it
+                // never reaches the per-member matrix (its pass takes the
+                // resync arm), so its member-scoped withdraw of the displaced
+                // route would be lost: the key stays IN the table (invisible
+                // to tombstones) and the resync announces table ∖ own-sourced.
+                // Record it as an extra (over-)withdraw at staging; the
+                // resync's `member_retains` guard drops it if the source
+                // flips back before the resync runs.
+                Some(
+                    group
+                        .dirty_members
+                        .iter()
+                        .inspect(|_| checkpoint())
+                        .copied()
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                None
+            }
+        });
+        if let Some(dirty) = dirty {
+            self.replacement_checkpoint(true);
+            let scoped_reads = self.replacement_summary_groups.is_some();
+            for member in dirty {
+                self.replacement_checkpoint(false);
                 let lost: Vec<(Prefix, u32)> = out
-                    .member_scoped_withdraws(member, || {
-                        replacement_readiness_checkpoint(readiness, false);
-                    })
+                    .member_scoped_withdraws(member, || self.replacement_checkpoint(false))
                     .collect();
-                if !lost.is_empty() {
+                if lost.is_empty() {
+                    continue;
+                }
+                let unicast = &mut self
+                    .pending_extra_withdraws
+                    .entry(member)
+                    .or_default()
+                    .unicast;
+                if scoped_reads {
+                    let mut unicast = std::mem::take(unicast);
+                    unicast.extend(
+                        lost.into_iter()
+                            .inspect(|_| self.replacement_checkpoint(false)),
+                    );
                     self.pending_extra_withdraws
-                        .entry(member)
-                        .or_default()
-                        .unicast
-                        .extend(lost.into_iter().inspect(|_| checkpoint()));
+                        .get_mut(&member)
+                        .expect("existing withdrawals")
+                        .unicast = unicast;
+                } else {
+                    let readiness = &self.replacement_readiness;
+                    unicast.extend(lost.into_iter().inspect(|_| {
+                        super::super::replacement_readiness_checkpoint(readiness, false);
+                    }));
                 }
             }
             self.refresh_group_residue_gauge();
@@ -1018,33 +1072,38 @@ impl RibManager {
         if adjust_rejections {
             self.adjust_staged_rejections(gid, None, &rejected_keys, in_scope, false);
         }
-        let readiness = &self.replacement_readiness;
-        let checkpoint = || replacement_readiness_checkpoint(readiness, false);
-        let group = Self::staged_group_mut(&mut self.group_ribs, gid);
-        for delta in &out.deltas {
-            checkpoint();
-            group.apply_vpn_delta(delta);
-        }
-        // Denial-residue transition scope: this pass's keys replace their
-        // prior records (the `record_policy_filtered` shape).
-        for key in keys {
-            checkpoint();
-            group.vpn_policy_denied.remove(key);
-        }
-        for (key, denial) in denials {
-            checkpoint();
-            group.vpn_policy_denied.insert(key, denial);
-        }
-        if !group.dirty_members.is_empty() {
-            group.vpn_tombstones.extend(
-                out.deltas
-                    .iter()
-                    .filter(|d| {
-                        checkpoint();
-                        d.new.is_none()
-                    })
-                    .map(|d| d.key),
-            );
+        let dirty = self.with_staged_group(gid, |group, readiness, live| {
+            let checkpoint = || checkpoint_with_summary_reader(readiness, None, false, live);
+            for delta in &out.deltas {
+                checkpoint();
+                group.apply_vpn_delta(delta);
+            }
+            // Denial-residue transition scope: this pass's keys replace their
+            // prior records (the `record_policy_filtered` shape).
+            for key in keys {
+                checkpoint();
+                group.vpn_policy_denied.remove(key);
+            }
+            for (key, denial) in denials {
+                checkpoint();
+                group.vpn_policy_denied.insert(key, denial);
+            }
+            if group.dirty_members.is_empty() {
+                false
+            } else {
+                group.vpn_tombstones.extend(
+                    out.deltas
+                        .iter()
+                        .filter(|d| {
+                            checkpoint();
+                            d.new.is_none()
+                        })
+                        .map(|d| d.key),
+                );
+                true
+            }
+        });
+        if dirty {
             self.refresh_group_residue_gauge();
         }
         if adjust_rejections {

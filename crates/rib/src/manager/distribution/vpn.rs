@@ -995,7 +995,8 @@ impl RibManager {
         let readiness = self.replacement_readiness.clone();
         #[cfg(test)]
         let retirement_observer = self.replacement_readiness_test_hook.clone();
-        let mut checkpoint = || {
+        // Group tombstones are recorded under a mutable group borrow.
+        let readiness_checkpoint = || {
             super::super::replacement_readiness_checkpoint_at(&readiness, "selection_vpn", false);
         };
         let targeted = |peer: &PeerId| targets.is_none_or(|targets| targets.contains(peer));
@@ -1011,7 +1012,7 @@ impl RibManager {
             .keys()
             .filter(|peer| targeted(peer))
             .any(|peer| {
-                checkpoint();
+                self.replacement_checkpoint_at("selection_vpn", false);
                 self.peer_orr_vantage
                     .get(peer)
                     .is_some_and(|vantage| self.orr.spf.contains_key(vantage))
@@ -1060,14 +1061,14 @@ impl RibManager {
         let peers: Vec<PeerId> = self
             .outbound_peers
             .keys()
-            .inspect(|_| checkpoint())
+            .inspect(|_| self.replacement_checkpoint_at("selection_vpn", false))
             .filter(|peer| targeted(peer))
             .copied()
             .collect();
         // Per key set a peer may stage: the AFIs it carries.
         let mut carried_afis = [None, None];
         for peer in peers {
-            checkpoint();
+            self.replacement_checkpoint_at("selection_vpn", false);
             // VPN ingest applies each UPDATE here without a readiness owner,
             // and one member's work can be large (a dirty member's recovery
             // bookkeeping). Service the dedicated read-only lane at each peer
@@ -1113,7 +1114,7 @@ impl RibManager {
                         .is_some_and(|group| group.dirty_members.contains(&peer))
                 {
                     let member_emits = stage.deltas.iter().any(|delta| {
-                        checkpoint();
+                        self.replacement_checkpoint_at("selection_vpn", false);
                         [&delta.old, &delta.new].into_iter().flatten().any(|route| {
                             route.peer != peer
                                 && crate::manager::update_groups::rt_passes(
@@ -1134,7 +1135,7 @@ impl RibManager {
                     self.mark_outbound_dirty_inner(peer, false);
                     let lost: Vec<VpnRouteKey> = stage
                         .member_scoped_withdraws(peer, member_filter.as_ref(), || {
-                            super::super::replacement_readiness_checkpoint(&readiness, false);
+                            self.replacement_checkpoint(false);
                         })
                         .collect();
                     if !lost.is_empty() {
@@ -1156,7 +1157,7 @@ impl RibManager {
                 let shared_announce = (!self.dirty_peers.contains(&peer)
                     && !self.outbound_channel_full(peer)
                     && stage.deltas.iter().all(|delta| {
-                        checkpoint();
+                        self.replacement_checkpoint_at("selection_vpn", false);
                         delta.new.as_ref().is_none_or(|route| {
                             route.peer != peer
                                 && crate::manager::update_groups::rt_passes(
@@ -1170,7 +1171,7 @@ impl RibManager {
                         stage
                             .deltas
                             .iter()
-                            .inspect(|_| checkpoint())
+                            .inspect(|_| self.replacement_checkpoint_at("selection_vpn", false))
                             .filter_map(|delta| delta.new.clone())
                             .collect::<Vec<_>>()
                             .into()
@@ -1193,7 +1194,7 @@ impl RibManager {
                             }
                         },
                         &mut vpn_withdraw,
-                        &mut || super::super::replacement_readiness_checkpoint(&readiness, false),
+                        &mut || self.replacement_checkpoint(false),
                     );
                 let vpn_announce = shared_announce.unwrap_or_else(|| vpn_announce.into());
                 if vpn_announce.is_empty() && vpn_withdraw.is_empty() {
@@ -1209,7 +1210,7 @@ impl RibManager {
                 let group_prior = stage
                     .deltas
                     .iter()
-                    .inspect(|_| checkpoint())
+                    .inspect(|_| self.replacement_checkpoint_at("selection_vpn", false))
                     .filter_map(|delta| {
                         let key = crate::route::VpnRibRouteKey {
                             nlri_key: delta.key,
@@ -1265,7 +1266,7 @@ impl RibManager {
                             stage
                                 .deltas
                                 .iter()
-                                .inspect(|_| checkpoint())
+                                .inspect(|_| readiness_checkpoint())
                                 .filter(|d| d.new.is_none())
                                 .map(|d| d.key),
                         );
@@ -1276,7 +1277,7 @@ impl RibManager {
                     // member's extra-withdraw residue instead.
                     let lost: Vec<VpnRouteKey> = stage
                         .member_scoped_withdraws(peer, member_filter.as_ref(), || {
-                            super::super::replacement_readiness_checkpoint(&readiness, false);
+                            self.replacement_checkpoint(false);
                         })
                         .collect();
                     if !lost.is_empty() {
@@ -1384,10 +1385,15 @@ impl RibManager {
             let metrics = self.metrics.clone();
 
             let loc_rib_len = self.loc_rib.len();
-            let rib_out = self
-                .adj_ribs_out
+            self.adj_ribs_out
                 .entry(peer)
                 .or_insert_with(|| crate::adj_rib_out::AdjRibOut::with_capacity(peer, loc_rib_len));
+            // Staging only reads this table, so checkpoints can serve other
+            // peers' current rows between keys.
+            let rib_out = self
+                .adj_ribs_out
+                .get(&peer)
+                .expect("the staged Adj-RIB-Out exists");
             let mut export_tally = crate::update::NeighborPolicyStats::default();
             let policy_stats = &mut export_tally;
 
@@ -1430,7 +1436,12 @@ impl RibManager {
                         rtc_filter.as_ref(),
                         &mut vpn_announce,
                         &mut vpn_withdraw,
-                        &mut || super::super::replacement_readiness_checkpoint(&readiness, false),
+                        &mut || {
+                            #[cfg(test)]
+                            self.replacement_checkpoint_at(super::VPN_STAGE_KEY, false);
+                            #[cfg(not(test))]
+                            self.replacement_checkpoint(false);
+                        },
                     );
                     vpn_announce.len() + vpn_withdraw.len() - before
                 });
@@ -1476,18 +1487,16 @@ impl RibManager {
                 observer("vpn_group_stage_retirement_before");
             }
             stage.retire_with(&mut |force| {
-                super::super::replacement_readiness_checkpoint_at(
-                    &readiness,
-                    "vpn_group_stage_retirement",
-                    force,
-                );
+                self.replacement_checkpoint_at("vpn_group_stage_retirement", force);
             });
             #[cfg(test)]
             if let Some(observer) = &retirement_observer {
                 observer("vpn_group_stage_retirement_after");
             }
         }
-        crate::adj_rib_out::release_hash_map(&mut vpn_group_stage, &mut checkpoint);
+        crate::adj_rib_out::release_hash_map(&mut vpn_group_stage, &mut || {
+            self.replacement_checkpoint_at("selection_vpn", false);
+        });
         #[cfg(feature = "bench-internals")]
         super::super::bench_support::retirement_end(0, retirement);
     }

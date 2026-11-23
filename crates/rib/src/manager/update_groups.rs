@@ -304,6 +304,13 @@ pub(super) enum GroupMembership {
 }
 
 impl GroupMembership {
+    pub(in crate::manager) fn group_id(&self) -> Option<usize> {
+        match self {
+            Self::Grouped(id) => Some(*id),
+            _ => None,
+        }
+    }
+
     /// Operator-facing label: `group:N` or the ungrouped reason.
     pub(super) fn label(&self) -> String {
         match self {
@@ -2510,6 +2517,33 @@ impl From<admitted_recovery::FailureCause> for RecoveryFallbackCause {
 }
 
 impl RibManager {
+    /// Expand named peers through their entry source and destination groups.
+    /// Several movers in the same group must enumerate its members only once.
+    pub(in crate::manager) fn replacement_summary_scope(
+        &self,
+        moves: impl IntoIterator<Item = (PeerId, Option<usize>)>,
+    ) -> super::replacement_summaries::ReplacementSummaryScope {
+        let mut scope = super::replacement_summaries::ReplacementSummaryScope::default();
+        if self.summary_rx.is_none() || self.unicast_release_partial() {
+            return scope;
+        }
+        for (peer, destination) in moves {
+            scope.peers.insert(peer);
+            scope.groups.extend(self.grouped_member_of(peer));
+            scope.groups.extend(destination);
+            self.replacement_checkpoint(false);
+        }
+        for gid in &scope.groups {
+            if let Some(group) = self.group_ribs.get(gid) {
+                for &peer in &group.members {
+                    scope.peers.insert(peer);
+                    self.replacement_checkpoint(false);
+                }
+            }
+        }
+        scope
+    }
+
     /// The group id a registered peer is a member of, if any.
     pub(in crate::manager) fn grouped_member_of(&self, peer: PeerId) -> Option<usize> {
         match self.update_groups.members.get(&peer) {
@@ -2736,16 +2770,21 @@ impl RibManager {
             .then_some(gid)
     }
 
-    fn group_capture_checkpoint(&self) -> impl FnMut(bool) + use<> {
+    fn group_capture_checkpoint(&self) -> impl FnMut(bool, Option<&Self>) + use<> {
         let readiness = self.replacement_readiness.clone();
         #[cfg(test)]
         let observer = self.replacement_readiness_test_hook.clone();
-        move |force| {
+        move |force, live| {
             #[cfg(test)]
             if force && let Some(observer) = &observer {
                 observer("common_capture");
             }
-            super::counted_checkpoint(&readiness, "capture_group_admitted", force);
+            super::checkpoint_with_summary_reader(
+                &readiness,
+                cfg!(test).then_some("capture_group_admitted"),
+                force,
+                live,
+            );
         }
     }
 
@@ -2765,109 +2804,121 @@ impl RibManager {
         let mut checkpoint = self.group_capture_checkpoint();
         let mut begun = Vec::with_capacity(members.len());
         for &peer in members {
-            match self
-                .pending_group_admitted
-                .begin_capture_with_checkpoint(peer, &mut checkpoint)
-            {
+            match self.with_summary_recovery_ledger(None, |ledger, _, _, live| {
+                ledger.begin_capture_with_checkpoint(peer, &mut |force| checkpoint(force, live))
+            }) {
                 Ok(_) => begun.push(peer),
                 Err(error) => self.record_group_recovery_refusal(peer, error, true),
             }
         }
-        let Some(group) = self.group_ribs.get_mut(&gid) else {
+        #[cfg(feature = "bench-internals")]
+        let mut bench_draft = None;
+        #[cfg(feature = "bench-internals")]
+        let mut bench_slots = 0;
+        #[cfg(test)]
+        let projections = std::cell::Cell::new(0_usize);
+        #[cfg(test)]
+        let target_checks = std::cell::Cell::new(0_usize);
+        #[cfg(test)]
+        let row_observer = self.replacement_readiness_test_hook.clone();
+        let Some(capture) =
+            self.with_summary_recovery_ledger(Some(gid), |ledger, group, _, live| {
+                let group = group?;
+                #[cfg(feature = "bench-internals")]
+                {
+                    bench_slots = group.table.unicast_slot_count();
+                    bench_draft = Some(super::bench_support::GroupCaptureDraft::begin(
+                        group.recovery_snapshot,
+                        bench_slots,
+                    ));
+                }
+                let index: HashMap<PeerId, usize> = begun
+                    .iter()
+                    .enumerate()
+                    .map(|(member, &peer)| (peer, member))
+                    .collect();
+                let controlled: Vec<(usize, PeerId, (u32, u32))> = begun
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(member, &peer)| {
+                        let rs = group.rs_members.get(&peer).copied()?;
+                        Some((member, peer, rs))
+                    })
+                    .collect();
+                // Control members by each ASN a target can name them by
+                // (`RsTargets::names`): their own and the route server's.
+                let mut named: HashMap<u32, Vec<usize>> = HashMap::new();
+                for (position, &(_, _, (rs_asn, member_asn))) in controlled.iter().enumerate() {
+                    named.entry(member_asn).or_default().push(position);
+                    if rs_asn != member_asn {
+                        named.entry(rs_asn).or_default().push(position);
+                    }
+                }
+                let local_role = group.local_role;
+                // A member that is not the row's source keeps the staged route at its
+                // own key, unless RFC 7947 control suppresses it toward that member:
+                // only `rs_tagged` rows can, and only for members their targets name.
+                let project = |staged: &Route| {
+                    #[cfg(test)]
+                    {
+                        projections.set(projections.get() + 1);
+                        if let Some(observer) = &row_observer {
+                            observer("capture_old_cohort_key");
+                        }
+                    }
+                    (!super::distribution::otc_egress_blocked(staged, local_role))
+                        .then_some(Key::Unicast(staged.prefix, staged.path_id))
+                };
+                let exclude = |staged: &Route, excluded: &mut dyn FnMut(usize)| {
+                    if let Some(&member) = index.get(&staged.peer) {
+                        excluded(member);
+                    }
+                    if controlled.is_empty() {
+                        return;
+                    }
+                    let key = (staged.prefix, staged.path_id);
+                    let Some(targets) = group.rs_tagged.get(&key) else {
+                        return;
+                    };
+                    // Visit only the members the row's targets name, each once.
+                    let mut candidates = smallvec::SmallVec::<[usize; 8]>::new();
+                    if targets.all {
+                        candidates.extend(0..controlled.len());
+                    } else {
+                        for asn in &targets.asns {
+                            candidates.extend(named.get(asn).into_iter().flatten().copied());
+                        }
+                        candidates.sort_unstable();
+                        candidates.dedup();
+                    }
+                    for position in candidates {
+                        #[cfg(test)]
+                        target_checks.set(target_checks.get() + 1);
+                        let (member, peer, rs) = controlled[position];
+                        if peer != staged.peer
+                            && group
+                                .adv_entry_post_backstop_for(peer, &key.0, key.1, Some(rs))
+                                .is_none()
+                        {
+                            excluded(member);
+                        }
+                    }
+                };
+                Some(ledger.capture_cohort_old_with_checkpoint(
+                    &begun,
+                    group.recovery_snapshot,
+                    &group.table,
+                    project,
+                    exclude,
+                    &mut |force| checkpoint(force, live),
+                ))
+            })
+        else {
             return begun
                 .into_iter()
                 .filter(|&peer| self.capture_begun_group_admitted_keys(peer, true))
                 .collect();
         };
-        #[cfg(feature = "bench-internals")]
-        let mut bench_draft = Some(super::bench_support::GroupCaptureDraft::begin(
-            group.recovery_snapshot,
-            group.table.unicast_slot_count(),
-        ));
-        #[cfg(feature = "bench-internals")]
-        let bench_slots = group.table.unicast_slot_count();
-        let index: HashMap<PeerId, usize> = begun
-            .iter()
-            .enumerate()
-            .map(|(member, &peer)| (peer, member))
-            .collect();
-        let controlled: Vec<(usize, PeerId, (u32, u32))> = begun
-            .iter()
-            .enumerate()
-            .filter_map(|(member, &peer)| {
-                let rs = group.rs_members.get(&peer).copied()?;
-                Some((member, peer, rs))
-            })
-            .collect();
-        // Control members by each ASN a target can name them by
-        // (`RsTargets::names`): their own and the route server's.
-        let mut named: HashMap<u32, Vec<usize>> = HashMap::new();
-        for (position, &(_, _, (rs_asn, member_asn))) in controlled.iter().enumerate() {
-            named.entry(member_asn).or_default().push(position);
-            if rs_asn != member_asn {
-                named.entry(rs_asn).or_default().push(position);
-            }
-        }
-        let local_role = group.local_role;
-        #[cfg(test)]
-        let projections = std::cell::Cell::new(0_usize);
-        #[cfg(test)]
-        let target_checks = std::cell::Cell::new(0_usize);
-        let projected: &GroupRibOut = group;
-        // A member that is not the row's source keeps the staged route at its
-        // own key, unless RFC 7947 control suppresses it toward that member:
-        // only `rs_tagged` rows can, and only for members their targets name.
-        let project = |staged: &Route| {
-            #[cfg(test)]
-            projections.set(projections.get() + 1);
-            (!super::distribution::otc_egress_blocked(staged, local_role))
-                .then_some(Key::Unicast(staged.prefix, staged.path_id))
-        };
-        let exclude = |staged: &Route, excluded: &mut dyn FnMut(usize)| {
-            if let Some(&member) = index.get(&staged.peer) {
-                excluded(member);
-            }
-            if controlled.is_empty() {
-                return;
-            }
-            let key = (staged.prefix, staged.path_id);
-            let Some(targets) = projected.rs_tagged.get(&key) else {
-                return;
-            };
-            // Visit only the members the row's targets name, each once.
-            let mut candidates = smallvec::SmallVec::<[usize; 8]>::new();
-            if targets.all {
-                candidates.extend(0..controlled.len());
-            } else {
-                for asn in &targets.asns {
-                    candidates.extend(named.get(asn).into_iter().flatten().copied());
-                }
-                candidates.sort_unstable();
-                candidates.dedup();
-            }
-            for position in candidates {
-                #[cfg(test)]
-                target_checks.set(target_checks.get() + 1);
-                let (member, peer, rs) = controlled[position];
-                if peer != staged.peer
-                    && projected
-                        .adv_entry_post_backstop_for(peer, &key.0, key.1, Some(rs))
-                        .is_none()
-                {
-                    excluded(member);
-                }
-            }
-        };
-        let capture = self
-            .pending_group_admitted
-            .capture_cohort_old_with_checkpoint(
-                &begun,
-                group.recovery_snapshot,
-                &group.table,
-                project,
-                exclude,
-                &mut checkpoint,
-            );
         #[cfg(test)]
         {
             self.adj_rib_out_commit_stats.group_capture_target_checks += target_checks.get();
@@ -2879,10 +2930,9 @@ impl RibManager {
             self.record_group_recovery_refusal(peer, error, true);
         }
         for peer in capture.shared {
-            if let Err(error) = self
-                .pending_group_admitted
-                .seal_capture_with_checkpoint(peer, &mut checkpoint)
-            {
+            if let Err(error) = self.with_summary_recovery_ledger(None, |ledger, _, _, live| {
+                ledger.seal_capture_with_checkpoint(peer, &mut |force| checkpoint(force, live))
+            }) {
                 self.record_group_recovery_refusal(peer, error, true);
                 continue;
             }
@@ -2968,10 +3018,9 @@ impl RibManager {
         mark_dirty_on_refusal: bool,
     ) -> bool {
         let mut checkpoint = self.group_capture_checkpoint();
-        if let Err(error) = self
-            .pending_group_admitted
-            .begin_capture_with_checkpoint(peer, &mut checkpoint)
-        {
+        if let Err(error) = self.with_summary_recovery_ledger(None, |ledger, _, _, live| {
+            ledger.begin_capture_with_checkpoint(peer, &mut |force| checkpoint(force, live))
+        }) {
             self.record_group_recovery_refusal(peer, error, mark_dirty_on_refusal);
             return false;
         }
@@ -2998,19 +3047,25 @@ impl RibManager {
         let mut checkpoint = self.group_capture_checkpoint();
         #[cfg(feature = "bench-internals")]
         let mut bench_capture = None;
+        let mut snapshot_handle = None;
+        #[cfg(test)]
+        let projections = std::cell::Cell::new(0_usize);
+        #[cfg(test)]
+        let mut group_table_capture = false;
+        #[cfg(test)]
+        let observer = self.replacement_readiness_test_hook.clone();
         let result = if self.pending_regroup_baseline.contains_key(&peer) || gid.is_none() {
-            let count = self.pending_regroup_baseline.get(&peer).map_or_else(
-                || {
-                    self.adj_ribs_out
-                        .get(&peer)
-                        .map_or(0, |rib| rib.len().saturating_add(rib.vpn_len()))
-                },
-                |base| base.unicast.len().saturating_add(base.vpn.len()),
-            );
-            let ledger = &mut self.pending_group_admitted;
-            (|| {
+            let mut capture = |ledger: &mut admitted_recovery::AdmittedRecovery,
+                               base: Option<&RegroupBaseline>,
+                               rib: Option<&AdjRibOut>,
+                               live: Option<&RibManager>| {
+                let mut checkpoint = |force| checkpoint(force, live);
+                let count = base.map_or_else(
+                    || rib.map_or(0, |rib| rib.len().saturating_add(rib.vpn_len())),
+                    |base| base.unicast.len().saturating_add(base.vpn.len()),
+                );
                 ledger.reserve_capture_with_checkpoint(peer, count, &mut checkpoint)?;
-                if let Some(base) = self.pending_regroup_baseline.get(&peer) {
+                if let Some(base) = base {
                     for &(prefix, path_id) in base.unicast.keys() {
                         checkpoint(false);
                         ledger.push_capture_with_checkpoint(
@@ -3027,7 +3082,7 @@ impl RibManager {
                             &mut checkpoint,
                         )?;
                     }
-                } else if let Some(rib) = self.adj_ribs_out.get(&peer) {
+                } else if let Some(rib) = rib {
                     for route in rib.iter() {
                         checkpoint(false);
                         ledger.push_capture_with_checkpoint(
@@ -3047,54 +3102,81 @@ impl RibManager {
                     }
                 }
                 Ok(())
-            })()
-        } else if let Some(group) = gid.and_then(|gid| self.group_ribs.get_mut(&gid)) {
-            #[cfg(test)]
-            {
-                self.adj_rib_out_commit_stats.group_table_captures += 1;
-            }
-            #[cfg(feature = "bench-internals")]
-            let bench_draft = super::bench_support::GroupCaptureDraft::begin(
-                group.recovery_snapshot,
-                group.table.unicast_slot_count(),
-            );
-            let rejected = self.peer_unexportable.get(&peer);
-            let limits = self.outbound_prefix_limits.get(&peer);
-            let projected: &GroupRibOut = group;
-            let old_filter = filter.as_ref();
-            #[cfg(test)]
-            let projections = std::cell::Cell::new(0_usize);
-            let project_uc = |staged: &Route| {
-                #[cfg(test)]
-                projections.set(projections.get() + 1);
-                let entry = projected.adv_entry_post_backstop_for(
-                    peer,
-                    &staged.prefix,
-                    staged.path_id,
-                    rs_control,
-                )?;
-                let route = entry.route;
-                let key = ExactExportKey::Unicast(route.prefix, route.path_id);
-                (!rejected.is_some_and(|keys| keys.contains(&key))
-                    && limits.is_none_or(|limits| limits.admits_grouped(&route.prefix)))
-                .then_some(Key::Unicast(route.prefix, route.path_id))
             };
-            let project_vpn = |route: &VpnRibRoute| {
-                #[cfg(test)]
-                projections.set(projections.get() + 1);
-                (projected.stages_vpn()
-                    && route.peer != peer
-                    && rt_passes(old_filter, route)
-                    && !rejected
-                        .is_some_and(|keys| keys.contains(&ExactExportKey::Vpn(route.key()))))
-                .then(|| {
-                    let key = route.key();
-                    Key::Vpn(key.nlri_key, key.path_id)
+            if self.replacement_summary_groups.is_some() {
+                self.with_summary_recovery_ledger(None, |ledger, _, _, live| {
+                    let manager = live.expect("scoped recovery capture");
+                    let base = manager.pending_regroup_baseline.get(&peer);
+                    let rib = base
+                        .is_none()
+                        .then(|| manager.adj_ribs_out.get(&peer))
+                        .flatten();
+                    capture(ledger, base, rib, live)
                 })
-            };
-            let result = self
-                .pending_group_admitted
-                .capture_full_old_with_checkpoint(
+            } else {
+                let base = self.pending_regroup_baseline.get(&peer);
+                let rib = base
+                    .is_none()
+                    .then(|| self.adj_ribs_out.get(&peer))
+                    .flatten();
+                capture(&mut self.pending_group_admitted, base, rib, None)
+            }
+        } else {
+            let mut capture = |ledger: &mut admitted_recovery::AdmittedRecovery,
+                               group: Option<&GroupRibOut>,
+                               rejected: Option<&HashSet<ExactExportKey>>,
+                               limits: Option<
+                &super::outbound_prefix_limits::OutboundPrefixLimits,
+            >,
+                               live: Option<&RibManager>| {
+                let Some(group) = group else {
+                    return Ok(());
+                };
+                let mut checkpoint = |force| checkpoint(force, live);
+                #[cfg(test)]
+                {
+                    group_table_capture = true;
+                }
+                #[cfg(feature = "bench-internals")]
+                let bench_draft = super::bench_support::GroupCaptureDraft::begin(
+                    group.recovery_snapshot,
+                    group.table.unicast_slot_count(),
+                );
+                let old_filter = filter.as_ref();
+                let project_uc = |staged: &Route| {
+                    #[cfg(test)]
+                    {
+                        projections.set(projections.get() + 1);
+                        if let Some(observer) = &observer {
+                            observer("capture_old_peer_key");
+                        }
+                    }
+                    let entry = group.adv_entry_post_backstop_for(
+                        peer,
+                        &staged.prefix,
+                        staged.path_id,
+                        rs_control,
+                    )?;
+                    let route = entry.route;
+                    let key = ExactExportKey::Unicast(route.prefix, route.path_id);
+                    (!rejected.is_some_and(|keys| keys.contains(&key))
+                        && limits.is_none_or(|limits| limits.admits_grouped(&route.prefix)))
+                    .then_some(Key::Unicast(route.prefix, route.path_id))
+                };
+                let project_vpn = |route: &VpnRibRoute| {
+                    #[cfg(test)]
+                    projections.set(projections.get() + 1);
+                    (group.stages_vpn()
+                        && route.peer != peer
+                        && rt_passes(old_filter, route)
+                        && !rejected
+                            .is_some_and(|keys| keys.contains(&ExactExportKey::Vpn(route.key()))))
+                    .then(|| {
+                        let key = route.key();
+                        Key::Vpn(key.nlri_key, key.path_id)
+                    })
+                };
+                let result = ledger.capture_full_old_with_checkpoint(
                     peer,
                     group.recovery_snapshot,
                     &group.table,
@@ -3103,31 +3185,54 @@ impl RibManager {
                     project_vpn,
                     &mut checkpoint,
                 );
-            #[cfg(test)]
-            {
-                self.adj_rib_out_commit_stats.group_capture_projections += projections.get();
+                if let Ok(outcome) = &result {
+                    snapshot_handle = outcome.handle;
+                }
+                #[cfg(feature = "bench-internals")]
+                if let Ok(outcome) = &result {
+                    bench_capture = Some((bench_draft, *outcome));
+                }
+                result.map(|_| ())
+            };
+            if self.replacement_summary_groups.is_some() {
+                self.with_summary_recovery_ledger(gid, |ledger, group, _, live| {
+                    let manager = live.expect("scoped recovery capture");
+                    capture(
+                        ledger,
+                        group,
+                        manager.peer_unexportable.get(&peer),
+                        manager.outbound_prefix_limits.get(&peer),
+                        live,
+                    )
+                })
+            } else {
+                capture(
+                    &mut self.pending_group_admitted,
+                    gid.and_then(|gid| self.group_ribs.get(&gid)),
+                    self.peer_unexportable.get(&peer),
+                    self.outbound_prefix_limits.get(&peer),
+                    None,
+                )
             }
-            if let Ok(outcome) = &result
-                && let Some(handle) = outcome.handle
-            {
-                group.recovery_snapshot = Some(handle);
-            }
-            #[cfg(feature = "bench-internals")]
-            if let Ok(outcome) = &result {
-                bench_capture = Some((bench_draft, *outcome));
-            }
-            result.map(|_| ())
-        } else {
-            Ok(())
         };
+        #[cfg(test)]
+        {
+            self.adj_rib_out_commit_stats.group_table_captures += usize::from(group_table_capture);
+            self.adj_rib_out_commit_stats.group_capture_projections += projections.get();
+        }
+        if let (Some(gid), Some(handle)) = (gid, snapshot_handle) {
+            self.group_ribs
+                .get_mut(&gid)
+                .expect("captured group")
+                .recovery_snapshot = Some(handle);
+        }
         if let Err(error) = result {
             self.record_group_recovery_refusal(peer, error, mark_dirty_on_refusal);
             return false;
         }
-        if let Err(error) = self
-            .pending_group_admitted
-            .seal_capture_with_checkpoint(peer, &mut checkpoint)
-        {
+        if let Err(error) = self.with_summary_recovery_ledger(None, |ledger, _, _, live| {
+            ledger.seal_capture_with_checkpoint(peer, &mut |force| checkpoint(force, live))
+        }) {
             self.record_group_recovery_refusal(peer, error, mark_dirty_on_refusal);
             return false;
         }
@@ -3148,7 +3253,7 @@ impl RibManager {
         peer: PeerId,
         candidates: A,
     ) where
-        A: Clone + Iterator<Item = admitted_recovery::Key>,
+        A: Iterator<Item = Option<admitted_recovery::Key>>,
     {
         use admitted_recovery::Key;
         if self
@@ -3161,39 +3266,53 @@ impl RibManager {
         let Some(gid) = self.grouped_member_of(peer) else {
             return;
         };
-        let Some(group) = self.group_ribs.get_mut(&gid) else {
-            return;
-        };
-        let readiness = self.replacement_readiness.clone();
-        let mut checkpoint = |force| super::replacement_readiness_checkpoint(&readiness, force);
-        let shape = candidates.fold((0, 0), |(count, additions), key| {
-            checkpoint(false);
-            let present = self
-                .pending_group_admitted
-                .candidate_universe_contains(peer, group.recovery_snapshot, &key, &mut checkpoint)
-                .unwrap_or_else(|| match key {
-                    Key::Unicast(prefix, path_id) => group.table.get(&prefix, path_id).is_some(),
-                    Key::Vpn(nlri_key, path_id) => {
-                        group.stages_vpn()
-                            && group
-                                .table
-                                .get_vpn(&VpnRibRouteKey { nlri_key, path_id })
-                                .is_some()
-                    }
+        let handle =
+            self.with_summary_recovery_ledger(Some(gid), |ledger, group, readiness, live| {
+                let group = group?;
+                let mut checkpoint =
+                    |force| super::checkpoint_with_summary_reader(readiness, None, force, live);
+                let shape = candidates.fold((0, 0), |(count, additions), candidate| {
+                    checkpoint(false);
+                    let Some(key) = candidate else {
+                        return (count, additions);
+                    };
+                    let present = ledger
+                        .candidate_universe_contains(
+                            peer,
+                            group.recovery_snapshot,
+                            &key,
+                            &mut checkpoint,
+                        )
+                        .unwrap_or_else(|| match key {
+                            Key::Unicast(prefix, path_id) => {
+                                group.table.get(&prefix, path_id).is_some()
+                            }
+                            Key::Vpn(nlri_key, path_id) => {
+                                group.stages_vpn()
+                                    && group
+                                        .table
+                                        .get_vpn(&VpnRibRouteKey { nlri_key, path_id })
+                                        .is_some()
+                            }
+                        });
+                    (count + 1, additions + usize::from(!present))
                 });
-            (count + 1, additions + usize::from(!present))
-        });
-        if let Ok(Some(handle)) = self
-            .pending_group_admitted
-            .share_group_capture_with_checkpoint(
-                peer,
-                group.recovery_snapshot,
-                &group.table,
-                shape,
-                &mut checkpoint,
-            )
-        {
-            group.recovery_snapshot = Some(handle);
+                ledger
+                    .share_group_capture_with_checkpoint(
+                        peer,
+                        group.recovery_snapshot,
+                        &group.table,
+                        shape,
+                        &mut checkpoint,
+                    )
+                    .ok()
+                    .flatten()
+            });
+        if let Some(handle) = handle {
+            self.group_ribs
+                .get_mut(&gid)
+                .expect("captured group")
+                .recovery_snapshot = Some(handle);
         }
     }
 
@@ -3717,7 +3836,6 @@ impl RibManager {
         member_of: Option<usize>,
         group_stage: &HashMap<usize, GroupStageOutput>,
         deferred_groups: &mut HashMap<usize, PeerId>,
-        checkpoint: &impl Fn(),
     ) {
         // Common-family staging has not advanced EVPN. Preserve its actual
         // clean OLD before this missed admission makes the member dirty.
@@ -3747,15 +3865,20 @@ impl RibManager {
                 .is_some_and(|group| group.dirty_members.contains(anchor))
         });
         if !copied {
-            if let Some(group) = self.group_ribs.get_mut(&gid) {
-                let withdrawn: Vec<(Prefix, u32)> = stage.withdrawn_keys(checkpoint).collect();
-                group.tombstones.extend(withdrawn);
+            if self.group_ribs.contains_key(&gid) {
+                self.with_staged_group(gid, |group, readiness, live| {
+                    let checkpoint =
+                        || super::checkpoint_with_summary_reader(readiness, None, false, live);
+                    group.tombstones.extend(stage.withdrawn_keys(&checkpoint));
+                });
             }
             deferred_groups.insert(gid, peer);
         }
         // A source-flip member-scoped withdraw (this member is the delta's
         // new source) keeps the key IN the table, invisible to tombstones.
-        let lost: Vec<(Prefix, u32)> = stage.member_scoped_withdraws(peer, checkpoint).collect();
+        let lost: Vec<(Prefix, u32)> = stage
+            .member_scoped_withdraws(peer, &|| self.replacement_checkpoint(false))
+            .collect();
         if !lost.is_empty() {
             self.pending_extra_withdraws
                 .entry(peer)
@@ -3803,72 +3926,76 @@ impl RibManager {
         swaps: Option<&[DatasetSwap]>,
         reply: tokio::sync::oneshot::Sender<Result<(), RibCommandError>>,
     ) {
-        let result = self.with_replacement_summary_reads("reevaluate", |manager| {
-            let started = std::time::Instant::now();
-            // An unregistered peer has nothing staged to re-evaluate; its
-            // registration evaluates the current datasets. Dropping it keeps
-            // one deferred `PeerUp` from rejecting the whole batch.
-            let peers: Vec<PeerId> = peers
-                .iter()
-                .copied()
-                .filter(|peer| manager.outbound_peers.contains_key(peer))
-                .collect();
-            if peers.is_empty() {
-                // An empty target set would still qualify for the group
-                // pass and scan the whole table for nobody.
-                return Ok(());
-            }
-            let peers = peers.as_slice();
-            let bounded = swaps.and_then(|swaps| manager.dataset_swap_bound(peers, swaps));
-            let mode = if bounded.is_some() { "delta" } else { "full" };
-            let affected = bounded.as_ref().map(|bound| bound.prefixes.len());
-            let affected_vpn = bounded.as_ref().map(|bound| bound.vpn.len());
-            #[cfg(any(test, feature = "bench-internals"))]
-            let group_pass = manager.full_pass_path == super::FullPassPath::Group;
-            #[cfg(not(any(test, feature = "bench-internals")))]
-            let group_pass = true;
-            let mut full_pass = None;
-            let result = match bounded {
-                Some(bound) => {
-                    // The Loc-RIB best is unchanged, so the VPN identities
-                    // ride as forced keys for every target, not only the
-                    // non-best readers.
-                    if !bound.vpn.is_empty() {
-                        manager.distribute_vpn_changes(
-                            &bound.vpn,
-                            &bound.vpn,
-                            Some(&bound.targets),
-                        );
-                    }
-                    if !bound.prefixes.is_empty() {
-                        manager.distribute_changes_to_targets(&bound.prefixes, &bound.targets);
-                    }
-                    Ok(())
+        let result = self.with_replacement_summary_preflight(|manager| {
+            let affected =
+                manager.replacement_summary_scope(peers.iter().map(|&peer| (peer, None)));
+            manager.with_scoped_replacement_summary_reads("reevaluate", affected, |manager| {
+                let started = std::time::Instant::now();
+                // An unregistered peer has nothing staged to re-evaluate; its
+                // registration evaluates the current datasets. Dropping it keeps
+                // one deferred `PeerUp` from rejecting the whole batch.
+                let peers: Vec<PeerId> = peers
+                    .iter()
+                    .copied()
+                    .filter(|peer| manager.outbound_peers.contains_key(peer))
+                    .collect();
+                if peers.is_empty() {
+                    // An empty target set would still qualify for the group
+                    // pass and scan the whole table for nobody.
+                    return Ok(());
                 }
-                None => {
-                    if let Some(targets) = group_pass
-                        .then(|| manager.dataset_reevaluation_targets(peers))
-                        .flatten()
-                    {
-                        full_pass = Some("group");
-                        manager.reevaluate_full_pass_by_group(&targets);
+                let peers = peers.as_slice();
+                let bounded = swaps.and_then(|swaps| manager.dataset_swap_bound(peers, swaps));
+                let mode = if bounded.is_some() { "delta" } else { "full" };
+                let affected = bounded.as_ref().map(|bound| bound.prefixes.len());
+                let affected_vpn = bounded.as_ref().map(|bound| bound.vpn.len());
+                #[cfg(any(test, feature = "bench-internals"))]
+                let group_pass = manager.full_pass_path == super::FullPassPath::Group;
+                #[cfg(not(any(test, feature = "bench-internals")))]
+                let group_pass = true;
+                let mut full_pass = None;
+                let result = match bounded {
+                    Some(bound) => {
+                        // The Loc-RIB best is unchanged, so the VPN identities
+                        // ride as forced keys for every target, not only the
+                        // non-best readers.
+                        if !bound.vpn.is_empty() {
+                            manager.distribute_vpn_changes(
+                                &bound.vpn,
+                                &bound.vpn,
+                                Some(&bound.targets),
+                            );
+                        }
+                        if !bound.prefixes.is_empty() {
+                            manager.distribute_changes_to_targets(&bound.prefixes, &bound.targets);
+                        }
                         Ok(())
-                    } else {
-                        full_pass = Some("member");
-                        manager.reevaluate_peer_export_policies_synchronously(peers, swaps)
                     }
-                }
-            };
-            info!(
-                peers = peers.len(),
-                mode,
-                full_pass,
-                affected_prefixes = affected,
-                affected_vpn_keys = affected_vpn,
-                elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                "dataset export re-evaluation complete"
-            );
-            result
+                    None => {
+                        if let Some(targets) = group_pass
+                            .then(|| manager.dataset_reevaluation_targets(peers))
+                            .flatten()
+                        {
+                            full_pass = Some("group");
+                            manager.reevaluate_full_pass_by_group(&targets);
+                            Ok(())
+                        } else {
+                            full_pass = Some("member");
+                            manager.reevaluate_peer_export_policies_synchronously(peers, swaps)
+                        }
+                    }
+                };
+                info!(
+                    peers = peers.len(),
+                    mode,
+                    full_pass,
+                    affected_prefixes = affected,
+                    affected_vpn_keys = affected_vpn,
+                    elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    "dataset export re-evaluation complete"
+                );
+                result
+            })
         });
         let _ = reply.send(result);
     }
@@ -3891,12 +4018,10 @@ impl RibManager {
         peers: &[PeerId],
         swaps: &[DatasetSwap],
     ) -> Option<DatasetSwapBound> {
-        let readiness = self.replacement_readiness.clone();
-        let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
         let targets = self.dataset_reevaluation_targets(peers)?;
         let mut probed = vec![false; swaps.len()];
         for peer in &targets {
-            checkpoint();
+            self.replacement_checkpoint(false);
             let Some(chain) = self.export_policy_for(*peer).map(PolicyChain::compiled) else {
                 continue;
             };
@@ -3941,14 +4066,14 @@ impl RibManager {
             for rib in self.ribs.values() {
                 prefixes.extend(
                     rib.iter_slots()
-                        .inspect(|_| checkpoint())
+                        .inspect(|_| self.replacement_checkpoint(false))
                         .flatten()
                         .filter(route_differs)
                         .map(|route| route.prefix),
                 );
                 vpn.extend(
                     rib.iter_vpn_slots()
-                        .inspect(|_| checkpoint())
+                        .inspect(|_| self.replacement_checkpoint(false))
                         .flatten()
                         .filter(vpn_differs)
                         .map(|route| route.key().nlri_key),
@@ -3957,14 +4082,14 @@ impl RibManager {
             prefixes.extend(
                 self.loc_rib
                     .iter()
-                    .inspect(|_| checkpoint())
+                    .inspect(|_| self.replacement_checkpoint(false))
                     .filter(route_differs)
                     .map(|route| route.prefix),
             );
             vpn.extend(
                 self.loc_rib
                     .iter_vpn()
-                    .inspect(|_| checkpoint())
+                    .inspect(|_| self.replacement_checkpoint(false))
                     .filter(vpn_differs)
                     .map(|route| route.key().nlri_key),
             );
@@ -3984,8 +4109,6 @@ impl RibManager {
     /// verdicts), and no conditional advertisement is installed. `None`
     /// leaves the per-member full resync.
     fn dataset_reevaluation_targets(&self, peers: &[PeerId]) -> Option<HashSet<PeerId>> {
-        let readiness = self.replacement_readiness.clone();
-        let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
         if peers
             .iter()
             .any(|peer| !self.outbound_peers.contains_key(peer))
@@ -4011,7 +4134,7 @@ impl RibManager {
         targets
             .iter()
             .all(|peer| {
-                checkpoint();
+                self.replacement_checkpoint(false);
                 self.peer_sendable_families
                     .get(peer)
                     .is_some_and(|families| {
@@ -4037,8 +4160,6 @@ impl RibManager {
         {
             self.dataset_full_table_scans += 1;
         }
-        let readiness = self.replacement_readiness.clone();
-        let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
         let groups: HashSet<usize> = targets
             .iter()
             .filter_map(|peer| self.grouped_member_of(*peer))
@@ -4047,25 +4168,25 @@ impl RibManager {
             .unicast_prefix_peers
             .prefixes
             .keys()
-            .inspect(|_| checkpoint())
+            .inspect(|_| self.replacement_checkpoint(false))
             .copied()
             .collect();
         prefixes.extend(
             self.loc_rib
                 .iter()
-                .inspect(|_| checkpoint())
+                .inspect(|_| self.replacement_checkpoint(false))
                 .map(|route| route.prefix),
         );
         let mut vpn: HashSet<VpnRouteKey> = self
             .loc_rib
             .iter_vpn()
-            .inspect(|_| checkpoint())
+            .inspect(|_| self.replacement_checkpoint(false))
             .map(|route| route.key().nlri_key)
             .collect();
         for rib in self.ribs.values() {
             vpn.extend(
                 rib.iter_vpn_slots()
-                    .inspect(|_| checkpoint())
+                    .inspect(|_| self.replacement_checkpoint(false))
                     .flatten()
                     .map(|route| route.key().nlri_key),
             );
@@ -4076,14 +4197,14 @@ impl RibManager {
                     group
                         .table
                         .iter()
-                        .inspect(|_| checkpoint())
+                        .inspect(|_| self.replacement_checkpoint(false))
                         .map(|route| route.prefix),
                 );
                 vpn.extend(
                     group
                         .table
                         .iter_vpn()
-                        .inspect(|_| checkpoint())
+                        .inspect(|_| self.replacement_checkpoint(false))
                         .map(|route| route.key().nlri_key),
                 );
             }
@@ -4093,32 +4214,36 @@ impl RibManager {
                 prefixes.extend(
                     rib_out
                         .iter()
-                        .inspect(|_| checkpoint())
+                        .inspect(|_| self.replacement_checkpoint(false))
                         .map(|route| route.prefix),
                 );
                 vpn.extend(
                     rib_out
                         .iter_vpn()
-                        .inspect(|_| checkpoint())
+                        .inspect(|_| self.replacement_checkpoint(false))
                         .map(|route| route.key().nlri_key),
                 );
             }
             if let Some(blocked) = self.peer_otc_blocked.get(peer) {
-                prefixes.extend(blocked.keys().inspect(|_| checkpoint()).copied());
+                prefixes.extend(
+                    blocked
+                        .keys()
+                        .inspect(|_| self.replacement_checkpoint(false))
+                        .copied(),
+                );
             }
         }
         if !vpn.is_empty() {
             self.distribute_vpn_changes(&vpn, &vpn, Some(targets));
         }
-        // Operator summaries are served from the frozen snapshot between
-        // the family passes, while the group tables are mid-update.
+        // The targeted groups retain their entry view between family passes.
         self.replacement_checkpoint_at("dataset_staging", true);
         if !prefixes.is_empty() {
             self.distribute_changes_to_targets(&prefixes, targets);
         }
         self.replacement_checkpoint_at("dataset_staging", true);
-        super::retire_hash_set(&mut vpn, &mut || checkpoint());
-        super::retire_hash_set(&mut prefixes, &mut || checkpoint());
+        super::retire_hash_set(&mut vpn, &mut || self.replacement_checkpoint(false));
+        super::retire_hash_set(&mut prefixes, &mut || self.replacement_checkpoint(false));
     }
 
     #[expect(
@@ -4130,21 +4255,23 @@ impl RibManager {
         peers: &[PeerId],
         swaps: Option<&[DatasetSwap]>,
     ) -> Result<(), RibCommandError> {
-        let readiness = self.replacement_readiness.clone();
-        let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
         if let Some(peer) = peers
             .iter()
-            .inspect(|_| checkpoint())
+            .inspect(|_| self.replacement_checkpoint(false))
             .find(|peer| !self.outbound_peers.contains_key(peer))
         {
             return Err(RibCommandError::not_found(format!(
                 "peer {peer} not registered for outbound updates"
             )));
         }
-        let mut targets: HashSet<_> = peers.iter().inspect(|_| checkpoint()).copied().collect();
+        let mut targets: HashSet<_> = peers
+            .iter()
+            .inspect(|_| self.replacement_checkpoint(false))
+            .copied()
+            .collect();
         let mut groups: HashSet<_> = peers
             .iter()
-            .inspect(|_| checkpoint())
+            .inspect(|_| self.replacement_checkpoint(false))
             .filter_map(|peer| self.grouped_member_of(*peer))
             .collect();
         // A partially named group keeps its committed table unless this
@@ -4154,7 +4281,7 @@ impl RibManager {
             self.group_ribs.get(gid).is_some_and(|group| {
                 (group.members.len() <= targets.len()
                     && group.members.iter().all(|p| {
-                        checkpoint();
+                        self.replacement_checkpoint(false);
                         targets.contains(p)
                     }))
                     || group.export_chain.as_ref().is_some_and(|chain| {
@@ -4171,7 +4298,7 @@ impl RibManager {
                 self.group_ribs[gid]
                     .members
                     .iter()
-                    .inspect(|_| checkpoint())
+                    .inspect(|_| self.replacement_checkpoint(false))
                     .copied(),
             );
         }
@@ -4188,18 +4315,20 @@ impl RibManager {
             let mut keys: HashSet<_> = self
                 .loc_rib
                 .iter_evpn()
-                .inspect(|_| checkpoint())
+                .inspect(|_| self.replacement_checkpoint(false))
                 .map(crate::route::EvpnRibRoute::key)
                 .collect();
             keys.extend(
                 group
                     .table
                     .iter_evpn()
-                    .inspect(|_| checkpoint())
+                    .inspect(|_| self.replacement_checkpoint(false))
                     .map(crate::route::EvpnRibRoute::key),
             );
             if self.selection_deferred((Afi::L2Vpn, Safi::Evpn)) {
-                crate::manager::retire_hash_set(&mut keys, &mut || checkpoint());
+                crate::manager::retire_hash_set(&mut keys, &mut || {
+                    self.replacement_checkpoint(false);
+                });
                 continue;
             }
             for &peer in &members {
@@ -4225,12 +4354,12 @@ impl RibManager {
             // The sparse operation-local payloads now own every changed
             // value needed by the existing trailing mixed transaction.
             staged.retire_with(&mut |force| {
-                super::replacement_readiness_checkpoint(&readiness, force);
+                self.replacement_checkpoint(force);
             });
-            crate::manager::retire_hash_set(&mut keys, &mut || checkpoint());
+            crate::manager::retire_hash_set(&mut keys, &mut || self.replacement_checkpoint(false));
         }
         for &peer in &targets {
-            checkpoint();
+            self.replacement_checkpoint(false);
             let mut feed = evpn_feeds.remove(&peer);
             if let Some(gid) = self.evpn_grouped_member_of(peer)
                 && !groups.contains(&gid)
@@ -4253,19 +4382,19 @@ impl RibManager {
                 .unicast_prefix_peers
                 .prefixes
                 .keys()
-                .inspect(|_| checkpoint())
+                .inspect(|_| self.replacement_checkpoint(false))
                 .copied()
                 .collect();
             prefixes.extend(
                 self.loc_rib
                     .iter()
-                    .inspect(|_| checkpoint())
+                    .inspect(|_| self.replacement_checkpoint(false))
                     .map(|route| route.prefix),
             );
             let mut vpn_keys: HashSet<_> = self
                 .loc_rib
                 .iter_vpn()
-                .inspect(|_| checkpoint())
+                .inspect(|_| self.replacement_checkpoint(false))
                 .map(VpnRibRoute::key)
                 .collect();
             for gid in &groups {
@@ -4274,14 +4403,14 @@ impl RibManager {
                         group
                             .table
                             .iter()
-                            .inspect(|_| checkpoint())
+                            .inspect(|_| self.replacement_checkpoint(false))
                             .map(|route| route.prefix),
                     );
                     vpn_keys.extend(
                         group
                             .table
                             .iter_vpn()
-                            .inspect(|_| checkpoint())
+                            .inspect(|_| self.replacement_checkpoint(false))
                             .map(VpnRibRoute::key),
                     );
                 }
@@ -4289,12 +4418,12 @@ impl RibManager {
             self.record_deferred_unicast(&prefixes);
             self.record_deferred_vpn(&vpn_keys);
             vpn_keys.retain(|key| {
-                checkpoint();
+                self.replacement_checkpoint(false);
                 !self.selection_deferred(key.afi_safi())
             });
             let vpn_keys: HashSet<_> = vpn_keys
                 .into_iter()
-                .inspect(|_| checkpoint())
+                .inspect(|_| self.replacement_checkpoint(false))
                 .map(|key| key.nlri_key)
                 .collect();
             let mut memo = super::distribution::ExportMemo::default();
@@ -4304,7 +4433,7 @@ impl RibManager {
                 let mut staged = self.stage_group_prefixes(gid, &prefixes, &mut memo);
                 self.replacement_checkpoint_at("dataset_staging", true);
                 staged.retire_with(&mut |force| {
-                    super::replacement_readiness_checkpoint(&readiness, force);
+                    self.replacement_checkpoint(force);
                 });
                 self.replacement_checkpoint_at("dataset_staging", true);
                 if self
@@ -4314,11 +4443,11 @@ impl RibManager {
                 {
                     let mut staged = self.stage_group_vpn_keys(gid, &vpn_keys);
                     staged.retire_with(&mut |force| {
-                        super::replacement_readiness_checkpoint(&readiness, force);
+                        self.replacement_checkpoint(force);
                     });
                 }
             }
-            memo.retire_with(&mut || checkpoint());
+            memo.retire_with(&mut || self.replacement_checkpoint(false));
             self.refresh_lane_gauge();
         }
         self.distribute_scoped_resync(targets, evpn_feeds, false);
@@ -4410,13 +4539,11 @@ impl RibManager {
         if !self.retain_initial_group_admitted(peer) {
             self.release_group_admitted_keys(peer);
         }
-        let readiness = self.replacement_readiness.clone();
-        let mut checkpoint =
-            || super::replacement_readiness_checkpoint_at(&readiness, "retirement", false);
         if let Some(mut baseline) = self.pending_regroup_baseline.remove(&peer) {
-            baseline.retire_with(&mut checkpoint);
+            baseline.retire_with(&mut || self.replacement_checkpoint_at("retirement", false));
         }
         if let Some(mut extras) = self.pending_extra_withdraws.remove(&peer) {
+            let mut checkpoint = || self.replacement_checkpoint_at("retirement", false);
             super::retire_hash_set(&mut extras.unicast, &mut checkpoint);
             super::retire_hash_set(&mut extras.vpn, &mut checkpoint);
         }
@@ -4426,14 +4553,24 @@ impl RibManager {
         // are made exact again.
         let filter = self.member_rt_filter(peer);
         if let Some(gid) = self.grouped_member_of(peer)
-            && let Some(group) = self.group_ribs.get_mut(&gid)
+            && self.group_ribs.contains_key(&gid)
         {
-            group.recompute_vpn_member_counts(peer, filter.as_ref(), &mut checkpoint);
-            group.dirty_members.remove(&peer);
-            if group.dirty_members.is_empty() {
-                super::retire_hash_set(&mut group.tombstones, &mut checkpoint);
-                super::retire_hash_set(&mut group.vpn_tombstones, &mut checkpoint);
-            }
+            self.with_staged_group(gid, |group, readiness, live| {
+                let mut checkpoint = || {
+                    super::checkpoint_with_summary_reader(
+                        readiness,
+                        Some("retirement"),
+                        false,
+                        live,
+                    );
+                };
+                group.recompute_vpn_member_counts(peer, filter.as_ref(), &mut checkpoint);
+                group.dirty_members.remove(&peer);
+                if group.dirty_members.is_empty() {
+                    super::retire_hash_set(&mut group.tombstones, &mut checkpoint);
+                    super::retire_hash_set(&mut group.vpn_tombstones, &mut checkpoint);
+                }
+            });
         }
         self.refresh_group_residue_gauge();
         if held_counts && !self.retain_initial_group_admitted(peer) {
@@ -4668,11 +4805,10 @@ impl RibManager {
     /// Apply aggregated export-policy verdict rows to a peer's counters
     /// (integer adds — no per-(prefix × peer) prometheus lookups).
     fn bump_export_counters(&mut self, peer: PeerId, rows: &[(Option<String>, PolicyAction, u64)]) {
-        let readiness = self.replacement_readiness.clone();
         let mut stats = crate::update::NeighborPolicyStats::default();
         let peer_label = peer.label();
         for (policy, action, n) in rows {
-            super::replacement_readiness_checkpoint(&readiness, false);
+            self.replacement_checkpoint(false);
             if *n == 0 {
                 continue;
             }
@@ -4705,8 +4841,6 @@ impl RibManager {
     }
 
     fn leave_group_without_gauge_refresh(&mut self, gid: usize, peer: PeerId) {
-        let readiness = self.replacement_readiness.clone();
-        let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
         // A withdrawal the group queued to this member may not have
         // reached it; the member's own hold ledger keeps it for a flap after
         // the move. A session teardown has already deregistered the peer and
@@ -4718,7 +4852,7 @@ impl RibManager {
         {
             let keys: Vec<_> = group_ledger
                 .iter()
-                .inspect(|_| checkpoint())
+                .inspect(|_| self.replacement_checkpoint(false))
                 .copied()
                 .collect();
             self.record_hold_exempt_withdrawn(
@@ -4727,19 +4861,24 @@ impl RibManager {
                 "group_leave",
             );
         }
-        let Some(group) = self.group_ribs.get_mut(&gid) else {
+        if !self.group_ribs.contains_key(&gid) {
             return;
-        };
-        group.members.remove(&peer);
-        group.visible_rejections.remove(&peer);
-        group.remove_rs_member(peer, &mut || checkpoint());
-        group.vpn_member_counts.remove(&peer);
-        group.dirty_members.remove(&peer);
-        if group.dirty_members.is_empty() {
-            super::retire_hash_set(&mut group.tombstones, &mut || checkpoint());
-            super::retire_hash_set(&mut group.vpn_tombstones, &mut || checkpoint());
         }
-        if group.members.is_empty() {
+        let empty = self.with_staged_group(gid, |group, readiness, live| {
+            let mut checkpoint =
+                || super::checkpoint_with_summary_reader(readiness, None, false, live);
+            group.members.remove(&peer);
+            group.visible_rejections.remove(&peer);
+            group.remove_rs_member(peer, &mut checkpoint);
+            group.vpn_member_counts.remove(&peer);
+            group.dirty_members.remove(&peer);
+            if group.dirty_members.is_empty() {
+                super::retire_hash_set(&mut group.tombstones, &mut checkpoint);
+                super::retire_hash_set(&mut group.vpn_tombstones, &mut checkpoint);
+            }
+            group.members.is_empty()
+        });
+        if empty {
             self.remove_group_with_readiness(gid);
         }
     }
@@ -5040,9 +5179,7 @@ impl RibManager {
         let _ = reply.send(self.update_group_comparison(primary, comparison));
     }
 
-    /// Compute a comparison without crossing the actor boundary.  The
-    /// aggregate `NeighborService` snapshot uses this alongside its primary
-    /// peer row, so both values describe one manager generation.
+    /// Compare both peers using the current membership and group-key maps.
     pub(super) fn update_group_comparison(
         &self,
         primary: PeerId,
@@ -5059,8 +5196,7 @@ impl RibManager {
     /// bookkeeping.
     fn refresh_update_group_gauges(&mut self) {
         self.reclaim_unused_update_group_policies();
-        let readiness = self.replacement_readiness.clone();
-        let mut checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
+        let mut checkpoint = || self.replacement_checkpoint(false);
         self.replacement_checkpoint(true);
         let mut member_counts: HashMap<usize, i64> =
             HashMap::with_capacity(self.update_groups.members.len());
@@ -5108,8 +5244,6 @@ impl RibManager {
         if self.update_groups.reclamation_deferred {
             return;
         }
-        let readiness = self.replacement_readiness.clone();
-        let mut checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
         let group_bound = self
             .group_ribs
             .len()
@@ -5118,9 +5252,14 @@ impl RibManager {
         self.replacement_checkpoint(true);
         let mut groups: HashSet<usize> = HashSet::with_capacity(group_bound);
         self.replacement_checkpoint(true);
-        groups.extend(self.group_ribs.keys().inspect(|_| checkpoint()).copied());
+        groups.extend(
+            self.group_ribs
+                .keys()
+                .inspect(|_| self.replacement_checkpoint(false))
+                .copied(),
+        );
         groups.extend(self.update_groups.members.values().filter_map(|member| {
-            checkpoint();
+            self.replacement_checkpoint(false);
             if let GroupMembership::Grouped(id) = member {
                 Some(*id)
             } else {
@@ -5153,7 +5292,7 @@ impl RibManager {
             groups.remove(&gid);
         }
         chains.extend(groups.drain().filter_map(|id| {
-            checkpoint();
+            self.replacement_checkpoint(false);
             self.update_groups.group_key(id).and_then(|key| key.chain)
         }));
         self.replacement_checkpoint(true);
@@ -5176,12 +5315,12 @@ impl RibManager {
         }
         drop(groups);
         self.replacement_checkpoint(true);
-        for (id, chain) in self.update_groups.chains.iter_mut().enumerate() {
-            checkpoint();
+        for id in 0..self.update_groups.chains.len() {
+            self.replacement_checkpoint(false);
             if !chains.contains(&id) {
-                *chain = None;
+                self.update_groups.chains[id] = None;
             }
-            checkpoint();
+            self.replacement_checkpoint(false);
         }
         // Heavy payloads reflect current ownership; small key slots remain
         // historical metadata, including rejected or discarded preparation.
@@ -5189,7 +5328,7 @@ impl RibManager {
             .update_groups
             .chains
             .iter()
-            .inspect(|_| checkpoint())
+            .inspect(|_| self.replacement_checkpoint(false))
             .filter(|chain| chain.is_some())
             .count();
         self.update_groups.optional_chain_owner =
@@ -5204,7 +5343,7 @@ impl RibManager {
             i64::try_from(self.update_groups.groups.len()).unwrap_or(i64::MAX),
         );
         self.replacement_checkpoint(true);
-        super::retire_hash_set(&mut chains, &mut checkpoint);
+        super::retire_hash_set(&mut chains, &mut || self.replacement_checkpoint(false));
         self.replacement_checkpoint(true);
     }
 

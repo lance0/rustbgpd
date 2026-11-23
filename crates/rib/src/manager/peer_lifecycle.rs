@@ -1252,13 +1252,26 @@ impl RibManager {
         keys: impl IntoIterator<Item = (Prefix, u32)>,
         stage: &'static str,
     ) {
-        let readiness = self.replacement_readiness.clone();
-        let ledger = self.hold_exempt_withdrawn.entry(owner).or_default();
-        insert_bounded(ledger, keys, &mut || {
-            super::replacement_readiness_checkpoint_at(&readiness, stage, false);
+        if self.replacement_summary_groups.is_none() {
+            let readiness = &self.replacement_readiness;
+            let ledger = self.hold_exempt_withdrawn.entry(owner).or_default();
+            insert_bounded(ledger, keys, &mut || {
+                super::replacement_readiness_checkpoint_at(readiness, stage, false);
+            });
+            if ledger.is_empty() {
+                self.hold_exempt_withdrawn.remove(&owner);
+            }
+            return;
+        }
+        let mut ledger = self
+            .hold_exempt_withdrawn
+            .remove(&owner)
+            .unwrap_or_default();
+        insert_bounded(&mut ledger, keys, &mut || {
+            self.replacement_checkpoint_at(stage, false);
         });
-        if ledger.is_empty() {
-            self.hold_exempt_withdrawn.remove(&owner);
+        if !ledger.is_empty() {
+            self.hold_exempt_withdrawn.insert(owner, ledger);
         }
     }
 
