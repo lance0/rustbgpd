@@ -314,6 +314,15 @@ fn register_growth_peer(
 }
 
 #[test]
+fn registration_of_rr_non_client_uses_the_authoritative_group_build() {
+    let mut manager = staging_manager();
+    manager.cluster_id = Some(Ipv4Addr::LOCALHOST);
+    manager.first_group_build_min_routes = 0;
+    let _receiver = register_growth_peer(&mut manager, MEMBER, 1);
+    assert!(manager.grouped_member_of(MEMBER).is_some());
+}
+
+#[test]
 fn registration_with_local_role_uses_the_authoritative_group_build() {
     let mut manager = staging_manager();
     manager.first_group_build_min_routes = 0;
