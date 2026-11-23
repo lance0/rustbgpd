@@ -2282,11 +2282,19 @@ impl RibManager {
                 // LLGR-stale routes (RFC 9494 §4.2). Deduplicated: a family
                 // marked twice would be deleted.
                 // A completed family is absent from the EoR waiters, but the
-                // retired session's OPEN still covers its fresh routes.
+                // retired session's OPEN still covers its fresh routes. As in
+                // `handle_peer_graceful_restart`, a family listed only in its
+                // LLGR capability enters the LLGR phase at once.
+                let mut llgr_only: Vec<(Afi, Safi)> = Vec::new();
+                let mut llgr_config = None;
                 if let Some(context) = self
                     .live_sessions
                     .get(&peer)
-                    .and_then(|sessions| sessions.last())
+                    .and_then(|sessions| {
+                        sessions
+                            .iter()
+                            .find(|record| Some(record.session_id) == supersedes)
+                    })
                     .and_then(|record| record.gr_context.as_ref())
                 {
                     let llgr = self.llgr_peers.get(&peer);
@@ -2294,6 +2302,44 @@ impl RibManager {
                         if !llgr.is_some_and(|awaiting| awaiting.contains(family)) {
                             self.gr_peers.entry(peer).or_default().insert(*family);
                         }
+                    }
+                    if context.local_llgr_stale_time > 0 {
+                        for listed in &context.peer_llgr_families {
+                            let family = (listed.afi, listed.safi);
+                            if listed.stale_time > 0
+                                && !context.peer_gr_families.contains(&family)
+                                && !llgr_only.contains(&family)
+                            {
+                                llgr_only.push(family);
+                            }
+                        }
+                    }
+                    if !llgr_only.is_empty() {
+                        llgr_config = Some(super::helpers::LlgrPeerConfig {
+                            peer_llgr_capable: true,
+                            peer_llgr_families: context.peer_llgr_families.clone(),
+                            local_llgr_stale_time: context.local_llgr_stale_time,
+                            stale_routes_time: self
+                                .gr_stale_routes_time
+                                .get(&peer)
+                                .copied()
+                                .or_else(|| {
+                                    self.llgr_peer_config
+                                        .get(&peer)
+                                        .map(|config| config.stale_routes_time)
+                                })
+                                .unwrap_or(360),
+                        });
+                    }
+                }
+                if !llgr_only.is_empty()
+                    && let Some(awaiting) = self.gr_peers.get_mut(&peer)
+                {
+                    awaiting.retain(|family| !llgr_only.contains(family));
+                    if awaiting.is_empty() {
+                        self.gr_peers.remove(&peer);
+                        self.gr_stale_deadlines.remove(&peer);
+                        self.gr_stale_routes_time.remove(&peer);
                     }
                 }
                 let mut retained: Vec<(Afi, Safi)> = Vec::new();
@@ -2303,6 +2349,7 @@ impl RibManager {
                     .into_iter()
                     .flatten()
                     .chain(self.llgr_peers.get(&peer).into_iter().flatten())
+                    .chain(&llgr_only)
                 {
                     if !retained.contains(&family) {
                         retained.push(family);
@@ -2311,6 +2358,10 @@ impl RibManager {
                 self.with_selection_readiness(|manager| {
                     manager.mark_gr_retention_with_readiness(peer, &retained);
                 });
+                if let Some(llgr_config) = llgr_config {
+                    self.enter_llgr_phase(peer, &llgr_only, &llgr_config, None);
+                    self.llgr_peer_config.insert(peer, llgr_config);
+                }
             }
             // Transport recreates the outbound channel whenever a session
             // ends, so one connection never registers twice.

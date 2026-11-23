@@ -1193,7 +1193,7 @@ impl RibManager {
     /// `page_topology` is a version-fenced paged-read topology the caller
     /// took out before advancing page versions; it is retired under the
     /// owner.
-    fn enter_llgr_phase(
+    pub(super) fn enter_llgr_phase(
         &mut self,
         peer: PeerId,
         families: &[(Afi, Safi)],

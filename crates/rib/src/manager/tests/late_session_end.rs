@@ -1086,3 +1086,107 @@ fn replacement_naming_an_unregistered_session_leaves_the_registered_routes_fresh
     assert_eq!(held(&manager, 1), Some((true, false, true)));
     assert_eq!(held(&manager, 2), Some((false, false, true)));
 }
+
+fn llgr_both() -> Vec<rustbgpd_wire::LlgrFamily> {
+    DUAL_STACK
+        .iter()
+        .map(|&(afi, safi)| rustbgpd_wire::LlgrFamily {
+            afi,
+            safi,
+            forwarding_preserved: false,
+            stale_time: 3600,
+        })
+        .collect()
+}
+
+fn llgr_restart_end(session_id: u64) -> RibUpdate {
+    RibUpdate::PeerGracefulRestart {
+        peer: peer(),
+        session_id,
+        restart_time: 90,
+        stale_routes_time: 120,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: true,
+        peer_llgr_families: llgr_both(),
+        llgr_stale_time: 3600,
+    }
+}
+
+/// IPv6 is listed only in the LLGR capability. Returns whether the IPv4
+/// route is selected, and whether the IPv6 route is selected and LLGR-stale,
+/// after the replacement registers, with the reconnect's restart end
+/// delivered before or after its replacement.
+fn llgr_only_scenario(complete_v6: bool, superseded_first: bool) -> (bool, bool, bool) {
+    let v4_route = make_route(
+        Ipv4Prefix::new(Ipv4Addr::new(10, 0, 1, 0), 24),
+        Ipv4Addr::new(192, 0, 2, 1),
+    );
+    let v6_route = ipv6_route_from_peer();
+    let mut manager = test_manager();
+    peer_up(&mut manager, 1);
+    manager.handle_update(llgr_restart_end(1));
+    manager.handle_update(reconnect_context(
+        2,
+        vec![(Afi::Ipv4, Safi::Unicast)],
+        llgr_both(),
+    ));
+    peer_up_superseding(&mut manager, 2, Some(1));
+    announce_routes(&mut manager, 2, vec![v4_route.clone(), v6_route.clone()]);
+    if complete_v6 {
+        manager.handle_update(RibUpdate::EndOfRib {
+            peer: peer(),
+            session_id: 2,
+            afi: Afi::Ipv6,
+            safi: Safi::Unicast,
+        });
+    }
+    manager.handle_update(reconnect_context(
+        3,
+        vec![(Afi::Ipv4, Safi::Unicast)],
+        llgr_both(),
+    ));
+    if superseded_first {
+        peer_up_superseding(&mut manager, 3, Some(2));
+        manager.handle_update(RibUpdate::LateSessionEnd(Box::new(llgr_restart_end(2))));
+    } else {
+        manager.handle_update(llgr_restart_end(2));
+        peer_up_superseding(&mut manager, 3, Some(2));
+    }
+    (
+        manager.loc_rib.get(&v4_route.prefix).is_some(),
+        manager.loc_rib.get(&v6_route.prefix).is_some(),
+        manager
+            .ribs
+            .get(&peer())
+            .and_then(|rib| rib.get(&v6_route.prefix, 0))
+            .is_some_and(|route| route.is_llgr_stale),
+    )
+}
+
+/// The reconnect completed an LLGR-only family: in order, its end retains it
+/// LLGR-stale (RFC 9494 §4.2), and so must its replacement.
+/// Mutation-red: carrying only the GR families withdraws the IPv6 route.
+#[test]
+fn llgr_only_completed_family_retained_in_both_orders() {
+    let in_order = llgr_only_scenario(true, false);
+    let superseded = llgr_only_scenario(true, true);
+    assert_eq!(in_order, (true, true, true));
+    assert_eq!(
+        in_order, superseded,
+        "completed LLGR-only family: in-order {in_order:?} vs superseded {superseded:?}"
+    );
+}
+
+/// The reconnect still owes End-of-RIB for an LLGR-only family: it stays in
+/// the LLGR phase, which the replacement's LLGR capability lists.
+/// Mutation-red: leaving it a GR waiter removes it as unlisted.
+#[test]
+fn llgr_only_pending_family_retained_in_both_orders() {
+    let in_order = llgr_only_scenario(false, false);
+    let superseded = llgr_only_scenario(false, true);
+    assert_eq!(in_order, (true, true, true));
+    assert_eq!(
+        in_order, superseded,
+        "pending LLGR-only family: in-order {in_order:?} vs superseded {superseded:?}"
+    );
+}
