@@ -36,7 +36,7 @@ impl Announcement {
         manager: &RibManager,
         peer: PeerId,
         admitted: bool,
-    ) -> Option<OutboundCommitBatch> {
+    ) -> Option<OutboundCommitBatch<'static>> {
         let mut exact_export_snapshot = None;
         // The stage proved route equality. The receiver supplies the actual
         // prior and a single immutable profile for comparison and admission.

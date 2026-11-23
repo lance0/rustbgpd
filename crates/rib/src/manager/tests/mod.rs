@@ -1675,6 +1675,7 @@ fn gr_with_llgr(
         restart_time,
         stale_routes_time: 360,
         gr_families,
+        peer_notification_gr: false,
         peer_llgr_capable: true,
         peer_llgr_families: llgr_families
             .into_iter()
@@ -1761,6 +1762,7 @@ mod first_group_build;
 mod first_group_writers;
 mod flowspec;
 mod flowspec_advertised;
+mod flowspec_departure_commit;
 mod gr_helper_stale_exempt;
 mod gr_llgr;
 mod hold_release_owed_drain;

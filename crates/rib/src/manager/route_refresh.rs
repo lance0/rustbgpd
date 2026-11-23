@@ -490,7 +490,7 @@ impl RibManager {
                 info!(%peer, "graceful restart complete — all End-of-RIB received");
                 self.gr_peers.remove(&peer);
                 self.gr_stale_deadlines.remove(&peer);
-                self.gr_stale_routes_time.remove(&peer);
+                self.gr_stale_timers.remove(&peer);
                 self.llgr_peer_config.remove(&peer);
                 self.metrics.set_gr_active(&peer_label, false);
                 self.metrics.set_gr_stale_routes(&peer_label, 0);

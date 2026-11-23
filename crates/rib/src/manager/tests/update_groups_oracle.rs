@@ -1728,6 +1728,7 @@ impl Oracle {
                 restart_time: 120,
                 stale_routes_time: 300,
                 gr_families: vpn_rtc_sendable(),
+                peer_notification_gr: false,
                 peer_llgr_capable: false,
                 peer_llgr_families: vec![],
                 llgr_stale_time: 0,

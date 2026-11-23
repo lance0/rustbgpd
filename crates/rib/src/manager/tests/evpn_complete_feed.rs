@@ -3446,7 +3446,7 @@ fn leave_one_slot(manager: &RibManager, peer: PeerId) {
 
 fn clean_replay_batch(
     feed: crate::manager::evpn_recovery::EvpnCompleteFeed,
-) -> OutboundCommitBatch {
+) -> OutboundCommitBatch<'static> {
     OutboundCommitBatch {
         evpn_announce: feed.announce.into(),
         evpn_withdraw: feed.withdraw,

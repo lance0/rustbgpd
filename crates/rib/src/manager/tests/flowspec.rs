@@ -301,6 +301,7 @@ async fn flowspec_gauge_tracks_gr_llgr_expiry_and_end_of_rib() {
                 120,
                 360,
                 vec![(Afi::Ipv4, Safi::FlowSpec), (Afi::Ipv6, Safi::FlowSpec)],
+                false,
                 llgr,
                 vec![rustbgpd_wire::LlgrFamily {
                     afi: Afi::Ipv4,
@@ -494,6 +495,7 @@ async fn flowspec_gr_omitted_families_withdraw_all_paths_and_redistribute() {
                     360,
                     gr_families,
                     false,
+                    false,
                     vec![],
                     0,
                 ));
@@ -659,6 +661,7 @@ async fn gr_flowspec_eor_recomputes_and_redistributes() {
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: vec![(Afi::Ipv4, Safi::FlowSpec)],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
         llgr_stale_time: 0,
@@ -999,6 +1002,7 @@ async fn flowspec_gr_consecutive_restart_deletes_stale_routes() {
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: vec![(Afi::Ipv4, Safi::FlowSpec)],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
         llgr_stale_time: 0,
@@ -1053,6 +1057,7 @@ async fn flowspec_gr_eor_sweeps_non_readvertised() {
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: vec![(Afi::Ipv4, Safi::FlowSpec)],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
         llgr_stale_time: 0,
@@ -1136,6 +1141,7 @@ async fn flowspec_llgr_eor_sweeps_non_readvertised() {
         restart_time: 2,
         stale_routes_time: 5,
         gr_families: vec![(Afi::Ipv4, Safi::FlowSpec)],
+        peer_notification_gr: false,
         peer_llgr_capable: true,
         peer_llgr_families: vec![rustbgpd_wire::LlgrFamily {
             afi: Afi::Ipv4,

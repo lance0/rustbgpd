@@ -2974,6 +2974,7 @@ impl RibManager {
             restart_time: 120,
             stale_routes_time: 360,
             gr_families: families.to_vec(),
+            peer_notification_gr: false,
             peer_llgr_capable: false,
             peer_llgr_families: Vec::new(),
             llgr_stale_time: 0,

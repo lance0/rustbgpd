@@ -3481,6 +3481,7 @@ fn peer_update_group_series_follows_session_teardown() {
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: Vec::new(),
         llgr_stale_time: 0,

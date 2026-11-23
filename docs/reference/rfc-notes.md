@@ -1317,8 +1317,21 @@ RFC suggestion (step 7 or later) but matches GoBGP and FRR behavior.
    config, default 360s). This is the window for the peer to send
    End-of-RIB markers.
 
-**PeerUp during GR:** Routes are NOT cleared of stale flags. The timer is
-reset. Outbound state is re-registered. Stale flags are cleared only by
+On a second GR-eligible TCP loss, the ending session's negotiated N bit
+determines whether previously GR-stale routes survive. With N, rustbgpd
+retains them and the existing End-of-RIB deadline caps both the restart
+and End-of-RIB waits. Without N, rustbgpd deletes them. Routes refreshed
+between resets become stale in either case. An ordinary NOTIFICATION
+enters GR only with N. A Hard Reset purges the routes.
+[RFC 8538 §4.1](https://www.rfc-editor.org/rfc/rfc8538.html#section-4.1)
+
+If a replacement registers before the RIB receives the retired session's end,
+it knows only the retired session ID. During active retention, this fallback
+deletes previously GR-stale routes and marks fresh routes stale until
+End-of-RIB or expiry.
+
+**PeerUp during GR:** Routes are NOT cleared of stale flags. Outbound state
+is re-registered. Stale flags are cleared only by
 per-family End-of-RIB, not by session re-establishment. The exception is a
 retained family that the new OPEN does not list: RFC 4724 §4.2 requires its
 stale routes to be removed immediately "if a specific address family is not

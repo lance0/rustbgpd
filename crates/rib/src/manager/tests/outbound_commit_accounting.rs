@@ -51,7 +51,7 @@ fn manager() -> RibManager {
     RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
 }
 
-fn unicast_batch() -> OutboundCommitBatch {
+fn unicast_batch() -> OutboundCommitBatch<'static> {
     OutboundCommitBatch::with_unicast(
         vec![make_route(
             Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
@@ -62,7 +62,7 @@ fn unicast_batch() -> OutboundCommitBatch {
     )
 }
 
-fn family_batches() -> Vec<(&'static str, OutboundCommitBatch)> {
+fn family_batches() -> Vec<(&'static str, OutboundCommitBatch<'static>)> {
     vec![
         ("unicast", unicast_batch()),
         (

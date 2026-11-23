@@ -55,6 +55,7 @@ impl HoldEvent {
                     restart_time: 120,
                     stale_routes_time: 120,
                     gr_families: vec![EVPN],
+                    peer_notification_gr: false,
                     peer_llgr_capable: llgr,
                     peer_llgr_families: if llgr {
                         vec![rustbgpd_wire::LlgrFamily {

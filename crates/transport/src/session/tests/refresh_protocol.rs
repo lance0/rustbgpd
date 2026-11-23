@@ -303,6 +303,7 @@ async fn gr_orf_first_refresh_sends_initial_eor_before_any_borr_on_tcp() {
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: vec![family],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
         llgr_stale_time: 0,

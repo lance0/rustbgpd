@@ -64,6 +64,7 @@ async fn gr_marks_stale_and_demotes_routes() {
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
         llgr_stale_time: 0,
@@ -115,6 +116,7 @@ async fn gr_eor_clears_stale() {
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
         llgr_stale_time: 0,
@@ -199,6 +201,7 @@ async fn gr_consecutive_restart_deletes_stale_routes() {
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
         llgr_stale_time: 0,
@@ -252,6 +255,7 @@ async fn gr_eor_sweep_scopes_to_family() {
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
         llgr_stale_time: 0,
@@ -316,6 +320,7 @@ async fn gr_timer_sweeps_stale_routes() {
         restart_time: 5,
         stale_routes_time: 10,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
         llgr_stale_time: 0,
@@ -372,6 +377,7 @@ async fn gr_peer_up_defers_stale_to_eor() {
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
         llgr_stale_time: 0,
@@ -481,6 +487,7 @@ async fn gr_peer_up_timer_expires_sweeps_stale() {
         restart_time: 5,
         stale_routes_time: 10,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
         llgr_stale_time: 0,
@@ -577,6 +584,7 @@ async fn gr_peer_down_aborts_gr() {
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
         llgr_stale_time: 0,
@@ -669,6 +677,7 @@ async fn gr_withdraws_non_gr_family_routes() {
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
         llgr_stale_time: 0,
@@ -728,6 +737,7 @@ async fn llgr_gr_timer_promotes_to_llgr_stale() {
         restart_time: 5,
         stale_routes_time: 10,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: true,
         peer_llgr_families: vec![rustbgpd_wire::LlgrFamily {
             afi: Afi::Ipv4,
@@ -788,6 +798,7 @@ async fn llgr_timer_sweeps_llgr_stale_routes() {
         restart_time: 2,
         stale_routes_time: 5,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: true,
         peer_llgr_families: vec![rustbgpd_wire::LlgrFamily {
             afi: Afi::Ipv4,
@@ -850,6 +861,7 @@ async fn llgr_eor_clears_llgr_stale() {
         restart_time: 2,
         stale_routes_time: 5,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: true,
         peer_llgr_families: vec![rustbgpd_wire::LlgrFamily {
             afi: Afi::Ipv4,
@@ -978,6 +990,7 @@ async fn late_end_of_rib_after_llgr_promotion_from_a_registered_session() {
         restart_time: 2,
         stale_routes_time: 5,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: true,
         peer_llgr_families: vec![rustbgpd_wire::LlgrFamily {
             afi: Afi::Ipv4,
@@ -1051,6 +1064,7 @@ async fn llgr_peer_down_aborts_llgr() {
         restart_time: 2,
         stale_routes_time: 5,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: true,
         peer_llgr_families: vec![rustbgpd_wire::LlgrFamily {
             afi: Afi::Ipv4,
@@ -1121,6 +1135,7 @@ async fn llgr_without_peer_capability_falls_through_to_sweep() {
         restart_time: 2,
         stale_routes_time: 5,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
         llgr_stale_time: 3600, // local config, but peer doesn't support
@@ -1229,6 +1244,7 @@ async fn llgr_reestablish_uses_captured_stale_routes_time() {
         restart_time: 2,
         stale_routes_time: 77,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: true,
         peer_llgr_families: vec![rustbgpd_wire::LlgrFamily {
             afi: Afi::Ipv4,
@@ -1247,8 +1263,11 @@ async fn llgr_reestablish_uses_captured_stale_routes_time() {
     // the stale_routes_time captured at GR entry, not the 360 s default.
     let _out_rx = establish_peer(&mut manager, peer);
     assert_eq!(
-        manager.gr_stale_routes_time.get(&peer),
-        Some(&77),
+        manager
+            .gr_stale_timers
+            .get(&peer)
+            .map(|timer| timer.seconds),
+        Some(77),
         "re-establishment during LLGR must honor the captured stale_routes_time"
     );
 }
@@ -1264,6 +1283,7 @@ async fn llgr_expiry_sweep_drops_llgr_peer_config() {
         restart_time: 2,
         stale_routes_time: 5,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: true,
         peer_llgr_families: vec![rustbgpd_wire::LlgrFamily {
             afi: Afi::Ipv4,
@@ -1323,6 +1343,7 @@ async fn gr_expiry_without_reestablish_releases_peer_state() {
         restart_time: 2,
         stale_routes_time: 5,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
         llgr_stale_time: 0,
@@ -1381,6 +1402,7 @@ async fn llgr_expiry_without_reestablish_releases_peer_state() {
         restart_time: 2,
         stale_routes_time: 5,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: true,
         peer_llgr_families: vec![rustbgpd_wire::LlgrFamily {
             afi: Afi::Ipv4,
@@ -1446,6 +1468,7 @@ async fn gr_expiry_sweep_spares_reestablished_peer_awaiting_eor() {
         restart_time: 2,
         stale_routes_time: 5,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
         llgr_stale_time: 0,
@@ -1566,6 +1589,7 @@ async fn grouped_late_join_reflects_gr_retained_rr_client_route() {
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: Vec::new(),
         llgr_stale_time: 0,
@@ -1636,6 +1660,7 @@ async fn ungrouped_llgr_promotion_keeps_rr_client_route_advertised() {
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: vec![family],
+        peer_notification_gr: false,
         peer_llgr_capable: true,
         peer_llgr_families: vec![rustbgpd_wire::LlgrFamily {
             afi: family.0,
@@ -1696,6 +1721,7 @@ async fn rr_client_role_is_overwritten_when_source_reestablishes_as_nonclient() 
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: Vec::new(),
         llgr_stale_time: 0,
@@ -1796,6 +1822,7 @@ async fn llgr_mixed_stale_times_sweep_per_family() {
         restart_time: 2,
         stale_routes_time: 360,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv4, Safi::MplsVpn)],
+        peer_notification_gr: false,
         peer_llgr_capable: true,
         peer_llgr_families: vec![
             rustbgpd_wire::LlgrFamily {
@@ -2275,6 +2302,7 @@ async fn evpn_gr_stale_routes_keep_exporting_during_gr_window() {
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: vec![(Afi::L2Vpn, Safi::Evpn)],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
         llgr_stale_time: 0,
@@ -2431,6 +2459,7 @@ async fn deferred_retention_peer(
         restart_time: 2,
         stale_routes_time: 5,
         gr_families: vec![(Afi::Ipv4, Safi::FlowSpec)],
+        peer_notification_gr: false,
         peer_llgr_capable: llgr,
         peer_llgr_families: if llgr {
             vec![rustbgpd_wire::LlgrFamily {
@@ -2949,6 +2978,7 @@ async fn duplicate_gr_family_is_retained_not_deleted() {
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: vec![V4_UNICAST, V4_UNICAST],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
         llgr_stale_time: 0,
@@ -3415,6 +3445,7 @@ async fn llgr_only_family_with_zero_stale_time_is_withdrawn_at_session_down() {
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: vec![V4_UNICAST],
+        peer_notification_gr: false,
         peer_llgr_capable: true,
         peer_llgr_families: vec![llgr_family(V4_UNICAST, 60), llgr_family(V6_UNICAST, 0)],
         llgr_stale_time: 3600,
@@ -3506,6 +3537,7 @@ async fn gr_family_with_zero_llst_is_purged_at_gr_expiry() {
         restart_time: 10,
         stale_routes_time: 360,
         gr_families: vec![V4_UNICAST, V6_UNICAST],
+        peer_notification_gr: false,
         peer_llgr_capable: true,
         peer_llgr_families: vec![llgr_family(V4_UNICAST, 60), llgr_family(V6_UNICAST, 0)],
         llgr_stale_time: 3600,
@@ -3699,6 +3731,7 @@ async fn end_of_rib_family_scope_leaves_nothing_for_a_full_pass() {
             (Afi::Ipv4, Safi::Unicast),
             (Afi::Ipv6, Safi::Unicast),
         ],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
         llgr_stale_time: 0,
@@ -3743,6 +3776,7 @@ async fn end_of_rib_family_scope_leaves_nothing_for_a_full_pass() {
         restart_time: 2,
         stale_routes_time: 360,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: true,
         peer_llgr_families: vec![rustbgpd_wire::LlgrFamily {
             afi: Afi::Ipv4,
@@ -4186,6 +4220,7 @@ async fn readiness_probe_runs_during_mass_graceful_restart_entry() {
             restart_time: 180,
             stale_routes_time: 360,
             gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            peer_notification_gr: false,
             peer_llgr_capable: false,
             peer_llgr_families: vec![],
             llgr_stale_time: 0,
@@ -4290,6 +4325,7 @@ async fn gr_retained_routes_after_end_of_rib(eor_session: u64, register: bool) -
         restart_time: 120,
         stale_routes_time: 360,
         gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_notification_gr: false,
         peer_llgr_capable: false,
         peer_llgr_families: vec![],
         llgr_stale_time: 0,
