@@ -2085,7 +2085,14 @@ impl RibManager {
         if (rd.is_none()
             && !labeled
             && self.grouped_unicast_admission_unknown(peer)
-            && !self.selection_rtbh_admission_known(peer, &prefix))
+            && !self.selection_rtbh_admission_known(peer, &prefix)
+            && !self
+                .frozen_group_local_row(peer, &prefix)
+                .is_some_and(|row| {
+                    source.is_none_or(|source| {
+                        source.peer == LOCAL_PEER && row.source.path_id == source.path_id
+                    })
+                }))
             || (rd.is_some()
                 && (self.private_vpn_admission_incomplete(peer)
                     || (self.vpn_grouped_member_of(peer).is_some()
@@ -2476,8 +2483,9 @@ impl RibManager {
         if self.selection_deferred(family) && !unicast_deferral_exempt(route) {
             // A row admitted before the hold stays in the Adj-RIB-Out; the
             // source-scoped explain finds it at its frozen outbound path ID.
-            let explanation =
-                (!resyncing).then(|| self.explain_unicast_export(peer, prefix, Some(source)));
+            let explanation = self
+                .held_local_export_known(peer, route, resyncing)
+                .then(|| self.explain_unicast_export(peer, prefix, Some(source)));
             if let Some(explanation) = explanation.filter(|explanation| {
                 explanation.decision == crate::update::ExplainDecision::Advertise
                     && explanation.already_advertised
@@ -3029,6 +3037,22 @@ impl RibManager {
             .then_some((limit, usage))
     }
 
+    fn held_local_export_known(
+        &self,
+        peer: PeerId,
+        route: &crate::route::Route,
+        resyncing: bool,
+    ) -> bool {
+        if self.grouped_member_of(peer).is_none() {
+            return !resyncing;
+        }
+        !self.outbound_channel_gone(peer)
+            && (!self.grouped_unicast_admission_unknown(peer)
+                || self
+                    .frozen_group_local_row(peer, &route.prefix)
+                    .is_some_and(|row| row.source.path_id == route.path_id))
+    }
+
     /// Whether `peer` is a grouped member whose admitted unicast state is
     /// unknown: it missed delivery or its channel closed, and it retains no
     /// regroup baseline. Closed channels lose retry flags before `PeerDown`.
@@ -3104,6 +3128,27 @@ impl RibManager {
     fn grouped_unicast_explain_view(&self, peer: PeerId, prefix: &Prefix) -> Option<AdjRibOut> {
         let group = self.group_ribs.get(&self.grouped_member_of(peer)?)?;
         let mut view = AdjRibOut::new(peer);
+        if let Some(row) = self.frozen_group_local_row(peer, prefix) {
+            view.insert_with_next_hop(row.route.clone(), row.action.clone(), &mut || {});
+            view.set_local_export_source((*prefix, 0), Some(row.source));
+            return Some(view);
+        }
+        if self.selection_deferred(prefix_family(prefix))
+            && let Some(source) = self.adj_ribs_out.get(&peer)?.local_export_source(prefix, 0)
+            && !source.deferral_exempt
+            && let Some(baseline) = self.grouped_dirty_unicast_baseline(peer)
+        {
+            let key = (*prefix, 0);
+            if let Some(route) = baseline.unicast.get(&key) {
+                view.insert_with_next_hop(
+                    route.clone(),
+                    baseline.next_hop_overrides.get(&key).cloned(),
+                    &mut || {},
+                );
+                view.set_local_export_source(key, Some(source));
+            }
+            return Some(view);
+        }
         if (self.dirty_peers.contains(&peer) && !self.selection_partial_caught_up(peer))
             || self.outbound_channel_gone(peer)
         {
@@ -3127,37 +3172,57 @@ impl RibManager {
         // the staged entries of this one prefix, plus route-server control:
         // the member's wire form is the emit seams' per-target resolution
         // (suppression and fallback) and rewrite of the shared row.
-        let rejected = self.peer_unexportable.get(&peer);
-        let limits = self.outbound_prefix_limits.get(&peer);
-        let initial = self.initial_group_admitted(peer);
-        let rs_control = self.rs_control_context(peer);
         for staged in group.table.iter_prefix(prefix) {
-            let Some(entry) =
-                group.adv_entry_post_backstop_for(peer, prefix, staged.path_id, rs_control)
-            else {
-                continue;
-            };
-            let route = entry.route;
-            let (_, large_communities) = group.source_control_for_route(route, entry.source_attrs);
-            if initial.is_some_and(|admitted| {
-                !admitted.contains(&ExactExportKey::Unicast(route.prefix, route.path_id))
-            }) || rejected.is_some_and(|keys| {
-                keys.contains(&ExactExportKey::Unicast(route.prefix, route.path_id))
-            }) || limits.is_some_and(|limits| !limits.admits_grouped(&route.prefix))
+            if let Some((route, action, source)) =
+                self.grouped_member_unicast_row(group, peer, prefix, staged.path_id)
             {
-                continue;
+                let key = (*prefix, route.path_id);
+                view.insert_with_next_hop(route, action, &mut || {});
+                view.set_local_export_source(key, source);
             }
-            let mut member_route = route.clone();
-            distribution::rs_control::rs_control_route_rewrite(
-                &mut member_route,
-                large_communities,
-                rs_control,
-            );
-            view.insert_with_next_hop(member_route, entry.nh.cloned(), &mut || {});
-            view.set_local_export_source((route.prefix, route.path_id), entry.local_source);
         }
         Some(view)
     }
+
+    pub(super) fn grouped_member_unicast_row(
+        &self,
+        group: &update_groups::GroupRibOut,
+        peer: PeerId,
+        prefix: &Prefix,
+        path_id: u32,
+    ) -> Option<(
+        crate::Route,
+        Option<rustbgpd_policy::NextHopAction>,
+        Option<crate::adj_rib_out::LocalExportSource>,
+    )> {
+        let rs_control = self.rs_control_context(peer);
+        let entry = group.adv_entry_post_backstop_for(peer, prefix, path_id, rs_control)?;
+        let route = entry.route;
+        let key = ExactExportKey::Unicast(route.prefix, route.path_id);
+        if self
+            .initial_group_admitted(peer)
+            .is_some_and(|admitted| !admitted.contains(&key))
+            || self
+                .peer_unexportable
+                .get(&peer)
+                .is_some_and(|keys| keys.contains(&key))
+            || self
+                .outbound_prefix_limits
+                .get(&peer)
+                .is_some_and(|limits| !limits.admits_grouped(&route.prefix))
+        {
+            return None;
+        }
+        let (_, large_communities) = group.source_control_for_route(route, entry.source_attrs);
+        let mut member_route = route.clone();
+        distribution::rs_control::rs_control_route_rewrite(
+            &mut member_route,
+            large_communities,
+            rs_control,
+        );
+        Some((member_route, entry.nh.cloned(), entry.local_source))
+    }
+
     /// During a hold the deferred candidate set omits a non-RTBH local row
     /// that a peer still holds from before the hold. The source of that
     /// frozen row: the Loc-RIB best for Add-Path, otherwise the advertised row.

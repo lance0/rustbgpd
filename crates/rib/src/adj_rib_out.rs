@@ -45,30 +45,59 @@ impl LocalExportSource {
     }
 }
 
-type LocalSourceKey = (Prefix, u32);
+type RouteRowKey = (Prefix, u32);
 
 /// A paced group keeps its ordered index after publication. Growing one fixed
 /// fanout tree path avoids relocating a populated hash shard in a staging poll.
-enum LocalSources {
-    Hashed(ShardedMap<LocalSourceKey, LocalExportSource>),
-    Ordered(BTreeMap<LocalSourceKey, LocalExportSource>),
+enum RouteRows<V> {
+    Hashed(ShardedMap<RouteRowKey, V>),
+    Ordered(BTreeMap<RouteRowKey, V>),
 }
 
-impl Default for LocalSources {
+impl<V> Default for RouteRows<V> {
     fn default() -> Self {
         Self::Hashed(ShardedMap::default())
     }
 }
 
-impl LocalSources {
-    fn insert(&mut self, key: LocalSourceKey, source: LocalExportSource) {
+impl<V> RouteRows<V> {
+    fn insert(&mut self, key: RouteRowKey, value: V) {
         match self {
-            Self::Hashed(table) => table.insert(key, source),
-            Self::Ordered(table) => table.insert(key, source),
+            Self::Hashed(table) => table.insert(key, value),
+            Self::Ordered(table) => table.insert(key, value),
         };
     }
 
-    fn remove(&mut self, key: &LocalSourceKey) {
+    fn get(&self, key: &RouteRowKey) -> Option<&V> {
+        match self {
+            Self::Hashed(table) => table.get(key),
+            Self::Ordered(table) => table.get(key),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Hashed(table) => table.len(),
+            Self::Ordered(table) => table.len(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Hashed(table) => table.is_empty(),
+            Self::Ordered(table) => table.is_empty(),
+        }
+    }
+
+    #[cfg(test)]
+    fn hashed_capacity(&self) -> usize {
+        match self {
+            Self::Hashed(table) => table.capacity(),
+            Self::Ordered(_) => panic!("fixture requires the ordinary hash table"),
+        }
+    }
+
+    fn remove(&mut self, key: &RouteRowKey) {
         match self {
             Self::Hashed(table) => table.remove(key),
             Self::Ordered(table) => table.remove(key),
@@ -79,6 +108,13 @@ impl LocalSources {
         match self {
             Self::Hashed(table) => table.clear(),
             Self::Ordered(table) => table.clear(),
+        }
+    }
+
+    fn release_with(&mut self, checkpoint: &mut impl RetirementCheckpoint) {
+        match self {
+            Self::Hashed(table) => release_sharded_map(table, checkpoint),
+            Self::Ordered(_) => self.retire_with(checkpoint),
         }
     }
 
@@ -251,16 +287,17 @@ pub struct AdjRibOut {
     /// was the largest heap component in docs/perf/rebaseline-2026-07.md.
     routes: RouteSlab<Route>,
     /// Only local rows need pre-policy identity; received route bodies grow no field.
-    local_export_sources: LocalSources,
+    local_export_sources: RouteRows<LocalExportSource>,
     /// Explicit `Specific` unicast actions admitted alongside route bodies.
     /// None uses the immutable session profile's default and needs no entry;
     /// `Self_` lives in `self_next_hop`. A hashed entry is 44 B plus one
     /// control byte, about 51-103 B per action with hashbrown's power-of-two
-    /// growth (94 B per route measured at 1M entries).
-    next_hop_overrides: ShardedMap<(Prefix, u32), NextHopAction>,
-    /// `Self_` action per slab slot, indexed by route handle. Allocated only
-    /// once a `Self_` action is admitted, so it costs 1 B per slot (plus `Vec`
-    /// growth slack) instead of a hashed entry per route.
+    /// growth (94 B per route measured at 1M entries). Paced policy groups
+    /// keep these entries in their ordered staging table after publication.
+    next_hop_overrides: RouteRows<NextHopAction>,
+    /// `Self_` action per slab slot, indexed by route handle. A paced build
+    /// with a policy that can set this action grows the flags alongside the
+    /// routes. Other tables start allocating on the first admitted action.
     self_next_hop: Vec<bool>,
     /// Set entries in `self_next_hop`, keeping the empty check O(1).
     self_next_hop_count: usize,
@@ -507,8 +544,8 @@ impl AdjRibOut {
         Self {
             peer,
             routes: RouteSlab::with_capacity(capacity),
-            local_export_sources: LocalSources::default(),
-            next_hop_overrides: ShardedMap::default(),
+            local_export_sources: RouteRows::default(),
+            next_hop_overrides: RouteRows::default(),
             self_next_hop: Vec::new(),
             self_next_hop_count: 0,
             prefix_path_ids: FamilyPrefixMap::default(),
@@ -689,13 +726,17 @@ impl AdjRibOut {
         }
     }
 
+    pub(crate) fn has_local_export_sources(&self) -> bool {
+        !self.local_export_sources.is_empty()
+    }
+
     /// Every admitted key's original local provenance.
     pub(crate) fn local_export_sources(
         &self,
     ) -> impl ExactSizeIterator<Item = (&(Prefix, u32), &LocalExportSource)> {
         match &self.local_export_sources {
-            LocalSources::Hashed(table) => LocalSourceIter::Hashed(table.iter()),
-            LocalSources::Ordered(table) => LocalSourceIter::Ordered(table.iter()),
+            RouteRows::Hashed(table) => LocalSourceIter::Hashed(table.iter()),
+            RouteRows::Ordered(table) => LocalSourceIter::Ordered(table.iter()),
         }
     }
 
@@ -704,12 +745,7 @@ impl AdjRibOut {
         prefix: &Prefix,
         path_id: u32,
     ) -> Option<LocalExportSource> {
-        let key = (*prefix, path_id);
-        match &self.local_export_sources {
-            LocalSources::Hashed(table) => table.get(&key),
-            LocalSources::Ordered(table) => table.get(&key),
-        }
-        .copied()
+        self.local_export_sources.get(&(*prefix, path_id)).copied()
     }
 
     /// The outbound path ID of a frozen admission: the local injection with
@@ -731,10 +767,40 @@ impl AdjRibOut {
             })
     }
 
+    /// A paced policy group records specific actions in an ordered table. One
+    /// insert into a growing hash shard can rehash thousands of route keys.
+    /// If the policy can set next-hop self, grow slot flags alongside routes:
+    /// the first matching route might be the last row of a large inventory.
+    pub(crate) fn prepare_first_group_next_hops(&mut self, chain: &rustbgpd_policy::PolicyChain) {
+        use rustbgpd_policy::ir::TermAction;
+
+        debug_assert_eq!(self.routes.slot_count(), 0);
+        self.next_hop_overrides = RouteRows::Ordered(BTreeMap::new());
+        let sets_self = |term: &rustbgpd_policy::ir::Term| {
+            matches!(&term.action, TermAction::Permit(mods) | TermAction::Continue(mods)
+                if matches!(mods.set_next_hop, Some(NextHopAction::Self_)))
+        };
+        if chain
+            .compiled()
+            .policies
+            .iter()
+            .flat_map(|policy| &policy.terms)
+            .any(|term| term.any_term(&sets_self))
+        {
+            self.self_next_hop.push(false);
+        }
+    }
+
     /// A new private unicast row can grow the first segment geometrically
     /// until one page is full. Reserve the rest before a later growth could
     /// relocate more than one page of initialized route bodies.
     pub(crate) fn prepare_first_group_insert(&mut self) {
+        if !self.self_next_hop.is_empty()
+            && self.self_next_hop.len() == self.routes.slot_count()
+            && self.routes.len() == self.routes.slot_count()
+        {
+            self.self_next_hop.push(false);
+        }
         if self.routes.slot_count() == REGISTRATION_PAGE_SIZE
             && self.routes.len() == REGISTRATION_PAGE_SIZE
         {
@@ -746,18 +812,18 @@ impl AdjRibOut {
     /// Called only when a private first-group page is about to commit local
     /// injection provenance. Network-only groups keep the inline empty map.
     pub(crate) fn prepare_first_group_local_sources(&mut self) {
-        if let LocalSources::Hashed(table) = &self.local_export_sources {
+        if let RouteRows::Hashed(table) = &self.local_export_sources {
             assert!(
                 table.is_empty(),
                 "select the index before the first local row"
             );
-            self.local_export_sources = LocalSources::Ordered(BTreeMap::new());
+            self.local_export_sources = RouteRows::Ordered(BTreeMap::new());
         }
     }
 
     #[cfg(test)]
     pub(crate) fn uses_ordered_local_sources(&self) -> bool {
-        matches!(self.local_export_sources, LocalSources::Ordered(_))
+        matches!(self.local_export_sources, RouteRows::Ordered(_))
     }
 
     pub(crate) fn set_local_export_source(
@@ -1065,8 +1131,8 @@ impl AdjRibOut {
     pub fn release_unicast(&mut self) {
         self.second_family.unicast = 0;
         self.routes = RouteSlab::default();
-        self.next_hop_overrides = ShardedMap::default();
-        self.local_export_sources = LocalSources::default();
+        self.next_hop_overrides = RouteRows::default();
+        self.local_export_sources = RouteRows::default();
         self.self_next_hop = Vec::new();
         self.self_next_hop_count = 0;
         self.prefix_path_ids = FamilyPrefixMap::default();
@@ -1078,7 +1144,7 @@ impl AdjRibOut {
     pub(crate) fn release_unicast_with(&mut self, checkpoint: &mut impl FnMut()) {
         self.second_family.unicast = 0;
         self.routes.release_with(checkpoint);
-        release_sharded_map(&mut self.next_hop_overrides, checkpoint);
+        self.next_hop_overrides.release_with(checkpoint);
         self.self_next_hop = Vec::new();
         self.self_next_hop_count = 0;
         self.prefix_path_ids.release_with(checkpoint);
@@ -1202,7 +1268,7 @@ impl AdjRibOut {
     pub(crate) fn retire_with(&mut self, checkpoint: &mut impl RetirementCheckpoint) {
         self.second_family = SecondFamilyCounts::default();
         self.routes.retire_with(checkpoint);
-        retire_sharded_map(&mut self.next_hop_overrides, checkpoint);
+        self.next_hop_overrides.retire_with(checkpoint);
         self.local_export_sources.retire_with(checkpoint);
         self.self_next_hop.clear();
         self.self_next_hop_count = 0;
@@ -2034,13 +2100,46 @@ mod tests {
                 &mut || {},
             );
         }
-        assert_eq!(rib.next_hop_overrides.capacity(), 0);
+        assert_eq!(rib.next_hop_overrides.hashed_capacity(), 0);
         assert_eq!(rib.self_next_hop_count, 1024);
         assert!(rib.self_next_hop.capacity() <= 2 * rib.unicast_slot_count());
         assert_eq!(
             rib.next_hop_override(&prefix, 1023),
             Some(&NextHopAction::Self_)
         );
+    }
+
+    #[test]
+    fn late_next_hop_self_initializes_one_staged_slot_at_a_time() {
+        use rustbgpd_policy::{NamedPolicy, PolicyChain, rpol::RpolFile, sets::SetStore};
+
+        let compiled = RpolFile::parse("policy p { term t { set next-hop self; accept } }")
+            .unwrap()
+            .compile_policy("p", &[], &mut SetStore::new())
+            .unwrap();
+        let chain =
+            PolicyChain::from_named(vec![NamedPolicy::from_rpol("p".into(), compiled.into())]);
+        let peer = PeerId::from_addr(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        for sets_self in [false, true] {
+            let mut rib = AdjRibOut::new(peer);
+            let empty = PolicyChain::new(Vec::new());
+            rib.prepare_first_group_next_hops(if sets_self { &chain } else { &empty });
+            let rows = 2 * REGISTRATION_PAGE_SIZE + 1;
+            for i in 0..rows {
+                let prefix = Prefix::V4(Ipv4Prefix::new(
+                    Ipv4Addr::from(u32::try_from(i).unwrap()),
+                    32,
+                ));
+                let action = (sets_self && i + 1 == rows).then_some(NextHopAction::Self_);
+                let before = rib.self_next_hop.len();
+                rib.prepare_first_group_insert();
+                rib.insert_with_next_hop(make_route(prefix, 0), action.clone(), &mut || {});
+                assert!(rib.self_next_hop.len() <= before + 1);
+                assert_eq!(rib.next_hop_override(&prefix, 0), action.as_ref());
+            }
+            assert_eq!(rib.self_next_hop.is_empty(), !sets_self);
+            assert_eq!(rib.next_hop_override_count(), usize::from(sets_self));
+        }
     }
 
     /// An export policy that sets a specific next hop stores one override
@@ -2056,7 +2155,7 @@ mod tests {
                     Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(0x0a00_0000 + (i << 8)), 24));
                 rib.insert_with_next_hop(make_route(prefix, 0), Some(action.clone()), &mut || {});
             },
-            |rib| rib.next_hop_overrides.capacity(),
+            |rib| rib.next_hop_overrides.hashed_capacity(),
         );
     }
 

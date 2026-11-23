@@ -119,7 +119,7 @@ impl RibManager {
             return None;
         }
         let input = self.installed_group_classifier_input(peer, policy);
-        let mut key = self.no_policy_group_key(peer, input, false)?;
+        let mut key = self.group_key_without_chain_id(peer, input, false)?;
         key.chain = source_key.chain;
         if &key != source_key {
             return None;
@@ -277,7 +277,7 @@ impl RibManager {
             }
             MembershipChange::ClearPolicy | MembershipChange::RecoverSlowPeer => {}
         }
-        self.no_policy_group_key(
+        self.group_key_without_chain_id(
             peer,
             input,
             matches!(change, MembershipChange::RecoverSlowPeer),

@@ -316,7 +316,7 @@ of taking its default process action. The ordering is a contract, asserted by
 2. FSM drives OPEN exchange. Transport encodes/decodes, feeds FSM events.
 3. On `Established`, FSM produces `NegotiatedSession` with capabilities.
 4. Transport sends `RibUpdate::PeerUp` to RIB with negotiated families and outbound channel.
-5. RIB registers the peer: at once on a small or quiet RIB, after queued route input on a large busy one (a plain unicast first member of its group is deferred on any large RIB). A groupable session joins its update group; the group's first member has the group table built first, in paced turns for a plain unicast session and inside the registration turn otherwise. The RIB then sends the group table (or, for a private session, its own export of the Loc-RIB) and End-of-RIB per family, unless a hold (for ORF, graceful restart or RT-Constrain, among others) delays a family's marker. See [Session comes up](../reference/rib-lifecycle.md#session-comes-up).
+5. On a large RIB, the first member of an eligible single-best unicast group builds the group's table across actor turns. Its export policy must be group-shareable. Other registrations start immediately on a small or quiet RIB and wait for queued route input on a large busy one. The RIB then sends the group table (or the session's private export of the Loc-RIB) and an End-of-RIB per family, unless a hold for ORF, graceful restart or RT-Constrain delays that family's marker. See [Session comes up](../reference/rib-lifecycle.md#session-comes-up).
 6. Inbound UPDATEs flow through the normal data path.
 
 ### Config Reload (SIGHUP)
