@@ -4873,6 +4873,62 @@ fn vpn_dirty_resync_replays_table_and_tombstones() {
     assert_eq!(announced, HashSet::from([vpn_key(1)]));
 }
 
+#[test]
+fn vpn_regroup_compares_the_receivers_reflected_identifier() {
+    let reopened = Ipv4Addr::new(192, 0, 2, 11);
+    for (is_ebgp, carried) in [(false, false), (true, false), (false, true)] {
+        let mut group = GroupRibOut::new(
+            None,
+            is_ebgp,
+            true,
+            !is_ebgp,
+            None,
+            vec![(Afi::Ipv4, Safi::MplsVpn)],
+            vec![],
+            false,
+            0,
+        );
+        let mut delta = vpn_announce_delta(1, OTHER1, None);
+        let selected = delta.new.as_mut().unwrap();
+        selected.peer_router_id = Ipv4Addr::new(192, 0, 2, 10);
+        if carried {
+            selected.attributes = AttrSet::new(vec![
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::OriginatorId(Ipv4Addr::new(192, 0, 2, 99)),
+            ]);
+        }
+        let baseline = FastMap::from_iter([(delta.key, selected.clone())]);
+        selected.peer_router_id = reopened;
+        group.apply_vpn_delta(&delta);
+        let mut announce = Vec::new();
+        let mut withdraw = Vec::new();
+        RibManager::assemble_group_vpn_resync(
+            &group,
+            MEMBER,
+            None,
+            false,
+            false,
+            Some(&baseline),
+            None,
+            None,
+            &mut announce,
+            &mut withdraw,
+            &mut |_| {},
+        );
+        let received: Vec<_> = announce
+            .iter()
+            .map(|r| (r.nlri.key(), r.peer_router_id))
+            .collect();
+        let replacement = (!is_ebgp && !carried).then_some((delta.key, reopened));
+        assert_eq!(
+            received,
+            replacement.as_slice(),
+            "eBGP={is_ebgp}, carried={carried}"
+        );
+        assert!(withdraw.is_empty(), "the member retained its VPN route");
+    }
+}
+
 /// VPN count synthesis tracks `apply_vpn_delta` (announce, source
 /// flip, withdraw), and `family_counts_for` buckets VPN by family.
 #[test]
