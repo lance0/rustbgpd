@@ -805,17 +805,14 @@ impl RibManager {
                 self.drop_gone_dirty_peer(peer);
                 continue;
             }
-            let sendable = self.peer_sendable_families.get(&peer).cloned();
-            let llgr = self.peer_advertised_llgr_families.get(&peer).cloned();
+            let sendable = self.peer_sendable_families.get(&peer);
             // Only a change in a FlowSpec family the peer negotiated can
             // reach it.
             let carried_to_peer: Vec<_> = carried
                 .iter()
                 .copied()
                 .filter(|owed| {
-                    sendable
-                        .as_ref()
-                        .is_some_and(|families| families.contains(&owed.afi_safis()[0]))
+                    sendable.is_some_and(|families| families.contains(&owed.afi_safis()[0]))
                 })
                 .collect();
             if carried_to_peer.is_empty() {
@@ -833,15 +830,13 @@ impl RibManager {
                 crate::manager::outbound_owing::WholePass::Skip => continue,
             }
             self.note_outbound_staging(peer);
-            let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
-            let interpret_rfc1997 = self.peer_interpret_rfc1997.contains(&peer);
-            let target_is_rr_client = self.peer_is_rr_client.get(&peer).copied().unwrap_or(false);
-            let target_peer_asn = self.peer_asn.get(&peer).copied();
+            let cached = self.departure_receiver_settings(peer);
+            let mut local = None;
+            let target = cached
+                .as_deref()
+                .unwrap_or_else(|| local.insert(super::ReceiverExportSettings::new(self, peer)));
             let target_peer_group = self.peer_group.get(&peer).map(String::as_str);
-            let export_pol = self
-                .export_policy_for(peer)
-                .map(rustbgpd_policy::PolicyChain::share);
-            let target_peer_label = peer.label();
+            let export_pol = self.export_chains.for_peer(peer);
             let metrics = self.metrics.clone();
 
             let loc_rib_len = self.loc_rib.len();
@@ -860,18 +855,18 @@ impl RibManager {
                 &self.peer_is_rr_client,
                 changed_keys,
                 peer,
-                target_peer_asn,
+                target.asn,
                 target_peer_group,
-                target_is_ebgp,
-                interpret_rfc1997,
-                target_is_rr_client,
+                target.is_ebgp,
+                target.interpret_rfc1997,
+                target.is_rr_client,
                 self.cluster_id,
-                sendable.as_ref(),
-                llgr.as_ref(),
-                export_pol.as_ref(),
+                target.sendable.as_ref(),
+                target.llgr.as_ref(),
+                export_pol,
                 &metrics,
                 policy_stats,
-                &target_peer_label,
+                &target.label,
                 &mut fs_announce,
                 &mut fs_withdraw,
                 &mut export_memo,

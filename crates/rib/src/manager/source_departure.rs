@@ -2,11 +2,12 @@
 //! distributes those changes over bounded key/member pages. A shared stage
 //! owns the actor until its last member has consumed the previous group state.
 
-use super::distribution::ReleaseDistribution;
+use super::distribution::{ReceiverExportSettings, ReleaseDistribution};
 use super::helpers::{LOCAL_PEER, prefix_family, unicast_deferral_exempt};
 use super::{Afi, HashSet, PeerId, Prefix, RibManager, RibUpdate, Safi};
 use crate::route::{FlowSpecKey, Route};
-use std::collections::hash_set;
+use std::collections::{HashMap, hash_set};
+use std::sync::Arc;
 
 const KEYS_PER_PAGE: usize = 16;
 pub(super) const MEMBERS_PER_PAGE: usize = 8;
@@ -55,6 +56,7 @@ enum Page {
 pub(super) struct SourceDeparture {
     source: PeerId,
     peers: Vec<PeerId>,
+    receiver_settings: HashMap<PeerId, Arc<ReceiverExportSettings>>,
     // Retain the identities independently of the consuming iterator. FIFO
     // lookahead can prove a new unicast message independent in O(message rows).
     affected: HashSet<Prefix>,
@@ -189,6 +191,24 @@ impl SourceDeparture {
 }
 
 impl RibManager {
+    /// Registration and policy changes wait behind the departure. Only retain
+    /// session settings here. Credit, admitted routes and export gates stay live.
+    pub(super) fn departure_receiver_settings(
+        &mut self,
+        peer: PeerId,
+    ) -> Option<Arc<ReceiverExportSettings>> {
+        let work = self.source_departure.as_ref()?;
+        if let Some(settings) = work.receiver_settings.get(&peer) {
+            return Some(Arc::clone(settings));
+        }
+        let settings = Arc::new(ReceiverExportSettings::new(self, peer));
+        self.source_departure
+            .as_mut()?
+            .receiver_settings
+            .insert(peer, Arc::clone(&settings));
+        Some(settings)
+    }
+
     pub(super) fn large_source_departure(&self, keys: usize) -> bool {
         // One departure owns the actor at a time. A teardown reached while
         // one is live keeps the synchronous path instead of replacing it.
@@ -334,6 +354,7 @@ impl RibManager {
         self.source_departure = Some(Box::new(SourceDeparture {
             source,
             peers,
+            receiver_settings: HashMap::new(),
             affected,
             best,
             held,
@@ -479,7 +500,18 @@ impl RibManager {
 
 #[cfg(test)]
 thread_local! {
+    static EXPORT_SETUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static RECEIVER_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn count_export_setup() {
+    EXPORT_SETUPS.set(EXPORT_SETUPS.get() + 1);
+}
+
+#[cfg(test)]
+pub(super) fn take_export_setups() -> usize {
+    EXPORT_SETUPS.replace(0)
 }
 
 #[cfg(test)]

@@ -182,7 +182,12 @@ fn observe_winner(manager: &RibManager) {
     }
 }
 
-fn assert_departed(updates: &[OutboundRouteUpdate], shape: Shape, rows: u32) -> bool {
+fn assert_departed(
+    updates: &[OutboundRouteUpdate],
+    shape: Shape,
+    rows: u32,
+    expect_probe: bool,
+) -> bool {
     let mut remaining = expected_rows(rows);
     let mut marker_seen = false;
     let mut withdrawal_after_marker = false;
@@ -219,9 +224,9 @@ fn assert_departed(updates: &[OutboundRouteUpdate], shape: Shape, rows: u32) -> 
         "missing {} withdrawals",
         remaining.len()
     );
-    assert!(
-        marker_seen,
-        "independent source must be advertised to every receiver"
+    assert_eq!(
+        marker_seen, expect_probe,
+        "unexpected independent UPDATE inventory"
     );
     withdrawal_after_marker
 }
@@ -384,7 +389,7 @@ async fn departure(shape: Shape, count: u8, rows: u32, arrival: ProbeArrival) ->
     );
     let mut interleaved = false;
     for updates in &streams {
-        interleaved |= assert_departed(updates, shape, rows);
+        interleaved |= assert_departed(updates, shape, rows, true);
     }
     assert!(
         interleaved,
@@ -499,6 +504,58 @@ async fn grouped_departure_chunks_an_uneven_member_tail_and_keeps_private_walks_
     let mixed = pressured_departure(Shape::Mixed, 5, 109);
     assert!(mixed.envelope <= 16);
     assert!(mixed.inspected <= 16 * 8 && mixed.emitted <= 16 * 8);
+}
+
+#[test]
+fn private_departure_prepares_each_export_receiver_once_across_pages() {
+    const RECEIVERS: u8 = 4;
+    let counts = [Shape::Private, Shape::FlowSpec].map(|shape| {
+        let mut previous_envelopes = usize::from(RECEIVERS);
+        [512, 2048].map(|rows| {
+            let (_tx, rx) = mpsc::channel(8);
+            let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+            manager.outbound_row_credit_override = None;
+            super::distribution_window::untimed_window(&mut manager);
+            register_test_peer(&mut manager, peer_v4(SOURCE), 0);
+            let mut receivers: Vec<_> = (0..RECEIVERS)
+                .map(|index| join(&mut manager, index, shape))
+                .collect();
+            seed(&mut manager, shape, rows);
+            for rx in &mut receivers {
+                assert_initial(rx, shape, rows);
+            }
+
+            crate::manager::source_departure::take_export_setups();
+            manager.handle_update(down(SOURCE));
+            assert!(manager.source_departure.is_some());
+            let mut streams: Vec<Vec<_>> = (0..RECEIVERS).map(|_| Vec::new()).collect();
+            while manager.source_departure.is_some() {
+                manager.poll_source_departure_turn();
+                for (rx, stream) in receivers.iter_mut().zip(&mut streams) {
+                    stream.extend(std::iter::from_fn(|| rx.try_recv().ok().map(delivered)));
+                }
+            }
+            let setups = crate::manager::source_departure::take_export_setups();
+            let mut envelopes = 0;
+            for updates in &streams {
+                assert_departed(updates, shape, rows, false);
+                envelopes += updates
+                    .iter()
+                    .filter(|update| {
+                        update.unicast_withdrawals().next().is_some()
+                            || !update.flowspec_withdraw.is_empty()
+                    })
+                    .count();
+            }
+            assert!(envelopes > previous_envelopes);
+            previous_envelopes = envelopes;
+            eprintln!(
+                "{shape:?} rows={rows} receivers={RECEIVERS} withdrawal_envelopes={envelopes} export_setups={setups}"
+            );
+            setups
+        })
+    });
+    assert_eq!(counts, [[usize::from(RECEIVERS); 2]; 2]);
 }
 
 /// Drive a departure unit by unit while an admissible UPDATE stays queued,

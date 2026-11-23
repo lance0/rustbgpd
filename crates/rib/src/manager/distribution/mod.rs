@@ -70,6 +70,36 @@ pub(in crate::manager) use unicast::{
     AddPathKeys, blackholing, exact_exportable, lease_rejection, multipath_candidate_suppressed,
 };
 
+pub(super) struct ReceiverExportSettings {
+    sendable: Option<Vec<(Afi, Safi)>>,
+    llgr: Option<Vec<(Afi, Safi)>>,
+    is_ebgp: bool,
+    interpret_rfc1997: bool,
+    is_rr_client: bool,
+    asn: Option<u32>,
+    label: String,
+}
+
+impl ReceiverExportSettings {
+    pub(super) fn new(manager: &RibManager, peer: PeerId) -> Self {
+        #[cfg(test)]
+        super::source_departure::count_export_setup();
+        Self {
+            sendable: manager.peer_sendable_families.get(&peer).cloned(),
+            llgr: manager.peer_advertised_llgr_families.get(&peer).cloned(),
+            is_ebgp: manager.peer_is_ebgp.get(&peer).copied().unwrap_or(true),
+            interpret_rfc1997: manager.peer_interpret_rfc1997.contains(&peer),
+            is_rr_client: manager
+                .peer_is_rr_client
+                .get(&peer)
+                .copied()
+                .unwrap_or(false),
+            asn: manager.peer_asn.get(&peer).copied(),
+            label: peer.label(),
+        }
+    }
+}
+
 /// The session a received UPDATE came from, for the VPN and labeled
 /// receive-path selection shortcut.
 #[derive(Clone, Copy, Debug)]
@@ -11173,19 +11203,24 @@ impl RibManager {
                         );
                     }
 
-                    // Resolve export policy, sendable families, and RR state before
-                    // borrowing rib_out (which holds a &mut to self.adj_ribs_out).
-                    let export_pol = self
-                        .export_policy_for(peer)
-                        .map(rustbgpd_policy::PolicyChain::share);
-                    let sendable = self.peer_sendable_families.get(&peer).cloned();
-                    let llgr = self.peer_advertised_llgr_families.get(&peer).cloned();
-                    let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
-                    let interpret_rfc1997 = self.peer_interpret_rfc1997.contains(&peer);
+                    let cached = if RELEASING && member_of.is_none() {
+                        self.departure_receiver_settings(peer)
+                    } else {
+                        None
+                    };
+                    let mut local = None;
+                    let target = cached
+                        .as_deref()
+                        .unwrap_or_else(|| local.insert(ReceiverExportSettings::new(self, peer)));
+                    // Borrow the installed chain directly so a departure never retains policy copies.
+                    let export_pol = self.export_chains.for_peer(peer);
+                    let sendable = &target.sendable;
+                    let llgr = &target.llgr;
+                    let target_is_ebgp = target.is_ebgp;
+                    let interpret_rfc1997 = target.interpret_rfc1997;
                     let rs_control_asn = self.peer_rs_control.get(&peer).copied();
-                    let target_is_rr_client =
-                        self.peer_is_rr_client.get(&peer).copied().unwrap_or(false);
-                    let target_peer_asn = self.peer_asn.get(&peer).copied();
+                    let target_is_rr_client = target.is_rr_client;
+                    let target_peer_asn = target.asn;
                     let target_peer_group = self.peer_group.get(&peer).map(String::as_str);
                     let cluster_id = self.cluster_id;
                     let peer_add_path_send_max =
@@ -11228,7 +11263,7 @@ impl RibManager {
                         .unwrap_or_default();
                     let loc_rib = &self.loc_rib;
                     let loc_rib_len = loc_rib.len();
-                    let target_peer_label = peer.label();
+                    let target_peer_label = target.label.as_str();
                     let mut export_tally = crate::update::NeighborPolicyStats::default();
                     let policy_stats = &mut export_tally;
 
@@ -11311,14 +11346,14 @@ impl RibManager {
                                 cluster_id,
                                 sendable.as_ref(),
                                 llgr.as_ref(),
-                                export_pol.as_ref(),
+                                export_pol,
                                 orf,
                                 conditional.as_ref(),
                                 orr_ctx,
                                 &mut export_memo,
                                 &metrics,
                                 policy_stats,
-                                &target_peer_label,
+                                target_peer_label,
                                 &mut unicast,
                                 is_force,
                                 &mut || checkpoint(),
@@ -11368,14 +11403,14 @@ impl RibManager {
                                 cluster_id,
                                 sendable.as_ref(),
                                 llgr.as_ref(),
-                                export_pol.as_ref(),
+                                export_pol,
                                 orf,
                                 conditional.as_ref(),
                                 None,
                                 &mut export_memo,
                                 &metrics,
                                 policy_stats,
-                                &target_peer_label,
+                                target_peer_label,
                                 &mut unicast,
                                 is_force,
                                 &mut || checkpoint(),
@@ -11409,13 +11444,13 @@ impl RibManager {
                                 cluster_id,
                                 sendable.as_ref(),
                                 llgr.as_ref(),
-                                export_pol.as_ref(),
+                                export_pol,
                                 orf,
                                 conditional.as_ref(),
                                 &mut export_memo,
                                 &metrics,
                                 policy_stats,
-                                &target_peer_label,
+                                target_peer_label,
                                 &mut unicast,
                                 is_force,
                                 &mut || checkpoint(),
@@ -11432,7 +11467,7 @@ impl RibManager {
                                 peer_group: target_peer_group,
                                 metrics: &metrics,
                                 policy_stats: &mut *policy_stats,
-                                peer_label: &target_peer_label,
+                                peer_label: target_peer_label,
                             };
                             Self::distribute_single_best_prefix_with_checkpoint(
                                 loc_rib,
@@ -11450,7 +11485,7 @@ impl RibManager {
                                 cluster_id,
                                 sendable.as_ref(),
                                 llgr.as_ref(),
-                                export_pol.as_ref(),
+                                export_pol,
                                 orf,
                                 conditional.as_ref(),
                                 &mut export_memo,
@@ -11491,10 +11526,10 @@ impl RibManager {
                             cluster_id,
                             sendable.as_ref(),
                             llgr.as_ref(),
-                            export_pol.as_ref(),
+                            export_pol,
                             &metrics,
                             policy_stats,
-                            &target_peer_label,
+                            target_peer_label,
                             &mut fs_announce,
                             &mut fs_withdraw,
                             &mut export_memo,
@@ -11543,7 +11578,7 @@ impl RibManager {
                                         peer_group: target_peer_group,
                                         metrics: &metrics,
                                         policy_stats: &mut *policy_stats,
-                                        peer_label: &target_peer_label,
+                                        peer_label: target_peer_label,
                                     },
                                     target_is_ebgp,
                                     interpret_rfc1997,
@@ -11551,7 +11586,7 @@ impl RibManager {
                                     cluster_id,
                                     sendable.as_ref(),
                                     llgr.as_ref(),
-                                    export_pol.as_ref(),
+                                    export_pol,
                                     rtc_filter.as_ref(),
                                     &mut evpn_announce,
                                     &mut evpn_withdraw,
@@ -11605,10 +11640,10 @@ impl RibManager {
                             cluster_id,
                             sendable.as_ref(),
                             llgr.as_ref(),
-                            export_pol.as_ref(),
+                            export_pol,
                             &metrics,
                             policy_stats,
-                            &target_peer_label,
+                            target_peer_label,
                             &mut bgpls_announce,
                             &mut bgpls_withdraw,
                             is_force,
@@ -11631,7 +11666,7 @@ impl RibManager {
                         add_path_send_max: peer_add_path_send_max,
                         add_path_send_limits: self.peer_add_path_send_limits.get(&peer),
                         add_path_send_families: &peer_add_path_send_families,
-                        export_pol: export_pol.as_ref(),
+                        export_pol,
                         force: is_force,
                     };
 
@@ -11650,7 +11685,7 @@ impl RibManager {
                                     peer_group: target_peer_group,
                                     metrics: &metrics,
                                     policy_stats: &mut *policy_stats,
-                                    peer_label: &target_peer_label,
+                                    peer_label: target_peer_label,
                                 };
                                 Self::stage_vpn_routes_with_checkpoint(
                                     &vpn_labeled_context,
@@ -11683,7 +11718,7 @@ impl RibManager {
                                     peer_group: target_peer_group,
                                     metrics: &metrics,
                                     policy_stats: &mut *policy_stats,
-                                    peer_label: &target_peer_label,
+                                    peer_label: target_peer_label,
                                 };
                                 Self::stage_labeled_routes_with_checkpoint(
                                     &vpn_labeled_context,
@@ -11718,10 +11753,10 @@ impl RibManager {
                             cluster_id,
                             sendable.as_ref(),
                             llgr.as_ref(),
-                            export_pol.as_ref(),
+                            export_pol,
                             &metrics,
                             policy_stats,
-                            &target_peer_label,
+                            target_peer_label,
                             &mut rtc_announce,
                             &mut rtc_withdraw,
                             is_force,
