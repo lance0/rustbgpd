@@ -89,6 +89,8 @@ pub(super) struct ReplayChanges {
     // Changed keys the ordered log could not hold. Each still has its queued
     // scan repair, which sends the current group row once the log drains.
     coalesced: BTreeSet<Prefix>,
+    // Set by the first coalesced change for the rest of the replay.
+    overflowed: bool,
     body_bytes: usize,
 }
 
@@ -116,11 +118,13 @@ impl ReplayChanges {
         }
     }
 
-    /// Leave a change that does not fit to the key's repair. Later changes to
-    /// the key join it, so the repair cannot precede a logged change.
+    /// Leave a change that does not fit to the key's repair. Repair pages run
+    /// only after the log drains, so the repair follows every logged change
+    /// for the key.
     fn coalesce(&mut self, prefix: Prefix) {
         self.absent.remove(&prefix);
         self.coalesced.insert(prefix);
+        self.overflowed = true;
     }
 
     /// Log one change, or return `false` without side effects when it does not fit.
@@ -193,10 +197,10 @@ impl RibManager {
                     }
                 }));
             }
-            if oversized
-                || replay.changes.coalesced(&delta.prefix)
-                || !replay.changes.push(peer, delta, stage)
-            {
+            // After the first overflow, every later change joins the repairs
+            // too. The log then only drains, so churn faster than one change
+            // per writer operation cannot hold pages back past that drain.
+            if oversized || replay.changes.overflowed || !replay.changes.push(peer, delta, stage) {
                 replay.changes.coalesce(delta.prefix);
             }
         }

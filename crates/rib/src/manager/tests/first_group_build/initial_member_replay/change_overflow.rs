@@ -151,3 +151,76 @@ async fn change_log_overflow_mid_replay_keeps_latest_state_and_withdrawals() {
         "the log overflow handed the replay to a whole-table resync"
     );
 }
+
+// The log sends one change per writer operation. Churn of two changes per
+// operation must not hold pages back: once the log overflows, later changes
+// coalesce, the log drains and the remaining table reaches the member while the
+// churn continues. Once the churn stops, the replay completes within a bounded
+// number of operations.
+#[tokio::test(start_paused = true)]
+async fn churn_above_the_log_drain_rate_still_delivers_pages() {
+    const CHURN_OPS: u32 = 3_000;
+    const SETTLE_OPS: u32 = 64;
+    let (mut manager, _tx, mut expected) = replay_fixture();
+    let peer = receiver(1);
+    let mut rx = member(&mut manager, peer, 1, false, false);
+    let first = first_page(&mut manager, &mut rx);
+    let churned = [first.announce[0].prefix, first.announce[1].prefix];
+    let mut state: Inventory = first
+        .announce
+        .iter()
+        .map(|row| (row.prefix, (row.peer, row.local_pref())))
+        .collect();
+    let builds = manager.adj_rib_out_commit_stats.resync_builds;
+    drop(first);
+    let mut eor = false;
+    // One writer operation: release the page, then let the replay take a turn.
+    let mut operate = |manager: &mut RibManager, state: &mut Inventory, eor: &mut bool| {
+        while let Ok(page) = rx.try_recv() {
+            for &(prefix, _) in page.unicast_withdrawals() {
+                state.remove(&prefix);
+            }
+            for row in page.announce.iter() {
+                state.insert(row.prefix, (row.peer, row.local_pref()));
+            }
+            *eor |= !page.end_of_rib.is_empty();
+        }
+        manager.wake_initial_member_replay();
+        manager.advance_pending_initial_registration();
+    };
+    let mut pref = 200;
+    for _ in 0..CHURN_OPS {
+        pref = if pref == 200 { 300 } else { 200 };
+        manager.handle_update(test_routes_received(
+            peer_v4(OTHER),
+            churned.iter().map(|&key| route(key, OTHER, pref)).collect(),
+        ));
+        drain_route_chunks(&mut manager);
+        operate(&mut manager, &mut state, &mut eor);
+    }
+    let delivered = expected
+        .keys()
+        .filter(|key| state.contains_key(*key))
+        .count();
+    assert_eq!(
+        delivered,
+        expected.len(),
+        "{CHURN_OPS} operations of churn delivered {delivered} of {} rows",
+        expected.len()
+    );
+    let mut settle = 0;
+    while !eor && settle < SETTLE_OPS {
+        operate(&mut manager, &mut state, &mut eor);
+        settle += 1;
+    }
+    assert!(
+        eor,
+        "no End-of-RIB within {SETTLE_OPS} operations after churn stopped"
+    );
+    for key in churned {
+        expected.insert(key, (peer_v4(OTHER), pref));
+    }
+    assert_eq!(state, expected);
+    assert_eq!(manager.adj_rib_out_commit_stats.resync_builds, builds);
+    assert!(!manager.dirty_peers.contains(&peer));
+}
