@@ -10,28 +10,47 @@
 # gate, runs in a zero-swap 64 GiB scope and is INVALID if a compiler appears.
 # `--verdict TIMELINE` regrades an existing timeline.
 set -euo pipefail
-# Verdict per arm: all 12 timed runs and every control exited 0 without a
-# compiler sample; each clean/mixed run waits <= 200 ms; clean completes paced;
-# mixed reports its fallback count (bar: 0); burst is report-only but must fall back.
+# Verdict per arm. Each of the 8 controls and the 24 scheduled runs must appear
+# exactly once, exit 0 and see no compiler sample, or the arm is INVALID. Then
+# each clean/mixed run waits <= 200 ms, clean completes paced, mixed reports its
+# fallback count (bar: 0), and burst is report-only but must fall back.
 verdict() {
     awk '
+        BEGIN {
+            split("parent cand", arms, " "); split("clean mixed burst budget-control", ctl_cells, " ")
+            split("plain policy", profiles, " "); split("clean mixed burst", cells, " ")
+            split("parent cand cand parent", order, " ")
+            for (a in arms) for (c in ctl_cells) control["ctl-" arms[a] "-" ctl_cells[c]] = 1
+            n = 0
+            for (p = 1; p <= 2; p++) for (c = 1; c <= 3; c++) for (o = 1; o <= 4; o++)
+                scheduled[sprintf("%02d-%s-%s-%s", ++n, order[o], profiles[p], cells[c])] = order[o]
+        }
         / end / {
-            split($3, id, "-"); arm = id[2]; cell = id[4]; delete kv
+            name = $3; split(name, id, "-"); cell = id[4]; delete kv
             for (i = 4; i <= NF; i++) { split($i, f, "="); kv[f[1]] = f[2] }
-            if (id[1] == "ctl") { if (kv["rc"] != 0) ctl_bad++; next }
-            runs[arm]++
-            if (kv["rc"] != 0 || kv["compiler_samples"] != 0 || kv["worst_wait_us"] == "") { bad[arm]++; next }
+            if (name in control) {
+                if (++control_seen[name] > 1 || kv["rc"] != 0 || kv["compiler_samples"] != 0) ctl_bad++
+                next
+            }
+            if (!(name in scheduled)) { stray++; next }
+            arm = scheduled[name]; runs[arm]++
+            if (++seen[name] > 1 || kv["rc"] != 0 || kv["compiler_samples"] != 0 || kv["worst_wait_us"] == "") {
+                bad[arm]++; next
+            }
             if (cell != "burst" && kv["worst_wait_us"] > 200000) wait_fail[arm]++
             if (cell == "clean" && kv["fallback"] != 0) clean_fail[arm]++
             if (cell == "mixed") { mixed[arm]++; fell[arm] += kv["fallback"] }
             if (cell == "burst" && kv["fallback"] != 1) bad[arm]++
         }
         END {
-            for (arm in runs) {
-                invalid = ctl_bad || bad[arm] || runs[arm] != 12
+            for (name in control) if (!(name in control_seen)) ctl_bad++
+            for (name in scheduled) if (!(name in seen)) bad[scheduled[name]]++
+            for (a = 1; a <= 2; a++) {
+                arm = arms[a]
+                invalid = ctl_bad || stray || bad[arm]
                 v = invalid ? "INVALID" : (wait_fail[arm] || clean_fail[arm] || fell[arm]) ? "FAIL" : "PASS"
-                printf "verdict arm=%s %s runs=%d invalid_runs=%d failed_controls=%d wait_over_200ms=%d clean_fallbacks=%d mixed_fallbacks=%d/%d\n",
-                    arm, v, runs[arm], bad[arm], ctl_bad, wait_fail[arm], clean_fail[arm], fell[arm], mixed[arm]
+                printf "verdict arm=%s %s runs=%d invalid_runs=%d failed_controls=%d unexpected_runs=%d wait_over_200ms=%d clean_fallbacks=%d mixed_fallbacks=%d/%d\n",
+                    arm, v, runs[arm], bad[arm], ctl_bad, stray, wait_fail[arm], clean_fail[arm], fell[arm], mixed[arm]
             }
         }' "$1"
 }

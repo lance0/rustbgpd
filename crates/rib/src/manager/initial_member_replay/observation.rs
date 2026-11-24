@@ -1,5 +1,7 @@
 //! Bench-only observations at the replay owner's enrollment and terminal decisions.
 
+use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications};
+
 use super::{PeerId, RibManager};
 
 /// Registration replay transitions for the specified receiver and outbound session.
@@ -37,6 +39,40 @@ impl RibManager {
     pub fn with_bench_initial_replay_peer_limit(mut self, bytes: usize) -> Self {
         self.pending_group_admitted.set_bench_peer_limit(bytes);
         self
+    }
+
+    /// An export chain that permits every route and adds `community`, so a
+    /// receiver forms its own update group with a policy-shaped table.
+    #[must_use]
+    pub fn bench_community_export_policy(community: u32) -> PolicyChain {
+        let entry = PolicyStatement {
+            prefix: None,
+            ge: None,
+            le: None,
+            action: PolicyAction::Permit,
+            match_community: vec![],
+            match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_evpn_route_type: None,
+            match_rpki_validation: None,
+            match_aspa_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: None,
+            modifications: RouteModifications {
+                communities_add: vec![community],
+                ..Default::default()
+            },
+        };
+        PolicyChain::new(vec![Policy {
+            entries: vec![entry],
+            default_action: PolicyAction::Deny,
+        }])
     }
 
     pub(in crate::manager) fn observe_initial_replay(&self, peer: PeerId, event: BenchReplayEvent) {

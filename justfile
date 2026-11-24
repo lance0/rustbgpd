@@ -357,6 +357,7 @@ bench-list:
       gate-contract                 bench/smoke-benches.sh (smoke only, no measurement)
 
     Drivers without a recipe (run directly; see their headers):
+      bench/scale/compare-cold-join-churn.sh
       bench/scale/compare-recovery-memory.sh
       bench/scale/irrreload/run-bmp-buffer-receipt.sh
       bench/scale/irrreload/run-memory-attribution.sh

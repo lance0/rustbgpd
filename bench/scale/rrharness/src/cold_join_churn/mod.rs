@@ -1,6 +1,5 @@
 //! Measure unrelated UPDATE delivery during a cold first-member join.
 use super::*;
-use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications};
 use tokio::sync::{watch, Notify};
 
 mod inventory;
@@ -49,37 +48,6 @@ fn burst_update() -> RibUpdate {
     empty_routes_received(IpAddr::V4(source), routes)
 }
 
-fn export_chain() -> PolicyChain {
-    let entry = PolicyStatement {
-        prefix: None,
-        ge: None,
-        le: None,
-        action: PolicyAction::Permit,
-        match_community: vec![],
-        match_as_path: None,
-        match_neighbor_set: None,
-        match_route_type: None,
-        match_evpn_route_type: None,
-        match_rpki_validation: None,
-        match_aspa_validation: None,
-        match_as_path_length_ge: None,
-        match_as_path_length_le: None,
-        match_local_pref_ge: None,
-        match_local_pref_le: None,
-        match_med_ge: None,
-        match_med_le: None,
-        match_next_hop: None,
-        modifications: RouteModifications {
-            communities_add: vec![TAG],
-            ..Default::default()
-        },
-    };
-    PolicyChain::new(vec![Policy {
-        entries: vec![entry],
-        default_action: PolicyAction::Deny,
-    }])
-}
-
 fn marker_prefix(seq: u16) -> Ipv4Prefix {
     let [hi, lo] = seq.to_be_bytes();
     Ipv4Prefix::new(Ipv4Addr::new(198, 18, hi, lo), 32)
@@ -88,7 +56,7 @@ fn marker_prefix(seq: u16) -> Ipv4Prefix {
 fn peer_up(
     peer: PeerId,
     outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
-    policy: Option<PolicyChain>,
+    tagged: bool,
 ) -> RibUpdate {
     RibUpdate::PeerUp {
         supersedes: None,
@@ -97,7 +65,7 @@ fn peer_up(
         peer_asn: 64512,
         peer_router_id: Ipv4Addr::new(192, 0, 2, 1),
         outbound_tx,
-        export_policy: policy,
+        export_policy: tagged.then(|| RibManager::bench_community_export_policy(TAG)),
         sendable_families: vec![(Afi::Ipv4, Safi::Unicast)],
         is_ebgp: false,
         route_reflector_client: true,
@@ -132,7 +100,7 @@ async fn register(
     .await
     .expect("actor accepts encoder");
     let (outbound, rx) = mpsc::channel(CHANNEL_CAP);
-    let up = peer_up(peer, outbound, tagged.then(export_chain));
+    let up = peer_up(peer, outbound, tagged);
     let permit = tx.reserve().await.expect("actor accepts registration");
     let admitted = Instant::now();
     permit.send(up);

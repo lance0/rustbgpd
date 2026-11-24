@@ -47,4 +47,10 @@ expect compiler '/ 06-cand-plain-mixed /s/compiler_samples=0/compiler_samples=3/
 expect missing-summary '/ 03-cand-plain-clean /s/worst_wait_us=1500//' PASS INVALID
 expect missing-run '/ 24-parent-policy-burst /d' INVALID PASS
 expect control-failed '/ ctl-cand-burst /s/rc=0/rc=1/' INVALID INVALID
+expect control-missing '/ ctl-parent-budget-control /d' INVALID INVALID
+expect control-duplicated '/ ctl-cand-mixed /p' INVALID INVALID
+expect control-compiler '/ ctl-parent-clean /s/compiler_samples=0/compiler_samples=2/' INVALID INVALID
+expect controls-skipped '/ ctl-/d' INVALID INVALID
+expect run-duplicated '/ 07-cand-plain-mixed /p' PASS INVALID
+expect run-misnumbered '/ 12-parent-plain-burst /s/12-parent/13-parent/' INVALID INVALID
 echo "cold-join-churn verdict: all cases passed"
