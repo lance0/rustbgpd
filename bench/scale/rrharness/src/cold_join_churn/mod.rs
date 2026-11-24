@@ -15,7 +15,9 @@ use workload::Workload;
 const TAG: u32 = (64_512 << 16) | 31;
 const MARKER_SOURCE: u32 = INGRESS_FLOOD;
 /// One message of new prefixes, above every 1,024-entry replay change cap.
-// Above the replay scan's 4,096-key repair cap; smaller bursts coalesce.
+// Above the replay scan's 4,096-key repair cap. New prefixes also fall back
+// above the 1,024-key sparse admission overlay; only changes to prefixes in the
+// joiner's initial universe coalesce into page work.
 const BURST_ROWS: usize = 8192;
 
 /// Read and reset the production longest-actor-poll window.

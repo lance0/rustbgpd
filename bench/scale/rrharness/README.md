@@ -528,7 +528,7 @@ first base route.
 | --- | --- | --- |
 | `clean` | none | `paced_complete` |
 | `mixed` | one source hard flap plus the sustained stream below | reported: `paced_complete` or a fallback with its cause |
-| `burst` | one UPDATE with 8,192 new prefixes, above the 4,096-key scan repair cap | `replay_to_dirty` (control: the detector must fire) |
+| `burst` | one UPDATE with 8,192 new prefixes, above the 4,096-key scan repair cap (and the 1,024-key sparse admission overlay that new prefixes use) | `replay_to_dirty` (control: the detector must fire) |
 | `budget-control` | none; the per-peer admitted-proof budget is cut to 64 KiB | `budget_refusal` (control) |
 
 `mixed` uses these rates:
