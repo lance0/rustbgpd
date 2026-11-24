@@ -9,8 +9,17 @@ use crate::route::{FlowSpecKey, Route};
 use std::collections::hash_set;
 
 const KEYS_PER_PAGE: usize = 16;
+/// Keys in a shared group page and in the widest quiet page. One poll stages
+/// the whole page, so this bounds per-key stage work rather than member work.
+const WIDE_KEYS_PER_PAGE: usize = 256;
 pub(super) const MEMBERS_PER_PAGE: usize = 8;
-pub(super) const RECEIVER_ROWS_PER_POLL: usize = 256;
+/// A teardown above this many receiver-keys is paced instead of running in
+/// one actor turn.
+const PACED_DEPARTURE_RECEIVER_KEYS: usize = 256;
+/// Receiver-keys one departure poll may visit. At the measured 18-38 ns per
+/// group receiver-key this is about 0.3-0.6 ms of work between yields; a
+/// smaller poll spends more on the turn seam than on the walk.
+pub(super) const RECEIVER_ROWS_PER_POLL: usize = 16_384;
 const QUIET_PAGE_RECEIVER_KEYS: usize = 65_536;
 /// Receiver-keys one quiet delivery unit may visit; at about 0.4 µs per
 /// private receiver-key this keeps a single unit near 3 ms.
@@ -82,7 +91,7 @@ impl SourceDeparture {
         // An arrival must wait for the pinned page to reach its entire roster.
         // A one-key page still has to reach every member of a larger roster.
         let quiet_width =
-            (QUIET_PAGE_RECEIVER_KEYS / self.peers.len().max(1)).clamp(1, RECEIVER_ROWS_PER_POLL);
+            (QUIET_PAGE_RECEIVER_KEYS / self.peers.len().max(1)).clamp(1, WIDE_KEYS_PER_PAGE);
         let page_width = |remaining: usize, queued_width, can_widen| {
             if quiet {
                 // Leave a seam for an arrival just after the empty observation,
@@ -103,7 +112,7 @@ impl SourceDeparture {
                 let key_limit = page_width(
                     keys.len(),
                     if shared {
-                        RECEIVER_ROWS_PER_POLL
+                        WIDE_KEYS_PER_PAGE
                     } else {
                         KEYS_PER_PAGE
                     },
@@ -193,7 +202,7 @@ impl RibManager {
         // One departure owns the actor at a time. A teardown reached while
         // one is live keeps the synchronous path instead of replacing it.
         self.source_departure.is_none()
-            && keys.saturating_mul(self.outbound_peers.len()) > RECEIVER_ROWS_PER_POLL
+            && keys.saturating_mul(self.outbound_peers.len()) > PACED_DEPARTURE_RECEIVER_KEYS
     }
 
     /// A private receiver that selects its own winner among all candidates,
@@ -317,7 +326,7 @@ impl RibManager {
             .zip(exporters)
             .map(|(keys, kind)| {
                 keys.len().div_ceil(if kind == Exporters::PlainGroups {
-                    RECEIVER_ROWS_PER_POLL
+                    WIDE_KEYS_PER_PAGE
                 } else {
                     KEYS_PER_PAGE
                 })
@@ -331,7 +340,7 @@ impl RibManager {
         } else {
             PrimaryTurn::AfterBatch
         };
-        self.source_departure = Some(Box::new(SourceDeparture {
+        let mut work = Box::new(SourceDeparture {
             source,
             peers,
             affected,
@@ -343,7 +352,18 @@ impl RibManager {
             families,
             page: None,
             primary,
-        }));
+        });
+        // A queued head that cannot commute, such as the next PeerDown, waits
+        // for the whole departure. Fence it now so the first page runs quiet.
+        if self.primary_lookahead.is_none() {
+            self.primary_lookahead = self.rx.try_recv().ok();
+        }
+        if let Some(update) = &self.primary_lookahead
+            && matches!(work.classify(update, 0), PrimaryHead::Fenced)
+        {
+            work.primary = PrimaryTurn::Fenced;
+        }
+        self.source_departure = Some(work);
     }
 
     /// Nothing admissible waits behind the departure. A fenced FIFO head

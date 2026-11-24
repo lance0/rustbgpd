@@ -126,18 +126,25 @@ impl ReleaseDistribution {
             return maximum;
         };
         let key_count = (self.prefixes.len() + keys.held.len()).max(1);
-        maximum.min(super::super::source_departure::RECEIVER_ROWS_PER_POLL / key_count)
+        let members = (RECEIVER_ROWS_PER_POLL / key_count).max(1);
+        // Group members walk only their per-member corrections. Private
+        // receivers keep the narrower per-walk cap.
+        if keys.shared {
+            members
+        } else {
+            maximum.min(members)
+        }
     }
 
-    fn peer_batch(&self, manager: &RibManager, after: Option<PeerId>) -> Vec<PeerId> {
+    fn peer_batch(&self, manager: &RibManager, after: Option<PeerId>, limit: usize) -> Vec<PeerId> {
         if self.departure.is_some() {
             manager
                 .source_departure
                 .as_ref()
                 .expect("departure owns the roster")
-                .peer_batch(after, RELEASE_MEMBERS_PER_POLL)
+                .peer_batch(after, limit)
         } else {
-            manager.release_peer_batch(after, RELEASE_MEMBERS_PER_POLL)
+            manager.release_peer_batch(after, limit)
         }
     }
 
@@ -209,7 +216,9 @@ impl RibManager {
                 pass.phase = Phase::Classify(None);
             }
             Phase::Classify(after) => {
-                let peers = pass.peer_batch(self, after);
+                // A departure classifies as many members as one delivery poll.
+                let limit = pass.member_limit(RELEASE_MEMBERS_PER_POLL);
+                let peers = pass.peer_batch(self, after, limit);
                 let mut remaining = RECEIVER_ROWS_PER_POLL;
                 let mut last = after;
                 for &peer in &peers {
@@ -267,7 +276,7 @@ impl RibManager {
                     self.collect_owed_floors(peer, &mut pass.floors);
                     pass.groups.entry(gid).or_default().push(peer);
                 }
-                pass.phase = if peers.len() == RELEASE_MEMBERS_PER_POLL {
+                pass.phase = if peers.len() == limit {
                     Phase::Classify(peers.last().copied())
                 } else if pass.prefixes.is_empty() {
                     Phase::Finish
@@ -334,7 +343,7 @@ impl RibManager {
                 }
             }
             Phase::Cap(after, over) => {
-                let peers = pass.peer_batch(self, after);
+                let peers = pass.peer_batch(self, after, RELEASE_MEMBERS_PER_POLL);
                 for &peer in &peers {
                     if self.cap_release_owed_peer(peer, over, &mut pass.floors)
                         && pass.departure.is_some()
@@ -570,7 +579,7 @@ impl RibManager {
                     super::super::source_departure::quiet_delivery_members(
                         pass.prefixes.len() + keys.held.len(),
                     )
-                    .max(maximum)
+                    .max(pass.member_limit(maximum))
                 } else if quiet_departure {
                     maximum
                 } else {
@@ -798,7 +807,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     #[test]
-    fn departure_classifies_and_caps_cheap_peers_together_and_charges_row_walks() {
+    fn departure_classifies_one_delivery_page_of_peers_per_poll_and_caps_evictions_singly() {
         let mut manager = RibManager::new(
             mpsc::channel(1).1,
             mpsc::channel(1).1,
@@ -813,7 +822,9 @@ mod tests {
             register_test_peer(&mut manager, peer, 1);
         }
         let prefix = |i| Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(i), 32));
-        let changed: HashSet<_> = (0..256u32).map(prefix).collect();
+        // A page this wide fits 16 members in one poll's receiver-key budget.
+        let keys = u32::try_from(RECEIVER_ROWS_PER_POLL / 16).unwrap();
+        let changed: HashSet<_> = (0..keys).map(prefix).collect();
         manager.start_source_departure(
             peer_v4(Ipv4Addr::LOCALHOST),
             changed.clone(),
@@ -821,13 +832,14 @@ mod tests {
             &HashSet::new(),
         );
         let (ended, _) = mpsc::channel(1);
-        // These disjoint intersections must inspect all 256 keys apiece.
+        // These disjoint intersections inspect every page key apiece, which
+        // still fits the budget of a member-limited poll.
         for &peer in &peers[16..18] {
             manager.helper_stale_exempt.insert(
                 peer,
                 HelperStaleExempt {
                     ended: ended.downgrade(),
-                    keys: (256..512).map(|i| (prefix(i), 0)).collect(),
+                    keys: (keys..2 * keys).map(|i| (prefix(i), 0)).collect(),
                     settled: true,
                     release_changed: [false; 2],
                     orf_blocked: vec![],
@@ -850,8 +862,8 @@ mod tests {
         };
         pass.phase = Phase::Classify(None);
         assert_eq!(visit(&mut manager, &mut pass), 16);
-        assert_eq!(visit(&mut manager, &mut pass), 1);
-        assert_eq!(visit(&mut manager, &mut pass), 15);
+        assert_eq!(visit(&mut manager, &mut pass), 16);
+        assert_eq!(visit(&mut manager, &mut pass), 0);
         assert_eq!(
             pass.groups.values().map(Vec::len).sum::<usize>(),
             peers.len()

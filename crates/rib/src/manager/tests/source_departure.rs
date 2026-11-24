@@ -8,12 +8,14 @@ use rustbgpd_wire::{FlowSpecComponent, FlowSpecPrefix};
 use super::exportability::ReusableExactExportEncoder;
 use super::lifecycle::{test_peer_up, test_routes_received};
 use super::*;
-use crate::manager::source_departure::{take_flowspec_withdrawal_work, take_receiver_rows};
+use crate::manager::source_departure::{
+    RECEIVER_ROWS_PER_POLL, take_flowspec_withdrawal_work, take_receiver_rows,
+};
 
 const SOURCE: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 1);
 const OTHER: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 2);
 const ROWS: u32 = 1024;
-const POLL_LIMIT: usize = 256;
+const POLL_LIMIT: usize = RECEIVER_ROWS_PER_POLL;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Shape {
@@ -232,6 +234,8 @@ struct PollCounts {
     envelope: usize,
     envelopes: usize,
     polls: usize,
+    /// Units that ran while the FIFO held admissible work.
+    pressured: usize,
 }
 
 fn register_source_only(manager: &mut RibManager) -> mpsc::Receiver<OutboundRouteUpdate> {
@@ -450,13 +454,20 @@ fn poll_counts(
         envelope: withdrawal_sizes.max().unwrap(),
         envelopes,
         polls,
+        pressured: 0,
     }
 }
 
 async fn check_sizes(shape: Shape) {
-    let small = Box::pin(departure(shape, 8, ROWS, ProbeArrival::Prequeued)).await;
+    // A group poll covers the poll budget over a 256-key page. Both rosters
+    // must exceed it before a flat maximum shows the bound.
+    let (small_count, large_count) = match shape {
+        Shape::Grouped | Shape::RsControl => (72, 144),
+        _ => (8, 32),
+    };
+    let small = Box::pin(departure(shape, small_count, ROWS, ProbeArrival::Prequeued)).await;
     let small_work = take_flowspec_withdrawal_work();
-    let large = Box::pin(departure(shape, 32, ROWS, ProbeArrival::Prequeued)).await;
+    let large = Box::pin(departure(shape, large_count, ROWS, ProbeArrival::Prequeued)).await;
     if shape == Shape::FlowSpec {
         let large_work = take_flowspec_withdrawal_work();
         eprintln!(
@@ -613,11 +624,11 @@ async fn rs_control_grouped_departure_yields_to_an_unrelated_update() {
 
 #[tokio::test(start_paused = true)]
 async fn grouped_departure_chunks_an_uneven_member_tail_and_keeps_private_walks_small() {
-    // 256 / 109 = 2 receivers per poll, with one receiver on the last page.
+    // 16,384 / 109 = 150 receivers per poll, with ten on the last page.
     // The extra source-only private registration in both fixtures cannot
     // disqualify the first fixture. A sendable private receiver must.
-    let grouped = pressured_departure(Shape::Grouped, 5, 109);
-    assert_eq!((grouped.envelope, grouped.emitted), (109, 218));
+    let grouped = pressured_departure(Shape::Grouped, 160, 109);
+    assert_eq!((grouped.envelope, grouped.emitted), (109, 150 * 109));
     let mixed = pressured_departure(Shape::Mixed, 5, 109);
     assert!(mixed.envelope <= 16);
     assert!(mixed.inspected <= 16 * 8 && mixed.emitted <= 16 * 8);
@@ -626,6 +637,11 @@ async fn grouped_departure_chunks_an_uneven_member_tail_and_keeps_private_walks_
 /// Drive a departure unit by unit while an admissible UPDATE stays queued,
 /// so every unit runs under FIFO pressure.
 fn pressured_departure(shape: Shape, count: u8, rows: u32) -> PollCounts {
+    queued_departure(shape, count, rows, announce(OTHER, probe_prefix()))
+}
+
+/// Drive a departure unit by unit while `head` stays queued behind it.
+fn queued_departure(shape: Shape, count: u8, rows: u32, head: RibUpdate) -> PollCounts {
     let (tx, rx) = mpsc::channel(16);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     manager.outbound_row_credit_override = None;
@@ -648,12 +664,13 @@ fn pressured_departure(shape: Shape, count: u8, rows: u32) -> PollCounts {
     for rx in &mut receivers {
         assert_initial(rx, shape, rows);
     }
-    tx.try_send(announce(OTHER, probe_prefix())).unwrap();
+    tx.try_send(head).unwrap();
     manager.handle_update(down(SOURCE));
     assert!(manager.source_departure.is_some());
     take_receiver_rows();
-    let (mut envelope, mut emitted, mut inspected, mut polls) = (0, 0, 0, 0);
+    let (mut envelope, mut emitted, mut inspected, mut polls, mut pressured) = (0, 0, 0, 0, 0);
     while manager.source_departure.is_some() {
+        pressured += usize::from(!manager.source_departure_quiet());
         manager.advance_source_departure();
         polls += 1;
         inspected = inspected.max(take_receiver_rows());
@@ -673,7 +690,48 @@ fn pressured_departure(shape: Shape, count: u8, rows: u32) -> PollCounts {
         envelope,
         envelopes: 0,
         polls,
+        pressured,
     }
+}
+
+/// Departure polls are sized by receiver work, not by a fixed member page.
+/// 572 keys toward 128 group members is 73,216 receiver-keys. Each member
+/// walk takes about one poll per 16k of them, plus a few seams per key page,
+/// whether or not an admissible UPDATE waits.
+#[test]
+fn group_departure_polls_scale_with_receiver_work() {
+    const KEYS: u32 = 572;
+    const MEMBERS: u8 = 128;
+    let per_walk = (KEYS as usize * usize::from(MEMBERS)).div_ceil(16_384);
+    let mut over = Vec::new();
+    for shape in [Shape::Grouped, Shape::RsControl] {
+        let pressured = pressured_departure(shape, MEMBERS, KEYS);
+        let fenced = queued_departure(shape, MEMBERS, KEYS, down(OTHER));
+        eprintln!(
+            "{shape:?} keys={KEYS} members={MEMBERS}: pressured polls={} fenced polls={}",
+            pressured.polls, fenced.polls
+        );
+        // Classify, RS count removal, RS restore and emission each walk the
+        // roster on each of at most four key pages.
+        let bound = 4 * 12 + 4 * per_walk;
+        for polls in [pressured.polls, fenced.polls] {
+            if polls > bound {
+                over.push(format!("{shape:?}: {polls} departure polls, bound {bound}"));
+            }
+        }
+    }
+    assert!(over.is_empty(), "{over:?}");
+}
+
+/// The next `PeerDown` cannot run before this departure ends. Fencing it when
+/// the departure starts lets the first page run quiet, as later pages do.
+/// The driver skips the seam checks, so only that start can fence the head.
+#[test]
+fn a_peer_down_queued_behind_a_departure_lets_every_unit_run_quiet() {
+    let fenced = queued_departure(Shape::RsControl, 16, ROWS, down(OTHER));
+    assert_eq!(fenced.pressured, 0, "units ran under FIFO pressure");
+    let pressured = pressured_departure(Shape::RsControl, 16, ROWS);
+    assert_eq!(pressured.pressured, pressured.polls);
 }
 
 /// With one key page there is no later key boundary. All 32 members must
@@ -846,6 +904,9 @@ async fn refresh_between_departures_sees_reselected_routes_and_reconnect_owns_it
     drop(tx);
     SAW_DEPARTURE.set(false);
     manager.actor_turn_check = Some(observe_winner);
+    // The refresh is a fenced head, so the departure runs quiet. Observe
+    // each unit: one quiet turn could otherwise finish it.
+    manager.flush_poll_budget = Duration::ZERO;
     let end = Box::pin(manager.run_actor()).await;
     assert!(
         SAW_DEPARTURE.get(),
@@ -1218,7 +1279,7 @@ impl PartialGroupWitness {
 async fn a_grouped_departure_publishes_the_entire_key_page_before_dispatching_an_update() {
     // More members than one quiet delivery unit covers at this page width,
     // so a partially delivered group is observable between units.
-    const MEMBERS: u8 = 40;
+    const MEMBERS: u8 = 80;
     let (tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     for source in [SOURCE, OTHER] {
