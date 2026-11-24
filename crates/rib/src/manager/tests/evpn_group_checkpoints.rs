@@ -688,16 +688,18 @@ fn shared_capture_walk_leaves_what_one_capture_per_member_leaves() {
     }
 }
 
-/// N members beginning capture in one pass used to hash and probe every key
-/// N times. The shared walk interns each key once, so the ledger's index
-/// work must not grow with the member count.
+/// N members beginning capture in one pass used to hash and look up every
+/// key N times. The shared walk interns each key once, so the ledger's index
+/// lookups must not grow with the member count. Lookups, not probe steps:
+/// the index hashes with a random key per manager, so probe-chain lengths
+/// differ between the two managers compared here.
 #[test]
 fn shared_capture_walk_index_probes_do_not_grow_with_members() {
-    let probes = |members: u8| {
+    let lookups = |members: u8| {
         let mut pass = OwnedPass::new(members, 128, true);
         let keys = pass.changed();
         let gid = pass.gid;
-        let before = pass.manager.evpn_recovery.probes_for_test();
+        let before = pass.manager.evpn_recovery.lookups_for_test();
         pass.manager.stage_group_evpn_keys(gid, &keys);
         for peer in &pass.peers {
             let handle = pass.manager.evpn_recovery_handle(*peer).unwrap();
@@ -711,13 +713,14 @@ fn shared_capture_walk_index_probes_do_not_grow_with_members() {
                 128
             );
         }
-        pass.manager.evpn_recovery.probes_for_test() - before
+        pass.manager.evpn_recovery.lookups_for_test() - before
     };
-    let (few, many) = (probes(2), probes(16));
-    assert!(few >= 128, "every key was interned: {few} probes");
-    assert!(
-        many < few * 2,
-        "{many} index probes for 16 members against {few} for 2: per-member interning is 8x"
+    let (few, many) = (lookups(2), lookups(16));
+    // The first key meets an unallocated table and needs no lookup.
+    assert!(few >= 127, "every key was looked up: {few} lookups");
+    assert_eq!(
+        many, few,
+        "{many} index lookups for 16 members against {few} for 2: per-member interning"
     );
 }
 
