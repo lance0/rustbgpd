@@ -5,6 +5,8 @@ use std::future::{Future, poll_fn};
 use rustbgpd_policy::{NextHopAction, Policy, PolicyAction, PolicyChain};
 
 use super::*;
+use crate::manager::distribution::ExportMemo;
+use crate::manager::first_group_build::page_memo;
 
 const TAG: u32 = 64_501 << 16 | 7;
 const PAGE: usize = crate::loc_rib::REGISTRATION_PAGE_SIZE;
@@ -255,4 +257,64 @@ fn paged_policy_build_shares_each_modified_source_attribute_set() {
         .map(|row| Arc::as_ptr(&row.attributes))
         .collect();
     assert_eq!(allocations.len(), 1);
+}
+
+fn outcome_scans() -> usize {
+    crate::manager::slice_timing::group_work()
+        .get("export_memo_outcome_scans")
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Peak outcome comparisons in one page, and peak outcomes retained, when a
+/// prefix-specific policy gives every key of each page its own modification
+/// of one shared source allocation.
+fn prefix_specific_pages(pages: usize) -> (usize, usize) {
+    let source = route(prefixes(0)[0], SOURCE, 100).attributes;
+    let mut memo = ExportMemo::default();
+    let (mut peak_scans, mut peak_outcomes) = (0, 0);
+    for page in 0..pages {
+        let memo = page_memo(&mut memo);
+        let before = outcome_scans();
+        for key in 0..PAGE {
+            let mods = rustbgpd_policy::RouteModifications {
+                communities_add: vec![u32::try_from(page * PAGE + key).unwrap()],
+                ..Default::default()
+            };
+            memo.apply_attrs(&source, &mods);
+        }
+        peak_scans = peak_scans.max(outcome_scans() - before);
+        peak_outcomes = peak_outcomes.max(memo.outcomes());
+    }
+    (peak_scans, peak_outcomes)
+}
+
+#[test]
+fn page_memo_bounds_prefix_specific_outcomes_and_keeps_shared_sources() {
+    // One source entry, so only the outcome bound can roll the memo over.
+    let small = prefix_specific_pages(8);
+    assert_eq!(small, prefix_specific_pages(32));
+    assert!(small.1 <= 3 * PAGE, "{small:?}");
+    assert!(small.0 <= 3 * PAGE * PAGE, "{small:?}");
+
+    // The reload shape: 700 sources, one shared outcome each, across pages.
+    let sources: Vec<_> = (0..700u16)
+        .map(|i| route(prefixes(i)[0], SOURCE, 100).attributes)
+        .collect();
+    let mods = rustbgpd_policy::RouteModifications {
+        communities_add: vec![TAG],
+        ..Default::default()
+    };
+    let mut memo = ExportMemo::default();
+    let first: Vec<_> = sources
+        .iter()
+        .map(|source| page_memo(&mut memo).apply_attrs(source, &mods).0)
+        .collect();
+    for _ in 0..32 {
+        let memo = page_memo(&mut memo);
+        for (source, shared) in sources.iter().zip(&first) {
+            assert!(Arc::ptr_eq(&memo.apply_attrs(source, &mods).0, shared));
+        }
+    }
+    assert_eq!((memo.len(), memo.outcomes()), (700, 700));
 }

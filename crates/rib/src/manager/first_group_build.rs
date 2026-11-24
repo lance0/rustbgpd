@@ -83,12 +83,15 @@ struct ReloadSource {
     aspa: Option<std::sync::Weak<rustbgpd_rpki::AspaTable>>,
 }
 
-fn page_memo(memo: &mut ExportMemo) -> &mut ExportMemo {
+pub(super) fn page_memo(memo: &mut ExportMemo) -> &mut ExportMemo {
     // Keep common modified attributes shared across discovery and repair.
-    // Each single-best page can add at most one source per key. Resetting
-    // above one page bounds both retention and drop at two pages of sources,
-    // each with at most two nonempty outcomes from the admitted static terms.
-    if memo.len() > REGISTRATION_PAGE_SIZE {
+    // Each single-best page can add at most one source and one outcome per
+    // key. A reload policy yields at most two outcomes per source, but a
+    // first-group policy can yield one per prefix-specific term. Resetting
+    // above one page of sources or two pages of outcomes bounds retention,
+    // the per-route outcome scan and the drop at three pages; it never
+    // triggers before the source bound for a reload policy.
+    if memo.len() > REGISTRATION_PAGE_SIZE || memo.outcomes() > 2 * REGISTRATION_PAGE_SIZE {
         *memo = ExportMemo::default();
     }
     memo
