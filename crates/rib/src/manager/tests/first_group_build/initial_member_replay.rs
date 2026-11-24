@@ -1,6 +1,7 @@
 //! Drive the registration owner one turn at a time to change a live partial replay.
 mod exact_refusal;
 mod reservation;
+mod source_departure;
 
 use super::*;
 use crate::SelectionDeferralConfig;

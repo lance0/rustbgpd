@@ -13,6 +13,26 @@ enum Changes {
     None,
     DifferentKeys,
     WithdrawThenReannounce,
+    SourceDeparture,
+}
+
+const DEPARTED_ROUTES: u16 = 600;
+
+fn departed_prefixes() -> impl Iterator<Item = Ipv4Prefix> {
+    (0..DEPARTED_ROUTES).map(|i| prefix(ROUTES + 1 + i))
+}
+
+/// Take the second source down without graceful restart and wait until its
+/// paced departure has removed its last winner.
+async fn depart_source(tx: &mpsc::Sender<RibUpdate>) {
+    tx.send(RibUpdate::PeerDown {
+        peer: PeerId::from_addr(IpAddr::V4(C)),
+        session_id: 0,
+    })
+    .await
+    .unwrap();
+    let last = departed_prefixes().last().unwrap();
+    assert!(winners(tx, vec![Prefix::V4(last)]).await[0].is_none());
 }
 
 async fn update_source(
@@ -303,7 +323,9 @@ async fn establish_member(
         None,
         false,
     );
-    if changes != Changes::None {
+    // A held page needs a one-slot writer. The one-turn reference drains its
+    // dump before the departure, so its withdrawals need no corrective resync.
+    if changes != Changes::None && (paced || changes != Changes::SourceDeparture) {
         (session.outbound_tx, session.outbound_rx) = mpsc::channel(1);
     }
     let (client, wire) = connected_stream_pair().await;
@@ -329,6 +351,23 @@ async fn establish_member(
     (session, wire, families.len(), command_sender)
 }
 
+/// The paced candidate departs while this page's latch is held; the one-turn
+/// reference departs after its dump is delivered.
+async fn deliver_around_departure(
+    session: &mut PeerSession,
+    tx: &mpsc::Sender<RibUpdate>,
+    update: rustbgpd_rib::OutboundRouteUpdate,
+    paced: bool,
+) {
+    if paced {
+        depart_source(tx).await;
+        session.test_drain_outbound(update).await;
+    } else {
+        session.test_drain_outbound(update).await;
+        depart_source(tx).await;
+    }
+}
+
 async fn replay(paced: bool, policy: bool, changes: Changes) -> WireTrace {
     let (tx, rx) = mpsc::channel(32);
     let (_queries, queries) = mpsc::channel(1);
@@ -346,6 +385,9 @@ async fn replay(paced: bool, policy: bool, changes: Changes) -> WireTrace {
             65021
         },
     ));
+    if changes == Changes::SourceDeparture {
+        base.extend(departed_prefixes().map(|key| make_sourced_route(C, key, 65021)));
+    }
     manager.bench_seed_loc_rib(base);
     let actor = tokio::spawn(manager.run());
     let (mut session, mut wire, family_count, _commands) =
@@ -388,7 +430,18 @@ async fn replay(paced: bool, policy: bool, changes: Changes) -> WireTrace {
             }
         }
         ends += update.end_of_rib.len();
+        if changes == Changes::SourceDeparture && edits.is_none() {
+            let key = departed_prefixes().next().unwrap();
+            edits = Some((key, key));
+            deliver_around_departure(&mut session, &tx, update, paced).await;
+            continue;
+        }
         session.test_drain_outbound(update).await;
+    }
+    if changes == Changes::SourceDeparture {
+        while let Ok(update) = session.outbound_rx.try_recv() {
+            session.test_drain_outbound(update).await;
+        }
     }
     if paced {
         assert!(
@@ -412,7 +465,9 @@ async fn replay(paced: bool, policy: bool, changes: Changes) -> WireTrace {
     actor.abort();
     let _ = actor.await;
     assert_eq!(edits.is_some(), changes != Changes::None);
-    check_wire(&mut wire, paced, changes, edits);
+    if changes != Changes::SourceDeparture {
+        check_wire(&mut wire, paced, changes, edits);
+    }
     wire
 }
 
@@ -456,4 +511,37 @@ async fn held_page_delivers_withdraw_then_three_distinct_announcements_before_eo
     )
     .await
     .expect("separately applied updates reach the receiver");
+}
+
+// A large source departure mid-replay is a release pass. The member keeps its
+// paced replay: departed rows it was sent are withdrawn once, unsent ones never
+// reach it, and no base row is announced twice by a corrective resync.
+#[tokio::test]
+async fn source_departure_mid_replay_matches_the_one_turn_table() {
+    tokio::time::timeout(Duration::from_secs(90), async {
+        let reference = Box::pin(replay(false, true, Changes::SourceDeparture)).await;
+        let mut candidate = Box::pin(replay(true, true, Changes::SourceDeparture)).await;
+        assert!(
+            candidate.state == reference.state,
+            "final wire table differs from the one-turn reference"
+        );
+        let departed: std::collections::BTreeSet<_> = departed_prefixes().map(wire_key).collect();
+        let mut withdrawn = 0;
+        for (key, events) in &candidate.events {
+            if departed.contains(key) {
+                assert_eq!(events.len(), 2, "departed {key:?}: announce then withdraw");
+                assert!(events[0].1.is_some() && events[1].1.is_none());
+                withdrawn += 1;
+            } else {
+                assert_eq!(events.len(), 1, "base row {key:?} repeated");
+            }
+        }
+        assert!(withdrawn > 0, "the first page carried departed rows");
+        assert_eq!(
+            candidate.eors.remove(&(1, 1)).map(|eors| eors.len()),
+            Some(1)
+        );
+    })
+    .await
+    .expect("departure replay to finish");
 }

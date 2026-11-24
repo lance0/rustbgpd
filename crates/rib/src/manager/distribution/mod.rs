@@ -10299,7 +10299,10 @@ impl RibManager {
                     }
                     let member_of = self.grouped_member_of(peer);
                     if self.is_initial_member_replay(peer) {
-                        if RELEASING
+                        // A source departure stages ordinary group deltas, and its
+                        // Loc-RIB writes are already in the member's scan. Other
+                        // release passes also admit rows missed during a hold.
+                        if (RELEASING && self.source_departure.is_none())
                             || self.force_outbound_peers.contains(&peer)
                             || self.dirty_peers.contains(&peer)
                         {
