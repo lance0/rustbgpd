@@ -14,7 +14,7 @@ use changes::ReplayChanges;
 use tokio::sync::mpsc;
 
 use super::distribution::OutboundCommitBatch;
-use super::update_groups::admitted_recovery::{Key, OnReservationRefusal};
+use super::update_groups::admitted_recovery::{Key, OnReservationRefusal, ReplayRoom};
 use super::{PeerId, RibManager};
 use crate::fast_hash::FastSet;
 use crate::loc_rib::{REGISTRATION_PAGE_SIZE, RegistrationScanStatus};
@@ -57,12 +57,40 @@ struct Replay {
     carry: VecDeque<Prefix>,
 }
 
+/// What a paceable registration waits for before its replay can start.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SlotWait {
+    /// Every one of the `MAX_JOIN_COHORT` replay slots is taken.
+    Cap,
+    /// The live replays' proofs leave no room for this table, or an older
+    /// registration waits for that room.
+    Budget,
+}
+
+impl SlotWait {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cap => "replay_cap",
+            Self::Budget => "proof_budget",
+        }
+    }
+}
+
 #[derive(Default)]
 pub(super) struct InitialMemberReplays {
     members: HashMap<PeerId, Replay>,
     ready: VecDeque<PeerId>,
     blocked: VecDeque<PeerId>,
     registration_due: bool,
+    // The registration queue length when its every entry last waited for a
+    // replay slot. A replay's end, or a queue change, makes it runnable.
+    slot_wait: Option<usize>,
+    // Registrations waiting for a replay slot, each with its cause, logged
+    // once per wait.
+    waiters: HashMap<PeerId, SlotWait>,
+    // Groups published for a founder that then waited for a slot. One no
+    // queued registration claims is retired.
+    founder_groups: Vec<usize>,
     #[cfg(feature = "bench-internals")]
     observer: Option<observation::ReplayObserver>,
     #[cfg(test)]
@@ -70,6 +98,16 @@ pub(super) struct InitialMemberReplays {
 }
 
 impl InitialMemberReplays {
+    pub(super) fn note_founder_group(&mut self, gid: usize) {
+        if !self.founder_groups.contains(&gid) {
+            self.founder_groups.push(gid);
+        }
+    }
+
+    pub(super) fn take_founder_groups(&mut self) -> Vec<usize> {
+        std::mem::take(&mut self.founder_groups)
+    }
+
     pub(super) fn runnable(&self) -> bool {
         !self.ready.is_empty()
     }
@@ -94,22 +132,127 @@ impl RibManager {
             .is_some_and(|replay| replay.changes.unsent())
     }
 
+    /// What `peer`'s paceable registration waits for, if anything: a slot
+    /// while live replays hold every one, or proof budget while their
+    /// proofs leave no room for its table (and always when `behind_budget`,
+    /// an older registration waiting for that room, keeps the queue FIFO).
+    /// It does not wait when no replay is live, when its table would not
+    /// fit even once they end, or when its replay would be refused anyway.
+    pub(super) fn replay_slot_wait(&self, peer: PeerId, behind_budget: bool) -> Option<SlotWait> {
+        let replays = &self.initial_member_replays.members;
+        if replays.is_empty()
+            || replays.contains_key(&peer)
+            || !self.eligible_initial_member_replay(peer)
+            || self.replay_peer_refusal(peer).is_some()
+        {
+            return None;
+        }
+        // A table that fits under neither limit is refused whatever ends:
+        // it takes its one-turn send now rather than wait for a slot.
+        let room = self
+            .pending_group_admitted
+            .initial_replay_room(self.pending_replay_rows(peer));
+        if room == ReplayRoom::Never {
+            return None;
+        }
+        if replays.len() >= super::peer_lifecycle::MAX_JOIN_COHORT {
+            return Some(SlotWait::Cap);
+        }
+        (behind_budget || room == ReplayRoom::AfterReplays).then_some(SlotWait::Budget)
+    }
+
+    /// [`Self::replay_slot_wait`] for a registration completed outside the
+    /// queue walk: it also waits behind any queued registration that waits
+    /// for proof budget.
+    pub(super) fn registration_waits_for_replay_slot(&mut self, peer: PeerId) -> bool {
+        let behind_budget = self
+            .pending_initial_registrations
+            .iter()
+            .take_while(|queued| **queued != peer)
+            .any(|queued| {
+                self.initial_member_replays.waiters.get(queued) == Some(&SlotWait::Budget)
+            });
+        let wait = self.replay_slot_wait(peer, behind_budget);
+        self.note_replay_slot_wait(peer, wait);
+        wait.is_some()
+    }
+
+    /// Record the registration's wait, logging the first of each.
+    pub(super) fn note_replay_slot_wait(&mut self, peer: PeerId, wait: Option<SlotWait>) {
+        let Some(wait) = wait else {
+            self.initial_member_replays.waiters.remove(&peer);
+            return;
+        };
+        if self
+            .initial_member_replays
+            .waiters
+            .insert(peer, wait)
+            .is_none()
+        {
+            tracing::debug!(
+                %peer,
+                cause = wait.as_str(),
+                replays = self.initial_member_replays.members.len(),
+                "paced initial table waits for a replay slot"
+            );
+        }
+    }
+
+    /// Peer state that refuses a paced replay whatever the free slots, so
+    /// waiting for one would not help.
+    fn replay_peer_refusal(&self, peer: PeerId) -> Option<ReplayCause> {
+        if self.dirty_peers.contains(&peer) {
+            Some(ReplayCause::from_label(|| "already_dirty"))
+        } else if self.outbound_prefix_limits.contains_key(&peer)
+            || self.configured_outbound_limit(peer)
+        {
+            // A waiting registration installs its configured limits only
+            // when it registers.
+            Some(ReplayCause::from_label(|| "prefix_limit"))
+        } else if self.retain_initial_group_admitted(peer) {
+            Some(ReplayCause::from_label(|| "retained_proof"))
+        } else if self.peer_orf_pending.contains_key(&peer) {
+            Some(ReplayCause::from_label(|| "orf_pending"))
+        } else {
+            None
+        }
+    }
+
+    /// Whether a queued registration can make progress. One whose every
+    /// entry waits for a replay slot is not, until a replay ends, the queue
+    /// changes, or a message other than a unicast receipt arrives (a session
+    /// or profile change can end a wait).
+    pub(super) fn registration_runnable(&self) -> bool {
+        !self.pending_initial_registrations.is_empty()
+            && self.initial_member_replays.slot_wait
+                != Some(self.pending_initial_registrations.len())
+    }
+
+    pub(super) fn set_registration_slot_wait(&mut self, waiting: bool) {
+        self.initial_member_replays.slot_wait =
+            waiting.then_some(self.pending_initial_registrations.len());
+    }
+
     pub(super) fn start_initial_member_replay(&mut self, peer: PeerId) -> bool {
         let Some(gid) = self.grouped_member_of(peer) else {
-            return false;
+            return self
+                .refuse_initial_member_replay(peer, ReplayCause::from_label(|| "ungrouped"));
         };
         let group = &self.group_ribs[&gid];
-        if self.initial_member_replays.members.len() >= super::peer_lifecycle::MAX_JOIN_COHORT
-            || group.evpn_table_stamp == 0
-            || self.dirty_peers.contains(&peer)
-            || self.outbound_prefix_limits.contains_key(&peer)
-            || self.retain_initial_group_admitted(peer)
-            || self.peer_orf_pending.contains_key(&peer)
+        let refusal = if self.initial_member_replays.members.len()
+            >= super::peer_lifecycle::MAX_JOIN_COHORT
         {
-            return false;
+            Some(ReplayCause::from_label(|| "replay_cap"))
+        } else if group.evpn_table_stamp == 0 {
+            Some(ReplayCause::from_label(|| "unpublished_table"))
+        } else {
+            self.replay_peer_refusal(peer)
+        };
+        if let Some(cause) = refusal {
+            return self.refuse_initial_member_replay(peer, cause);
         }
         let table_stamp = group.evpn_table_stamp;
-        let changes = if group.per_client_best {
+        let changes = if group.per_client_best || self.rs_control_context(peer).is_some() {
             ReplayChanges::coalescing()
         } else {
             ReplayChanges::default()
@@ -117,15 +260,22 @@ impl RibManager {
         let enrollment = self
             .pending_group_admitted
             .begin_initial_replay(peer, group.table.len());
-        if !matches!(enrollment, Ok(true)) {
-            #[cfg(feature = "bench-internals")]
-            if let Err(error) = enrollment {
+        match enrollment {
+            Ok(true) => {}
+            Ok(false) => {
+                return self
+                    .refuse_initial_member_replay(peer, ReplayCause::from_label(|| "proof_state"));
+            }
+            Err(error) => {
+                #[cfg(feature = "bench-internals")]
                 self.observe_initial_replay(
                     peer,
                     BenchReplayEvent::EnrollmentRefused(error.cause.as_str()),
                 );
+                #[cfg(not(feature = "bench-internals"))]
+                let _ = error;
+                return false;
             }
-            return false;
         }
         self.refresh_group_recovery_gauges();
         self.loc_rib.start_member_replay_scan(peer);
@@ -161,10 +311,21 @@ impl RibManager {
         true
     }
 
+    /// The registration sends its table in its own turn instead.
+    fn refuse_initial_member_replay(&self, peer: PeerId, cause: ReplayCause) -> bool {
+        #[cfg(feature = "bench-internals")]
+        self.observe_initial_replay(peer, BenchReplayEvent::Refused(cause.label));
+        #[cfg(not(feature = "bench-internals"))]
+        let _ = (self, peer, cause);
+        false
+    }
+
     pub(super) fn abort_initial_member_replay(&mut self, peer: PeerId) -> bool {
         if self.initial_member_replays.members.remove(&peer).is_none() {
             return false;
         }
+        // A released slot or proof budget may admit a waiting registration.
+        self.initial_member_replays.slot_wait = None;
         self.initial_member_replays.ready.retain(|p| *p != peer);
         self.initial_member_replays.blocked.retain(|p| *p != peer);
         self.loc_rib.stop_member_replay_scan(peer);
@@ -197,7 +358,7 @@ impl RibManager {
 
     pub(super) fn service_initial_member_replay(&mut self) -> bool {
         if self.initial_member_replays.registration_due
-            && (self.first_group_build.is_some() || !self.pending_initial_registrations.is_empty())
+            && (self.first_group_build.is_some() || self.registration_runnable())
         {
             self.initial_member_replays.registration_due = false;
             return false;
@@ -389,14 +550,11 @@ impl RibManager {
         let mut reconciled = Vec::new();
         let mut keys = HashSet::new();
         let mut units = 0;
-        while let Some(&prefix) = replay.carry.front() {
-            // One unit per key, plus each fallback row its slot may search.
-            let cost = 1 + rs_control.map_or(0, |_| group.rs_fallback_rows(&prefix));
-            if units != 0 && units + cost > REGISTRATION_PAGE_SIZE {
-                break;
-            }
-            units += cost;
-            replay.carry.pop_front();
+        while units < REGISTRATION_PAGE_SIZE
+            && let Some(prefix) = replay.carry.pop_front()
+        {
+            // One unit per key, plus each fallback row its slot searched.
+            units += 1;
             keys.insert(prefix);
             // Grouped single-best outbound identities use path ID zero,
             // including when the received winner has its own Add-Path ID.
@@ -408,7 +566,11 @@ impl RibManager {
             } else if sent || replay.changes.owns_absent(&prefix) {
                 continue;
             }
-            if let Some(entry) = group.adv_entry_for(peer, &prefix, 0, rs_control) {
+            let slot = group.replay_slot(peer, &prefix, rs_control);
+            if rs_control.is_some() {
+                units += group.rs_fallback_searched(&prefix, slot.as_ref());
+            }
+            if let Some(entry) = slot {
                 // RFC 7947: prepend from the source tags, scrub the post-policy route.
                 let (_, source_large) =
                     group.source_control_for_route(entry.route, entry.source_attrs);

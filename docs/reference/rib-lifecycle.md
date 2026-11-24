@@ -43,6 +43,7 @@ finishes the unit it is in, and one unit can be a whole table.
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Plain unicast, grouped | Table build **paced** ([receipt](../perf/first-group-build-registration-2026-11.md)); initial table **paced** from 10,000 routes | **paced** by read gate and window | Resync **one turn** per member | **one turn** per request; queued requests share it | Nothing filtered: **bounded turns**, updates held until commit. Otherwise one shared turn | **paced** between batches; input held inside a batch | Selection **one turn**. Large fanout **paced** |
 | Group-shareable export policy | Single-best unicast table build and initial table **paced** | As plain | As plain | As plain | As plain | As plain; not measured with policy | As plain. Policy shape not measured |
+| Route-server control, single best | Table build **one turn**, with the first client's control index; initial table **paced** from 10,000 routes, also for each client of a rejoining cohort | As plain; not measured | As plain; not measured | As plain; not measured | As plain; not measured | As plain; not measured | As plain; not measured |
 | Configured role | Table build and initial table together in **one turn**; not measured | As plain; not measured | As plain; not measured | As plain; not measured | As plain if nothing is OTC-blocked; not measured | As plain; not measured | As plain. Role shape not measured |
 | Route-server per-client best | Cold policy-free, role-free eBGP unicast group build and initial table **paced**; with export policy, initial table **one turn** | Window; per-client ranking not measured | As plain; not measured | One turn per request, never shared | Shared cohort **one turn**; other members **paced** by command; not measured | **paced** between batches, as plain; a crowded prefix alone | Selection **one turn**. Large fanout uses narrow key pages |
 | Kept private: ORF, ORR, conditional advertisement, peer-context policy, slow-peer isolation | Initial table **one turn** per receiver; not measured | Window; work grows with receivers | **paced** row cursor; fallback resync one turn | One turn per request | Members **paced** by command, a whole-table resync each; not measured | **paced** row cursor | Large fanout **paced**. Private single-best measured |
@@ -164,16 +165,16 @@ while the Loc-RIB holds one million best routes.
    first member and the RIB builds the group's table from the whole
    Loc-RIB, both families, with export policy evaluated per route. The
    route-server control on this session keeps it on the synchronous path.
-3. **Its initial table follows in the same turn.** Without returning to
-   its queues, the RIB replays the group table to the client, less the
-   client's own routes, as one whole-table operation, then sends
-   End-of-RIB for each family. If the group is plain (not per-client
-   best), up to 64 queued joiners of the same group share one replay. A
-   per-client-best joiner always gets its own.
+3. **Its initial table follows in pages.** A single-best client receives
+   the group table, less its own routes and the rows its RFC 7947 controls
+   suppress, in pages of about 1,024 keys, then End-of-RIB for each family
+   (the paged replay under [Session comes up](#session-comes-up)). Other
+   peers' updates run between pages. A per-client-best client with an
+   export policy still receives its whole table in the registration turn.
 
-   Build and replay are two phases of one blocking registration turn, so
-   every other peer's updates wait for their sum. It grows linearly with
-   the table. The 1M-route cost of this join is **not measured** for this
+   The build, when this client is the first member, is one blocking
+   registration turn, so every other peer's updates wait for it. It grows
+   linearly with the table. The 1M-route cost of this join is **not measured** for this
    shape in any public receipt. The nearest measurement is of a different
    shape: before the paced build, a plain IPv4 session with no policy held
    the actor for about 2.2 s at one million routes, build and replay
@@ -402,7 +403,10 @@ holds under [Restart](#restart)).
 - Queued joiners of one plain group share a replay: up to 64 registrations
   complete in one turn from one payload (`take_join_cohort`). Per-client
   best groups and sessions with Add-Path, ORF, ORR or conditional
-  advertisement do not share.
+  advertisement do not share. A joiner that takes the paged replay below,
+  including a route-server client with RFC 7947 controls, registers in its
+  own turn instead, so a rejoining cohort of such clients is paged member
+  by member.
 - Measured: the shared replay at 700 IPv4 route-server members and 400,400
   prefixes ([receipt](../perf/join-cohort-converged-rejoin-2026-10.md)).
   A full-table ROUTE-REFRESH replay of one family, which uses the same
@@ -418,23 +422,43 @@ holds under [Restart](#restart)).
   group with no export policy, joining a table of at least 10,000 routes
   receives it in pages of about 1,024 keys, with other peers' updates
   between pages. End-of-RIB follows the last page, at a route-batch
-  boundary. A per-client-best member's slot also follows its runner-up and,
-  with route-server controls, its own RFC 7947 view of the candidates, which
-  can change without a new best path. Every such change during the join
-  repairs that key from the member's current slot. Each page also counts
-  the fallback rows a route-server client's slot may search, so a page of
+  boundary. A per-client-best member's slot also follows its runner-up, and
+  a route-server client's slot follows its own RFC 7947 view of the
+  candidates: suppression and the prepend and scrub rewrite. Both can change
+  without a new best path, for example when an export policy hides a
+  changed control community. Every such change during the join repairs that
+  key from the member's current slot. Each page also counts the fallback
+  rows a per-client-best route-server client's slot searched, so a page of
   crowded prefixes spreads across turns. More than about 4,096 changed keys
-  during the join, or more than 64 concurrent paged joins, fall back to one
-  resync or one-turn replay of the member's table. Tests:
+  during the join fall back to one resync of the member's table. A joiner
+  that would be paged, including the founder of a group built while it
+  waited, waits in the registration queue while 64 paged joins are in
+  progress, or while their admitted-key proofs leave no room for its table
+  in the 512 MiB proof budget, until one of them ends. Waiters start in
+  arrival order: behind one waiting for budget, no later joiner starts even
+  if its smaller table would fit. A joiner does not wait when no paged join
+  is in progress, when its table would not fit even after every paged join
+  ends (whatever the free slots), or when its replay would be refused for
+  another reason (a dirty receiver, a configured outbound prefix limit, a
+  pending ORF); a refused replay sends its table in one turn, without taking
+  the queued joiners into that turn. A session or profile change ends a wait
+  that no longer applies, and a founder that leaves while it waits retires
+  the table built for it. Each wait is logged at debug level with its
+  cause. An outbound
+  prefix limit applied during the join is checked against the routes
+  admitted so far, and later pages meet it at commit. Tests:
   [`per_client_best.rs`](../../crates/rib/src/manager/tests/first_group_build/initial_member_replay/per_client_best.rs)
   compares the paged table with the one-turn join under churn, source
-  departure, flap, regroup and overflow;
-  [`member_replay_work.rs`](../../crates/rib/src/manager/tests/first_group_build/member_replay_work.rs)
-  and
+  departure, flap, regroup and overflow, for per-client-best and
+  single-best route-server clients;
+  [`member_replay_work.rs`](../../crates/rib/src/manager/tests/first_group_build/member_replay_work.rs),
   [`pcb_work.rs`](../../crates/rib/src/manager/tests/first_group_build/pcb_work.rs)
+  and
+  [`rs_cohort_work.rs`](../../crates/rib/src/manager/tests/first_group_build/rs_cohort_work.rs)
   count each poll's replay work.
 - Not measured: the paged initial table's turn length at one million routes
-  for a per-client-best member, and the initial table at one million routes
+  for a per-client-best member or a rejoining route-server cohort, and the
+  initial table at one million routes
   for any shape outside the paged replay.
 
 ## Steady state

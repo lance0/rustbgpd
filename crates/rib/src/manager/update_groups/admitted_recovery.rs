@@ -30,6 +30,7 @@ pub(in crate::manager) enum Key {
 /// search on this comparison once per admitted key.
 impl Ord for Key {
     fn cmp(&self, other: &Self) -> Ordering {
+        count_comparison();
         match (self, other) {
             (Self::Unicast(left, left_id), Self::Unicast(right, right_id)) => {
                 prefix_cmp(left, right).then(left_id.cmp(right_id))
@@ -110,6 +111,14 @@ impl From<Key> for ExactExportKey {
             Key::Vpn(nlri_key, path_id) => Self::Vpn(VpnRibRouteKey { nlri_key, path_id }),
         }
     }
+}
+
+/// Where a new initial replay's proof fits in the ledger's budgets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::manager) enum ReplayRoom {
+    Fits,
+    AfterReplays,
+    Never,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -229,12 +238,14 @@ struct Snapshot {
     references: usize,
     keys: Keys,
     /// Unicast slab slot -> key position for `..vpn_base`, then open-addressed
-    /// VPN key buckets: VPN rows have no slab slot to index.
+    /// VPN key buckets: VPN rows have no slab slot to index. An initial
+    /// replay's universe (`keyed`) buckets every key from `vpn_base` zero.
     slot_positions: SlotPositions,
     vpn_base: usize,
     /// The table's VPN key set this indexed pool was built from.
     vpn_keys: Option<VpnKeyVersion>,
     indexed: bool,
+    keyed: bool,
 }
 
 /// A pool's VPN positions plus every VPN key change its source table made
@@ -257,6 +268,75 @@ impl Snapshot {
             + self.keys.capacity() * size_of::<Key>()
             + self.slot_positions.capacity() * size_of::<u32>()
     }
+
+    /// The key buckets of a keyed universe; empty for any other pool.
+    fn key_index(&self) -> &[u32] {
+        if self.keyed {
+            &self.slot_positions
+        } else {
+            &[]
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Ordered comparisons plus bucket probes of proof keys on this thread.
+    pub(in crate::manager) static KEY_COMPARISONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[inline]
+fn count_comparison() {
+    #[cfg(test)]
+    KEY_COMPARISONS.with(|count| count.set(count.get() + 1));
+}
+
+/// Open-addressed buckets for `count` keys: at most two-thirds full and
+/// never full, so every probe ends.
+fn key_index_len(count: usize) -> usize {
+    count.saturating_add(count / 2).saturating_add(1)
+}
+
+fn key_bucket(key: &Key, buckets: usize) -> usize {
+    use std::hash::BuildHasher;
+
+    match key {
+        Key::Vpn(vpn, path_id) => AdmittedRecovery::vpn_bucket(vpn, *path_id, buckets),
+        Key::Unicast(prefix, path_id) => {
+            let hash = FastState::default().hash_one((prefix, path_id));
+            usize::try_from(hash % buckets as u64).expect("bucket is below a usize length")
+        }
+    }
+}
+
+/// Record a universe key at `position`; the buckets are never full.
+fn index_key(index: &mut [u32], key: &Key, position: u32) {
+    let mut bucket = key_bucket(key, index.len());
+    while index[bucket] != EMPTY_SLOT {
+        bucket = (bucket + 1) % index.len();
+    }
+    index[bucket] = position;
+}
+
+/// The position of `key` in `universe`: a bucket probe where the universe
+/// carries a key index, else a binary search.
+fn universe_position(universe: &[Key], index: &[u32], key: &Key) -> Option<usize> {
+    if index.is_empty() {
+        return universe.binary_search(key).ok();
+    }
+    let mut bucket = key_bucket(key, index.len());
+    loop {
+        let position = index[bucket];
+        if position == EMPTY_SLOT {
+            return None;
+        }
+        count_comparison();
+        if universe.get(position as usize) == Some(key) {
+            return Some(position as usize);
+        }
+        bucket = (bucket + 1) % index.len();
+    }
 }
 
 /// A borrowed exact set. Only mask bits and sparse keys prove admission;
@@ -264,6 +344,8 @@ impl Snapshot {
 #[derive(Clone, Copy, Debug)]
 pub(in crate::manager) struct AdmittedKeyView<'a> {
     universe: &'a [Key],
+    /// The universe's key buckets; empty where lookups binary search.
+    index: &'a [u32],
     words: &'a [u64],
     sparse: &'a [Key],
     masked: usize,
@@ -279,7 +361,7 @@ impl<'a> AdmittedKeyView<'a> {
     }
 
     fn contains_key(self, key: Key) -> bool {
-        self.universe.binary_search(&key).is_ok_and(|index| {
+        universe_position(self.universe, self.index, &key).is_some_and(|index| {
             self.words
                 .get(index / 64)
                 .is_some_and(|word| word & (1_u64 << (index % 64)) != 0)
@@ -298,10 +380,17 @@ impl<'a> AdmittedKeyView<'a> {
         visit: &mut impl FnMut(u32),
     ) {
         let lower = Key::Unicast(prefix, 0);
-        let begin = self.universe.partition_point(|key| {
-            checkpoint(false);
-            *key < lower
-        });
+        // Path ID zero is the prefix's lowest key: where the universe holds
+        // it, its bucket names the lower bound.
+        let begin = (!self.index.is_empty())
+            .then(|| universe_position(self.universe, self.index, &lower))
+            .flatten()
+            .unwrap_or_else(|| {
+                self.universe.partition_point(|key| {
+                    checkpoint(false);
+                    *key < lower
+                })
+            });
         for (index, key) in self.universe.iter().enumerate().skip(begin) {
             checkpoint(false);
             let Key::Unicast(key_prefix, path_id) = key else {
@@ -387,6 +476,7 @@ impl AdmittedKeys {
     pub(in crate::manager) fn view(&self) -> AdmittedKeyView<'_> {
         AdmittedKeyView {
             universe: &[],
+            index: &[],
             words: &[],
             sparse: &self.0,
             masked: 0,
@@ -493,6 +583,16 @@ impl AdmittedRecovery {
     }
 
     #[cfg(test)]
+    pub(in crate::manager) fn set_test_daemon_limit(&mut self, bytes: usize) {
+        self.daemon_limit = bytes;
+    }
+
+    #[cfg(test)]
+    pub(in crate::manager) fn set_test_peer_limit(&mut self, bytes: usize) {
+        self.peer_limit = bytes;
+    }
+
+    #[cfg(test)]
     pub(in crate::manager) fn fail_next_allocation_for_test(&mut self) {
         self.fail_next_allocation = true;
     }
@@ -547,16 +647,16 @@ impl AdmittedRecovery {
         if record.state != State::Complete {
             return None;
         }
-        let universe = match record.snapshot {
-            Some(handle) => self
-                .snapshots
-                .get(self.snapshot_index(handle)?)?
-                .keys
-                .as_slice(),
-            None => &[],
+        let (universe, index) = match record.snapshot {
+            Some(handle) => {
+                let snapshot = self.snapshots.get(self.snapshot_index(handle)?)?;
+                (snapshot.keys.as_slice(), snapshot.key_index())
+            }
+            None => (&[][..], &[][..]),
         };
         Some(AdmittedKeyView {
             universe,
+            index,
             words: &record.words,
             sparse: &record.keys.0,
             masked: record.masked,
@@ -599,6 +699,20 @@ impl AdmittedRecovery {
             .ok()
     }
 
+    /// A record's universe keys and their key buckets, borrowing only the pool.
+    fn universe(snapshots: &Snapshots, handle: Option<SnapshotHandle>) -> (&[Key], &[u32]) {
+        handle
+            .and_then(|handle| {
+                snapshots
+                    .binary_search_by_key(&handle.0, |snapshot| snapshot.handle.0)
+                    .ok()
+            })
+            .map_or((&[], &[]), |index| {
+                let snapshot = &snapshots[index];
+                (snapshot.keys.as_slice(), snapshot.key_index())
+            })
+    }
+
     #[cfg(feature = "bench-internals")]
     pub(in crate::manager) fn bench_peer_charge(&self, peer: PeerId) -> usize {
         self.index(peer).map_or(0, |index| self.peer_charge(index))
@@ -624,6 +738,17 @@ impl AdmittedRecovery {
             vpn.saturating_add(vpn / 2).saturating_add(1)
         };
         table.unicast_slot_count().saturating_add(buckets)
+    }
+
+    /// Index entries a new pool of `count` keys carries: slab slots plus VPN
+    /// buckets over a source table, or one bucket set over every key of an
+    /// initial replay's universe.
+    fn snapshot_index_len(slot_source: Option<&AdjRibOut>, keyed: bool, count: usize) -> usize {
+        match slot_source {
+            Some(table) => Self::index_len(table, count),
+            None if keyed => key_index_len(count),
+            None => 0,
+        }
     }
 
     fn vpn_bucket(key: &VpnRouteKey, path_id: u32, buckets: usize) -> usize {
@@ -681,6 +806,7 @@ impl AdmittedRecovery {
         count: usize,
         keys: A,
         slot_source: Option<&AdjRibOut>,
+        keyed: bool,
         checkpoint: &mut impl FnMut(bool),
     ) -> Result<SnapshotHandle, Failure> {
         let index = self.index(peer).map_err(|_| self.missing_proof(peer))?;
@@ -689,7 +815,7 @@ impl AdmittedRecovery {
             .checked_mul(size_of::<Key>())
             .ok_or_else(Self::overflow)?;
         let slot_count = slot_source.map_or(0, AdjRibOut::unicast_slot_count);
-        let index_len = slot_source.map_or(0, |table| Self::index_len(table, count));
+        let index_len = Self::snapshot_index_len(slot_source, keyed, count);
         let slot_bytes = index_len
             .checked_mul(size_of::<u32>())
             .ok_or_else(Self::overflow)?;
@@ -728,7 +854,7 @@ impl AdmittedRecovery {
                 attempted_daemon_bytes: daemon,
             });
         }
-        if slot_source.is_some() {
+        if index_len != 0 {
             checkpoint(true);
             let failed =
                 !self.allocation_permitted() || slot_positions.try_grow(index_len).is_err();
@@ -816,6 +942,23 @@ impl AdmittedRecovery {
                 checkpoint(true);
                 self.used -= temporary;
                 return Err(self.missing_proof(peer));
+            }
+        } else if keyed {
+            // Every position must fit below the empty-bucket marker.
+            if u32::try_from(count).is_ok_and(|count| count < EMPTY_SLOT) {
+                checkpoint(true);
+                slot_positions.resize(index_len, EMPTY_SLOT);
+                checkpoint(true);
+            } else {
+                checkpoint(true);
+                drop((owned, slot_positions));
+                checkpoint(true);
+                self.used -= temporary;
+                return Err(Self::overflow());
+            }
+            for (position, key) in (0_u32..).zip(owned.iter()) {
+                checkpoint(false);
+                index_key(&mut slot_positions, key, position);
             }
         }
 
@@ -915,6 +1058,7 @@ impl AdmittedRecovery {
             vpn_base: slot_count,
             vpn_keys: slot_source.map(AdjRibOut::vpn_key_version),
             indexed: slot_source.is_some(),
+            keyed,
         });
         checkpoint(true);
         self.next_snapshot = id.checked_add(1);
@@ -1069,7 +1213,7 @@ impl AdmittedRecovery {
         keys: A,
         shape: (usize, usize),
         slot_source: Option<&AdjRibOut>,
-        initial_replay: bool,
+        replay: bool,
         checkpoint: &mut impl FnMut(bool),
     ) -> Result<Option<SnapshotHandle>, Failure> {
         if let Some(handle) = self.records[index].snapshot {
@@ -1093,15 +1237,9 @@ impl AdmittedRecovery {
         } else {
             (
                 words,
-                count
-                    .checked_mul(size_of::<Key>())
-                    .and_then(|n| {
-                        n.checked_add(
-                            slot_source
-                                .map_or(0, |table| Self::index_len(table, count))
-                                .checked_mul(size_of::<u32>())?,
-                        )
-                    })
+                Self::snapshot_index_len(slot_source, replay, count)
+                    .checked_mul(size_of::<u32>())
+                    .and_then(|n| n.checked_add(count.checked_mul(size_of::<Key>())?))
                     .and_then(|n| n.checked_add(size_of::<Snapshot>()))
                     .ok_or_else(Self::overflow)?,
             )
@@ -1142,7 +1280,7 @@ impl AdmittedRecovery {
                 attempted_daemon_bytes: daemon,
             });
         }
-        if !initial_replay {
+        if !replay {
             for _ in 0..actual_words {
                 checkpoint(false);
                 self.records[index].words.push(0);
@@ -1153,20 +1291,22 @@ impl AdmittedRecovery {
         // fallible step, so a refusal cannot strand an expanded shared pool.
         let handle = match reused {
             Some(handle) => handle,
-            None => match self.create_snapshot(peer, count, keys, slot_source, checkpoint) {
-                Ok(handle) => handle,
-                Err(error) => {
-                    checkpoint(true);
-                    self.records[index].words.clear();
-                    self.records[index]
-                        .words
-                        .try_grow(0)
-                        .expect("empty pinned SmallVec deallocation cannot fail");
-                    self.used -= bytes;
-                    checkpoint(true);
-                    return Err(error);
+            None => {
+                match self.create_snapshot(peer, count, keys, slot_source, replay, checkpoint) {
+                    Ok(handle) => handle,
+                    Err(error) => {
+                        checkpoint(true);
+                        self.records[index].words.clear();
+                        self.records[index]
+                            .words
+                            .try_grow(0)
+                            .expect("empty pinned SmallVec deallocation cannot fail");
+                        self.used -= bytes;
+                        checkpoint(true);
+                        return Err(error);
+                    }
                 }
-            },
+            }
         };
         let snapshot_index = self
             .snapshot_index(handle)
@@ -2041,6 +2181,48 @@ impl AdmittedRecovery {
         Ok(handle.is_some())
     }
 
+    /// Where an initial replay over `rows` table rows (its mask, keyed
+    /// universe and headers) fits: in the daemon budget now, only once the
+    /// live initial replays release theirs, or under neither limit.
+    pub(in crate::manager) fn initial_replay_room(&self, rows: usize) -> ReplayRoom {
+        let growth = if self.snapshots.len() == self.snapshots.capacity() {
+            (self.snapshots.capacity() * 2).max(1) * size_of::<Snapshot>() + size_of::<Snapshots>()
+        } else {
+            0
+        };
+        let Some(needed) = Self::shared_words(rows).ok().and_then(|words| {
+            words
+                .checked_mul(size_of::<u64>())?
+                .checked_add(rows.checked_mul(size_of::<Key>())?)?
+                .checked_add(key_index_len(rows).checked_mul(size_of::<u32>())?)?
+                .checked_add(
+                    size_of::<Record>()
+                        + size_of::<Words>()
+                        + 2 * size_of::<Snapshot>()
+                        + size_of::<Keys>()
+                        + size_of::<SlotPositions>(),
+                )
+        }) else {
+            return ReplayRoom::Never;
+        };
+        let daemon = needed.saturating_add(growth);
+        if needed > self.peer_limit {
+            return ReplayRoom::Never;
+        }
+        if self.used.saturating_add(daemon) <= self.daemon_limit {
+            return ReplayRoom::Fits;
+        }
+        let replays: usize = (0..self.records.len())
+            .filter(|&index| self.records[index].initial_replay)
+            .map(|index| self.peer_charge(index))
+            .sum();
+        if self.used.saturating_sub(replays).saturating_add(daemon) <= self.daemon_limit {
+            ReplayRoom::AfterReplays
+        } else {
+            ReplayRoom::Never
+        }
+    }
+
     /// Group churn can shrink the table or add a prefix behind the walk. Such
     /// keys stay in the ordinary sparse overlay when first admitted.
     pub(in crate::manager) fn extend_initial_replay_universe(
@@ -2060,7 +2242,12 @@ impl AdmittedRecovery {
             return false;
         };
         let record = &mut self.records[index];
-        let universe = &mut self.snapshots[snapshot].keys;
+        let Snapshot {
+            keys: universe,
+            slot_positions,
+            keyed,
+            ..
+        } = &mut self.snapshots[snapshot];
         for key in keys {
             if universe.len() == universe.capacity() {
                 break;
@@ -2072,6 +2259,11 @@ impl AdmittedRecovery {
             }
             if universe.len().is_multiple_of(64) {
                 record.words.push(0);
+            }
+            if *keyed {
+                // The pool's capacity is below the empty-bucket marker.
+                let position = u32::try_from(universe.len()).expect("checked at creation");
+                index_key(slot_positions, &key, position);
             }
             universe.push(key);
         }
@@ -2244,7 +2436,7 @@ impl AdmittedRecovery {
 
     fn union_len<A>(
         keys: &[Key],
-        universe: &[Key],
+        (universe, key_index): (&[Key], &[u32]),
         announcements: A,
         checkpoint: &mut impl FnMut(bool),
     ) -> Result<usize, Failure>
@@ -2256,7 +2448,9 @@ impl AdmittedRecovery {
         // below any readiness budget, and is not worth a seam per comparison.
         for key in announcements {
             checkpoint(false);
-            if universe.binary_search(&key).is_err() && keys.binary_search(&key).is_err() {
+            if universe_position(universe, key_index, &key).is_none()
+                && keys.binary_search(&key).is_err()
+            {
                 len = len.checked_add(1).ok_or_else(Self::overflow)?;
             }
         }
@@ -2277,13 +2471,10 @@ impl AdmittedRecovery {
         let Some(index) = self.complete_index(peer, checkpoint)? else {
             return Ok(false);
         };
-        let universe = self.records[index]
-            .snapshot
-            .and_then(|handle| self.snapshot_index(handle))
-            .map_or(&[][..], |snapshot| self.snapshots[snapshot].keys.as_slice());
+        let (universe, key_index) = Self::universe(&self.snapshots, self.records[index].snapshot);
         let result = Self::union_len(
             &self.records[index].keys.0,
-            universe,
+            (universe, key_index),
             announcements,
             checkpoint,
         )
@@ -2315,7 +2506,7 @@ impl AdmittedRecovery {
     /// A sorted stream keeps its matched position; only its first lookup needs
     /// a lower bound, so a small withdrawal does not walk the whole universe.
     fn sorted_match(
-        keys: &[Key],
+        (keys, key_index): (&[Key], &[u32]),
         cursor: &mut Option<usize>,
         key: Key,
         paged: bool,
@@ -2323,7 +2514,7 @@ impl AdmittedRecovery {
     ) -> Option<usize> {
         // Two repairs can be at opposite ends of the whole replay universe.
         if paged {
-            return keys.binary_search(&key).ok();
+            return universe_position(keys, key_index, &key);
         }
         let position = cursor.get_or_insert_with(|| {
             keys.partition_point(|prior| {
@@ -2394,10 +2585,7 @@ impl AdmittedRecovery {
         let Some(index) = self.complete_index(peer, checkpoint)? else {
             return Ok(false);
         };
-        let universe = self.records[index]
-            .snapshot
-            .and_then(|handle| self.snapshot_index(handle))
-            .map_or(&[][..], |snapshot| self.snapshots[snapshot].keys.as_slice());
+        let (universe, key_index) = Self::universe(&self.snapshots, self.records[index].snapshot);
         let record = &self.records[index];
         let mut previous = None;
         let mut base_cursor = None;
@@ -2408,7 +2596,7 @@ impl AdmittedRecovery {
                 return Err(self.fail(index, self.missing_proof(peer), checkpoint));
             }
             let admitted = if let Some(position) = Self::sorted_match(
-                universe,
+                (universe, key_index),
                 &mut base_cursor,
                 key,
                 record.initial_replay,
@@ -2417,7 +2605,7 @@ impl AdmittedRecovery {
                 record.words[position / 64] & (1_u64 << (position % 64)) != 0
             } else {
                 Self::sorted_match(
-                    &record.keys.0,
+                    (&record.keys.0, &[]),
                     &mut sparse_cursor,
                     key,
                     record.initial_replay,
@@ -2440,14 +2628,16 @@ impl AdmittedRecovery {
         {
             return Ok(false);
         }
-        let universe = self.records[index]
-            .snapshot
-            .and_then(|handle| self.snapshot_index(handle))
-            .map_or(&[][..], |snapshot| self.snapshots[snapshot].keys.as_slice());
+        let (universe, key_index) = Self::universe(&self.snapshots, self.records[index].snapshot);
         let record = &mut self.records[index];
         let prior = record.entries();
-        let applied =
-            Self::apply_reserved_keys(record, universe, announcements, withdrawals, checkpoint);
+        let applied = Self::apply_reserved_keys(
+            record,
+            (universe, key_index),
+            announcements,
+            withdrawals,
+            checkpoint,
+        );
         self.entries = self.entries - prior + record.entries();
         if !applied {
             return Err(self.fail(index, self.missing_proof(peer), checkpoint));
@@ -2457,7 +2647,7 @@ impl AdmittedRecovery {
 
     fn apply_reserved_keys<A, W>(
         record: &mut Record,
-        universe: &[Key],
+        (universe, key_index): (&[Key], &[u32]),
         announcements: A,
         withdrawals: W,
         checkpoint: &mut impl FnMut(bool),
@@ -2472,7 +2662,7 @@ impl AdmittedRecovery {
         for key in withdrawals.clone() {
             checkpoint(false);
             if let Some(position) = Self::sorted_match(
-                universe,
+                (universe, key_index),
                 &mut base_cursor,
                 key,
                 record.initial_replay,
@@ -2500,7 +2690,7 @@ impl AdmittedRecovery {
         let mut needs_sort = false;
         for key in announcements {
             checkpoint(false);
-            if let Ok(position) = universe.binary_search(&key) {
+            if let Some(position) = universe_position(universe, key_index, &key) {
                 let bit = 1_u64 << (position % 64);
                 if record.words[position / 64] & bit == 0 {
                     record.words[position / 64] |= bit;
@@ -2809,6 +2999,7 @@ mod tests {
         let sparse = [Key::Unicast(v4, 3)];
         let view = AdmittedKeyView {
             universe: &universe,
+            index: &[],
             words: &words,
             sparse: &sparse,
             masked: 2,
@@ -3766,10 +3957,16 @@ mod tests {
             let mut comparisons = 0;
             for (position, key) in raw.iter().copied().enumerate() {
                 assert_eq!(
-                    AdmittedRecovery::sorted_match(&raw, &mut cursor, key, false, &mut |force| {
-                        assert!(!force);
-                        comparisons += 1;
-                    }),
+                    AdmittedRecovery::sorted_match(
+                        (&raw, &[]),
+                        &mut cursor,
+                        key,
+                        false,
+                        &mut |force| {
+                            assert!(!force);
+                            comparisons += 1;
+                        }
+                    ),
                     Some(position),
                 );
             }
@@ -3783,10 +3980,16 @@ mod tests {
             comparisons = 0;
             for (position, key) in raw.iter().copied().enumerate().skip(raw.len() - 2) {
                 assert_eq!(
-                    AdmittedRecovery::sorted_match(&raw, &mut cursor, key, false, &mut |force| {
-                        assert!(!force);
-                        comparisons += 1;
-                    }),
+                    AdmittedRecovery::sorted_match(
+                        (&raw, &[]),
+                        &mut cursor,
+                        key,
+                        false,
+                        &mut |force| {
+                            assert!(!force);
+                            comparisons += 1;
+                        }
+                    ),
                     Some(position),
                 );
             }

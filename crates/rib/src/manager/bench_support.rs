@@ -2434,7 +2434,9 @@ impl RibManager {
     /// Finish deferred registrations and first-group builds. Large unicast groups
     /// leave their writer-paced initial replay to [`Self::bench_finish_initial_replays`].
     pub fn bench_complete_deferred_registrations(&mut self) {
-        while self.first_group_build.is_some() || !self.pending_initial_registrations.is_empty() {
+        // Registrations waiting for a replay slot resume in
+        // [`Self::bench_finish_initial_replays`] as replays end.
+        while self.first_group_build.is_some() || self.registration_runnable() {
             if self.optional_destination_retirement_active() {
                 self.advance_optional_destination_retirement();
             } else if self.pending_destination_prestage.is_some() {
@@ -2455,11 +2457,14 @@ impl RibManager {
         let mut elapsed = std::time::Duration::ZERO;
         loop {
             drain();
-            if !self.initial_member_replays.runnable() && !self.initial_member_replays.parked() {
+            if !self.initial_member_replays.runnable()
+                && !self.initial_member_replays.parked()
+                && !self.registration_runnable()
+            {
                 return elapsed;
             }
             let started = std::time::Instant::now();
-            if !self.initial_member_replays.runnable() {
+            if !self.initial_member_replays.runnable() && self.initial_member_replays.parked() {
                 assert!(
                     self.wake_initial_member_replay(),
                     "initial replay writer must drain"

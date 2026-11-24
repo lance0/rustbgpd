@@ -2,7 +2,7 @@
 
 use std::future::{Future, poll_fn};
 
-use super::policy_work::{Build, snapshot};
+use super::policy_work::{Build, Counts, snapshot};
 use super::*;
 
 const RS_ASN: u32 = 65_000;
@@ -114,9 +114,14 @@ async fn cold_server(prefix_count: u16, paths_per_prefix: u32) -> Build {
         let before = snapshot();
         let result = actor.as_mut().poll(cx);
         let after = snapshot();
-        charged.record(&before, after.clone(), CHARGED);
+        let moved = |stage: &&str| after.get(*stage) != before.get(*stage);
         replay.record(&before, after.clone(), REPLAY);
-        build.record(&before, after, WORK);
+        // A paced replay poll's fallback searches are the replay's own. The
+        // build's last poll can also start a one-turn replay of a small table.
+        if !REPLAY.iter().any(moved) || CHARGED.iter().any(moved) {
+            charged.record(&before, after.clone(), CHARGED);
+            build.record(&before, after, WORK);
+        }
         while let Ok(update) = rx.try_recv().map(delivered) {
             assert!(update.unicast_withdrawals().next().is_none());
             for row in update.announce.iter() {
@@ -149,28 +154,7 @@ async fn cold_server(prefix_count: u16, paths_per_prefix: u32) -> Build {
             "{stage}"
         );
     }
-    if usize::from(prefix_count) > PAGE {
-        // The replay pages the table too: one page of keys per poll, and one
-        // page of units counting each fallback row a key's RS view may
-        // search, beyond the poll's first key.
-        let paths = usize::try_from(paths_per_prefix).unwrap();
-        assert!(replay.polls > 1, "{replay:?}");
-        assert!(
-            replay.peak["initial_member_replay_visits"] <= PAGE,
-            "{replay:?}"
-        );
-        assert!(
-            replay.peak["initial_member_replay_units"] <= PAGE + paths,
-            "{replay:?}"
-        );
-        assert!(replay.total["initial_member_replay_units"] >= usize::from(prefix_count));
-    } else {
-        // A table below the paging threshold replays in one turn.
-        assert_eq!(
-            replay.peak.get("initial_member_replay_visits").copied(),
-            Some(usize::from(prefix_count))
-        );
-    }
+    assert_replay_pages(&replay, prefix_count, paths_per_prefix);
     assert!(
         charged.peak["work_units"] <= CANDIDATE_BUDGET,
         "{:?}",
@@ -179,6 +163,39 @@ async fn cold_server(prefix_count: u16, paths_per_prefix: u32) -> Build {
     assert!(build.total["first_pcb_fallback_appends"] > 0);
     assert!(build.total["pcb_rs_index_keys"] >= usize::from(prefix_count));
     build
+}
+
+fn assert_replay_pages(replay: &Build, prefix_count: u16, paths_per_prefix: u32) {
+    if usize::from(prefix_count) <= PAGE {
+        // A table below the paging threshold replays in one turn.
+        assert_eq!(
+            replay.peak.get("initial_member_replay_visits").copied(),
+            Some(usize::from(prefix_count))
+        );
+        return;
+    }
+    // The replay pages the table too: one page of keys per poll, and one
+    // page of units counting each fallback row a key's RS view searched,
+    // beyond the poll's last key.
+    let paths = usize::try_from(paths_per_prefix).unwrap();
+    assert!(replay.polls > 1, "{replay:?}");
+    assert!(
+        replay.peak["initial_member_replay_visits"] <= PAGE,
+        "{replay:?}"
+    );
+    assert!(
+        replay.peak["initial_member_replay_units"] <= PAGE + paths,
+        "{replay:?}"
+    );
+    assert!(replay.total["initial_member_replay_units"] >= usize::from(prefix_count));
+    // Every key's winner is suppressed toward the member, so each slot
+    // searches its fallback rows. The unit budget bounds those searches.
+    let searches = |counts: &Counts| counts.get("pcb_rs_fallback_search").copied().unwrap_or(0);
+    assert!(searches(&replay.peak) <= PAGE + paths, "{replay:?}");
+    assert!(
+        searches(&replay.total) >= usize::from(prefix_count),
+        "{replay:?}"
+    );
 }
 
 async fn check_growth(small: (u16, u32), large: (u16, u32)) {

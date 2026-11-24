@@ -1052,6 +1052,15 @@ impl RibManager {
         self.refresh_outbound_limit_gauges(peer);
     }
 
+    /// Whether `peer`'s configuration limits either unicast family, read
+    /// from the configuration, so before its registration installs it.
+    pub(super) fn configured_outbound_limit(&self, peer: PeerId) -> bool {
+        let resolved = self.resolve_outbound_limits(&self.outbound_limit_control.config, peer);
+        LIMITED_FAMILIES
+            .into_iter()
+            .any(|afi| resolved.family(afi).is_some())
+    }
+
     /// Families with a pending capacity-recovery resync for `peer`.
     #[cfg(test)]
     pub(in crate::manager) fn outbound_limit_recovery_for(&self, peer: PeerId) -> Vec<Afi> {

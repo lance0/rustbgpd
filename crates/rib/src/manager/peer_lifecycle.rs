@@ -2938,6 +2938,7 @@ impl RibManager {
             || cold_group
             || self.registration_waits_for_first_group(peer)
             || self.registration_waits_for_optional_destination(peer)
+            || self.registration_waits_for_replay_slot(peer)
         {
             if !self.pending_initial_registrations.contains(&peer) {
                 debug!(
@@ -3267,7 +3268,13 @@ impl RibManager {
     /// Register the leader and start its paced initial replay when eligible.
     /// For a synchronous replay, queued compatible members share one export
     /// probe and encode cell. Each commits its own updates and End-of-RIB.
+    /// A paceable leader the replay refused sends only its own table: the
+    /// queued joiners keep their own turns and their own chance to pace.
+    /// Live replays holding every slot make it wait in the queue instead
+    /// ([`Self::registration_waits_for_replay_slot`]).
     pub(super) fn complete_deferred_registration(&mut self, leader: PeerId) {
+        self.set_registration_slot_wait(false);
+        self.note_replay_slot_wait(leader, None);
         let pace = self.eligible_initial_member_replay(leader);
         if !self.install_outbound_registration(leader)
             || (pace && self.start_initial_member_replay(leader))
@@ -3276,7 +3283,11 @@ impl RibManager {
         }
         super::with_executor_handoff(|| {
             self.with_replacement_readiness(|manager| {
-                let members = manager.take_join_cohort(leader);
+                let members = if pace {
+                    Vec::new()
+                } else {
+                    manager.take_join_cohort(leader)
+                };
                 if members.is_empty() {
                     manager.send_initial_table_with_readiness(leader, None);
                 } else {

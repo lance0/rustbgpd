@@ -3105,4 +3105,5 @@ mod per_client_best_oracle;
 mod policy_fallback;
 mod policy_oracle;
 mod policy_work;
+mod rs_cohort_work;
 mod sustained_feed;

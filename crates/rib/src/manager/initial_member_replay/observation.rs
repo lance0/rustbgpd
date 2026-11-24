@@ -11,6 +11,9 @@ pub enum BenchReplayEvent {
     Enrolled,
     /// The reservation for the initial proof failed with this ledger cause.
     EnrollmentRefused(&'static str),
+    /// The replay did not start for this cause; the registration sent its
+    /// table in its own turn.
+    Refused(&'static str),
     /// The cursor and change queue completed before normal `EoR` settlement.
     Completed,
     /// The actor handed replay to dirty resync after this guard fired.

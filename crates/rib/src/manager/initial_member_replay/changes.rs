@@ -95,9 +95,10 @@ pub(super) struct ReplayChanges {
 }
 
 impl ReplayChanges {
-    /// A per-client-best slot also follows the runner-up and the receiver's
-    /// RS view, which the ordered log cannot express. Every change for such
-    /// a member reconciles its current slot against admission instead.
+    /// A per-client-best slot also follows the runner-up, and an RS-control
+    /// receiver's slot follows its own RFC 7947 view. The ordered log holds
+    /// the shared row, so every change for such a member reconciles its
+    /// current slot against admission instead.
     pub(super) fn coalescing() -> Self {
         Self {
             overflowed: true,
@@ -188,11 +189,12 @@ impl RibManager {
         if matches!(replay.phase, Phase::PrepareProof(_)) {
             return Ok(());
         }
-        if self.group_ribs[&replay.gid].per_client_best {
+        if self.group_ribs[&replay.gid].per_client_best || rs_control {
             // The member's slot reads the winner, its runner-up and, toward
             // an RS-control receiver, the source tags and fallback rows. The
             // last three change without a Loc-RIB write, so record the keys
-            // the live per-member emit reads as scan repairs.
+            // the live per-member emit reads as scan repairs. A single-best
+            // group has no runner-up or fallback rows.
             let keys = stage
                 .deltas
                 .iter()
