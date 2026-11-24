@@ -91,14 +91,23 @@ fn registration(
     n: u8,
     rs: bool,
 ) -> (RibUpdate, mpsc::Receiver<OutboundRouteUpdate>) {
+    registration_session(manager, n, rs, 1)
+}
+
+fn registration_session(
+    manager: &mut RibManager,
+    n: u8,
+    rs: bool,
+    session_id: u64,
+) -> (RibUpdate, mpsc::Receiver<OutboundRouteUpdate>) {
     let peer = receiver(n);
     manager.handle_update(RibUpdate::SetPeerRsControl {
         peer,
-        session_id: 1,
+        session_id,
         rs_control_asn: rs.then_some(RS_AS),
     });
     let (tx, rx) = mpsc::channel(64);
-    let mut up = test_peer_up(peer, 1, tx);
+    let mut up = test_peer_up(peer, session_id, tx);
     let RibUpdate::PeerUp {
         peer_asn,
         per_client_best,
@@ -122,7 +131,7 @@ fn check_replay(
     n: u8,
     rs: bool,
     rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
-) {
+) -> BTreeMap<Prefix, String> {
     let group = &manager.group_ribs[&manager.grouped_member_of(receiver(n)).unwrap()];
     let mut expected = BTreeMap::new();
     for (&prefix, paths) in candidates {
@@ -148,6 +157,7 @@ fn check_replay(
         .collect();
     assert_eq!(group.family_counts_for(receiver(n)), counts);
     let mut ends = HashSet::new();
+    let mut delivered = BTreeMap::new();
     while let Ok(update) = rx.try_recv() {
         assert_eq!(update.unicast_withdrawals().count(), 0);
         for row in update.announce.iter() {
@@ -156,6 +166,22 @@ fn check_replay(
                 .remove(&row.prefix)
                 .expect("unexpected or duplicate advertisement")
                 .check(row, row.prefix, rs);
+            // Everything encoded or reflected; receipt time differs per run.
+            delivered.insert(
+                row.prefix,
+                format!(
+                    "{:?}",
+                    (
+                        row.next_hop,
+                        row.link_local_next_hop,
+                        row.peer,
+                        row.peer_router_id,
+                        &*row.attributes,
+                        row.path_id,
+                        row.origin_type,
+                    )
+                ),
+            );
         }
         for family in update.end_of_rib {
             assert!(ends.insert(family), "repeated End-of-RIB");
@@ -167,6 +193,17 @@ fn check_replay(
         expected.len()
     );
     assert_eq!(ends, DUAL.into_iter().collect());
+    delivered
+}
+
+fn settle(manager: &mut RibManager) {
+    for _ in 0..100_000 {
+        if manager.pending_initial_registrations.is_empty() && manager.first_group_build.is_none() {
+            return;
+        }
+        manager.advance_pending_initial_registration();
+    }
+    panic!("registration did not settle");
 }
 
 fn check_lanes(manager: &RibManager, candidates: &Candidates) {
@@ -184,7 +221,7 @@ fn check_lanes(manager: &RibManager, candidates: &Candidates) {
     }
 }
 
-fn copied_keys(manager: &mut RibManager, candidates: &Candidates) -> [Prefix; 4] {
+fn copied_keys<const N: usize>(manager: &mut RibManager, candidates: &Candidates) -> [Prefix; N] {
     // Use only completed rows in the unpublished table. Hash order is per process.
     for _ in 0..10_000 {
         assert!(manager.first_group_build.is_some());
@@ -195,7 +232,7 @@ fn copied_keys(manager: &mut RibManager, candidates: &Candidates) -> [Prefix; 4]
                 (paths[1].unwrap().suppress && manager.first_group_contains(prefix))
                     .then_some(prefix)
             })
-            .take(4)
+            .take(N)
             .collect();
         if let Ok(keys) = keys.try_into() {
             return keys;
@@ -244,7 +281,7 @@ fn per_client_best_founder_repairs_runner_up_churn_before_first_replay() {
         paced.first_group_build.is_some(),
         "eligible route-server founder must pace construction"
     );
-    let [replaced, removed, reannounced, metadata] = copied_keys(&mut paced, &candidates);
+    let [replaced, removed, reannounced, metadata, gone] = copied_keys(&mut paced, &candidates);
     let replacement = Candidate {
         source: OTHER,
         router_id: OTHER,
@@ -265,6 +302,18 @@ fn per_client_best_founder_repairs_runner_up_churn_before_first_replay() {
     ));
     drain_route_chunks(&mut paced);
     winner.check(paced.loc_rib.get(&metadata).unwrap(), metadata, false);
+    // Every path of a staged prefix leaves, so the published group drops it.
+    for source in SOURCES {
+        let mut received = test_routes_received(peer_v4(source), vec![]);
+        let RibUpdate::RoutesReceived { withdrawn, .. } = &mut received else {
+            unreachable!()
+        };
+        withdrawn.push((gone, 0));
+        paced.handle_update(received);
+        drain_route_chunks(&mut paced);
+    }
+    candidates.remove(&gone);
+    assert!(paced.loc_rib.get(&gone).is_none());
     let (up, mut sibling) = registration(&mut paced, 2, true);
     paced.handle_update(up);
     assert!(
@@ -282,6 +331,7 @@ fn per_client_best_founder_repairs_runner_up_churn_before_first_replay() {
     assert!(synchronous.first_group_build.is_none());
     let (up, mut reference_sibling) = registration(&mut synchronous, 2, true);
     synchronous.handle_update(up);
+    let mut replays = Vec::new();
     for (manager, first, sibling) in [
         (
             &mut synchronous,
@@ -290,22 +340,14 @@ fn per_client_best_founder_repairs_runner_up_churn_before_first_replay() {
         ),
         (&mut paced, &mut first, &mut sibling),
     ] {
-        for _ in 0..100_000 {
-            if manager.pending_initial_registrations.is_empty()
-                && manager.first_group_build.is_none()
-            {
-                break;
-            }
-            manager.advance_pending_initial_registration();
-        }
-        assert!(manager.first_group_build.is_none());
+        settle(manager);
         assert_eq!(
             manager.grouped_member_of(receiver(1)).unwrap(),
             manager.grouped_member_of(receiver(2)).unwrap()
         );
         check_lanes(manager, &candidates);
-        check_replay(manager, &candidates, 1, true, first);
-        check_replay(manager, &candidates, 2, true, sibling);
+        let first = check_replay(manager, &candidates, 1, true, first);
+        let sibling = check_replay(manager, &candidates, 2, true, sibling);
         // A transparent warm join shares the table and retains its control tags.
         let (up, mut transparent) = registration(manager, 3, false);
         manager.handle_update(up);
@@ -313,8 +355,80 @@ fn per_client_best_founder_repairs_runner_up_churn_before_first_replay() {
             manager.grouped_member_of(receiver(3)),
             manager.grouped_member_of(receiver(1))
         );
-        check_replay(manager, &candidates, 3, false, &mut transparent);
+        let transparent = check_replay(manager, &candidates, 3, false, &mut transparent);
+        replays.push([first, sibling, transparent]);
     }
+    // Every delivered route, including attributes the model does not name.
+    assert!(
+        replays[0] == replays[1],
+        "paced replay differs from synchronous"
+    );
+}
+
+/// Register an RS-controlled founder and stop once its private table holds rows.
+fn start_paced(
+    candidates: &Candidates,
+) -> (
+    RibManager,
+    mpsc::Sender<RibUpdate>,
+    mpsc::Receiver<OutboundRouteUpdate>,
+    Prefix,
+) {
+    let (mut manager, primary, _) = fixture(0);
+    seed(&mut manager, candidates);
+    let (up, rx) = registration(&mut manager, 1, true);
+    manager.handle_update(up);
+    assert!(manager.first_group_build.is_some());
+    let [staged] = copied_keys(&mut manager, candidates);
+    (manager, primary, rx, staged)
+}
+
+#[test]
+fn per_client_best_founder_down_retires_its_unpublished_group() {
+    let candidates = inputs();
+    let (mut manager, _primary, mut canceled, _) = start_paced(&candidates);
+    let groups = manager.group_ribs.len();
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: receiver(1),
+        session_id: 1,
+    });
+    settle(&mut manager);
+    assert!(
+        canceled.try_recv().is_err(),
+        "a downed founder got a replay"
+    );
+    assert!(manager.grouped_member_of(receiver(1)).is_none());
+    assert_eq!(
+        manager.group_ribs.len(),
+        groups,
+        "the partial group was published"
+    );
+
+    // The next session builds again from the current inputs.
+    let (up, mut founder) = registration_session(&mut manager, 1, true, 2);
+    manager.handle_update(up);
+    settle(&mut manager);
+    check_lanes(&manager, &candidates);
+    check_replay(&manager, &candidates, 1, true, &mut founder);
+}
+
+#[test]
+fn per_client_best_reconnect_without_control_retires_the_controlled_build() {
+    let candidates = inputs();
+    let (mut manager, _primary, mut old, staged) = start_paced(&candidates);
+    // The replacement session no longer interprets control communities, so
+    // rows staged for the first session would withhold suppressed paths.
+    let (up, mut current) = registration_session(&mut manager, 1, false, 2);
+    manager.handle_update(up);
+    manager.advance_pending_initial_registration();
+    assert!(
+        !manager.first_group_contains(staged),
+        "a new session must retire its predecessor's private table"
+    );
+    settle(&mut manager);
+    assert!(old.try_recv().is_err());
+    check_lanes(&manager, &candidates);
+    check_replay(&manager, &candidates, 1, false, &mut current);
 }
 
 #[test]
@@ -325,9 +439,10 @@ fn first_per_client_best_build_admits_only_eligible_unicast() {
         WithPolicy,
         WithVpn,
         Ibgp,
+        WithRole,
         WithoutControl,
     }
-    use Case::{Ibgp, RsOnly, WithPolicy, WithVpn, WithoutControl};
+    use Case::{Ibgp, RsOnly, WithPolicy, WithRole, WithVpn, WithoutControl};
     let (mut manager, _tx, _) = fixture(1);
     // A different group key per case keeps an earlier table from masking admission.
     for (n, case) in [
@@ -335,9 +450,18 @@ fn first_per_client_best_build_admits_only_eligible_unicast() {
         (2, WithPolicy),
         (3, WithVpn),
         (4, Ibgp),
-        (5, WithoutControl),
+        (5, WithRole),
+        (6, WithoutControl),
     ] {
         let (mut up, _rx) = registration(&mut manager, n, case != WithoutControl);
+        if case == WithRole {
+            // RFC 9234 OTC filtering stays on the synchronous builder.
+            manager.handle_update(RibUpdate::SetPeerExportContext {
+                peer: receiver(n),
+                session_id: 1,
+                local_role: Some(rustbgpd_wire::BgpRole::RouteServer),
+            });
+        }
         let RibUpdate::PeerUp {
             per_client_best,
             export_policy,
@@ -357,7 +481,7 @@ fn first_per_client_best_build_admits_only_eligible_unicast() {
             }
             WithVpn => sendable_families.push((Afi::Ipv4, Safi::MplsVpn)),
             Ibgp => *is_ebgp = false,
-            WithoutControl => {}
+            WithRole | WithoutControl => {}
         }
         manager.handle_update(up);
         assert_eq!(
@@ -372,4 +496,68 @@ fn first_per_client_best_build_admits_only_eligible_unicast() {
             );
         }
     }
+}
+
+#[test]
+fn per_client_best_founder_repairs_a_runner_up_source_departure() {
+    let mut candidates = inputs();
+    let (mut manager, _primary, mut founder, _) = start_paced(&candidates);
+    // The bulk teardown recomputes every prefix, but the Loc-RIB winner
+    // never changes. Each staged lane and fallback list still names OTHER.
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: peer_v4(OTHER),
+        session_id: 0,
+    });
+    assert!(
+        manager.source_departure.is_some(),
+        "expected a paced departure"
+    );
+    drain_source_departure(&mut manager);
+    drain_route_chunks(&mut manager);
+    for paths in candidates.values_mut() {
+        paths[1] = None;
+    }
+    settle(&mut manager);
+    check_lanes(&manager, &candidates);
+    check_replay(&manager, &candidates, 1, true, &mut founder);
+}
+
+#[test]
+fn a_writer_joining_a_building_per_client_best_group_applies_at_once() {
+    let candidates = inputs();
+    let (mut manager, _primary, _) = fixture(0);
+    seed(&mut manager, &candidates);
+    // The incumbent keeps a synchronous group until its policy is cleared.
+    let (mut up, mut incumbent) = registration(&mut manager, 2, true);
+    let RibUpdate::PeerUp { export_policy, .. } = &mut up else {
+        unreachable!()
+    };
+    *export_policy = Some(crate::manager::tests::update_groups::community_chain(
+        MARKER,
+    ));
+    manager.handle_update(up);
+    settle(&mut manager);
+    while incumbent.try_recv().is_ok() {}
+    let (up, mut founder) = registration(&mut manager, 1, true);
+    manager.handle_update(up);
+    assert!(manager.first_group_build.is_some());
+    let [_] = copied_keys(&mut manager, &candidates);
+
+    // The private builder never claims a writer, so the clear applies in its
+    // own turn and the incumbent's synchronous build supersedes the job.
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::ReplacePeerExportPolicy {
+        peer: receiver(2),
+        export_policy: None,
+        reply,
+    });
+    assert!(manager.first_group_pending_writer().is_none());
+    assert!(matches!(response.try_recv(), Ok(Ok(()))));
+    settle(&mut manager);
+    assert_eq!(
+        manager.grouped_member_of(receiver(1)),
+        manager.grouped_member_of(receiver(2))
+    );
+    check_lanes(&manager, &candidates);
+    check_replay(&manager, &candidates, 1, true, &mut founder);
 }

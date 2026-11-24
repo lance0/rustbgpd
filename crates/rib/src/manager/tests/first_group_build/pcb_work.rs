@@ -63,7 +63,8 @@ fn seed(manager: &mut RibManager, prefix_count: u16, paths_per_prefix: u32) {
 
 async fn cold_server(prefix_count: u16, paths_per_prefix: u32) -> Build {
     let (mut manager, tx, _) = fixture(0);
-    manager.initial_member_replays.min_routes = None;
+    // Offer the paced initial replay at every size this test builds.
+    manager.initial_member_replays.min_routes = Some(0);
     seed(&mut manager, prefix_count, paths_per_prefix);
     let peer = receiver(1);
     manager.handle_update(RibUpdate::SetPeerRsControl {
@@ -125,6 +126,12 @@ async fn cold_server(prefix_count: u16, paths_per_prefix: u32) -> Build {
             "{stage}"
         );
     }
+    // The paced replay journals winner changes only. A PCB member also needs
+    // lane-only changes and its own RS view, so its replay stays one turn.
+    assert_eq!(
+        build.peak.get("initial_member_replay_visits").copied(),
+        Some(usize::from(prefix_count))
+    );
     assert!(build.total["first_pcb_fallback_appends"] > 0);
     assert!(build.total["pcb_rs_index_keys"] >= usize::from(prefix_count));
     build
@@ -183,5 +190,5 @@ async fn pcb_cold_build_bounds_broad_table_work_per_poll() {
 
 #[tokio::test]
 async fn pcb_cold_build_bounds_crowded_prefix_work_per_poll() {
-    check_growth((1, 2_048), (1, 8_192)).await;
+    check_growth((1, 8_192), (1, 32_768)).await;
 }
