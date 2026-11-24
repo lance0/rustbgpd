@@ -578,6 +578,7 @@ impl RibManager {
         let group = &self.group_ribs[&gid];
         // Paced per-client-best groups have no export policy, so every
         // substituted lane slot carries the group's one permit label.
+        debug_assert!(!group.per_client_best || group.export_chain.is_none());
         let permits = group.unicast_permit_count(peer, None);
         let mut rows = Vec::with_capacity(1 + group.single_best_denials.labels.len());
         if permits != 0 {

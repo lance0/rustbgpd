@@ -1,9 +1,13 @@
-//! A per-client-best member replays through the paced lane. Its slot also
-//! follows the runner-up and its RFC 7947 view, which change without a
+//! A per-client-best or route-server-control member replays through the
+//! paced lane. A per-client-best slot also follows the runner-up, and an
+//! RS-control slot follows the member's RFC 7947 view. Both change without a
 //! Loc-RIB write, so every mid-replay change must reach the member as a
 //! repair of its current slot.
+use rustbgpd_policy::{Policy, PolicyAction, PolicyChain};
+
 use super::*;
 use crate::manager::tests::lifecycle::test_session_routes_received;
+use crate::manager::tests::update_groups::deny_statement;
 
 const THIRD: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 3);
 const RS_ASN: u32 = 65_000;
@@ -15,6 +19,43 @@ const HOT: usize = 24;
 
 /// What the member holds: each prefix's route as delivered.
 type Table = BTreeMap<Prefix, String>;
+
+/// The founder's and member's registration profile.
+#[derive(Clone, Copy, Debug)]
+struct Shape {
+    pcb: bool,
+    rs: bool,
+    policy: bool,
+}
+
+const PCB: Shape = Shape {
+    pcb: true,
+    rs: false,
+    policy: false,
+};
+const PCB_RS: Shape = Shape { rs: true, ..PCB };
+// A single-best route-server client: one shared winner, its own view.
+const RS: Shape = Shape {
+    pcb: false,
+    ..PCB_RS
+};
+// The export policy strips the suppression community, so a change of that
+// tag alone moves the member's RFC 7947 view without changing the shared row.
+const RS_POLICY: Shape = Shape { policy: true, ..RS };
+const SHAPES: [Shape; 4] = [PCB, PCB_RS, RS, RS_POLICY];
+
+fn strip_chain() -> PolicyChain {
+    // `65001:7` names no route server, so RFC 7947 keeps it.
+    let mut statement = deny_statement(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0));
+    statement.prefix = None;
+    statement.action = PolicyAction::Permit;
+    statement.modifications.communities_add.push(0xfde9_0007);
+    statement.modifications.communities_remove.push(asn(1));
+    PolicyChain::new(vec![Policy {
+        entries: vec![statement],
+        default_action: PolicyAction::Deny,
+    }])
+}
 
 fn asn(n: u8) -> u32 {
     64_600 + u32::from(n)
@@ -41,14 +82,14 @@ fn join_pcb(
     manager: &mut RibManager,
     n: u8,
     session_id: u64,
-    rs: bool,
+    shape: Shape,
     capacity: usize,
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let peer = receiver(n);
     manager.handle_update(RibUpdate::SetPeerRsControl {
         peer,
         session_id,
-        rs_control_asn: rs.then_some(RS_ASN),
+        rs_control_asn: shape.rs.then_some(RS_ASN),
     });
     let (out, rx) = mpsc::channel(capacity);
     let mut up = test_peer_up(peer, session_id, out);
@@ -56,14 +97,16 @@ fn join_pcb(
         peer_asn,
         per_client_best,
         sendable_families,
+        export_policy,
         ..
     } = &mut up
     else {
         unreachable!()
     };
     *peer_asn = asn(n);
-    *per_client_best = true;
+    *per_client_best = shape.pcb;
     *sendable_families = vec![FAMILY];
+    *export_policy = shape.policy.then(strip_chain);
     manager.handle_update(up);
     rx
 }
@@ -113,7 +156,7 @@ struct Run {
 impl Run {
     /// Members 9 (the founder) and 1 share a published group. Member 1's
     /// replay is paced when `paced`, else one turn.
-    fn start(paced: bool, rs: bool) -> Self {
+    fn start(paced: bool, shape: Shape) -> Self {
         let (mut manager, primary, _) = fixture(0);
         register_test_peer(&mut manager, peer_v4(THIRD), 0);
         for (i, source) in SOURCES[..3].iter().copied().enumerate() {
@@ -124,12 +167,12 @@ impl Run {
             manager.handle_update(test_routes_received(peer_v4(source), rows));
             drain_route_chunks(&mut manager);
         }
-        let mut founder = join_pcb(&mut manager, 9, 1, rs, 1 << 16);
+        let mut founder = join_pcb(&mut manager, 9, 1, shape, 1 << 16);
         settle(&mut manager);
         while founder.try_recv().is_ok() {}
         manager.initial_member_replays.min_routes = Some(if paced { 1 } else { usize::MAX });
         let builds = manager.adj_rib_out_commit_stats.resync_builds;
-        let rx = join_pcb(&mut manager, 1, 1, rs, 64);
+        let rx = join_pcb(&mut manager, 1, 1, shape, 64);
         assert_eq!(manager.is_initial_member_replay(receiver(1)), paced);
         Self {
             manager,
@@ -184,13 +227,18 @@ impl Run {
                 continue;
             }
             for _ in 0..per_turn {
-                let source = next(SOURCES.len());
+                // A third re-announce the preferred path with only its
+                // suppression tag drawn again.
+                let tag_only = next(3) == 0;
+                let source = if tag_only { 0 } else { next(SOURCES.len()) };
                 let change = Change {
                     source,
                     prefix: hot[next(HOT)],
                     // The member's own path wins when present.
-                    pref: (next(4) != 0).then(|| {
-                        if source == 3 {
+                    pref: (tag_only || next(4) != 0).then(|| {
+                        if tag_only {
+                            PREFS[0]
+                        } else if source == 3 {
                             400
                         } else {
                             50 + 50 * u32::try_from(next(6)).unwrap()
@@ -209,6 +257,11 @@ impl Run {
 
     /// The paced run keeps its writer and table: no fallback resync and one marker.
     fn assert_paced(&self) {
+        // The replay pages read group rows, so each must be a Loc-RIB key.
+        let gid = self.manager.grouped_member_of(receiver(1)).unwrap();
+        for row in self.manager.group_ribs[&gid].table.iter() {
+            assert!(self.manager.loc_rib.get(&row.prefix).is_some(), "{row:?}");
+        }
         assert_eq!(self.markers, 1);
         assert!(!self.manager.dirty_peers.contains(&receiver(1)));
         assert_eq!(
@@ -248,8 +301,8 @@ fn settle(manager: &mut RibManager) {
 }
 
 /// The one-turn join of the same input, then the same changes in order.
-fn reference(rs: bool, changes: &[Change]) -> Table {
-    let mut run = Run::start(false, rs);
+fn reference(shape: Shape, changes: &[Change]) -> Table {
+    let mut run = Run::start(false, shape);
     settle(&mut run.manager);
     run.read();
     assert_eq!(run.markers, 1);
@@ -261,20 +314,23 @@ fn reference(rs: bool, changes: &[Change]) -> Table {
 }
 
 // Exact table against the synchronous join: the member takes the winner
-// (runner-up substitution), the runner-up changes under the member's own
-// winner (no Loc-RIB write), and tags move the RS view to fallback rows.
+// (runner-up substitution, or no slot for a single-best member), the
+// runner-up changes under the member's own winner (no Loc-RIB write), tags
+// move the RS view to fallback rows or suppress the slot, and RFC 7947
+// scrubs the control communities. Behind a stripping policy, a tag-only
+// change moves the RS view with no change to the shared row.
 #[test]
 fn per_client_best_paced_replay_matches_the_one_turn_join_under_churn() {
-    for rs in [false, true] {
+    for shape in SHAPES {
         for seed in [1, 7, 42] {
-            let mut paced = Run::start(true, rs);
+            let mut paced = Run::start(true, shape);
             let changes = paced.churn(seed, 4, 160);
             assert!(changes.len() >= 32, "too few mid-replay changes");
             paced.assert_paced();
             assert_eq!(
                 paced.table,
-                reference(rs, &changes),
-                "rs={rs} seed={seed}: paced replay differs from the one-turn join"
+                reference(shape, &changes),
+                "{shape:?} seed={seed}: paced replay differs from the one-turn join"
             );
         }
     }
@@ -285,8 +341,8 @@ fn per_client_best_paced_replay_matches_the_one_turn_join_under_churn() {
 // page that drains the last one completes in its own turn.
 #[test]
 fn per_client_best_replay_completes_under_unbroken_churn() {
-    for rs in [false, true] {
-        let mut paced = Run::start(true, rs);
+    for shape in SHAPES {
+        let mut paced = Run::start(true, shape);
         let mut turns = 0;
         let changes = {
             let mut applied = Vec::new();
@@ -294,7 +350,7 @@ fn per_client_best_replay_completes_under_unbroken_churn() {
             let mut n = 0_usize;
             while paced.replaying() {
                 turns += 1;
-                assert!(turns < 512, "rs={rs}: churn held the replay open");
+                assert!(turns < 512, "{shape:?}: churn held the replay open");
                 paced.turn();
                 if hot.len() < HOT {
                     hot.extend(paced.table.keys().copied().take(HOT - hot.len()));
@@ -317,7 +373,7 @@ fn per_client_best_replay_completes_under_unbroken_churn() {
             applied
         };
         paced.assert_paced();
-        assert_eq!(paced.table, reference(rs, &changes), "rs={rs}");
+        assert_eq!(paced.table, reference(shape, &changes), "{shape:?}");
     }
 }
 
@@ -326,8 +382,8 @@ fn per_client_best_replay_completes_under_unbroken_churn() {
 // preferred path stays, but changes every lane and fallback list.
 #[test]
 fn per_client_best_replay_keeps_its_pages_through_a_runner_up_departure() {
-    for rs in [false, true] {
-        let mut paced = Run::start(true, rs);
+    for shape in SHAPES {
+        let mut paced = Run::start(true, shape);
         while paced.table.len() < 1024 {
             paced.turn();
         }
@@ -341,7 +397,7 @@ fn per_client_best_replay_keeps_its_pages_through_a_runner_up_departure() {
         paced.churn(0, 0, 0);
         paced.assert_paced();
 
-        let mut synchronous = Run::start(false, rs);
+        let mut synchronous = Run::start(false, shape);
         settle(&mut synchronous.manager);
         synchronous.read();
         synchronous.manager.handle_update(RibUpdate::PeerDown {
@@ -357,7 +413,7 @@ fn per_client_best_replay_keeps_its_pages_through_a_runner_up_departure() {
             drain_unicast_release(&mut synchronous.manager);
             synchronous.read();
         }
-        assert_eq!(paced.table, synchronous.table, "rs={rs}");
+        assert_eq!(paced.table, synchronous.table, "{shape:?}");
     }
 }
 
@@ -365,59 +421,66 @@ fn per_client_best_replay_keeps_its_pages_through_a_runner_up_departure() {
 // afresh and receives its whole table and one marker.
 #[test]
 fn per_client_best_flap_mid_replay_restarts_with_the_new_session() {
-    let mut paced = Run::start(true, true);
-    while paced.table.len() < 1024 {
-        paced.turn();
+    for shape in [PCB_RS, RS] {
+        let mut paced = Run::start(true, shape);
+        while paced.table.len() < 1024 {
+            paced.turn();
+        }
+        paced.manager.handle_update(RibUpdate::PeerDown {
+            peer: receiver(1),
+            session_id: 1,
+        });
+        paced.rx = join_pcb(&mut paced.manager, 1, 2, shape, 64);
+        paced.table.clear();
+        paced.markers = 0;
+        paced.churn(0, 0, 0);
+        assert_eq!(paced.markers, 1);
+        assert_eq!(paced.table, reference(shape, &[]), "{shape:?}");
     }
-    paced.manager.handle_update(RibUpdate::PeerDown {
-        peer: receiver(1),
-        session_id: 1,
-    });
-    paced.rx = join_pcb(&mut paced.manager, 1, 2, true, 64);
-    paced.table.clear();
-    paced.markers = 0;
-    paced.churn(0, 0, 0);
-    assert_eq!(paced.markers, 1);
-    assert_eq!(paced.table, reference(true, &[]));
 }
 
 // Adding an export policy regroups the member. The replay recovers from its
 // changed group instead of finishing against the old table.
 #[test]
 fn per_client_best_regroup_mid_replay_owes_one_marker_for_the_new_group() {
-    // RFC 7947 control would scrub the policy's community, which uses the RS ASN.
-    let mut paced = Run::start(true, false);
-    while paced.table.len() < 1024 {
-        paced.turn();
+    fn regroup(run: &mut Run) {
+        let old = run.manager.grouped_member_of(receiver(1));
+        let (reply, mut result) = oneshot::channel();
+        run.manager
+            .handle_update(RibUpdate::ReplacePeerExportPolicy {
+                peer: receiver(1),
+                export_policy: Some(community_chain(TAG)),
+                reply,
+            });
+        assert!(matches!(result.try_recv(), Ok(Ok(()))));
+        assert_ne!(run.manager.grouped_member_of(receiver(1)), old);
+        for _ in 0..64 {
+            run.manager.resync_dirty_peers_bounded();
+            run.read();
+        }
     }
-    let old = paced.manager.grouped_member_of(receiver(1));
-    let (reply, mut result) = oneshot::channel();
-    paced
-        .manager
-        .handle_update(RibUpdate::ReplacePeerExportPolicy {
-            peer: receiver(1),
-            export_policy: Some(community_chain(TAG)),
-            reply,
-        });
-    assert!(matches!(result.try_recv(), Ok(Ok(()))));
-    assert!(!paced.replaying(), "the regroup retired the replay");
-    assert_ne!(paced.manager.grouped_member_of(receiver(1)), old);
-    for _ in 0..64 {
-        paced.manager.resync_dirty_peers_bounded();
-        paced.read();
+
+    for shape in [PCB, RS] {
+        let mut paced = Run::start(true, shape);
+        while paced.table.len() < 1024 {
+            paced.turn();
+        }
+        regroup(&mut paced);
+        assert!(!paced.replaying(), "the regroup retired the replay");
+        assert_eq!(paced.markers, 1);
+        let mut synchronous = Run::start(false, shape);
+        settle(&mut synchronous.manager);
+        synchronous.read();
+        regroup(&mut synchronous);
+        // RFC 7947 scrubs the policy's community, which names the RS ASN.
+        let tagged = paced
+            .table
+            .values()
+            .filter(|row| row.contains(&TAG.to_string()))
+            .count();
+        assert_eq!(tagged, if shape.rs { 0 } else { paced.table.len() });
+        assert_eq!(paced.table, synchronous.table, "{shape:?}");
     }
-    assert_eq!(paced.markers, 1);
-    let tagged = paced
-        .table
-        .values()
-        .filter(|row| row.contains(&TAG.to_string()))
-        .count();
-    assert_eq!(
-        tagged,
-        paced.table.len(),
-        "a row kept the old group's policy"
-    );
-    assert_eq!(paced.table.len(), reference(false, &[]).len());
 }
 
 // The member's slot changes behind the cursor while its writer is held. The
@@ -433,40 +496,48 @@ fn per_client_best_listing_refuses_while_a_slot_repair_is_unsent() {
         response.try_recv().unwrap().map(|page| page.routes)
     }
 
-    let mut paced = Run::start(true, true);
-    let first = loop {
-        paced.manager.advance_pending_initial_registration();
-        if let Ok(page) = paced.rx.try_recv() {
-            break page;
+    for shape in [PCB_RS, RS] {
+        let mut paced = Run::start(true, shape);
+        let first = loop {
+            paced.manager.advance_pending_initial_registration();
+            if let Ok(page) = paced.rx.try_recv() {
+                break page;
+            }
+        };
+        let held = first.announce[0].clone();
+        listing(&mut paced.manager).expect("a clean partial replay lists its pages");
+        // Member 1 takes the winner: its slot becomes the runner-up, or
+        // nothing for a single-best member.
+        Change {
+            source: 3,
+            prefix: held.prefix,
+            pref: Some(400),
+            suppress: false,
         }
-    };
-    let held = first.announce[0].clone();
-    listing(&mut paced.manager).expect("a clean partial replay lists its pages");
-    // Member 1 takes the winner: its slot becomes the runner-up.
-    Change {
-        source: 3,
-        prefix: held.prefix,
-        pref: Some(400),
-        suppress: false,
+        .apply(&mut paced.manager);
+        assert!(
+            paced
+                .manager
+                .initial_member_replay_changes_pending(receiver(1))
+        );
+        assert!(matches!(
+            listing(&mut paced.manager),
+            Err(RoutePageError::ResyncInProgress)
+        ));
+        drop(first);
+        read_into(&mut paced.rx, &mut paced.table, &mut paced.markers);
+        paced.churn(0, 0, 0);
+        paced.assert_paced();
+        let listed = listing(&mut paced.manager).expect("the repaired view lists");
+        if shape.pcb {
+            // The member's own winner substitutes the runner-up, the slot it held.
+            let row = &paced.table[&held.prefix];
+            assert!(row.starts_with(&format!("({:?}", held.peer)), "{row}");
+        } else {
+            assert!(!paced.table.contains_key(&held.prefix));
+            assert!(listed.iter().all(|row| row.prefix != held.prefix));
+        }
     }
-    .apply(&mut paced.manager);
-    assert!(
-        paced
-            .manager
-            .initial_member_replay_changes_pending(receiver(1))
-    );
-    assert!(matches!(
-        listing(&mut paced.manager),
-        Err(RoutePageError::ResyncInProgress)
-    ));
-    drop(first);
-    read_into(&mut paced.rx, &mut paced.table, &mut paced.markers);
-    paced.churn(0, 0, 0);
-    paced.assert_paced();
-    // The member's own winner substitutes the runner-up, the slot it held.
-    listing(&mut paced.manager).expect("the repaired view lists");
-    let row = &paced.table[&held.prefix];
-    assert!(row.starts_with(&format!("({:?}", held.peer)), "{row}");
 }
 
 // Distinct changes faster than a page drains overflow the member's repairs.
@@ -474,49 +545,57 @@ fn per_client_best_listing_refuses_while_a_slot_repair_is_unsent() {
 // and still sends one marker.
 #[test]
 fn per_client_best_churn_above_the_repair_limit_recovers_with_one_resync() {
-    let mut paced = Run::start(true, true);
-    while paced.table.len() < 1024 {
+    for shape in [PCB_RS, RS] {
+        let mut paced = Run::start(true, shape);
+        while paced.table.len() < 1024 {
+            paced.turn();
+        }
+        // OTHER takes the win on every key and announces 1,000 new ones: more
+        // distinct changes than the member's repair log holds.
+        let changes: Vec<_> = (0..ROWS + 1000)
+            .map(|n| Change {
+                source: 1,
+                prefix: prefixes(n)[0],
+                pref: Some(350),
+                suppress: false,
+            })
+            .collect();
+        paced.manager.handle_update(test_routes_received(
+            peer_v4(OTHER),
+            changes
+                .iter()
+                .map(|change| input(change.prefix, OTHER, 350, false))
+                .collect(),
+        ));
+        drain_route_chunks(&mut paced.manager);
         paced.turn();
+        assert!(!paced.replaying(), "overflow retired the replay");
+        assert!(paced.manager.dirty_peers.contains(&receiver(1)));
+        for _ in 0..64 {
+            paced.manager.resync_dirty_peers_bounded();
+            paced.read();
+        }
+        assert!(!paced.manager.dirty_peers.contains(&receiver(1)));
+        assert_eq!(paced.markers, 1);
+        assert!(paced.manager.adj_rib_out_commit_stats.resync_builds > paced.builds);
+        assert_eq!(paced.table, reference(shape, &changes), "{shape:?}");
     }
-    // OTHER takes the win on every key and announces 1,000 new ones: more
-    // distinct changes than the member's repair log holds.
-    let changes: Vec<_> = (0..ROWS + 1000)
-        .map(|n| Change {
-            source: 1,
-            prefix: prefixes(n)[0],
-            pref: Some(350),
-            suppress: false,
-        })
-        .collect();
-    paced.manager.handle_update(test_routes_received(
-        peer_v4(OTHER),
-        changes
-            .iter()
-            .map(|change| input(change.prefix, OTHER, 350, false))
-            .collect(),
-    ));
-    drain_route_chunks(&mut paced.manager);
-    paced.turn();
-    assert!(!paced.replaying(), "overflow retired the replay");
-    assert!(paced.manager.dirty_peers.contains(&receiver(1)));
-    for _ in 0..64 {
-        paced.manager.resync_dirty_peers_bounded();
-        paced.read();
-    }
-    assert!(!paced.manager.dirty_peers.contains(&receiver(1)));
-    assert_eq!(paced.markers, 1);
-    assert!(paced.manager.adj_rib_out_commit_stats.resync_builds > paced.builds);
-    assert_eq!(paced.table, reference(true, &changes));
 }
 
 // A ROUTE-REFRESH at a partial page waits for the initial marker, then
 // answers with the member's whole current table.
 #[tokio::test(start_paused = true)]
 async fn per_client_best_route_refresh_mid_replay_follows_the_initial_marker() {
+    for shape in [PCB_RS, RS] {
+        refresh_mid_replay(shape).await;
+    }
+}
+
+async fn refresh_mid_replay(shape: Shape) {
     use rustbgpd_wire::RouteRefreshSubtype::{BoRR, EoRR};
 
-    let expected = reference(true, &[]);
-    let mut paced = Run::start(true, true);
+    let expected = reference(shape, &[]);
+    let mut paced = Run::start(true, shape);
     let first = loop {
         paced.manager.advance_pending_initial_registration();
         if let Ok(page) = paced.rx.try_recv() {

@@ -1720,8 +1720,18 @@ impl GroupRibOut {
             .is_some()
     }
 
-    /// The fallback rows an RS-control member's slot at `prefix` may search.
-    pub(in crate::manager) fn rs_fallback_rows(&self, prefix: &Prefix) -> usize {
+    /// At most the fallback rows an RS-control member's resolved `slot` at
+    /// `prefix` searched: none where the winner serves the member.
+    pub(in crate::manager) fn rs_fallback_searched(
+        &self,
+        prefix: &Prefix,
+        slot: Option<&AdvEntry<'_>>,
+    ) -> usize {
+        let winner = self.table.get(prefix, 0);
+        if slot.is_some_and(|entry| winner.is_some_and(|winner| std::ptr::eq(entry.route, winner)))
+        {
+            return 0;
+        }
         self.rs_fallback.get(prefix).map_or(0, |rows| rows.len())
     }
 
@@ -1742,11 +1752,47 @@ impl GroupRibOut {
         path_id: u32,
         rs_control: Option<(u32, u32)>,
     ) -> Option<AdvEntry<'_>> {
+        self.member_slot(
+            #[cfg(test)]
+            false,
+            member,
+            prefix,
+            path_id,
+            rs_control,
+        )
+    }
+
+    /// [`Self::adv_entry_for`] at path ID zero for the paced initial
+    /// replay, whose fallback searches tests count.
+    pub(in crate::manager) fn replay_slot(
+        &self,
+        member: PeerId,
+        prefix: &Prefix,
+        rs_control: Option<(u32, u32)>,
+    ) -> Option<AdvEntry<'_>> {
+        self.member_slot(
+            #[cfg(test)]
+            true,
+            member,
+            prefix,
+            0,
+            rs_control,
+        )
+    }
+
+    fn member_slot(
+        &self,
+        #[cfg(test)] counting_index: bool,
+        member: PeerId,
+        prefix: &Prefix,
+        path_id: u32,
+        rs_control: Option<(u32, u32)>,
+    ) -> Option<AdvEntry<'_>> {
         let staged = self.table.get(prefix, path_id)?;
         let winner = self.staged_entry(staged, prefix, path_id);
         payload::resolve_member_slot(
             #[cfg(test)]
-            false,
+            counting_index,
             member,
             rs_control,
             winner,

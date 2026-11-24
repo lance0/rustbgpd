@@ -809,7 +809,23 @@ impl RibManager {
 
     /// A founder's inputs must remain stable under the registration scan's
     /// Loc-RIB change tracking. Other members can still join the finished table.
+    /// A single-best RS-control founder still builds in its registration
+    /// turn: attaching the group's first RS-control member indexes the whole
+    /// table there, so pacing the build alone would not shorten that turn.
     fn eligible_first_group_key(
+        &self,
+        peer: PeerId,
+        record: &super::super::LiveSessionRecord,
+    ) -> Option<super::GroupKey> {
+        if record.rs_control_asn.is_some() && !record.per_client_best {
+            return None;
+        }
+        self.eligible_paced_group_key(peer, record)
+    }
+
+    /// The group of a registration whose initial table can be paged. An
+    /// RS-control member's pages resolve its own RFC 7947 view of each slot.
+    fn eligible_paced_group_key(
         &self,
         peer: PeerId,
         record: &super::super::LiveSessionRecord,
@@ -818,7 +834,6 @@ impl RibManager {
 
         if record.registration_policy_fallback
             || record.local_role.is_some()
-            || (record.rs_control_asn.is_some() && !record.per_client_best)
             || (record.per_client_best && (!record.is_ebgp || record.export_policy.is_some()))
             || record.sendable_families.is_empty()
             || record.sendable_families.iter().any(|&family| {
@@ -847,7 +862,7 @@ impl RibManager {
                 .live_sessions
                 .get(&peer)
                 .and_then(|sessions| sessions.last())
-                .is_some_and(|record| self.eligible_first_group_key(peer, record).is_some())
+                .is_some_and(|record| self.eligible_paced_group_key(peer, record).is_some())
     }
 
     pub(in crate::manager) fn current_first_group_record(

@@ -109,7 +109,7 @@ impl RibManager {
             return false;
         }
         let table_stamp = group.evpn_table_stamp;
-        let changes = if group.per_client_best {
+        let changes = if group.per_client_best || self.rs_control_context(peer).is_some() {
             ReplayChanges::coalescing()
         } else {
             ReplayChanges::default()
@@ -389,14 +389,11 @@ impl RibManager {
         let mut reconciled = Vec::new();
         let mut keys = HashSet::new();
         let mut units = 0;
-        while let Some(&prefix) = replay.carry.front() {
-            // One unit per key, plus each fallback row its slot may search.
-            let cost = 1 + rs_control.map_or(0, |_| group.rs_fallback_rows(&prefix));
-            if units != 0 && units + cost > REGISTRATION_PAGE_SIZE {
-                break;
-            }
-            units += cost;
-            replay.carry.pop_front();
+        while units < REGISTRATION_PAGE_SIZE
+            && let Some(prefix) = replay.carry.pop_front()
+        {
+            // One unit per key, plus each fallback row its slot searched.
+            units += 1;
             keys.insert(prefix);
             // Grouped single-best outbound identities use path ID zero,
             // including when the received winner has its own Add-Path ID.
@@ -408,7 +405,11 @@ impl RibManager {
             } else if sent || replay.changes.owns_absent(&prefix) {
                 continue;
             }
-            if let Some(entry) = group.adv_entry_for(peer, &prefix, 0, rs_control) {
+            let slot = group.replay_slot(peer, &prefix, rs_control);
+            if rs_control.is_some() {
+                units += group.rs_fallback_searched(&prefix, slot.as_ref());
+            }
+            if let Some(entry) = slot {
                 // RFC 7947: prepend from the source tags, scrub the post-policy route.
                 let (_, source_large) =
                     group.source_control_for_route(entry.route, entry.source_attrs);
