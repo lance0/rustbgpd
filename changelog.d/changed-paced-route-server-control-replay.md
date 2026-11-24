@@ -9,4 +9,7 @@
   A change during the join to a client's view, including a control
   community that the export policy hides, is sent as a repair of that key
   from the current table. A client that is the first member of its group
-  still builds the group table in its registration turn.
+  still builds the group table in its registration turn, then receives its
+  own table in pages. Past 64 concurrent paged joins, each further joiner
+  that could be paged receives its table in its own turn, instead of one
+  turn carrying the tables of up to 64 joiners.

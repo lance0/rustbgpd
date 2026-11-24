@@ -431,7 +431,10 @@ holds under [Restart](#restart)).
   rows a per-client-best route-server client's slot searched, so a page of
   crowded prefixes spreads across turns. More than about 4,096 changed keys
   during the join, or more than 64 concurrent paged joins, fall back to one
-  resync or one-turn replay of the member's table. Tests:
+  resync or one-turn replay of the member's table. Such a joiner does not
+  take the queued joiners into its turn; each gets its own. An outbound
+  prefix limit applied during the join is checked against the routes
+  admitted so far, and later pages meet it at commit. Tests:
   [`per_client_best.rs`](../../crates/rib/src/manager/tests/first_group_build/initial_member_replay/per_client_best.rs)
   compares the paged table with the one-turn join under churn, source
   departure, flap, regroup and overflow, for per-client-best and

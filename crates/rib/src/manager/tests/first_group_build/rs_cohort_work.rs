@@ -43,12 +43,19 @@ fn rs_client(
     rx
 }
 
-/// A published single-best group of RS-control clients, then `joiners`
-/// more whose registrations queue behind actor work, as a mass rejoin does.
-async fn rejoin(joiners: u8) -> Rejoin {
+const ROWS: usize = PAGES as usize * REGISTRATION_PAGE_SIZE;
+
+/// A published single-best group of RS-control clients. Later
+/// registrations queue behind actor work, as in a mass rejoin.
+struct Published {
+    manager: RibManager,
+    tx: mpsc::Sender<RibUpdate>,
+    _founder: mpsc::Receiver<OutboundRouteUpdate>,
+}
+
+fn published() -> Published {
     let (mut manager, tx, _) = fixture(0);
-    let rows = usize::from(PAGES) * REGISTRATION_PAGE_SIZE;
-    let table = (0..u16::try_from(rows).unwrap())
+    let table = (0..u16::try_from(ROWS).unwrap())
         .map(|index| route(prefixes(index)[0], SOURCE, 100))
         .collect();
     manager.handle_update(test_routes_received(peer_v4(SOURCE), table));
@@ -62,6 +69,20 @@ async fn rejoin(joiners: u8) -> Rejoin {
     // Queued input makes each registration defer to the run loop.
     tx.try_send(test_routes_received(peer_v4(SOURCE), vec![]))
         .unwrap();
+    Published {
+        manager,
+        tx,
+        _founder: founder,
+    }
+}
+
+async fn rejoin(joiners: u8) -> Rejoin {
+    let rows = ROWS;
+    let Published {
+        mut manager,
+        tx,
+        _founder: founder,
+    } = published();
     let mut clients: Vec<_> = (1..=joiners)
         .map(|n| rs_client(&mut manager, n, 1 << 12))
         .collect();
@@ -133,4 +154,53 @@ async fn rs_control_rejoin_cohort_pages_every_initial_table() {
             "joiners={joiners}: {work:?}"
         );
     }
+}
+
+// With every paced replay slot taken, a refused leader sends its own table
+// in its turn. It must not take the queued joiners along: each one waits
+// for its own turn, and its own chance at a paced replay.
+#[test]
+fn joiners_past_the_replay_cap_send_one_table_per_turn() {
+    use crate::manager::peer_lifecycle::MAX_JOIN_COHORT;
+
+    let Published {
+        mut manager,
+        tx: _tx,
+        _founder,
+    } = published();
+    // Writers that hold one page each park their replays and keep the slots.
+    let cap = u8::try_from(MAX_JOIN_COHORT).unwrap();
+    let _parked: Vec<_> = (1..=cap).map(|n| rs_client(&mut manager, n, 1)).collect();
+    for _ in 0..100_000 {
+        if manager.pending_initial_registrations.is_empty() {
+            break;
+        }
+        manager.advance_pending_initial_registration();
+    }
+    assert!((1..=cap).all(|n| manager.is_initial_member_replay(receiver(n))));
+
+    let mut late: Vec<_> = (cap + 1..=cap + 8)
+        .map(|n| (n, rs_client(&mut manager, n, 1 << 12), HashSet::new(), 0))
+        .collect();
+    let mut peak = 0;
+    for _ in 0..10_000 {
+        if late.iter().all(|(.., markers)| *markers == 1) {
+            break;
+        }
+        manager.advance_pending_initial_registration();
+        let mut delivered = 0;
+        for (n, rx, seen, markers) in &mut late {
+            while let Ok(update) = rx.try_recv() {
+                assert!(!manager.is_initial_member_replay(receiver(*n)));
+                delivered += update.announce.len();
+                seen.extend(update.announce.iter().map(|row| row.prefix));
+                *markers += update.end_of_rib.len();
+            }
+        }
+        peak = peak.max(delivered);
+    }
+    for (n, _, seen, markers) in &late {
+        assert_eq!((seen.len(), *markers), (ROWS, 1), "joiner {n}");
+    }
+    assert_eq!(peak, ROWS, "one turn sent more than one table");
 }
