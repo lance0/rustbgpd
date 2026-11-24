@@ -477,6 +477,16 @@ impl AdmittedRecovery {
         }
     }
 
+    #[cfg(feature = "bench-internals")]
+    pub(in crate::manager) fn set_bench_peer_limit(&mut self, bytes: usize) {
+        assert!(self.records.is_empty() && self.snapshots.is_empty());
+        assert!(
+            bytes <= self.peer_limit,
+            "a control may only reduce the peer budget"
+        );
+        self.peer_limit = bytes;
+    }
+
     #[cfg(test)]
     pub(in crate::manager) fn with_test_limits(peer: usize, daemon: usize) -> Self {
         Self::with_limits(peer, daemon)

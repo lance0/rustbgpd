@@ -10113,6 +10113,8 @@ impl RibManager {
         // Ordinary passes and the two continuations each select their mode at the caller.
         debug_assert_eq!(RELEASING, release.is_some());
         debug_assert_eq!(DRAINING, drain.is_some());
+        let release_departure = release.as_ref().is_some_and(|page| page.departure);
+        debug_assert!(!release_departure || self.source_departure.is_some());
         let mut denial_receipt = release.as_mut().and_then(|page| page.denial_receipt.take());
         let stage_rs_verdicts = release.as_mut().and_then(|page| page.rs_verdicts.take());
         let mut drain = if DRAINING { drain } else { None };
@@ -10358,12 +10360,25 @@ impl RibManager {
                     }
                     let member_of = self.grouped_member_of(peer);
                     if self.is_initial_member_replay(peer) {
-                        if RELEASING
+                        // A source departure stages ordinary group deltas, and its
+                        // Loc-RIB writes are already in the member's scan. Other
+                        // release passes also admit rows missed during a hold.
+                        if (RELEASING && !release_departure)
                             || self.force_outbound_peers.contains(&peer)
                             || self.dirty_peers.contains(&peer)
                         {
-                            self.abort_initial_member_replay(peer);
-                            self.mark_outbound_dirty(peer);
+                            let cause =
+                                super::initial_member_replay::ReplayCause::from_label(|| {
+                                    if RELEASING {
+                                        "release_fanout"
+                                    } else if self.force_outbound_peers.contains(&peer) {
+                                        "forced_resync"
+                                    } else {
+                                        self.group_recovery_fallback(peer)
+                                            .map_or("already_dirty", |cause| cause.as_str())
+                                    }
+                                });
+                            self.recover_initial_member_replay(peer, cause);
                         } else {
                             // The replay scan delivers current winners and repairs against
                             // actual admission. The live pass owns its policy evaluations.
@@ -10372,9 +10387,9 @@ impl RibManager {
                             {
                                 self.apply_group_policy_counters(peer, &stage.evals);
                                 self.apply_initial_replay_page_policy(peer, gid, best_changed);
-                                if !self.record_initial_replay_changes(peer, stage) {
-                                    self.abort_initial_member_replay(peer);
-                                    self.mark_outbound_dirty(peer);
+                                if let Err(cause) = self.record_initial_replay_changes(peer, stage)
+                                {
+                                    self.recover_initial_member_replay(peer, cause);
                                 }
                             }
                             break 'member;

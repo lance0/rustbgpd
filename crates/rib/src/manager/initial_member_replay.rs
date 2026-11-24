@@ -3,6 +3,11 @@
 
 mod changes;
 
+#[cfg(feature = "bench-internals")]
+mod observation;
+#[cfg(feature = "bench-internals")]
+pub use observation::BenchReplayEvent;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use changes::ReplayChanges;
@@ -14,6 +19,25 @@ use super::{PeerId, RibManager};
 use crate::fast_hash::FastSet;
 use crate::loc_rib::{REGISTRATION_PAGE_SIZE, RegistrationScanStatus};
 use crate::update::{ExactExportKey, OutboundRouteUpdate, RouteQueryKey, route_query_key};
+
+// The non-benchmark failure path carries only success/failure, and never
+// evaluates the diagnostic (including any extra lookups it needs).
+#[derive(Clone, Copy)]
+pub(super) struct ReplayCause {
+    #[cfg(feature = "bench-internals")]
+    label: &'static str,
+}
+
+impl ReplayCause {
+    pub(super) fn from_label(label: impl FnOnce() -> &'static str) -> Self {
+        #[cfg(not(feature = "bench-internals"))]
+        let _ = label;
+        Self {
+            #[cfg(feature = "bench-internals")]
+            label: label(),
+        }
+    }
+}
 
 enum Phase {
     PrepareProof(Option<RouteQueryKey>),
@@ -35,6 +59,8 @@ pub(super) struct InitialMemberReplays {
     ready: VecDeque<PeerId>,
     blocked: VecDeque<PeerId>,
     registration_due: bool,
+    #[cfg(feature = "bench-internals")]
+    observer: Option<observation::ReplayObserver>,
     #[cfg(test)]
     pub(super) min_routes: Option<usize>,
 }
@@ -61,7 +87,7 @@ impl RibManager {
         self.initial_member_replays
             .members
             .get(&peer)
-            .is_some_and(|replay| replay.changes.has_pending())
+            .is_some_and(|replay| replay.changes.unsent())
     }
 
     pub(super) fn start_initial_member_replay(&mut self, peer: PeerId) -> bool {
@@ -79,11 +105,17 @@ impl RibManager {
             return false;
         }
         let table_stamp = group.evpn_table_stamp;
-        if !matches!(
-            self.pending_group_admitted
-                .begin_initial_replay(peer, group.table.len()),
-            Ok(true)
-        ) {
+        let enrollment = self
+            .pending_group_admitted
+            .begin_initial_replay(peer, group.table.len());
+        if !matches!(enrollment, Ok(true)) {
+            #[cfg(feature = "bench-internals")]
+            if let Err(error) = enrollment {
+                self.observe_initial_replay(
+                    peer,
+                    BenchReplayEvent::EnrollmentRefused(error.cause.as_str()),
+                );
+            }
             return false;
         }
         self.refresh_group_recovery_gauges();
@@ -102,6 +134,8 @@ impl RibManager {
         self.initial_member_replays.ready.push_back(peer);
         self.set_initial_group_admitted_counts(peer, [0; 6]);
         self.start_initial_replay_policy(peer, gid);
+        #[cfg(feature = "bench-internals")]
+        self.observe_initial_replay(peer, BenchReplayEvent::Enrolled);
         let families = self.peer_sendable_families[&peer]
             .iter()
             .copied()
@@ -166,9 +200,15 @@ impl RibManager {
         true
     }
 
-    fn recover_initial_member_replay(&mut self, peer: PeerId) {
+    pub(super) fn recover_initial_member_replay(&mut self, peer: PeerId, cause: ReplayCause) {
         self.abort_initial_member_replay(peer);
-        self.mark_outbound_dirty(peer);
+        let marked = self.mark_outbound_dirty(peer);
+        #[cfg(feature = "bench-internals")]
+        if marked {
+            self.observe_initial_replay(peer, BenchReplayEvent::Dirty(cause.label));
+        }
+        #[cfg(not(feature = "bench-internals"))]
+        let _ = (cause, marked);
     }
 
     fn advance_initial_member_replay(&mut self, peer: PeerId) {
@@ -194,19 +234,31 @@ impl RibManager {
             return;
         }
         let gid = job.gid;
-        if self.grouped_member_of(peer) != Some(gid)
+        let invalidation = if self.grouped_member_of(peer) != Some(gid)
             || self
                 .group_ribs
                 .get(&gid)
                 .is_none_or(|g| g.evpn_table_stamp != job.table_stamp)
-            || self.dirty_peers.contains(&peer)
-            || self.loc_rib.member_replay_scan_status(peer) == RegistrationScanStatus::Overflow
-            || self
-                .pending_group_admitted
-                .initial_replay_sparse_len(peer)
-                .is_none_or(|rows| rows > REGISTRATION_PAGE_SIZE)
         {
-            self.recover_initial_member_replay(peer);
+            Some(ReplayCause::from_label(|| "group_changed"))
+        } else if self.dirty_peers.contains(&peer) {
+            Some(ReplayCause::from_label(|| {
+                self.group_recovery_fallback(peer)
+                    .map_or("already_dirty", |cause| cause.as_str())
+            }))
+        } else if self.loc_rib.member_replay_scan_status(peer) == RegistrationScanStatus::Overflow {
+            Some(ReplayCause::from_label(|| "scan_repair_limit"))
+        } else {
+            match self.pending_group_admitted.initial_replay_sparse_len(peer) {
+                None => Some(ReplayCause::from_label(|| "missing_proof")),
+                Some(rows) if rows > REGISTRATION_PAGE_SIZE => {
+                    Some(ReplayCause::from_label(|| "sparse_key_limit"))
+                }
+                Some(_) => None,
+            }
+        };
+        if let Some(cause) = invalidation {
+            self.recover_initial_member_replay(peer, cause);
             return;
         }
         if self.outbound_channel_full(peer) || self.outbound_operation_live(peer) {
@@ -220,11 +272,14 @@ impl RibManager {
         if !job.changes.has_pending()
             && self.loc_rib.member_replay_scan_status(peer) == RegistrationScanStatus::Ready
         {
+            debug_assert!(!job.changes.unsent(), "a coalesced key outlived its repair");
             if !self.pending_route_batches.is_empty() {
                 self.initial_member_replays.ready.push_back(peer);
                 return;
             }
             self.abort_initial_member_replay(peer);
+            #[cfg(feature = "bench-internals")]
+            self.observe_initial_replay(peer, BenchReplayEvent::Completed);
             self.complete_initial_selection_replay(peer);
             self.retire_completed_initial_group_admitted(peer);
             self.settle_free_eor(peer);
@@ -253,7 +308,7 @@ impl RibManager {
             .pending_group_admitted
             .extend_initial_replay_universe(peer, keys)
         {
-            self.recover_initial_member_replay(peer);
+            self.recover_initial_member_replay(peer, ReplayCause::from_label(|| "missing_proof"));
             return;
         }
         #[cfg(test)]
@@ -289,36 +344,57 @@ impl RibManager {
             page.bucket_visits + page.repairs,
         );
         let Some(admitted) = self.pending_group_admitted.get(&peer) else {
-            self.recover_initial_member_replay(peer);
+            self.recover_initial_member_replay(peer, ReplayCause::from_label(|| "missing_proof"));
             return;
         };
         let group = &self.group_ribs[&gid];
         let changes = &self.initial_member_replays.members[&peer].changes;
         let mut routes = Vec::new();
         let mut actions = Vec::new();
+        let mut withdraw = Vec::new();
+        let mut prior = FastSet::default();
+        let mut reconciled = Vec::new();
         for prefix in &page.keys {
             // Grouped single-best outbound identities use path ID zero,
             // including when the received winner has its own Add-Path ID.
             let key = ExactExportKey::Unicast(*prefix, 0);
-            if admitted.contains(&key) || changes.owns_absent(prefix) {
+            let sent = admitted.contains(&key);
+            // A coalesced key reconciles its current row against admission.
+            if changes.coalesced(prefix) {
+                reconciled.push(*prefix);
+            } else if sent || changes.owns_absent(prefix) {
                 continue;
             }
             if let Some(entry) = group.adv_entry_for(peer, prefix, 0, None) {
                 routes.push(entry.route.clone());
                 actions.push(entry.nh.cloned());
+            } else if sent {
+                withdraw.push((*prefix, 0));
+            } else {
+                continue;
+            }
+            if sent {
+                prior.insert(key);
             }
         }
-        if !routes.is_empty() {
+        if !routes.is_empty() || !withdraw.is_empty() {
             let batch = OutboundCommitBatch {
                 slot: operation.slot(),
                 force_unicast_replay: true,
                 unicast_otc_prechecked: true,
+                withdraw,
                 ..OutboundCommitBatch::with_unicast(routes.into(), actions.into())
             };
-            if !self.commit_initial_member_batch(peer, batch, FastSet::default()) {
+            if !self.commit_initial_member_batch(peer, batch, prior) {
                 return;
             }
         }
+        self.initial_member_replays
+            .members
+            .get_mut(&peer)
+            .expect("live replay")
+            .changes
+            .settle_coalesced(&reconciled);
         self.apply_initial_replay_page_policy(
             peer,
             gid,
@@ -334,12 +410,14 @@ impl RibManager {
         prior: FastSet<ExactExportKey>,
     ) -> bool {
         batch.on_proof_refusal = OnReservationRefusal::StopBeforeSend;
-        if self
-            .try_send_and_commit_outbound_update_with_group_prior(peer, batch, prior, None)
-            .is_err()
-            || self.group_recovery_fallback(peer).is_some()
-        {
-            self.recover_initial_member_replay(peer);
+        let commit =
+            self.try_send_and_commit_outbound_update_with_group_prior(peer, batch, prior, None);
+        if let Err(failure) = commit {
+            self.recover_initial_member_replay(peer, ReplayCause::from_label(|| failure.as_str()));
+            return false;
+        }
+        if let Some(failure) = self.group_recovery_fallback(peer) {
+            self.recover_initial_member_replay(peer, ReplayCause::from_label(|| failure.as_str()));
             return false;
         }
         self.advance_advertised_pages();
