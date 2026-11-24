@@ -227,7 +227,7 @@ impl RibManager {
             if !force
                 && rib_out
                     .get_rtc(key)
-                    .is_some_and(|existing| rtc_routes_equal(existing, &modified))
+                    .is_some_and(|existing| rtc_routes_equal(existing, &modified, target_is_ebgp))
             {
                 continue;
             }
