@@ -74,15 +74,7 @@ impl ReplayObservation {
                     "budget_refusal"
                 } else if matches!(*cause, "selection_release" | "release_fanout") {
                     "selection_release_to_dirty"
-                } else if matches!(
-                    *cause,
-                    "stage_delta_limit"
-                        | "pending_change_limit"
-                        | "change_body_budget"
-                        | "absent_key_limit"
-                        | "scan_repair_limit"
-                        | "sparse_key_limit"
-                ) {
+                } else if matches!(*cause, "scan_repair_limit" | "sparse_key_limit") {
                     "replay_to_dirty"
                 } else {
                     return Err(invalid_stat(format!(
@@ -128,7 +120,7 @@ mod tests {
         assert!(observation.receipt().is_err());
         observation.record(peer, 7, BenchReplayEvent::Completed);
         assert_eq!(observation.receipt().unwrap().disposition, "paced_complete");
-        observation.record(peer, 7, BenchReplayEvent::Dirty("pending_change_limit"));
+        observation.record(peer, 7, BenchReplayEvent::Dirty("scan_repair_limit"));
         assert!(observation.receipt().is_err());
     }
 
@@ -186,7 +178,7 @@ mod tests {
     }
 
     #[test]
-    fn ledger_refusal_is_distinct_from_change_body_cap() {
+    fn ledger_refusal_is_distinct_from_scan_repair_cap() {
         let peer = PeerId::from_addr("192.0.2.1".parse().unwrap());
         let observation = ReplayObservation::new(peer, 7, Instant::now());
         observation.record(peer, 7, BenchReplayEvent::EnrollmentRefused("peer_limit"));
@@ -195,7 +187,7 @@ mod tests {
         assert_eq!(receipt.enrolled_us, None);
 
         for (cause, expected) in [
-            ("change_body_budget", "replay_to_dirty"),
+            ("scan_repair_limit", "replay_to_dirty"),
             ("daemon_limit", "budget_refusal"),
             ("allocation_failure", "budget_refusal"),
         ] {

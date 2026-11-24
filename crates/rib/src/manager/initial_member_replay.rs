@@ -87,7 +87,7 @@ impl RibManager {
         self.initial_member_replays
             .members
             .get(&peer)
-            .is_some_and(|replay| replay.changes.has_pending())
+            .is_some_and(|replay| replay.changes.unsent())
     }
 
     pub(super) fn start_initial_member_replay(&mut self, peer: PeerId) -> bool {
@@ -272,6 +272,7 @@ impl RibManager {
         if !job.changes.has_pending()
             && self.loc_rib.member_replay_scan_status(peer) == RegistrationScanStatus::Ready
         {
+            debug_assert!(!job.changes.unsent(), "a coalesced key outlived its repair");
             if !self.pending_route_batches.is_empty() {
                 self.initial_member_replays.ready.push_back(peer);
                 return;
@@ -350,29 +351,50 @@ impl RibManager {
         let changes = &self.initial_member_replays.members[&peer].changes;
         let mut routes = Vec::new();
         let mut actions = Vec::new();
+        let mut withdraw = Vec::new();
+        let mut prior = FastSet::default();
+        let mut reconciled = Vec::new();
         for prefix in &page.keys {
             // Grouped single-best outbound identities use path ID zero,
             // including when the received winner has its own Add-Path ID.
             let key = ExactExportKey::Unicast(*prefix, 0);
-            if admitted.contains(&key) || changes.owns_absent(prefix) {
+            let sent = admitted.contains(&key);
+            // A coalesced key reconciles its current row against admission.
+            if changes.coalesced(prefix) {
+                reconciled.push(*prefix);
+            } else if sent || changes.owns_absent(prefix) {
                 continue;
             }
             if let Some(entry) = group.adv_entry_for(peer, prefix, 0, None) {
                 routes.push(entry.route.clone());
                 actions.push(entry.nh.cloned());
+            } else if sent {
+                withdraw.push((*prefix, 0));
+            } else {
+                continue;
+            }
+            if sent {
+                prior.insert(key);
             }
         }
-        if !routes.is_empty() {
+        if !routes.is_empty() || !withdraw.is_empty() {
             let batch = OutboundCommitBatch {
                 slot: operation.slot(),
                 force_unicast_replay: true,
                 unicast_otc_prechecked: true,
+                withdraw,
                 ..OutboundCommitBatch::with_unicast(routes.into(), actions.into())
             };
-            if !self.commit_initial_member_batch(peer, batch, FastSet::default()) {
+            if !self.commit_initial_member_batch(peer, batch, prior) {
                 return;
             }
         }
+        self.initial_member_replays
+            .members
+            .get_mut(&peer)
+            .expect("live replay")
+            .changes
+            .settle_coalesced(&reconciled);
         self.apply_initial_replay_page_policy(
             peer,
             gid,

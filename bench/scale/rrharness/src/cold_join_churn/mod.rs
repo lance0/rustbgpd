@@ -15,7 +15,8 @@ use workload::Workload;
 const TAG: u32 = (64_512 << 16) | 31;
 const MARKER_SOURCE: u32 = INGRESS_FLOOD;
 /// One message of new prefixes, above every 1,024-entry replay change cap.
-const BURST_ROWS: usize = 2048;
+// Above the replay scan's 4,096-key repair cap; smaller bursts coalesce.
+const BURST_ROWS: usize = 8192;
 
 /// Read and reset the production longest-actor-poll window.
 fn poll_max_us(metrics: &BgpMetrics) -> u64 {

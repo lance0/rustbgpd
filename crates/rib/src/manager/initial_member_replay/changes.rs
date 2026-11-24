@@ -1,5 +1,7 @@
 //! Preserve actual staged changes in publication order once replay begins
-//! sending. Discovery owns the untouched rows.
+//! sending. Discovery owns the untouched rows. A change that does not fit the
+//! bounded log is coalesced into its key's scan repair, which sends the
+//! current row after the log drains instead of falling back to a resync.
 
 use std::collections::{BTreeSet, VecDeque};
 
@@ -84,6 +86,9 @@ pub(super) struct ReplayChanges {
     // Keys drained from the journal that are absent after a withdrawal or
     // exact-export rejection must not be rediscovered.
     absent: BTreeSet<Prefix>,
+    // Changed keys the ordered log could not hold. Each still has its queued
+    // scan repair, which sends the current group row once the log drains.
+    coalesced: BTreeSet<Prefix>,
     body_bytes: usize,
 }
 
@@ -92,28 +97,46 @@ impl ReplayChanges {
         !self.pending.is_empty()
     }
 
+    /// Whether the group view holds a change this member has not accepted.
+    pub(super) fn unsent(&self) -> bool {
+        !self.pending.is_empty() || !self.coalesced.is_empty()
+    }
+
     pub(super) fn owns_absent(&self, prefix: &Prefix) -> bool {
         self.absent.contains(prefix)
     }
 
-    fn push(
-        &mut self,
-        peer: PeerId,
-        delta: &GroupDelta,
-        stage: &GroupStageOutput,
-    ) -> Result<(), ReplayCause> {
+    pub(super) fn coalesced(&self, prefix: &Prefix) -> bool {
+        self.coalesced.contains(prefix)
+    }
+
+    pub(super) fn settle_coalesced(&mut self, prefixes: &[Prefix]) {
+        for prefix in prefixes {
+            self.coalesced.remove(prefix);
+        }
+    }
+
+    /// Leave a change that does not fit to the key's repair. Later changes to
+    /// the key join it, so the repair cannot precede a logged change.
+    fn coalesce(&mut self, prefix: Prefix) {
+        self.absent.remove(&prefix);
+        self.coalesced.insert(prefix);
+    }
+
+    /// Log one change, or return `false` without side effects when it does not fit.
+    fn push(&mut self, peer: PeerId, delta: &GroupDelta, stage: &GroupStageOutput) -> bool {
         let row = delta.new.as_ref().filter(|(row, _)| row.peer != peer);
         if row.is_none() && delta.old_source.is_none_or(|source| source == peer) {
-            return Ok(());
+            return true;
         }
         if self.pending.len() >= REGISTRATION_PAGE_SIZE {
-            return Err(ReplayCause::from_label(|| "pending_change_limit"));
+            return false;
         }
         let change = if let Some((route, action)) = row {
             let Some(charge) = retained_route_bytes(route, size_of::<Announcement>())
                 .filter(|charge| *charge <= MAX_BODY_BYTES - self.body_bytes)
             else {
-                return Err(ReplayCause::from_label(|| "change_body_budget"));
+                return false;
             };
             self.body_bytes += charge;
             Change::Announce(Box::new(Announcement {
@@ -132,7 +155,7 @@ impl ReplayChanges {
             Change::Withdraw(delta.prefix)
         };
         self.pending.push_back(change);
-        Ok(())
+        true
     }
 }
 
@@ -150,9 +173,9 @@ impl RibManager {
         if matches!(replay.phase, Phase::PrepareProof(_)) {
             return Ok(());
         }
-        if stage.deltas.len() > REGISTRATION_PAGE_SIZE {
-            return Err(ReplayCause::from_label(|| "stage_delta_limit"));
-        }
+        // A stage larger than one page goes to the repairs whole, so the
+        // log never holds part of one publication.
+        let oversized = stage.deltas.len() > REGISTRATION_PAGE_SIZE;
         for delta in &stage.deltas {
             // A write outside the scan's repair scope must go to the normal
             // resync before the receiver can settle its initial table.
@@ -170,7 +193,12 @@ impl RibManager {
                     }
                 }));
             }
-            replay.changes.push(peer, delta, stage)?;
+            if oversized
+                || replay.changes.coalesced(&delta.prefix)
+                || !replay.changes.push(peer, delta, stage)
+            {
+                replay.changes.coalesce(delta.prefix);
+            }
         }
         Ok(())
     }
@@ -236,15 +264,10 @@ impl RibManager {
             .is_some_and(|view| view.contains(&key))
         {
             changes.absent.remove(&prefix);
-        } else if changes.absent.len() < REGISTRATION_PAGE_SIZE || changes.absent.contains(&prefix)
-        {
+        } else if changes.absent.len() < REGISTRATION_PAGE_SIZE {
+            // Past the cap, a later page that reaches this key probes it
+            // again and admits only what the current group row allows.
             changes.absent.insert(prefix);
-        } else {
-            self.recover_initial_member_replay(
-                peer,
-                ReplayCause::from_label(|| "absent_key_limit"),
-            );
-            return;
         }
         self.initial_member_replays.ready.push_back(peer);
     }
