@@ -441,10 +441,17 @@ holds under [Restart](#restart)).
   ends (whatever the free slots), or when its replay would be refused for
   another reason (a dirty receiver, a configured outbound prefix limit, a
   pending ORF); a refused replay sends its table in one turn, without taking
-  the queued joiners into that turn. A session or profile change ends a wait
-  that no longer applies, and a founder that leaves while it waits retires
-  the table built for it. Each wait is logged at debug level with its
-  cause. An outbound
+  the queued joiners into that turn. A leader that cannot be paced at all,
+  such as one whose policy build fell back, does not take a paceable joiner
+  into its turn either; a joiner whose own paced replay would be refused
+  still shares that turn. A session or profile change ends a wait that no
+  longer applies, and a founder that leaves while it waits retires the table
+  built for it. While a joiner waits, nothing is sent to it and no replay
+  starts for it: an export-policy change or reload makes it register later
+  under the new policy, a ROUTE-REFRESH is answered by the table it waits
+  for, an ORF update is refused (a paceable joiner negotiated none), and a read
+  of its Adj-RIB-Out shows nothing advertised without waking the queue.
+  Each wait is logged at debug level with its cause. An outbound
   prefix limit applied during the join is checked against the routes
   admitted so far, and later pages meet it at commit. Tests:
   [`per_client_best.rs`](../../crates/rib/src/manager/tests/first_group_build/initial_member_replay/per_client_best.rs)

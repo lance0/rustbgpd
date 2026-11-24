@@ -3309,6 +3309,9 @@ impl RibManager {
     /// group table holds no control-form community for its RS ASN, on the
     /// source or the post-policy route (the LAN-474 emit-filter
     /// predicate). Membership is re-checked after each joiner installs.
+    /// A joiner that can take the paced replay never joins: it pages its own
+    /// table, or past the replay cap or proof budget waits for a slot. One
+    /// whose paced replay would be refused anyway shares the leader's turn.
     ///
     /// At most [`MAX_JOIN_COHORT`] registrations complete, leader included.
     /// One turn's admission work is bounded: at most one control-tag pass
@@ -3379,7 +3382,8 @@ impl RibManager {
                     })
                 && !self.slow_isolated_peers.contains(&peer)
                 && !self.peer_orf_filters.contains_key(&peer)
-                && !self.peer_has_conditional_advertisements(peer);
+                && !self.peer_has_conditional_advertisements(peer)
+                && self.paced_replay_room(peer).is_none();
             if joins {
                 members.push(peer);
             } else {
