@@ -9,7 +9,7 @@ use crate::route::{FlowSpecKey, Route};
 use std::collections::hash_set;
 
 pub(super) const KEYS_PER_PAGE: usize = 16;
-/// Keys in a pressured shared group page and in a quiet private or FlowSpec
+/// Keys in a pressured shared group page and in a quiet private or `FlowSpec`
 /// page. One poll stages the whole page, so this bounds per-key stage work
 /// rather than member work.
 pub(super) const WIDE_KEYS_PER_PAGE: usize = 256;
@@ -31,7 +31,7 @@ pub(super) const DEPARTURE_MEMBERS_PER_POLL: usize = 256;
 /// the width does not shrink with the roster. A typical departure of up to
 /// this many keys reaches each member once.
 const QUIET_GROUP_KEYS_PER_PAGE: usize = super::ROUTES_RECEIVED_CHUNK_SIZE;
-/// Receiver-keys one quiet unit may visit on a private or FlowSpec page; at
+/// Receiver-keys one quiet unit may visit on a private or `FlowSpec` page; at
 /// about 0.4 µs per private receiver-key this keeps a single unit near 3 ms.
 /// A wide group page takes the larger receiver-key budget instead.
 pub(super) const QUIET_UNIT_RECEIVER_KEYS: usize = 8_192;

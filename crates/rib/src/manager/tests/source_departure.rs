@@ -333,6 +333,17 @@ fn pace_for_arrival(manager: &mut RibManager, arrival: ProbeArrival) {
     }
 }
 
+/// Receiver-keys one poll may visit while the probe waits. A prequeued UPDATE
+/// keeps the first page narrow. A later arrival can find a wide quiet page,
+/// which a private member page still bounds.
+fn waiting_poll_limit(shape: Shape, arrival: ProbeArrival) -> usize {
+    match (shape, arrival) {
+        (Shape::Grouped | Shape::RsControl, _) => POLL_LIMIT,
+        (_, ProbeArrival::Prequeued) => PRIVATE_POLL_LIMIT,
+        _ => MEMBERS_PER_PAGE * WIDE_KEYS_PER_PAGE,
+    }
+}
+
 async fn departure(shape: Shape, count: u8, rows: u32, arrival: ProbeArrival) -> PollCounts {
     let (tx, rx) = mpsc::channel(16);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
@@ -419,20 +430,10 @@ async fn departure(shape: Shape, count: u8, rows: u32, arrival: ProbeArrival) ->
             "{shape:?} K={count}: receiver-key inspection witness too small: {total}"
         );
     }
-    // A prequeued UPDATE keeps the first page narrow. A later arrival can
-    // find a wide quiet page, which a private member page still bounds.
-    let limit = match (shape, arrival) {
-        (Shape::Grouped | Shape::RsControl, _) => POLL_LIMIT,
-        (_, ProbeArrival::Prequeued) => PRIVATE_POLL_LIMIT,
-        _ => MEMBERS_PER_PAGE * WIDE_KEYS_PER_PAGE,
-    };
+    let limit = waiting_poll_limit(shape, arrival);
     assert!(
-        most <= limit,
-        "{shape:?} K={count}: {most} receiver-keys in one physical actor poll, limit {limit}"
-    );
-    assert!(
-        most_sent <= limit,
-        "{shape:?} K={count}: {most_sent} withdrawals delivered in one physical actor poll, limit {limit}"
+        most <= limit && most_sent <= limit,
+        "{shape:?} K={count}: {most} receiver-keys and {most_sent} withdrawals in one physical actor poll, limit {limit}"
     );
     assert!(end.dirty_peers.is_empty());
     poll_counts(
@@ -715,8 +716,8 @@ fn queued_departure(shape: Shape, count: u16, rows: u32, head: RibUpdate) -> Pol
         envelope,
         envelopes,
         polls,
-        members,
         pressured,
+        members,
     }
 }
 
