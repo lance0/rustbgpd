@@ -331,9 +331,9 @@ impl RibManager {
                         path_id: next_rank,
                     };
                     if force
-                        || rib_out
-                            .get_labeled(&out_key)
-                            .is_none_or(|existing| !labeled_routes_equal(existing, &modified))
+                        || rib_out.get_labeled(&out_key).is_none_or(|existing| {
+                            !labeled_routes_equal(existing, &modified, target_is_ebgp)
+                        })
                     {
                         checkpoint.borrow_mut()();
                         labeled_announce.push(modified);
@@ -663,9 +663,9 @@ impl RibManager {
                 path_id: 0,
             };
             if force
-                || rib_out
-                    .get_labeled(&out_key)
-                    .is_none_or(|existing| !labeled_routes_equal(existing, &modified))
+                || rib_out.get_labeled(&out_key).is_none_or(|existing| {
+                    !labeled_routes_equal(existing, &modified, target_is_ebgp)
+                })
             {
                 if let Some(trace) = target.trace() {
                     trace.staged_next_hop = Some(modified.next_hop);

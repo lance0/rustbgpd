@@ -204,7 +204,7 @@ impl RibManager {
             if !force
                 && rib_out
                     .get_bgpls(key)
-                    .is_some_and(|existing| bgpls_routes_equal(existing, &modified))
+                    .is_some_and(|existing| bgpls_routes_equal(existing, &modified, target_is_ebgp))
             {
                 continue;
             }

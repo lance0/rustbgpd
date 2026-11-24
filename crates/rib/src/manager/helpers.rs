@@ -11,7 +11,7 @@ use rustbgpd_wire::{
     Afi, AspaValidation, LlgrFamily, Prefix, RpkiValidation, Safi, VpnAddressFamily, VpnRouteKey,
 };
 
-use crate::route::BgpLsFamily;
+use crate::route::{BgpLsFamily, RouteOrigin};
 
 /// Sentinel peer for locally-injected routes.
 pub(super) const LOCAL_PEER: crate::PeerId = crate::PeerId::LOCAL;
@@ -120,24 +120,37 @@ pub(super) fn routes_equal(a: &crate::route::Route, b: &crate::route::Route) -> 
         && (Arc::ptr_eq(&a.attributes, &b.attributes) || a.attributes == b.attributes)
 }
 
-/// An admitted iBGP-learned row sent to an iBGP peer is reflected. Transport
-/// adds a cluster and supplies the source BGP Identifier only for a missing
-/// `ORIGINATOR_ID` (RFC 4456 section 8).
+/// With equal path attributes, only reflected iBGP paths can put the source
+/// BGP Identifier on the wire (RFC 4456 section 8).
+fn same_reflection(
+    target_is_ebgp: bool,
+    old: (RouteOrigin, Ipv4Addr),
+    new: (RouteOrigin, Ipv4Addr),
+    attributes: &crate::attr_set::AttrSet,
+) -> bool {
+    use crate::route::RouteOrigin::Ibgp;
+    target_is_ebgp
+        || match (old, new) {
+            ((Ibgp, old_id), (Ibgp, new_id)) => {
+                old_id == new_id || attributes.summary().originator_id.is_some()
+            }
+            ((Ibgp, _), _) | (_, (Ibgp, _)) => false,
+            _ => true,
+        }
+}
+
 pub(super) fn routes_equal_for_target(
     old: &crate::route::Route,
     new: &crate::route::Route,
     target_is_ebgp: bool,
 ) -> bool {
-    use crate::route::RouteOrigin::Ibgp;
     routes_equal(old, new)
-        && (target_is_ebgp
-            || match (old.origin_type, new.origin_type) {
-                (Ibgp, Ibgp) => {
-                    old.peer_router_id == new.peer_router_id || old.originator_id().is_some()
-                }
-                (Ibgp, _) | (_, Ibgp) => false,
-                _ => true,
-            })
+        && same_reflection(
+            target_is_ebgp,
+            (old.origin_type, old.peer_router_id),
+            (new.origin_type, new.peer_router_id),
+            &old.attributes,
+        )
 }
 
 pub(super) fn unicast_routes_equal(
@@ -176,12 +189,27 @@ pub(super) fn evpn_routes_equal(
         && (Arc::ptr_eq(&a.attributes, &b.attributes) || a.attributes == b.attributes)
 }
 
+pub(super) fn evpn_routes_equal_for_target(
+    a: &crate::route::EvpnRibRoute,
+    b: &crate::route::EvpnRibRoute,
+    target_is_ebgp: bool,
+) -> bool {
+    evpn_routes_equal(a, b)
+        && same_reflection(
+            target_is_ebgp,
+            (a.origin_type, a.peer_router_id),
+            (b.origin_type, b.peer_router_id),
+            &a.attributes,
+        )
+}
+
 /// BGP-LS counterpart of [`routes_equal`]. The opaque NLRI key is supplied by
 /// the map key; equality here covers the selected-route metadata and attributes
 /// that can change while the opaque route identity stays stable.
 pub(super) fn bgpls_routes_equal(
     a: &crate::route::BgpLsRibRoute,
     b: &crate::route::BgpLsRibRoute,
+    target_is_ebgp: bool,
 ) -> bool {
     a.family == b.family
         && a.nlri == b.nlri
@@ -189,6 +217,12 @@ pub(super) fn bgpls_routes_equal(
         && a.peer == b.peer
         && a.path_id == b.path_id
         && (Arc::ptr_eq(&a.attributes, &b.attributes) || a.attributes == b.attributes)
+        && same_reflection(
+            target_is_ebgp,
+            (a.origin_type, a.peer_router_id),
+            (b.origin_type, b.peer_router_id),
+            &a.attributes,
+        )
 }
 
 /// VPNv4/VPNv6 counterpart of [`routes_equal`]. Unlike BGP-LS, the full NLRI
@@ -211,6 +245,20 @@ pub(super) fn vpn_routes_equal(
         && (Arc::ptr_eq(&a.attributes, &b.attributes) || a.attributes == b.attributes)
 }
 
+pub(super) fn vpn_routes_equal_for_target(
+    a: &crate::route::VpnRibRoute,
+    b: &crate::route::VpnRibRoute,
+    target_is_ebgp: bool,
+) -> bool {
+    vpn_routes_equal(a, b)
+        && same_reflection(
+            target_is_ebgp,
+            (a.origin_type, a.peer_router_id),
+            (b.origin_type, b.peer_router_id),
+            &a.attributes,
+        )
+}
+
 /// Labeled-unicast counterpart of [`routes_equal`]. Like VPN, the full NLRI
 /// must be compared: the MPLS label stack is route data excluded from the map
 /// key, so a same-peer relabel changes `nlri` while the key stays stable —
@@ -218,6 +266,7 @@ pub(super) fn vpn_routes_equal(
 pub(super) fn labeled_routes_equal(
     a: &crate::route::LabeledRibRoute,
     b: &crate::route::LabeledRibRoute,
+    target_is_ebgp: bool,
 ) -> bool {
     a.nlri == b.nlri
         && a.next_hop == b.next_hop
@@ -229,6 +278,12 @@ pub(super) fn labeled_routes_equal(
         && a.peer == b.peer
         && a.path_id == b.path_id
         && (Arc::ptr_eq(&a.attributes, &b.attributes) || a.attributes == b.attributes)
+        && same_reflection(
+            target_is_ebgp,
+            (a.origin_type, a.peer_router_id),
+            (b.origin_type, b.peer_router_id),
+            &a.attributes,
+        )
 }
 
 /// RT-Constrain counterpart of [`routes_equal`]. Like VPN, the full NLRI is
@@ -237,12 +292,19 @@ pub(super) fn labeled_routes_equal(
 pub(super) fn rtc_routes_equal(
     a: &crate::route::RtcRibRoute,
     b: &crate::route::RtcRibRoute,
+    target_is_ebgp: bool,
 ) -> bool {
     a.nlri == b.nlri
         && a.next_hop == b.next_hop
         && a.peer == b.peer
         && a.path_id == b.path_id
         && (Arc::ptr_eq(&a.attributes, &b.attributes) || a.attributes == b.attributes)
+        && same_reflection(
+            target_is_ebgp,
+            (a.origin_type, a.peer_router_id),
+            (b.origin_type, b.peer_router_id),
+            &a.attributes,
+        )
 }
 
 #[must_use]

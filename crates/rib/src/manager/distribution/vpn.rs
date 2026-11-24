@@ -1,6 +1,6 @@
 use super::{
     Afi, HashSet, OutboundCommitBatch, PolicyChain, RibManager, RouteContext, Safi, route_type,
-    should_suppress_ibgp_inner, vpn_route_family, vpn_routes_equal, warn,
+    should_suppress_ibgp_inner, vpn_route_family, vpn_routes_equal_for_target, warn,
 };
 use crate::PeerId;
 use crate::attr_set::AttrSet;
@@ -347,9 +347,9 @@ impl RibManager {
                         path_id: next_rank,
                     };
                     if force
-                        || rib_out
-                            .get_vpn(&out_key)
-                            .is_none_or(|existing| !vpn_routes_equal(existing, &modified))
+                        || rib_out.get_vpn(&out_key).is_none_or(|existing| {
+                            !vpn_routes_equal_for_target(existing, &modified, target_is_ebgp)
+                        })
                     {
                         checkpoint.borrow_mut()();
                         vpn_announce.push(modified);
@@ -732,9 +732,9 @@ impl RibManager {
                 path_id: 0,
             };
             if force
-                || rib_out
-                    .get_vpn(&out_key)
-                    .is_none_or(|existing| !vpn_routes_equal(existing, &modified))
+                || rib_out.get_vpn(&out_key).is_none_or(|existing| {
+                    !vpn_routes_equal_for_target(existing, &modified, target_is_ebgp)
+                })
             {
                 if let Some(trace) = target.trace() {
                     trace.staged_next_hop = Some(modified.next_hop);
