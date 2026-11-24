@@ -140,25 +140,28 @@ impl RibManager {
     /// fit even once they end, or when its replay would be refused anyway.
     pub(super) fn replay_slot_wait(&self, peer: PeerId, behind_budget: bool) -> Option<SlotWait> {
         let replays = &self.initial_member_replays.members;
-        if replays.is_empty()
-            || replays.contains_key(&peer)
-            || !self.eligible_initial_member_replay(peer)
-            || self.replay_peer_refusal(peer).is_some()
-        {
+        if replays.is_empty() || replays.contains_key(&peer) {
             return None;
         }
-        // A table that fits under neither limit is refused whatever ends:
-        // it takes its one-turn send now rather than wait for a slot.
-        let room = self
-            .pending_group_admitted
-            .initial_replay_room(self.pending_replay_rows(peer));
-        if room == ReplayRoom::Never {
-            return None;
-        }
+        let room = self.paced_replay_room(peer)?;
         if replays.len() >= super::peer_lifecycle::MAX_JOIN_COHORT {
             return Some(SlotWait::Cap);
         }
         (behind_budget || room == ReplayRoom::AfterReplays).then_some(SlotWait::Budget)
+    }
+
+    /// The proof room for `peer`'s paced replay, or `None` when its
+    /// registration cannot take one whatever ends: it is not eligible, peer
+    /// state refuses it, or its table fits under neither limit. Such a
+    /// registration sends its table in one turn.
+    pub(super) fn paced_replay_room(&self, peer: PeerId) -> Option<ReplayRoom> {
+        if !self.eligible_initial_member_replay(peer) || self.replay_peer_refusal(peer).is_some() {
+            return None;
+        }
+        let room = self
+            .pending_group_admitted
+            .initial_replay_room(self.pending_replay_rows(peer));
+        (room != ReplayRoom::Never).then_some(room)
     }
 
     /// [`Self::replay_slot_wait`] for a registration completed outside the

@@ -5414,8 +5414,10 @@ impl RibManager {
         // replay slot without changing the queue. Unicast receipts, the bulk
         // of the input, and operator reads leave the waiters to the next
         // replay's end.
-        if !matches!(update.unmetered(), RibUpdate::RoutesReceived { .. })
-            && update.actor_turn_kind() != rustbgpd_telemetry::metrics::RibActorTurnKind::Query
+        if !matches!(
+            update.unmetered(),
+            RibUpdate::RoutesReceived { .. } | RibUpdate::WireRoutesReceived(_)
+        ) && update.actor_turn_kind() != rustbgpd_telemetry::metrics::RibActorTurnKind::Query
         {
             self.set_registration_slot_wait(false);
         }

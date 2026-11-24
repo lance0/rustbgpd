@@ -443,7 +443,8 @@ holds under [Restart](#restart)).
   pending ORF); a refused replay sends its table in one turn, without taking
   the queued joiners into that turn. A leader that cannot be paced at all,
   such as one whose policy build fell back, does not take a paceable joiner
-  into its turn either. A session or profile change ends a wait that no
+  into its turn either; a joiner whose own paced replay would be refused
+  still shares that turn. A session or profile change ends a wait that no
   longer applies, and a founder that leaves while it waits retires the table
   built for it. While a joiner waits, nothing is sent to it and no replay
   starts for it: an export-policy change or reload makes it register later

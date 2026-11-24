@@ -722,14 +722,19 @@ fn assert_waiting(
 }
 
 // Every paced replay shape waits for a slot past the replay cap: a plain
-// single-best member, a per-client-best member and an RS-control member,
-// each the founder of its group or a joiner of the published one.
+// single-best member and an RS-control member joining the published group,
+// and a per-client-best member and a dual-stack RS-control member founding
+// their own. The per-client-best build publishes while its founder waits;
+// the RS-control founder waits first and builds its group in one turn when
+// a slot frees. Either founder then pages its table, and the second client
+// of each shape joins whichever group the first is in.
 #[test]
 fn every_paced_shape_waits_for_a_replay_slot() {
-    for (shape, rs, pcb) in [
-        ("single-best", None, false),
-        ("per-client-best", None, true),
-        ("rs-control", Some(RS_ASN), false),
+    for (shape, rs, pcb, families, founds) in [
+        ("single-best", None, false, &V4[..], false),
+        ("per-client-best", None, true, &V4[..], true),
+        ("rs-control", Some(RS_ASN), false, &V4[..], false),
+        ("rs-control founder", Some(RS_ASN), false, &DUAL[..], true),
     ] {
         let Published {
             mut manager,
@@ -737,9 +742,13 @@ fn every_paced_shape_waits_for_a_replay_slot() {
             ..
         } = published();
         let mut parked = fill_replay_slots(&mut manager);
+        let groups = manager.group_ribs.len();
         let mut joiners: Vec<_> = [100, 101]
             .into_iter()
-            .map(|n| (n, shaped_client(&mut manager, n, 1 << 12, rs, &V4, pcb)))
+            .map(|n| {
+                let rx = shaped_client(&mut manager, n, 1 << 12, rs, families, pcb);
+                (n, rx)
+            })
             .collect();
         for _ in 0..10_000 {
             manager.advance_pending_initial_registration();
@@ -747,7 +756,8 @@ fn every_paced_shape_waits_for_a_replay_slot() {
         assert_waiting(&mut manager, &mut joiners);
 
         release(&mut manager, &mut parked);
-        let (peak, paced) = advance_until_complete(&mut manager, &mut joiners, ROWS, 1);
+        let markers = families.len();
+        let (peak, paced) = advance_until_complete(&mut manager, &mut joiners, ROWS, markers);
         assert_eq!(paced, [true, true], "{shape}");
         assert!(
             peak <= REGISTRATION_PAGE_SIZE,
@@ -755,6 +765,17 @@ fn every_paced_shape_waits_for_a_replay_slot() {
         );
         let group = manager.grouped_member_of(receiver(100));
         assert!(group.is_some(), "{shape}");
+        assert_eq!(group, manager.grouped_member_of(receiver(101)), "{shape}");
+        assert_eq!(
+            group != manager.grouped_member_of(receiver(200)),
+            founds,
+            "{shape}"
+        );
+        assert_eq!(
+            manager.group_ribs.len(),
+            groups + usize::from(founds),
+            "{shape}"
+        );
         assert_eq!(
             manager.group_ribs[&group.unwrap()].per_client_best,
             pcb,
@@ -795,6 +816,67 @@ fn a_leader_that_cannot_pace_leaves_slot_waiters_queued() {
     let (peak, paced) = advance_until_complete(&mut manager, &mut joiners, ROWS, 1);
     assert!(paced.iter().all(|&p| p), "{paced:?}");
     assert!(peak <= REGISTRATION_PAGE_SIZE, "one turn sent {peak} rows");
+}
+
+// A joiner whose own paced replay would be refused (a configured outbound
+// prefix limit, or a table no proof budget fits) gains nothing from its own
+// turn, so it still shares the one-turn replay of a leader that cannot pace.
+#[test]
+fn a_joiner_refused_its_own_pacing_shares_a_fallback_leaders_turn() {
+    use crate::manager::tests::outbound_prefix_limits::{apply, limit_config, prepare};
+
+    for refusal in ["prefix_limit", "never_fits"] {
+        let Published {
+            mut manager,
+            tx: _tx,
+            ..
+        } = published();
+        let (leader, joiner) = (110, 111);
+        if refusal == "prefix_limit" {
+            let limit = u32::try_from(2 * ROWS).unwrap();
+            prepare(
+                &mut manager,
+                1,
+                limit_config(&[(receiver(joiner), Some(limit), None)], &[]),
+            )
+            .expect("no registered peer exceeds the limit");
+            apply(&mut manager, 1, true).expect("applied");
+        } else {
+            manager.pending_group_admitted.set_test_peer_limit(ROWS);
+        }
+        let mut leader_rx = rs_client(&mut manager, leader, 1 << 12);
+        manager
+            .live_sessions
+            .get_mut(&receiver(leader))
+            .and_then(|sessions| sessions.last_mut())
+            .unwrap()
+            .registration_policy_fallback = true;
+        let mut joiner_rx = rs_client(&mut manager, joiner, 1 << 12);
+        assert!(manager.paced_replay_room(receiver(joiner)).is_none());
+
+        let (mut leader_ends, mut joiner_rows, mut joiner_ends) = (0, 0, 0);
+        for _ in 0..10_000 {
+            manager.advance_pending_initial_registration();
+            while let Ok(update) = leader_rx.try_recv() {
+                leader_ends += update.end_of_rib.len();
+            }
+            while let Ok(update) = joiner_rx.try_recv() {
+                joiner_rows += update.announce.len();
+                joiner_ends += update.end_of_rib.len();
+            }
+            if leader_ends > 0 {
+                break;
+            }
+        }
+        assert_eq!(leader_ends, 1, "{refusal}");
+        assert!(
+            !manager
+                .pending_initial_registrations
+                .contains(&receiver(joiner)),
+            "{refusal}: the joiner did not share the leader's turn"
+        );
+        assert_eq!((joiner_rows, joiner_ends), (ROWS, 1), "{refusal}");
+    }
 }
 
 /// Release the slots and page the waiter's whole table once, then check
@@ -963,4 +1045,37 @@ fn reading_a_waiters_adj_rib_out_shows_nothing_and_starts_no_work() {
     assert_waiting(&mut manager, &mut waiter);
 
     complete_waiter(&mut manager, &mut parked, &mut waiter, |_| {});
+}
+
+// A change that ends a waiter's reason to wait wakes the queue. A configured
+// outbound prefix limit refuses the waiter's paced replay, so it sends its
+// table in its own turn while the slots stay held.
+#[test]
+fn a_change_that_ends_a_wait_wakes_the_queue() {
+    use crate::manager::tests::outbound_prefix_limits::{apply, limit_config, prepare};
+
+    let Published {
+        mut manager,
+        tx: _tx,
+        ..
+    } = published();
+    let _parked = fill_replay_slots(&mut manager);
+    let n = 100;
+    let mut waiter = [(n, client(&mut manager, n, 1 << 12, None, &V4))];
+    assert_waiting(&mut manager, &mut waiter);
+
+    let limit = u32::try_from(2 * ROWS).unwrap();
+    prepare(
+        &mut manager,
+        1,
+        limit_config(&[(receiver(n), Some(limit), None)], &[]),
+    )
+    .expect("no registered peer exceeds the limit");
+    apply(&mut manager, 1, true).expect("applied");
+    assert!(
+        manager.registration_runnable(),
+        "the limit left the waiter asleep"
+    );
+    let [(_, rx)] = waiter;
+    sends_without_waiting(&mut manager, n, rx);
 }
