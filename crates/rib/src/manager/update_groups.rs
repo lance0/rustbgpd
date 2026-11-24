@@ -95,7 +95,7 @@ use payload::{
     emit_vpn_group_deltas_for_member,
 };
 
-use super::helpers::{LOCAL_PEER, routes_equal, vpn_routes_equal};
+use super::helpers::{LOCAL_PEER, routes_equal, vpn_routes_equal_for_target};
 use super::{PolicyFilteredRouteKey, RibManager, RtcMembership};
 use crate::adj_rib_out::AdjRibOut;
 use crate::route::{EvpnRibRoute, Route, VpnRibRoute, VpnRibRouteKey};

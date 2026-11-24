@@ -69,7 +69,8 @@ impl RibManager {
         pcb: &mut ReleasePcb,
         budget: &mut usize,
     ) -> Option<PreparedPcb> {
-        self.poll_pcb_prefix(self.group_ribs.get(&gid)?, prefix, pcb, budget)
+        let mut memo = ExportMemo::default();
+        self.poll_pcb_prefix(self.group_ribs.get(&gid)?, prefix, pcb, &mut memo, budget)
     }
 
     pub(in crate::manager) fn poll_first_group_pcb(
@@ -77,11 +78,13 @@ impl RibManager {
         group: &GroupRibOut,
         prefix: Prefix,
         pcb: &mut FirstGroupSelection,
+        memo: &mut ExportMemo,
         budget: &mut usize,
     ) -> Option<PreparedPcb> {
         debug_assert!(group.per_client_best && group.is_ebgp);
         debug_assert!(group.export_chain.is_none() && group.local_role.is_none());
-        self.poll_pcb_prefix(group, prefix, pcb, budget)
+        // The build's persistent memo shares modified attributes across pages.
+        self.poll_pcb_prefix(group, prefix, pcb, memo, budget)
     }
 
     fn poll_pcb_prefix<S: RankedPaths>(
@@ -89,6 +92,7 @@ impl RibManager {
         group: &GroupRibOut,
         prefix: Prefix,
         pcb: &mut ReleasePcb<S>,
+        memo: &mut ExportMemo,
         budget: &mut usize,
     ) -> Option<PreparedPcb> {
         // A release fences its candidates. A first group's capture queues a
@@ -134,7 +138,6 @@ impl RibManager {
 
         let export_pol = group.export_chain.as_ref();
         let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
-        let mut memo = ExportMemo::default();
         let mut evals = GroupEvalAccumulator::default();
         while !pcb.walk_complete && *budget > 0 {
             if S::FIRST_GROUP && *budget < pcb.ranked.pop_budget() {
@@ -157,7 +160,7 @@ impl RibManager {
                 group.local_role,
                 export_pol,
                 needs_as_path_string,
-                &mut memo,
+                memo,
                 &mut evals,
                 &mut pcb.rows,
                 &mut pcb.otc_blocked,

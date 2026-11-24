@@ -3094,6 +3094,10 @@ async fn labeled_input_passing_a_retained_session_end_reaches_a_paused_cursor_re
     }
 }
 
+mod authoritative_metadata;
+mod authoritative_order;
+mod authoritative_reload;
+mod authoritative_scope;
 mod initial_member_replay;
 mod member_replay_work;
 mod pcb_work;

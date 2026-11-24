@@ -27,7 +27,7 @@ pub(super) struct ReplacementSummaries {
     ledger_detached: bool,
 }
 
-struct SummaryProjection {
+pub(super) struct SummaryProjection {
     neighbors: HashMap<PeerId, NeighborRibSnapshot>,
     memberships: HashMap<PeerId, GroupMembership>,
     group_keys: HashMap<usize, GroupKey>,
@@ -57,7 +57,12 @@ impl ReplacementSummaries {
             if let Some(trace) = self.post_commit_query_trace.take() {
                 trace.emit("summary");
             }
-            self.answer(query, live);
+            let proofs = self.ledger_detached.then(|| {
+                self.recovery_proofs
+                    .as_ref()
+                    .expect("detached proof membership")
+            });
+            self.view.answer(query, live, proofs);
         }
         received
     }
@@ -74,14 +79,21 @@ impl ReplacementSummaries {
                 || peers
                     .iter()
                     .any(|peer| !self.view.neighbors.contains_key(peer))
-                || comparison.is_some_and(|(left, right)| !self.pair_is_frozen(left, right)))
+                || comparison.is_some_and(|(left, right)| !self.view.pair_is_frozen(left, right)))
     }
+}
 
+impl SummaryProjection {
     fn pair_is_frozen(&self, left: PeerId, right: PeerId) -> bool {
-        self.view.neighbors.contains_key(&left) && self.view.neighbors.contains_key(&right)
+        self.neighbors.contains_key(&left) && self.neighbors.contains_key(&right)
     }
 
-    fn answer(&self, query: RibSummaryQuery, live: Option<&RibManager>) {
+    fn answer(
+        &self,
+        query: RibSummaryQuery,
+        live: Option<&RibManager>,
+        proofs: Option<&HashSet<PeerId>>,
+    ) {
         let RibSummaryQuery::NeighborRibSnapshots {
             peers,
             comparison,
@@ -95,8 +107,7 @@ impl ReplacementSummaries {
         if include_retained {
             retained = live.expect("live retained roster").gr_retention_peers();
             retained.extend(
-                self.view
-                    .neighbors
+                self.neighbors
                     .iter()
                     .filter(|(_, row)| !row.gr_retention.is_empty())
                     .map(|(peer, _)| *peer),
@@ -108,21 +119,16 @@ impl ReplacementSummaries {
             comparison,
             retained,
             |peer| {
-                self.view.neighbors.get(&peer).cloned().unwrap_or_else(|| {
-                    let proof = self.ledger_detached.then(|| {
-                        self.recovery_proofs
-                            .as_ref()
-                            .expect("detached proof membership")
-                            .contains(&peer)
-                    });
+                self.neighbors.get(&peer).cloned().unwrap_or_else(|| {
+                    let proof = proofs.map(|proofs| proofs.contains(&peer));
                     live.expect("live neighbor row")
                         .neighbor_rib_snapshot_with_proof(peer, proof)
                 })
             },
             |left, right| {
                 if self.pair_is_frozen(left, right) {
-                    compare_update_groups(&self.view.memberships, left, right, |id| {
-                        self.view.group_keys.get(&id)
+                    compare_update_groups(&self.memberships, left, right, |id| {
+                        self.group_keys.get(&id)
                     })
                 } else {
                     live.expect("live group comparison")
@@ -231,7 +237,33 @@ impl RibManager {
         if let Some(trace) = self.post_commit_query_trace.take() {
             trace.emit("summary");
         }
-        self.handle_update(query.into());
+        if let Some(view) = self
+            .authoritative_reload
+            .as_ref()
+            .and_then(|reload| reload.summary.as_ref())
+        {
+            view.answer(query, Some(self), None);
+        } else {
+            self.handle_update(query.into());
+        }
+    }
+
+    pub(super) fn capture_reload_summaries(
+        &mut self,
+        peers: impl Iterator<Item = PeerId>,
+        gid: usize,
+    ) {
+        if self.summary_rx.is_none() {
+            return;
+        }
+        let summary = self.with_replacement_summary_preflight(|manager| {
+            let scope = manager.replacement_summary_scope(peers.map(|peer| (peer, Some(gid))));
+            manager.capture_affected_summaries(&scope.peers)
+        });
+        self.authoritative_reload
+            .as_mut()
+            .expect("accepted reload")
+            .summary = Some(summary);
     }
 
     pub(super) fn drain_summary_queries(&mut self) {
@@ -281,7 +313,7 @@ impl RibManager {
     pub(super) fn with_scoped_replacement_summary_reads<T>(
         &mut self,
         operation: &'static str,
-        scope: ReplacementSummaryScope,
+        mut scope: ReplacementSummaryScope,
         work: impl FnOnce(&mut Self) -> T,
     ) -> T {
         // A nested scope has already moved the receiver into the shared context.
@@ -293,7 +325,20 @@ impl RibManager {
             #[cfg(feature = "bench-internals")]
             tracing::info!(target: "replacement_summary", operation, phase = "enter", "replacement summary scope");
             let started = std::time::Instant::now();
-            let view = manager.capture_affected_summaries(&scope.peers);
+            let view = if let Some(mut entry) = manager.authoritative_reload.as_mut().and_then(|reload| reload.summary.take()) {
+                // A registration may have joined a touched group since entry.
+                // Include it for helpers that detach that group's canonical state.
+                scope.peers.retain(|peer| !entry.neighbors.contains_key(peer));
+                if !scope.peers.is_empty() {
+                    let additional = manager.capture_affected_summaries(&scope.peers);
+                    entry.neighbors.extend(additional.neighbors);
+                    entry.memberships.extend(additional.memberships);
+                    entry.group_keys.extend(additional.group_keys);
+                }
+                entry
+            } else {
+                manager.capture_affected_summaries(&scope.peers)
+            };
             drop(scope.peers);
             manager.replacement_summary_groups = Some(scope.groups);
             let capture_us = started.elapsed().as_micros();

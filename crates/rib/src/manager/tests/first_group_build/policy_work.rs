@@ -5,6 +5,8 @@ use std::future::{Future, poll_fn};
 use rustbgpd_policy::{NextHopAction, Policy, PolicyAction, PolicyChain};
 
 use super::*;
+use crate::manager::distribution::ExportMemo;
+use crate::manager::first_group_build::page_memo;
 
 const TAG: u32 = 64_501 << 16 | 7;
 const PAGE: usize = crate::loc_rib::REGISTRATION_PAGE_SIZE;
@@ -207,4 +209,111 @@ async fn policy_cold_build_bounds_work_per_physical_poll() {
         assert!(peak["group_denials_written"] <= PAGE, "{peak:?}");
         assert!(peak["group_growing_slab_slots"] <= 2 * PAGE, "{peak:?}");
     }
+}
+
+#[test]
+fn paged_policy_build_shares_each_modified_source_attribute_set() {
+    // One source attribute allocation across several pages, as for a packed
+    // UPDATE. The synchronous build modifies it once; so must the paged one,
+    // or the encoder prepares and packs one attribute set per page.
+    let (mut manager, _tx, _) = fixture(0);
+    let rows = u16::try_from(4 * PAGE).unwrap();
+    let shared = route(prefixes(0)[0], SOURCE, 100);
+    let base = (0..rows)
+        .map(|i| Route {
+            prefix: prefixes(i)[0],
+            ..shared.clone()
+        })
+        .collect();
+    manager.handle_update(test_routes_received(peer_v4(SOURCE), base));
+    drain_route_chunks(&mut manager);
+
+    let peer = receiver(1);
+    let (out, _rx) = mpsc::channel(32);
+    let mut up = test_peer_up(peer, 1, out);
+    let RibUpdate::PeerUp {
+        is_ebgp,
+        route_reflector_client,
+        export_policy,
+        ..
+    } = &mut up
+    else {
+        unreachable!()
+    };
+    *is_ebgp = false;
+    *route_reflector_client = true;
+    *export_policy = Some(mixed_policy());
+    manager.handle_update(up);
+    assert!(manager.first_group_build.is_some(), "paged policy build");
+    finish(&mut manager);
+
+    let group = &manager.group_ribs[&manager.grouped_member_of(peer).unwrap()];
+    assert_eq!(group.table.len(), usize::from(rows));
+    let allocations: std::collections::HashSet<_> = group
+        .table
+        .iter()
+        .inspect(|row| assert!(row.communities().contains(&TAG)))
+        .map(|row| Arc::as_ptr(&row.attributes))
+        .collect();
+    assert_eq!(allocations.len(), 1);
+}
+
+fn outcome_scans() -> usize {
+    crate::manager::slice_timing::group_work()
+        .get("export_memo_outcome_scans")
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Peak outcome comparisons in one page, and peak outcomes retained, when a
+/// prefix-specific policy gives every key of each page its own modification
+/// of one shared source allocation.
+fn prefix_specific_pages(pages: usize) -> (usize, usize) {
+    let source = route(prefixes(0)[0], SOURCE, 100).attributes;
+    let mut memo = ExportMemo::default();
+    let (mut peak_scans, mut peak_outcomes) = (0, 0);
+    for page in 0..pages {
+        let memo = page_memo(&mut memo);
+        let before = outcome_scans();
+        for key in 0..PAGE {
+            let mods = rustbgpd_policy::RouteModifications {
+                communities_add: vec![u32::try_from(page * PAGE + key).unwrap()],
+                ..Default::default()
+            };
+            memo.apply_attrs(&source, &mods);
+        }
+        peak_scans = peak_scans.max(outcome_scans() - before);
+        peak_outcomes = peak_outcomes.max(memo.outcomes());
+    }
+    (peak_scans, peak_outcomes)
+}
+
+#[test]
+fn page_memo_bounds_prefix_specific_outcomes_and_keeps_shared_sources() {
+    // One source entry, so only the outcome bound can roll the memo over.
+    let small = prefix_specific_pages(8);
+    assert_eq!(small, prefix_specific_pages(32));
+    assert!(small.1 <= 3 * PAGE, "{small:?}");
+    assert!(small.0 <= 3 * PAGE * PAGE, "{small:?}");
+
+    // The reload shape: 700 sources, one shared outcome each, across pages.
+    let sources: Vec<_> = (0..700u16)
+        .map(|i| route(prefixes(i)[0], SOURCE, 100).attributes)
+        .collect();
+    let mods = rustbgpd_policy::RouteModifications {
+        communities_add: vec![TAG],
+        ..Default::default()
+    };
+    let mut memo = ExportMemo::default();
+    let first: Vec<_> = sources
+        .iter()
+        .map(|source| page_memo(&mut memo).apply_attrs(source, &mods).0)
+        .collect();
+    for _ in 0..32 {
+        let memo = page_memo(&mut memo);
+        for (source, shared) in sources.iter().zip(&first) {
+            assert!(Arc::ptr_eq(&memo.apply_attrs(source, &mods).0, shared));
+        }
+    }
+    assert_eq!((memo.len(), memo.outcomes()), (700, 700));
 }

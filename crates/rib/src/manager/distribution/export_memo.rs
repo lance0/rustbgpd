@@ -142,6 +142,14 @@ impl ExportMemo {
         self.entries.len()
     }
 
+    /// Cached post-modification outcomes across every source entry.
+    pub(in crate::manager) fn outcomes(&self) -> usize {
+        self.entries
+            .values()
+            .map(|entry| entry.modified.len())
+            .sum()
+    }
+
     pub(in crate::manager) fn retire_with(&mut self, checkpoint: &mut impl FnMut()) {
         for (_, entry) in self.entries.iter_mut() {
             checkpoint();
@@ -206,7 +214,14 @@ impl ExportMemo {
         mods: &RouteModifications,
     ) -> (Arc<AttrSet>, Option<NextHopAction>) {
         let entry = self.entry(source);
-        if let Some((_, attrs, nh)) = entry.modified.iter().find(|(m, _, _)| m == mods) {
+        let found = entry.modified.iter().position(|(m, _, _)| m == mods);
+        #[cfg(test)]
+        crate::manager::slice_timing::record_work(
+            "export_memo_outcome_scans",
+            found.map_or(entry.modified.len(), |index| index + 1),
+        );
+        if let Some(index) = found {
+            let (_, attrs, nh) = &entry.modified[index];
             return (Arc::clone(attrs), nh.clone());
         }
         let mut attrs = Arc::clone(source);

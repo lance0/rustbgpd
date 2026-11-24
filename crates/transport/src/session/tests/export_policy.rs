@@ -1,4 +1,5 @@
 use super::*;
+mod authoritative_wire;
 
 fn export_chain(action: PolicyAction) -> PolicyChain {
     PolicyChain::new(vec![Policy {

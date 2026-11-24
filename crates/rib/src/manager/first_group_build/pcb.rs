@@ -9,6 +9,7 @@ use super::super::distribution::release_pcb::{
 };
 use super::super::update_groups::{FirstPcbCommit, GroupRibOut};
 use super::RibManager;
+use crate::manager::distribution::ExportMemo;
 
 #[derive(Default)]
 pub(super) struct FirstGroupPcb {
@@ -22,7 +23,12 @@ pub(super) struct FirstGroupPcb {
 impl FirstGroupPcb {
     /// Take at most one discovery/repair page and share one candidate budget
     /// across its prefixes, including the receiver's control-index preparation.
-    pub(super) fn advance(&mut self, manager: &mut RibManager, group: &mut GroupRibOut) -> bool {
+    pub(super) fn advance(
+        &mut self,
+        manager: &mut RibManager,
+        group: &mut GroupRibOut,
+        memo: &mut ExportMemo,
+    ) -> bool {
         let mut budget = CANDIDATES_PER_POLL;
         let mut took_page = false;
         loop {
@@ -56,8 +62,13 @@ impl FirstGroupPcb {
                 continue;
             }
             if self.prepared.is_none() {
-                self.prepared =
-                    manager.poll_first_group_pcb(group, prefix, &mut self.selection, &mut budget);
+                self.prepared = manager.poll_first_group_pcb(
+                    group,
+                    prefix,
+                    &mut self.selection,
+                    memo,
+                    &mut budget,
+                );
                 if self.selection.stale {
                     manager
                         .loc_rib

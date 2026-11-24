@@ -77,6 +77,8 @@ pub use event::{EvpnRouteEvent, RouteEvent, RouteEventType};
 pub use fast_hash::AddrHasher;
 pub use loc_rib::LocRib;
 pub use manager::RibManager;
+#[cfg(feature = "bench-internals")]
+pub use manager::authoritative_reload_build_pages;
 pub use manager::{
     ConditionEntryStatus, ConditionalAdvertiseIf, ConditionalAdvertisement,
     ConditionalAdvertisementCapture, ConditionalAdvertisementSet, ConditionalAdvertisementStatus,

@@ -318,9 +318,9 @@ the relevant owner has the state from which a summary could be produced.
 
 | Surface | Current path and budget | State and publication boundary |
 |---|---|---|
-| `neighbor` / `ListNeighbors`, `GetNeighborState` | operator `ListPeers` / `GetPeerState`, then typed RIB `NeighborRibSnapshots`; separate 2 s stages | mixed: live peer/session observations plus RIB summaries frozen during synchronous replacement; no shared generation pin |
+| `neighbor` / `ListNeighbors`, `GetNeighborState` | operator `ListPeers` / `GetPeerState`, then typed RIB `NeighborRibSnapshots`; separate 2 s stages | mixed: live peer/session observations plus RIB summaries frozen during synchronous replacement; while an authoritative reload builds its destination across turns, affected peers keep their command-entry summaries until commit and unrelated rows stay live; no shared generation pin |
 | `dynamic-neighbor list` / `ListDynamicNeighbors` | peer-manager `ListDynamicRanges`; 2 s | actor-owned configured ranges |
-| `policy stats --direction export` | typed RIB `ExportPolicyTermHits`; shared 2 s RPC deadline | numeric installed-chain observations frozen during synchronous replacement; persistent publication is not selected |
+| `policy stats --direction export` | typed RIB `ExportPolicyTermHits`; shared 2 s RPC deadline | numeric installed-chain observations frozen during synchronous replacement; while an authoritative reload builds its destination across turns, rows report the old installed chains, which keep counting old-policy UPDATEs, and candidate hits stay private until commit; persistent publication is not selected |
 | `policy stats --direction import` | operator `QueryImportPolicyTermHits`, concurrent session collection under the remainder of the same deadline | session-derived import-chain term counters |
 | policy-stats peer validation and datasets | operator `HasPeerAddress`, `QueryPolicyDatasets`; same deadline | actor-owned peer membership and dataset bindings |
 | `policy explain --direction import` | peer manager to one session; 2 s outer, 500 ms inner | session-local decision cache |
