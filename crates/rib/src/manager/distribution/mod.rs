@@ -9585,7 +9585,6 @@ impl RibManager {
     /// Returns the set of prefixes that actually changed.
     /// Also emits route events to the broadcast channel.
     pub(super) fn recompute_best(&mut self, affected: &HashSet<Prefix>) -> HashSet<Prefix> {
-        self.record_deferred_unicast(affected);
         if self.loc_rib.begin_bulk_candidate_changes(affected.len()) {
             self.recompute_best_inner::<true>(affected)
         } else {
@@ -9601,6 +9600,9 @@ impl RibManager {
         let checkpoint = || {
             super::replacement_readiness_checkpoint_at(&readiness, "selection_candidates", false);
         };
+        // Keep the announce and withdraw paths' second recording of the
+        // keys they hand to full recompute, as before candidate capture.
+        self.record_deferred_unicast(affected);
         // `changed` is a subset of `affected`: an owner reserves it so inserts
         // never rehash between checkpoints; unowned passes grow it lazily.
         let owned = readiness.is_some();
