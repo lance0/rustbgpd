@@ -2,7 +2,7 @@
 //! has received the staged delta or transferred it to corrective resync.
 
 use super::super::outbound_owing::CursorFloors;
-use super::super::source_departure::RECEIVER_ROWS_PER_POLL;
+use super::super::source_departure::{DEPARTURE_MEMBERS_PER_POLL, RECEIVER_ROWS_PER_POLL};
 use super::super::update_groups::{GroupRibOut, GroupStageOutput, ReleaseFallback};
 use super::release_denials::{DENIALS_PER_POLL, MemberVerdicts, ReleaseDenials};
 use super::release_pcb::{CANDIDATES_PER_POLL, PreparedPcb, PreparedPcbs, ReleasePcb};
@@ -126,7 +126,7 @@ impl ReleaseDistribution {
             return maximum;
         };
         let key_count = (self.prefixes.len() + keys.held.len()).max(1);
-        let members = (RECEIVER_ROWS_PER_POLL / key_count).max(1);
+        let members = (RECEIVER_ROWS_PER_POLL / key_count).clamp(1, DEPARTURE_MEMBERS_PER_POLL);
         // Group members walk only their per-member corrections. Private
         // receivers keep the narrower per-walk cap.
         if keys.shared {
@@ -807,7 +807,8 @@ mod tests {
     use tokio::sync::mpsc;
 
     #[test]
-    fn departure_classifies_one_delivery_page_of_peers_per_poll_and_caps_evictions_singly() {
+    fn departure_classifies_a_delivery_page_per_poll_isolates_missing_proofs_and_caps_evictions_singly()
+     {
         let mut manager = RibManager::new(
             mpsc::channel(1).1,
             mpsc::channel(1).1,
@@ -847,6 +848,13 @@ mod tests {
                 },
             );
         }
+        // A member whose held initial dump lacks its admission proof costs a
+        // whole poll budget, so it cannot join the charged walks before it.
+        let missing = peers[18];
+        assert!(manager.grouped_member_of(missing).is_some());
+        let sessions = manager.live_sessions.get_mut(&missing).unwrap();
+        sessions.last_mut().unwrap().selection_initial_pending = true;
+        assert!(manager.retain_initial_group_admitted(missing));
         let mut pass = ReleaseDistribution::for_departure(
             Afi::Ipv4,
             changed.clone(),
@@ -862,8 +870,8 @@ mod tests {
         };
         pass.phase = Phase::Classify(None);
         assert_eq!(visit(&mut manager, &mut pass), 16);
-        assert_eq!(visit(&mut manager, &mut pass), 16);
-        assert_eq!(visit(&mut manager, &mut pass), 0);
+        assert_eq!(visit(&mut manager, &mut pass), 2);
+        assert_eq!(visit(&mut manager, &mut pass), 14);
         assert_eq!(
             pass.groups.values().map(Vec::len).sum::<usize>(),
             peers.len()

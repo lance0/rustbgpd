@@ -8,10 +8,10 @@ use super::{Afi, HashSet, PeerId, Prefix, RibManager, RibUpdate, Safi};
 use crate::route::{FlowSpecKey, Route};
 use std::collections::hash_set;
 
-const KEYS_PER_PAGE: usize = 16;
+pub(super) const KEYS_PER_PAGE: usize = 16;
 /// Keys in a shared group page and in the widest quiet page. One poll stages
 /// the whole page, so this bounds per-key stage work rather than member work.
-const WIDE_KEYS_PER_PAGE: usize = 256;
+pub(super) const WIDE_KEYS_PER_PAGE: usize = 256;
 pub(super) const MEMBERS_PER_PAGE: usize = 8;
 /// A teardown above this many receiver-keys is paced instead of running in
 /// one actor turn.
@@ -20,9 +20,14 @@ const PACED_DEPARTURE_RECEIVER_KEYS: usize = 256;
 /// group receiver-key this is about 0.3-0.6 ms of work between yields; a
 /// smaller poll spends more on the turn seam than on the walk.
 pub(super) const RECEIVER_ROWS_PER_POLL: usize = 16_384;
+/// Members one departure poll may visit, whatever the page width. Each member
+/// also costs an envelope, a commit and an End-of-RIB check that the
+/// receiver-key budget does not count.
+pub(super) const DEPARTURE_MEMBERS_PER_POLL: usize = 256;
 const QUIET_PAGE_RECEIVER_KEYS: usize = 65_536;
-/// Receiver-keys one quiet delivery unit may visit; at about 0.4 µs per
-/// private receiver-key this keeps a single unit near 3 ms.
+/// Receiver-keys one quiet unit may visit on a private or FlowSpec page; at
+/// about 0.4 µs per private receiver-key this keeps a single unit near 3 ms.
+/// A wide group page takes the larger receiver-key budget instead.
 pub(super) const QUIET_UNIT_RECEIVER_KEYS: usize = 8_192;
 /// Wall-clock budget for consecutive quiet units in one actor turn. It sits
 /// well below the waiting-UPDATE delay bar, leaving room for the last unit.
@@ -30,7 +35,7 @@ pub(super) const QUIET_LOOP_BUDGET: std::time::Duration = std::time::Duration::f
 
 /// Members one quiet delivery unit covers for a page of `keys` receiver-keys.
 pub(super) fn quiet_delivery_members(keys: usize) -> usize {
-    (QUIET_UNIT_RECEIVER_KEYS / keys.max(1)).max(1)
+    (QUIET_UNIT_RECEIVER_KEYS / keys.max(1)).clamp(1, DEPARTURE_MEMBERS_PER_POLL)
 }
 
 #[derive(Clone, Copy)]

@@ -9,13 +9,17 @@ use super::exportability::ReusableExactExportEncoder;
 use super::lifecycle::{test_peer_up, test_routes_received};
 use super::*;
 use crate::manager::source_departure::{
-    RECEIVER_ROWS_PER_POLL, take_flowspec_withdrawal_work, take_receiver_rows,
+    DEPARTURE_MEMBERS_PER_POLL, KEYS_PER_PAGE, MEMBERS_PER_PAGE, RECEIVER_ROWS_PER_POLL,
+    WIDE_KEYS_PER_PAGE, take_flowspec_withdrawal_work, take_receiver_rows,
 };
 
 const SOURCE: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 1);
 const OTHER: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 2);
 const ROWS: u32 = 1024;
 const POLL_LIMIT: usize = RECEIVER_ROWS_PER_POLL;
+/// Receiver-keys one pressured private poll may visit: a narrow member page
+/// over a narrow key page.
+const PRIVATE_POLL_LIMIT: usize = MEMBERS_PER_PAGE * KEYS_PER_PAGE;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Shape {
@@ -81,8 +85,8 @@ fn seed(manager: &mut RibManager, shape: Shape, rows: u32) {
     drain_route_chunks(manager);
 }
 
-fn join(manager: &mut RibManager, index: u8, shape: Shape) -> mpsc::Receiver<OutboundRouteUpdate> {
-    let peer = peer_v4(Ipv4Addr::new(192, 0, 2, index + 1));
+fn join(manager: &mut RibManager, index: u16, shape: Shape) -> mpsc::Receiver<OutboundRouteUpdate> {
+    let peer = peer_v4(Ipv4Addr::from(0xc000_0201 + u32::from(index)));
     manager.handle_update(RibUpdate::SetPeerExportEncoder {
         peer,
         session_id: 1,
@@ -236,6 +240,8 @@ struct PollCounts {
     polls: usize,
     /// Units that ran while the FIFO held admissible work.
     pressured: usize,
+    /// Most members classified or delivered to in one poll.
+    members: usize,
 }
 
 fn register_source_only(manager: &mut RibManager) -> mpsc::Receiver<OutboundRouteUpdate> {
@@ -342,7 +348,7 @@ async fn departure(shape: Shape, count: u8, rows: u32, arrival: ProbeArrival) ->
                 Shape::Mixed => Shape::Grouped,
                 other => other,
             };
-            join(&mut manager, index, receiver)
+            join(&mut manager, index.into(), receiver)
         })
         .collect();
     seed(&mut manager, shape, rows);
@@ -412,13 +418,20 @@ async fn departure(shape: Shape, count: u8, rows: u32, arrival: ProbeArrival) ->
             "{shape:?} K={count}: receiver-key inspection witness too small: {total}"
         );
     }
+    // A prequeued UPDATE keeps the first page narrow. A later arrival can
+    // find a wide quiet page, which a private member page still bounds.
+    let limit = match (shape, arrival) {
+        (Shape::Grouped | Shape::RsControl, _) => POLL_LIMIT,
+        (_, ProbeArrival::Prequeued) => PRIVATE_POLL_LIMIT,
+        _ => MEMBERS_PER_PAGE * WIDE_KEYS_PER_PAGE,
+    };
     assert!(
-        most <= POLL_LIMIT,
-        "{shape:?} K={count}: {most} receiver-keys in one physical actor poll"
+        most <= limit,
+        "{shape:?} K={count}: {most} receiver-keys in one physical actor poll, limit {limit}"
     );
     assert!(
-        most_sent <= POLL_LIMIT,
-        "{shape:?} K={count}: {most_sent} withdrawals delivered in one physical actor poll"
+        most_sent <= limit,
+        "{shape:?} K={count}: {most_sent} withdrawals delivered in one physical actor poll, limit {limit}"
     );
     assert!(end.dirty_peers.is_empty());
     poll_counts(
@@ -455,6 +468,7 @@ fn poll_counts(
         envelopes,
         polls,
         pressured: 0,
+        members: 0,
     }
 }
 
@@ -636,12 +650,12 @@ async fn grouped_departure_chunks_an_uneven_member_tail_and_keeps_private_walks_
 
 /// Drive a departure unit by unit while an admissible UPDATE stays queued,
 /// so every unit runs under FIFO pressure.
-fn pressured_departure(shape: Shape, count: u8, rows: u32) -> PollCounts {
+fn pressured_departure(shape: Shape, count: u16, rows: u32) -> PollCounts {
     queued_departure(shape, count, rows, announce(OTHER, probe_prefix()))
 }
 
 /// Drive a departure unit by unit while `head` stays queued behind it.
-fn queued_departure(shape: Shape, count: u8, rows: u32, head: RibUpdate) -> PollCounts {
+fn queued_departure(shape: Shape, count: u16, rows: u32, head: RibUpdate) -> PollCounts {
     let (tx, rx) = mpsc::channel(16);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     manager.outbound_row_credit_override = None;
@@ -669,20 +683,29 @@ fn queued_departure(shape: Shape, count: u8, rows: u32, head: RibUpdate) -> Poll
     assert!(manager.source_departure.is_some());
     take_receiver_rows();
     let (mut envelope, mut emitted, mut inspected, mut polls, mut pressured) = (0, 0, 0, 0, 0);
+    let mut members = 0;
     while manager.source_departure.is_some() {
         pressured += usize::from(!manager.source_departure_quiet());
+        let scans = manager.adj_rib_out_commit_stats.owed_peer_scans;
         manager.advance_source_departure();
         polls += 1;
         inspected = inspected.max(take_receiver_rows());
-        let mut sent = 0;
+        let (mut sent, mut reached) = (0, 0);
         for receiver in &mut receivers {
+            let mut got = false;
             while let Ok(update) = receiver.try_recv().map(delivered) {
                 let rows = update.unicast_withdrawals().count();
                 envelope = envelope.max(rows);
                 sent += rows;
+                got |= rows > 0;
             }
+            reached += usize::from(got);
         }
         emitted = emitted.max(sent);
+        // Members classified or delivered to in this poll.
+        members = members
+            .max(reached)
+            .max(manager.adj_rib_out_commit_stats.owed_peer_scans - scans);
     }
     PollCounts {
         inspected,
@@ -690,6 +713,7 @@ fn queued_departure(shape: Shape, count: u8, rows: u32, head: RibUpdate) -> Poll
         envelope,
         envelopes: 0,
         polls,
+        members,
         pressured,
     }
 }
@@ -701,7 +725,7 @@ fn queued_departure(shape: Shape, count: u8, rows: u32, head: RibUpdate) -> Poll
 #[test]
 fn group_departure_polls_scale_with_receiver_work() {
     const KEYS: u32 = 572;
-    const MEMBERS: u8 = 128;
+    const MEMBERS: u16 = 128;
     let per_walk = (KEYS as usize * usize::from(MEMBERS)).div_ceil(16_384);
     let mut over = Vec::new();
     for shape in [Shape::Grouped, Shape::RsControl] {
@@ -721,6 +745,31 @@ fn group_departure_polls_scale_with_receiver_work() {
         }
     }
     assert!(over.is_empty(), "{over:?}");
+}
+
+/// A one-key page leaves nearly the whole receiver-key budget unused, but
+/// each member still costs an envelope and a commit. The member ceiling
+/// bounds a poll whether or not an admissible UPDATE waits.
+#[test]
+fn a_one_key_departure_to_a_large_group_visits_bounded_members_per_poll() {
+    const MEMBERS: u16 = 600;
+    for shape in [Shape::Grouped, Shape::RsControl] {
+        for (head, label) in [
+            (announce(OTHER, probe_prefix()), "pressured"),
+            (down(OTHER), "fenced"),
+        ] {
+            let counts = queued_departure(shape, MEMBERS, 1, head);
+            eprintln!(
+                "{shape:?} {label} keys=1 members={MEMBERS}: polls={} max_members_per_poll={}",
+                counts.polls, counts.members
+            );
+            assert!(
+                counts.members <= DEPARTURE_MEMBERS_PER_POLL,
+                "{shape:?} {label}: {} members in one poll",
+                counts.members
+            );
+        }
+    }
 }
 
 /// The next `PeerDown` cannot run before this departure ends. Fencing it when
@@ -1286,7 +1335,7 @@ async fn a_grouped_departure_publishes_the_entire_key_page_before_dispatching_an
         register_test_peer(&mut manager, peer_v4(source), 0);
     }
     let mut outputs: Vec<_> = (0..MEMBERS)
-        .map(|index| join(&mut manager, index, Shape::Grouped))
+        .map(|index| join(&mut manager, index.into(), Shape::Grouped))
         .collect();
     let group = manager
         .grouped_member_of(peer_v4(Ipv4Addr::new(192, 0, 2, 1)))
@@ -1402,6 +1451,10 @@ fn drain_rs_stage(
     (announced, withdrawn)
 }
 
+/// More RS-control members than one poll's receiver-key budget covers on a
+/// 191-key family page.
+const RS_WIDE_MEMBERS: u16 = 100;
+
 async fn rs_control_departure(refusals_per_family: u16) {
     use crate::update::ExactExportKey;
     let (tx, rx) = mpsc::channel(8);
@@ -1409,7 +1462,7 @@ async fn rs_control_departure(refusals_per_family: u16) {
     for source in [SOURCE, OTHER] {
         register_test_peer(&mut manager, peer_v4(source), 0);
     }
-    let mut outputs: Vec<_> = (0..3)
+    let mut outputs: Vec<_> = (0..RS_WIDE_MEMBERS)
         .map(|index| join(&mut manager, index, Shape::RsControl))
         .collect();
     let first = peer_v4(Ipv4Addr::new(192, 0, 2, 1));
@@ -1486,12 +1539,11 @@ async fn rs_control_departure(refusals_per_family: u16) {
     }
     assert!(work_polls > 1, "expected multiple receiver pages");
     eprintln!(
-        "RS-control plain-to-tagged departure: refusals_per_family={refusals_per_family} K=3 rows_per_family={RS_STAGE_ROWS} max_inspected_per_poll={peak}"
+        "RS-control plain-to-tagged departure: refusals_per_family={refusals_per_family} K={RS_WIDE_MEMBERS} rows_per_family={RS_STAGE_ROWS} max_inspected_per_poll={peak}"
     );
-    let unit = crate::manager::source_departure::QUIET_UNIT_RECEIVER_KEYS;
     assert!(
-        peak > 0 && peak <= unit,
-        "{peak} receiver-key inspections in one quiet unit, limit {unit}"
+        peak > 0 && peak <= POLL_LIMIT,
+        "{peak} receiver-key inspections in one quiet unit, limit {POLL_LIMIT}"
     );
 }
 
@@ -1502,7 +1554,8 @@ async fn grouped_source_departure_rechecks_rs_control_tags_for_each_family_stage
 
 #[tokio::test(start_paused = true)]
 async fn grouped_source_departure_bounds_rs_control_and_exact_refusals_together() {
-    // 192 RS checks plus 96 retained refusals exceed the 256-row poll budget.
+    // RS checks and 96 retained refusals per member, over more members than
+    // one poll's receiver-key budget covers.
     rs_control_departure(96).await;
 }
 
@@ -1551,6 +1604,8 @@ fn assert_pending_rebuild_waits_for_departure(force: bool) {
     }
     let (mut most, mut most_sent) = (0, 0);
     while manager.source_departure.is_some() {
+        // The pending receiver keeps every page pressured and narrow.
+        assert!(!manager.source_departure_quiet());
         manager.advance_source_departure();
         most = most.max(take_receiver_rows());
         let mut sent = 0;
@@ -1562,11 +1617,11 @@ fn assert_pending_rebuild_waits_for_departure(force: bool) {
         most_sent = most_sent.max(sent);
     }
     assert!(
-        most <= POLL_LIMIT,
+        most <= PRIVATE_POLL_LIMIT,
         "force={force}: {most} receiver-keys inspected in one departure poll"
     );
     assert!(
-        most_sent <= POLL_LIMIT,
+        most_sent <= PRIVATE_POLL_LIMIT,
         "force={force}: {most_sent} rows sent in one departure poll"
     );
 }
@@ -1617,6 +1672,19 @@ fn rs_departure_fixture() -> (
     RibManager,
     Vec<mpsc::Receiver<OutboundRouteUpdate>>,
 ) {
+    rs_departure_fixture_with(3, None)
+}
+
+/// [`rs_departure_fixture`] with `members` members and `head` queued behind
+/// the departing source.
+fn rs_departure_fixture_with(
+    members: u16,
+    head: Option<RibUpdate>,
+) -> (
+    mpsc::Sender<RibUpdate>,
+    RibManager,
+    Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+) {
     let (tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     // Unlimited credit and no distribution window keep receivers out of the
@@ -1626,7 +1694,7 @@ fn rs_departure_fixture() -> (
     for source in [SOURCE, OTHER] {
         register_test_peer(&mut manager, peer_v4(source), 0);
     }
-    let mut outputs: Vec<_> = (0..3)
+    let mut outputs: Vec<_> = (0..members)
         .map(|index| join(&mut manager, index, Shape::RsControl))
         .collect();
     // The departing winner is suppressed for member 0 and its alternate for
@@ -1638,6 +1706,9 @@ fn rs_departure_fixture() -> (
     }
     for output in &mut outputs {
         drain_rs_stage(output, SOURCE);
+    }
+    if let Some(head) = head {
+        tx.try_send(head).unwrap();
     }
     manager.handle_update(down(SOURCE));
     assert!(manager.source_departure.is_some());
@@ -1699,10 +1770,12 @@ fn rs_restore_and_emission_cover_one_member_page_across_a_pressure_change() {
 /// restore page must already fit the pressured receiver-key budget.
 #[test]
 fn rs_restore_page_stays_within_the_pressured_limit_when_an_update_arrives_before_emission() {
-    let (tx, mut manager, mut outputs) = rs_departure_fixture();
+    // A whole-roster page would exceed the receiver-key budget.
+    let (tx, mut manager, mut outputs) = rs_departure_fixture_with(RS_WIDE_MEMBERS, None);
     take_receiver_rows();
     let (mut queued_peak, mut queued_sent, mut armed) = (0, 0, false);
-    let mut seen: Vec<(BTreeSet<Prefix>, BTreeSet<Prefix>)> = vec![Default::default(); 3];
+    let mut seen: Vec<(BTreeSet<Prefix>, BTreeSet<Prefix>)> =
+        vec![Default::default(); outputs.len()];
     while manager.source_departure.is_some() {
         let waiting = !manager.rx.is_empty();
         manager.advance_source_departure();
@@ -1734,6 +1807,54 @@ fn rs_restore_page_stays_within_the_pressured_limit_when_an_update_arrives_befor
         "{queued_sent} rows emitted in one poll while an UPDATE waited, limit {POLL_LIMIT}"
     );
     assert_rs_departure_counts(&manager, &mut outputs);
+}
+
+/// Control-tagged departing and replacement routes make each member page
+/// restore RS counts and then emit to the same members. At 128 members a
+/// whole-roster family page exceeds one poll's receiver-key budget, so the
+/// polls must split it, with or without a waiting UPDATE.
+#[test]
+fn a_tagged_rs_departure_paces_restores_and_emissions_by_receiver_work() {
+    const MEMBERS: u16 = 128;
+    let keys = 2 * usize::from(RS_STAGE_ROWS);
+    let per_walk = (keys * usize::from(MEMBERS)).div_ceil(RECEIVER_ROWS_PER_POLL);
+    let mut over = Vec::new();
+    for (head, fenced) in [
+        (announce(OTHER, probe_prefix()), false),
+        (down(OTHER), true),
+    ] {
+        let (_tx, mut manager, mut outputs) = rs_departure_fixture_with(MEMBERS, Some(head));
+        take_receiver_rows();
+        let (mut polls, mut peak, mut pinned, mut quiet) = (0, 0, 0, 0);
+        while manager.source_departure.is_some() {
+            quiet += usize::from(manager.source_departure_quiet());
+            manager.advance_source_departure();
+            polls += 1;
+            peak = peak.max(take_receiver_rows());
+            pinned += usize::from(manager.departure_rs_restore_pinned());
+            for output in &mut outputs {
+                while output.try_recv().is_ok() {}
+            }
+        }
+        eprintln!(
+            "tagged RS fenced={fenced} members={MEMBERS} keys={keys}: polls={polls} pinned_restores={pinned} max_inspected_per_poll={peak}"
+        );
+        assert_eq!(quiet, if fenced { polls } else { 0 }, "fenced={fenced}");
+        assert!(
+            pinned > 1,
+            "fenced={fenced}: restores did not pin member pages"
+        );
+        // Classify, RS count removal, restore and emission on at most four
+        // family pages.
+        let bound = 4 * 12 + 4 * per_walk;
+        if polls > bound || peak > POLL_LIMIT {
+            over.push(format!(
+                "fenced={fenced}: {polls} polls (bound {bound}), {peak} receiver-keys in one poll"
+            ));
+        }
+        assert_rs_departure_counts(&manager, &mut outputs);
+    }
+    assert!(over.is_empty(), "{over:?}");
 }
 
 /// Forced readiness checkpoints that bracket policy-filtered allocation in
