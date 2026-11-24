@@ -10054,6 +10054,8 @@ impl RibManager {
         // Ordinary passes and the two continuations each select their mode at the caller.
         debug_assert_eq!(RELEASING, release.is_some());
         debug_assert_eq!(DRAINING, drain.is_some());
+        let release_departure = release.as_ref().is_some_and(|page| page.departure);
+        debug_assert!(!release_departure || self.source_departure.is_some());
         let mut denial_receipt = release.as_mut().and_then(|page| page.denial_receipt.take());
         let stage_rs_verdicts = release.as_mut().and_then(|page| page.rs_verdicts.take());
         let mut drain = if DRAINING { drain } else { None };
@@ -10302,7 +10304,7 @@ impl RibManager {
                         // A source departure stages ordinary group deltas, and its
                         // Loc-RIB writes are already in the member's scan. Other
                         // release passes also admit rows missed during a hold.
-                        if (RELEASING && self.source_departure.is_none())
+                        if (RELEASING && !release_departure)
                             || self.force_outbound_peers.contains(&peer)
                             || self.dirty_peers.contains(&peer)
                         {

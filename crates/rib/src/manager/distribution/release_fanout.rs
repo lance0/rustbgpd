@@ -21,6 +21,8 @@ const PCB_STAGE_WORK: usize = 2_048;
 
 pub(super) struct ReleaseMembers<'a> {
     pub(super) afi: Afi,
+    /// A source departure, whose stage carries only ordinary group deltas.
+    pub(super) departure: bool,
     pub(super) peers: &'a [PeerId],
     pub(super) stage: &'a HashMap<usize, GroupStageOutput>,
     pub(super) rs_verdicts: Option<&'a mut HashMap<(usize, u32), bool>>,
@@ -610,6 +612,7 @@ impl RibManager {
                         None,
                         Some(ReleaseMembers {
                             afi: pass.afi,
+                            departure: pass.departure.is_some(),
                             peers,
                             stage: &pass.staged,
                             rs_verdicts: rs_verdicts.as_mut(),
