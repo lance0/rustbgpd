@@ -88,6 +88,7 @@ mod tests {
     use super::*;
     use crate::PeerId;
     use crate::adj_rib_out::LocalExportSource;
+    use crate::manager::distribution::ExportMemo;
     use crate::route::Route;
     use crate::test_support::make_route_with_path_id;
     use rustbgpd_wire::{Afi, Ipv4Prefix, Ipv6Prefix, Prefix, Safi};
@@ -145,7 +146,12 @@ mod tests {
                 route.origin_type = RouteOrigin::Local;
             }
             assert!(manager.loc_rib.recompute(prefix, std::iter::once(&route)));
-            group = manager.stage_first_group_page(1, group, &[prefix].into());
+            group = manager.stage_first_group_page(
+                1,
+                group,
+                &[prefix].into(),
+                &mut ExportMemo::default(),
+            );
             assert!(group.table.get(&prefix, 0).is_some());
             assert_eq!(
                 group.table.local_export_source(&prefix, 0),
@@ -196,7 +202,7 @@ mod tests {
         // Both the first scan and a restart after journal overflow begin empty.
         for attempt in 0..2 {
             assert_eq!(group.table.bench_route_capacity(), 0);
-            group = manager.stage_first_group_page(1, group, &page);
+            group = manager.stage_first_group_page(1, group, &page, &mut ExportMemo::default());
             assert_eq!(group.table.bench_route_capacity(), REGISTRATION_PAGE_SIZE);
 
             let key = prefix(0);
@@ -205,7 +211,12 @@ mod tests {
             assert!(manager.loc_rib.recompute(key, [&replacement].into_iter()));
             for _ in 0..2 {
                 // A replacement, then an unchanged repair.
-                group = manager.stage_first_group_page(1, group, &[key].into());
+                group = manager.stage_first_group_page(
+                    1,
+                    group,
+                    &[key].into(),
+                    &mut ExportMemo::default(),
+                );
                 assert_eq!(
                     group.table.get(&key, 0).unwrap().next_hop,
                     replacement.next_hop
@@ -213,18 +224,25 @@ mod tests {
                 assert_eq!(group.table.bench_route_capacity(), REGISTRATION_PAGE_SIZE);
             }
             assert!(manager.loc_rib.recompute(key, std::iter::empty()));
-            group = manager.stage_first_group_page(1, group, &[key].into());
+            group =
+                manager.stage_first_group_page(1, group, &[key].into(), &mut ExportMemo::default());
             assert!(group.table.get(&key, 0).is_none());
             let extra = prefix(REGISTRATION_PAGE_SIZE);
             let fresh = make_route_with_path_id(extra, 0);
             assert!(manager.loc_rib.recompute(extra, [&fresh].into_iter()));
-            group = manager.stage_first_group_page(1, group, &[extra].into());
+            group = manager.stage_first_group_page(
+                1,
+                group,
+                &[extra].into(),
+                &mut ExportMemo::default(),
+            );
             assert_eq!(group.table.len(), REGISTRATION_PAGE_SIZE);
             assert_eq!(group.table.bench_route_capacity(), REGISTRATION_PAGE_SIZE);
 
             let restored = make_route_with_path_id(key, 0);
             assert!(manager.loc_rib.recompute(key, [&restored].into_iter()));
-            group = manager.stage_first_group_page(1, group, &[key].into());
+            group =
+                manager.stage_first_group_page(1, group, &[key].into(), &mut ExportMemo::default());
             assert_eq!(group.table.len(), REGISTRATION_PAGE_SIZE + 1);
             assert_eq!(group.table.bench_route_capacity(), SEGMENT);
             if attempt == 0 {

@@ -209,3 +209,50 @@ async fn policy_cold_build_bounds_work_per_physical_poll() {
         assert!(peak["group_growing_slab_slots"] <= 2 * PAGE, "{peak:?}");
     }
 }
+
+#[test]
+fn paged_policy_build_shares_each_modified_source_attribute_set() {
+    // One source attribute allocation across several pages, as for a packed
+    // UPDATE. The synchronous build modifies it once; so must the paged one,
+    // or the encoder prepares and packs one attribute set per page.
+    let (mut manager, _tx, _) = fixture(0);
+    let rows = u16::try_from(4 * PAGE).unwrap();
+    let shared = route(prefixes(0)[0], SOURCE, 100);
+    let base = (0..rows)
+        .map(|i| Route {
+            prefix: prefixes(i)[0],
+            ..shared.clone()
+        })
+        .collect();
+    manager.handle_update(test_routes_received(peer_v4(SOURCE), base));
+    drain_route_chunks(&mut manager);
+
+    let peer = receiver(1);
+    let (out, _rx) = mpsc::channel(32);
+    let mut up = test_peer_up(peer, 1, out);
+    let RibUpdate::PeerUp {
+        is_ebgp,
+        route_reflector_client,
+        export_policy,
+        ..
+    } = &mut up
+    else {
+        unreachable!()
+    };
+    *is_ebgp = false;
+    *route_reflector_client = true;
+    *export_policy = Some(mixed_policy());
+    manager.handle_update(up);
+    assert!(manager.first_group_build.is_some(), "paged policy build");
+    finish(&mut manager);
+
+    let group = &manager.group_ribs[&manager.grouped_member_of(peer).unwrap()];
+    assert_eq!(group.table.len(), usize::from(rows));
+    let allocations: std::collections::HashSet<_> = group
+        .table
+        .iter()
+        .inspect(|row| assert!(row.communities().contains(&TAG)))
+        .map(|row| Arc::as_ptr(&row.attributes))
+        .collect();
+    assert_eq!(allocations.len(), 1);
+}

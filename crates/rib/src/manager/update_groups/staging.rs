@@ -278,10 +278,10 @@ impl RibManager {
         gid: usize,
         table: GroupRibOut,
         prefixes: &HashSet<Prefix>,
+        memo: &mut crate::manager::distribution::ExportMemo,
     ) -> GroupRibOut {
         let replace_existing = table.export_chain.is_some();
-        let mut memo = crate::manager::distribution::ExportMemo::default();
-        self.stage_private_group_page(gid, table, prefixes, replace_existing, &mut memo)
+        self.stage_private_group_page(gid, table, prefixes, replace_existing, memo)
     }
 
     pub(in crate::manager) fn stage_private_group_page(
