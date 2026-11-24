@@ -777,14 +777,29 @@ changed sessions to the RIB, which moves them by one of three paths.
   answers readiness at every poll and a bounded number of reads between
   polls before commit. Other peers' updates therefore wait for the whole transition,
   in bounded turns.
-- **Shared cohort in one turn.** A cohort the clean path refuses goes to
-  one authoritative batch command. Members that can still move together
-  commit inside that one turn. That includes a whole per-client-best
-  group moving to one new chain, which shares one payload and takes no
-  per-member resync
+- **Shared cohort in an authoritative batch.** When a reload or rollback
+  moves one group to a new destination and the Loc-RIB holds at least
+  10,000 winners, the RIB can build the destination across several turns. The movers must export a single best path and send
+  only IPv4 unicast or only IPv6 unicast. Each export chain can contain
+  at most one policy with up to two terms. A term can test an inline prefix,
+  local preference, MED or RPKI state, or match unconditionally. It can deny
+  the route or permit it with up to two literal standard-community additions.
+  Each construction page visits at most 1,024 Loc-RIB buckets and repair
+  keys combined. Other peers' UPDATEs can install under the old policy
+  between pages. A retained session end still precedes later UPDATEs from
+  that peer. Retained policy and family changes also keep their place ahead
+  of later UPDATEs. Affected neighbor summaries retain their command-entry
+  values while unrelated neighbor summaries stay live. General RIB reads
+  wait for commit. The RIB accounts for changed winners before publishing
+  the destination. Inventory comparison, membership and outbound commit
+  still run together, and the batch replies after that work finishes.
+  An occupied destination already has its table. Larger or more complex
+  policies, dual-stack, mixed-family and multi-pair batches keep their
+  previous construction path. A whole per-client-best group moving to one
+  new chain can still share one payload
+  and skip per-member resync
   (`batched_authoritative_pcb_cohort_commits_in_one_shared_transition` in
   [`tests/update_groups.rs`](../../crates/rib/src/manager/tests/update_groups.rs)).
-  Not measured.
 - **Remaining members, paced by command.** Every other changed member
   (ungrouped, per-client best outside a shared cohort, or sending EVPN,
   VPN, labeled unicast, FlowSpec or BGP-LS) is handed back, and the peer

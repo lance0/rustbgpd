@@ -596,7 +596,7 @@ async fn withdrawals_ahead_of_a_vpn_release_through_the_actor_loop_fit() {
         };
         actor_walk(rows, vec![withdrawal], 0, None, 400, false)
     };
-    let ((receivers, head), (_, control)) = with_control_async(shape).await;
+    let ((receivers, head), (_, control)) = Box::pin(with_control_async(shape)).await;
     assert_eq!(receivers[0].wire.table.len(), (ROWS - GONE) as usize);
     assert_at_or_below_control(&head.capacities, &control.capacities, "withdrawals ahead");
 }

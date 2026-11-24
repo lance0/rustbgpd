@@ -1,4 +1,5 @@
 //! Drive the registration owner one turn at a time to change a live partial replay.
+mod authoritative_regroup;
 mod change_overflow;
 mod exact_refusal;
 mod reservation;

@@ -14,6 +14,12 @@ use super::{
 /// fallback list, committed together after the pass.
 type LaneUpdate = (Prefix, Option<RunnerUp>, Option<super::RsFallback>);
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Staging {
+    Live,
+    Private { replace_existing: bool },
+}
+
 impl RibManager {
     /// The group a staging pass read at its top, for the commit block
     /// at its bottom. `&mut self` held across the whole pass is the
@@ -235,7 +241,7 @@ impl RibManager {
         pcb: Option<crate::manager::distribution::PreparedPcbs>,
     ) -> GroupStageOutput {
         let mut out =
-            self.stage_group_prefixes_inner(gid, prefixes, memo, paged_members, pcb, false);
+            self.stage_group_prefixes_inner(gid, prefixes, memo, paged_members, pcb, Staging::Live);
         // A memberless prestaged destination needs live table updates,
         // but no wire payload until a member adopts it.
         if self
@@ -262,7 +268,7 @@ impl RibManager {
         prefixes: &HashSet<Prefix, S>,
         memo: &mut crate::manager::distribution::ExportMemo,
     ) -> GroupStageOutput {
-        self.stage_group_prefixes_inner(gid, prefixes, memo, false, None, false)
+        self.stage_group_prefixes_inner(gid, prefixes, memo, false, None, Staging::Live)
     }
 
     /// Lend the memberless table to the synchronous single-best stager for one
@@ -272,13 +278,32 @@ impl RibManager {
         gid: usize,
         table: GroupRibOut,
         prefixes: &HashSet<Prefix>,
+        memo: &mut crate::manager::distribution::ExportMemo,
+    ) -> GroupRibOut {
+        let replace_existing = table.export_chain.is_some();
+        self.stage_private_group_page(gid, table, prefixes, replace_existing, memo)
+    }
+
+    pub(in crate::manager) fn stage_private_group_page(
+        &mut self,
+        gid: usize,
+        table: GroupRibOut,
+        prefixes: &HashSet<Prefix>,
+        replace_existing: bool,
+        memo: &mut crate::manager::distribution::ExportMemo,
     ) -> GroupRibOut {
         let std::collections::hash_map::Entry::Vacant(slot) = self.group_ribs.entry(gid) else {
             return table;
         };
         slot.insert(table);
-        let mut memo = crate::manager::distribution::ExportMemo::default();
-        self.stage_group_prefixes_inner(gid, prefixes, &mut memo, false, None, true);
+        self.stage_group_prefixes_inner(
+            gid,
+            prefixes,
+            memo,
+            false,
+            None,
+            Staging::Private { replace_existing },
+        );
         self.group_ribs
             .remove(&gid)
             .expect("single exclusive staging pass")
@@ -295,8 +320,15 @@ impl RibManager {
         memo: &mut crate::manager::distribution::ExportMemo,
         paged_members: bool,
         mut pcb: Option<crate::manager::distribution::PreparedPcbs>,
-        speculative: bool,
+        staging: Staging,
     ) -> GroupStageOutput {
+        let speculative = staging != Staging::Live;
+        let replace_existing = matches!(
+            staging,
+            Staging::Private {
+                replace_existing: true
+            }
+        );
         self.replacement_checkpoint(true);
         #[cfg(test)]
         let growth_before = (
@@ -618,8 +650,8 @@ impl RibManager {
                     &mut result,
                     // A private repair replaces the complete route. Wire-equal
                     // metadata changes (for example peer_router_id) must reach
-                    // the founder's table and initial replay.
-                    speculative && chain.is_some() && old_source.is_some(),
+                    // the adopted table even when a reload clears the policy.
+                    replace_existing && old_source.is_some(),
                 );
                 // Single-best stages at most one evaluation per prefix;
                 // its decision-attribution label tags the staged entry (or

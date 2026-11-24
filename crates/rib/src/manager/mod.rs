@@ -27,6 +27,8 @@ mod eor_hold;
 mod evpn_recovery;
 mod export_chains;
 mod first_group_build;
+#[cfg(feature = "bench-internals")]
+pub use first_group_build::authoritative_reload_build_pages;
 mod first_group_order;
 mod flowspec_validation;
 mod graceful_restart;
@@ -994,6 +996,8 @@ pub struct RibManager {
     pending_initial_registrations: VecDeque<PeerId>,
     initial_member_replays: Box<initial_member_replay::InitialMemberReplays>,
     first_group_build: Option<Box<first_group_build::FirstGroupBuild>>,
+    /// Accepted command's readiness age, frozen reads and terminal table handoff.
+    authoritative_reload: Option<Box<first_group_build::AuthoritativeReload>>,
     /// A completed registration table handed to policy, or a fresh authoritative
     /// destination awaiting its inventory verdict. Its first member adopts it;
     /// a refused unowned table transfers to bounded retirement.
@@ -3297,6 +3301,7 @@ impl RibManager {
             pending_initial_registrations: VecDeque::new(),
             initial_member_replays: Box::default(),
             first_group_build: None,
+            authoritative_reload: None,
             paced_policy_destination: None,
             optional_destination_retirement: None,
             #[cfg(test)]
@@ -3648,7 +3653,10 @@ impl RibManager {
             return false;
         }
         let entered = tokio::time::Instant::now();
-        let started = entered - age;
+        let started = self
+            .authoritative_reload
+            .as_ref()
+            .map_or_else(|| entered - age, |reload| reload.started);
         self.replacement_readiness = Some(Arc::new(ReplacementReadinessContext {
             live_waiting: AtomicBool::new(false),
             wake: Arc::new(ReadinessWake {
@@ -3664,11 +3672,12 @@ impl RibManager {
                 metrics: self.metrics.clone(),
                 count: self.completed_loc_rib_count(),
                 kind,
-                transition_age: self.pending_clean_policy_transition.is_some()
-                    && matches!(
-                        kind,
-                        ReadinessOwnerKind::Ingest | ReadinessOwnerKind::PeerTeardown
-                    ),
+                transition_age: self.authoritative_reload.is_some()
+                    || (self.pending_clean_policy_transition.is_some()
+                        && matches!(
+                            kind,
+                            ReadinessOwnerKind::Ingest | ReadinessOwnerKind::PeerTeardown
+                        )),
                 started,
                 last_service: tokio::time::Instant::now(),
                 budget: self.flush_poll_budget.min(FLUSH_POLL_BUDGET),
@@ -4440,6 +4449,9 @@ impl RibManager {
 
     /// Replay one admitted request at the first seam where its view is complete.
     fn serve_released_read(&mut self) -> bool {
+        if self.accepted_reload_build() {
+            return false;
+        }
         if self
             .release_primary_reads
             .front()
@@ -4481,6 +4493,9 @@ impl RibManager {
             return;
         }
         self.drain_summary_queries();
+        if self.accepted_reload_build() {
+            return;
+        }
         for _ in 0..limit {
             if self.release_general_reads.len() >= self.query_rx.max_capacity()
                 || self.first_group_general_head.is_some()
@@ -4595,7 +4610,12 @@ impl RibManager {
             RibReadinessQuery::LocRibCount { reply, enqueued } => {
                 self.metrics
                     .observe_rib_readiness_query_wait("actor_loop", enqueued.elapsed());
-                let result = match policy_transition_elapsed {
+                let elapsed = self
+                    .authoritative_reload
+                    .as_ref()
+                    .map(|reload| reload.started.elapsed())
+                    .or(policy_transition_elapsed);
+                let result = match elapsed {
                     Some(elapsed) if elapsed >= MAX_HEALTHY_POLICY_TRANSITION_AGE => {
                         Err(RibReadinessError::PolicyTransitionStalled)
                     }
@@ -8555,6 +8575,7 @@ impl RibManager {
 
             let accept_summary = !self.unicast_release_partial();
             let accept_general = query_rx_open
+                && !self.accepted_reload_build()
                 && self.release_general_reads.len() < self.query_rx.max_capacity()
                 && self.first_group_general_head.is_none()
                 && !self.first_group_replay_due();
