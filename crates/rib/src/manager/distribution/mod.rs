@@ -53,6 +53,7 @@ pub(in crate::manager) use evpn::PendingEvpnFanout;
 mod export_memo;
 mod flowspec;
 mod labeled;
+mod pcb_rank;
 pub(super) mod release_denials;
 mod release_fanout;
 pub(super) mod release_pcb;
@@ -9427,7 +9428,7 @@ impl RibManager {
     ) -> HashSet<Prefix> {
         use std::cmp::Ordering;
 
-        self.record_deferred_unicast(affected);
+        self.record_selection_input_changes(affected);
         let partial = self.unicast_release_partial();
         // Some(true): install the challenger directly (case 5).
         // Some(false): provably unchanged, skip (case 4).
@@ -9502,7 +9503,7 @@ impl RibManager {
                 }
             }
         }
-        changed.extend(self.recompute_best(&needs_full));
+        changed.extend(self.recompute_best_inner::<false>(&needs_full));
         changed
     }
 
@@ -9515,7 +9516,7 @@ impl RibManager {
         &mut self,
         affected: &HashSet<Prefix>,
     ) -> HashSet<Prefix> {
-        self.record_deferred_unicast(affected);
+        self.record_selection_input_changes(affected);
         let partial = self.unicast_release_partial();
         let needs_full: HashSet<Prefix> = affected
             .iter()
@@ -9533,18 +9534,37 @@ impl RibManager {
             })
             .copied()
             .collect();
-        self.recompute_best(&needs_full)
+        self.recompute_best_inner::<false>(&needs_full)
+    }
+
+    /// Capture all changed candidates before the announce/withdraw fast paths
+    /// discard prefixes whose global winner survived. Bulk selection (GR,
+    /// validation, refresh and teardown) enters through `recompute_best`.
+    fn record_selection_input_changes(&mut self, affected: &HashSet<Prefix>) {
+        self.loc_rib.record_registration_candidate_changes(affected);
+        self.record_deferred_unicast(affected);
     }
 
     /// Recompute Loc-RIB best path for a set of affected prefixes.
     /// Returns the set of prefixes that actually changed.
     /// Also emits route events to the broadcast channel.
     pub(super) fn recompute_best(&mut self, affected: &HashSet<Prefix>) -> HashSet<Prefix> {
+        self.record_deferred_unicast(affected);
+        if self.loc_rib.begin_bulk_candidate_changes(affected.len()) {
+            self.recompute_best_inner::<true>(affected)
+        } else {
+            self.recompute_best_inner::<false>(affected)
+        }
+    }
+
+    fn recompute_best_inner<const RECORD_CANDIDATES: bool>(
+        &mut self,
+        affected: &HashSet<Prefix>,
+    ) -> HashSet<Prefix> {
         let readiness = self.replacement_readiness.clone();
         let checkpoint = || {
             super::replacement_readiness_checkpoint_at(&readiness, "selection_candidates", false);
         };
-        self.record_deferred_unicast(affected);
         // `changed` is a subset of `affected`: an owner reserves it so inserts
         // never rehash between checkpoints; unowned passes grow it lazily.
         let owned = readiness.is_some();
@@ -9553,6 +9573,9 @@ impl RibManager {
         #[cfg(test)]
         let reserved = changed.capacity();
         for prefix in affected {
+            if RECORD_CANDIDATES {
+                self.loc_rib.record_registration_candidate_change(*prefix);
+            }
             let previous_best = self.loc_rib.get(prefix).map(BestSource::of);
             // Inner scope: `candidates` borrows the Adj-RIB-Ins and must be
             // dropped before the `&mut self` event publication below.

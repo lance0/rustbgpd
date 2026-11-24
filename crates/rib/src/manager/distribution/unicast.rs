@@ -379,6 +379,8 @@ fn orr_candidates_with_checkpoint<'a>(
 ) -> Vec<&'a crate::route::Route> {
     let mut candidates = Vec::new();
     for route in RibManager::unicast_candidates(ribs, prefix_peers, prefix, local_only) {
+        #[cfg(test)]
+        crate::manager::slice_timing::record_work("first_pcb_gathered", 1);
         checkpoint();
         if Some(route.peer) == target_peer
             || should_suppress_ibgp_inner(
@@ -2610,6 +2612,8 @@ impl RibManager {
         checkpoint();
         candidates.sort_by(|a, b| {
             checkpoint();
+            #[cfg(test)]
+            crate::manager::slice_timing::record_work("first_pcb_comparisons", 1);
             best_path_cmp(a, b)
         });
 
@@ -2618,7 +2622,7 @@ impl RibManager {
         for candidate in candidates {
             if walk.consume(
                 candidate,
-                rib_out,
+                Some(rib_out),
                 prefix,
                 group_local_role,
                 export_pol,
@@ -4030,6 +4034,10 @@ pub(super) struct PcbWalk {
 }
 
 impl PcbWalk {
+    pub(super) fn retire_first_group_rows(&mut self, budget: &mut usize) -> bool {
+        self.fallback.retire_first_pcb_rows(budget)
+    }
+
     #[expect(
         clippy::too_many_arguments,
         clippy::too_many_lines,
@@ -4038,7 +4046,7 @@ impl PcbWalk {
     pub(super) fn consume(
         &mut self,
         candidate: &crate::route::Route,
-        rib_out: &AdjRibOut,
+        advertised: Option<&AdjRibOut>,
         prefix: &Prefix,
         group_local_role: Option<rustbgpd_wire::BgpRole>,
         export_pol: Option<&PolicyChain>,
@@ -4049,6 +4057,8 @@ impl PcbWalk {
         otc_blocked: &mut Vec<crate::route::Route>,
         checkpoint: &mut impl FnMut(),
     ) -> bool {
+        #[cfg(test)]
+        crate::manager::slice_timing::record_work("first_pcb_consumed", 1);
         checkpoint();
         if self.clean_sources.contains(&candidate.peer) {
             return false;
@@ -4085,6 +4095,8 @@ impl PcbWalk {
         checkpoint();
         let (result, evaluation) = evaluate_chain_with_attribution(export_pol, &ctx);
         checkpoint();
+        #[cfg(test)]
+        crate::manager::slice_timing::record_work("first_pcb_eval_calls", 1);
         evals.record(&evaluation, candidate.peer);
         let label = evaluation.matched_policy.clone();
         let filtered_key = PolicyFilteredRouteKey {
@@ -4182,16 +4194,20 @@ impl PcbWalk {
         self.winner_source = Some(candidate.peer);
         self.stage.winner_label = label;
         self.stage.winner_source_attrs = capture_source_attrs(candidate);
-        let changed = rib_out.local_export_source(prefix, 0)
-            != crate::adj_rib_out::LocalExportSource::from_route(candidate)
-            || rib_out.get(prefix, 0).is_none_or(|existing| {
-                !unicast_routes_equal(
-                    existing,
-                    rib_out.next_hop_override(prefix, modified.path_id),
-                    &modified,
-                    nh_action.as_ref(),
-                )
-            });
+        // A cold group's repair must store the current winner even when its
+        // wire payload is identical: future replay also reads source metadata.
+        let changed = advertised.is_none_or(|rib_out| {
+            rib_out.local_export_source(prefix, 0)
+                != crate::adj_rib_out::LocalExportSource::from_route(candidate)
+                || rib_out.get(prefix, 0).is_none_or(|existing| {
+                    !unicast_routes_equal(
+                        existing,
+                        rib_out.next_hop_override(prefix, modified.path_id),
+                        &modified,
+                        nh_action.as_ref(),
+                    )
+                })
+        });
         if changed {
             checkpoint();
             out.record_local_source(candidate, modified.path_id);

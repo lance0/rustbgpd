@@ -9,17 +9,17 @@ use super::*;
 const TAG: u32 = 64_501 << 16 | 7;
 const PAGE: usize = crate::loc_rib::REGISTRATION_PAGE_SIZE;
 
-type Counts = BTreeMap<&'static str, usize>;
+pub(super) type Counts = BTreeMap<&'static str, usize>;
 
 #[derive(Debug, Default)]
-struct Build {
-    peak: Counts,
+pub(super) struct Build {
+    pub(super) peak: Counts,
     longest: Counts,
-    total: Counts,
-    polls: usize,
+    pub(super) total: Counts,
+    pub(super) polls: usize,
 }
 
-fn snapshot() -> Counts {
+pub(super) fn snapshot() -> Counts {
     use crate::manager::slice_timing::{checkpoints, group_work};
     let mut counts = group_work();
     let build_row = crate::manager::GROUP_TABLE_BUILD_ROW;
@@ -32,7 +32,7 @@ fn snapshot() -> Counts {
 }
 
 impl Build {
-    fn record(&mut self, before: &Counts, after: Counts) {
+    pub(super) fn record(&mut self, before: &Counts, after: Counts, stages: &[&str]) {
         let mut poll: Counts = after
             .into_iter()
             .map(|(stage, count)| (stage, count - before.get(stage).copied().unwrap_or(0)))
@@ -40,31 +40,14 @@ impl Build {
         let discovery = poll.get("first_group_discovery").copied().unwrap_or(0)
             + poll[crate::manager::GROUP_TABLE_BUILD_ROW];
         poll.insert("discovery", discovery);
-        if discovery == 0
-            && poll.get("first_group_repairs").copied().unwrap_or(0) == 0
-            && poll["group_staged_key"] == 0
-        {
+        let units = stages
+            .iter()
+            .map(|name| poll.get(*name).copied().unwrap_or(0))
+            .sum();
+        if units == 0 {
             return;
         }
         self.polls += 1;
-        // Readiness checkpoints include the per-prefix stage loop. The other
-        // counters record inside work that a single checkpoint can cover.
-        let units = [
-            "discovery",
-            "first_group_repairs",
-            "first_group_evaluated_lookups",
-            "group_stage_checkpoints",
-            "group_policy_evals",
-            "group_inverse_evals",
-            "group_source_writes",
-            "group_denials_written",
-            "group_denials_removed",
-            "group_rehashed_keys",
-            "group_growing_slab_slots",
-        ]
-        .map(|name| poll.get(name).copied().unwrap_or(0))
-        .into_iter()
-        .sum();
         poll.insert("work_units", units);
         if units > self.longest.get("work_units").copied().unwrap_or(0) {
             self.longest.clone_from(&poll);
@@ -136,7 +119,23 @@ async fn cold_policy_peak(per_family: u16) -> Build {
     let manager = poll_fn(|cx| {
         let before = snapshot();
         let result = actor.as_mut().poll(cx);
-        build.record(&before, snapshot());
+        build.record(
+            &before,
+            snapshot(),
+            &[
+                "discovery",
+                "first_group_repairs",
+                "first_group_evaluated_lookups",
+                "group_stage_checkpoints",
+                "group_policy_evals",
+                "group_inverse_evals",
+                "group_source_writes",
+                "group_denials_written",
+                "group_denials_removed",
+                "group_rehashed_keys",
+                "group_growing_slab_slots",
+            ],
+        );
         while let Ok(update) = receiver.try_recv().map(delivered) {
             for row in update.announce.iter() {
                 assert!(matches!(row.prefix, Prefix::V4(_)));

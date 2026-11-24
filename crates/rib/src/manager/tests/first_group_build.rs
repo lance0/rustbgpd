@@ -3096,6 +3096,8 @@ async fn labeled_input_passing_a_retained_session_end_reaches_a_paused_cursor_re
 
 mod initial_member_replay;
 mod member_replay_work;
+mod pcb_work;
+mod per_client_best_oracle;
 mod policy_fallback;
 mod policy_oracle;
 mod policy_work;

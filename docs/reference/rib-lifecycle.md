@@ -44,7 +44,7 @@ finishes the unit it is in, and one unit can be a whole table.
 | Plain unicast, grouped | Table build **paced**; initial table **one turn** (both in the [receipt](../perf/first-group-build-registration-2026-11.md)) | **paced** by read gate and window | Resync **one turn** per member | **one turn** per request; queued requests share it | Nothing filtered: **bounded turns**, updates held until commit. Otherwise one shared turn | **paced** between batches; input held inside a batch | Selection **one turn**. Large fanout **paced** |
 | Group-shareable export policy | Single-best unicast table build **paced**; initial table **one turn** | As plain | As plain | As plain | As plain | As plain; not measured with policy | As plain. Policy shape not measured |
 | Configured role | Table build and initial table together in **one turn**; not measured | As plain; not measured | As plain; not measured | As plain; not measured | As plain if nothing is OTC-blocked; not measured | As plain; not measured | As plain. Role shape not measured |
-| Route-server per-client best | Table build and own initial table together in **one turn**; not measured | Window; per-client ranking not measured | As plain; not measured | One turn per request, never shared | Shared cohort **one turn**; other members **paced** by command; not measured | **paced** between batches, as plain; a crowded prefix alone | Selection **one turn**. Large fanout uses narrow key pages |
+| Route-server per-client best | Cold policy-free, role-free eBGP unicast group build **paced**; initial table **one turn** | Window; per-client ranking not measured | As plain; not measured | One turn per request, never shared | Shared cohort **one turn**; other members **paced** by command; not measured | **paced** between batches, as plain; a crowded prefix alone | Selection **one turn**. Large fanout uses narrow key pages |
 | Kept private: ORF, ORR, conditional advertisement, peer-context policy, slow-peer isolation | Initial table **one turn** per receiver; not measured | Window; work grows with receivers | **paced** row cursor; fallback resync one turn | One turn per request | Members **paced** by command, a whole-table resync each; not measured | **paced** row cursor | Large fanout **paced**. Private single-best measured |
 | Add-Path send | As kept private; not measured | As kept private | As kept private; not measured with several paths | One turn per request | As kept private | As kept private; not measured with several paths | Large fanout uses narrow key pages. Not measured |
 | Dual-stack (IPv4 and IPv6 unicast) | As its row above; one table holds both families | As its row above | As above, per family | Per family | As its row above | Each family released separately | One selection turn, separate unicast pages per AFI |
@@ -312,8 +312,9 @@ if needed. Any other session keeps its own Adj-RIB-Out.
 - *Paced build.* `defer_first_group_registration` in
   [`membership.rs`](../../crates/rib/src/manager/update_groups/membership.rs)
   admits a session that negotiated only IPv4 or IPv6 unicast, with an
-  optional group-shareable export policy. Roles, route-server control and
-  per-client best each exclude a session.
+  optional group-shareable export policy for single-best, or a policy-free
+  eBGP per-client-best profile with optional route-server controls. Both
+  profiles require an unconfigured local role.
   It also refuses an iBGP non-client on a route reflector and any family
   still inside a restart selection hold.
   [`first_group_build.rs`](../../crates/rib/src/manager/first_group_build.rs)
@@ -343,6 +344,14 @@ if needed. Any other session keeps its own Adj-RIB-Out.
     compares the staged routes, denials and policy counters with synchronous
     registration. [The work-count test](../../crates/rib/src/manager/tests/first_group_build/policy_work.rs)
     records the construction work within each actor poll.
+  - *Per-client best.* The group ranks candidates within each prefix across
+    turns and prepares the first member’s route-server control index as it
+    goes. A change to a lower-ranked path can change a client’s export even
+    when the Loc-RIB winner stays the same. Such changes queue a fresh ranking
+    before the group is published. The completed group uses the ordinary
+    per-client-best initial replay, which sends the receiver’s table in one
+    turn. Attaching the first RS-controlled member to an existing group can
+    still index the installed table during that member’s registration.
   - Tests: `registration_finishes_discovery_and_repairs_under_continuing_changes`
     and `registration_coalesces_repairs_and_invalidates_on_the_first_excess_key`
     in [`loc_rib.rs`](../../crates/rib/src/loc_rib.rs) bound a turn's work;
@@ -366,8 +375,9 @@ if needed. Any other session keeps its own Adj-RIB-Out.
     longer discards its work while it waits.
 - *One-turn build.* Every other grouped session takes `ensure_group_table`:
   a walk of the whole Loc-RIB that stages every family the group owns.
-  That includes grouped sessions with a configured role, route-server
-  control or per-client best, and any session that also negotiated VPN,
+  That includes grouped sessions with a configured role, single-best
+  route-server controls, an export policy on a per-client-best session, and
+  any session that also negotiated VPN,
   EVPN or another non-unicast family. It runs inside the registration
   turn: `install_registration_state` reaches it through `join_group`, and
   the initial table below follows without the actor returning to its

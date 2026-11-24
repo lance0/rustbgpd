@@ -50,6 +50,8 @@ use rustbgpd_wire::ExtendedCommunity;
 
 pub(in crate::manager) mod admitted_recovery;
 mod first_group_retirement;
+mod first_pcb;
+pub(in crate::manager) use first_pcb::FirstPcbCommit;
 mod membership;
 mod mutation_target;
 mod optional_retirement;
@@ -741,10 +743,10 @@ pub(in crate::manager) struct GroupRibOut {
     /// prefixes), never per member — and recomputed alongside the
     /// winner on every staging of the prefix. Always empty for plain
     /// groups.
-    runner_up: ShardedMap<Prefix, RunnerUp>,
+    runner_up: PolicyRows<Prefix, RunnerUp>,
     /// Ranked alternatives for member-specific control-community selection and
     /// diagnostics. A marked diagnostic row can never occupy an advertised slot.
-    rs_fallback: ShardedMap<Prefix, RsFallback>,
+    rs_fallback: PolicyRows<Prefix, RsFallback>,
     /// RFC 7947 control contexts `(rs_asn, member_asn)` of the members that
     /// enforce control communities.
     rs_members: AddrMap<PeerId, (u32, u32)>,
@@ -752,12 +754,12 @@ pub(in crate::manager) struct GroupRibOut {
     /// ([`Self::adv_entry_post_backstop_for`]) may differ from `adv(m)`: a
     /// winner or lane entry with a suppression-form community, or a
     /// fallback list. Maintained only while `rs_members` is non-empty.
-    rs_tagged: ShardedMap<(Prefix, u32), RsTargets>,
+    rs_tagged: PolicyRows<(Prefix, u32), RsTargets>,
     /// [`Self::rs_tagged`] keys by the ASN their targets name, so seeding a
     /// joining member resolves only the keys that can name it.
-    rs_named: ShardedMap<u32, ShardedMap<(Prefix, u32), ()>>,
+    rs_named: PolicyRows<u32, PolicyRows<(Prefix, u32), ()>>,
     /// [`Self::rs_tagged`] keys carrying the announce-to-none large form.
-    rs_all: ShardedMap<(Prefix, u32), ()>,
+    rs_all: PolicyRows<(Prefix, u32), ()>,
     /// Per rs-control member, the per-family `[v4, v6]` difference between
     /// its wire slots and `adv(m)` over `rs_tagged`: the correction the O(1)
     /// count synthesis adds for that member.
@@ -889,8 +891,8 @@ impl GroupRibOut {
         crate::adj_rib_out::release_sharded_map(&mut self.vpn_policy_denied, checkpoint);
         self.otc_blocked.retire_with(checkpoint);
         release_hash_map(&mut self.vpn_member_counts, checkpoint);
-        crate::adj_rib_out::release_sharded_map(&mut self.runner_up, checkpoint);
-        crate::adj_rib_out::release_sharded_map(&mut self.rs_fallback, checkpoint);
+        self.runner_up.release(checkpoint);
+        self.rs_fallback.release(checkpoint);
         release_hash_map(&mut self.rs_members, checkpoint);
         self.clear_rs_index(checkpoint);
         release_hash_map(&mut self.rs_count_adjust, checkpoint);
@@ -960,12 +962,12 @@ impl GroupRibOut {
             vpn_policy_denied: ShardedMap::default(),
             otc_blocked: OtcBlocked::Ordinary(FastMap::default()),
             vpn_member_counts: AddrMap::default(),
-            runner_up: ShardedMap::default(),
-            rs_fallback: ShardedMap::default(),
+            runner_up: PolicyRows::default(),
+            rs_fallback: PolicyRows::default(),
             rs_members: AddrMap::default(),
-            rs_tagged: ShardedMap::default(),
-            rs_named: ShardedMap::default(),
-            rs_all: ShardedMap::default(),
+            rs_tagged: PolicyRows::default(),
+            rs_named: PolicyRows::default(),
+            rs_all: PolicyRows::default(),
             rs_count_adjust: AddrMap::default(),
             lane_counts: AddrMap::default(),
             export_chain,
@@ -1285,6 +1287,8 @@ impl GroupRibOut {
     /// suppressible lane entry always comes with a fallback list, so a
     /// prefix without a suppressible winner or a fallback list needs none.
     fn rs_targets(&self, key: (Prefix, u32)) -> Option<RsTargets> {
+        #[cfg(test)]
+        super::slice_timing::record_work("pcb_rs_index_keys", 1);
         self.table.get(&key.0, key.1)?;
         let (communities, large) = self.source_control(key);
         let fallback = key.1 == 0 && self.rs_fallback.contains_key(&key.0);
@@ -1320,7 +1324,7 @@ impl GroupRibOut {
         }
         if let Some(targets) = targets {
             for &asn in &targets.asns {
-                self.rs_named.get_or_default(asn).insert(key, ());
+                self.rs_named.insert_index_key(asn, key);
             }
             if targets.all {
                 self.rs_all.insert(key, ());
@@ -1332,13 +1336,12 @@ impl GroupRibOut {
     /// Retire the control index, one checkpoint per entry: at a full-table
     /// tagging it is as large as the table.
     fn clear_rs_index(&mut self, checkpoint: &mut impl FnMut()) {
-        use crate::adj_rib_out::release_sharded_map;
-        release_sharded_map(&mut self.rs_tagged, checkpoint);
-        for (_, keys) in self.rs_named.iter_mut() {
-            release_sharded_map(keys, checkpoint);
-        }
-        release_sharded_map(&mut self.rs_named, checkpoint);
-        release_sharded_map(&mut self.rs_all, checkpoint);
+        self.rs_tagged.release(checkpoint);
+        self.rs_named
+            .release_with(checkpoint, |(_, mut keys), checkpoint| {
+                keys.release(checkpoint)
+            });
+        self.rs_all.release(checkpoint);
     }
 
     /// `member`'s wire slot at `key` minus its `adv(m)` slot, both after
@@ -1371,6 +1374,8 @@ impl GroupRibOut {
             .then(|| self.rs_fallback.get(&key.0))
             .flatten();
         let resolved = payload::resolve_member_slot(
+            #[cfg(test)]
+            true,
             member,
             Some(rs_control),
             winner,
@@ -1501,6 +1506,10 @@ impl GroupRibOut {
         rs_control: (u32, u32),
         checkpoint: &mut impl FnMut(),
     ) {
+        // A paced founder already indexed and counted each published prefix.
+        if self.rs_members.get(&member) == Some(&rs_control) {
+            return;
+        }
         if self.rs_members.is_empty() {
             self.clear_rs_index(checkpoint);
             let keys: Vec<(Prefix, u32)> = self
@@ -1522,7 +1531,7 @@ impl GroupRibOut {
         // keys, then keys naming its ASN, then keys naming the route
         // server's ASN (`0:RS`).
         let (rs_asn, member_asn) = rs_control;
-        let empty = ShardedMap::default();
+        let empty = PolicyRows::default();
         let by_member = self.rs_named.get(&member_asn).unwrap_or(&empty);
         let by_rs = if rs_asn == member_asn {
             &empty
@@ -1731,6 +1740,8 @@ impl GroupRibOut {
         let staged = self.table.get(prefix, path_id)?;
         let winner = self.staged_entry(staged, prefix, path_id);
         payload::resolve_member_slot(
+            #[cfg(test)]
+            false,
             member,
             rs_control,
             winner,

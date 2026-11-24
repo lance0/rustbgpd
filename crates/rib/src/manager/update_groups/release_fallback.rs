@@ -51,6 +51,8 @@ pub(in crate::manager) struct FallbackRows {
 
 impl FallbackRows {
     pub(in crate::manager) fn push(&mut self, entry: RunnerUp) {
+        #[cfg(test)]
+        crate::manager::slice_timing::record_work("first_pcb_fallback_appends", 1);
         if self.first_other_source.is_none()
             && self
                 .first
@@ -81,6 +83,26 @@ impl FallbackRows {
 
     pub(super) fn iter(&self) -> impl Iterator<Item = &RunnerUp> {
         self.first.iter().chain(self.rest.values().flatten())
+    }
+
+    /// Release payloads against the same budget as prefix and rank retirement.
+    pub(in crate::manager) fn retire_first_pcb_rows(&mut self, budget: &mut usize) -> bool {
+        while *budget > 0 && self.len > 0 {
+            let mut tail = self.rest.last_entry();
+            let page = tail.as_mut().map_or(&mut self.first, |page| page.get_mut());
+            let count = page.len().min(*budget);
+            page.truncate(page.len() - count);
+            if page.is_empty()
+                && let Some(tail) = tail
+            {
+                tail.remove();
+            }
+            self.len -= count;
+            *budget -= count;
+            #[cfg(test)]
+            crate::manager::slice_timing::record_work("pcb_fallback_retired_rows", count);
+        }
+        self.is_empty()
     }
 
     /// Drop at most one page. Payload destruction can release attributes,
@@ -131,6 +153,16 @@ impl RsFallback {
         }
     }
 
+    pub(super) fn clear_founder_projection(&mut self) {
+        self.prepared = None;
+    }
+
+    pub(in crate::manager) fn retire_first_pcb_rows(&mut self, budget: &mut usize) -> bool {
+        Arc::get_mut(&mut self.rows)
+            .expect("unpublished fallback is privately owned")
+            .retire_first_pcb_rows(budget)
+    }
+
     pub(super) fn has_next_hop_actions(&self) -> bool {
         self.rows.has_next_hop
     }
@@ -176,7 +208,7 @@ impl RsFallback {
 }
 
 #[derive(Default)]
-struct Preparation {
+pub(super) struct Preparation {
     contexts: Projections,
     member: usize,
     #[cfg(test)]
@@ -186,14 +218,15 @@ struct Preparation {
 }
 
 impl Preparation {
-    fn install(
+    pub(super) fn install(
         &mut self,
         list: Option<&mut RsFallback>,
+        inline_limit: usize,
         members: &[PeerId],
         context: impl Fn(PeerId) -> Option<Control>,
         budget: &mut usize,
     ) -> bool {
-        let Some(list) = list.filter(|list| list.len() > FALLBACK_PAGE && list.prepared.is_none())
+        let Some(list) = list.filter(|list| list.len() > inline_limit && list.prepared.is_none())
         else {
             return true;
         };
@@ -235,6 +268,7 @@ impl Preparation {
                 #[cfg(test)]
                 {
                     self.visits += 1;
+                    crate::manager::slice_timing::record_work("pcb_fallback_projection_visits", 1);
                 }
                 let (communities, large) = source_control_input(entry.source_attrs.as_ref());
                 if rs_control_suppressed(communities, large, Some(context)) {
@@ -342,10 +376,13 @@ impl RibManager {
                 .copied()
                 .zip(self.peer_asn.get(&peer).copied())
         };
-        if !progress
-            .old
-            .install(old.as_deref_mut(), members, context, &mut budget)
-        {
+        if !progress.old.install(
+            old.as_deref_mut(),
+            FALLBACK_PAGE,
+            members,
+            context,
+            &mut budget,
+        ) {
             return false;
         }
         if stage.release_fallback_equal == Some(true) {
@@ -355,7 +392,10 @@ impl RibManager {
                 .expect("equal large lists")
                 .prepared
                 .clone_from(&old.as_ref().expect("equal large lists").prepared);
-        } else if !progress.new.install(new, members, context, &mut budget) {
+        } else if !progress
+            .new
+            .install(new, FALLBACK_PAGE, members, context, &mut budget)
+        {
             return false;
         }
         if let Some(old) = old.filter(|list| list.len() > FALLBACK_PAGE) {
@@ -561,6 +601,7 @@ mod tests {
         let resolve = |list: &RsFallback, peer| {
             let checked = Cell::new(0);
             let route = resolve_member_slot(
+                false,
                 peer,
                 Some(context),
                 winner.adv_entry(),

@@ -1,5 +1,7 @@
 //! Build a cold registration's unicast table privately, one actor turn at a time.
 
+mod pcb;
+
 use std::collections::{BTreeSet, VecDeque};
 
 use rustbgpd_policy::{PolicyChain, PolicyHitCounters};
@@ -47,6 +49,7 @@ pub(super) struct FirstGroupBuild {
     // writer kept a session end retained or another destination waited.
     behind_turns: u16,
     policy: Option<Box<FirstGroupPolicy>>,
+    pcb: Option<Box<pcb::FirstGroupPcb>>,
     table: GroupRibOut,
 }
 
@@ -165,7 +168,16 @@ impl RibManager {
     ) {
         debug_assert!(self.first_group_slot_available());
         self.loc_rib.start_registration_scan();
-        let table = self.first_group_table(peer, gid);
+        let mut table = self.first_group_table(peer, gid);
+        let pcb = table.per_client_best.then(|| {
+            let record = self.live_sessions[&peer].last().expect("current founder");
+            table.prepare_first_pcb_founder(
+                peer,
+                record.rs_control_asn.map(|rs| (rs, record.peer_asn)),
+            );
+            self.loc_rib.track_registration_candidates();
+            Box::default()
+        });
         let policy = table
             .export_chain
             .as_ref()
@@ -180,6 +192,7 @@ impl RibManager {
             behind_turns: 0,
             table,
             policy,
+            pcb,
         }));
     }
 
@@ -240,6 +253,7 @@ impl RibManager {
     pub(super) fn first_group_writer_claim(&mut self, update: &RibUpdate) -> bool {
         self.first_group_build
             .as_ref()
+            .filter(|job| job.pcb.is_none())
             .map(|job| job.gid)
             .is_some_and(|gid| self.writer_needs_group(update, gid))
     }
@@ -543,6 +557,8 @@ impl RibManager {
     // Keep the existing queue as the authority on pending registrations, even
     // while this job is building. GR and collision handling consult that queue.
     pub(super) fn advance_first_group_build(&mut self) {
+        #[cfg(test)]
+        let work = super::slice_timing::GroupBuildWork::start();
         let mut job = self.first_group_build.take().expect("active first group");
         if job.writer.as_deref().is_some_and(|writer| match writer {
             RibUpdate::ReplacePeerExportPoliciesAuthoritatively { reply, .. } => reply.is_closed(),
@@ -555,24 +571,34 @@ impl RibManager {
             self.release_first_group_writer(job);
             return;
         }
-        let FirstGroupPhase::Scanning(founder) = &job.phase else {
+        if matches!(job.phase, FirstGroupPhase::Retiring) {
             self.retire_first_group_page(job);
             return;
-        };
+        }
         let current = job.writer.is_some()
-            || founder.as_ref().is_some_and(|waiter| {
-                self.current_first_group_waiter(job.peer, job.gid, job.table.export_chain.as_ref())
-                    .is_some_and(|(session, sender)| {
-                        session == waiter.session_id && waiter.sender.same_channel(&sender)
-                    })
-            });
+            || self
+                .current_first_group_record(job.peer, job.gid, job.table.export_chain.as_ref())
+                .is_some_and(|record| {
+                    job.founded_by(job.peer, record)
+                        && (job.pcb.is_none()
+                            || job.table.first_pcb_founder_matches(
+                                job.peer,
+                                record.rs_control_asn.map(|rs| (rs, record.peer_asn)),
+                            ))
+                });
         self.release_abandoned_reservation(&mut job);
         // Input can keep discovery waiting behind repairs for as long as it
         // lasts. Count the turns on which it does so while a retained
         // session end or another destination's command waits for this build.
         let keeps_waiting =
             job.other_destination_waits || (job.writer.is_some() && self.session_end_retained());
-        if keeps_waiting && self.loc_rib.registration_scan_behind() {
+        if keeps_waiting
+            && (self.loc_rib.registration_scan_behind()
+                || job
+                    .pcb
+                    .as_ref()
+                    .is_some_and(|pcb| pcb.active_changed(&self.loc_rib)))
+        {
             job.behind_turns = job.behind_turns.saturating_add(1);
         }
         let outrun = job.behind_turns >= BEHIND_TURNS_BEFORE_SEAL;
@@ -603,34 +629,35 @@ impl RibManager {
         if outrun {
             self.seal_first_group_commit_frontier();
         }
-        let mut page = self.loc_rib.take_registration_page();
-        #[cfg(test)]
-        {
-            super::slice_timing::record_work("first_group_discovery", page.bucket_visits);
-            super::slice_timing::record_work("first_group_repairs", page.repairs);
-        }
-        debug_assert!(page.bucket_visits + page.repairs <= REGISTRATION_PAGE_SIZE);
-        if let Some(policy) = &mut job.policy
-            && !policy.prepare_page(&job.table, &mut page)
-        {
-            self.fallback_policy_first_group(job);
-            return;
-        }
-        if !page.keys.is_empty() {
-            let prefixes = page.keys.into_iter().collect();
-            job.table = self.stage_first_group_page(job.gid, job.table, &prefixes);
-        }
-        // Errors are never subtracted, so a second one already decides the
-        // fallback at publication. Stop before staging the rest of the table.
-        if job.policy.is_some()
-            && job
-                .table
-                .export_chain
-                .as_ref()
-                .is_some_and(|chain| chain.hit_counters().eval_errors() > 1)
-        {
-            self.fallback_policy_first_group(job);
-            return;
+        if let Some(pcb) = &mut job.pcb {
+            if !pcb.advance(self, &mut job.table) {
+                self.first_group_build = Some(job);
+                return;
+            }
+        } else {
+            let mut page = self.take_first_group_page();
+            if let Some(policy) = &mut job.policy
+                && !policy.prepare_page(&job.table, &mut page)
+            {
+                self.fallback_policy_first_group(job);
+                return;
+            }
+            if !page.keys.is_empty() {
+                let prefixes = page.keys.into_iter().collect();
+                job.table = self.stage_first_group_page(job.gid, job.table, &prefixes);
+            }
+            // Errors are never subtracted, so a second one already decides the
+            // fallback at publication. Stop before staging the rest of the table.
+            if job.policy.is_some()
+                && job
+                    .table
+                    .export_chain
+                    .as_ref()
+                    .is_some_and(|chain| chain.hit_counters().eval_errors() > 1)
+            {
+                self.fallback_policy_first_group(job);
+                return;
+            }
         }
         if self.loc_rib.registration_scan_status() != RegistrationScanStatus::Ready
             || !self.pending_route_batches.is_empty()
@@ -652,10 +679,25 @@ impl RibManager {
                 return;
             }
         }
+        #[cfg(test)]
+        drop(work);
         self.finish_first_group_build(job);
     }
 
+    fn take_first_group_page(&mut self) -> crate::loc_rib::RegistrationPage {
+        let page = self.loc_rib.take_registration_page();
+        #[cfg(test)]
+        {
+            super::slice_timing::record_work("first_group_discovery", page.bucket_visits);
+            super::slice_timing::record_work("first_group_repairs", page.repairs);
+        }
+        debug_assert!(page.bucket_visits + page.repairs <= REGISTRATION_PAGE_SIZE);
+        page
+    }
+
     fn finish_first_group_build(&mut self, mut job: Box<FirstGroupBuild>) {
+        #[cfg(test)]
+        let work = super::slice_timing::GroupBuildWork::start();
         if let Some(policy) = &job.policy
             && !policy.finish(
                 job.table
@@ -676,6 +718,8 @@ impl RibManager {
             self.first_group_build = Some(job);
             return;
         }
+        #[cfg(test)]
+        drop(work);
         if let Some(writer) = job.writer.take() {
             self.paced_policy_destination = Some(gid);
             self.handle_update(*writer);
@@ -759,7 +803,12 @@ impl RibManager {
                 return;
             }
         }
-        if !job.table.retire_first_group_page(budget) {
+        let retired = if let Some(pcb) = &mut job.pcb {
+            pcb.retire(&mut job.table, budget)
+        } else {
+            job.table.retire_first_group_page(budget)
+        };
+        if !retired {
             self.first_group_build = Some(job);
             return;
         }
@@ -791,8 +840,11 @@ impl RibManager {
             .as_ref()
             .map(|chain| FirstGroupPolicy::start(chain, &mut self.loc_rib));
         let founder = self
-            .current_first_group_waiter(job.peer, job.gid, job.table.export_chain.as_ref())
-            .map(|(session_id, sender)| Waiter { session_id, sender });
+            .current_first_group_record(job.peer, job.gid, job.table.export_chain.as_ref())
+            .map(|record| Waiter {
+                session_id: record.session_id,
+                sender: record.outbound_tx.clone(),
+            });
         job.phase = FirstGroupPhase::Scanning(founder);
         self.first_group_build = Some(job);
     }
