@@ -8307,10 +8307,14 @@ impl RibManager {
                     #[cfg(test)]
                     {
                         self.departure_units_this_turn += 1;
-                        source_departure::charge_quiet_unit();
+                        source_departure::charge_quiet_unit(departed);
                     }
                     let now = source_departure::quiet_clock();
-                    longest_departure_unit = longest_departure_unit.max(now - unit);
+                    // A primary dispatch ends the turn and says nothing about
+                    // the cost of a departure unit.
+                    if departed {
+                        longest_departure_unit = longest_departure_unit.max(now - unit);
+                    }
                     if !departed
                         || self.source_departure.is_none()
                         || self.dampening_history.notice_failed()

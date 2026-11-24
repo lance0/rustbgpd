@@ -9,9 +9,9 @@ use super::exportability::ReusableExactExportEncoder;
 use super::lifecycle::{test_peer_up, test_routes_received};
 use super::*;
 use crate::manager::source_departure::{
-    DEPARTURE_MEMBERS_PER_POLL, KEYS_PER_PAGE, MEMBERS_PER_PAGE, RECEIVER_ROWS_PER_POLL,
-    WIDE_KEYS_PER_PAGE, set_quiet_unit_cost, take_departure_pages, take_flowspec_withdrawal_work,
-    take_receiver_rows,
+    DEPARTURE_MEMBERS_PER_POLL, KEYS_PER_PAGE, MEMBERS_PER_PAGE, QUIET_PAGE_RECEIVER_KEYS,
+    RECEIVER_ROWS_PER_POLL, WIDE_KEYS_PER_PAGE, set_quiet_unit_costs, take_departure_pages,
+    take_flowspec_withdrawal_work, take_receiver_rows,
 };
 
 const SOURCE: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 1);
@@ -814,6 +814,146 @@ fn a_flap_storm_departure_visits_each_member_once() {
     }
 }
 
+/// `members` receivers of `shape`, each holding `rows` routes from
+/// `SOURCE`, plus the source-only session's receiver to keep open.
+fn fixture(
+    shape: Shape,
+    members: u16,
+    rows: u32,
+) -> (
+    mpsc::Sender<RibUpdate>,
+    RibManager,
+    Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+    mpsc::Receiver<OutboundRouteUpdate>,
+) {
+    let (tx, rx) = mpsc::channel(16);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.outbound_row_credit_override = None;
+    super::distribution_window::untimed_window(&mut manager);
+    for source in [SOURCE, OTHER] {
+        register_test_peer(&mut manager, peer_v4(source), 0);
+    }
+    let no_exports = register_source_only(&mut manager);
+    let mut receivers: Vec<_> = (0..members)
+        .map(|index| join(&mut manager, index, shape))
+        .collect();
+    seed(&mut manager, shape, rows);
+    for rx in &mut receivers {
+        assert_initial(rx, shape, rows);
+    }
+    (tx, manager, receivers, no_exports)
+}
+
+fn probe_applied(manager: &RibManager) -> bool {
+    manager
+        .loc_rib
+        .get(&Prefix::V4(probe_prefix()))
+        .is_some_and(|route| route.peer == peer_v4(OTHER))
+}
+
+/// Drive a departure that starts with an empty FIFO. An UPDATE arrives as
+/// its first quiet page opens. Returns the receiver-keys inspected and the
+/// withdrawals delivered from that arrival until its route is selected.
+fn arrival_wait(shape: Shape, members: u16, rows: u32) -> (usize, usize) {
+    let (tx, mut manager, mut receivers, _no_exports) = fixture(shape, members, rows);
+    queue_probe(ProbeArrival::AfterEmpty, tx);
+    manager.handle_update(down(SOURCE));
+    assert!(manager.source_departure.is_some());
+    take_receiver_rows();
+    let (mut inspected, mut withdrawn, mut during) = (0, 0, false);
+    while manager.source_departure.is_some() {
+        let waiting = !probe_applied(&manager);
+        manager.poll_source_departure_turn();
+        let rows = take_receiver_rows();
+        let sent: usize = receivers
+            .iter_mut()
+            .flat_map(|rx| std::iter::from_fn(|| rx.try_recv().ok().map(delivered)))
+            .map(|update| update.unicast_withdrawals().count() + update.flowspec_withdraw.len())
+            .sum();
+        // The arrival lands at the start of a unit, so that unit's work
+        // counts. The poll that applies it does no departure work.
+        if waiting && PROBE_SENT.get() && !probe_applied(&manager) {
+            inspected += rows;
+            withdrawn += sent;
+        }
+        during |= probe_applied(&manager) && manager.source_departure.is_some();
+    }
+    assert!(
+        during,
+        "{shape:?}: the arrival waited for the whole departure"
+    );
+    (inspected, withdrawn)
+}
+
+/// An arrival behind a quiet private page waits for the whole page, at
+/// about 0.4 µs per receiver-key. The page narrows with the roster so that
+/// wait stays within one quiet page budget.
+#[test]
+fn an_arrival_behind_a_quiet_private_page_waits_for_a_bounded_page() {
+    const MEMBERS: u16 = 512;
+    let (inspected, _) = arrival_wait(Shape::Private, MEMBERS, 300);
+    eprintln!("private arrival members={MEMBERS} keys=300: inspected_before_apply={inspected}");
+    assert!(
+        inspected > 0 && inspected <= QUIET_PAGE_RECEIVER_KEYS,
+        "{inspected} receiver-keys inspected before the arrival applied"
+    );
+}
+
+/// A quiet group page keeps its width whatever the roster, so an arrival
+/// behind it waits for at most one page width toward every member.
+#[test]
+fn an_arrival_behind_a_quiet_group_page_waits_for_at_most_one_page_width() {
+    const MEMBERS: u16 = 1_000;
+    // More keys than one page, so a wider page would hold the arrival longer.
+    const KEYS: u32 = 1_100;
+    let (_, withdrawn) = arrival_wait(Shape::Grouped, MEMBERS, KEYS);
+    // The accepted wait, fixed here so a wider page constant fails it.
+    let bound = 1_024 * usize::from(MEMBERS);
+    eprintln!(
+        "group arrival members={MEMBERS} keys={KEYS}: withdrawn_before_apply={withdrawn} bound={bound}"
+    );
+    assert!(
+        withdrawn > 0 && withdrawn <= bound,
+        "{withdrawn} withdrawals delivered before the arrival applied, bound {bound}"
+    );
+}
+
+thread_local! {
+    static MOST_UNITS_AFTER_PROBE: Cell<usize> = const { Cell::new(0) };
+}
+
+fn observe_after_probe(manager: &RibManager) {
+    if manager.source_departure.is_some() && probe_applied(manager) {
+        MOST_UNITS_AFTER_PROBE.set(
+            MOST_UNITS_AFTER_PROBE
+                .get()
+                .max(manager.departure_units_this_turn),
+        );
+    }
+}
+
+/// A primary dispatch inside the departure loop ends its turn and is not a
+/// departure unit. On a fake clock it costs 9 ms and each departure unit
+/// 1 ms; the quiet turns after it must still run several units.
+#[tokio::test(start_paused = true)]
+async fn a_slow_primary_dispatch_does_not_narrow_later_quiet_turns() {
+    let (tx, manager, _receivers, _no_exports) = fixture(Shape::Grouped, 64, ROWS);
+    let mut manager = manager;
+    tx.try_send(down(SOURCE)).unwrap();
+    tx.try_send(announce(OTHER, probe_prefix())).unwrap();
+    drop(tx);
+    MOST_UNITS_AFTER_PROBE.set(0);
+    manager.actor_turn_check = Some(observe_after_probe);
+    set_quiet_unit_costs(Some([Duration::from_millis(1), Duration::from_millis(9)]));
+    let end = Box::pin(manager.run_actor()).await;
+    set_quiet_unit_costs(None);
+    assert!(end.source_departure.is_none());
+    assert!(probe_applied(&end));
+    let most = MOST_UNITS_AFTER_PROBE.get();
+    eprintln!("after a 9 ms dispatch: most_units_per_quiet_turn={most}");
+    assert!(most > 1, "{most} units per quiet turn after the dispatch");
+}
+
 thread_local! {
     static FIRST_DEPARTURE_TURN: Cell<Option<usize>> = const { Cell::new(None) };
 }
@@ -834,21 +974,7 @@ fn observe_quiet_turn(manager: &RibManager) {
 /// unit. A fake clock charges each unit 3 ms against the 10 ms budget.
 #[tokio::test(start_paused = true)]
 async fn the_quiet_loop_starts_only_units_that_fit_its_budget() {
-    let (tx, rx) = mpsc::channel(16);
-    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    manager.outbound_row_credit_override = None;
-    super::distribution_window::untimed_window(&mut manager);
-    for source in [SOURCE, OTHER] {
-        register_test_peer(&mut manager, peer_v4(source), 0);
-    }
-    let _no_exports = register_source_only(&mut manager);
-    let mut receivers: Vec<_> = (0..64)
-        .map(|index| join(&mut manager, index, Shape::RsControl))
-        .collect();
-    seed(&mut manager, Shape::RsControl, ROWS);
-    for rx in &mut receivers {
-        assert_initial(rx, Shape::RsControl, ROWS);
-    }
+    let (tx, mut manager, mut receivers, _no_exports) = fixture(Shape::RsControl, 64, ROWS);
     // The second PeerDown fences the first departure, so every unit is quiet.
     tx.try_send(down(SOURCE)).unwrap();
     tx.try_send(down(OTHER)).unwrap();
@@ -859,9 +985,9 @@ async fn the_quiet_loop_starts_only_units_that_fit_its_budget() {
     let cost = Duration::from_millis(3);
     let budget = crate::manager::source_departure::QUIET_LOOP_BUDGET;
     assert!(manager.flush_poll_budget >= budget);
-    set_quiet_unit_cost(Some(cost));
+    set_quiet_unit_costs(Some([cost, cost]));
     let end = Box::pin(manager.run_actor()).await;
-    set_quiet_unit_cost(None);
+    set_quiet_unit_costs(None);
     assert!(end.source_departure.is_none());
     for rx in &mut receivers {
         let updates: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok().map(delivered)).collect();

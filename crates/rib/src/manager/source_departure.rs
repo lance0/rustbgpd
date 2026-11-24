@@ -9,9 +9,9 @@ use crate::route::{FlowSpecKey, Route};
 use std::collections::hash_set;
 
 pub(super) const KEYS_PER_PAGE: usize = 16;
-/// Keys in a pressured shared group page and in a quiet private or `FlowSpec`
-/// page. One poll stages the whole page, so this bounds per-key stage work
-/// rather than member work.
+/// Keys in a pressured shared group page and in the widest quiet private or
+/// `FlowSpec` page. One poll stages the whole page, so this bounds per-key
+/// stage work rather than member work.
 pub(super) const WIDE_KEYS_PER_PAGE: usize = 256;
 pub(super) const MEMBERS_PER_PAGE: usize = 8;
 /// A teardown above this many receiver-keys is paced instead of running in
@@ -31,6 +31,10 @@ pub(super) const DEPARTURE_MEMBERS_PER_POLL: usize = 256;
 /// the width does not shrink with the roster. A typical departure of up to
 /// this many keys reaches each member once.
 const QUIET_GROUP_KEYS_PER_PAGE: usize = super::ROUTES_RECEIVED_CHUNK_SIZE;
+/// Receiver-keys in a quiet private or `FlowSpec` page. An arrival waits for
+/// the whole page, and each private receiver-key costs about 0.4 µs, so these
+/// pages narrow as the roster grows.
+pub(super) const QUIET_PAGE_RECEIVER_KEYS: usize = 65_536;
 /// Receiver-keys one quiet unit may visit on a private or `FlowSpec` page; at
 /// about 0.4 µs per private receiver-key this keeps a single unit near 3 ms.
 /// A wide group page takes the larger receiver-key budget instead.
@@ -43,7 +47,7 @@ pub(super) const QUIET_LOOP_BUDGET: std::time::Duration = std::time::Duration::f
 /// The quiet loop's clock. Tests give each unit a fixed cost instead.
 pub(super) fn quiet_clock() -> std::time::Instant {
     #[cfg(test)]
-    if let Some((now, _)) = QUIET_CLOCK.get() {
+    if let Some((now, ..)) = QUIET_CLOCK.get() {
         return now;
     }
     std::time::Instant::now()
@@ -51,20 +55,22 @@ pub(super) fn quiet_clock() -> std::time::Instant {
 
 #[cfg(test)]
 thread_local! {
-    static QUIET_CLOCK: std::cell::Cell<Option<(std::time::Instant, std::time::Duration)>> =
+    static QUIET_CLOCK: std::cell::Cell<Option<(std::time::Instant, [std::time::Duration; 2])>> =
         const { std::cell::Cell::new(None) };
 }
 
-/// Run the quiet loop on a fake clock that advances `cost` per unit.
+/// Run the quiet loop on a fake clock that advances `[departure, primary]`
+/// per unit, by whether the unit advanced the departure or dispatched
+/// primary work.
 #[cfg(test)]
-pub(super) fn set_quiet_unit_cost(cost: Option<std::time::Duration>) {
-    QUIET_CLOCK.set(cost.map(|cost| (std::time::Instant::now(), cost)));
+pub(super) fn set_quiet_unit_costs(costs: Option<[std::time::Duration; 2]>) {
+    QUIET_CLOCK.set(costs.map(|costs| (std::time::Instant::now(), costs)));
 }
 
 #[cfg(test)]
-pub(super) fn charge_quiet_unit() {
-    if let Some((now, cost)) = QUIET_CLOCK.get() {
-        QUIET_CLOCK.set(Some((now + cost, cost)));
+pub(super) fn charge_quiet_unit(departed: bool) {
+    if let Some((now, costs)) = QUIET_CLOCK.get() {
+        QUIET_CLOCK.set(Some((now + costs[usize::from(!departed)], costs)));
     }
 }
 
@@ -129,12 +135,16 @@ impl SourceDeparture {
 
     fn next_page(&mut self, quiet: bool) -> Option<Page> {
         // An arrival waits for the pinned page to reach its entire roster:
-        // at most one visit of each member, as under pressure. A waiting
-        // UPDATE keeps the pressured width, which bounds that visit.
+        // at most one visit of each member, as under pressure. A quiet group
+        // page keeps its width whatever the roster; a private page, whose
+        // receiver-keys cost far more, keeps the whole page within
+        // QUIET_PAGE_RECEIVER_KEYS. A waiting UPDATE keeps the pressured width.
         // A fenced head cannot run before the departure ends, so only an
         // empty FIFO keeps a seam for an arrival just after the empty
         // observation, even when the wider page could consume the remainder.
         let seam = !matches!(self.primary, PrimaryTurn::Fenced);
+        let private_width =
+            (QUIET_PAGE_RECEIVER_KEYS / self.peers.len().max(1)).clamp(1, WIDE_KEYS_PER_PAGE);
         let page_width = |remaining: usize, queued_width: usize, quiet_width: usize| {
             if quiet && seam {
                 quiet_width.min(remaining.saturating_sub(1).max(1))
@@ -151,7 +161,7 @@ impl SourceDeparture {
                     Exporters::PlainGroups => {
                         page_width(keys.len(), WIDE_KEYS_PER_PAGE, QUIET_GROUP_KEYS_PER_PAGE)
                     }
-                    Exporters::Private => page_width(keys.len(), KEYS_PER_PAGE, WIDE_KEYS_PER_PAGE),
+                    Exporters::Private => page_width(keys.len(), KEYS_PER_PAGE, private_width),
                     Exporters::Mixed => page_width(keys.len(), KEYS_PER_PAGE, KEYS_PER_PAGE),
                 };
                 let mut page: HashSet<_> =
@@ -167,7 +177,7 @@ impl SourceDeparture {
                 ))));
             }
         }
-        let width = page_width(self.flowspec.len(), KEYS_PER_PAGE, WIDE_KEYS_PER_PAGE);
+        let width = page_width(self.flowspec.len(), KEYS_PER_PAGE, private_width);
         let keys: HashSet<_> = self.flowspec.by_ref().take(width).collect();
         (!keys.is_empty()).then_some(Page::FlowSpec { keys, next: 0 })
     }
