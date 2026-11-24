@@ -1139,8 +1139,12 @@ impl RibManager {
             | FamilyReplayKind::SelectionRelease => {
                 if self.is_initial_member_replay(peer) {
                     if matches!(replay_kind, FamilyReplayKind::SelectionRelease) {
-                        self.abort_initial_member_replay(peer);
-                        self.mark_outbound_dirty(peer);
+                        self.recover_initial_member_replay(
+                            peer,
+                            super::initial_member_replay::ReplayCause::from_label(
+                                || "selection_release",
+                            ),
+                        );
                     }
                     return FamilyReplayOutcome::Deferred;
                 }

@@ -38,7 +38,17 @@ DEPARTURE_DISPATCH = (
     "mod source_departure;\nmod source_departure_receivers;\n",
     '    if mode == "source-departure" {\n        source_departure::main(&args[2..]);\n        return;\n    }\n',
 )
-COMPONENT_DISPATCH = (*SCAN_DISPATCH, *RETIREMENT_DISPATCH, *DEPARTURE_DISPATCH)
+# The cold-join churn cell needs the bench-only initial-replay observer.
+COLD_JOIN_DISPATCH = (
+    "mod cold_join_churn;\n",
+    '            "cold-join-churn" => {\n'
+    '                if let Err(error) = cold_join_churn::run(&args[2..]).await {\n'
+    '                    eprintln!("cold-join-churn: {error}");\n'
+    '                    std::process::exit(1);\n'
+    '                }\n'
+    '            }\n',
+)
+COMPONENT_DISPATCH = (*SCAN_DISPATCH, *RETIREMENT_DISPATCH, *DEPARTURE_DISPATCH, *COLD_JOIN_DISPATCH)
 RETIREMENT_SOURCE = "crates/rib/src/manager/distribution/vpn.rs"
 RETIREMENT_LIMIT = 12 * 1024**3
 RETIREMENT_ORDER = ("old-drop", "candidate", "candidate", "old-drop")
@@ -1255,7 +1265,8 @@ def memory_dispatch_snippets(source: str) -> tuple[str, ...]:
             "component dispatch anchor drift")
     blocks = SCAN_DISPATCH
     for name, optional in (("retirement", RETIREMENT_DISPATCH),
-                           ("source-departure", DEPARTURE_DISPATCH)):
+                           ("source-departure", DEPARTURE_DISPATCH),
+                           ("cold-join-churn", COLD_JOIN_DISPATCH)):
         counts = tuple(source.count(block) for block in optional)
         require(counts in ((0, 0), (1, 1)), f"partial or duplicate {name} dispatch")
         if counts == (1, 1):

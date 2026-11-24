@@ -652,7 +652,9 @@ jobs:
             bench/tests/test-scale-host-quiet.sh \
             bench/tests/test-cgroup-memory-stat.sh \
             bench/scale/matrix/rss-sampler.sh \
-            bench/scale/compare-rrharness.sh
+            bench/scale/compare-rrharness.sh \
+            bench/scale/compare-cold-join-churn.sh \
+            bench/tests/test-cold-join-churn-verdict.sh
           shellcheck bench/tests/test-vpn-query-receipt.sh
           shellcheck bench/tests/test-vpn-query-campaign.sh \
             bench/run-vpn-query-campaign.sh
@@ -671,6 +673,7 @@ jobs:
           python3 bench/tests/test_verify_mrt_attribute_scratch_campaign.py
           bash -n bench/scale/compare-rrharness.sh
           bash bench/tests/test-rrharness-driver.sh
+          bash bench/tests/test-cold-join-churn-verdict.sh
           python3 -m unittest discover -s bench/scale -p 'test_source_departure*.py' -v
           python3 -m unittest discover \
             -s bench/scale/enhanced-route-refresh -p 'test_*.py'

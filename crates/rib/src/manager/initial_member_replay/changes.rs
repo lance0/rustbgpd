@@ -1,12 +1,14 @@
 //! Preserve actual staged changes in publication order once replay begins
-//! sending. Discovery owns the untouched rows.
+//! sending. Discovery owns the untouched rows. A change that does not fit the
+//! bounded log is coalesced into its key's scan repair, which sends the
+//! current row after the log drains instead of falling back to a resync.
 
 use std::collections::{BTreeSet, VecDeque};
 
 use rustbgpd_policy::NextHopAction;
 use rustbgpd_wire::Prefix;
 
-use super::{Phase, REGISTRATION_PAGE_SIZE, RibManager};
+use super::{Phase, REGISTRATION_PAGE_SIZE, ReplayCause, RibManager};
 use crate::PeerId;
 use crate::manager::distribution::OutboundCommitBatch;
 use crate::manager::selection_deferral::retained_route_bytes;
@@ -84,6 +86,11 @@ pub(super) struct ReplayChanges {
     // Keys drained from the journal that are absent after a withdrawal or
     // exact-export rejection must not be rediscovered.
     absent: BTreeSet<Prefix>,
+    // Changed keys the ordered log could not hold. Each still has its queued
+    // scan repair, which sends the current group row once the log drains.
+    coalesced: BTreeSet<Prefix>,
+    // Set by the first coalesced change for the rest of the replay.
+    overflowed: bool,
     body_bytes: usize,
 }
 
@@ -92,10 +99,35 @@ impl ReplayChanges {
         !self.pending.is_empty()
     }
 
+    /// Whether the group view holds a change this member has not accepted.
+    pub(super) fn unsent(&self) -> bool {
+        !self.pending.is_empty() || !self.coalesced.is_empty()
+    }
+
     pub(super) fn owns_absent(&self, prefix: &Prefix) -> bool {
         self.absent.contains(prefix)
     }
 
+    pub(super) fn coalesced(&self, prefix: &Prefix) -> bool {
+        self.coalesced.contains(prefix)
+    }
+
+    pub(super) fn settle_coalesced(&mut self, prefixes: &[Prefix]) {
+        for prefix in prefixes {
+            self.coalesced.remove(prefix);
+        }
+    }
+
+    /// Leave a change that does not fit to the key's repair. Repair pages run
+    /// only after the log drains, so the repair follows every logged change
+    /// for the key.
+    fn coalesce(&mut self, prefix: Prefix) {
+        self.absent.remove(&prefix);
+        self.coalesced.insert(prefix);
+        self.overflowed = true;
+    }
+
+    /// Log one change, or return `false` without side effects when it does not fit.
     fn push(&mut self, peer: PeerId, delta: &GroupDelta, stage: &GroupStageOutput) -> bool {
         let row = delta.new.as_ref().filter(|(row, _)| row.peer != peer);
         if row.is_none() && delta.old_source.is_none_or(|source| source == peer) {
@@ -136,30 +168,43 @@ impl RibManager {
         &mut self,
         peer: PeerId,
         stage: &GroupStageOutput,
-    ) -> bool {
+    ) -> Result<(), ReplayCause> {
         let replay = self
             .initial_member_replays
             .members
             .get_mut(&peer)
             .expect("active replay");
         if matches!(replay.phase, Phase::PrepareProof(_)) {
-            return true;
+            return Ok(());
         }
-        if stage.deltas.len() > REGISTRATION_PAGE_SIZE {
-            return false;
-        }
+        // A stage larger than one page goes to the repairs whole, so the
+        // log never holds part of one publication.
+        let oversized = stage.deltas.len() > REGISTRATION_PAGE_SIZE;
         for delta in &stage.deltas {
             // A write outside the scan's repair scope must go to the normal
             // resync before the receiver can settle its initial table.
             if !self
                 .loc_rib
                 .member_replay_change_recorded(peer, delta.prefix)
-                || !replay.changes.push(peer, delta, stage)
             {
-                return false;
+                return Err(ReplayCause::from_label(|| {
+                    if self.loc_rib.member_replay_scan_status(peer)
+                        == crate::loc_rib::RegistrationScanStatus::Overflow
+                    {
+                        "scan_repair_limit"
+                    } else {
+                        "change_outside_scan"
+                    }
+                }));
+            }
+            // After the first overflow, every later change joins the repairs
+            // too. The log then only drains, so churn faster than one change
+            // per writer operation cannot hold pages back past that drain.
+            if oversized || replay.changes.overflowed || !replay.changes.push(peer, delta, stage) {
+                replay.changes.coalesce(delta.prefix);
             }
         }
-        true
+        Ok(())
     }
 
     pub(super) fn send_initial_replay_change(
@@ -223,12 +268,10 @@ impl RibManager {
             .is_some_and(|view| view.contains(&key))
         {
             changes.absent.remove(&prefix);
-        } else if changes.absent.len() < REGISTRATION_PAGE_SIZE || changes.absent.contains(&prefix)
-        {
+        } else if changes.absent.len() < REGISTRATION_PAGE_SIZE {
+            // Past the cap, a later page that reaches this key probes it
+            // again and admits only what the current group row allows.
             changes.absent.insert(prefix);
-        } else {
-            self.recover_initial_member_replay(peer);
-            return;
         }
         self.initial_member_replays.ready.push_back(peer);
     }

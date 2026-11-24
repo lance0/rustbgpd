@@ -36,6 +36,7 @@ use rustbgpd_wire::{
 };
 use tokio::sync::{mpsc, oneshot};
 
+mod cold_join_churn;
 mod recovery_memory;
 mod recovery_retirement;
 mod recovery_scan;
@@ -252,13 +253,24 @@ struct Harness {
     clients: Vec<IpAddr>,
     mgr_tid: i32,
     ticks_per_second: u64,
+    metrics: BgpMetrics,
 }
 
 async fn setup(n_clients: u32, n_sources: u32) -> Harness {
+    setup_with_manager(n_clients, n_sources, std::convert::identity).await
+}
+
+async fn setup_with_manager(
+    n_clients: u32,
+    n_sources: u32,
+    configure: impl FnOnce(RibManager) -> RibManager + Send + 'static,
+) -> Harness {
     let ticks_per_second = clock_ticks_per_second().expect("failed to query sysconf(_SC_CLK_TCK)");
     let (tx, rx) = mpsc::channel::<RibUpdate>(1024);
     let (qtx, qrx) = mpsc::channel::<RibUpdate>(64);
     let (tid_tx, tid_rx) = std::sync::mpsc::channel::<i32>();
+    let metrics = BgpMetrics::new();
+    let manager_metrics = metrics.clone();
     std::thread::Builder::new()
         .name("ribmgr".into())
         .spawn(move || {
@@ -272,9 +284,9 @@ async fn setup(n_clients: u32, n_sources: u32) -> Harness {
                 qrx,
                 None,
                 Some(Ipv4Addr::new(10, 255, 255, 255)),
-                BgpMetrics::new(),
+                manager_metrics,
             );
-            rt.block_on(mgr.run());
+            rt.block_on(configure(mgr).run());
         })
         .unwrap();
     let mgr_tid = tid_rx.recv().unwrap();
@@ -286,6 +298,7 @@ async fn setup(n_clients: u32, n_sources: u32) -> Harness {
         clients: Vec::with_capacity(n_clients as usize),
         mgr_tid,
         ticks_per_second,
+        metrics,
     };
     for index in 0..n_sources {
         let (outbound_tx, _outbound_rx) = mpsc::channel(1);
@@ -659,6 +672,12 @@ fn main() {
         .unwrap();
     rt.block_on(async move {
         match mode.as_str() {
+            "cold-join-churn" => {
+                if let Err(error) = cold_join_churn::run(&args[2..]).await {
+                    eprintln!("cold-join-churn: {error}");
+                    std::process::exit(1);
+                }
+            }
             "late-join" => {
                 assert_eq!(
                     args.len(),
