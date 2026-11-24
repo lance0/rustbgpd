@@ -39,6 +39,8 @@ pub(in crate::manager) struct ReleasePcb<S = Vec<Path>> {
     ranked: S,
     gathered: bool,
     walk_complete: bool,
+    /// A first group found a ranked path gone; the owner requeues the prefix.
+    pub(in crate::manager) stale: bool,
     walk: PcbWalk,
     rows: UnicastDistributionResult<(PolicyFilteredRouteKey, Option<PolicyLabel>)>,
     evals: VecDeque<GroupEvalAccumulator>,
@@ -89,10 +91,25 @@ impl RibManager {
         pcb: &mut ReleasePcb<S>,
         budget: &mut usize,
     ) -> Option<PreparedPcb> {
+        // A release fences its candidates. A first group's capture queues a
+        // fresh rank before any changed path is read again, so a missing path
+        // means a writer bypassed `recompute_best*`: requeue, never panic.
+        let stale = std::cell::Cell::new(false);
         let route = |(source, path): Path| {
-            self.ribs[&source]
-                .get(&prefix, path)
-                .expect("candidate cannot change before a valid rank resumes")
+            let found = self
+                .ribs
+                .get(&source)
+                .and_then(|rib| rib.get(&prefix, path));
+            assert!(
+                S::FIRST_GROUP || found.is_some(),
+                "candidate source is fenced during group staging"
+            );
+            debug_assert!(
+                found.is_some(),
+                "an Adj-RIB-In write skipped candidate capture"
+            );
+            stale.set(stale.get() || found.is_none());
+            found
         };
         let precedes = |a, b, budget: &mut usize| {
             if S::FIRST_GROUP {
@@ -100,9 +117,18 @@ impl RibManager {
                 #[cfg(test)]
                 super::super::slice_timing::record_work("first_pcb_comparisons", 1);
             }
-            crate::best_path::best_path_cmp(route(a), route(b)).is_lt()
+            match (route(a), route(b)) {
+                (Some(a), Some(b)) => crate::best_path::best_path_cmp(a, b).is_lt(),
+                _ => false,
+            }
         };
-        if !pcb.gathered && !self.gather_pcb_candidates(group, prefix, pcb, budget, precedes) {
+        let gathered =
+            pcb.gathered || self.gather_pcb_candidates(group, prefix, pcb, budget, precedes);
+        if stale.get() {
+            pcb.stale = true;
+            return None;
+        }
+        if !gathered {
             return None;
         }
 
@@ -120,8 +146,12 @@ impl RibManager {
                 pcb.walk_complete = true;
                 break;
             };
+            let Some(candidate) = route(path).filter(|_| !stale.get()) else {
+                pcb.stale = true;
+                return None;
+            };
             if pcb.walk.consume(
-                route(path),
+                candidate,
                 (!S::FIRST_GROUP).then_some(&group.table),
                 &prefix,
                 group.local_role,

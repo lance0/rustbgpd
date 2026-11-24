@@ -58,6 +58,13 @@ impl FirstGroupPcb {
             if self.prepared.is_none() {
                 self.prepared =
                     manager.poll_first_group_pcb(group, prefix, &mut self.selection, &mut budget);
+                if self.selection.stale {
+                    manager
+                        .loc_rib
+                        .record_registration_candidate_changes(&std::iter::once(prefix).collect());
+                    self.discard();
+                    continue;
+                }
             }
             let Some(prepared) = self.prepared.as_mut() else {
                 return false;

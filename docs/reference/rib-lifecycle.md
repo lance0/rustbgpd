@@ -348,7 +348,10 @@ if needed. Any other session keeps its own Adj-RIB-Out.
     turns and prepares the first member’s route-server control index as it
     goes. A change to a lower-ranked path can change a client’s export even
     when the Loc-RIB winner stays the same. Such changes queue a fresh ranking
-    before the group is published. The completed group uses the ordinary
+    before the group is published. The build ranks only about a dozen prefixes
+    per turn, so sustained input can overflow its repair log. After one
+    overflow restart, a second overflow completes the member through the
+    one-turn build. The completed group uses the ordinary
     per-client-best initial replay, which sends the receiver’s table in one
     turn. Attaching the first RS-controlled member to an existing group can
     still index the installed table during that member’s registration.

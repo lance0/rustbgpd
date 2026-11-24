@@ -30,6 +30,14 @@ use crate::update::RibUpdate;
 /// the waiting command sooner under input that does not stop.
 pub(super) const BEHIND_TURNS_BEFORE_SEAL: u16 = 64;
 
+/// Paced per-client-best attempts a founder may lose to repair-log overflow
+/// before it takes the synchronous build. One restart absorbs a single burst,
+/// such as a source's full table arriving as the build starts. A second
+/// overflow means ingest outruns the candidate repairs (about a dozen prefixes
+/// per poll against 1,024-route chunks); another restart would only repeat
+/// discovery, so the founder accepts the parent's one-turn build instead.
+pub(super) const PCB_OVERFLOW_RESTARTS: u8 = 1;
+
 struct Waiter {
     session_id: u64,
     sender: mpsc::Sender<OutboundRouteUpdate>,
@@ -623,6 +631,12 @@ impl RibManager {
             if job.writer.is_some() && self.session_end_retained() {
                 self.seal_first_group_commit_frontier();
             }
+            if current
+                && job.pcb.is_some()
+                && self.loc_rib.registration_scan_status() == RegistrationScanStatus::Overflow
+            {
+                self.count_pcb_build_overflow(&job);
+            }
             job.stop_scan(&mut self.loc_rib);
             job.phase = FirstGroupPhase::Retiring;
             self.retire_first_group_page(job);
@@ -686,6 +700,26 @@ impl RibManager {
         #[cfg(test)]
         drop(work);
         self.finish_first_group_build(job);
+    }
+
+    // ponytail: past the restart bound, sustained ingest completes the founder
+    // through the one-turn `ensure_group_table`. LAN-3470 paces it instead.
+    fn count_pcb_build_overflow(&mut self, job: &FirstGroupBuild) {
+        let Some(record) = self
+            .live_sessions
+            .get_mut(&job.peer)
+            .and_then(|sessions| sessions.last_mut())
+            .filter(|record| job.founded_by(job.peer, record))
+        else {
+            return;
+        };
+        record.registration_pcb_overflows = record.registration_pcb_overflows.saturating_add(1);
+        if record.registration_pcb_overflows > PCB_OVERFLOW_RESTARTS {
+            record.registration_policy_fallback = true;
+            tracing::debug!(peer = %job.peer, "per-client-best build overflowed again; using the synchronous build");
+            #[cfg(test)]
+            super::slice_timing::record_work("pcb_build_overflow_fallback", 1);
+        }
     }
 
     fn take_first_group_page(&mut self) -> crate::loc_rib::RegistrationPage {
