@@ -22,16 +22,23 @@ type Table = BTreeMap<Prefix, String>;
 
 /// The founder's and member's registration profile.
 #[derive(Clone, Copy, Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is an independent registration input of the test matrix"
+)]
 struct Shape {
     pcb: bool,
     rs: bool,
     policy: bool,
+    // Member 9 publishes the group before member 1 joins.
+    founder: bool,
 }
 
 const PCB: Shape = Shape {
     pcb: true,
     rs: false,
     policy: false,
+    founder: true,
 };
 const PCB_RS: Shape = Shape { rs: true, ..PCB };
 // A single-best route-server client: one shared winner, its own view.
@@ -42,7 +49,13 @@ const RS: Shape = Shape {
 // The export policy strips the suppression community, so a change of that
 // tag alone moves the member's RFC 7947 view without changing the shared row.
 const RS_POLICY: Shape = Shape { policy: true, ..RS };
-const SHAPES: [Shape; 4] = [PCB, PCB_RS, RS, RS_POLICY];
+// Member 1 founds the group: it builds the table in its registration turn,
+// then pages its own initial table.
+const RS_FOUNDER: Shape = Shape {
+    founder: false,
+    ..RS_POLICY
+};
+const SHAPES: [Shape; 5] = [PCB, PCB_RS, RS, RS_POLICY, RS_FOUNDER];
 
 fn strip_chain() -> PolicyChain {
     // `65001:7` names no route server, so RFC 7947 keeps it.
@@ -167,13 +180,19 @@ impl Run {
             manager.handle_update(test_routes_received(peer_v4(source), rows));
             drain_route_chunks(&mut manager);
         }
-        let mut founder = join_pcb(&mut manager, 9, 1, shape, 1 << 16);
+        let mut founder = if shape.founder {
+            join_pcb(&mut manager, 9, 1, shape, 1 << 16)
+        } else {
+            mpsc::channel(1).1
+        };
         settle(&mut manager);
         while founder.try_recv().is_ok() {}
+        let gid = manager.grouped_member_of(receiver(9));
         manager.initial_member_replays.min_routes = Some(if paced { 1 } else { usize::MAX });
         let builds = manager.adj_rib_out_commit_stats.resync_builds;
         let rx = join_pcb(&mut manager, 1, 1, shape, 64);
         assert_eq!(manager.is_initial_member_replay(receiver(1)), paced);
+        assert_eq!(gid.is_some(), shape.founder);
         Self {
             manager,
             _primary: primary,
@@ -579,6 +598,35 @@ fn per_client_best_churn_above_the_repair_limit_recovers_with_one_resync() {
         assert_eq!(paced.markers, 1);
         assert!(paced.manager.adj_rib_out_commit_stats.resync_builds > paced.builds);
         assert_eq!(paced.table, reference(shape, &changes), "{shape:?}");
+    }
+}
+
+// An outbound prefix limit applied mid-replay checks the routes admitted so
+// far. The later pages then meet it at commit, the last gate before the
+// wire, as any later growth of the member's table would.
+#[test]
+fn outbound_prefix_limit_applied_mid_replay_caps_the_later_pages() {
+    use crate::manager::tests::outbound_prefix_limits::{apply, limit_config, prepare};
+
+    const LIMIT: u32 = 2_000;
+    for shape in [PCB_RS, RS] {
+        let mut paced = Run::start(true, shape);
+        while paced.table.len() < 1024 {
+            paced.turn();
+        }
+        assert!(paced.replaying());
+        let full = reference(shape, &[]).len();
+        assert!(full > LIMIT as usize, "{shape:?}: {full}");
+        prepare(
+            &mut paced.manager,
+            1,
+            limit_config(&[(receiver(1), Some(LIMIT), None)], &[]),
+        )
+        .expect("the admitted pages fit the limit");
+        apply(&mut paced.manager, 1, true).expect("applied mid-replay");
+        paced.churn(0, 0, 0);
+        assert_eq!(paced.markers, 1, "{shape:?}");
+        assert_eq!(paced.table.len(), LIMIT as usize, "{shape:?}");
     }
 }
 
