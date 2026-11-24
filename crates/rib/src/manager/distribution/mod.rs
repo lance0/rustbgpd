@@ -6472,9 +6472,12 @@ impl RibManager {
             });
             return;
         }
-        let result = self.apply_export_policy_replacements_deferring_residual(replacements);
-        self.publish_export_roster();
-        let _ = reply.send(result);
+        self.accept_authoritative_replacement(
+            RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+                replacements,
+                reply,
+            },
+        );
     }
 
     pub(super) fn handle_restore_peer_export_policies_authoritatively(
@@ -6488,9 +6491,37 @@ impl RibManager {
         // the detached receiver owns the late acknowledgement, while this actor
         // must still repair the RIB. Never use `reply.is_closed()` as a reason to
         // skip compensation.
-        let result = self.restore_export_policy_replacements_deferring_residual(replacements);
-        self.publish_export_roster();
-        let _ = reply.send(result);
+        self.accept_authoritative_replacement(
+            RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                replacements,
+                reply,
+            },
+        );
+    }
+
+    /// The acceptance check has already run. Losing the receiver during
+    /// private construction cannot cancel the command or its compensation.
+    pub(in crate::manager) fn finish_authoritative_replacement(&mut self, command: RibUpdate) {
+        match command {
+            RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+                replacements,
+                reply,
+            } => {
+                let result = self.apply_export_policy_replacements_deferring_residual(replacements);
+                self.publish_export_roster();
+                let _ = reply.send(result);
+            }
+            RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                replacements,
+                reply,
+            } => {
+                let result =
+                    self.restore_export_policy_replacements_deferring_residual(replacements);
+                self.publish_export_roster();
+                let _ = reply.send(result);
+            }
+            _ => unreachable!("accepted authoritative replacement"),
+        }
     }
 
     /// A whole rollback in one call, for tests: the rollback batch, then
@@ -7512,7 +7543,12 @@ impl RibManager {
             if speculative {
                 self.paced_policy_destination = Some(destination);
             }
-            self.ensure_group_table(destination, exemplar);
+            if let Some(table) = self.take_authoritative_destination(destination) {
+                let replaced = self.publish_first_group(destination, table);
+                debug_assert!(replaced.is_none());
+            } else {
+                self.ensure_group_table(destination, exemplar);
+            }
             receipt.destination_ensures += 1;
         }
         if destination_existed {

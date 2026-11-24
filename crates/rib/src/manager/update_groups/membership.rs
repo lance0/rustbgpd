@@ -4,6 +4,41 @@ use super::{
 };
 use crate::PeerId;
 
+/// The static tag policies used for grouped reloads have one or two literal
+/// community additions. Allow one scalar or inline-prefix deciding term
+/// before the tag. Inspect the compiled terms so TOML and rpol share the gate.
+fn bounded_reload_policy(chain: &PolicyChain) -> bool {
+    use rustbgpd_policy::RouteModifications;
+    use rustbgpd_policy::ir::{MatchExpr, TermAction};
+
+    let compiled = chain.compiled();
+    compiled.referenced_datasets().next().is_none()
+        && compiled.policies.len() <= 1
+        && compiled.policies.iter().all(|policy| {
+            policy.terms.len() <= 2
+                && policy.terms.iter().all(|term| {
+                    matches!(
+                        term.guard,
+                        MatchExpr::True
+                            | MatchExpr::PrefixEq { .. }
+                            | MatchExpr::LocalPref(_)
+                            | MatchExpr::Med(_)
+                            | MatchExpr::RpkiIs(_)
+                    ) && match &term.action {
+                        TermAction::Deny => true,
+                        TermAction::Permit(mods) => {
+                            mods.communities_add.len() <= 2
+                                && mods.same_as(&RouteModifications {
+                                    communities_add: mods.communities_add.clone(),
+                                    ..RouteModifications::default()
+                                })
+                        }
+                        _ => false,
+                    }
+                })
+        })
+}
+
 impl RibManager {
     /// Planning and allocation share one ownership decision without installing
     /// the destination table before the last OLD member has left.
@@ -868,6 +903,87 @@ impl RibManager {
             self.start_first_group(peer, gid, record.session_id, record.outbound_tx.clone());
         }
         true
+    }
+
+    /// Resolve a chain-only change from an installed, single-family cohort.
+    /// Single-best RS control is member-specific at inventory and emission;
+    /// the shared table retains the same pre-policy attributes as a cold ensure.
+    pub(in crate::manager) fn reload_build_pair(
+        &mut self,
+        replacements: &[crate::update::PeerExportPolicyReplacement],
+    ) -> Option<(usize, usize)> {
+        use rustbgpd_wire::{Afi, Safi};
+
+        let first = replacements.first()?;
+        let policy = first.export_policy.as_ref();
+        let source = self.grouped_member_of(first.peer)?;
+        let group = self.group_ribs.get(&source)?;
+        let source_key = self.update_groups.group_key(source)?;
+        if !source_key.is_unicast_only()
+            || group.per_client_best
+            || crate::manager::distribution::otc_role_blocks(group.local_role)
+            || (self.cluster_id.is_some() && !group.is_ebgp && !group.is_rr_client)
+            || group.export_chain.as_ref() == policy
+            || [group.export_chain.as_ref(), policy]
+                .into_iter()
+                .flatten()
+                .any(|chain| !bounded_reload_policy(chain))
+        {
+            return None;
+        }
+        let mut seen = HashSet::with_capacity(replacements.len());
+        for replacement in replacements {
+            let peer = replacement.peer;
+            let families = self.peer_sendable_families.get(&peer)?;
+            if !seen.insert(peer)
+                || self.grouped_member_of(peer) != Some(source)
+                || !self.shared_policy_transition_member_ready(peer)
+                || families.len() != 1
+                || !families.iter().all(|&family| {
+                    matches!(family, (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast))
+                        && !self
+                            .selection_deferral
+                            .as_ref()
+                            .is_some_and(|state| state.may_hold_family(family))
+                })
+                || replacement.export_policy.as_ref() != policy
+            {
+                return None;
+            }
+            let input = self.installed_group_classifier_input(peer, policy);
+            let mut key = self.group_key_without_chain_id(peer, input, false)?;
+            key.chain = source_key.chain;
+            if &key != source_key {
+                return None;
+            }
+        }
+        let dest = self
+            .compute_update_group_membership_for_policy(first.peer, policy, None)
+            .group_id()?;
+        (!self.group_ribs.contains_key(&dest)).then_some((source, dest))
+    }
+
+    pub(in crate::manager) fn reload_group_table(
+        &self,
+        source: usize,
+        policy: Option<&PolicyChain>,
+    ) -> GroupRibOut {
+        let group = &self.group_ribs[&source];
+        let mut table = GroupRibOut::new(
+            policy.map(PolicyChain::fork_for_install),
+            group.is_ebgp,
+            group.interpret_rfc1997,
+            group.is_rr_client,
+            group.local_role,
+            group.sendable.clone(),
+            group.llgr.clone(),
+            false,
+            0,
+        );
+        if policy.is_some() {
+            table.prepare_policy_first_group();
+        }
+        table
     }
 
     /// Take the pending session's eligible profile. The segmented table grows

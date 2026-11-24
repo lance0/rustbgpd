@@ -130,6 +130,11 @@ fn is_injected_self_route(route: &Route) -> bool {
 
 #[cfg(test)]
 thread_local! {
+    pub(super) static PREPARED_UNICAST_BUNDLES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static UNICAST_PROBE_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static EXACT_BATCH_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static REUSED_EXACT_LENGTHS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+
     /// IPv6 next-hop fallback warnings emitted on this thread, so a test can
     /// pin the warning count without depending on tracing callsite interest,
     /// which is process-wide.
@@ -1133,6 +1138,8 @@ impl SessionExportProfile {
         cache.bind(self.owner_id, self.generation);
         let key = self.prepared_attr_cache_key(route, local_ipv4, next_hop_override);
         cache.entries.entry(key).or_insert_with(|| {
+            #[cfg(test)]
+            PREPARED_UNICAST_BUNDLES.set(PREPARED_UNICAST_BUNDLES.get() + 1);
             self.prepare_unicast_attribute_bundle(route, local_ipv4, next_hop_override)
         })
     }
@@ -1331,6 +1338,8 @@ impl SessionExportProfile {
         if let Some(hit) = length_cache.get(&key) {
             return Ok(*hit);
         }
+        #[cfg(test)]
+        UNICAST_PROBE_BUILDS.set(UNICAST_PROBE_BUILDS.get() + 1);
         let result = exact_export_result(match candidate {
             PreparedUnicastCandidate::Ipv4Body { attrs, entry } => self
                 .probe_ipv4_body(std::slice::from_ref(&entry), &[], &attrs)
@@ -2497,6 +2506,8 @@ impl ExactExportSnapshot for SessionExportProfile {
         checkpoint: &mut dyn FnMut(),
     ) -> Vec<Result<ExactExportResult, ExactExportError>> {
         checkpoint();
+        #[cfg(test)]
+        EXACT_BATCH_ROWS.set(EXACT_BATCH_ROWS.get() + candidates.len());
         let mut prepared_attr_cache = PreparedAttrCache::default();
         prepared_attr_cache.entries.reserve(candidates.len());
         checkpoint();
@@ -2578,6 +2589,8 @@ impl ExactExportSnapshot for SessionExportProfile {
             return None;
         }
 
+        #[cfg(test)]
+        REUSED_EXACT_LENGTHS.set(REUSED_EXACT_LENGTHS.get() + encoded_lengths.len());
         let max_len = self.max_message_len();
         let mut results = Vec::with_capacity(encoded_lengths.len());
         for &encoded_len in encoded_lengths {

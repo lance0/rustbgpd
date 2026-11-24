@@ -937,6 +937,11 @@ impl RibManager {
     /// key, so a mixed member shares a unicast group and must take the
     /// per-member path to have its other families re-exported.
     pub(in crate::manager) fn shared_policy_transition_member_ready(&self, peer: PeerId) -> bool {
+        // The shared old-to-new delta assumes the member received the whole
+        // source table. Regroup a partial replay against its admitted rows.
+        if self.is_initial_member_replay(peer) {
+            return false;
+        }
         let only_unicast = self
             .peer_sendable_families
             .get(&peer)
