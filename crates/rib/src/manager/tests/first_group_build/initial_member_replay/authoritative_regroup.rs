@@ -69,7 +69,7 @@ async fn partial_mover_withdraws_only_its_admitted_rows_before_the_initial_eor()
     assert!(manager.is_initial_member_replay(peer));
     let mut wire = BTreeMap::new();
     for row in first.announce.iter() {
-        assert!(row.communities().is_empty());
+        assert_eq!(row.communities(), &[] as &[u32]);
         wire.insert(row.prefix, (row.peer, row.local_pref(), Vec::new()));
     }
     let owed: BTreeSet<_> = high
@@ -150,7 +150,7 @@ async fn sibling_reload_restages_a_replacement_while_the_joiner_owes_its_initial
     assert_eq!(manager.grouped_member_of(mover), Some(source));
     let mut wire = Inventory::new();
     for row in first.announce.iter() {
-        assert!(row.communities().is_empty());
+        assert_eq!(row.communities(), &[] as &[u32]);
         wire.insert(row.prefix, (row.peer, row.local_pref()));
     }
 
@@ -176,19 +176,19 @@ async fn sibling_reload_restages_a_replacement_while_the_joiner_owes_its_initial
     // followed by the rebuilt row under its new one at commit.
     let mut old_replacements = Vec::new();
     while let Ok(page) = established.try_recv().map(delivered) {
-        assert!(page.end_of_rib.is_empty());
+        assert_eq!(page.end_of_rib, Vec::<(Afi, Safi)>::new());
         old_replacements.extend(page.announce.iter().map(|row| {
-            assert!(row.communities().is_empty());
+            assert_eq!(row.communities(), &[] as &[u32]);
             (row.prefix, row.peer, row.local_pref())
         }));
     }
     assert_eq!(old_replacements, [(staged, peer_v4(OTHER), 130)]);
-    assert!(finish_reload(&mut manager, response).is_empty());
+    assert_eq!(finish_reload(&mut manager, response), Vec::<PeerId>::new());
     assert_ne!(manager.grouped_member_of(mover), Some(source));
     assert_eq!(manager.grouped_member_of(joiner), Some(source));
     let mut target = Inventory::new();
     while let Ok(page) = established.try_recv().map(delivered) {
-        assert!(page.end_of_rib.is_empty());
+        assert_eq!(page.end_of_rib, Vec::<(Afi, Safi)>::new());
         assert_eq!(page.unicast_withdrawals().count(), 0);
         for row in page.announce.iter() {
             assert_eq!(row.communities(), [TAG]);
@@ -209,7 +209,7 @@ async fn sibling_reload_restages_a_replacement_while_the_joiner_owes_its_initial
             let page = delivered(joining.recv().await.unwrap());
             assert_eq!(page.unicast_withdrawals().count(), 0);
             for row in page.announce.iter() {
-                assert!(row.communities().is_empty());
+                assert_eq!(row.communities(), &[] as &[u32]);
                 let value = (row.peer, row.local_pref());
                 if let Some(old) = wire.insert(row.prefix, value) {
                     repaired.push((row.prefix, old, value));
