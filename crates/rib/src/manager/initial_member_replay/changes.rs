@@ -6,7 +6,7 @@ use std::collections::{BTreeSet, VecDeque};
 use rustbgpd_policy::NextHopAction;
 use rustbgpd_wire::Prefix;
 
-use super::{Phase, REGISTRATION_PAGE_SIZE, RibManager};
+use super::{Phase, REGISTRATION_PAGE_SIZE, ReplayCause, RibManager};
 use crate::PeerId;
 use crate::manager::distribution::OutboundCommitBatch;
 use crate::manager::selection_deferral::retained_route_bytes;
@@ -96,19 +96,24 @@ impl ReplayChanges {
         self.absent.contains(prefix)
     }
 
-    fn push(&mut self, peer: PeerId, delta: &GroupDelta, stage: &GroupStageOutput) -> bool {
+    fn push(
+        &mut self,
+        peer: PeerId,
+        delta: &GroupDelta,
+        stage: &GroupStageOutput,
+    ) -> Result<(), ReplayCause> {
         let row = delta.new.as_ref().filter(|(row, _)| row.peer != peer);
         if row.is_none() && delta.old_source.is_none_or(|source| source == peer) {
-            return true;
+            return Ok(());
         }
         if self.pending.len() >= REGISTRATION_PAGE_SIZE {
-            return false;
+            return Err(ReplayCause::from_label(|| "pending_change_limit"));
         }
         let change = if let Some((route, action)) = row {
             let Some(charge) = retained_route_bytes(route, size_of::<Announcement>())
                 .filter(|charge| *charge <= MAX_BODY_BYTES - self.body_bytes)
             else {
-                return false;
+                return Err(ReplayCause::from_label(|| "change_body_budget"));
             };
             self.body_bytes += charge;
             Change::Announce(Box::new(Announcement {
@@ -127,7 +132,7 @@ impl ReplayChanges {
             Change::Withdraw(delta.prefix)
         };
         self.pending.push_back(change);
-        true
+        Ok(())
     }
 }
 
@@ -136,17 +141,17 @@ impl RibManager {
         &mut self,
         peer: PeerId,
         stage: &GroupStageOutput,
-    ) -> bool {
+    ) -> Result<(), ReplayCause> {
         let replay = self
             .initial_member_replays
             .members
             .get_mut(&peer)
             .expect("active replay");
         if matches!(replay.phase, Phase::PrepareProof(_)) {
-            return true;
+            return Ok(());
         }
         if stage.deltas.len() > REGISTRATION_PAGE_SIZE {
-            return false;
+            return Err(ReplayCause::from_label(|| "stage_delta_limit"));
         }
         for delta in &stage.deltas {
             // A write outside the scan's repair scope must go to the normal
@@ -154,12 +159,20 @@ impl RibManager {
             if !self
                 .loc_rib
                 .member_replay_change_recorded(peer, delta.prefix)
-                || !replay.changes.push(peer, delta, stage)
             {
-                return false;
+                return Err(ReplayCause::from_label(|| {
+                    if self.loc_rib.member_replay_scan_status(peer)
+                        == crate::loc_rib::RegistrationScanStatus::Overflow
+                    {
+                        "scan_repair_limit"
+                    } else {
+                        "change_outside_scan"
+                    }
+                }));
             }
+            replay.changes.push(peer, delta, stage)?;
         }
-        true
+        Ok(())
     }
 
     pub(super) fn send_initial_replay_change(
@@ -227,7 +240,10 @@ impl RibManager {
         {
             changes.absent.insert(prefix);
         } else {
-            self.recover_initial_member_replay(peer);
+            self.recover_initial_member_replay(
+                peer,
+                ReplayCause::from_label(|| "absent_key_limit"),
+            );
             return;
         }
         self.initial_member_replays.ready.push_back(peer);

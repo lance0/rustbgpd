@@ -76,7 +76,16 @@ impl RibManager {
         // OLD before marking dirty so regroup recovery retains its withdrawals.
         let replaying = self.abort_initial_member_replay(peer);
         if self.drop_peer_owing(peer) || replaying {
-            self.mark_outbound_dirty(peer);
+            let marked = self.mark_outbound_dirty(peer);
+            #[cfg(feature = "bench-internals")]
+            if marked && replaying {
+                self.observe_initial_replay(
+                    peer,
+                    super::super::BenchReplayEvent::Dirty("group_changed"),
+                );
+            }
+            #[cfg(not(feature = "bench-internals"))]
+            let _ = marked;
         }
         let prev_gid = match previous {
             Some(GroupMembership::Grouped(id)) => Some(id),

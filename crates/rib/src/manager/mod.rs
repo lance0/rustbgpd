@@ -32,6 +32,8 @@ mod flowspec_validation;
 mod graceful_restart;
 mod helpers;
 mod initial_member_replay;
+#[cfg(feature = "bench-internals")]
+pub use initial_member_replay::BenchReplayEvent;
 mod lease_expiry;
 mod outbound_credit;
 mod outbound_owing;

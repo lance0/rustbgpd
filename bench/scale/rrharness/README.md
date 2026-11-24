@@ -505,3 +505,97 @@ Means span every run and repetition in a stage. Any failed trial, swap use, wron
 application order, inexact inventory or a candidate poll publishing more than
 256 rows is a FAIL. A skipped or invalid trial, a missing mode, a misordered
 schedule or identical arm binaries make the cell or campaign INVALID.
+
+## Cold join with churn
+
+`cold-join-churn` measures a cold first-member join while ordinary churn runs.
+The joiner is the first member of its update group, so the group is built and
+then paced to the joiner as an initial replay. A witness in a second group
+receives a train of unrelated marker UPDATEs, one at a time, each sent 5 ms
+after the previous one arrives. A marker's wait runs from its admission to the
+primary RIB FIFO until the witness receives it.
+
+```text
+rrharness cold-join-churn ROWS plain|policy clean|mixed|burst|budget-control
+```
+
+`ROWS` is 16,384 to 1,000,000 routes. `policy` gives the joiner an export
+policy that adds a community. The witness gets the other shape, so the
+joiner's group is always a new build. Churn starts when the joiner receives its
+first base route.
+
+| Cell | Churn during the replay | Expected result |
+| --- | --- | --- |
+| `clean` | none | `paced_complete` |
+| `mixed` | one source hard flap plus the sustained stream below | reported: `paced_complete` or a fallback with its cause |
+| `burst` | one UPDATE with 2,048 new prefixes, above every 1,024-entry change cap | `replay_to_dirty` (control: the detector must fire) |
+| `budget-control` | none; the per-peer admitted-proof budget is cut to 64 KiB | `budget_refusal` (control) |
+
+`mixed` uses these rates:
+
+- **Stream:** eight sources each toggle (announce, then withdraw) their own
+  16-prefix block every 125 ms, staggered across the period. That is 64
+  UPDATEs and 1,024 prefix changes a second, the churn engine of the RR
+  flagship soak (`tests/soak/run-soak-rr-flagship.sh`).
+- **Flap:** one source with 572 routes goes down without graceful restart.
+  Once the witness has seen every route withdrawn, it returns with a new
+  session and a higher LOCAL_PREF. 572 is the per-member table of the
+  converged-rejoin receipt
+  ([`docs/perf/join-cohort-converged-rejoin-2026-10.md`](../../../docs/perf/join-cohort-converged-rejoin-2026-10.md)).
+
+A 1,000,000-row `mixed` run fails unless all eight stream sources both
+announce and withdraw during the replay. At every size, the flap and the
+stream must overlap the replay.
+
+The RIB reports the replay's enrollment, completion, or handoff to dirty
+resync, with the guard that fired, through a bench-only observer
+(`RibManager::with_bench_initial_replay_observer`, behind `bench-internals`).
+A production build does not compile the observer or the cause labels. A
+handoff with an unexpected cause, a missing terminal event, or a fallback
+outside the churn interval makes the run fail. A fallback is never counted as
+a paced completion. The cell also checks the exact inventory of both receivers
+at the final fence.
+
+One parseable line summarizes each run. Offsets are microseconds from the
+joiner's PeerUp admission:
+
+```text
+cold_join_churn_summary mode= rows= disposition= fallback=0|1 cause= fallback_us=
+  fallback_after_first_page_us= first_page_us= eor_us= burst_admit_us= worst_wait_us=
+  build_max_poll_us= replay_max_poll_us= post_max_poll_us=
+```
+
+`worst_wait_us` is the longest marker wait over the join, including a marker
+still in flight at the joiner's End-of-RIB. The poll maxima come from the
+production `bgp_rib_actor_slice_max_microseconds{stage="actor_poll"}` window.
+The window is reset at PeerUp, then read and reset at the first base route
+(build), at End-of-RIB (replay) and at the final fence (post). A poll is charged
+to the phase in which it ends. A fallback resync runs before End-of-RIB, so
+its whole-table turn appears in `replay_max_poll_us` and in the marker waits.
+
+### Timed campaign
+
+```sh
+bench/scale/compare-cold-join-churn.sh PARENT_REF CANDIDATE_REF "$out" [ROWS]
+```
+
+The script builds `--profile scale -p rrharness` for each ref in its own
+worktree and target under `$out`, and checks that the two binaries differ.
+Equal refs give an A/A run from one binary. It runs the four cells at 16,384
+rows on both arms as untimed controls, then `clean`, `mixed` and `burst` for
+`plain` and `policy` at `ROWS` (default 1,000,000) in parent, candidate,
+candidate, parent order. Each timed run holds the host lock exclusively, passes
+`host-quiet.sh`, runs in a 64 GiB zero-swap scope, and is INVALID if a compiler
+process appears. The timeline ends with one verdict line per arm. Remove the
+`$out/src-*` worktrees with `git worktree remove` afterward.
+
+Frozen bars, per arm (12 timed runs):
+
+- Every `clean` and `mixed` run has `worst_wait_us` of 200,000 or less.
+- Every `clean` run completes paced (`fallback=0`).
+- `mixed` falls back in 0 of its 4 runs. The verdict line reports the count,
+  and the per-run lines give each fallback's cause and time.
+- `burst` is report-only. It measures the cost of a fallback, and every run
+  must report `fallback=1`, or the arm is INVALID.
+- Any failed control or run, a compiler sample, or a missing run makes the arm
+  INVALID. Otherwise a missed bar is FAIL.

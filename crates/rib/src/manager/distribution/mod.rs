@@ -10303,8 +10303,18 @@ impl RibManager {
                             || self.force_outbound_peers.contains(&peer)
                             || self.dirty_peers.contains(&peer)
                         {
-                            self.abort_initial_member_replay(peer);
-                            self.mark_outbound_dirty(peer);
+                            let cause =
+                                super::initial_member_replay::ReplayCause::from_label(|| {
+                                    if RELEASING {
+                                        "release_fanout"
+                                    } else if self.force_outbound_peers.contains(&peer) {
+                                        "forced_resync"
+                                    } else {
+                                        self.group_recovery_fallback(peer)
+                                            .map_or("already_dirty", |cause| cause.as_str())
+                                    }
+                                });
+                            self.recover_initial_member_replay(peer, cause);
                         } else {
                             // The replay scan delivers current winners and repairs against
                             // actual admission. The live pass owns its policy evaluations.
@@ -10313,9 +10323,9 @@ impl RibManager {
                             {
                                 self.apply_group_policy_counters(peer, &stage.evals);
                                 self.apply_initial_replay_page_policy(peer, gid, best_changed);
-                                if !self.record_initial_replay_changes(peer, stage) {
-                                    self.abort_initial_member_replay(peer);
-                                    self.mark_outbound_dirty(peer);
+                                if let Err(cause) = self.record_initial_replay_changes(peer, stage)
+                                {
+                                    self.recover_initial_member_replay(peer, cause);
                                 }
                             }
                             break 'member;

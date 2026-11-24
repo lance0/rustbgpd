@@ -75,6 +75,8 @@ An offline test or a reduced smoke does not replace a measured run.
 - **Timing and query comparisons:** `compare-criterion.sh`,
   `compare-route-paging.sh`, `run-vpn-query-campaign.sh`, and
   `scale/compare-rrharness.sh`; use the recipes below.
+  `scale/compare-cold-join-churn.sh` runs the cold-join churn cells; see
+  [its recipe](scale/rrharness/README.md#cold-join-with-churn).
 - **Memory and recovery:** `compare-rib-memory.sh`,
   `scale/compare-recovery-memory.sh`, and its `recovery_memory.py` classifier.
   The recovery driver's `--check-controls` compiles against its fixed controls.
