@@ -1,6 +1,8 @@
 //! Build a cold registration's unicast table privately, one actor turn at a time.
 
 mod pcb;
+#[cfg(test)]
+pub(super) use pcb::RANK_DISCARDS_BEFORE_FORCED;
 
 use std::collections::{BTreeSet, VecDeque};
 
@@ -716,6 +718,12 @@ impl RibManager {
                 return;
             };
             *search += 1;
+            if self.authoritative_registration_due(peer) {
+                self.pending_initial_registrations
+                    .retain(|&queued| queued != peer);
+                self.complete_deferred_registration(peer);
+                return;
+            }
             self.defer_first_group_registration(peer);
             if self.first_group_build.is_none() {
                 return;
@@ -894,6 +902,22 @@ impl RibManager {
         #[cfg(test)]
         drop(work);
         self.finish_first_group_build(job);
+    }
+
+    /// A founder whose paced build retired for good (overflow past the restart
+    /// bound, or a policy fallback) can never start another one. Busy turns
+    /// otherwise only retry the paced build, so under input that never drains
+    /// it would wait forever. Complete it at a route-batch boundary.
+    fn authoritative_registration_due(&self, peer: PeerId) -> bool {
+        self.pending_route_batches.is_empty()
+            && !self.registration_waits_for_optional_destination(peer)
+            && self
+                .live_sessions
+                .get(&peer)
+                .and_then(|sessions| sessions.last())
+                .is_some_and(|record| {
+                    record.registration_wait_since.is_some() && record.registration_policy_fallback
+                })
     }
 
     // ponytail: past the restart bound, sustained ingest completes the founder
@@ -1089,7 +1113,12 @@ impl RibManager {
     }
 
     fn retire_first_group_page(&mut self, mut job: Box<FirstGroupBuild>) {
-        let mut budget = REGISTRATION_PAGE_SIZE;
+        // A per-client-best build retires candidate rows, not page slots.
+        let mut budget = if job.pcb.is_some() {
+            super::distribution::release_pcb::CANDIDATES_PER_POLL
+        } else {
+            REGISTRATION_PAGE_SIZE
+        };
         if let Some(policy) = &mut job.policy {
             let count = budget.min(policy.retiring.len());
             let retired = policy.retiring.drain(..count);

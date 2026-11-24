@@ -1,6 +1,6 @@
 //! A PCB founder ranks all paths for one prefix before installing that prefix's
 //! winner, source-specific runner-up and RS fallback in its private group.
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use rustbgpd_wire::Prefix;
 
@@ -11,6 +11,13 @@ use super::super::update_groups::{FirstPcbCommit, GroupRibOut};
 use super::RibManager;
 use crate::manager::distribution::ExportMemo;
 
+/// Partial ranks of one prefix that input may discard before the build ranks
+/// it whole within one poll. Repairs coalesce to one key, so a prefix that
+/// changes every poll never overflows the log; without this bound a crowded
+/// prefix whose losing paths keep changing would hold the founder forever.
+/// The forced rank costs that prefix's candidates once, not the table.
+pub(in crate::manager) const RANK_DISCARDS_BEFORE_FORCED: u8 = 2;
+
 #[derive(Default)]
 pub(super) struct FirstGroupPcb {
     page: VecDeque<Prefix>,
@@ -18,6 +25,9 @@ pub(super) struct FirstGroupPcb {
     selection: FirstGroupSelection,
     prepared: Option<PreparedPcb>,
     commit: FirstPcbCommit,
+    // Partial ranks discarded per prefix, until that prefix commits.
+    discarded: HashMap<Prefix, u8>,
+    forced: bool,
 }
 
 impl FirstGroupPcb {
@@ -31,6 +41,15 @@ impl FirstGroupPcb {
     ) -> bool {
         let mut budget = CANDIDATES_PER_POLL;
         let mut took_page = false;
+        // Only a rank carried from an earlier poll is partial. Input that
+        // changed its prefix since then discards it; count the discard.
+        if let Some(prefix) = self.active
+            && manager.loc_rib.registration_candidate_queued(&prefix)
+        {
+            let discards = self.discarded.entry(prefix).or_default();
+            *discards = discards.saturating_add(1);
+            self.discard();
+        }
         loop {
             if self.active.is_none() {
                 if !self.selection.retire(&mut budget) || !self.commit.retire(&mut budget) {
@@ -53,6 +72,10 @@ impl FirstGroupPcb {
                 self.page.pop_front();
                 self.active = Some(prefix);
                 self.selection = FirstGroupSelection::default();
+                self.forced = self
+                    .discarded
+                    .get(&prefix)
+                    .is_some_and(|&discards| discards >= RANK_DISCARDS_BEFORE_FORCED);
             }
             let prefix = self.active.expect("started prefix");
             // A queued repair owns a fresh pass over the current paths. Never
@@ -61,14 +84,20 @@ impl FirstGroupPcb {
                 self.discard();
                 continue;
             }
+            // No input arrives within a poll, so a forced rank always completes.
+            let mut unbounded = usize::MAX;
+            let spend = if self.forced {
+                &mut unbounded
+            } else {
+                &mut budget
+            };
             if self.prepared.is_none() {
-                self.prepared = manager.poll_first_group_pcb(
-                    group,
-                    prefix,
-                    &mut self.selection,
-                    memo,
-                    &mut budget,
-                );
+                #[cfg(test)]
+                if self.forced {
+                    crate::manager::slice_timing::record_work("pcb_forced_ranks", 1);
+                }
+                self.prepared =
+                    manager.poll_first_group_pcb(group, prefix, &mut self.selection, memo, spend);
                 if self.selection.stale {
                     manager
                         .loc_rib
@@ -80,9 +109,10 @@ impl FirstGroupPcb {
             let Some(prepared) = self.prepared.as_mut() else {
                 return false;
             };
-            if !self.commit.prepare(group, prefix, prepared, &mut budget) {
+            if !self.commit.prepare(group, prefix, prepared, spend) {
                 return false;
             }
+            self.discarded.remove(&prefix);
             self.commit.commit(
                 group,
                 prefix,

@@ -435,3 +435,154 @@ fn per_client_best_founder_joins_under_sustained_ingest() {
         "joined only after ingest ended"
     );
 }
+
+fn delivered_rows(rx: &mut mpsc::Receiver<OutboundRouteUpdate>) -> Vec<(Prefix, PeerId)> {
+    let mut seen = Vec::new();
+    while let Ok(update) = rx.try_recv().map(delivered) {
+        seen.extend(update.announce.iter().map(|row| (row.prefix, row.peer)));
+    }
+    seen
+}
+
+// A losing path of a crowded prefix that changes every poll discards each
+// partial rank, and its repairs coalesce to one key, so the log never
+// overflows. The founder must still join while the churn continues.
+#[test]
+fn crowded_prefix_losing_path_churn_still_joins() {
+    use crate::manager::first_group_build::RANK_DISCARDS_BEFORE_FORCED;
+    let (mut manager, _tx, _) = fixture(0);
+    seed(&mut manager, 1, 4_096);
+    let prefix = prefixes(0)[0];
+    let mut rx = register(&mut manager, 1, CLIENT_ASN);
+    assert!(manager.first_group_build.is_some());
+    let mut polls = 0;
+    for round in 0..2_000_u32 {
+        if manager.grouped_member_of(receiver(1)).is_some() {
+            break;
+        }
+        let losing = route(prefix, OTHER, 100 + round % 2);
+        manager.handle_update(test_routes_received(peer_v4(OTHER), vec![losing]));
+        drain_route_chunks(&mut manager);
+        assert_eq!(manager.loc_rib.get(&prefix).unwrap().peer, peer_v4(SOURCE));
+        manager.advance_pending_initial_registration();
+        polls += 1;
+    }
+    eprintln!("joined after {polls} polls of churn");
+    assert!(
+        manager.grouped_member_of(receiver(1)).is_some(),
+        "never joined"
+    );
+    // Discovery, one partial rank per allowed discard, then the forced rank
+    // and publication in one poll, with one poll of slack.
+    let bound = 1 + usize::from(RANK_DISCARDS_BEFORE_FORCED) + 2;
+    assert!(polls <= bound, "{polls} polls > {bound}");
+    assert_eq!(delivered_rows(&mut rx), [(prefix, peer_v4(OTHER))]);
+}
+
+// A founder disconnect while a crowded prefix is partly ranked retires its
+// candidate rows within the same per-poll budget as the build.
+#[test]
+fn crowded_retirement_after_disconnect_stays_within_the_candidate_budget() {
+    let (mut manager, _tx, _) = fixture(0);
+    seed(&mut manager, 1, 4_096);
+    let _rx = register(&mut manager, 1, CLIENT_ASN);
+    for _ in 0..40 {
+        manager.advance_first_group_build();
+    }
+    assert!(
+        manager.first_group_build.is_some(),
+        "rank finished too early"
+    );
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: receiver(1),
+        session_id: 1,
+    });
+    let mut charged = Build::default();
+    for _ in 0..10_000 {
+        if manager.first_group_build.is_none() {
+            break;
+        }
+        let before = snapshot();
+        manager.advance_pending_initial_registration();
+        charged.record(&before, snapshot(), CHARGED);
+    }
+    assert!(manager.first_group_build.is_none());
+    assert!(
+        charged.total["work_units"] > CANDIDATE_BUDGET,
+        "nothing to retire: {:?}",
+        charged.total
+    );
+    assert!(
+        charged.peak["work_units"] <= CANDIDATE_BUDGET,
+        "{:?}",
+        charged.peak
+    );
+}
+
+// The run loop under input that never drains: after the second overflow the
+// founder can no longer pace, and busy turns used to retry only the paced
+// build. It must complete synchronously at a route-batch boundary instead.
+#[tokio::test]
+async fn overflowed_founder_registers_while_input_stays_queued() {
+    const CAP: usize = 2_000;
+    let (mut manager, tx, _) = fixture(0);
+    seed(&mut manager, 8_192, 2);
+    let peer = receiver(1);
+    manager.handle_update(RibUpdate::SetPeerRsControl {
+        peer,
+        session_id: 1,
+        rs_control_asn: Some(RS_ASN),
+    });
+    let (out, mut rx) = mpsc::channel(1 << 16);
+    let mut up = test_peer_up(peer, 1, out);
+    let RibUpdate::PeerUp {
+        peer_asn,
+        per_client_best,
+        ..
+    } = &mut up
+    else {
+        unreachable!()
+    };
+    *peer_asn = CLIENT_ASN;
+    *per_client_best = true;
+    tx.try_send(up).unwrap();
+    let mut tx = Some(tx);
+    let mut actor = Box::pin(manager.run_actor());
+    let (mut polls, mut round, mut joined_at) = (0, 0_u32, None);
+    let manager = poll_fn(|cx| {
+        let result = actor.as_mut().poll(cx);
+        polls += 1;
+        while let Ok(update) = rx.try_recv() {
+            if !update.end_of_rib.is_empty() {
+                joined_at.get_or_insert(polls);
+            }
+        }
+        if let Some(sender) = &tx {
+            if joined_at.is_some() || polls >= CAP {
+                tx = None;
+            } else {
+                // OTHER takes or yields the Loc-RIB win on 1,024 distinct prefixes.
+                let pref = if round % 2 == 0 { 300 } else { 100 };
+                let rows = (0..1_024_u32)
+                    .map(|k| {
+                        let i = u16::try_from((round * 1_024 + k) % 8_192).unwrap();
+                        route(prefixes(i)[0], OTHER, pref)
+                    })
+                    .collect();
+                if sender
+                    .try_send(test_routes_received(peer_v4(OTHER), rows))
+                    .is_ok()
+                {
+                    round += 1;
+                }
+            }
+            cx.waker().wake_by_ref();
+        }
+        result
+    })
+    .await;
+    eprintln!("joined at poll {joined_at:?} after {round} queued updates");
+    assert!(manager.grouped_member_of(peer).is_some());
+    let joined_at = joined_at.expect("no End-of-RIB");
+    assert!(joined_at < CAP / 4, "joined only at poll {joined_at}");
+}

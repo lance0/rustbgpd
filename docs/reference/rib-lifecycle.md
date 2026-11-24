@@ -351,7 +351,9 @@ if needed. Any other session keeps its own Adj-RIB-Out.
     before the group is published. The build ranks only about a dozen prefixes
     per turn, so sustained input can overflow its repair log. After one
     overflow restart, a second overflow completes the member through the
-    one-turn build. The completed group uses the ordinary
+    one-turn build, at the next route-batch boundary even while input stays
+    queued. A crowded prefix whose partial rank input discards twice is
+    ranked whole in one turn, at the cost of that prefix's candidates. The completed group uses the ordinary
     per-client-best initial replay, which sends the receiver’s table in one
     turn. Attaching the first RS-controlled member to an existing group can
     still index the installed table during that member’s registration.
