@@ -100,6 +100,44 @@ pub(super) fn checkpoint_count() -> usize {
     CHECKPOINTS.with_borrow(|counts| counts.values().sum())
 }
 
+/// Allocation growth and checkpointed visits inside one synchronous construction
+/// or member-index call. Replay can start in the very same actor poll.
+#[cfg(test)]
+pub(super) struct GroupBuildWork {
+    checkpoints: usize,
+    rehashed: usize,
+    growing_slots: usize,
+}
+
+#[cfg(test)]
+impl GroupBuildWork {
+    pub(super) fn start() -> Self {
+        Self {
+            checkpoints: checkpoint_count(),
+            rehashed: crate::test_support::REHASHED_KEYS.get(),
+            growing_slots: crate::test_support::GROWING_SLAB_SLOTS.get(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for GroupBuildWork {
+    fn drop(&mut self) {
+        record_work(
+            "group_build_checkpoints",
+            checkpoint_count() - self.checkpoints,
+        );
+        record_work(
+            "group_build_rehashed",
+            crate::test_support::REHASHED_KEYS.get() - self.rehashed,
+        );
+        record_work(
+            "group_build_growing_slots",
+            crate::test_support::GROWING_SLAB_SLOTS.get() - self.growing_slots,
+        );
+    }
+}
+
 /// Charge actual visits made by a build substep to the enclosing actor poll.
 #[cfg(test)]
 pub(super) fn record_work(stage: &'static str, units: usize) {

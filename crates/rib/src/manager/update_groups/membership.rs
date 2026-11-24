@@ -818,8 +818,8 @@ impl RibManager {
 
         if record.registration_policy_fallback
             || record.local_role.is_some()
-            || record.rs_control_asn.is_some()
-            || record.per_client_best
+            || (record.rs_control_asn.is_some() && !record.per_client_best)
+            || (record.per_client_best && (!record.is_ebgp || record.export_policy.is_some()))
             || record.sendable_families.is_empty()
             || record.sendable_families.iter().any(|&family| {
                 !matches!(family, (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast))
@@ -847,18 +847,19 @@ impl RibManager {
                 .live_sessions
                 .get(&peer)
                 .and_then(|sessions| sessions.last())
-                .is_some_and(|record| self.eligible_first_group_key(peer, record).is_some())
+                .is_some_and(|record| {
+                    // The replay journal tracks winner changes. PCB members also
+                    // need lane-only changes and a receiver-specific RS view.
+                    !record.per_client_best && self.eligible_first_group_key(peer, record).is_some()
+                })
     }
 
-    pub(in crate::manager) fn current_first_group_waiter(
+    pub(in crate::manager) fn current_first_group_record(
         &self,
         peer: PeerId,
         gid: usize,
         policy: Option<&PolicyChain>,
-    ) -> Option<(
-        u64,
-        tokio::sync::mpsc::Sender<crate::update::OutboundRouteUpdate>,
-    )> {
+    ) -> Option<&super::super::LiveSessionRecord> {
         let record = self.live_sessions.get(&peer)?.last()?;
         let mut key = self.eligible_first_group_key(peer, record)?;
         let expected = self.update_groups.group_key(gid)?;
@@ -867,7 +868,7 @@ impl RibManager {
             (Some(current), Some(staged)) => current.same_policies(staged),
             (current, staged) => current.is_none() && staged.is_none(),
         };
-        (&key == expected && same_policy).then(|| (record.session_id, record.outbound_tx.clone()))
+        (&key == expected && same_policy).then_some(record)
     }
 
     /// Defer a cold registration and start building when its slot is free.
@@ -1016,7 +1017,7 @@ impl RibManager {
             None,
             record.sendable_families.clone(),
             record.negotiated_llgr_families.clone(),
-            false,
+            key.per_client_best,
             0,
         );
         if record.export_policy.is_some() {
@@ -1049,6 +1050,8 @@ impl RibManager {
         reason = "the ordered family staging and its readiness checkpoints share one group build"
     )]
     pub(in crate::manager) fn ensure_group_table(&mut self, gid: usize, peer: PeerId) {
+        #[cfg(test)]
+        let _work = crate::manager::slice_timing::GroupBuildWork::start();
         if !self.group_ribs.contains_key(&gid) {
             #[cfg(test)]
             if let Some(observer) = &self.replacement_readiness_test_hook {
@@ -1179,6 +1182,8 @@ impl RibManager {
     /// transition commit. Ungrouped peers never pass through it and retain
     /// their independently installed chain.
     pub(super) fn install_group_member(&mut self, gid: usize, peer: PeerId) {
+        #[cfg(test)]
+        let _work = crate::manager::slice_timing::GroupBuildWork::start();
         // Grouped unicast state belongs to GroupRibOut. Install the private
         // multi-family table with no unicast reservation before any family
         // can become its first creator; non-unicast state still lives here,

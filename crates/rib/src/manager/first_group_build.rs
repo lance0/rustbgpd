@@ -1,5 +1,9 @@
 //! Build a cold registration's unicast table privately, one actor turn at a time.
 
+mod pcb;
+#[cfg(test)]
+pub(super) use pcb::RANK_DISCARDS_BEFORE_FORCED;
+
 use std::collections::{BTreeSet, VecDeque};
 
 use rustbgpd_policy::{PolicyChain, PolicyHitCounters};
@@ -28,6 +32,14 @@ use crate::update::RibUpdate;
 /// fit the budget, five spend it). A smaller one replays the session end or
 /// the waiting command sooner under input that does not stop.
 pub(super) const BEHIND_TURNS_BEFORE_SEAL: u16 = 64;
+
+/// Paced per-client-best attempts a founder may lose to repair-log overflow
+/// before it takes the synchronous build. One restart absorbs a single burst,
+/// such as a source's full table arriving as the build starts. A second
+/// overflow means ingest outruns the candidate repairs (about a dozen prefixes
+/// per poll against 1,024-route chunks); another restart would only repeat
+/// discovery, so the founder accepts the parent's one-turn build instead.
+pub(super) const PCB_OVERFLOW_RESTARTS: u8 = 1;
 
 #[cfg(any(test, feature = "bench-internals"))]
 thread_local! {
@@ -63,6 +75,7 @@ pub(super) struct FirstGroupBuild {
     // writer kept a session end retained or another destination waited.
     behind_turns: u16,
     policy: Option<Box<FirstGroupPolicy>>,
+    pcb: Option<Box<pcb::FirstGroupPcb>>,
     table: GroupRibOut,
     // Shares modified attributes across pages, as one synchronous build does.
     memo: ExportMemo,
@@ -90,7 +103,8 @@ pub(super) fn page_memo(memo: &mut ExportMemo) -> &mut ExportMemo {
     // first-group policy can yield one per prefix-specific term. Resetting
     // above one page of sources or two pages of outcomes bounds retention,
     // the per-route outcome scan and the drop at three pages; it never
-    // triggers before the source bound for a reload policy.
+    // triggers before the source bound for a reload policy. A per-client-best
+    // poll adds at most one of each per candidate unit it spends.
     if memo.len() > REGISTRATION_PAGE_SIZE || memo.outcomes() > 2 * REGISTRATION_PAGE_SIZE {
         *memo = ExportMemo::default();
     }
@@ -243,10 +257,20 @@ impl RibManager {
         &mut self,
         peer: PeerId,
         gid: usize,
-        table: GroupRibOut,
+        mut table: GroupRibOut,
     ) -> &mut FirstGroupBuild {
         debug_assert!(self.first_group_slot_available());
         self.loc_rib.start_registration_scan();
+        let pcb = table.per_client_best.then(|| {
+            // A reload destination is never per-client-best (`reload_build_pair`).
+            let record = self.live_sessions[&peer].last().expect("current founder");
+            table.prepare_first_pcb_founder(
+                peer,
+                record.rs_control_asn.map(|rs| (rs, record.peer_asn)),
+            );
+            self.loc_rib.track_registration_candidates();
+            Box::default()
+        });
         let policy = table
             .export_chain
             .as_ref()
@@ -262,6 +286,7 @@ impl RibManager {
             behind_turns: 0,
             table,
             policy,
+            pcb,
             memo: ExportMemo::default(),
         }))
     }
@@ -400,6 +425,7 @@ impl RibManager {
     pub(super) fn first_group_writer_claim(&mut self, update: &RibUpdate) -> bool {
         self.first_group_build
             .as_ref()
+            .filter(|job| job.pcb.is_none())
             .map(|job| job.gid)
             .is_some_and(|gid| self.writer_needs_group(update, gid))
     }
@@ -692,6 +718,12 @@ impl RibManager {
                 return;
             };
             *search += 1;
+            if self.authoritative_registration_due(peer) {
+                self.pending_initial_registrations
+                    .retain(|&queued| queued != peer);
+                self.complete_deferred_registration(peer);
+                return;
+            }
             self.defer_first_group_registration(peer);
             if self.first_group_build.is_none() {
                 return;
@@ -719,17 +751,21 @@ impl RibManager {
             self.release_first_group_writer(job);
             return;
         }
-        let FirstGroupPhase::Scanning(founder) = &job.phase else {
+        if matches!(job.phase, FirstGroupPhase::Retiring) {
             self.retire_first_group_page(job);
             return;
-        };
+        }
         let current = job.writer.is_some()
-            || founder.as_ref().is_some_and(|waiter| {
-                self.current_first_group_waiter(job.peer, job.gid, job.table.export_chain.as_ref())
-                    .is_some_and(|(session, sender)| {
-                        session == waiter.session_id && waiter.sender.same_channel(&sender)
-                    })
-            });
+            || self
+                .current_first_group_record(job.peer, job.gid, job.table.export_chain.as_ref())
+                .is_some_and(|record| {
+                    job.founded_by(job.peer, record)
+                        && (job.pcb.is_none()
+                            || job.table.first_pcb_founder_matches(
+                                job.peer,
+                                record.rs_control_asn.map(|rs| (rs, record.peer_asn)),
+                            ))
+                });
         self.release_abandoned_reservation(&mut job);
         // Input can keep discovery waiting behind repairs for as long as it
         // lasts. Count the turns on which it does so while a retained
@@ -737,7 +773,13 @@ impl RibManager {
         let keeps_waiting = job.reload.is_some()
             || job.other_destination_waits
             || (job.writer.is_some() && self.session_end_retained());
-        if keeps_waiting && self.loc_rib.registration_scan_behind() {
+        if keeps_waiting
+            && (self.loc_rib.registration_scan_behind()
+                || job
+                    .pcb
+                    .as_ref()
+                    .is_some_and(|pcb| pcb.active_changed(&self.loc_rib)))
+        {
             job.behind_turns = job.behind_turns.saturating_add(1);
         }
         let outrun = job.behind_turns >= BEHIND_TURNS_BEFORE_SEAL;
@@ -764,6 +806,12 @@ impl RibManager {
             if job.writer.is_some() && self.session_end_retained() {
                 self.seal_first_group_commit_frontier();
             }
+            if current
+                && job.pcb.is_some()
+                && self.loc_rib.registration_scan_status() == RegistrationScanStatus::Overflow
+            {
+                self.count_pcb_build_overflow(&job);
+            }
             job.stop_scan(&mut self.loc_rib);
             job.phase = FirstGroupPhase::Retiring;
             self.retire_first_group_page(job);
@@ -780,41 +828,44 @@ impl RibManager {
     /// Stage one bounded page. A completed scan can publish only after all
     /// admitted routes and their distribution have reached the commit frontier.
     fn advance_first_group_page(&mut self, mut job: Box<FirstGroupBuild>) {
-        let mut page = self.loc_rib.take_registration_page();
         #[cfg(test)]
-        {
-            super::slice_timing::record_work("first_group_discovery", page.bucket_visits);
-            super::slice_timing::record_work("first_group_repairs", page.repairs);
-        }
-        debug_assert!(page.bucket_visits + page.repairs <= REGISTRATION_PAGE_SIZE);
-        if let Some(policy) = &mut job.policy
-            && !policy.prepare_page(&job.table, &mut page)
-        {
-            self.fallback_policy_first_group(job);
-            return;
-        }
-        if !page.keys.is_empty() {
-            let prefixes = page.keys.into_iter().collect();
-            let memo = page_memo(&mut job.memo);
-            job.table = if job.reload.is_some() {
-                #[cfg(any(test, feature = "bench-internals"))]
-                RELOAD_BUILD_PAGES.with(|pages| pages.set(pages.get() + 1));
-                self.stage_private_group_page(job.gid, job.table, &prefixes, true, memo)
-            } else {
-                self.stage_first_group_page(job.gid, job.table, &prefixes, memo)
-            };
-        }
-        // Errors are never subtracted, so a second one already decides the
-        // fallback at publication. Stop before staging the rest of the table.
-        if job.policy.is_some()
-            && job
-                .table
-                .export_chain
-                .as_ref()
-                .is_some_and(|chain| chain.hit_counters().eval_errors() > 1)
-        {
-            self.fallback_policy_first_group(job);
-            return;
+        let work = super::slice_timing::GroupBuildWork::start();
+        if let Some(pcb) = &mut job.pcb {
+            if !pcb.advance(self, &mut job.table, page_memo(&mut job.memo)) {
+                self.first_group_build = Some(job);
+                return;
+            }
+        } else {
+            let mut page = self.take_first_group_page();
+            if let Some(policy) = &mut job.policy
+                && !policy.prepare_page(&job.table, &mut page)
+            {
+                self.fallback_policy_first_group(job);
+                return;
+            }
+            if !page.keys.is_empty() {
+                let prefixes = page.keys.into_iter().collect();
+                let memo = page_memo(&mut job.memo);
+                job.table = if job.reload.is_some() {
+                    #[cfg(any(test, feature = "bench-internals"))]
+                    RELOAD_BUILD_PAGES.with(|pages| pages.set(pages.get() + 1));
+                    self.stage_private_group_page(job.gid, job.table, &prefixes, true, memo)
+                } else {
+                    self.stage_first_group_page(job.gid, job.table, &prefixes, memo)
+                };
+            }
+            // Errors are never subtracted, so a second one already decides the
+            // fallback at publication. Stop before staging the rest of the table.
+            if job.policy.is_some()
+                && job
+                    .table
+                    .export_chain
+                    .as_ref()
+                    .is_some_and(|chain| chain.hit_counters().eval_errors() > 1)
+            {
+                self.fallback_policy_first_group(job);
+                return;
+            }
         }
         // Once discovery ends, drain a finite ingress frontier. A steady
         // stream can otherwise leave a small repair backlog on *every* page.
@@ -848,7 +899,56 @@ impl RibManager {
                 return;
             }
         }
+        #[cfg(test)]
+        drop(work);
         self.finish_first_group_build(job);
+    }
+
+    /// A founder whose paced build retired for good (overflow past the restart
+    /// bound, or a policy fallback) can never start another one. Busy turns
+    /// otherwise only retry the paced build, so under input that never drains
+    /// it would wait forever. Complete it at a route-batch boundary.
+    fn authoritative_registration_due(&self, peer: PeerId) -> bool {
+        self.pending_route_batches.is_empty()
+            && !self.registration_waits_for_optional_destination(peer)
+            && self
+                .live_sessions
+                .get(&peer)
+                .and_then(|sessions| sessions.last())
+                .is_some_and(|record| {
+                    record.registration_wait_since.is_some() && record.registration_policy_fallback
+                })
+    }
+
+    // ponytail: past the restart bound, sustained ingest completes the founder
+    // through the one-turn `ensure_group_table`. LAN-3470 paces it instead.
+    fn count_pcb_build_overflow(&mut self, job: &FirstGroupBuild) {
+        let Some(record) = self
+            .live_sessions
+            .get_mut(&job.peer)
+            .and_then(|sessions| sessions.last_mut())
+            .filter(|record| job.founded_by(job.peer, record))
+        else {
+            return;
+        };
+        record.registration_pcb_overflows = record.registration_pcb_overflows.saturating_add(1);
+        if record.registration_pcb_overflows > PCB_OVERFLOW_RESTARTS {
+            record.registration_policy_fallback = true;
+            tracing::debug!(peer = %job.peer, "per-client-best build overflowed again; using the synchronous build");
+            #[cfg(test)]
+            super::slice_timing::record_work("pcb_build_overflow_fallback", 1);
+        }
+    }
+
+    fn take_first_group_page(&mut self) -> crate::loc_rib::RegistrationPage {
+        let page = self.loc_rib.take_registration_page();
+        #[cfg(test)]
+        {
+            super::slice_timing::record_work("first_group_discovery", page.bucket_visits);
+            super::slice_timing::record_work("first_group_repairs", page.repairs);
+        }
+        debug_assert!(page.bucket_visits + page.repairs <= REGISTRATION_PAGE_SIZE);
+        page
     }
 
     fn commit_authoritative_reload(
@@ -899,6 +999,8 @@ impl RibManager {
     }
 
     fn finish_first_group_build(&mut self, mut job: Box<FirstGroupBuild>) {
+        #[cfg(test)]
+        let work = super::slice_timing::GroupBuildWork::start();
         if let Some(policy) = &job.policy
             && !policy.finish(
                 job.table
@@ -926,6 +1028,8 @@ impl RibManager {
             self.first_group_build = Some(job);
             return;
         }
+        #[cfg(test)]
+        drop(work);
         if let Some(writer) = job.writer.take() {
             self.paced_policy_destination = Some(gid);
             self.handle_update(*writer);
@@ -1009,7 +1113,12 @@ impl RibManager {
     }
 
     fn retire_first_group_page(&mut self, mut job: Box<FirstGroupBuild>) {
-        let mut budget = REGISTRATION_PAGE_SIZE;
+        // A per-client-best build retires candidate rows, not page slots.
+        let mut budget = if job.pcb.is_some() {
+            super::distribution::release_pcb::CANDIDATES_PER_POLL
+        } else {
+            REGISTRATION_PAGE_SIZE
+        };
         if let Some(policy) = &mut job.policy {
             let count = budget.min(policy.retiring.len());
             let retired = policy.retiring.drain(..count);
@@ -1022,7 +1131,12 @@ impl RibManager {
                 return;
             }
         }
-        if !job.table.retire_first_group_page(budget) {
+        let retired = if let Some(pcb) = &mut job.pcb {
+            pcb.retire(&mut job.table, budget)
+        } else {
+            job.table.retire_first_group_page(budget)
+        };
+        if !retired {
             self.first_group_build = Some(job);
             return;
         }
@@ -1056,6 +1170,10 @@ impl RibManager {
         }
         // Retirement can discard slab handles and overflow can omit a
         // withdrawal. Restart with fresh storage even for the same group key.
+        debug_assert!(
+            job.pcb.is_none(),
+            "a per-client-best build never holds a writer"
+        );
         job.table = job.table.empty_first_group_table();
         job.behind_turns = 0;
         self.loc_rib.start_registration_scan();
@@ -1065,8 +1183,11 @@ impl RibManager {
             .as_ref()
             .map(|chain| FirstGroupPolicy::start(chain, &mut self.loc_rib));
         let founder = self
-            .current_first_group_waiter(job.peer, job.gid, job.table.export_chain.as_ref())
-            .map(|(session_id, sender)| Waiter { session_id, sender });
+            .current_first_group_record(job.peer, job.gid, job.table.export_chain.as_ref())
+            .map(|record| Waiter {
+                session_id: record.session_id,
+                sender: record.outbound_tx.clone(),
+            });
         job.phase = FirstGroupPhase::Scanning(founder);
         self.first_group_build = Some(job);
     }

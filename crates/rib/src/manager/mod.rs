@@ -2245,8 +2245,12 @@ pub(super) struct LiveSessionRecord {
     /// `PeerUp`, or the collision failback that handed an earlier-registered
     /// survivor the registration again. `None` once its registration installs.
     registration_wait_since: Option<tokio::time::Instant>,
-    /// This waiting session must rebuild from authoritative policy inputs after invalidation.
+    /// This waiting session must rebuild from authoritative inputs after
+    /// invalidation: its policy changed mid-build, or input kept overflowing
+    /// its per-client-best repair log.
     registration_policy_fallback: bool,
+    /// Repair-log overflows that retired this session's per-client-best build.
+    registration_pcb_overflows: u8,
     source_context: Option<Arc<crate::update::PeerSourceContext>>,
     /// Interned scope of `source_context`'s interface, resolved at
     /// registration; `DEFAULT` for a numbered neighbor.

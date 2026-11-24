@@ -29,6 +29,59 @@ fn discovered_winners(count: usize) -> (LocRib, Vec<Route>) {
     (loc, routes)
 }
 
+#[test]
+fn candidate_only_changes_belong_to_the_per_client_best_founder() {
+    let mut loc = LocRib::new();
+    let route = registration_route(0);
+    let prefix = route.prefix;
+    let affected = std::collections::HashSet::from([prefix]);
+    assert!(loc.recompute(prefix, [&route].into_iter()));
+    loc.start_registration_scan();
+    loc.start_member_replay_scan(route.peer);
+
+    loc.record_registration_candidate_changes(&affected);
+    assert!(!loc.registration_candidate_queued(&prefix));
+    loc.track_registration_candidates();
+    loc.record_registration_candidate_changes(&affected);
+    loc.record_registration_candidate_changes(&affected);
+    assert!(loc.registration_candidate_queued(&prefix));
+    assert!(!loc.member_replay_change_recorded(route.peer, prefix));
+
+    let discovery = loc.take_registration_page();
+    assert!(discovery.keys.is_empty(), "the repair owns this prefix");
+    let repair = loc.take_registration_page();
+    assert_eq!(repair.keys, [prefix]);
+    assert_eq!(repair.repairs, 1);
+    assert!(!loc.registration_candidate_queued(&prefix));
+
+    // A later mutation must invalidate even a prefix already handed to a
+    // candidate walk. Such a walk may still be between source or path visits.
+    loc.record_registration_candidate_changes(&affected);
+    assert!(loc.registration_candidate_queued(&prefix));
+    assert_eq!(loc.take_registration_page().keys, [prefix]);
+    assert_eq!(
+        loc.registration_scan_status(),
+        RegistrationScanStatus::Ready
+    );
+}
+
+#[test]
+fn bulk_candidate_overflow_invalidates_an_unqueued_partial_walk() {
+    let mut loc = LocRib::new();
+    let prefix = registration_route(0).prefix;
+    loc.start_registration_scan();
+    loc.track_registration_candidates();
+    assert!(loc.begin_bulk_candidate_changes(1));
+    assert!(!loc.registration_candidate_queued(&prefix));
+
+    assert!(!loc.begin_bulk_candidate_changes(super::REGISTRATION_REPAIR_LIMIT + 1));
+    assert_eq!(
+        loc.registration_scan_status(),
+        RegistrationScanStatus::Overflow
+    );
+    assert!(loc.registration_candidate_queued(&prefix));
+}
+
 fn change_next_hops(loc: &mut LocRib, routes: &mut [Route], last_octet: u8) {
     for route in routes {
         route.next_hop = Ipv4Addr::new(192, 0, 2, last_octet).into();

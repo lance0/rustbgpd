@@ -1,4 +1,4 @@
-//! Route-keyed export policy state. A paced first group keeps its ordered
+//! Route-keyed group state. A paced first group keeps its ordered
 //! tables after publication so adoption never has to rehash a full inventory.
 
 use std::collections::BTreeMap;
@@ -79,6 +79,17 @@ impl<K: Hash + Ord, V> PolicyRows<K, V> {
         }
     }
 
+    pub(super) fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        match self {
+            Self::Sharded(map) => map.get_mut(key),
+            Self::Ordered(map) => map.get_mut(key),
+        }
+    }
+
+    pub(super) fn contains_key(&self, key: &K) -> bool {
+        self.get(key).is_some()
+    }
+
     pub(super) fn get_or_default(&mut self, key: K) -> &mut V
     where
         V: Default,
@@ -89,11 +100,11 @@ impl<K: Hash + Ord, V> PolicyRows<K, V> {
         }
     }
 
-    pub(super) fn insert(&mut self, key: K, value: V) {
+    pub(super) fn insert(&mut self, key: K, value: V) -> Option<V> {
         match self {
             Self::Sharded(map) => map.insert(key, value),
             Self::Ordered(map) => map.insert(key, value),
-        };
+        }
     }
 
     pub(super) fn remove(&mut self, key: &K) -> Option<V> {
@@ -126,6 +137,18 @@ impl<K: Hash + Ord, V> PolicyRows<K, V> {
             .into_iter()
             .flatten()
             .chain(ordered.into_iter().flatten())
+    }
+
+    pub(super) fn keys(&self) -> impl Iterator<Item = &K> {
+        self.iter().map(|(key, _)| key)
+    }
+
+    pub(super) fn values(&self) -> impl Iterator<Item = &V> {
+        self.iter().map(|(_, value)| value)
+    }
+
+    pub(super) fn release(&mut self, checkpoint: &mut impl FnMut()) {
+        self.release_with(checkpoint, |entry, _| drop(entry));
     }
 
     pub(super) fn release_with<C: FnMut()>(
@@ -162,5 +185,23 @@ impl<K: Hash + Ord, V> PolicyRows<K, V> {
             *budget -= 1;
         }
         map.is_empty()
+    }
+}
+
+// A paced group must bound growth of each reverse-index set as well as the
+// outer map. Ordinary groups keep the compact sharded representation.
+impl<K: Ord + Hash, L: Ord + Hash> PolicyRows<K, PolicyRows<L, ()>> {
+    #[expect(
+        clippy::zero_sized_map_values,
+        reason = "an ordered key set shares the PolicyRows representation of the sharded index"
+    )]
+    pub(super) fn insert_index_key(&mut self, key: K, value: L) {
+        let set = match self {
+            Self::Sharded(map) => map.get_or_default(key),
+            Self::Ordered(map) => map
+                .entry(key)
+                .or_insert_with(|| PolicyRows::Ordered(BTreeMap::new())),
+        };
+        set.insert(value, ());
     }
 }

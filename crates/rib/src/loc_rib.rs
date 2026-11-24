@@ -65,6 +65,10 @@ impl RegistrationScans {
 
 /// Changes behind the cursor include replacements and withdrawals, so callers
 /// stage each key against the live Loc-RIB even when it now has no winner.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "discovery, repair, candidate tracking and overflow are independent scan states"
+)]
 #[derive(Default)]
 struct RegistrationScan {
     shard: usize,
@@ -72,6 +76,7 @@ struct RegistrationScan {
     discovery_finished: bool,
     rewinds: u16,
     repair_due: bool,
+    track_candidates: bool,
     repairs: VecDeque<Prefix>,
     // Only policy founders need the previous winner of each queued repair.
     displaced: Option<VecDeque<Option<Route>>>,
@@ -107,6 +112,23 @@ impl RegistrationScan {
             self.repairs.push_back(key);
             if let Some(displaced) = &mut self.displaced {
                 displaced.push_back(previous.cloned());
+            }
+        }
+    }
+
+    /// Record keys without winner preimages. An oversized batch of distinct
+    /// keys cannot fit, even if some already have a pending repair.
+    fn record_changes(&mut self, changes: &HashSet<Prefix>) {
+        debug_assert!(self.displaced.is_none());
+        if changes.len() > REGISTRATION_REPAIR_LIMIT {
+            self.overflow = true;
+        }
+        if !self.overflow {
+            for &key in changes {
+                self.record(key, None);
+                if self.overflow {
+                    break;
+                }
             }
         }
     }
@@ -370,6 +392,60 @@ impl LocRib {
         scan.displaced = Some(VecDeque::new());
     }
 
+    /// A per-client-best table depends on all candidate paths, including paths
+    /// that lose global best-path selection. Only its private build owns these
+    /// repairs; member replay scans consume changes to the installed table.
+    pub(crate) fn track_registration_candidates(&mut self) {
+        let scan = self
+            .registration_scans
+            .as_mut()
+            .and_then(|scans| scans.build.as_mut())
+            .expect("fresh private scan");
+        debug_assert!(scan.repairs.is_empty() && scan.displaced.is_none());
+        scan.track_candidates = true;
+    }
+
+    fn candidate_registration_scan(&mut self) -> Option<&mut RegistrationScan> {
+        self.registration_scans
+            .as_mut()
+            .and_then(|scans| scans.build.as_mut())
+            .filter(|scan| scan.track_candidates)
+    }
+
+    pub(crate) fn record_registration_candidate_changes(&mut self, affected: &HashSet<Prefix>) {
+        if let Some(scan) = self.candidate_registration_scan() {
+            scan.record_changes(affected);
+        }
+    }
+
+    /// Bulk recompute can receive a sparse set reserved from the entire
+    /// Adj-RIB-In. Record keys during its existing traversal, avoiding a
+    /// second scan of all the empty buckets.
+    pub(crate) fn begin_bulk_candidate_changes(&mut self, count: usize) -> bool {
+        self.candidate_registration_scan().is_some_and(|scan| {
+            scan.overflow |= count > REGISTRATION_REPAIR_LIMIT;
+            !scan.overflow
+        })
+    }
+
+    pub(crate) fn record_registration_candidate_change(&mut self, prefix: Prefix) {
+        self.candidate_registration_scan()
+            .expect("bulk recompute owns the candidate scan")
+            .record(prefix, None);
+    }
+
+    /// A partial candidate walk holds live Adj-RIB-In positions. Before
+    /// resuming it, leave the next visit to an outstanding repair if any
+    /// candidate for this prefix changed since the walk started.
+    pub(crate) fn registration_candidate_queued(&self, prefix: &Prefix) -> bool {
+        self.registration_scans
+            .as_ref()
+            .and_then(|scans| scans.build.as_ref())
+            .is_some_and(|scan| {
+                scan.track_candidates && (scan.overflow || scan.queued.contains(prefix))
+            })
+    }
+
     pub(crate) fn stop_registration_scan(&mut self) -> VecDeque<Option<Route>> {
         let displaced = self
             .registration_scans
@@ -417,7 +493,7 @@ impl LocRib {
             .as_mut()
             .and_then(|scans| scans.build.as_mut())
             .expect("registration owns a scan");
-        let skip_queued = scan.displaced.is_some();
+        let skip_queued = scan.displaced.is_some() || scan.track_candidates;
         Self::take_scan_page(&self.routes, scan, skip_queued)
     }
 
@@ -461,18 +537,8 @@ impl LocRib {
             return;
         };
         for (peer, scan) in &mut scans.members {
-            if scan.overflow || !targets.contains(peer) {
-                continue;
-            }
-            if changes.len() > REGISTRATION_REPAIR_LIMIT {
-                scan.overflow = true;
-                continue;
-            }
-            for &key in changes {
-                scan.record(key, None);
-                if scan.overflow {
-                    break;
-                }
+            if targets.contains(peer) {
+                scan.record_changes(changes);
             }
         }
     }

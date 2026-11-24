@@ -1,60 +1,21 @@
 //! Rank and evaluate one per-client-best prefix over bounded candidate pages.
-//! The containing group's release transaction fences candidate mutations.
+//! A release fences live candidates. A speculative first group invalidates
+//! the partial rank on candidate mutation before resuming it.
 
-use super::super::update_groups::{GroupEvalAccumulator, PerClientBestPrefixStage, PolicyLabel};
+use super::super::update_groups::{
+    GroupEvalAccumulator, GroupRibOut, PerClientBestPrefixStage, PolicyLabel,
+};
+use super::pcb_rank::{PagedPaths, Path, RankedPaths};
 use super::unicast::{PcbWalk, multipath_candidate_suppressed};
 use super::{
-    ExportMemo, HashMap, PeerId, PolicyChain, PolicyFilteredRouteKey, Prefix, RibManager,
+    ExportMemo, HashMap, PolicyChain, PolicyFilteredRouteKey, Prefix, RibManager,
     UnicastDistributionResult, prefix_family, should_suppress_ibgp_inner,
 };
 use crate::route::Route;
 
 use std::collections::VecDeque;
 
-pub(super) const CANDIDATES_PER_POLL: usize = 128;
-type Path = (PeerId, u32);
-
-/// A heap of identities, compared against the live Adj-RIB-In. The ordinary
-/// comparator ends in the peer endpoint and path ID so distinct paths never tie.
-#[derive(Default)]
-struct RankedPaths(Vec<Path>);
-
-impl RankedPaths {
-    fn push(&mut self, path: Path, precedes: impl Fn(Path, Path) -> bool) {
-        let mut index = self.0.len();
-        self.0.push(path);
-        while index > 0 {
-            let parent = (index - 1) / 2;
-            if !precedes(path, self.0[parent]) {
-                break;
-            }
-            self.0[index] = self.0[parent];
-            index = parent;
-        }
-        self.0[index] = path;
-    }
-
-    fn pop(&mut self, precedes: impl Fn(Path, Path) -> bool) -> Option<Path> {
-        let first = *self.0.first()?;
-        let last = self.0.pop().expect("nonempty ranked paths");
-        if !self.0.is_empty() {
-            let mut index = 0;
-            while 2 * index + 1 < self.0.len() {
-                let mut child = 2 * index + 1;
-                if child + 1 < self.0.len() && precedes(self.0[child + 1], self.0[child]) {
-                    child += 1;
-                }
-                if !precedes(self.0[child], last) {
-                    break;
-                }
-                self.0[index] = self.0[child];
-                index = child;
-            }
-            self.0[index] = last;
-        }
-        Some(first)
-    }
-}
+pub(in crate::manager) const CANDIDATES_PER_POLL: usize = 128;
 
 pub(in crate::manager) struct PreparedPcb {
     pub(in crate::manager) stage: PerClientBestPrefixStage,
@@ -72,15 +33,30 @@ pub(in crate::manager) struct PreparedPcbs {
 }
 
 #[derive(Default)]
-pub(in crate::manager) struct ReleasePcb {
+pub(in crate::manager) struct ReleasePcb<S = Vec<Path>> {
     source: usize,
     after: Option<u32>,
-    ranked: RankedPaths,
+    ranked: S,
     gathered: bool,
+    walk_complete: bool,
+    /// A first group found a ranked path gone; the owner requeues the prefix.
+    pub(in crate::manager) stale: bool,
     walk: PcbWalk,
     rows: UnicastDistributionResult<(PolicyFilteredRouteKey, Option<PolicyLabel>)>,
     evals: VecDeque<GroupEvalAccumulator>,
     otc_blocked: Vec<Route>,
+}
+
+pub(in crate::manager) type FirstGroupSelection = ReleasePcb<PagedPaths>;
+
+impl FirstGroupSelection {
+    /// The owner invalidated a policy-free, role-free first group. Its only
+    /// unbounded scratch is the ranked inventory and its partial fallback.
+    pub(in crate::manager) fn retire(&mut self, budget: &mut usize) -> bool {
+        debug_assert!(self.rows.policy_filtered.is_empty() && self.otc_blocked.is_empty());
+        debug_assert!(self.evals.is_empty());
+        self.ranked.retire(budget) && self.walk.retire_first_group_rows(budget)
+    }
 }
 
 impl RibManager {
@@ -93,17 +69,144 @@ impl RibManager {
         pcb: &mut ReleasePcb,
         budget: &mut usize,
     ) -> Option<PreparedPcb> {
-        let group = self.group_ribs.get(&gid)?;
+        let mut memo = ExportMemo::default();
+        self.poll_pcb_prefix(self.group_ribs.get(&gid)?, prefix, pcb, &mut memo, budget)
+    }
+
+    pub(in crate::manager) fn poll_first_group_pcb(
+        &self,
+        group: &GroupRibOut,
+        prefix: Prefix,
+        pcb: &mut FirstGroupSelection,
+        memo: &mut ExportMemo,
+        budget: &mut usize,
+    ) -> Option<PreparedPcb> {
+        debug_assert!(group.per_client_best && group.is_ebgp);
+        debug_assert!(group.export_chain.is_none() && group.local_role.is_none());
+        // The build's persistent memo shares modified attributes across pages.
+        self.poll_pcb_prefix(group, prefix, pcb, memo, budget)
+    }
+
+    fn poll_pcb_prefix<S: RankedPaths>(
+        &self,
+        group: &GroupRibOut,
+        prefix: Prefix,
+        pcb: &mut ReleasePcb<S>,
+        memo: &mut ExportMemo,
+        budget: &mut usize,
+    ) -> Option<PreparedPcb> {
+        // A release fences its candidates. A first group's capture queues a
+        // fresh rank before any changed path is read again, so a missing path
+        // means a writer bypassed `recompute_best*`: requeue, never panic.
+        let stale = std::cell::Cell::new(false);
+        let route = |(source, path): Path| {
+            let found = self
+                .ribs
+                .get(&source)
+                .and_then(|rib| rib.get(&prefix, path));
+            assert!(
+                S::FIRST_GROUP || found.is_some(),
+                "candidate source is fenced during group staging"
+            );
+            debug_assert!(
+                found.is_some(),
+                "an Adj-RIB-In write skipped candidate capture"
+            );
+            stale.set(stale.get() || found.is_none());
+            found
+        };
+        let precedes = |a, b, budget: &mut usize| {
+            if S::FIRST_GROUP {
+                *budget -= 1;
+                #[cfg(test)]
+                super::super::slice_timing::record_work("first_pcb_comparisons", 1);
+            }
+            match (route(a), route(b)) {
+                (Some(a), Some(b)) => crate::best_path::best_path_cmp(a, b).is_lt(),
+                _ => false,
+            }
+        };
+        let gathered =
+            pcb.gathered || self.gather_pcb_candidates(group, prefix, pcb, budget, precedes);
+        if stale.get() {
+            pcb.stale = true;
+            return None;
+        }
+        if !gathered {
+            return None;
+        }
+
+        let export_pol = group.export_chain.as_ref();
+        let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
+        let mut evals = GroupEvalAccumulator::default();
+        while !pcb.walk_complete && *budget > 0 {
+            if S::FIRST_GROUP && *budget < pcb.ranked.pop_budget() {
+                *budget = 0;
+                break;
+            }
+            *budget -= 1;
+            let Some(path) = pcb.ranked.pop_ranked(|a, b| precedes(a, b, budget)) else {
+                pcb.walk_complete = true;
+                break;
+            };
+            let Some(candidate) = route(path).filter(|_| !stale.get()) else {
+                pcb.stale = true;
+                return None;
+            };
+            if pcb.walk.consume(
+                candidate,
+                (!S::FIRST_GROUP).then_some(&group.table),
+                &prefix,
+                group.local_role,
+                export_pol,
+                needs_as_path_string,
+                memo,
+                &mut evals,
+                &mut pcb.rows,
+                &mut pcb.otc_blocked,
+                &mut || {},
+            ) {
+                pcb.walk_complete = true;
+                break;
+            }
+        }
+        // The synchronous first-group builder discards speculative pass
+        // evaluations. Member counters come from the completed table on join.
+        if !S::FIRST_GROUP && !evals.is_empty() {
+            pcb.evals.push_back(evals);
+        }
+        if !pcb.walk_complete || (S::FIRST_GROUP && !pcb.ranked.retire(budget)) {
+            return None;
+        }
+        Some(PreparedPcb {
+            stage: std::mem::take(&mut pcb.walk).finish(
+                &group.table,
+                &prefix,
+                &mut pcb.rows,
+                &mut || {},
+            ),
+            rows: std::mem::take(&mut pcb.rows),
+            evals: std::mem::take(&mut pcb.evals),
+            otc_blocked: std::mem::take(&mut pcb.otc_blocked),
+        })
+    }
+
+    fn gather_pcb_candidates<S: RankedPaths>(
+        &self,
+        group: &GroupRibOut,
+        prefix: Prefix,
+        pcb: &mut ReleasePcb<S>,
+        budget: &mut usize,
+        precedes: impl Fn(Path, Path, &mut usize) -> bool,
+    ) -> bool {
         let family = prefix_family(&prefix);
         let local_only = self.selection_deferred(family);
-        let route = |(source, path): Path| {
-            self.ribs[&source]
-                .get(&prefix, path)
-                .expect("candidate source is fenced during group staging")
-        };
-        let precedes = |a, b| crate::best_path::best_path_cmp(route(a), route(b)).is_lt();
         pcb.gathered |= !group.sendable.contains(&family);
         while !pcb.gathered && *budget > 0 {
+            #[cfg(test)]
+            if S::FIRST_GROUP {
+                super::super::slice_timing::record_work("first_pcb_source_probes", 1);
+            }
             let Some(epoch) = self.unicast_prefix_peers.epochs(&prefix).nth(pcb.source) else {
                 pcb.gathered = true;
                 break;
@@ -115,12 +218,22 @@ impl RibManager {
                 .into_iter()
                 .flatten();
             while *budget > 0 {
+                // A sift never crosses a poll. Reserve its worst case, then
+                // charge only the comparisons actually performed.
+                if S::FIRST_GROUP && *budget < pcb.ranked.push_budget() {
+                    *budget = 0;
+                    return false;
+                }
                 *budget -= 1;
                 let Some(candidate) = paths.next() else {
                     pcb.source += 1;
                     pcb.after = None;
                     break;
                 };
+                #[cfg(test)]
+                if S::FIRST_GROUP {
+                    super::super::slice_timing::record_work("first_pcb_gathered", 1);
+                }
                 pcb.after = Some(candidate.path_id);
                 if (!local_only || super::unicast_deferral_exempt(candidate))
                     && crate::srv6::unicast_eligible(candidate)
@@ -140,58 +253,13 @@ impl RibManager {
                         Some(&group.llgr),
                     )
                 {
-                    pcb.ranked.push(
+                    pcb.ranked.push_ranked(
                         (source.expect("candidate has source"), candidate.path_id),
-                        precedes,
+                        |a, b| precedes(a, b, budget),
                     );
                 }
             }
         }
-        if !pcb.gathered {
-            return None;
-        }
-
-        let export_pol = group.export_chain.as_ref();
-        let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
-        let mut memo = ExportMemo::default();
-        let mut done = false;
-        let mut evals = GroupEvalAccumulator::default();
-        while *budget > 0 {
-            *budget -= 1;
-            let Some(path) = pcb.ranked.pop(precedes) else {
-                done = true;
-                break;
-            };
-            if pcb.walk.consume(
-                route(path),
-                &group.table,
-                &prefix,
-                group.local_role,
-                export_pol,
-                needs_as_path_string,
-                &mut memo,
-                &mut evals,
-                &mut pcb.rows,
-                &mut pcb.otc_blocked,
-                &mut || {},
-            ) {
-                done = true;
-                break;
-            }
-        }
-        if !evals.is_empty() {
-            pcb.evals.push_back(evals);
-        }
-        done.then(|| PreparedPcb {
-            stage: std::mem::take(&mut pcb.walk).finish(
-                &group.table,
-                &prefix,
-                &mut pcb.rows,
-                &mut || {},
-            ),
-            rows: std::mem::take(&mut pcb.rows),
-            evals: std::mem::take(&mut pcb.evals),
-            otc_blocked: std::mem::take(&mut pcb.otc_blocked),
-        })
+        pcb.gathered
     }
 }

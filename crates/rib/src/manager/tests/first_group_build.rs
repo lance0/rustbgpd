@@ -3100,6 +3100,8 @@ mod authoritative_reload;
 mod authoritative_scope;
 mod initial_member_replay;
 mod member_replay_work;
+mod pcb_work;
+mod per_client_best_oracle;
 mod policy_fallback;
 mod policy_oracle;
 mod policy_work;

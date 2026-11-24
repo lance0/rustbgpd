@@ -45,6 +45,14 @@ expect burst-missed '/ 11-cand-plain-burst /s/fallback=1/fallback=0/' PASS INVAL
 expect run-failed '/ 05-parent-plain-mixed /s/rc=0/rc=1/' INVALID PASS
 expect compiler '/ 06-cand-plain-mixed /s/compiler_samples=0/compiler_samples=3/' PASS INVALID
 expect missing-summary '/ 03-cand-plain-clean /s/worst_wait_us=1500//' PASS INVALID
+expect missing-wait '/ 03-cand-plain-clean /s/ worst_wait_us=1500//' PASS INVALID
+expect missing-fallback '/ 05-parent-plain-mixed /s/ fallback=0//' INVALID PASS
+expect fallback-not-binary '/ 06-cand-plain-mixed /s/fallback=0/fallback=2/' PASS INVALID
+expect missing-rc '/ 02-cand-plain-clean /s/ rc=0//' PASS INVALID
+expect missing-compiler-samples '/ 08-parent-plain-mixed /s/ compiler_samples=0//' INVALID PASS
+expect control-missing-rc '/ ctl-cand-clean /s/ rc=0//' INVALID INVALID
+expect control-missing-compiler-samples '/ ctl-parent-mixed /s/ compiler_samples=0//' INVALID INVALID
+expect control-missing-fallback '/ ctl-cand-burst /s/ fallback=0//' INVALID INVALID
 expect missing-run '/ 24-parent-policy-burst /d' INVALID PASS
 expect control-failed '/ ctl-cand-burst /s/rc=0/rc=1/' INVALID INVALID
 expect control-missing '/ ctl-parent-budget-control /d' INVALID INVALID

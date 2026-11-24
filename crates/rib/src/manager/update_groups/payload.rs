@@ -126,6 +126,8 @@ impl PriorGroupSlots {
             policy_label: None,
         };
         resolve_member_slot(
+            #[cfg(test)]
+            false,
             member,
             rs_control,
             winner,
@@ -145,6 +147,7 @@ impl PriorGroupSlots {
 /// require them. OTC-marked diagnostic rows in a blocking-role list
 /// cannot supply the member's advertised slot.
 pub(in crate::manager) fn resolve_member_slot<'a>(
+    #[cfg(test)] counting_index: bool,
     member: PeerId,
     rs_control: Option<(u32, u32)>,
     winner: AdvEntry<'a>,
@@ -171,7 +174,13 @@ pub(in crate::manager) fn resolve_member_slot<'a>(
             }
             fallback
                 .iter()
-                .filter(|row| !fallback.blocks(row))
+                .filter(|row| {
+                    #[cfg(test)]
+                    if counting_index {
+                        crate::manager::slice_timing::record_work("pcb_rs_fallback_search", 1);
+                    }
+                    !fallback.blocks(row)
+                })
                 .map(RunnerUp::adv_entry)
                 .find(|entry| entry.route.peer != member && eligible(entry))
         }

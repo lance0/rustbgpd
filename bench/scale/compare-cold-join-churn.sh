@@ -11,11 +11,18 @@
 # `--verdict TIMELINE` regrades an existing timeline.
 set -euo pipefail
 # Verdict per arm. Each of the 8 controls and the 24 scheduled runs must appear
-# exactly once, exit 0 and see no compiler sample, or the arm is INVALID. Then
+# exactly once, report numeric rc, compiler_samples and worst_wait_us and a
+# fallback of 0 or 1, exit 0 and see no compiler sample, or the arm is INVALID.
+# AWK reads an absent field as 0, so a missing field must never pass. Then
 # each clean/mixed run waits <= 200 ms, clean completes paced, mixed reports its
 # fallback count (bar: 0), and burst is report-only but must fall back.
 verdict() {
     awk '
+        function num(k) { return (k in kv) && kv[k] ~ /^[0-9]+$/ }
+        function complete() {
+            return num("rc") && num("compiler_samples") && num("worst_wait_us") &&
+                ("fallback" in kv) && (kv["fallback"] == "0" || kv["fallback"] == "1")
+        }
         BEGIN {
             split("parent cand", arms, " "); split("clean mixed burst budget-control", ctl_cells, " ")
             split("plain policy", profiles, " "); split("clean mixed burst", cells, " ")
@@ -29,12 +36,12 @@ verdict() {
             name = $3; split(name, id, "-"); cell = id[4]; delete kv
             for (i = 4; i <= NF; i++) { split($i, f, "="); kv[f[1]] = f[2] }
             if (name in control) {
-                if (++control_seen[name] > 1 || kv["rc"] != 0 || kv["compiler_samples"] != 0) ctl_bad++
+                if (++control_seen[name] > 1 || !complete() || kv["rc"] != 0 || kv["compiler_samples"] != 0) ctl_bad++
                 next
             }
             if (!(name in scheduled)) { stray++; next }
             arm = scheduled[name]; runs[arm]++
-            if (++seen[name] > 1 || kv["rc"] != 0 || kv["compiler_samples"] != 0 || kv["worst_wait_us"] == "") {
+            if (++seen[name] > 1 || !complete() || kv["rc"] != 0 || kv["compiler_samples"] != 0) {
                 bad[arm]++; next
             }
             if (cell != "burst" && kv["worst_wait_us"] > 200000) wait_fail[arm]++

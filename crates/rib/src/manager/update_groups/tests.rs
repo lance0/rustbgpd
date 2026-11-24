@@ -701,7 +701,7 @@ fn runner_up_grows_one_shard_per_insert() {
                 }),
             );
         },
-        |group| group.runner_up.capacity(),
+        |group| group.runner_up.sharded().capacity(),
     );
 }
 

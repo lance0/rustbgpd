@@ -2474,6 +2474,7 @@ impl RibManager {
             session_id,
             registration_wait_since: None,
             registration_policy_fallback: false,
+            registration_pcb_overflows: 0,
             source_context,
             peer_scope,
             peer_group: self
@@ -2989,6 +2990,7 @@ impl RibManager {
         // This session's registration wait ends here.
         record.registration_wait_since = None;
         record.registration_policy_fallback = false;
+        record.registration_pcb_overflows = 0;
         let orf_refresh = std::mem::take(&mut record.registration_orf_refresh);
         let session_id = record.session_id;
         let outbound_tx = record.outbound_tx.clone();
