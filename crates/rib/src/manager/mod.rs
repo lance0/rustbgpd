@@ -8224,6 +8224,10 @@ impl RibManager {
         let latch_released = Arc::clone(&self.outbound_latch_released);
         let mut query_rx_open = true;
         let mut primary_run = PrimaryRunBudget::default();
+        // Whether the previous iteration ran a departure turn, and the longest
+        // unit the live departure has run so far.
+        let mut departure_turn = false;
+        let mut longest_departure_unit = std::time::Duration::ZERO;
         // Start of the primary work admitted since the last prestage slice.
         let mut prestage_primary_since: Option<std::time::Instant> = None;
         let mut release_primary_due = true;
@@ -8278,22 +8282,40 @@ impl RibManager {
                     );
                     return self;
                 }
+                // The poll that started this departure also tore down its
+                // source. Give the departure's units a poll of their own.
+                if !departure_turn {
+                    departure_turn = true;
+                    longest_departure_unit = std::time::Duration::ZERO;
+                    self.drain_readiness_queries(None);
+                    #[cfg(test)]
+                    if let Some(check) = self.actor_turn_check {
+                        check(&self);
+                    }
+                    tokio::task::yield_now().await;
+                    continue;
+                }
                 // While nothing admissible waits, run consecutive departure
                 // units for a short budget. The first queued message, a lost
-                // notice lane or the budget ends the turn.
-                let started = std::time::Instant::now();
+                // notice lane or a unit that would not fit ends the turn: the
+                // next unit may cost as much as the longest one so far.
+                let started = source_departure::quiet_clock();
                 let budget = source_departure::QUIET_LOOP_BUDGET.min(self.flush_poll_budget);
                 loop {
+                    let unit = source_departure::quiet_clock();
                     let departed = self.poll_source_departure_turn();
                     #[cfg(test)]
                     {
                         self.departure_units_this_turn += 1;
+                        source_departure::charge_quiet_unit();
                     }
+                    let now = source_departure::quiet_clock();
+                    longest_departure_unit = longest_departure_unit.max(now - unit);
                     if !departed
                         || self.source_departure.is_none()
                         || self.dampening_history.notice_failed()
                         || !self.source_departure_quiet()
-                        || started.elapsed() >= budget
+                        || now - started + longest_departure_unit >= budget
                     {
                         break;
                     }
@@ -8310,6 +8332,7 @@ impl RibManager {
                 tokio::task::yield_now().await;
                 continue;
             }
+            departure_turn = false;
             // A staged group delta must reach its members before another mutation
             // can change the shared table or membership. Yield the executor on
             // every bounded member poll; admit primary traffic at the batch seam.

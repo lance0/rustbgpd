@@ -10,7 +10,8 @@ use super::lifecycle::{test_peer_up, test_routes_received};
 use super::*;
 use crate::manager::source_departure::{
     DEPARTURE_MEMBERS_PER_POLL, KEYS_PER_PAGE, MEMBERS_PER_PAGE, RECEIVER_ROWS_PER_POLL,
-    WIDE_KEYS_PER_PAGE, take_flowspec_withdrawal_work, take_receiver_rows,
+    WIDE_KEYS_PER_PAGE, set_quiet_unit_cost, take_departure_pages, take_flowspec_withdrawal_work,
+    take_receiver_rows,
 };
 
 const SOURCE: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 1);
@@ -683,7 +684,7 @@ fn queued_departure(shape: Shape, count: u16, rows: u32, head: RibUpdate) -> Pol
     assert!(manager.source_departure.is_some());
     take_receiver_rows();
     let (mut envelope, mut emitted, mut inspected, mut polls, mut pressured) = (0, 0, 0, 0, 0);
-    let mut members = 0;
+    let (mut members, mut envelopes) = (0, 0);
     while manager.source_departure.is_some() {
         pressured += usize::from(!manager.source_departure_quiet());
         let scans = manager.adj_rib_out_commit_stats.owed_peer_scans;
@@ -701,6 +702,7 @@ fn queued_departure(shape: Shape, count: u16, rows: u32, head: RibUpdate) -> Pol
             }
             reached += usize::from(got);
         }
+        envelopes += reached;
         emitted = emitted.max(sent);
         // Members classified or delivered to in this poll.
         members = members
@@ -711,7 +713,7 @@ fn queued_departure(shape: Shape, count: u16, rows: u32, head: RibUpdate) -> Pol
         inspected,
         emitted,
         envelope,
-        envelopes: 0,
+        envelopes,
         polls,
         members,
         pressured,
@@ -770,6 +772,116 @@ fn a_one_key_departure_to_a_large_group_visits_bounded_members_per_poll() {
             );
         }
     }
+}
+
+/// A flap-storm departure: 572 keys toward a 699-member route-server group,
+/// with the next `PeerDown` queued behind it. Every key page visits every
+/// member, and that visit costs more than its keys, so the quiet page width
+/// must not shrink with the roster.
+#[test]
+fn a_flap_storm_departure_visits_each_member_once() {
+    const KEYS: u32 = 572;
+    const MEMBERS: u16 = 699;
+    for (head, quiet) in [
+        (down(OTHER), true),
+        (announce(OTHER, probe_prefix()), false),
+    ] {
+        take_departure_pages();
+        let counts = queued_departure(Shape::RsControl, MEMBERS, KEYS, head);
+        let pages = take_departure_pages();
+        eprintln!(
+            "RS flap departure quiet={quiet} keys={KEYS} members={MEMBERS}: pages={pages} member_envelopes={} polls={} max_members_per_poll={}",
+            counts.envelopes, counts.polls, counts.members
+        );
+        assert_eq!(counts.pressured == 0, quiet);
+        // A waiting UPDATE keeps the pressured page width.
+        let bound = if quiet {
+            1
+        } else {
+            usize::try_from(KEYS).unwrap().div_ceil(WIDE_KEYS_PER_PAGE)
+        };
+        assert!(
+            pages <= bound,
+            "quiet={quiet}: {pages} pages, bound {bound}"
+        );
+        assert!(
+            counts.envelopes <= bound * usize::from(MEMBERS),
+            "quiet={quiet}: {} member envelopes",
+            counts.envelopes
+        );
+        assert!(counts.members <= DEPARTURE_MEMBERS_PER_POLL);
+    }
+}
+
+thread_local! {
+    static FIRST_DEPARTURE_TURN: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+fn observe_quiet_turn(manager: &RibManager) {
+    if manager.source_departure.is_some() && FIRST_DEPARTURE_TURN.get().is_none() {
+        FIRST_DEPARTURE_TURN.set(Some(manager.departure_units_this_turn));
+    }
+    MOST_UNITS_PER_TURN.set(
+        MOST_UNITS_PER_TURN
+            .get()
+            .max(manager.departure_units_this_turn),
+    );
+}
+
+/// The quiet loop starts a unit only if one as long as the longest so far
+/// still fits its budget, and the poll that tears the source down runs no
+/// unit. A fake clock charges each unit 3 ms against the 10 ms budget.
+#[tokio::test(start_paused = true)]
+async fn the_quiet_loop_starts_only_units_that_fit_its_budget() {
+    let (tx, rx) = mpsc::channel(16);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.outbound_row_credit_override = None;
+    super::distribution_window::untimed_window(&mut manager);
+    for source in [SOURCE, OTHER] {
+        register_test_peer(&mut manager, peer_v4(source), 0);
+    }
+    let _no_exports = register_source_only(&mut manager);
+    let mut receivers: Vec<_> = (0..64)
+        .map(|index| join(&mut manager, index, Shape::RsControl))
+        .collect();
+    seed(&mut manager, Shape::RsControl, ROWS);
+    for rx in &mut receivers {
+        assert_initial(rx, Shape::RsControl, ROWS);
+    }
+    // The second PeerDown fences the first departure, so every unit is quiet.
+    tx.try_send(down(SOURCE)).unwrap();
+    tx.try_send(down(OTHER)).unwrap();
+    drop(tx);
+    FIRST_DEPARTURE_TURN.set(None);
+    MOST_UNITS_PER_TURN.set(0);
+    manager.actor_turn_check = Some(observe_quiet_turn);
+    let cost = Duration::from_millis(3);
+    let budget = crate::manager::source_departure::QUIET_LOOP_BUDGET;
+    assert!(manager.flush_poll_budget >= budget);
+    set_quiet_unit_cost(Some(cost));
+    let end = Box::pin(manager.run_actor()).await;
+    set_quiet_unit_cost(None);
+    assert!(end.source_departure.is_none());
+    for rx in &mut receivers {
+        let updates: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok().map(delivered)).collect();
+        let withdrawn: usize = updates
+            .iter()
+            .map(|update| update.unicast_withdrawals().count())
+            .sum();
+        assert_eq!(withdrawn, usize::try_from(ROWS).unwrap());
+    }
+    let most = MOST_UNITS_PER_TURN.get();
+    let fit = usize::try_from(budget.as_millis() / cost.as_millis()).unwrap();
+    eprintln!("quiet loop: unit=3ms budget={budget:?} most_units_per_turn={most}");
+    assert_eq!(
+        FIRST_DEPARTURE_TURN.get(),
+        Some(0),
+        "teardown poll ran units"
+    );
+    assert!(
+        most > 1 && u32::try_from(most).unwrap() * cost <= budget,
+        "{most} units of {cost:?} in one turn, budget {budget:?} (fit {fit})"
+    );
 }
 
 /// The next `PeerDown` cannot run before this departure ends. Fencing it when

@@ -9,8 +9,9 @@ use crate::route::{FlowSpecKey, Route};
 use std::collections::hash_set;
 
 pub(super) const KEYS_PER_PAGE: usize = 16;
-/// Keys in a shared group page and in the widest quiet page. One poll stages
-/// the whole page, so this bounds per-key stage work rather than member work.
+/// Keys in a pressured shared group page and in a quiet private or FlowSpec
+/// page. One poll stages the whole page, so this bounds per-key stage work
+/// rather than member work.
 pub(super) const WIDE_KEYS_PER_PAGE: usize = 256;
 pub(super) const MEMBERS_PER_PAGE: usize = 8;
 /// A teardown above this many receiver-keys is paced instead of running in
@@ -24,14 +25,48 @@ pub(super) const RECEIVER_ROWS_PER_POLL: usize = 16_384;
 /// also costs an envelope, a commit and an End-of-RIB check that the
 /// receiver-key budget does not count.
 pub(super) const DEPARTURE_MEMBERS_PER_POLL: usize = 256;
-const QUIET_PAGE_RECEIVER_KEYS: usize = 65_536;
+/// Keys in a quiet shared group page: the keys of one ordinary route chunk,
+/// so its stage poll does no more work than an ordinary UPDATE turn. Every
+/// page visits each member once, and that visit costs more than its keys, so
+/// the width does not shrink with the roster. A typical departure of up to
+/// this many keys reaches each member once.
+const QUIET_GROUP_KEYS_PER_PAGE: usize = super::ROUTES_RECEIVED_CHUNK_SIZE;
 /// Receiver-keys one quiet unit may visit on a private or FlowSpec page; at
 /// about 0.4 µs per private receiver-key this keeps a single unit near 3 ms.
 /// A wide group page takes the larger receiver-key budget instead.
 pub(super) const QUIET_UNIT_RECEIVER_KEYS: usize = 8_192;
 /// Wall-clock budget for consecutive quiet units in one actor turn. It sits
-/// well below the waiting-UPDATE delay bar, leaving room for the last unit.
+/// well below the waiting-UPDATE delay bar. A unit starts only if one as long
+/// as the departure's longest so far still ends within it.
 pub(super) const QUIET_LOOP_BUDGET: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// The quiet loop's clock. Tests give each unit a fixed cost instead.
+pub(super) fn quiet_clock() -> std::time::Instant {
+    #[cfg(test)]
+    if let Some((now, _)) = QUIET_CLOCK.get() {
+        return now;
+    }
+    std::time::Instant::now()
+}
+
+#[cfg(test)]
+thread_local! {
+    static QUIET_CLOCK: std::cell::Cell<Option<(std::time::Instant, std::time::Duration)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Run the quiet loop on a fake clock that advances `cost` per unit.
+#[cfg(test)]
+pub(super) fn set_quiet_unit_cost(cost: Option<std::time::Duration>) {
+    QUIET_CLOCK.set(cost.map(|cost| (std::time::Instant::now(), cost)));
+}
+
+#[cfg(test)]
+pub(super) fn charge_quiet_unit() {
+    if let Some((now, cost)) = QUIET_CLOCK.get() {
+        QUIET_CLOCK.set(Some((now + cost, cost)));
+    }
+}
 
 /// Members one quiet delivery unit covers for a page of `keys` receiver-keys.
 pub(super) fn quiet_delivery_members(keys: usize) -> usize {
@@ -93,20 +128,18 @@ impl SourceDeparture {
     }
 
     fn next_page(&mut self, quiet: bool) -> Option<Page> {
-        // An arrival must wait for the pinned page to reach its entire roster.
-        // A one-key page still has to reach every member of a larger roster.
-        let quiet_width =
-            (QUIET_PAGE_RECEIVER_KEYS / self.peers.len().max(1)).clamp(1, WIDE_KEYS_PER_PAGE);
-        let page_width = |remaining: usize, queued_width, can_widen| {
-            if quiet {
-                // Leave a seam for an arrival just after the empty observation,
-                // even when the wider page could consume the entire remainder.
-                let limit = if can_widen {
-                    quiet_width
-                } else {
-                    quiet_width.min(queued_width)
-                };
-                limit.min(remaining.saturating_sub(1).max(1))
+        // An arrival waits for the pinned page to reach its entire roster:
+        // at most one visit of each member, as under pressure. A waiting
+        // UPDATE keeps the pressured width, which bounds that visit.
+        // A fenced head cannot run before the departure ends, so only an
+        // empty FIFO keeps a seam for an arrival just after the empty
+        // observation, even when the wider page could consume the remainder.
+        let seam = !matches!(self.primary, PrimaryTurn::Fenced);
+        let page_width = |remaining: usize, queued_width: usize, quiet_width: usize| {
+            if quiet && seam {
+                quiet_width.min(remaining.saturating_sub(1).max(1))
+            } else if quiet {
+                quiet_width
             } else {
                 queued_width
             }
@@ -114,15 +147,13 @@ impl SourceDeparture {
         for (index, keys) in self.unicast.iter_mut().enumerate() {
             if !keys.is_empty() {
                 let shared = self.exporters[index] == Exporters::PlainGroups;
-                let key_limit = page_width(
-                    keys.len(),
-                    if shared {
-                        WIDE_KEYS_PER_PAGE
-                    } else {
-                        KEYS_PER_PAGE
-                    },
-                    self.exporters[index] != Exporters::Mixed,
-                );
+                let key_limit = match self.exporters[index] {
+                    Exporters::PlainGroups => {
+                        page_width(keys.len(), WIDE_KEYS_PER_PAGE, QUIET_GROUP_KEYS_PER_PAGE)
+                    }
+                    Exporters::Private => page_width(keys.len(), KEYS_PER_PAGE, WIDE_KEYS_PER_PAGE),
+                    Exporters::Mixed => page_width(keys.len(), KEYS_PER_PAGE, KEYS_PER_PAGE),
+                };
                 let mut page: HashSet<_> =
                     keys.drain(keys.len().saturating_sub(key_limit)..).collect();
                 let held = page
@@ -136,7 +167,7 @@ impl SourceDeparture {
                 ))));
             }
         }
-        let width = page_width(self.flowspec.len(), KEYS_PER_PAGE, true);
+        let width = page_width(self.flowspec.len(), KEYS_PER_PAGE, WIDE_KEYS_PER_PAGE);
         let keys: HashSet<_> = self.flowspec.by_ref().take(width).collect();
         (!keys.is_empty()).then_some(Page::FlowSpec { keys, next: 0 })
     }
@@ -397,7 +428,15 @@ impl RibManager {
             .source_departure
             .as_mut()
             .expect("departure owns the actor");
-        let Some(mut page) = work.page.take().or_else(|| work.next_page(quiet)) else {
+        let page = work.page.take().or_else(|| {
+            let page = work.next_page(quiet);
+            #[cfg(test)]
+            if page.is_some() {
+                DEPARTURE_PAGES.set(DEPARTURE_PAGES.get() + 1);
+            }
+            page
+        });
+        let Some(mut page) = page else {
             self.source_departure = None;
             // The last admitted export can release the final strong reference
             // to a departed route's attributes. Use the same retirement owner
@@ -505,6 +544,7 @@ impl RibManager {
 #[cfg(test)]
 thread_local! {
     static RECEIVER_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static DEPARTURE_PAGES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static FLOWSPEC_WITHDRAWAL_WORK: std::cell::Cell<(usize, usize, usize)> =
         const { std::cell::Cell::new((0, 0, 0)) };
 }
@@ -528,4 +568,10 @@ pub(super) fn inspect_receiver_row() {
 #[cfg(test)]
 pub(super) fn take_receiver_rows() -> usize {
     RECEIVER_ROWS.replace(0)
+}
+
+/// Key pages departures have opened on this thread since the last call.
+#[cfg(test)]
+pub(super) fn take_departure_pages() -> usize {
+    DEPARTURE_PAGES.replace(0)
 }
