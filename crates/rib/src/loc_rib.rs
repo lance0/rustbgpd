@@ -518,6 +518,18 @@ impl LocRib {
             .is_some_and(|scan| scan.queued.contains(&prefix))
     }
 
+    /// Queue a repair for a group change that wrote no Loc-RIB row. `false`
+    /// once the member's repair log has overflowed.
+    pub(crate) fn record_member_replay_change(&mut self, peer: PeerId, prefix: Prefix) -> bool {
+        let scan = self
+            .registration_scans
+            .as_mut()
+            .and_then(|scans| scans.members.get_mut(&peer))
+            .expect("active replay");
+        scan.record(prefix, None);
+        !scan.overflow
+    }
+
     pub(crate) fn take_member_replay_page(&mut self, peer: PeerId) -> RegistrationPage {
         let scan = self
             .registration_scans

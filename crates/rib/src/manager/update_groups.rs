@@ -1720,6 +1720,11 @@ impl GroupRibOut {
             .is_some()
     }
 
+    /// The fallback rows an RS-control member's slot at `prefix` may search.
+    pub(in crate::manager) fn rs_fallback_rows(&self, prefix: &Prefix) -> usize {
+        self.rs_fallback.get(prefix).map_or(0, |rows| rows.len())
+    }
+
     pub(in crate::manager) fn runner_up_count(&self) -> usize {
         self.runner_up.len()
     }
@@ -1933,21 +1938,24 @@ impl GroupRibOut {
         counts[1] += delta[1];
     }
 
-    /// Staged unicast slots of a plain group sourced by anyone but
-    /// `member`, optionally limited to one unicast family: exactly the
-    /// `adv(m)` permit slots of a group with no exception lane.
-    pub(in crate::manager) fn plain_permit_count(
+    /// Staged unicast slots sourced by anyone but `member`, plus the
+    /// member's lane substitutions, optionally limited to one unicast
+    /// family: exactly the `adv(m)` permit slots without RS control. A
+    /// plain group has no lane.
+    pub(in crate::manager) fn unicast_permit_count(
         &self,
         member: PeerId,
         family: Option<(Afi, Safi)>,
     ) -> u64 {
-        debug_assert!(!self.per_client_best, "lane slots are not derivable");
         let own = self.source_counts.get(&member).copied().unwrap_or_default();
+        let lane = self.lane_counts.get(&member).copied().unwrap_or_default();
         [(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)]
             .into_iter()
             .enumerate()
             .filter(|(_, slot_family)| family.is_none_or(|family| family == *slot_family))
-            .map(|(slot, _)| self.family_totals[slot].saturating_sub(own[slot]) as u64)
+            .map(|(slot, _)| {
+                (self.family_totals[slot].saturating_sub(own[slot]) + lane[slot]) as u64
+            })
             .sum()
     }
 

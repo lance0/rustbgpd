@@ -847,11 +847,7 @@ impl RibManager {
                 .live_sessions
                 .get(&peer)
                 .and_then(|sessions| sessions.last())
-                .is_some_and(|record| {
-                    // The replay journal tracks winner changes. PCB members also
-                    // need lane-only changes and a receiver-specific RS view.
-                    !record.per_client_best && self.eligible_first_group_key(peer, record).is_some()
-                })
+                .is_some_and(|record| self.eligible_first_group_key(peer, record).is_some())
     }
 
     pub(in crate::manager) fn current_first_group_record(
