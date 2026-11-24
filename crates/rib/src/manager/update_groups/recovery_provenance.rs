@@ -161,6 +161,10 @@ struct SlotSpace {
     /// Probe and shift steps, for work-bound regressions.
     #[cfg(test)]
     probes: std::sync::atomic::AtomicU64,
+    /// Index lookups, one per key looked up whatever its probe-chain
+    /// length, which the random key makes vary from run to run.
+    #[cfg(test)]
+    lookups: std::sync::atomic::AtomicU64,
     /// Entries moved from the start of the table back to its end.
     #[cfg(test)]
     wrapped_moves: std::sync::atomic::AtomicU64,
@@ -236,6 +240,9 @@ impl SlotSpace {
 
     /// Probe from a bucket the caller hashed once for this key.
     fn find_from(&self, mut bucket: usize, key: &EvpnRouteKey) -> Option<u32> {
+        #[cfg(test)]
+        self.lookups
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         loop {
             self.probed();
             let entry = self.index[bucket];
@@ -1123,6 +1130,7 @@ impl EvpnRecoveryProvenance {
         let space = &self.space;
         // Lookups here are not work the regressions measure.
         let probes = space.probes.load(std::sync::atomic::Ordering::Relaxed);
+        let lookups = space.lookups.load(std::sync::atomic::Ordering::Relaxed);
         let high_water = space.keys.len();
         assert!(high_water <= space.capacity());
         assert_eq!(space.holders.len(), high_water);
@@ -1195,6 +1203,9 @@ impl EvpnRecoveryProvenance {
         space
             .probes
             .store(probes, std::sync::atomic::Ordering::Relaxed);
+        space
+            .lookups
+            .store(lookups, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub(in crate::manager) fn register(
@@ -2076,10 +2087,12 @@ impl EvpnRecoveryProvenance {
         })
     }
 
-    /// Index probe and shift steps so far, for work-bound regressions.
+    /// Index lookups so far, for work-bound regressions.
     #[cfg(test)]
-    pub(in crate::manager) fn probes_for_test(&self) -> u64 {
-        self.space.probes.load(std::sync::atomic::Ordering::Relaxed)
+    pub(in crate::manager) fn lookups_for_test(&self) -> u64 {
+        self.space
+            .lookups
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Every live key with its holder count.
