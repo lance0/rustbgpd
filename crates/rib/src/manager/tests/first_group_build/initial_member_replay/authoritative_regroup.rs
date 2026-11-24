@@ -80,6 +80,8 @@ async fn partial_mover_withdraws_only_its_admitted_rows_before_the_initial_eor()
     assert!(!owed.is_empty() && owed.len() < high.len());
 
     let response = reload(&mut manager, peer);
+    // A partial replay never takes the private build or the shared delta.
+    assert!(!manager.accepted_reload_build());
     let residual = finish_reload(&mut manager, response);
     if !residual.is_empty() {
         assert_eq!(residual, [peer]);
