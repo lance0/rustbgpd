@@ -10,6 +10,8 @@
   community that the export policy hides, is sent as a repair of that key
   from the current table. A client that is the first member of its group
   still builds the group table in its registration turn, then receives its
-  own table in pages. Past 64 concurrent paged joins, each further joiner
-  that could be paged receives its table in its own turn, instead of one
-  turn carrying the tables of up to 64 joiners.
+  own table in pages. Past 64 concurrent paged joins, or when the paged
+  joins in progress fill the admitted-key proof budget, a further joiner
+  that could be paged waits for one of them to end, instead of receiving
+  its whole table in one RIB turn. Each paged row finds its admission
+  state by key, so the cost per row no longer grows with the table.

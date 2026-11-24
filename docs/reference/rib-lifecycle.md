@@ -430,9 +430,12 @@ holds under [Restart](#restart)).
   key from the member's current slot. Each page also counts the fallback
   rows a per-client-best route-server client's slot searched, so a page of
   crowded prefixes spreads across turns. More than about 4,096 changed keys
-  during the join, or more than 64 concurrent paged joins, fall back to one
-  resync or one-turn replay of the member's table. Such a joiner does not
-  take the queued joiners into its turn; each gets its own. An outbound
+  during the join fall back to one resync of the member's table. A joiner
+  that would be paged waits in the registration queue while 64 paged joins
+  are in progress, or while their admitted-key proofs leave no room for its
+  table in the 512 MiB proof budget, until one of them ends. With no paged
+  join in progress it does not wait: a refused replay sends its table in one
+  turn, without taking the queued joiners into that turn. An outbound
   prefix limit applied during the join is checked against the routes
   admitted so far, and later pages meet it at commit. Tests:
   [`per_client_best.rs`](../../crates/rib/src/manager/tests/first_group_build/initial_member_replay/per_client_best.rs)

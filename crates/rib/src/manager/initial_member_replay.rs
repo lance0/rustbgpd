@@ -63,6 +63,9 @@ pub(super) struct InitialMemberReplays {
     ready: VecDeque<PeerId>,
     blocked: VecDeque<PeerId>,
     registration_due: bool,
+    // The registration queue length when its every entry last waited for a
+    // replay slot. A replay's end, or a queue change, makes it runnable.
+    slot_wait: Option<usize>,
     #[cfg(feature = "bench-internals")]
     observer: Option<observation::ReplayObserver>,
     #[cfg(test)]
@@ -94,19 +97,60 @@ impl RibManager {
             .is_some_and(|replay| replay.changes.unsent())
     }
 
+    /// A paceable registration waits while live replays hold every slot or
+    /// the proof budget its table needs: their ends release them. With no
+    /// replay live nothing would, so the registration goes ahead.
+    pub(super) fn registration_waits_for_replay_slot(&self, peer: PeerId) -> bool {
+        let replays = &self.initial_member_replays.members;
+        if replays.is_empty() || replays.contains_key(&peer) {
+            return false;
+        }
+        self.eligible_initial_member_replay(peer)
+            && (replays.len() >= super::peer_lifecycle::MAX_JOIN_COHORT
+                || self
+                    .pending_replay_rows(peer)
+                    .is_some_and(|rows| !self.pending_group_admitted.initial_replay_fits(rows)))
+    }
+
+    /// Whether a queued registration can make progress. One whose every
+    /// entry waits for a replay slot is not, until a replay ends or the
+    /// queue changes.
+    pub(super) fn registration_runnable(&self) -> bool {
+        !self.pending_initial_registrations.is_empty()
+            && self.initial_member_replays.slot_wait
+                != Some(self.pending_initial_registrations.len())
+    }
+
+    pub(super) fn set_registration_slot_wait(&mut self, waiting: bool) {
+        self.initial_member_replays.slot_wait =
+            waiting.then_some(self.pending_initial_registrations.len());
+    }
+
     pub(super) fn start_initial_member_replay(&mut self, peer: PeerId) -> bool {
         let Some(gid) = self.grouped_member_of(peer) else {
-            return false;
+            return self
+                .refuse_initial_member_replay(peer, ReplayCause::from_label(|| "ungrouped"));
         };
         let group = &self.group_ribs[&gid];
-        if self.initial_member_replays.members.len() >= super::peer_lifecycle::MAX_JOIN_COHORT
-            || group.evpn_table_stamp == 0
-            || self.dirty_peers.contains(&peer)
-            || self.outbound_prefix_limits.contains_key(&peer)
-            || self.retain_initial_group_admitted(peer)
-            || self.peer_orf_pending.contains_key(&peer)
+        let refusal = if self.initial_member_replays.members.len()
+            >= super::peer_lifecycle::MAX_JOIN_COHORT
         {
-            return false;
+            Some(ReplayCause::from_label(|| "replay_cap"))
+        } else if group.evpn_table_stamp == 0 {
+            Some(ReplayCause::from_label(|| "unpublished_table"))
+        } else if self.dirty_peers.contains(&peer) {
+            Some(ReplayCause::from_label(|| "already_dirty"))
+        } else if self.outbound_prefix_limits.contains_key(&peer) {
+            Some(ReplayCause::from_label(|| "prefix_limit"))
+        } else if self.retain_initial_group_admitted(peer) {
+            Some(ReplayCause::from_label(|| "retained_proof"))
+        } else if self.peer_orf_pending.contains_key(&peer) {
+            Some(ReplayCause::from_label(|| "orf_pending"))
+        } else {
+            None
+        };
+        if let Some(cause) = refusal {
+            return self.refuse_initial_member_replay(peer, cause);
         }
         let table_stamp = group.evpn_table_stamp;
         let changes = if group.per_client_best || self.rs_control_context(peer).is_some() {
@@ -117,15 +161,22 @@ impl RibManager {
         let enrollment = self
             .pending_group_admitted
             .begin_initial_replay(peer, group.table.len());
-        if !matches!(enrollment, Ok(true)) {
-            #[cfg(feature = "bench-internals")]
-            if let Err(error) = enrollment {
+        match enrollment {
+            Ok(true) => {}
+            Ok(false) => {
+                return self
+                    .refuse_initial_member_replay(peer, ReplayCause::from_label(|| "proof_state"));
+            }
+            Err(error) => {
+                #[cfg(feature = "bench-internals")]
                 self.observe_initial_replay(
                     peer,
                     BenchReplayEvent::EnrollmentRefused(error.cause.as_str()),
                 );
+                #[cfg(not(feature = "bench-internals"))]
+                let _ = error;
+                return false;
             }
-            return false;
         }
         self.refresh_group_recovery_gauges();
         self.loc_rib.start_member_replay_scan(peer);
@@ -161,10 +212,21 @@ impl RibManager {
         true
     }
 
+    /// The registration sends its table in its own turn instead.
+    fn refuse_initial_member_replay(&self, peer: PeerId, cause: ReplayCause) -> bool {
+        #[cfg(feature = "bench-internals")]
+        self.observe_initial_replay(peer, BenchReplayEvent::Refused(cause.label));
+        #[cfg(not(feature = "bench-internals"))]
+        let _ = (self, peer, cause);
+        false
+    }
+
     pub(super) fn abort_initial_member_replay(&mut self, peer: PeerId) -> bool {
         if self.initial_member_replays.members.remove(&peer).is_none() {
             return false;
         }
+        // A released slot or proof budget may admit a waiting registration.
+        self.initial_member_replays.slot_wait = None;
         self.initial_member_replays.ready.retain(|p| *p != peer);
         self.initial_member_replays.blocked.retain(|p| *p != peer);
         self.loc_rib.stop_member_replay_scan(peer);
@@ -197,7 +259,7 @@ impl RibManager {
 
     pub(super) fn service_initial_member_replay(&mut self) -> bool {
         if self.initial_member_replays.registration_due
-            && (self.first_group_build.is_some() || !self.pending_initial_registrations.is_empty())
+            && (self.first_group_build.is_some() || self.registration_runnable())
         {
             self.initial_member_replays.registration_due = false;
             return false;

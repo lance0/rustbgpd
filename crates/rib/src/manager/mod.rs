@@ -5011,7 +5011,14 @@ impl RibManager {
             return;
         }
         self.retire_abandoned_destination_prestage();
-        while let Some(peer) = self.pending_initial_registrations.pop_front() {
+        // Each entry is examined at most once per call; one whose replay
+        // waits for a slot keeps its place behind the others.
+        let mut examine = self.pending_initial_registrations.len();
+        let mut slot_waits = false;
+        while examine != 0
+            && let Some(peer) = self.pending_initial_registrations.pop_front()
+        {
+            examine -= 1;
             let waiting = self
                 .live_sessions
                 .get(&peer)
@@ -5040,9 +5047,15 @@ impl RibManager {
                 }
                 return;
             }
+            if self.registration_waits_for_replay_slot(peer) {
+                self.pending_initial_registrations.push_back(peer);
+                slot_waits = true;
+                continue;
+            }
             self.complete_deferred_registration(peer);
             return;
         }
+        self.set_registration_slot_wait(slot_waits);
         if self.first_group_build.is_some() {
             self.advance_first_group_build();
         }
@@ -8860,7 +8873,7 @@ impl RibManager {
                 prestage_primary_since = None;
                 self.drain_readiness_queries(None);
                 if optional_registration_due
-                    && !self.pending_initial_registrations.is_empty()
+                    && self.registration_runnable()
                     && self.pending_route_batches.is_empty()
                 {
                     self.advance_pending_initial_registration();
@@ -8882,7 +8895,7 @@ impl RibManager {
             // Private construction alternates with queued primary work. Ordinary
             // registrations retain their existing priority behind queued imports.
             if self.first_group_build.is_some()
-                || !self.pending_initial_registrations.is_empty()
+                || self.registration_runnable()
                 || self.initial_member_replays.runnable()
             {
                 if registration_primary_due && self.drain_ready_updates().await {

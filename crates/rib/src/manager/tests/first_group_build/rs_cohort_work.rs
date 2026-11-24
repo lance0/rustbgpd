@@ -54,8 +54,12 @@ struct Published {
 }
 
 fn published() -> Published {
+    published_with(ROWS)
+}
+
+fn published_with(rows: usize) -> Published {
     let (mut manager, tx, _) = fixture(0);
-    let table = (0..u16::try_from(ROWS).unwrap())
+    let table = (0..u16::try_from(rows).unwrap())
         .map(|index| route(prefixes(index)[0], SOURCE, 100))
         .collect();
     manager.handle_update(test_routes_received(peer_v4(SOURCE), table));
@@ -77,12 +81,26 @@ fn published() -> Published {
 }
 
 async fn rejoin(joiners: u8) -> Rejoin {
+    rejoin_within(joiners, None).await
+}
+
+/// [`rejoin`] with the proof budget room for `replays` paced tables.
+async fn rejoin_within(joiners: u8, replays: Option<usize>) -> Rejoin {
     let rows = ROWS;
     let Published {
         mut manager,
         tx,
         _founder: founder,
     } = published();
+    if let Some(replays) = replays {
+        // A table's mask, keys and their bucket index, plus header slack
+        // below half a table.
+        use crate::manager::update_groups::admitted_recovery::Key;
+
+        let table = ROWS * (size_of::<Key>() + 6 * size_of::<u32>() / 4) + ROWS / 8 + 1024;
+        let ledger = &mut manager.pending_group_admitted;
+        ledger.set_test_daemon_limit(ledger.bytes() + replays * table + table / 2);
+    }
     let mut clients: Vec<_> = (1..=joiners)
         .map(|n| rs_client(&mut manager, n, 1 << 12))
         .collect();
@@ -156,11 +174,11 @@ async fn rs_control_rejoin_cohort_pages_every_initial_table() {
     }
 }
 
-// With every paced replay slot taken, a refused leader sends its own table
-// in its turn. It must not take the queued joiners along: each one waits
-// for its own turn, and its own chance at a paced replay.
+// With every paced replay slot taken, a later joiner waits in the queue
+// rather than sending its whole table in one turn. A freed slot starts its
+// paced replay.
 #[test]
-fn joiners_past_the_replay_cap_send_one_table_per_turn() {
+fn joiners_past_the_replay_cap_wait_for_a_slot() {
     use crate::manager::peer_lifecycle::MAX_JOIN_COHORT;
 
     let Published {
@@ -170,9 +188,9 @@ fn joiners_past_the_replay_cap_send_one_table_per_turn() {
     } = published();
     // Writers that hold one page each park their replays and keep the slots.
     let cap = u8::try_from(MAX_JOIN_COHORT).unwrap();
-    let _parked: Vec<_> = (1..=cap).map(|n| rs_client(&mut manager, n, 1)).collect();
+    let mut parked: Vec<_> = (1..=cap).map(|n| rs_client(&mut manager, n, 1)).collect();
     for _ in 0..100_000 {
-        if manager.pending_initial_registrations.is_empty() {
+        if !manager.registration_runnable() {
             break;
         }
         manager.advance_pending_initial_registration();
@@ -180,18 +198,39 @@ fn joiners_past_the_replay_cap_send_one_table_per_turn() {
     assert!((1..=cap).all(|n| manager.is_initial_member_replay(receiver(n))));
 
     let mut late: Vec<_> = (cap + 1..=cap + 8)
-        .map(|n| (n, rs_client(&mut manager, n, 1 << 12), HashSet::new(), 0))
+        .map(|n| {
+            (
+                n,
+                rs_client(&mut manager, n, 1 << 12),
+                HashSet::new(),
+                0,
+                false,
+            )
+        })
         .collect();
+    for _ in 0..1_000 {
+        manager.advance_pending_initial_registration();
+    }
+    // Nothing advances while the slots stay held, and nothing spins.
+    assert!(!manager.registration_runnable());
+    for (n, rx, ..) in &mut late {
+        assert!(rx.try_recv().is_err(), "joiner {n} sent while waiting");
+        assert!(!manager.is_initial_member_replay(receiver(*n)));
+    }
+
+    // Closing the parked writers ends their replays and frees the slots.
+    parked.clear();
     let mut peak = 0;
-    for _ in 0..10_000 {
-        if late.iter().all(|(.., markers)| *markers == 1) {
+    for _ in 0..100_000 {
+        if late.iter().all(|(.., markers, _)| *markers == 1) {
             break;
         }
+        manager.wake_initial_member_replay();
         manager.advance_pending_initial_registration();
         let mut delivered = 0;
-        for (n, rx, seen, markers) in &mut late {
+        for (n, rx, seen, markers, paced) in &mut late {
+            *paced |= manager.is_initial_member_replay(receiver(*n));
             while let Ok(update) = rx.try_recv() {
-                assert!(!manager.is_initial_member_replay(receiver(*n)));
                 delivered += update.announce.len();
                 seen.extend(update.announce.iter().map(|row| row.prefix));
                 *markers += update.end_of_rib.len();
@@ -199,8 +238,63 @@ fn joiners_past_the_replay_cap_send_one_table_per_turn() {
         }
         peak = peak.max(delivered);
     }
-    for (n, _, seen, markers) in &late {
+    for (n, _, seen, markers, paced) in &late {
         assert_eq!((seen.len(), *markers), (ROWS, 1), "joiner {n}");
+        assert!(paced, "joiner {n} was not paced");
     }
-    assert_eq!(peak, ROWS, "one turn sent more than one table");
+    assert!(peak <= REGISTRATION_PAGE_SIZE, "one turn sent {peak} rows");
+}
+
+// The proof budget has room for two paced tables at a time. The other
+// joiners wait for a replay to end instead of sending a whole table in one
+// turn under a refused enrollment.
+#[tokio::test]
+async fn joiners_past_the_proof_budget_wait_for_a_replay_to_end() {
+    let work = rejoin_within(8, Some(2)).await;
+    eprintln!("{work:?}");
+    assert!(work.peak_rows <= REGISTRATION_PAGE_SIZE, "{work:?}");
+    assert!(work.polls >= 8 * usize::from(PAGES), "{work:?}");
+}
+
+/// Ordered key comparisons plus bucket probes per row of one RS-control
+/// joiner's paced replay over a `rows`-row table.
+fn replay_comparisons_per_row(rows: usize) -> usize {
+    use crate::manager::update_groups::admitted_recovery::KEY_COMPARISONS;
+
+    let Published {
+        mut manager,
+        tx: _tx,
+        _founder,
+    } = published_with(rows);
+    let mut rx = rs_client(&mut manager, 1, 1 << 16);
+    let before = KEY_COMPARISONS.with(std::cell::Cell::get);
+    let (mut seen, mut markers, mut paced) = (0, 0, false);
+    for _ in 0..100_000 {
+        if markers == 1 {
+            break;
+        }
+        manager.advance_pending_initial_registration();
+        paced |= manager.is_initial_member_replay(receiver(1));
+        while let Ok(update) = rx.try_recv() {
+            seen += update.announce.len();
+            markers += update.end_of_rib.len();
+        }
+    }
+    let comparisons = KEY_COMPARISONS.with(std::cell::Cell::get) - before;
+    assert!(paced);
+    assert_eq!((seen, markers), (rows, 1));
+    comparisons.div_ceil(rows)
+}
+
+// Each replayed row finds its admission state by key bucket, so the
+// comparisons per row stay flat as the table grows. A binary search over
+// the replay universe pays one more comparison per doubling, on each of
+// the several lookups a row takes.
+#[test]
+fn rs_control_replay_key_comparisons_per_row_stay_flat() {
+    let small = replay_comparisons_per_row(4 * REGISTRATION_PAGE_SIZE);
+    let large = replay_comparisons_per_row(32 * REGISTRATION_PAGE_SIZE);
+    eprintln!("comparisons per row: 4 pages {small}, 32 pages {large}");
+    assert!(large <= small, "4 pages {small}, 32 pages {large}");
+    assert!(large <= 16, "32 pages {large}");
 }
