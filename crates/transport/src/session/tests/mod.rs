@@ -2340,6 +2340,7 @@ mod local_revalidation;
 mod loop_detection;
 mod max_prefix;
 mod metrics;
+mod mp_reflected_reconnect;
 mod mrt_next_hop;
 mod next_hop;
 mod notification;

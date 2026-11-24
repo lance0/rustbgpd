@@ -5,6 +5,7 @@ use super::{
 };
 use crate::PeerId;
 use crate::attr_set::AttrSet;
+use crate::manager::helpers::evpn_routes_equal_for_target;
 
 impl RibManager {
     /// Unpaced, for tests that apply one chunk directly.
@@ -653,9 +654,9 @@ impl RibManager {
             // RFC 8326 GShut community attach where the wire change is
             // applied later in transport.
             let identical = !force
-                && rib_out
-                    .get_evpn(key)
-                    .is_some_and(|existing| evpn_routes_equal(existing, &modified));
+                && rib_out.get_evpn(key).is_some_and(|existing| {
+                    evpn_routes_equal_for_target(existing, &modified, target_is_ebgp)
+                });
             if let Some(trace) = target.trace() {
                 trace.staged_evpn = Some(modified.clone());
                 trace.suppressed_identical = identical;
