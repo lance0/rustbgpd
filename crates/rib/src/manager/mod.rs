@@ -5412,8 +5412,11 @@ impl RibManager {
         }
         // A session or profile message can end a registration's wait for a
         // replay slot without changing the queue. Unicast receipts, the bulk
-        // of the input, leave the waiters to the next replay's end.
-        if !matches!(update.unmetered(), RibUpdate::RoutesReceived { .. }) {
+        // of the input, and operator reads leave the waiters to the next
+        // replay's end.
+        if !matches!(update.unmetered(), RibUpdate::RoutesReceived { .. })
+            && update.actor_turn_kind() != rustbgpd_telemetry::metrics::RibActorTurnKind::Query
+        {
             self.set_registration_slot_wait(false);
         }
         // Only a following BGP-LS UPDATE may see the cache behind its inputs.

@@ -21,14 +21,10 @@ fn rs_client(
     n: u8,
     capacity: usize,
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
-    client(
-        manager,
-        n,
-        capacity,
-        Some(RS_ASN),
-        &[(Afi::Ipv4, Safi::Unicast)],
-    )
+    client(manager, n, capacity, Some(RS_ASN), &V4)
 }
+
+const V4: [(Afi, Safi); 1] = [(Afi::Ipv4, Safi::Unicast)];
 
 fn client(
     manager: &mut RibManager,
@@ -36,6 +32,17 @@ fn client(
     capacity: usize,
     rs_control_asn: Option<u32>,
     families: &[(Afi, Safi)],
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    shaped_client(manager, n, capacity, rs_control_asn, families, false)
+}
+
+fn shaped_client(
+    manager: &mut RibManager,
+    n: u8,
+    capacity: usize,
+    rs_control_asn: Option<u32>,
+    families: &[(Afi, Safi)],
+    pcb: bool,
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
     let peer = receiver(n);
     manager.handle_update(RibUpdate::SetPeerRsControl {
@@ -48,6 +55,7 @@ fn client(
     let RibUpdate::PeerUp {
         peer_asn,
         sendable_families,
+        per_client_best,
         ..
     } = &mut up
     else {
@@ -55,6 +63,7 @@ fn client(
     };
     *peer_asn = 64_600 + u32::from(n);
     *sendable_families = families.to_vec();
+    *per_client_best = pcb;
     manager.handle_update(up);
     rx
 }
@@ -273,6 +282,17 @@ fn advance_until_complete(
     rows: usize,
     markers: usize,
 ) -> (usize, Vec<bool>) {
+    advance_until_complete_with(manager, clients, rows, markers, |_| {})
+}
+
+/// [`advance_until_complete`], checking every announced row.
+fn advance_until_complete_with(
+    manager: &mut RibManager,
+    clients: &mut [(u8, mpsc::Receiver<OutboundRouteUpdate>)],
+    rows: usize,
+    markers: usize,
+    mut check: impl FnMut(&Route),
+) -> (usize, Vec<bool>) {
     let mut seen = vec![HashSet::new(); clients.len()];
     let mut ends = vec![0; clients.len()];
     let mut paced = vec![false; clients.len()];
@@ -288,7 +308,10 @@ fn advance_until_complete(
             paced[index] |= manager.is_initial_member_replay(receiver(*n));
             while let Ok(update) = rx.try_recv() {
                 delivered += update.announce.len();
-                seen[index].extend(update.announce.iter().map(|row| row.prefix));
+                for row in update.announce.iter() {
+                    check(row);
+                    assert!(seen[index].insert(row.prefix), "joiner {n}: duplicate row");
+                }
                 ends[index] += update.end_of_rib.len();
             }
         }
@@ -677,4 +700,267 @@ fn rs_control_replay_key_comparisons_per_row_stay_flat() {
     // About 11 with key buckets; a binary search on any one lookup path
     // (withdrawal match, prefix paths, admission, apply) adds at least 6.
     assert!(per_row <= 14, "{per_row} comparisons per row");
+}
+
+/// Joiners of one shape waiting for a replay slot: none has sent, none
+/// replays, and the queue sleeps.
+fn assert_waiting(
+    manager: &mut RibManager,
+    joiners: &mut [(u8, mpsc::Receiver<OutboundRouteUpdate>)],
+) {
+    settle(manager);
+    assert!(!manager.registration_runnable(), "the queue spins");
+    for (n, rx) in joiners {
+        assert!(rx.try_recv().is_err(), "joiner {n} sent while waiting");
+        assert!(!manager.is_initial_member_replay(receiver(*n)));
+        assert!(
+            manager
+                .pending_initial_registrations
+                .contains(&receiver(*n))
+        );
+    }
+}
+
+// Every paced replay shape waits for a slot past the replay cap: a plain
+// single-best member, a per-client-best member and an RS-control member,
+// each the founder of its group or a joiner of the published one.
+#[test]
+fn every_paced_shape_waits_for_a_replay_slot() {
+    for (shape, rs, pcb) in [
+        ("single-best", None, false),
+        ("per-client-best", None, true),
+        ("rs-control", Some(RS_ASN), false),
+    ] {
+        let Published {
+            mut manager,
+            tx: _tx,
+            ..
+        } = published();
+        let mut parked = fill_replay_slots(&mut manager);
+        let mut joiners: Vec<_> = [100, 101]
+            .into_iter()
+            .map(|n| (n, shaped_client(&mut manager, n, 1 << 12, rs, &V4, pcb)))
+            .collect();
+        for _ in 0..10_000 {
+            manager.advance_pending_initial_registration();
+        }
+        assert_waiting(&mut manager, &mut joiners);
+
+        release(&mut manager, &mut parked);
+        let (peak, paced) = advance_until_complete(&mut manager, &mut joiners, ROWS, 1);
+        assert_eq!(paced, [true, true], "{shape}");
+        assert!(
+            peak <= REGISTRATION_PAGE_SIZE,
+            "{shape}: one turn sent {peak} rows"
+        );
+        let group = manager.grouped_member_of(receiver(100));
+        assert!(group.is_some(), "{shape}");
+        assert_eq!(
+            manager.group_ribs[&group.unwrap()].per_client_best,
+            pcb,
+            "{shape}"
+        );
+    }
+}
+
+// A leader that cannot page its own table (its policy build fell back)
+// still sends it in its turn, but must not take the joiners waiting for a
+// replay slot along: they keep their place and page their own tables.
+#[test]
+fn a_leader_that_cannot_pace_leaves_slot_waiters_queued() {
+    let Published {
+        mut manager,
+        tx: _tx,
+        ..
+    } = published();
+    let mut parked = fill_replay_slots(&mut manager);
+    let mut joiners: Vec<_> = (100..104)
+        .map(|n| (n, rs_client(&mut manager, n, 1 << 12)))
+        .collect();
+    assert_waiting(&mut manager, &mut joiners);
+
+    let leader = 110;
+    let mut leader_rx = [(leader, rs_client(&mut manager, leader, 1 << 12))];
+    manager
+        .live_sessions
+        .get_mut(&receiver(leader))
+        .and_then(|sessions| sessions.last_mut())
+        .unwrap()
+        .registration_policy_fallback = true;
+    let (_, paced) = advance_until_complete(&mut manager, &mut leader_rx, ROWS, 1);
+    assert!(!paced[0]);
+    assert_waiting(&mut manager, &mut joiners);
+
+    release(&mut manager, &mut parked);
+    let (peak, paced) = advance_until_complete(&mut manager, &mut joiners, ROWS, 1);
+    assert!(paced.iter().all(|&p| p), "{paced:?}");
+    assert!(peak <= REGISTRATION_PAGE_SIZE, "one turn sent {peak} rows");
+}
+
+/// Release the slots and page the waiter's whole table once, then check
+/// nothing follows its End-of-RIB.
+fn complete_waiter(
+    manager: &mut RibManager,
+    parked: &mut Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+    waiter: &mut [(u8, mpsc::Receiver<OutboundRouteUpdate>)],
+    check: impl FnMut(&Route),
+) {
+    release(manager, parked);
+    let (peak, paced) = advance_until_complete_with(manager, waiter, ROWS, 1, check);
+    assert!(paced[0], "the waiter was not paced");
+    assert!(peak <= REGISTRATION_PAGE_SIZE, "one turn sent {peak} rows");
+    for _ in 0..1_000 {
+        manager.wake_initial_member_replay();
+        manager.advance_pending_initial_registration();
+    }
+    assert!(waiter[0].1.try_recv().is_err(), "output after End-of-RIB");
+}
+
+const REGROUP_TAG: u32 = 0xfde9_0001;
+
+// A waiter whose export policy changes keeps waiting: the change neither
+// sends a table nor starts a replay. Once a slot frees it registers under
+// the new policy, in the new policy's group. A reload reaches a waiter the
+// same way: the authoritative batch skips the unregistered peer and the
+// session records the accepted chain for its registration.
+#[test]
+fn a_waiter_regrouped_or_reloaded_registers_under_its_new_policy() {
+    use crate::manager::tests::update_groups::community_chain;
+    use crate::update::PeerExportPolicyReplacement;
+
+    for reload in [false, true] {
+        let Published {
+            mut manager,
+            tx: _tx,
+            ..
+        } = published();
+        let mut parked = fill_replay_slots(&mut manager);
+        let n = 100;
+        let mut waiter = [(n, client(&mut manager, n, 1 << 12, None, &V4))];
+        assert_waiting(&mut manager, &mut waiter);
+        let old = manager.group_ribs.len();
+
+        let chain = community_chain(REGROUP_TAG);
+        manager.handle_update(RibUpdate::SetPeerSessionExportPolicy {
+            peer: receiver(n),
+            session_id: 1,
+            export_policy: Some(chain.clone()),
+        });
+        if reload {
+            let (reply, mut response) = oneshot::channel();
+            manager.handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+                replacements: vec![PeerExportPolicyReplacement {
+                    peer: receiver(n),
+                    export_policy: Some(chain),
+                }],
+                reply,
+            });
+            let residual = (0..128)
+                .find_map(|_| {
+                    let reply = response.try_recv().ok();
+                    if reply.is_none() && manager.first_group_build.is_some() {
+                        manager.advance_first_group_build();
+                    }
+                    reply
+                })
+                .expect("the reload replied");
+            assert_eq!(residual.unwrap(), [], "the waiter is not a residual");
+        }
+        for _ in 0..10_000 {
+            manager.advance_pending_initial_registration();
+        }
+        assert_waiting(&mut manager, &mut waiter);
+
+        complete_waiter(&mut manager, &mut parked, &mut waiter, |row| {
+            assert!(row.communities().contains(&REGROUP_TAG), "old-policy row");
+        });
+        assert!(manager.group_ribs.len() > old, "reload={reload}");
+        assert_ne!(
+            manager.grouped_member_of(receiver(n)),
+            manager.grouped_member_of(receiver(1)),
+            "reload={reload}"
+        );
+    }
+}
+
+// A Route Refresh from a waiter answers nothing before its registration:
+// the table it is waiting to page is the answer. An ORF update from a
+// waiter, which negotiated none, is refused. Neither starts work, and the
+// waiter later gets its table once, with one End-of-RIB.
+#[test]
+fn refresh_and_orf_from_a_waiter_start_no_work() {
+    use std::sync::Arc;
+
+    let Published {
+        mut manager,
+        tx: _tx,
+        ..
+    } = published();
+    let mut parked = fill_replay_slots(&mut manager);
+    let n = 100;
+    let mut waiter = [(n, client(&mut manager, n, 1 << 12, None, &V4))];
+    assert_waiting(&mut manager, &mut waiter);
+
+    manager.handle_update(RibUpdate::RouteRefreshRequest {
+        peer: receiver(n),
+        session_id: 1,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        queued: Arc::default(),
+    });
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::PeerOrfUpdate {
+        peer: receiver(n),
+        session_id: 1,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        when: rustbgpd_wire::WhenToRefresh::Immediate,
+        groups: Vec::new(),
+        reply,
+    });
+    assert!(response.try_recv().unwrap().is_err(), "ORF was accepted");
+    assert_waiting(&mut manager, &mut waiter);
+
+    complete_waiter(&mut manager, &mut parked, &mut waiter, |_| {});
+}
+
+// An operator read of a waiter's Adj-RIB-Out shows nothing advertised, and
+// it neither starts the waiter's replay nor wakes the waiting queue.
+#[test]
+fn reading_a_waiters_adj_rib_out_shows_nothing_and_starts_no_work() {
+    let Published {
+        mut manager,
+        tx: _tx,
+        ..
+    } = published();
+    let mut parked = fill_replay_slots(&mut manager);
+    let n = 100;
+    let mut waiter = [(n, client(&mut manager, n, 1 << 12, None, &V4))];
+    assert_waiting(&mut manager, &mut waiter);
+
+    let (reply, mut page) = oneshot::channel();
+    manager.handle_update(RibUpdate::QueryRoutesPage {
+        accept_releasing: false,
+        scope: RouteQueryScope::Advertised { peer: receiver(n) },
+        filter: None,
+        after: None,
+        expected_version: None,
+        page_size: 100,
+        reply,
+    });
+    let (reply, mut count) = oneshot::channel();
+    manager.handle_update(RibUpdate::QueryAdvertisedCount {
+        peer: receiver(n),
+        reply,
+    });
+    let page = page.try_recv().expect("the read replied");
+    assert!(
+        page.is_ok_and(|page| page.routes.is_empty()),
+        "advertised before its replay"
+    );
+    assert_eq!(count.try_recv().unwrap(), 0);
+    assert!(!manager.registration_runnable(), "the read woke the queue");
+    assert_waiting(&mut manager, &mut waiter);
+
+    complete_waiter(&mut manager, &mut parked, &mut waiter, |_| {});
 }
