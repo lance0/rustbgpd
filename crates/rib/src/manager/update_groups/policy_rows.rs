@@ -191,6 +191,10 @@ impl<K: Hash + Ord, V> PolicyRows<K, V> {
 // A paced group must bound growth of each reverse-index set as well as the
 // outer map. Ordinary groups keep the compact sharded representation.
 impl<K: Ord + Hash, L: Ord + Hash> PolicyRows<K, PolicyRows<L, ()>> {
+    #[expect(
+        clippy::zero_sized_map_values,
+        reason = "an ordered key set shares the PolicyRows representation of the sharded index"
+    )]
     pub(super) fn insert_index_key(&mut self, key: K, value: L) {
         let set = match self {
             Self::Sharded(map) => map.get_or_default(key),

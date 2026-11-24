@@ -1,6 +1,8 @@
 //! Install one ranked prefix into a private, policy-free PCB group. The
 //! founder's RS count is maintained alongside the staged rows so publishing
 //! the finished table does not seed it in a second pass.
+use std::collections::BTreeMap;
+
 use super::release_fallback::Preparation;
 use super::{GroupDelta, GroupRibOut, PeerId, PolicyRows, Prefix, RsFallback};
 use crate::manager::distribution::release_pcb::PreparedPcb;
@@ -122,19 +124,23 @@ impl FirstPcbCommit {
 }
 
 impl GroupRibOut {
+    #[expect(
+        clippy::zero_sized_map_values,
+        reason = "the ordered announce-to-none key set keeps the PolicyRows representation"
+    )]
     pub(in crate::manager) fn prepare_first_pcb_founder(
         &mut self,
         peer: PeerId,
         rs: Option<(u32, u32)>,
     ) {
         debug_assert!(self.table.is_empty() && self.members.is_empty() && self.per_client_best);
-        self.runner_up = PolicyRows::Ordered(Default::default());
-        self.rs_fallback = PolicyRows::Ordered(Default::default());
+        self.runner_up = PolicyRows::Ordered(BTreeMap::default());
+        self.rs_fallback = PolicyRows::Ordered(BTreeMap::default());
         if let Some(rs) = rs {
             self.rs_members.insert(peer, rs);
-            self.rs_tagged = PolicyRows::Ordered(Default::default());
-            self.rs_named = PolicyRows::Ordered(Default::default());
-            self.rs_all = PolicyRows::Ordered(Default::default());
+            self.rs_tagged = PolicyRows::Ordered(BTreeMap::default());
+            self.rs_named = PolicyRows::Ordered(BTreeMap::default());
+            self.rs_all = PolicyRows::Ordered(BTreeMap::default());
         }
     }
 
@@ -211,9 +217,9 @@ mod tests {
                     runner_up: Some(runner),
                     ..Default::default()
                 },
-                rows: Default::default(),
+                rows: crate::manager::distribution::UnicastDistributionResult::default(),
                 otc_blocked: Vec::new(),
-                evals: Default::default(),
+                evals: std::collections::VecDeque::default(),
             };
             prepared.rows.announce.push(winner.clone());
             prepared.rows.next_hop_override.push(None);

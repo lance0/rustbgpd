@@ -1339,7 +1339,7 @@ impl GroupRibOut {
         self.rs_tagged.release(checkpoint);
         self.rs_named
             .release_with(checkpoint, |(_, mut keys), checkpoint| {
-                keys.release(checkpoint)
+                keys.release(checkpoint);
             });
         self.rs_all.release(checkpoint);
     }

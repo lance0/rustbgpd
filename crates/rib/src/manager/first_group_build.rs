@@ -556,6 +556,10 @@ impl RibManager {
 
     // Keep the existing queue as the authority on pending registrations, even
     // while this job is building. GR and collision handling consult that queue.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the per-client-best and single-best page steps share one retirement and commit seam"
+    )]
     pub(super) fn advance_first_group_build(&mut self) {
         #[cfg(test)]
         let work = super::slice_timing::GroupBuildWork::start();

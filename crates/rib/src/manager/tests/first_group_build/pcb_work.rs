@@ -97,7 +97,7 @@ async fn cold_server(prefix_count: u16, paths_per_prefix: u32) -> Build {
         while let Ok(update) = rx.try_recv().map(delivered) {
             assert!(update.unicast_withdrawals().next().is_none());
             for row in update.announce.iter() {
-                assert!(markers.is_empty());
+                assert_eq!(markers.first(), None, "route after End-of-RIB");
                 assert_eq!(
                     (row.peer, row.next_hop),
                     (peer_v4(OTHER), IpAddr::V4(OTHER))

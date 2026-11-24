@@ -75,6 +75,22 @@ fn mixed_policy() -> PolicyChain {
     }])
 }
 
+// Readiness checkpoints include the per-prefix stage loop. The other
+// counters record inside work that a single checkpoint can cover.
+const WORK: &[&str] = &[
+    "discovery",
+    "first_group_repairs",
+    "first_group_evaluated_lookups",
+    "group_stage_checkpoints",
+    "group_policy_evals",
+    "group_inverse_evals",
+    "group_source_writes",
+    "group_denials_written",
+    "group_denials_removed",
+    "group_rehashed_keys",
+    "group_growing_slab_slots",
+];
+
 async fn cold_policy_peak(per_family: u16) -> Build {
     let (mut manager, tx, _) = fixture(0);
     let base: Vec<_> = (0..per_family)
@@ -119,23 +135,7 @@ async fn cold_policy_peak(per_family: u16) -> Build {
     let manager = poll_fn(|cx| {
         let before = snapshot();
         let result = actor.as_mut().poll(cx);
-        build.record(
-            &before,
-            snapshot(),
-            &[
-                "discovery",
-                "first_group_repairs",
-                "first_group_evaluated_lookups",
-                "group_stage_checkpoints",
-                "group_policy_evals",
-                "group_inverse_evals",
-                "group_source_writes",
-                "group_denials_written",
-                "group_denials_removed",
-                "group_rehashed_keys",
-                "group_growing_slab_slots",
-            ],
-        );
+        build.record(&before, snapshot(), WORK);
         while let Ok(update) = receiver.try_recv().map(delivered) {
             for row in update.announce.iter() {
                 assert!(matches!(row.prefix, Prefix::V4(_)));

@@ -477,7 +477,7 @@ fn first_per_client_best_build_admits_only_eligible_unicast() {
             WithPolicy => {
                 *export_policy = Some(crate::manager::tests::update_groups::community_chain(
                     MARKER,
-                ))
+                ));
             }
             WithVpn => sendable_families.push((Afi::Ipv4, Safi::MplsVpn)),
             Ibgp => *is_ebgp = false,

@@ -58,6 +58,10 @@ impl RegistrationScans {
 
 /// Changes behind the cursor include replacements and withdrawals, so callers
 /// stage each key against the live Loc-RIB even when it now has no winner.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "discovery, repair, candidate tracking and overflow are independent scan states"
+)]
 #[derive(Default)]
 struct RegistrationScan {
     shard: usize,
