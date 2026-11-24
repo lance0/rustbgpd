@@ -866,14 +866,17 @@ impl RibManager {
     }
 
     /// The rows of the published table a waiting paceable registration
-    /// would replay, if its group exists.
-    pub(in crate::manager) fn pending_replay_rows(&self, peer: PeerId) -> Option<usize> {
-        let record = self.live_sessions.get(&peer)?.last()?;
-        let mut key = self.eligible_paced_group_key(peer, record)?;
-        let gid = self
-            .update_groups
-            .existing_registration_group(&mut key, record.export_policy.as_ref())?;
-        self.group_ribs.get(&gid).map(|group| group.table.len())
+    /// would replay. A group not yet built is bounded by the Loc-RIB.
+    pub(in crate::manager) fn pending_replay_rows(&self, peer: PeerId) -> usize {
+        let published = || {
+            let record = self.live_sessions.get(&peer)?.last()?;
+            let mut key = self.eligible_paced_group_key(peer, record)?;
+            let gid = self
+                .update_groups
+                .existing_registration_group(&mut key, record.export_policy.as_ref())?;
+            self.group_ribs.get(&gid).map(|group| group.table.len())
+        };
+        published().unwrap_or_else(|| self.loc_rib.len())
     }
 
     pub(in crate::manager) fn current_first_group_record(

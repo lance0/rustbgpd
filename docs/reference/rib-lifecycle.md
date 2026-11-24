@@ -431,11 +431,17 @@ holds under [Restart](#restart)).
   rows a per-client-best route-server client's slot searched, so a page of
   crowded prefixes spreads across turns. More than about 4,096 changed keys
   during the join fall back to one resync of the member's table. A joiner
-  that would be paged waits in the registration queue while 64 paged joins
-  are in progress, or while their admitted-key proofs leave no room for its
-  table in the 512 MiB proof budget, until one of them ends. With no paged
-  join in progress it does not wait: a refused replay sends its table in one
-  turn, without taking the queued joiners into that turn. An outbound
+  that would be paged, including the founder of a group built while it
+  waited, waits in the registration queue while 64 paged joins are in
+  progress, or while their admitted-key proofs leave no room for its table
+  in the 512 MiB proof budget, until one of them ends. Waiters start in
+  arrival order: behind one waiting for budget, no later joiner starts even
+  if its smaller table would fit. A joiner does not wait when no paged join
+  is in progress, when its table would not fit even after every paged join
+  ends, or when its replay would be refused for another reason (a dirty
+  receiver, an outbound prefix limit, a pending ORF); a refused replay sends
+  its table in one turn, without taking the queued joiners into that turn.
+  Each wait is logged at debug level with its cause. An outbound
   prefix limit applied during the join is checked against the routes
   admitted so far, and later pages meet it at commit. Tests:
   [`per_client_best.rs`](../../crates/rib/src/manager/tests/first_group_build/initial_member_replay/per_client_best.rs)

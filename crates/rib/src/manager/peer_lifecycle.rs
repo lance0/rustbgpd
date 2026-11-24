@@ -3274,6 +3274,7 @@ impl RibManager {
     /// ([`Self::registration_waits_for_replay_slot`]).
     pub(super) fn complete_deferred_registration(&mut self, leader: PeerId) {
         self.set_registration_slot_wait(false);
+        self.note_replay_slot_wait(leader, None);
         let pace = self.eligible_initial_member_replay(leader);
         if !self.install_outbound_registration(leader)
             || (pace && self.start_initial_member_replay(leader))

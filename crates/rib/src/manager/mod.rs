@@ -5011,53 +5011,66 @@ impl RibManager {
             return;
         }
         self.retire_abandoned_destination_prestage();
-        // Each entry is examined at most once per call; one whose replay
-        // waits for a slot keeps its place behind the others.
-        let mut examine = self.pending_initial_registrations.len();
+        // Only a walk that ends with every entry waiting records the wait.
+        self.set_registration_slot_wait(false);
+        // Entries waiting for a replay slot keep their place, so the oldest
+        // goes first when one frees. Behind one that waits for proof budget,
+        // no later paceable entry starts, even one whose table would fit.
+        let mut index = 0;
         let mut slot_waits = false;
-        while examine != 0
-            && let Some(peer) = self.pending_initial_registrations.pop_front()
-        {
-            examine -= 1;
+        let mut behind_budget = false;
+        while let Some(&peer) = self.pending_initial_registrations.get(index) {
             let waiting = self
                 .live_sessions
                 .get(&peer)
                 .and_then(|sessions| sessions.last())
                 .is_some_and(|live| live.registration_wait_since.is_some());
             if !waiting {
+                self.pending_initial_registrations.remove(index);
+                self.note_replay_slot_wait(peer, None);
                 continue;
             }
             // A replacement session or a changed export policy must retire its
             // superseded table before this peer can fall back to a full build.
             if self.registration_waits_for_first_group(peer) {
-                self.pending_initial_registrations.push_back(peer);
+                self.requeue_pending_registration(index);
                 self.advance_first_group_build();
                 return;
             }
             if self.registration_waits_for_optional_destination(peer) {
-                self.pending_initial_registrations.push_back(peer);
+                self.requeue_pending_registration(index);
                 return;
             }
             if self.defer_first_group_registration(peer) {
                 // Rotate the queue so another group's warm registration can
                 // proceed while this cold table is being staged.
-                self.pending_initial_registrations.push_back(peer);
+                self.requeue_pending_registration(index);
                 if self.first_group_build.is_some() {
                     self.advance_first_group_build();
                 }
                 return;
             }
-            if self.registration_waits_for_replay_slot(peer) {
-                self.pending_initial_registrations.push_back(peer);
+            let wait = self.replay_slot_wait(peer, behind_budget);
+            self.note_replay_slot_wait(peer, wait);
+            if let Some(wait) = wait {
+                behind_budget |= wait == initial_member_replay::SlotWait::Budget;
                 slot_waits = true;
+                index += 1;
                 continue;
             }
+            self.pending_initial_registrations.remove(index);
             self.complete_deferred_registration(peer);
             return;
         }
         self.set_registration_slot_wait(slot_waits);
         if self.first_group_build.is_some() {
             self.advance_first_group_build();
+        }
+    }
+
+    fn requeue_pending_registration(&mut self, index: usize) {
+        if let Some(peer) = self.pending_initial_registrations.remove(index) {
+            self.pending_initial_registrations.push_back(peer);
         }
     }
 

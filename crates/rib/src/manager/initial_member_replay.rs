@@ -14,7 +14,7 @@ use changes::ReplayChanges;
 use tokio::sync::mpsc;
 
 use super::distribution::OutboundCommitBatch;
-use super::update_groups::admitted_recovery::{Key, OnReservationRefusal};
+use super::update_groups::admitted_recovery::{Key, OnReservationRefusal, ReplayRoom};
 use super::{PeerId, RibManager};
 use crate::fast_hash::FastSet;
 use crate::loc_rib::{REGISTRATION_PAGE_SIZE, RegistrationScanStatus};
@@ -57,6 +57,25 @@ struct Replay {
     carry: VecDeque<Prefix>,
 }
 
+/// What a paceable registration waits for before its replay can start.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SlotWait {
+    /// Every one of the `MAX_JOIN_COHORT` replay slots is taken.
+    Cap,
+    /// The live replays' proofs leave no room for this table, or an older
+    /// registration waits for that room.
+    Budget,
+}
+
+impl SlotWait {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cap => "replay_cap",
+            Self::Budget => "proof_budget",
+        }
+    }
+}
+
 #[derive(Default)]
 pub(super) struct InitialMemberReplays {
     members: HashMap<PeerId, Replay>,
@@ -66,6 +85,9 @@ pub(super) struct InitialMemberReplays {
     // The registration queue length when its every entry last waited for a
     // replay slot. A replay's end, or a queue change, makes it runnable.
     slot_wait: Option<usize>,
+    // Registrations waiting for a replay slot, each with its cause, logged
+    // once per wait.
+    waiters: HashMap<PeerId, SlotWait>,
     #[cfg(feature = "bench-internals")]
     observer: Option<observation::ReplayObserver>,
     #[cfg(test)]
@@ -97,19 +119,83 @@ impl RibManager {
             .is_some_and(|replay| replay.changes.unsent())
     }
 
-    /// A paceable registration waits while live replays hold every slot or
-    /// the proof budget its table needs: their ends release them. With no
-    /// replay live nothing would, so the registration goes ahead.
-    pub(super) fn registration_waits_for_replay_slot(&self, peer: PeerId) -> bool {
+    /// What `peer`'s paceable registration waits for, if anything: a slot
+    /// while live replays hold every one, or proof budget while their
+    /// proofs leave no room for its table (and always when `behind_budget`,
+    /// an older registration waiting for that room, keeps the queue FIFO).
+    /// It does not wait when no replay is live, when its table would not
+    /// fit even once they end, or when its replay would be refused anyway.
+    pub(super) fn replay_slot_wait(&self, peer: PeerId, behind_budget: bool) -> Option<SlotWait> {
         let replays = &self.initial_member_replays.members;
-        if replays.is_empty() || replays.contains_key(&peer) {
-            return false;
+        if replays.is_empty()
+            || replays.contains_key(&peer)
+            || !self.eligible_initial_member_replay(peer)
+            || self.replay_peer_refusal(peer).is_some()
+        {
+            return None;
         }
-        self.eligible_initial_member_replay(peer)
-            && (replays.len() >= super::peer_lifecycle::MAX_JOIN_COHORT
-                || self
-                    .pending_replay_rows(peer)
-                    .is_some_and(|rows| !self.pending_group_admitted.initial_replay_fits(rows)))
+        if replays.len() >= super::peer_lifecycle::MAX_JOIN_COHORT {
+            return Some(SlotWait::Cap);
+        }
+        if behind_budget {
+            return Some(SlotWait::Budget);
+        }
+        let rows = self.pending_replay_rows(peer);
+        (self.pending_group_admitted.initial_replay_room(rows) == ReplayRoom::AfterReplays)
+            .then_some(SlotWait::Budget)
+    }
+
+    /// [`Self::replay_slot_wait`] for a registration completed outside the
+    /// queue walk: it also waits behind any queued registration that waits
+    /// for proof budget.
+    pub(super) fn registration_waits_for_replay_slot(&mut self, peer: PeerId) -> bool {
+        let behind_budget = self
+            .pending_initial_registrations
+            .iter()
+            .take_while(|queued| **queued != peer)
+            .any(|queued| {
+                self.initial_member_replays.waiters.get(queued) == Some(&SlotWait::Budget)
+            });
+        let wait = self.replay_slot_wait(peer, behind_budget);
+        self.note_replay_slot_wait(peer, wait);
+        wait.is_some()
+    }
+
+    /// Record the registration's wait, logging the first of each.
+    pub(super) fn note_replay_slot_wait(&mut self, peer: PeerId, wait: Option<SlotWait>) {
+        let Some(wait) = wait else {
+            self.initial_member_replays.waiters.remove(&peer);
+            return;
+        };
+        if self
+            .initial_member_replays
+            .waiters
+            .insert(peer, wait)
+            .is_none()
+        {
+            tracing::debug!(
+                %peer,
+                cause = wait.as_str(),
+                replays = self.initial_member_replays.members.len(),
+                "paced initial table waits for a replay slot"
+            );
+        }
+    }
+
+    /// Peer state that refuses a paced replay whatever the free slots, so
+    /// waiting for one would not help.
+    fn replay_peer_refusal(&self, peer: PeerId) -> Option<ReplayCause> {
+        if self.dirty_peers.contains(&peer) {
+            Some(ReplayCause::from_label(|| "already_dirty"))
+        } else if self.outbound_prefix_limits.contains_key(&peer) {
+            Some(ReplayCause::from_label(|| "prefix_limit"))
+        } else if self.retain_initial_group_admitted(peer) {
+            Some(ReplayCause::from_label(|| "retained_proof"))
+        } else if self.peer_orf_pending.contains_key(&peer) {
+            Some(ReplayCause::from_label(|| "orf_pending"))
+        } else {
+            None
+        }
     }
 
     /// Whether a queued registration can make progress. One whose every
@@ -138,16 +224,8 @@ impl RibManager {
             Some(ReplayCause::from_label(|| "replay_cap"))
         } else if group.evpn_table_stamp == 0 {
             Some(ReplayCause::from_label(|| "unpublished_table"))
-        } else if self.dirty_peers.contains(&peer) {
-            Some(ReplayCause::from_label(|| "already_dirty"))
-        } else if self.outbound_prefix_limits.contains_key(&peer) {
-            Some(ReplayCause::from_label(|| "prefix_limit"))
-        } else if self.retain_initial_group_admitted(peer) {
-            Some(ReplayCause::from_label(|| "retained_proof"))
-        } else if self.peer_orf_pending.contains_key(&peer) {
-            Some(ReplayCause::from_label(|| "orf_pending"))
         } else {
-            None
+            self.replay_peer_refusal(peer)
         };
         if let Some(cause) = refusal {
             return self.refuse_initial_member_replay(peer, cause);

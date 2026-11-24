@@ -1043,9 +1043,13 @@ impl RibManager {
             if job.other_destination_waits {
                 self.clear_first_group_commit_frontier();
             }
-            self.pending_initial_registrations
-                .retain(|queued| *queued != peer);
-            self.complete_deferred_registration(peer);
+            // The table is published: a founder that must wait for a replay
+            // slot stays queued, as a warm joiner would.
+            if !self.registration_waits_for_replay_slot(peer) {
+                self.pending_initial_registrations
+                    .retain(|queued| *queued != peer);
+                self.complete_deferred_registration(peer);
+            }
         }
     }
 

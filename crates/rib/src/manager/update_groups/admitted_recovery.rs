@@ -113,6 +113,14 @@ impl From<Key> for ExactExportKey {
     }
 }
 
+/// Where a new initial replay's proof fits in the ledger's budgets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::manager) enum ReplayRoom {
+    Fits,
+    AfterReplays,
+    Never,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::manager) enum FailureCause {
     PeerLimit,
@@ -2168,31 +2176,46 @@ impl AdmittedRecovery {
         Ok(handle.is_some())
     }
 
-    /// Whether the daemon budget has room now for an initial replay over
-    /// `rows` table rows: its mask, its keyed universe and their headers.
-    pub(in crate::manager) fn initial_replay_fits(&self, rows: usize) -> bool {
+    /// Where an initial replay over `rows` table rows (its mask, keyed
+    /// universe and headers) fits: in the daemon budget now, only once the
+    /// live initial replays release theirs, or under neither limit.
+    pub(in crate::manager) fn initial_replay_room(&self, rows: usize) -> ReplayRoom {
         let growth = if self.snapshots.len() == self.snapshots.capacity() {
             (self.snapshots.capacity() * 2).max(1) * size_of::<Snapshot>() + size_of::<Snapshots>()
         } else {
             0
         };
-        Self::shared_words(rows)
-            .ok()
-            .and_then(|words| {
-                words
-                    .checked_mul(size_of::<u64>())?
-                    .checked_add(rows.checked_mul(size_of::<Key>())?)?
-                    .checked_add(key_index_len(rows).checked_mul(size_of::<u32>())?)?
-                    .checked_add(growth)?
-                    .checked_add(
-                        size_of::<Words>()
-                            + 2 * size_of::<Snapshot>()
-                            + size_of::<Keys>()
-                            + size_of::<SlotPositions>(),
-                    )?
-                    .checked_add(self.used)
-            })
-            .is_some_and(|daemon| daemon <= self.daemon_limit)
+        let Some(needed) = Self::shared_words(rows).ok().and_then(|words| {
+            words
+                .checked_mul(size_of::<u64>())?
+                .checked_add(rows.checked_mul(size_of::<Key>())?)?
+                .checked_add(key_index_len(rows).checked_mul(size_of::<u32>())?)?
+                .checked_add(
+                    size_of::<Record>()
+                        + size_of::<Words>()
+                        + 2 * size_of::<Snapshot>()
+                        + size_of::<Keys>()
+                        + size_of::<SlotPositions>(),
+                )
+        }) else {
+            return ReplayRoom::Never;
+        };
+        let daemon = needed.saturating_add(growth);
+        if needed > self.peer_limit {
+            return ReplayRoom::Never;
+        }
+        if self.used.saturating_add(daemon) <= self.daemon_limit {
+            return ReplayRoom::Fits;
+        }
+        let replays: usize = (0..self.records.len())
+            .filter(|&index| self.records[index].initial_replay)
+            .map(|index| self.peer_charge(index))
+            .sum();
+        if self.used.saturating_sub(replays).saturating_add(daemon) <= self.daemon_limit {
+            ReplayRoom::AfterReplays
+        } else {
+            ReplayRoom::Never
+        }
     }
 
     /// Group churn can shrink the table or add a prefix behind the walk. Such
