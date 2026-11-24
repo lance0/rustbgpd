@@ -367,6 +367,144 @@ fn a_cold_group_founder_at_the_replay_cap_waits_for_a_slot() {
     assert!(peak <= REGISTRATION_PAGE_SIZE, "one turn sent {peak} rows");
 }
 
+// A founder that leaves while it waits leaves no member and no waiter for
+// its published table, which retires rather than stays staged.
+#[test]
+fn a_waiting_founders_group_retires_when_it_leaves() {
+    let Published {
+        mut manager,
+        tx: _tx,
+        ..
+    } = published();
+    let _parked = fill_replay_slots(&mut manager);
+    let groups = manager.group_ribs.len();
+    let n = 100;
+    let _founder = client(&mut manager, n, 1 << 12, None, &DUAL);
+    for _ in 0..10_000 {
+        manager.advance_pending_initial_registration();
+    }
+    assert_eq!(manager.group_ribs.len(), groups + 1, "the build published");
+
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: receiver(n),
+        session_id: 1,
+    });
+    for _ in 0..10_000 {
+        if manager.optional_destination_retirement_active() {
+            manager.advance_optional_destination_retirement();
+        } else if manager.group_ribs.len() == groups {
+            break;
+        } else {
+            manager.advance_pending_initial_registration();
+        }
+    }
+    assert_eq!(
+        manager.group_ribs.len(),
+        groups,
+        "the unclaimed table stayed"
+    );
+    assert!(!manager.optional_destination_retirement_active());
+}
+
+/// With every replay slot held, register client `n` and advance until it
+/// holds the IPv4 table: it must not wait for a slot.
+fn sends_without_waiting(manager: &mut RibManager, n: u8, rx: mpsc::Receiver<OutboundRouteUpdate>) {
+    let mut joiner = [(n, rx)];
+    let (_, paced) = advance_until_complete(manager, &mut joiner, ROWS, 1);
+    assert!(!paced[0], "joiner {n} was paced");
+    assert!(
+        manager.is_initial_member_replay(receiver(1)),
+        "the slots were released"
+    );
+}
+
+// A table the per-peer proof limit refuses can never start a paced replay,
+// so a full set of slots must not hold it: it takes its one-turn send.
+#[test]
+fn a_table_that_can_never_fit_does_not_wait_for_a_slot() {
+    let Published {
+        mut manager,
+        tx: _tx,
+        ..
+    } = published();
+    let _parked = fill_replay_slots(&mut manager);
+    manager.pending_group_admitted.set_test_peer_limit(ROWS);
+    let rx = rs_client(&mut manager, 100, 1 << 12);
+    sends_without_waiting(&mut manager, 100, rx);
+}
+
+// A joiner whose configured outbound prefix limit refuses its paced replay
+// is limited before it registers, so it does not wait for a slot either.
+#[test]
+fn a_joiner_with_a_configured_prefix_limit_does_not_wait_for_a_slot() {
+    use crate::manager::tests::outbound_prefix_limits::{apply, limit_config, prepare};
+
+    let Published {
+        mut manager,
+        tx: _tx,
+        ..
+    } = published();
+    let _parked = fill_replay_slots(&mut manager);
+    let limit = u32::try_from(2 * ROWS).unwrap();
+    prepare(
+        &mut manager,
+        1,
+        limit_config(&[(receiver(100), Some(limit), None)], &[]),
+    )
+    .expect("no registered peer exceeds the limit");
+    apply(&mut manager, 1, true).expect("applied");
+    let rx = rs_client(&mut manager, 100, 1 << 12);
+    sends_without_waiting(&mut manager, 100, rx);
+}
+
+// A waiting joiner's replacement session negotiates ORF, which keeps it off
+// the paced replay (its table waits for the peer's filter). The queue length does not change, but the replacement
+// must not be left waiting for a slot it no longer needs.
+#[test]
+fn a_replacement_session_that_cannot_pace_stops_waiting() {
+    let Published {
+        mut manager,
+        tx: _tx,
+        ..
+    } = published();
+    let _parked = fill_replay_slots(&mut manager);
+    let n = 100;
+    let _first = rs_client(&mut manager, n, 1 << 12);
+    settle(&mut manager);
+    assert!(!manager.registration_runnable(), "the joiner waits");
+    let queued = manager.pending_initial_registrations.len();
+
+    let (out, rx) = mpsc::channel(1 << 12);
+    let mut up = test_peer_up(receiver(n), 2, out);
+    let RibUpdate::PeerUp {
+        peer_asn,
+        sendable_families,
+        negotiated_orf_recv,
+        ..
+    } = &mut up
+    else {
+        unreachable!()
+    };
+    *peer_asn = 64_600 + u32::from(n);
+    *sendable_families = vec![(Afi::Ipv4, Safi::Unicast)];
+    *negotiated_orf_recv = vec![(Afi::Ipv4, Safi::Unicast)];
+    manager.handle_update(up);
+    assert_eq!(manager.pending_initial_registrations.len(), queued);
+    assert!(
+        manager.registration_runnable(),
+        "the replacement stayed asleep"
+    );
+    // Without an ORF filter yet, its table is empty: End-of-RIB alone.
+    let mut joiner = [(n, rx)];
+    let (_, paced) = advance_until_complete(&mut manager, &mut joiner, 0, 1);
+    assert!(!paced[0]);
+    assert_eq!(manager.outbound_session_ids.get(&receiver(n)), Some(&2));
+    assert!(
+        manager.is_initial_member_replay(receiver(1)),
+        "the slots were released"
+    );
+}
+
 // The proof budget has room for two paced tables at a time. The other
 // joiners wait for a replay to end instead of sending a whole table in one
 // turn under a refused enrollment.

@@ -588,6 +588,11 @@ impl AdmittedRecovery {
     }
 
     #[cfg(test)]
+    pub(in crate::manager) fn set_test_peer_limit(&mut self, bytes: usize) {
+        self.peer_limit = bytes;
+    }
+
+    #[cfg(test)]
     pub(in crate::manager) fn fail_next_allocation_for_test(&mut self) {
         self.fail_next_allocation = true;
     }

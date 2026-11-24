@@ -571,6 +571,32 @@ impl RibManager {
             })
     }
 
+    /// Retire a table published for a founder that waited for a replay slot
+    /// once no queued registration would join it: its founder left. One
+    /// retirement runs at a time; the rest wait for a later walk.
+    pub(super) fn retire_unclaimed_founder_groups(&mut self) {
+        let gids = self.initial_member_replays.take_founder_groups();
+        for gid in gids {
+            let Some(group) = self.group_ribs.get(&gid) else {
+                continue;
+            };
+            if !group.members.is_empty() {
+                continue;
+            }
+            let claimed = self.pending_initial_registrations.iter().any(|&peer| {
+                self.pending_registration_matches_group(peer, gid, group.export_chain.as_ref())
+            });
+            if claimed
+                || self.first_group_build.is_some()
+                || self.optional_destination_retirement_active()
+            {
+                self.initial_member_replays.note_founder_group(gid);
+            } else {
+                self.retire_memberless_destination(gid, None);
+            }
+        }
+    }
+
     pub(super) fn retire_prepared_first_group(&mut self, gid: usize) -> bool {
         if self.paced_policy_destination != Some(gid)
             || !self
@@ -1045,7 +1071,9 @@ impl RibManager {
             }
             // The table is published: a founder that must wait for a replay
             // slot stays queued, as a warm joiner would.
-            if !self.registration_waits_for_replay_slot(peer) {
+            if self.registration_waits_for_replay_slot(peer) {
+                self.initial_member_replays.note_founder_group(gid);
+            } else {
                 self.pending_initial_registrations
                     .retain(|queued| *queued != peer);
                 self.complete_deferred_registration(peer);

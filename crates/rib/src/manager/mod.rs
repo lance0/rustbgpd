@@ -5063,6 +5063,7 @@ impl RibManager {
             return;
         }
         self.set_registration_slot_wait(slot_waits);
+        self.retire_unclaimed_founder_groups();
         if self.first_group_build.is_some() {
             self.advance_first_group_build();
         }
@@ -5408,6 +5409,12 @@ impl RibManager {
             // The discarded message may be the one an owed rebuild waited on.
             self.settle_orr_rebuild();
             return;
+        }
+        // A session or profile message can end a registration's wait for a
+        // replay slot without changing the queue. Unicast receipts, the bulk
+        // of the input, leave the waiters to the next replay's end.
+        if !matches!(update.unmetered(), RibUpdate::RoutesReceived { .. }) {
+            self.set_registration_slot_wait(false);
         }
         // Only a following BGP-LS UPDATE may see the cache behind its inputs.
         if self.orr_rebuild_owed_updates > 0

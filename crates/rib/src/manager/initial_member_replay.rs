@@ -88,6 +88,9 @@ pub(super) struct InitialMemberReplays {
     // Registrations waiting for a replay slot, each with its cause, logged
     // once per wait.
     waiters: HashMap<PeerId, SlotWait>,
+    // Groups published for a founder that then waited for a slot. One no
+    // queued registration claims is retired.
+    founder_groups: Vec<usize>,
     #[cfg(feature = "bench-internals")]
     observer: Option<observation::ReplayObserver>,
     #[cfg(test)]
@@ -95,6 +98,16 @@ pub(super) struct InitialMemberReplays {
 }
 
 impl InitialMemberReplays {
+    pub(super) fn note_founder_group(&mut self, gid: usize) {
+        if !self.founder_groups.contains(&gid) {
+            self.founder_groups.push(gid);
+        }
+    }
+
+    pub(super) fn take_founder_groups(&mut self) -> Vec<usize> {
+        std::mem::take(&mut self.founder_groups)
+    }
+
     pub(super) fn runnable(&self) -> bool {
         !self.ready.is_empty()
     }
@@ -134,15 +147,18 @@ impl RibManager {
         {
             return None;
         }
+        // A table that fits under neither limit is refused whatever ends:
+        // it takes its one-turn send now rather than wait for a slot.
+        let room = self
+            .pending_group_admitted
+            .initial_replay_room(self.pending_replay_rows(peer));
+        if room == ReplayRoom::Never {
+            return None;
+        }
         if replays.len() >= super::peer_lifecycle::MAX_JOIN_COHORT {
             return Some(SlotWait::Cap);
         }
-        if behind_budget {
-            return Some(SlotWait::Budget);
-        }
-        let rows = self.pending_replay_rows(peer);
-        (self.pending_group_admitted.initial_replay_room(rows) == ReplayRoom::AfterReplays)
-            .then_some(SlotWait::Budget)
+        (behind_budget || room == ReplayRoom::AfterReplays).then_some(SlotWait::Budget)
     }
 
     /// [`Self::replay_slot_wait`] for a registration completed outside the
@@ -187,7 +203,11 @@ impl RibManager {
     fn replay_peer_refusal(&self, peer: PeerId) -> Option<ReplayCause> {
         if self.dirty_peers.contains(&peer) {
             Some(ReplayCause::from_label(|| "already_dirty"))
-        } else if self.outbound_prefix_limits.contains_key(&peer) {
+        } else if self.outbound_prefix_limits.contains_key(&peer)
+            || self.configured_outbound_limit(peer)
+        {
+            // A waiting registration installs its configured limits only
+            // when it registers.
             Some(ReplayCause::from_label(|| "prefix_limit"))
         } else if self.retain_initial_group_admitted(peer) {
             Some(ReplayCause::from_label(|| "retained_proof"))
@@ -199,8 +219,9 @@ impl RibManager {
     }
 
     /// Whether a queued registration can make progress. One whose every
-    /// entry waits for a replay slot is not, until a replay ends or the
-    /// queue changes.
+    /// entry waits for a replay slot is not, until a replay ends, the queue
+    /// changes, or a message other than a unicast receipt arrives (a session
+    /// or profile change can end a wait).
     pub(super) fn registration_runnable(&self) -> bool {
         !self.pending_initial_registrations.is_empty()
             && self.initial_member_replays.slot_wait
