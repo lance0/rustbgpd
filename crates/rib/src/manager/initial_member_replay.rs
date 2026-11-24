@@ -19,6 +19,7 @@ use super::{PeerId, RibManager};
 use crate::fast_hash::FastSet;
 use crate::loc_rib::{REGISTRATION_PAGE_SIZE, RegistrationScanStatus};
 use crate::update::{ExactExportKey, OutboundRouteUpdate, RouteQueryKey, route_query_key};
+use rustbgpd_wire::Prefix;
 
 // The non-benchmark failure path carries only success/failure, and never
 // evaluates the diagnostic (including any extra lookups it needs).
@@ -51,6 +52,9 @@ struct Replay {
     sender: mpsc::Sender<OutboundRouteUpdate>,
     phase: Phase,
     changes: ReplayChanges,
+    // Page keys left when a poll spent its unit budget. An RS-control
+    // member's slot may search the prefix's fallback rows.
+    carry: VecDeque<Prefix>,
 }
 
 #[derive(Default)]
@@ -105,6 +109,11 @@ impl RibManager {
             return false;
         }
         let table_stamp = group.evpn_table_stamp;
+        let changes = if group.per_client_best {
+            ReplayChanges::coalescing()
+        } else {
+            ReplayChanges::default()
+        };
         let enrollment = self
             .pending_group_admitted
             .begin_initial_replay(peer, group.table.len());
@@ -128,7 +137,8 @@ impl RibManager {
                 session: self.outbound_session_ids[&peer],
                 sender: self.outbound_peers[&peer].clone(),
                 phase: Phase::PrepareProof(None),
-                changes: ReplayChanges::default(),
+                changes,
+                carry: VecDeque::new(),
             },
         );
         self.initial_member_replays.ready.push_back(peer);
@@ -269,23 +279,38 @@ impl RibManager {
             self.prepare_initial_member_proof_page(peer, gid, after);
             return;
         }
-        if !job.changes.has_pending()
-            && self.loc_rib.member_replay_scan_status(peer) == RegistrationScanStatus::Ready
-        {
-            debug_assert!(!job.changes.unsent(), "a coalesced key outlived its repair");
-            if !self.pending_route_batches.is_empty() {
-                self.initial_member_replays.ready.push_back(peer);
-                return;
-            }
-            self.abort_initial_member_replay(peer);
-            #[cfg(feature = "bench-internals")]
-            self.observe_initial_replay(peer, BenchReplayEvent::Completed);
-            self.complete_initial_selection_replay(peer);
-            self.retire_completed_initial_group_admitted(peer);
-            self.settle_free_eor(peer);
-            return;
+        if !self.complete_initial_member_replay(peer) {
+            self.send_initial_member_page(peer, gid);
         }
-        self.send_initial_member_page(peer, gid);
+    }
+
+    /// Complete once nothing is left to send. A page that drains the last
+    /// repair completes in its own turn when the writer has room for the
+    /// marker behind it: input that lands before the next turn would
+    /// otherwise queue a repair again, so steady churn slower than the
+    /// drain could hold back End-of-RIB indefinitely.
+    fn complete_initial_member_replay(&mut self, peer: PeerId) -> bool {
+        let job = &self.initial_member_replays.members[&peer];
+        if job.changes.has_pending()
+            || !job.carry.is_empty()
+            || self.loc_rib.member_replay_scan_status(peer) != RegistrationScanStatus::Ready
+            || self.dirty_peers.contains(&peer)
+        {
+            return false;
+        }
+        debug_assert!(!job.changes.unsent(), "a coalesced key outlived its repair");
+        // End-of-RIB waits for the rest of an UPDATE whose first chunks applied.
+        if !self.pending_route_batches.is_empty() {
+            self.initial_member_replays.ready.push_back(peer);
+            return true;
+        }
+        self.abort_initial_member_replay(peer);
+        #[cfg(feature = "bench-internals")]
+        self.observe_initial_replay(peer, BenchReplayEvent::Completed);
+        self.complete_initial_selection_replay(peer);
+        self.retire_completed_initial_group_admitted(peer);
+        self.settle_free_eor(peer);
+        true
     }
 
     fn prepare_initial_member_proof_page(
@@ -337,39 +362,66 @@ impl RibManager {
             self.send_initial_replay_change(peer, operation);
             return;
         }
-        let page = self.loc_rib.take_member_replay_page(peer);
-        #[cfg(test)]
-        super::slice_timing::record_work(
-            "initial_member_replay_visits",
-            page.bucket_visits + page.repairs,
-        );
+        let rs_control = self.rs_control_context(peer);
+        let replay = self
+            .initial_member_replays
+            .members
+            .get_mut(&peer)
+            .expect("live replay");
+        if replay.carry.is_empty() {
+            let page = self.loc_rib.take_member_replay_page(peer);
+            #[cfg(test)]
+            super::slice_timing::record_work(
+                "initial_member_replay_visits",
+                page.bucket_visits + page.repairs,
+            );
+            replay.carry = page.keys.into();
+        }
         let Some(admitted) = self.pending_group_admitted.get(&peer) else {
             self.recover_initial_member_replay(peer, ReplayCause::from_label(|| "missing_proof"));
             return;
         };
         let group = &self.group_ribs[&gid];
-        let changes = &self.initial_member_replays.members[&peer].changes;
         let mut routes = Vec::new();
         let mut actions = Vec::new();
         let mut withdraw = Vec::new();
         let mut prior = FastSet::default();
         let mut reconciled = Vec::new();
-        for prefix in &page.keys {
+        let mut keys = HashSet::new();
+        let mut units = 0;
+        while let Some(&prefix) = replay.carry.front() {
+            // One unit per key, plus each fallback row its slot may search.
+            let cost = 1 + rs_control.map_or(0, |_| group.rs_fallback_rows(&prefix));
+            if units != 0 && units + cost > REGISTRATION_PAGE_SIZE {
+                break;
+            }
+            units += cost;
+            replay.carry.pop_front();
+            keys.insert(prefix);
             // Grouped single-best outbound identities use path ID zero,
             // including when the received winner has its own Add-Path ID.
-            let key = ExactExportKey::Unicast(*prefix, 0);
+            let key = ExactExportKey::Unicast(prefix, 0);
             let sent = admitted.contains(&key);
             // A coalesced key reconciles its current row against admission.
-            if changes.coalesced(prefix) {
-                reconciled.push(*prefix);
-            } else if sent || changes.owns_absent(prefix) {
+            if replay.changes.coalesced(&prefix) {
+                reconciled.push(prefix);
+            } else if sent || replay.changes.owns_absent(&prefix) {
                 continue;
             }
-            if let Some(entry) = group.adv_entry_for(peer, prefix, 0, None) {
-                routes.push(entry.route.clone());
+            if let Some(entry) = group.adv_entry_for(peer, &prefix, 0, rs_control) {
+                // RFC 7947: prepend from the source tags, scrub the post-policy route.
+                let (_, source_large) =
+                    group.source_control_for_route(entry.route, entry.source_attrs);
+                let mut route = entry.route.clone();
+                super::distribution::rs_control::rs_control_route_rewrite(
+                    &mut route,
+                    source_large,
+                    rs_control,
+                );
+                routes.push(route);
                 actions.push(entry.nh.cloned());
             } else if sent {
-                withdraw.push((*prefix, 0));
+                withdraw.push((prefix, 0));
             } else {
                 continue;
             }
@@ -377,6 +429,8 @@ impl RibManager {
                 prior.insert(key);
             }
         }
+        #[cfg(test)]
+        super::slice_timing::record_work("initial_member_replay_units", units);
         if !routes.is_empty() || !withdraw.is_empty() {
             let batch = OutboundCommitBatch {
                 slot: operation.slot(),
@@ -395,12 +449,10 @@ impl RibManager {
             .expect("live replay")
             .changes
             .settle_coalesced(&reconciled);
-        self.apply_initial_replay_page_policy(
-            peer,
-            gid,
-            &page.keys.into_iter().collect::<HashSet<_>>(),
-        );
-        self.initial_member_replays.ready.push_back(peer);
+        self.apply_initial_replay_page_policy(peer, gid, &keys);
+        if self.outbound_channel_full(peer) || !self.complete_initial_member_replay(peer) {
+            self.initial_member_replays.ready.push_back(peer);
+        }
     }
 
     fn commit_initial_member_batch(

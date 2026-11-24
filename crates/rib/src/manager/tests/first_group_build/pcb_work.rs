@@ -35,6 +35,12 @@ const WORK: &[&str] = &[
     "group_denials_written",
 ];
 
+// The member's paced replay after the build publishes.
+const REPLAY: &[&str] = &[
+    "initial_member_replay_visits",
+    "initial_member_replay_units",
+];
+
 // Every stage that spends the poll's candidate budget, each counted at most
 // once per unit charged. One poll may combine several prefixes.
 const CHARGED: &[&str] = &[
@@ -101,6 +107,7 @@ async fn cold_server(prefix_count: u16, paths_per_prefix: u32) -> Build {
     let mut actor = Box::pin(manager.run_actor());
     let mut build = Build::default();
     let mut charged = Build::default();
+    let mut replay = Build::default();
     let mut seen = HashSet::new();
     let mut markers = Vec::new();
     let manager = poll_fn(|cx| {
@@ -108,6 +115,7 @@ async fn cold_server(prefix_count: u16, paths_per_prefix: u32) -> Build {
         let result = actor.as_mut().poll(cx);
         let after = snapshot();
         charged.record(&before, after.clone(), CHARGED);
+        replay.record(&before, after.clone(), REPLAY);
         build.record(&before, after, WORK);
         while let Ok(update) = rx.try_recv().map(delivered) {
             assert!(update.unicast_withdrawals().next().is_none());
@@ -141,12 +149,28 @@ async fn cold_server(prefix_count: u16, paths_per_prefix: u32) -> Build {
             "{stage}"
         );
     }
-    // The paced replay journals winner changes only. A PCB member also needs
-    // lane-only changes and its own RS view, so its replay stays one turn.
-    assert_eq!(
-        build.peak.get("initial_member_replay_visits").copied(),
-        Some(usize::from(prefix_count))
-    );
+    if usize::from(prefix_count) > PAGE {
+        // The replay pages the table too: one page of keys per poll, and one
+        // page of units counting each fallback row a key's RS view may
+        // search, beyond the poll's first key.
+        let paths = usize::try_from(paths_per_prefix).unwrap();
+        assert!(replay.polls > 1, "{replay:?}");
+        assert!(
+            replay.peak["initial_member_replay_visits"] <= PAGE,
+            "{replay:?}"
+        );
+        assert!(
+            replay.peak["initial_member_replay_units"] <= PAGE + paths,
+            "{replay:?}"
+        );
+        assert!(replay.total["initial_member_replay_units"] >= usize::from(prefix_count));
+    } else {
+        // A table below the paging threshold replays in one turn.
+        assert_eq!(
+            replay.peak.get("initial_member_replay_visits").copied(),
+            Some(usize::from(prefix_count))
+        );
+    }
     assert!(
         charged.peak["work_units"] <= CANDIDATE_BUDGET,
         "{:?}",
@@ -211,6 +235,14 @@ async fn pcb_cold_build_bounds_broad_table_work_per_poll() {
 #[tokio::test]
 async fn pcb_cold_build_bounds_crowded_prefix_work_per_poll() {
     check_growth((1, 8_192), (1, 32_768)).await;
+}
+
+// Crowded prefixes resolve the member's slot through hundreds of fallback
+// rows. A page of such keys must spread across polls, not search every row
+// of a page in one.
+#[tokio::test]
+async fn pcb_replay_bounds_fallback_searches_per_poll() {
+    cold_server(2_048, 32).await;
 }
 
 fn register(manager: &mut RibManager, n: u8, asn: u32) -> mpsc::Receiver<OutboundRouteUpdate> {

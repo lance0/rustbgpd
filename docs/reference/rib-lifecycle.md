@@ -41,10 +41,10 @@ finishes the unit it is in, and one unit can be a whole table.
 
 | Shape | [Session comes up](#session-comes-up) | [Steady state](#steady-state) | [Receiver falls behind](#receiver-falls-behind) | [Refresh, ORF, RTC](#refresh-orf-and-rt-constrain) | [Policy change](#policy-or-config-change) | [Restart](#restart) | [Session ends](#session-ends) |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Plain unicast, grouped | Table build **paced**; initial table **one turn** (both in the [receipt](../perf/first-group-build-registration-2026-11.md)) | **paced** by read gate and window | Resync **one turn** per member | **one turn** per request; queued requests share it | Nothing filtered: **bounded turns**, updates held until commit. Otherwise one shared turn | **paced** between batches; input held inside a batch | Selection **one turn**. Large fanout **paced** |
-| Group-shareable export policy | Single-best unicast table build **paced**; initial table **one turn** | As plain | As plain | As plain | As plain | As plain; not measured with policy | As plain. Policy shape not measured |
+| Plain unicast, grouped | Table build **paced** ([receipt](../perf/first-group-build-registration-2026-11.md)); initial table **paced** from 10,000 routes | **paced** by read gate and window | Resync **one turn** per member | **one turn** per request; queued requests share it | Nothing filtered: **bounded turns**, updates held until commit. Otherwise one shared turn | **paced** between batches; input held inside a batch | Selection **one turn**. Large fanout **paced** |
+| Group-shareable export policy | Single-best unicast table build and initial table **paced** | As plain | As plain | As plain | As plain | As plain; not measured with policy | As plain. Policy shape not measured |
 | Configured role | Table build and initial table together in **one turn**; not measured | As plain; not measured | As plain; not measured | As plain; not measured | As plain if nothing is OTC-blocked; not measured | As plain; not measured | As plain. Role shape not measured |
-| Route-server per-client best | Cold policy-free, role-free eBGP unicast group build **paced**; initial table **one turn** | Window; per-client ranking not measured | As plain; not measured | One turn per request, never shared | Shared cohort **one turn**; other members **paced** by command; not measured | **paced** between batches, as plain; a crowded prefix alone | Selection **one turn**. Large fanout uses narrow key pages |
+| Route-server per-client best | Cold policy-free, role-free eBGP unicast group build and initial table **paced**; with export policy, initial table **one turn** | Window; per-client ranking not measured | As plain; not measured | One turn per request, never shared | Shared cohort **one turn**; other members **paced** by command; not measured | **paced** between batches, as plain; a crowded prefix alone | Selection **one turn**. Large fanout uses narrow key pages |
 | Kept private: ORF, ORR, conditional advertisement, peer-context policy, slow-peer isolation | Initial table **one turn** per receiver; not measured | Window; work grows with receivers | **paced** row cursor; fallback resync one turn | One turn per request | Members **paced** by command, a whole-table resync each; not measured | **paced** row cursor | Large fanout **paced**. Private single-best measured |
 | Add-Path send | As kept private; not measured | As kept private | As kept private; not measured with several paths | One turn per request | As kept private | As kept private; not measured with several paths | Large fanout uses narrow key pages. Not measured |
 | Dual-stack (IPv4 and IPv6 unicast) | As its row above; one table holds both families | As its row above | As above, per family | Per family | As its row above | Each family released separately | One selection turn, separate unicast pages per AFI |
@@ -353,9 +353,9 @@ if needed. Any other session keeps its own Adj-RIB-Out.
     overflow restart, a second overflow completes the member through the
     one-turn build, at the next route-batch boundary even while input stays
     queued. A crowded prefix whose partial rank input discards twice is
-    ranked whole in one turn, at the cost of that prefix's candidates. The completed group uses the ordinary
-    per-client-best initial replay, which sends the receiver’s table in one
-    turn. Attaching the first RS-controlled member to an existing group can
+    ranked whole in one turn, at the cost of that prefix's candidates. The
+    completed group replays to the member in pages (see the initial table
+    below). Attaching the first RS-controlled member to an existing group can
     still index the installed table during that member’s registration.
   - Tests: `registration_finishes_discovery_and_repairs_under_continuing_changes`
     and `registration_coalesces_repairs_and_invalidates_on_the_first_excess_key`
@@ -414,8 +414,28 @@ holds under [Restart](#restart)).
   million routes and 410–432 ms at 400,000
   ([receipt](../perf/first-group-build-registration-2026-11.md),
   in-process harness).
-- Not measured: the initial table at one million routes for any other
-  shape. Splitting it into bounded turns is not on main.
+- Paged replay: a member of a single-best group, or of a per-client-best
+  group with no export policy, joining a table of at least 10,000 routes
+  receives it in pages of about 1,024 keys, with other peers' updates
+  between pages. End-of-RIB follows the last page, at a route-batch
+  boundary. A per-client-best member's slot also follows its runner-up and,
+  with route-server controls, its own RFC 7947 view of the candidates, which
+  can change without a new best path. Every such change during the join
+  repairs that key from the member's current slot. Each page also counts
+  the fallback rows a route-server client's slot may search, so a page of
+  crowded prefixes spreads across turns. More than about 4,096 changed keys
+  during the join, or more than 64 concurrent paged joins, fall back to one
+  resync or one-turn replay of the member's table. Tests:
+  [`per_client_best.rs`](../../crates/rib/src/manager/tests/first_group_build/initial_member_replay/per_client_best.rs)
+  compares the paged table with the one-turn join under churn, source
+  departure, flap, regroup and overflow;
+  [`member_replay_work.rs`](../../crates/rib/src/manager/tests/first_group_build/member_replay_work.rs)
+  and
+  [`pcb_work.rs`](../../crates/rib/src/manager/tests/first_group_build/pcb_work.rs)
+  count each poll's replay work.
+- Not measured: the paged initial table's turn length at one million routes
+  for a per-client-best member, and the initial table at one million routes
+  for any shape outside the paged replay.
 
 ## Steady state
 

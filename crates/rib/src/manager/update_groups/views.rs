@@ -533,7 +533,7 @@ impl RibManager {
         held: [bool; 2],
     ) -> u64 {
         if held == [false; 2] {
-            return group.plain_permit_count(peer, family);
+            return group.unicast_permit_count(peer, family);
         }
         // Open families use the staged counts. Held families evaluate only
         // exempt local sources, indexed independently of the received table.
@@ -541,7 +541,7 @@ impl RibManager {
             .into_iter()
             .zip(held)
             .filter(|(afi, held)| !*held && family.is_none_or(|f| f == (*afi, Safi::Unicast)))
-            .map(|(afi, _)| group.plain_permit_count(peer, Some((afi, Safi::Unicast))))
+            .map(|(afi, _)| group.unicast_permit_count(peer, Some((afi, Safi::Unicast))))
             .sum();
         open + group
             .table
@@ -576,8 +576,9 @@ impl RibManager {
     /// subsequent evaluations even when the receiver is waiting for a page.
     pub(in crate::manager) fn start_initial_replay_policy(&mut self, peer: PeerId, gid: usize) {
         let group = &self.group_ribs[&gid];
-        debug_assert!(!group.per_client_best);
-        let permits = group.plain_permit_count(peer, None);
+        // Paced per-client-best groups have no export policy, so every
+        // substituted lane slot carries the group's one permit label.
+        let permits = group.unicast_permit_count(peer, None);
         let mut rows = Vec::with_capacity(1 + group.single_best_denials.labels.len());
         if permits != 0 {
             rows.push((
@@ -585,6 +586,15 @@ impl RibManager {
                 PolicyAction::Permit,
                 permits,
             ));
+        }
+        #[cfg(test)]
+        {
+            let mut walked = Vec::new();
+            self.walk_replay_permits(group, peer, None, [false; 2], &mut walked);
+            assert_eq!(
+                rows, walked,
+                "replay permit synthesis diverged from the adv(m) walk"
+            );
         }
         for (label, (total, by_source)) in &group.single_best_denials.labels {
             let count = total - by_source.get(&peer).copied().unwrap_or_default();

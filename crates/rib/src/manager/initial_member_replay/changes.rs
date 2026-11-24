@@ -95,6 +95,16 @@ pub(super) struct ReplayChanges {
 }
 
 impl ReplayChanges {
+    /// A per-client-best slot also follows the runner-up and the receiver's
+    /// RS view, which the ordered log cannot express. Every change for such
+    /// a member reconciles its current slot against admission instead.
+    pub(super) fn coalescing() -> Self {
+        Self {
+            overflowed: true,
+            ..Self::default()
+        }
+    }
+
     pub(super) fn has_pending(&self) -> bool {
         !self.pending.is_empty()
     }
@@ -169,12 +179,45 @@ impl RibManager {
         peer: PeerId,
         stage: &GroupStageOutput,
     ) -> Result<(), ReplayCause> {
+        let rs_control = self.rs_control_context(peer).is_some();
         let replay = self
             .initial_member_replays
             .members
             .get_mut(&peer)
             .expect("active replay");
         if matches!(replay.phase, Phase::PrepareProof(_)) {
+            return Ok(());
+        }
+        if self.group_ribs[&replay.gid].per_client_best {
+            // The member's slot reads the winner, its runner-up and, toward
+            // an RS-control receiver, the source tags and fallback rows. The
+            // last three change without a Loc-RIB write, so record the keys
+            // the live per-member emit reads as scan repairs.
+            let keys = stage
+                .deltas
+                .iter()
+                .map(|delta| delta.prefix)
+                .chain(
+                    stage
+                        .lane_deltas
+                        .iter()
+                        .filter(|delta| delta.emit_target == Some(peer))
+                        .map(|delta| delta.prefix),
+                )
+                .chain(
+                    stage
+                        .rs_transitions
+                        .iter()
+                        .map(|transition| transition.prefix)
+                        .chain(stage.rs_priors.iter().map(|(prefix, _)| *prefix))
+                        .filter(|_| rs_control),
+                );
+            for prefix in keys {
+                if !self.loc_rib.record_member_replay_change(peer, prefix) {
+                    return Err(ReplayCause::from_label(|| "scan_repair_limit"));
+                }
+                replay.changes.coalesce(prefix);
+            }
             return Ok(());
         }
         // A stage larger than one page goes to the repairs whole, so the
