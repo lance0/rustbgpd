@@ -321,6 +321,9 @@ struct AdjRibOutCommitStats {
     private_extra_prefix_scans: usize,
     #[cfg(test)]
     local_source_withdraw_visits: usize,
+    /// Announced rows the grouped commit's local-source scan visited.
+    #[cfg(test)]
+    local_source_scan_visits: usize,
     /// Last End-of-RIB unicast pass: prefixes recomputed, best changes,
     /// and the recompute / distribution split in nanoseconds.
     eor_unicast_affected: usize,

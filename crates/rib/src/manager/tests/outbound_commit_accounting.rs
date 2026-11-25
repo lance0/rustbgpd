@@ -284,6 +284,79 @@ fn grouped_withdrawals_visit_only_populated_local_provenance() {
     assert_eq!(rib.local_export_source(&kept_prefix, 0), Some(untouched));
 }
 
+/// Only a local route has a local export source, so a member committing a
+/// shared group emission of received routes scans none of its rows: the
+/// count stays zero as membership and rows grow. A local route still
+/// records its source on every member, and a later received-only flush
+/// keeps it.
+#[test]
+fn shared_emission_without_local_routes_skips_the_local_source_scan() {
+    use super::lifecycle::{test_peer_up, test_routes_received};
+
+    fn delivered(output: &mut mpsc::Receiver<crate::OutboundRouteUpdate>) -> usize {
+        std::iter::from_fn(|| output.try_recv().ok())
+            .map(|update| update.announce.len())
+            .sum()
+    }
+
+    for members in [8_u8, 32] {
+        for rows in [4_u8, 64] {
+            let mut manager = manager();
+            let mut outputs = Vec::new();
+            for index in 0..members {
+                let peer = peer_v4(Ipv4Addr::new(192, 0, 2, 100 + index));
+                let (tx, rx) = mpsc::channel(64);
+                manager.handle_update(test_peer_up(peer, 0, tx));
+                assert!(manager.grouped_member_of(peer).is_some());
+                outputs.push((peer, rx));
+            }
+            register_test_peer(&mut manager, peer_v4(SOURCE), 0);
+            for (_, output) in &mut outputs {
+                delivered(output);
+            }
+
+            let mut local = super::eor_grace::local_route(7);
+            local.path_id = 41;
+            let local_prefix = local.prefix;
+            let before = manager.adj_rib_out_commit_stats.local_source_scan_visits;
+            let (reply, mut response) = oneshot::channel();
+            manager.handle_update(RibUpdate::InjectRoute {
+                route: local,
+                reply,
+            });
+            response.try_recv().unwrap().unwrap();
+            assert!(manager.adj_rib_out_commit_stats.local_source_scan_visits > before);
+            for (peer, output) in &mut outputs {
+                assert_eq!(delivered(output), 1);
+                let source = manager.adj_ribs_out[peer].local_export_source(&local_prefix, 0);
+                assert_eq!(source.map(|source| source.path_id), Some(41));
+            }
+
+            let received = (0..rows)
+                .map(|octet| {
+                    make_route(
+                        Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, octet), 32),
+                        SOURCE,
+                    )
+                })
+                .collect();
+            let before = manager.adj_rib_out_commit_stats.local_source_scan_visits;
+            manager.handle_update(test_routes_received(peer_v4(SOURCE), received));
+            drain_route_chunks(&mut manager);
+            assert_eq!(
+                manager.adj_rib_out_commit_stats.local_source_scan_visits - before,
+                0,
+                "{members} members, {rows} rows"
+            );
+            for (peer, output) in &mut outputs {
+                assert_eq!(delivered(output), usize::from(rows));
+                let source = manager.adj_ribs_out[peer].local_export_source(&local_prefix, 0);
+                assert_eq!(source.map(|source| source.path_id), Some(41));
+            }
+        }
+    }
+}
+
 /// An EVPN-owning update-group member with no recovery provenance cannot
 /// admit an EVPN batch; the open writer queue is never charged.
 #[test]
