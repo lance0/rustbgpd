@@ -1975,12 +1975,19 @@ fn replacement_readiness_checkpoint(
     replacement_readiness_checkpoint_untimed(readiness, force, None);
 }
 
+// The idle checkpoint runs once per row and must stay a test-and-branch:
+// keep this wrapper inline and the service body out of line, so a `None`
+// readiness pays no call or stack frame.
 #[cfg(not(feature = "bench-internals"))]
 #[expect(
     clippy::ref_option,
     reason = "callbacks borrow the actor's optional shared fence handle without creating another owner"
 )]
-#[inline]
+#[expect(
+    clippy::inline_always,
+    reason = "the per-row idle checkpoint must not pay a call and stack frame"
+)]
+#[inline(always)]
 fn replacement_readiness_checkpoint_untimed(
     readiness: &Option<Arc<ReplacementReadinessContext>>,
     force: bool,
@@ -2018,11 +2025,17 @@ fn replacement_readiness_checkpoint(
     replacement_readiness_checkpoint_tagged(readiness, force, None, false, None);
 }
 
+// Same shape as the untimed checkpoint: inline wrapper, out-of-line service.
 #[cfg(feature = "bench-internals")]
 #[expect(
     clippy::ref_option,
     reason = "callbacks borrow the actor's optional shared fence handle without creating another owner"
 )]
+#[expect(
+    clippy::inline_always,
+    reason = "the per-row idle checkpoint must not pay a call and stack frame"
+)]
+#[inline(always)]
 fn replacement_readiness_checkpoint_tagged(
     readiness: &Option<Arc<ReplacementReadinessContext>>,
     force: bool,
@@ -2073,6 +2086,7 @@ fn service_replacement_readiness(context: &ReplacementReadinessContext, force: b
     );
 }
 
+#[inline(never)]
 fn service_replacement_readiness_with_origin(
     context: &ReplacementReadinessContext,
     force: bool,
