@@ -58,23 +58,38 @@ impl ReplayObservation {
     }
 
     pub(super) fn receipt(&self) -> io::Result<ReplayReceipt> {
-        use BenchReplayEvent::{Completed, Dirty, Enrolled, EnrollmentRefused};
+        use BenchReplayEvent::{Completed, Dirty, Enrolled, EnrollmentRefused, Reconciled};
 
         let events = self.events.lock().expect("replay observations");
-        match events.as_slice() {
+        // A replay that rewound into a reconcile keeps its terminal events;
+        // the first rewind names the cause.
+        let reconciled = events.iter().find_map(|(at, event)| match event {
+            Reconciled(cause) => Some((*at, *cause)),
+            _ => None,
+        });
+        let terminal: Vec<_> = events
+            .iter()
+            .copied()
+            .filter(|(_, event)| !matches!(event, Reconciled(_)))
+            .collect();
+        match terminal.as_slice() {
             [(start, Enrolled), (end, Completed)] => Ok(ReplayReceipt {
-                disposition: "paced_complete",
+                disposition: if reconciled.is_some() {
+                    "reconcile_complete"
+                } else {
+                    "paced_complete"
+                },
                 enrolled_us: Some(*start),
-                fallback_us: None,
+                fallback_us: reconciled.map(|(at, _)| at),
                 completed_us: Some(*end),
-                cause: None,
+                cause: reconciled.map(|(_, cause)| cause),
             }),
             [(start, Enrolled), (end, Dirty(cause))] => Ok(ReplayReceipt {
                 disposition: if is_reservation_refusal(cause) {
                     "budget_refusal"
                 } else if matches!(*cause, "selection_release" | "release_fanout") {
                     "selection_release_to_dirty"
-                } else if matches!(*cause, "scan_repair_limit" | "sparse_key_limit") {
+                } else if *cause == "scan_repair_limit" {
                     "replay_to_dirty"
                 } else {
                     return Err(invalid_stat(format!(
@@ -175,6 +190,26 @@ mod tests {
             BenchReplayEvent::EnrollmentRefused("missing_proof"),
         );
         assert!(observation.receipt().is_err());
+    }
+
+    #[test]
+    fn a_rewind_into_reconcile_names_its_first_cause() {
+        let peer = PeerId::from_addr("192.0.2.1".parse().unwrap());
+        let observation = ReplayObservation::new(peer, 7, Instant::now());
+        observation.record(peer, 7, BenchReplayEvent::Enrolled);
+        observation.record(peer, 7, BenchReplayEvent::Reconciled("scan_repair_limit"));
+        observation.record(peer, 7, BenchReplayEvent::Reconciled("forced_resync"));
+        observation.record(peer, 7, BenchReplayEvent::Completed);
+        let receipt = observation.receipt().unwrap();
+        assert_eq!(receipt.disposition, "reconcile_complete");
+        assert_eq!(receipt.cause, Some("scan_repair_limit"));
+        assert!(receipt.fallback_us.is_some() && receipt.completed_us.is_some());
+        // A reconcile that later falls back reports the fallback.
+        let observation = ReplayObservation::new(peer, 7, Instant::now());
+        observation.record(peer, 7, BenchReplayEvent::Enrolled);
+        observation.record(peer, 7, BenchReplayEvent::Reconciled("scan_repair_limit"));
+        observation.record(peer, 7, BenchReplayEvent::Dirty("daemon_limit"));
+        assert_eq!(observation.receipt().unwrap().disposition, "budget_refusal");
     }
 
     #[test]
