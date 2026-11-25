@@ -80,6 +80,12 @@ fn seed(manager: &mut RibManager, prefix_count: u16, paths_per_prefix: u32) {
 }
 
 async fn cold_server(prefix_count: u16, paths_per_prefix: u32) -> Build {
+    cold_server_with(prefix_count, paths_per_prefix, false).await
+}
+
+/// `reconcile` forces an outbound refresh once the member's first replay row
+/// arrives, so the replay rescans and sweeps its proof in pages.
+async fn cold_server_with(prefix_count: u16, paths_per_prefix: u32, reconcile: bool) -> Build {
     let (mut manager, tx, _) = fixture(0);
     // Offer the paced initial replay at every size this test builds.
     manager.initial_member_replays.min_routes = Some(0);
@@ -110,6 +116,7 @@ async fn cold_server(prefix_count: u16, paths_per_prefix: u32) -> Build {
     let mut replay = Build::default();
     let mut seen = HashSet::new();
     let mut markers = Vec::new();
+    let mut refreshed = !reconcile;
     let manager = poll_fn(|cx| {
         let before = snapshot();
         let result = actor.as_mut().poll(cx);
@@ -130,9 +137,21 @@ async fn cold_server(prefix_count: u16, paths_per_prefix: u32) -> Build {
                     (row.peer, row.next_hop),
                     (peer_v4(OTHER), IpAddr::V4(OTHER))
                 );
-                assert!(seen.insert(row.prefix));
+                // A reconcile resends the rows its rescan visits.
+                assert!(seen.insert(row.prefix) || reconcile);
             }
             markers.extend(update.end_of_rib.iter().copied());
+        }
+        if !refreshed && !seen.is_empty() {
+            refreshed = true;
+            let (sender, _) = oneshot::channel();
+            let tx = tx.as_ref().expect("input open");
+            tx.try_send(RibUpdate::RefreshPeerOutbound {
+                peer,
+                reply: sender,
+            })
+            .unwrap();
+            cx.waker().wake_by_ref();
         }
         if !markers.is_empty() && tx.take().is_some() {
             cx.waker().wake_by_ref();
@@ -260,6 +279,21 @@ async fn pcb_cold_build_bounds_crowded_prefix_work_per_poll() {
 #[tokio::test]
 async fn pcb_replay_bounds_fallback_searches_per_poll() {
     cold_server(2_048, 32).await;
+}
+
+// A reconcile's proof sweep checks each admitted key's slot, which for these
+// keys searches every fallback row. It spends the same unit budget.
+#[tokio::test]
+async fn pcb_reconcile_bounds_fallback_searches_per_poll() {
+    let reconciles = || {
+        crate::manager::slice_timing::group_work()
+            .get("initial_replay_reconciles")
+            .copied()
+            .unwrap_or(0)
+    };
+    let before = reconciles();
+    cold_server_with(2_048, 32, true).await;
+    assert_eq!(reconciles() - before, 1);
 }
 
 fn register(manager: &mut RibManager, n: u8, asn: u32) -> mpsc::Receiver<OutboundRouteUpdate> {

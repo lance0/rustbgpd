@@ -8,4 +8,6 @@
   remaining pages instead of restarting the member's whole table. A departure
   or burst that changes more than about 4,096 best paths during the join
   rewinds the member into a paced reconcile of its table instead of a
-  one-turn resync, and End-of-RIB still follows the complete table.
+  one-turn resync, and End-of-RIB still follows the complete table. Churn
+  that overflows the reconcile on more than 8 rescans takes one resync,
+  counted with cause `lag`.

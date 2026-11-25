@@ -436,7 +436,9 @@ holds under [Restart](#restart)).
   of a one-turn resync: it rescans the table in pages, sending each key's
   current row against what the member was sent, then sweeps the member's
   admitted keys in pages to withdraw those the table no longer holds.
-  End-of-RIB still follows the complete table, once. A regroup, a lost
+  End-of-RIB still follows the complete table, once. Churn that overflows
+  the repair log on more than 8 rescans takes one resync instead (counted as
+  `lag`), so the repair log stays capped and the join completes. A regroup, a lost
   admitted-key proof or a member another path already marked dirty still
   takes the resync, at the 10 ms backlog cadence. Tests:
   [`reconcile.rs`](../../crates/rib/src/manager/tests/first_group_build/initial_member_replay/reconcile.rs).

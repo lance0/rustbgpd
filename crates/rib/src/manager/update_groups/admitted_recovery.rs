@@ -420,14 +420,14 @@ impl<'a> AdmittedKeyView<'a> {
     }
 
     /// Up to `visits` positions of an initial replay's proof after `after`,
-    /// in key order: the admitted unicast prefixes among them, the last key
+    /// in key order: the admitted keys among them, the last key
     /// visited (`None` once the sweep reached the end) and the positions
     /// visited. Its universe and sparse overlay are sorted and disjoint.
     pub(in crate::manager) fn sweep_unicast(
         self,
         after: Option<Key>,
         visits: usize,
-    ) -> (Vec<Prefix>, Option<Key>, usize) {
+    ) -> (Vec<Key>, Option<Key>, usize) {
         let start =
             |keys: &[Key]| after.map_or(0, |after| keys.partition_point(|key| *key <= after));
         let (mut base, mut sparse) = (start(self.universe), start(self.sparse));
@@ -446,8 +446,8 @@ impl<'a> AdmittedKeyView<'a> {
                     (*next.expect("the sparse key sorts first"), true)
                 }
             };
-            if admit && let Key::Unicast(prefix, _) = key {
-                admitted.push(prefix);
+            if admit {
+                admitted.push(key);
             }
             last = Some(key);
         }
@@ -2760,7 +2760,19 @@ impl AdmittedRecovery {
             }
         }
         if needs_sort {
-            Self::sort_keys(keys, checkpoint);
+            // The admitted keys before `old_len` are one sorted run. A stable
+            // sort finds it and merges in the page's new keys: linear in the
+            // overlay, not a whole re-sort per page.
+            checkpoint(true);
+            keys.sort_by(|left, right| {
+                checkpoint(false);
+                left.cmp(right)
+            });
+            keys.dedup_by(|left, right| {
+                checkpoint(false);
+                left == right
+            });
+            checkpoint(true);
         }
         true
     }
@@ -3114,6 +3126,64 @@ mod tests {
         assert!(ledger.remove(&who));
         assert_retained_credit(&ledger);
         assert_eq!(ledger.bytes(), size_of::<AdmittedRecovery>());
+    }
+
+    /// Checkpoints (one per comparison or visited key) to admit one page of
+    /// new prefixes, in hash order, behind a sparse overlay of `sparse` keys.
+    fn sparse_page_work(sparse: u32) -> usize {
+        const PAGE: u32 = 1_024;
+        let mut ledger = AdmittedRecovery::new();
+        let who = peer(1);
+        ledger.insert_empty(who).unwrap();
+        assert!(ledger.begin_initial_replay(who, 64).unwrap());
+        assert!(ledger.extend_initial_replay_universe(who, (0..64).map(slot_key)));
+        // Even keys above the universe, admitted in order: one sorted run.
+        for start in (0..sparse).step_by(PAGE as usize) {
+            let page = (start..(start + PAGE).min(sparse)).map(|n| slot_key(1_000 + 2 * n));
+            ledger.apply_admitted(who, page, [].into_iter()).unwrap();
+        }
+        assert_eq!(ledger.initial_replay_sparse_len(who), Some(sparse as usize));
+        // Odd keys spread over the overlay, in a scrambled order.
+        let page: Vec<_> = (0..PAGE)
+            .map(|n| slot_key(1_001 + 2 * ((n * 7_919) % PAGE) * (sparse / PAGE)))
+            .collect();
+        ledger.reserve_admitted(who, page.iter().copied()).unwrap();
+        let mut work = 0;
+        ledger
+            .apply_reserved_admitted_with_checkpoint(
+                who,
+                page.into_iter(),
+                [].into_iter(),
+                &mut |_| work += 1,
+            )
+            .unwrap();
+        assert_eq!(
+            ledger.initial_replay_sparse_len(who),
+            Some((sparse + PAGE) as usize)
+        );
+        let view = ledger.get(&who).unwrap();
+        let keys: Vec<_> = view.iter().collect();
+        assert!(
+            keys.windows(2).all(|pair| {
+                Key::try_from(&pair[0]).unwrap() < Key::try_from(&pair[1]).unwrap()
+            })
+        );
+        work
+    }
+
+    // A page of new prefixes merges into the sorted overlay. Re-sorting the
+    // whole overlay per page would cost S log S comparisons, quadratic over
+    // a join that keeps adding prefixes.
+    #[test]
+    fn a_page_of_new_sparse_keys_merges_in_linear_work() {
+        for sparse in [16_384, 65_536] {
+            let work = sparse_page_work(sparse);
+            eprintln!("sparse={sparse}: {work}");
+            assert!(
+                work <= 4 * sparse as usize + 32 * 1_024,
+                "sparse={sparse}: {work} checkpoints"
+            );
+        }
     }
 
     #[test]

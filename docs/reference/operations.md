@@ -2210,7 +2210,7 @@ routes that are exempt from the hold.
 | `proof_budget` | The replay's proof fits under neither recovery cap, for a joiner that shares another registration's one-turn send. A joiner that sends alone reports `peer_limit` or `daemon_limit` instead |
 | `policy_evaluation` | The export policy could not be evaluated privately, page by page |
 | `source_changed` | A session or RPKI/ASPA snapshot the reload depends on changed |
-| `lag` | Ingest kept the reload behind for 64 turns, or rewound its scan 64 times |
+| `lag` | Ingest kept the reload behind for 64 turns, or rewound its scan 64 times. For `initial_replay`, churn overflowed the replay's repair log on more than 8 rescans |
 | `slot_busy` | Another paced build held the build slot |
 | `clean_transition` | A clean policy transition was in progress |
 | `owed_row_cap` | The receiver fell behind the owed-row list cap during the job and was evicted to a whole-table resync; `bgp_rib_outbound_owing_fallback_total` counts the same eviction |
@@ -2222,7 +2222,9 @@ End-of-RIB once, after the complete table. That covers `scan_repair_limit`,
 `change_outside_scan`, `release_fanout`, `selection_release` and
 `forced_resync`. Those causes count for `initial_replay` only when the member
 cannot reconcile: its admitted-key proof is gone, it is already marked for a
-resync, or an ORF filter is installed on a forced resync.
+resync, or an ORF filter is installed on a forced resync. A replay whose repair
+log overflows on more than 8 rescans takes the resync with cause `lag`, so
+churn cannot hold its End-of-RIB back indefinitely.
 
 Occasional fallbacks are expected: a regroup or a flap during a join takes
 one. A rate that tracks ingest, such as `scan_repair_limit` on every first

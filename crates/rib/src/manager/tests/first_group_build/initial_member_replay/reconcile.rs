@@ -388,3 +388,114 @@ async fn a_replay_fallback_does_not_wait_for_an_armed_resync_interval() {
         "the regrouped member idled {waited:?}"
     );
 }
+
+fn apply_page(state: &mut Inventory, page: &OutboundRouteUpdate) {
+    for &(prefix, _) in page.unicast_withdrawals() {
+        assert!(state.remove(&prefix).is_some(), "withdrew unsent {prefix}");
+    }
+    for row in page.announce.iter() {
+        state.insert(row.prefix, (row.peer, row.local_pref()));
+    }
+    assert!(page.end_of_rib.is_empty(), "End-of-RIB during the churn");
+}
+
+// Churn that overflows the repair log on every rescan re-arms the replay a
+// bounded number of times, then takes one counted `lag` fallback. The repair
+// log never grows past its cap, and the member still ends with the exact
+// table and one End-of-RIB.
+#[tokio::test(start_paused = true)]
+async fn a_replay_that_overflows_every_rescan_takes_one_lag_fallback() {
+    const BURST: u16 = 5_000;
+    let (mut manager, tx, mut expected) = replay_fixture();
+    let peer = receiver(1);
+    let mut rx = member(&mut manager, peer, 64, false, false);
+    let first = first_page(&mut manager, &mut rx);
+    let mut state = inventory(&first);
+    drop(first);
+    let burst: Vec<_> = (0..BURST).map(|i| prefixes(V4_ROWS + i)[0]).collect();
+    let mut announced = false;
+    let mut rounds = 0;
+    while manager.is_initial_member_replay(peer) {
+        rounds += 1;
+        assert!(rounds < 64, "the replay never left its reconcile");
+        announced = !announced;
+        manager.handle_update(if announced {
+            new_routes(OTHER, V4_ROWS, BURST, 100)
+        } else {
+            withdraw(OTHER, &burst)
+        });
+        drain_route_chunks(&mut manager);
+        for _ in 0..4 {
+            manager.advance_pending_initial_registration();
+            while let Ok(page) = rx.try_recv() {
+                apply_page(&mut state, &page);
+            }
+            let repairs = manager.loc_rib.member_replay_repairs(peer).unwrap_or(0);
+            assert!(repairs <= 4_096, "the repair log grew to {repairs}");
+        }
+    }
+    crate::manager::tests::assert_paced_fallbacks(
+        &manager.metrics,
+        &[("initial_replay", "lag", 1.0)],
+    );
+    if announced {
+        for &key in &burst {
+            expected.insert(key, (peer_v4(OTHER), 100));
+        }
+    }
+    let actor = tokio::spawn(manager.run_actor());
+    drive_to_marker(&mut rx, &mut state, &expected).await;
+    drop(tx);
+    let _ = actor.await.unwrap();
+    assert!(rx.is_empty(), "output after End-of-RIB");
+}
+
+// A forced outbound refresh rewinds the replay, which then falls back before
+// its rescan resent a row. The resync that takes over must still be forced.
+#[tokio::test(start_paused = true)]
+async fn a_forced_reconcile_that_falls_back_keeps_its_resync_forced() {
+    let (mut manager, tx, expected) = replay_fixture();
+    let peer = receiver(1);
+    let mut rx = member(&mut manager, peer, 1, false, false);
+    let first = first_page(&mut manager, &mut rx);
+    let sent: BTreeSet<_> = first.announce.iter().map(|row| row.prefix).collect();
+    let mut state = inventory(&first);
+    let (reply, _result) = oneshot::channel();
+    manager.handle_update(RibUpdate::RefreshPeerOutbound { peer, reply });
+    assert!(manager.is_initial_member_replay(peer));
+    assert!(!manager.force_outbound_peers.contains(&peer));
+    let _ = manager.recover_initial_member_replay(peer, PacedFallbackCause::GroupChanged);
+    assert!(!manager.is_initial_member_replay(peer));
+    assert!(
+        manager.force_outbound_peers.contains(&peer),
+        "the fallback dropped the forced resync"
+    );
+    drop(first);
+    let actor = tokio::spawn(manager.run_actor());
+    let mut resent = BTreeSet::new();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let page = rx.recv().await.unwrap();
+            for &(prefix, _) in page.unicast_withdrawals() {
+                state.remove(&prefix);
+            }
+            for row in page.announce.iter() {
+                resent.insert(row.prefix);
+                state.insert(row.prefix, (row.peer, row.local_pref()));
+            }
+            if !page.end_of_rib.is_empty() {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("End-of-RIB");
+    drop(tx);
+    let _ = actor.await.unwrap();
+    assert_eq!(state, expected);
+    assert!(
+        sent.is_subset(&resent),
+        "{} rows sent before the forced refresh were not resent",
+        sent.difference(&resent).count()
+    );
+}
