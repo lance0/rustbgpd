@@ -352,12 +352,22 @@ impl RibManager {
             job.writer = Some(Box::new(command));
             job.reload = Some(source);
         } else {
-            // A batch whose every member's group already exports its new
-            // policy moves nothing, so its one turn is no fallback.
+            // A batch that changes no registered member's export moves
+            // nothing, so its one turn is no fallback: a grouped member's
+            // group already exports the new policy, or an ungrouped one has
+            // it installed. The kernel skips an unregistered peer.
             let moves = replacements.iter().any(|r| {
-                self.grouped_member_of(r.peer)
+                let new = r.export_policy.as_ref();
+                match self
+                    .grouped_member_of(r.peer)
                     .and_then(|gid| self.group_ribs.get(&gid))
-                    .is_none_or(|group| group.export_chain.as_ref() != r.export_policy.as_ref())
+                {
+                    Some(group) => group.export_chain.as_ref() != new,
+                    None => {
+                        self.outbound_peers.contains_key(&r.peer)
+                            && self.export_chains.get(&r.peer).and_then(Option::as_ref) != new
+                    }
+                }
             });
             if self.loc_rib.len() >= threshold
                 && moves

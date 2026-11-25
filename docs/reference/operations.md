@@ -2173,7 +2173,9 @@ fallback still counts if its session ends before the one-turn path runs. An
 initial table below the pacing threshold (10,000 routes) is sent in one turn by
 design and is not counted, and neither is an initial table that carries no
 unicast routes (an EVPN-only or VPN-only session, or unicast held by selection
-deferral), nor a reload batch that leaves every member's policy unchanged.
+deferral), nor a reload batch that leaves every member's policy unchanged. A
+selection-held session is excluded even when it is sent locally injected
+routes that are exempt from the hold.
 
 | `job` | Paced work |
 |-------|------------|

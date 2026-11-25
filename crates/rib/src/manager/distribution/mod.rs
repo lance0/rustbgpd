@@ -12893,6 +12893,25 @@ impl RibManager {
                                     self.note_owing_credit_fallback();
                                 }
                                 warn!(%peer, reason = failure.as_str(), "outbound update not sent — marking dirty for resync");
+                                // A paced release or departure page hands a
+                                // member it could not send to the dirty resync.
+                                // One already dirty or forced was handed over
+                                // before, by whoever marked it.
+                                if RELEASING
+                                    && !self.dirty_peers.contains(&peer)
+                                    && !self.force_outbound_peers.contains(&peer)
+                                {
+                                    let job = if release_departure {
+                                        super::initial_member_replay::PacedJob::SourceDeparture
+                                    } else {
+                                        super::initial_member_replay::PacedJob::ReleaseFanout
+                                    };
+                                    self.note_paced_fallback(
+                                        job,
+                                        failure.paced_fallback_cause(),
+                                        peer,
+                                    );
+                                }
                                 self.defer_unsent_outbound_pass(
                                     peer,
                                     member_of,
