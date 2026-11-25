@@ -1202,10 +1202,11 @@ pub(in crate::manager) fn assert_paced_fallbacks(
         })
         .collect();
     actual.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
-    let expected: Vec<_> = expected
+    let mut expected: Vec<_> = expected
         .iter()
         .map(|&(job, cause, count)| (job.to_owned(), cause.to_owned(), count))
         .collect();
+    expected.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
     assert_eq!(actual, expected);
 }
 

@@ -13,7 +13,6 @@ use tracing::{debug, info, warn};
 use super::distribution::OutboundCommitBatch;
 use super::eor_hold::{EorHold, EorTrigger};
 use super::helpers::prefix_family;
-use super::initial_member_replay::PacedJob;
 use super::{
     ExactExportKey, LiveSessionRecord, MAX_LIVE_SESSIONS_PER_PEER, PolicyFilteredRouteKey,
     RibManager,
@@ -2969,9 +2968,7 @@ impl RibManager {
         if self.install_outbound_registration(peer)
             && !(pace && self.start_initial_member_replay(peer))
         {
-            if let Some(cause) = unpaced {
-                self.note_paced_fallback(PacedJob::InitialReplay, cause, peer);
-            }
+            self.note_unpaced_initial_table(peer, unpaced);
             self.send_initial_table(peer);
         }
     }
@@ -3295,9 +3292,7 @@ impl RibManager {
         {
             return;
         }
-        if let Some(cause) = unpaced {
-            self.note_paced_fallback(PacedJob::InitialReplay, cause, leader);
-        }
+        self.note_unpaced_initial_table(leader, unpaced);
         super::with_executor_handoff(|| {
             self.with_replacement_readiness(|manager| {
                 let members = if pace {
@@ -3429,9 +3424,7 @@ impl RibManager {
             if !self.install_outbound_registration(peer) {
                 continue;
             }
-            if let Some(cause) = unpaced {
-                self.note_paced_fallback(PacedJob::InitialReplay, cause, peer);
-            }
+            self.note_unpaced_initial_table(peer, unpaced);
             // The admission profile predicts membership; the installed
             // registration decides it. A joiner that lands elsewhere still
             // gets its table in this turn, on the ordinary path.

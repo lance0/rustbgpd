@@ -2168,8 +2168,12 @@ the table and other peers wait behind it. See the
 
 `bgp_rib_paced_fallback_total{job,cause}` counts each such fallback once, and
 the daemon logs a `paced job fell back to a one-turn path` debug event with
-the `peer`, `job` and `cause`. An initial table below the pacing threshold
-(10,000 routes) is sent in one turn by design and is not counted.
+the `peer`, `job` and `cause`. A count means the fallback was chosen; a build
+fallback still counts if its session ends before the one-turn path runs. An
+initial table below the pacing threshold (10,000 routes) is sent in one turn by
+design and is not counted, and neither is an initial table that carries no
+unicast routes (an EVPN-only or VPN-only session, or unicast held by selection
+deferral), nor a reload batch that leaves every member's policy unchanged.
 
 | `job` | Paced work |
 |-------|------------|
@@ -2188,13 +2192,13 @@ the `peer`, `job` and `cause`. An initial table below the pacing threshold
 | `change_outside_scan` | A change reached the member outside its scan's repair scope |
 | `sparse_key_limit` | More than 1,024 new prefixes arrived behind the replay's proof walk |
 | `missing_proof` | The member's admitted-key proof was missing |
-| `peer_limit`, `daemon_limit`, `allocation_failure` | The member's admitted-key proof did not fit, as for `bgp_update_group_recovery_fallback_total` |
+| `peer_limit`, `daemon_limit`, `allocation_failure` | The member's admitted-key proof did not fit, as for `bgp_update_group_recovery_fallback_total`. A joiner whose replay reservation is refused as it starts reports the cap it hit |
 | `writer_unavailable` | The member's writer was full, closed or not registered |
 | `commit_refused` | A fail-closed commit gate refused the page; `bgp_outbound_commit_refusals_total` has the reason |
 | `release_fanout` | A selection-release fan-out reached a replaying member |
 | `forced_resync` | An operator outbound refresh or an ORF IMMEDIATE change forced a resync of a replaying member |
 | `selection_release` | A family selection release, or a partial one, was pending |
-| `ineligible_shape` | The registration's shape is not paced (see the lifecycle matrix) |
+| `ineligible_shape` | For `initial_replay`, the registration's shape is not paced (see the lifecycle matrix). For `reload_build`, the batch cannot be built privately: its members are ungrouped, in different groups, take different policies or send more than one family, the source group is per-client-best or not plain unicast, or the destination group already exists |
 | `ungrouped` | The member has no update group |
 | `replay_cap` | Every one of the 64 replay slots was taken |
 | `unpublished_table` | The member's group table was not published yet |
@@ -2202,10 +2206,10 @@ the `peer`, `job` and `cause`. An initial table below the pacing threshold
 | `retained_proof` | The member's admitted-key proof is held while its initial table waits on selection deferral |
 | `orf_pending` | The member's initial table waits for its ORF ROUTE-REFRESH (RFC 5291) |
 | `proof_state` | The member's admitted-key proof could not start a replay |
-| `proof_budget` | The replay's proof fits under neither recovery cap |
+| `proof_budget` | The replay's proof fits under neither recovery cap, for a joiner that shares another registration's one-turn send. A joiner that sends alone reports `peer_limit` or `daemon_limit` instead |
 | `policy_evaluation` | The export policy could not be evaluated privately, page by page |
 | `source_changed` | A session or RPKI/ASPA snapshot the reload depends on changed |
-| `lag` | Ingest kept the reload behind for its whole 64-turn budget |
+| `lag` | Ingest kept the reload behind for 64 turns, or rewound its scan 64 times |
 | `slot_busy` | Another paced build held the build slot |
 | `clean_transition` | A clean policy transition was in progress |
 
@@ -2595,7 +2599,7 @@ name it.
 | `bgp_rib_outbound_owed_drain_step_seconds{scope}` | Wall-clock duration of one owed-route drain step toward one receiver on the RIB actor. The closed `scope` set is `cursor` (up to 1,024 routes of an IPv4 or IPv6 unicast, labeled-unicast or VPN family, or of EVPN, owed whole, sent as a charged ordinary update), `keyed` (up to 1,024 routes of a receiver's owed set) and `whole` (one whole-family pass of a FlowSpec, BGP-LS or RT-Constrain family, including one sent for a waiting End-of-RIB). A step runs to completion, so every other peer's updates wait for it; a resync tick runs steps for about 25 ms. `cursor` and `keyed` steps do not grow with the table; a `whole` step does. Bucket edges include 0.05 and 0.25. Every series is exported at 0 from startup |
 | `bgp_rib_outbound_dirty_peers` | Peers currently marked dirty and awaiting outbound resync, sampled from the RIB's dirty set once per manager loop iteration. A healthy episode returns to 0 within seconds; under steady churn it can stay above 0 while every peer keeps resyncing. `rbgp doctor` and `rbgp neighbor` identify the peers |
 | `bgp_rib_outbound_dirty_oldest_seconds` | Age in whole seconds of the oldest current dirty episode, 0 when no peer is dirty; sampled with `bgp_rib_outbound_dirty_peers`. An episode starts when a peer becomes dirty and ends when its resync completes, so the value tracks the longest-waiting peer, not churn. `BgpOutboundResyncStalled` fires at 900 seconds |
-| `bgp_rib_paced_fallback_total{job,cause}` | Paced RIB jobs (first-group build, reload build, initial replay, source departure, selection release) that handed their work to a one-turn path. See [Paced-job fallbacks](#paced-job-fallbacks) for the labels |
+| `bgp_rib_paced_fallback_total{job,cause}` | Paced RIB jobs (first-group build, per-client-best build, reload build, initial replay, source departure, selection release) that handed their work to a one-turn path. See [Paced-job fallbacks](#paced-job-fallbacks) for the labels |
 | `bgp_rib_outbound_credit_rows` | Private-family rows held by ordinary outbound updates that are queued for, or being sent by, sessions, summed over every peer: the row credit in use. When a peer spends its credit, private-family changes become owed keys and drain from current state once credit returns. A credit refusal that reaches the commit boundary instead increments `bgp_outbound_commit_refusals_total{reason="outbound_credit"}` and schedules resync. Sampled once per manager loop iteration |
 | `bgp_rib_outbound_operations_live` | Whole-table outbound operations (initial advertisement, refresh response, resync, complete EVPN feed, operator replay) still queued or being sent, at most one per peer. They carry no row credit, so each is a whole table held for a peer until it is delivered. Sampled with `bgp_rib_outbound_credit_rows` |
 | `bgp_rib_ingest_channel_depth` | Queued `RibUpdate` messages (one per inbound UPDATE or control event, not routes) waiting for the RIB manager, sampled once per manager loop iteration: the ingest channel plus at most one update held while a distribution window decides whether to extend. Producers block only when the channel itself is full, which reads capacity + 1 while an update is held and capacity otherwise; a sustained reading at or above the channel capacity means the channel is full or within one message of full |

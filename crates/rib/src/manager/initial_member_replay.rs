@@ -19,7 +19,7 @@ use super::{PeerId, RibManager};
 use crate::fast_hash::FastSet;
 use crate::loc_rib::{REGISTRATION_PAGE_SIZE, RegistrationScanStatus};
 use crate::update::{ExactExportKey, OutboundRouteUpdate, RouteQueryKey, route_query_key};
-use rustbgpd_wire::Prefix;
+use rustbgpd_wire::{Afi, Prefix, Safi};
 
 pub(super) use rustbgpd_telemetry::reason_labels::{PacedFallbackCause, PacedJob};
 
@@ -329,6 +329,36 @@ impl RibManager {
         } else {
             PacedFallbackCause::IneligibleShape
         })
+    }
+
+    /// Count an installed registration's unpaced initial table, read by
+    /// [`Self::unpaced_initial_table_cause`], when that table carries
+    /// unicast routes: a sendable unicast family that neither selection
+    /// deferral nor the ORF gate holds, as the initial table filters them.
+    /// An EVPN-only, VPN-only or selection-held registration sends no
+    /// table-sized unicast dump.
+    pub(super) fn note_unpaced_initial_table(
+        &self,
+        peer: PeerId,
+        cause: Option<PacedFallbackCause>,
+    ) {
+        let Some(cause) = cause else {
+            return;
+        };
+        let orf_gated = self.peer_orf_pending.get(&peer);
+        let unicast = self
+            .peer_sendable_families
+            .get(&peer)
+            .is_some_and(|families| {
+                families.iter().any(|&family| {
+                    matches!(family, (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast))
+                        && !self.initial_selection_deferred(family)
+                        && orf_gated.is_none_or(|gated| !gated.contains(&family))
+                })
+            });
+        if unicast {
+            self.note_paced_fallback(PacedJob::InitialReplay, cause, peer);
+        }
     }
 
     /// Count one paced job's fallback to a one-turn path.

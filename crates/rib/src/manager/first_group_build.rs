@@ -309,11 +309,14 @@ impl RibManager {
         let threshold = self.first_group_build_min_routes;
         #[cfg(not(test))]
         let threshold = super::INITIAL_DUMP_DEFER_MIN_ROUTES;
+        // `None` until the shape is classified, which only a reload that
+        // passed every earlier check reaches.
+        let mut pair = None;
         if self.loc_rib.len() >= threshold
             && self.pending_clean_policy_transition.is_none()
             && !self.unicast_release_partial()
             && self.first_group_slot_available()
-            && let Some((source, gid)) = self.reload_build_pair(replacements)
+            && let Some((source, gid)) = *pair.insert(self.reload_build_pair(replacements))
             && let Some(sessions) = replacements
                 .iter()
                 .map(|r| {
@@ -349,20 +352,26 @@ impl RibManager {
             job.writer = Some(Box::new(command));
             job.reload = Some(source);
         } else {
+            // A batch whose every member's group already exports its new
+            // policy moves nothing, so its one turn is no fallback.
+            let moves = replacements.iter().any(|r| {
+                self.grouped_member_of(r.peer)
+                    .and_then(|gid| self.group_ribs.get(&gid))
+                    .is_none_or(|group| group.export_chain.as_ref() != r.export_policy.as_ref())
+            });
             if self.loc_rib.len() >= threshold
+                && moves
                 && let Some(first) = replacements.first()
             {
-                let cause = if self.pending_clean_policy_transition.is_some() {
-                    PacedFallbackCause::CleanTransition
-                } else if self.unicast_release_partial() {
-                    PacedFallbackCause::SelectionRelease
-                } else if !self.first_group_slot_available() {
-                    PacedFallbackCause::SlotBusy
-                } else if self.reload_build_pair(replacements).is_none() {
-                    PacedFallbackCause::IneligibleShape
-                } else {
+                let cause = match pair {
                     // A replaced session closed or is not registered.
-                    PacedFallbackCause::SourceChanged
+                    Some(Some(_)) => PacedFallbackCause::SourceChanged,
+                    Some(None) => PacedFallbackCause::IneligibleShape,
+                    None if self.pending_clean_policy_transition.is_some() => {
+                        PacedFallbackCause::CleanTransition
+                    }
+                    None if self.unicast_release_partial() => PacedFallbackCause::SelectionRelease,
+                    None => PacedFallbackCause::SlotBusy,
                 };
                 self.note_paced_fallback(PacedJob::ReloadBuild, cause, first.peer);
             }

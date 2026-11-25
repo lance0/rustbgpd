@@ -143,6 +143,13 @@ async fn check_reload_readiness(close_destination: bool) {
         manager.drain_readiness_queries(None);
         assert_eq!(retiring.try_recv().unwrap(), Err(PolicyTransitionStalled));
     }
+    // A closed destination session retires the accepted build.
+    let expected: &[_] = if close_destination {
+        &[("reload_build", "source_changed", 1.0)]
+    } else {
+        &[]
+    };
+    crate::manager::tests::assert_paced_fallbacks(&manager.metrics, expected);
     let terminal = Arc::new(std::sync::Mutex::new(None));
     let captured = Arc::clone(&terminal);
     let terminal_tx = tx.clone();
