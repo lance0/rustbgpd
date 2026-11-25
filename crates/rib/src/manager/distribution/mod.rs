@@ -12751,6 +12751,11 @@ impl RibManager {
                         } else {
                             FastSet::default()
                         };
+                        // A refusal can mark the member dirty before it
+                        // returns, so read the handover state first.
+                        let handed_over = RELEASING
+                            && (self.dirty_peers.contains(&peer)
+                                || self.force_outbound_peers.contains(&peer));
                         let commit = self
                             .try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
                                 peer,
@@ -12897,10 +12902,7 @@ impl RibManager {
                                 // member it could not send to the dirty resync.
                                 // One already dirty or forced was handed over
                                 // before, by whoever marked it.
-                                if RELEASING
-                                    && !self.dirty_peers.contains(&peer)
-                                    && !self.force_outbound_peers.contains(&peer)
-                                {
+                                if RELEASING && !handed_over {
                                     let job = if release_departure {
                                         super::initial_member_replay::PacedJob::SourceDeparture
                                     } else {

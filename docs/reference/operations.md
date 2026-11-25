@@ -2214,6 +2214,7 @@ routes that are exempt from the hold.
 | `lag` | Ingest kept the reload behind for 64 turns, or rewound its scan 64 times |
 | `slot_busy` | Another paced build held the build slot |
 | `clean_transition` | A clean policy transition was in progress |
+| `owed_row_cap` | The receiver fell behind the owed-row list cap during the job and was evicted to a whole-table resync; `bgp_rib_outbound_owing_fallback_total` counts the same eviction |
 
 Occasional fallbacks are expected: a regroup, a flap or a burst during a join
 takes one. A rate that tracks ingest, such as `scan_repair_limit` on every

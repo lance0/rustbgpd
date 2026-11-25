@@ -97,6 +97,15 @@ pub(in crate::manager) struct ReleaseDistribution {
 }
 
 impl ReleaseDistribution {
+    /// The paced job whose fallbacks this pass counts.
+    fn paced_job(&self) -> PacedJob {
+        if self.departure.is_some() {
+            PacedJob::SourceDeparture
+        } else {
+            PacedJob::ReleaseFanout
+        }
+    }
+
     pub(in crate::manager) fn for_departure(
         afi: Afi,
         affected: HashSet<Prefix>,
@@ -273,12 +282,11 @@ impl RibManager {
                             super::super::update_groups::RecoveryFallbackCause::MissingProof,
                         );
                         self.mark_outbound_dirty_inner(peer, false);
-                        let job = if pass.departure.is_some() {
-                            PacedJob::SourceDeparture
-                        } else {
-                            PacedJob::ReleaseFanout
-                        };
-                        self.note_paced_fallback(job, PacedFallbackCause::MissingProof, peer);
+                        self.note_paced_fallback(
+                            pass.paced_job(),
+                            PacedFallbackCause::MissingProof,
+                            peer,
+                        );
                     }
                     self.collect_owed_floors(peer, &mut pass.floors);
                     pass.groups.entry(gid).or_default().push(peer);
@@ -352,9 +360,16 @@ impl RibManager {
             Phase::Cap(after, over) => {
                 let peers = pass.peer_batch(self, after, RELEASE_MEMBERS_PER_POLL);
                 for &peer in &peers {
-                    if self.cap_release_owed_peer(peer, over, &mut pass.floors)
-                        && pass.departure.is_some()
-                    {
+                    let evicted = self.cap_release_owed_peer(peer, over, &mut pass.floors);
+                    if evicted {
+                        // The receiver recovers through its whole-table resync.
+                        self.note_paced_fallback(
+                            pass.paced_job(),
+                            PacedFallbackCause::OwedRowCap,
+                            peer,
+                        );
+                    }
+                    if evicted && pass.departure.is_some() {
                         // Cursor probes are fixed-size. Give an eviction its own
                         // recovery budget before continuing with the remaining peers.
                         self.settle_eor_after_pass();
@@ -899,5 +914,13 @@ mod tests {
         assert_eq!(visit(&mut manager, &mut pass), 1);
         assert_eq!(visit(&mut manager, &mut pass), 14);
         assert!(matches!(pass.phase, Phase::Finish));
+        // Each evicted receiver recovers through its whole-table resync.
+        crate::manager::tests::assert_paced_fallbacks(
+            &manager.metrics,
+            &[
+                ("source_departure", "missing_proof", 1.0),
+                ("source_departure", "owed_row_cap", 2.0),
+            ],
+        );
     }
 }

@@ -207,11 +207,13 @@ pub enum PacedFallbackCause {
     SlotBusy,
     /// A clean policy transition was in progress.
     CleanTransition,
+    /// The receiver fell behind the shared owed-row cap and was evicted.
+    OwedRowCap,
 }
 
 impl PacedFallbackCause {
     /// Every bounded fallback cause.
-    pub const ALL: [Self; 28] = [
+    pub const ALL: [Self; 29] = [
         Self::GroupChanged,
         Self::AlreadyDirty,
         Self::ScanRepairLimit,
@@ -240,6 +242,7 @@ impl PacedFallbackCause {
         Self::Lag,
         Self::SlotBusy,
         Self::CleanTransition,
+        Self::OwedRowCap,
     ];
 
     /// Canonical cause label shared by metrics and diagnostics.
@@ -274,6 +277,7 @@ impl PacedFallbackCause {
             Self::Lag => "lag",
             Self::SlotBusy => "slot_busy",
             Self::CleanTransition => "clean_transition",
+            Self::OwedRowCap => "owed_row_cap",
         }
     }
 }
