@@ -8,7 +8,7 @@ use std::collections::{BTreeSet, VecDeque};
 use rustbgpd_policy::NextHopAction;
 use rustbgpd_wire::Prefix;
 
-use super::{Phase, REGISTRATION_PAGE_SIZE, ReplayCause, RibManager};
+use super::{PacedFallbackCause, Phase, REGISTRATION_PAGE_SIZE, RibManager};
 use crate::PeerId;
 use crate::manager::distribution::OutboundCommitBatch;
 use crate::manager::selection_deferral::retained_route_bytes;
@@ -179,7 +179,7 @@ impl RibManager {
         &mut self,
         peer: PeerId,
         stage: &GroupStageOutput,
-    ) -> Result<(), ReplayCause> {
+    ) -> Result<(), PacedFallbackCause> {
         let rs_control = self.rs_control_context(peer).is_some();
         let replay = self
             .initial_member_replays
@@ -216,7 +216,7 @@ impl RibManager {
                 );
             for prefix in keys {
                 if !self.loc_rib.record_member_replay_change(peer, prefix) {
-                    return Err(ReplayCause::from_label(|| "scan_repair_limit"));
+                    return Err(PacedFallbackCause::ScanRepairLimit);
                 }
                 replay.changes.coalesce(prefix);
             }
@@ -232,15 +232,15 @@ impl RibManager {
                 .loc_rib
                 .member_replay_change_recorded(peer, delta.prefix)
             {
-                return Err(ReplayCause::from_label(|| {
+                return Err(
                     if self.loc_rib.member_replay_scan_status(peer)
                         == crate::loc_rib::RegistrationScanStatus::Overflow
                     {
-                        "scan_repair_limit"
+                        PacedFallbackCause::ScanRepairLimit
                     } else {
-                        "change_outside_scan"
-                    }
-                }));
+                        PacedFallbackCause::ChangeOutsideScan
+                    },
+                );
             }
             // After the first overflow, every later change joins the repairs
             // too. The log then only drains, so churn faster than one change

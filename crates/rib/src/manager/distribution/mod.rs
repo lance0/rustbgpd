@@ -290,6 +290,18 @@ impl OutboundCommitFailure {
             Self::Refused(reason) => reason.as_str(),
         }
     }
+
+    /// The paced-job fallback cause for a page this failure stopped.
+    pub(in crate::manager) const fn paced_fallback_cause(
+        self,
+    ) -> super::initial_member_replay::PacedFallbackCause {
+        match self {
+            Self::WriterUnavailable => {
+                super::initial_member_replay::PacedFallbackCause::WriterUnavailable
+            }
+            Self::Refused(_) => super::initial_member_replay::PacedFallbackCause::CommitRefused,
+        }
+    }
 }
 
 /// One owned outbound payload at the RIB-to-session commit boundary.
@@ -10384,17 +10396,15 @@ impl RibManager {
                             || self.force_outbound_peers.contains(&peer)
                             || self.dirty_peers.contains(&peer)
                         {
-                            let cause =
-                                super::initial_member_replay::ReplayCause::from_label(|| {
-                                    if RELEASING {
-                                        "release_fanout"
-                                    } else if self.force_outbound_peers.contains(&peer) {
-                                        "forced_resync"
-                                    } else {
-                                        self.group_recovery_fallback(peer)
-                                            .map_or("already_dirty", |cause| cause.as_str())
-                                    }
-                                });
+                            use super::initial_member_replay::PacedFallbackCause;
+                            let cause = if RELEASING {
+                                PacedFallbackCause::ReleaseFanout
+                            } else if self.force_outbound_peers.contains(&peer) {
+                                PacedFallbackCause::ForcedResync
+                            } else {
+                                self.group_recovery_fallback(peer)
+                                    .map_or(PacedFallbackCause::AlreadyDirty, Into::into)
+                            };
                             self.recover_initial_member_replay(peer, cause);
                         } else {
                             // The replay scan delivers current winners and repairs against
@@ -12756,6 +12766,11 @@ impl RibManager {
                         } else {
                             FastSet::default()
                         };
+                        // A refusal can mark the member dirty before it
+                        // returns, so read the handover state first.
+                        let handed_over = RELEASING
+                            && (self.dirty_peers.contains(&peer)
+                                || self.force_outbound_peers.contains(&peer));
                         let commit = self
                             .try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
                                 peer,
@@ -12898,6 +12913,22 @@ impl RibManager {
                                     self.note_owing_credit_fallback();
                                 }
                                 warn!(%peer, reason = failure.as_str(), "outbound update not sent — marking dirty for resync");
+                                // A paced release or departure page hands a
+                                // member it could not send to the dirty resync.
+                                // One already dirty or forced was handed over
+                                // before, by whoever marked it.
+                                if RELEASING && !handed_over {
+                                    let job = if release_departure {
+                                        super::initial_member_replay::PacedJob::SourceDeparture
+                                    } else {
+                                        super::initial_member_replay::PacedJob::ReleaseFanout
+                                    };
+                                    self.note_paced_fallback(
+                                        job,
+                                        failure.paced_fallback_cause(),
+                                        peer,
+                                    );
+                                }
                                 self.defer_unsent_outbound_pass(
                                     peer,
                                     member_of,

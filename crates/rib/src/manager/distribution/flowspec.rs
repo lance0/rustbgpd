@@ -645,7 +645,7 @@ impl RibManager {
             .inspect(|_| self.replacement_checkpoint_at("selection_flowspec", false))
             .copied()
             .collect();
-        self.distribute_flowspec_to_peers(&changed, &peers, false);
+        self.distribute_flowspec_to_peers(&changed, &peers, false, false);
         super::super::retire_hash_set(&mut changed, &mut || {
             self.replacement_checkpoint_at("selection_flowspec", false);
         });
@@ -771,7 +771,7 @@ impl RibManager {
     ) {
         self.with_selection_readiness(|manager| {
             let withdrawals_only = manager.loc_rib.flowspec_len() == 0;
-            manager.distribute_flowspec_to_peers(changed_keys, peers, withdrawals_only);
+            manager.distribute_flowspec_to_peers(changed_keys, peers, withdrawals_only, true);
         });
     }
 
@@ -779,11 +779,14 @@ impl RibManager {
         clippy::too_many_lines,
         reason = "FlowSpec family gating, checkpointed staging, and commit share the same receiver pass"
     )]
+    /// `departure` marks a paced source-departure page, which counts a
+    /// member it hands to the dirty resync.
     fn distribute_flowspec_to_peers(
         &mut self,
         changed_keys: &HashSet<FlowSpecKey>,
         peers: &[PeerId],
         withdrawals_only: bool,
+        departure: bool,
     ) {
         let readiness = self.replacement_readiness.clone();
         let mut checkpoint = || {
@@ -932,14 +935,26 @@ impl RibManager {
                 }
             };
 
-            if let Err(failure) = self.try_send_and_commit_outbound_update(peer, batch)
-                && self.owing_send_failed(
+            // A refusal can mark the member dirty before it returns, so read
+            // the handover state first.
+            let handed_over = departure
+                && (self.dirty_peers.contains(&peer) || self.force_outbound_peers.contains(&peer));
+            if let Err(failure) = self.try_send_and_commit_outbound_update(peer, batch) {
+                if self.owing_send_failed(
                     peer,
                     whole_pass == crate::manager::outbound_owing::WholePass::Stage,
                     failure,
-                )
-            {
-                warn!(%peer, "outbound channel full — FlowSpec update deferred");
+                ) {
+                    warn!(%peer, "outbound channel full — FlowSpec update deferred");
+                }
+                // A credit refusal owes the rows instead of going dirty.
+                if departure && !handed_over && self.dirty_peers.contains(&peer) {
+                    self.note_paced_fallback(
+                        super::super::initial_member_replay::PacedJob::SourceDeparture,
+                        failure.paced_fallback_cause(),
+                        peer,
+                    );
+                }
             }
         }
         export_memo.retire_with(&mut checkpoint);

@@ -11,6 +11,7 @@ use rustbgpd_wire::Prefix;
 use tokio::sync::mpsc;
 
 use super::distribution::ExportMemo;
+use super::initial_member_replay::{PacedFallbackCause, PacedJob};
 use super::update_groups::{
     GroupRibOut, OptionalGroupRetirement, OptionalInventoryRetirement, RejectedBatchedInventory,
 };
@@ -203,6 +204,16 @@ impl FirstGroupPolicy {
 }
 
 impl FirstGroupBuild {
+    pub(super) fn paced_job(&self) -> PacedJob {
+        if self.reload.is_some() {
+            PacedJob::ReloadBuild
+        } else if self.pcb.is_some() {
+            PacedJob::PerClientBestBuild
+        } else {
+            PacedJob::FirstGroupBuild
+        }
+    }
+
     pub(super) fn founded_by(&self, peer: PeerId, record: &super::LiveSessionRecord) -> bool {
         self.peer == peer
             && matches!(&self.phase, FirstGroupPhase::Scanning(Some(waiter))
@@ -298,11 +309,14 @@ impl RibManager {
         let threshold = self.first_group_build_min_routes;
         #[cfg(not(test))]
         let threshold = super::INITIAL_DUMP_DEFER_MIN_ROUTES;
+        // `None` until the shape is classified, which only a reload that
+        // passed every earlier check reaches.
+        let mut pair = None;
         if self.loc_rib.len() >= threshold
             && self.pending_clean_policy_transition.is_none()
             && !self.unicast_release_partial()
             && self.first_group_slot_available()
-            && let Some((source, gid)) = self.reload_build_pair(replacements)
+            && let Some((source, gid)) = *pair.insert(self.reload_build_pair(replacements))
             && let Some(sessions) = replacements
                 .iter()
                 .map(|r| {
@@ -338,6 +352,39 @@ impl RibManager {
             job.writer = Some(Box::new(command));
             job.reload = Some(source);
         } else {
+            // A batch that changes no registered member's export moves
+            // nothing, so its one turn is no fallback: a grouped member's
+            // group already exports the new policy, or an ungrouped one has
+            // it installed. The kernel skips an unregistered peer.
+            let moves = replacements.iter().any(|r| {
+                let new = r.export_policy.as_ref();
+                match self
+                    .grouped_member_of(r.peer)
+                    .and_then(|gid| self.group_ribs.get(&gid))
+                {
+                    Some(group) => group.export_chain.as_ref() != new,
+                    None => {
+                        self.outbound_peers.contains_key(&r.peer)
+                            && self.export_chains.get(&r.peer).and_then(Option::as_ref) != new
+                    }
+                }
+            });
+            if self.loc_rib.len() >= threshold
+                && moves
+                && let Some(first) = replacements.first()
+            {
+                let cause = match pair {
+                    // A replaced session closed or is not registered.
+                    Some(Some(_)) => PacedFallbackCause::SourceChanged,
+                    Some(None) => PacedFallbackCause::IneligibleShape,
+                    None if self.pending_clean_policy_transition.is_some() => {
+                        PacedFallbackCause::CleanTransition
+                    }
+                    None if self.unicast_release_partial() => PacedFallbackCause::SelectionRelease,
+                    None => PacedFallbackCause::SlotBusy,
+                };
+                self.note_paced_fallback(PacedJob::ReloadBuild, cause, first.peer);
+            }
             self.finish_authoritative_replacement(command);
         }
     }
@@ -822,7 +869,18 @@ impl RibManager {
             || (outrun && job.other_destination_waits)
         {
             if job.reload.is_some() {
-                self.retire_reload_build(job);
+                let cause = if !current {
+                    PacedFallbackCause::SourceChanged
+                } else if self.group_ribs.contains_key(&job.gid) {
+                    PacedFallbackCause::GroupChanged
+                } else if self.loc_rib.registration_scan_status()
+                    == RegistrationScanStatus::Overflow
+                {
+                    PacedFallbackCause::ScanRepairLimit
+                } else {
+                    PacedFallbackCause::Lag
+                };
+                self.retire_reload_build(job, cause);
                 return;
             }
             self.clear_first_group_commit_frontier();
@@ -915,7 +973,7 @@ impl RibManager {
             // registrations and effective inputs at this commit boundary.
             if let Some(source) = &job.reload {
                 if !self.reload_source_is_current(&job, source) {
-                    self.retire_reload_build(job);
+                    self.retire_reload_build(job, PacedFallbackCause::SourceChanged);
                     return;
                 }
             } else if !self.prepare_source_is_current(&job)
@@ -960,6 +1018,11 @@ impl RibManager {
         record.registration_pcb_overflows = record.registration_pcb_overflows.saturating_add(1);
         if record.registration_pcb_overflows > PCB_OVERFLOW_RESTARTS {
             record.registration_policy_fallback = true;
+            self.note_paced_fallback(
+                PacedJob::PerClientBestBuild,
+                PacedFallbackCause::ScanRepairLimit,
+                job.peer,
+            );
             tracing::debug!(peer = %job.peer, "per-client-best build overflowed again; using the synchronous build");
             #[cfg(test)]
             super::slice_timing::record_work("pcb_build_overflow_fallback", 1);
@@ -1115,7 +1178,7 @@ impl RibManager {
     /// Retire its pages, then let the same session use ordinary registration.
     fn fallback_policy_first_group(&mut self, mut job: Box<FirstGroupBuild>) {
         if job.reload.is_some() {
-            self.retire_reload_build(job);
+            self.retire_reload_build(job, PacedFallbackCause::PolicyEvaluation);
             return;
         }
         debug_assert!(job.writer.is_none() && job.table.export_chain.is_some());
@@ -1128,6 +1191,11 @@ impl RibManager {
             && record.outbound_tx.same_channel(&founder.sender)
         {
             record.registration_policy_fallback = true;
+            self.note_paced_fallback(
+                PacedJob::FirstGroupBuild,
+                PacedFallbackCause::PolicyEvaluation,
+                job.peer,
+            );
         }
         self.clear_first_group_commit_frontier();
         job.stop_scan(&mut self.loc_rib);
@@ -1137,7 +1205,8 @@ impl RibManager {
 
     /// One attempt per accepted command. Finish previously admitted route
     /// chunks, then dispose the uninstalled table before the exact fallback.
-    fn retire_reload_build(&mut self, mut job: Box<FirstGroupBuild>) {
+    fn retire_reload_build(&mut self, mut job: Box<FirstGroupBuild>, cause: PacedFallbackCause) {
+        self.note_paced_fallback(PacedJob::ReloadBuild, cause, job.peer);
         self.seal_first_group_commit_frontier();
         job.stop_scan(&mut self.loc_rib);
         job.phase = FirstGroupPhase::Retiring;

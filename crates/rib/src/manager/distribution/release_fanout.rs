@@ -1,6 +1,7 @@
 //! One unicast release batch. The actor owns this transaction until every member
 //! has received the staged delta or transferred it to corrective resync.
 
+use super::super::initial_member_replay::{PacedFallbackCause, PacedJob};
 use super::super::outbound_owing::CursorFloors;
 use super::super::source_departure::{DEPARTURE_MEMBERS_PER_POLL, RECEIVER_ROWS_PER_POLL};
 use super::super::update_groups::{GroupRibOut, GroupStageOutput, ReleaseFallback};
@@ -96,6 +97,15 @@ pub(in crate::manager) struct ReleaseDistribution {
 }
 
 impl ReleaseDistribution {
+    /// The paced job whose fallbacks this pass counts.
+    fn paced_job(&self) -> PacedJob {
+        if self.departure.is_some() {
+            PacedJob::SourceDeparture
+        } else {
+            PacedJob::ReleaseFanout
+        }
+    }
+
     pub(in crate::manager) fn for_departure(
         afi: Afi,
         affected: HashSet<Prefix>,
@@ -272,6 +282,11 @@ impl RibManager {
                             super::super::update_groups::RecoveryFallbackCause::MissingProof,
                         );
                         self.mark_outbound_dirty_inner(peer, false);
+                        self.note_paced_fallback(
+                            pass.paced_job(),
+                            PacedFallbackCause::MissingProof,
+                            peer,
+                        );
                     }
                     self.collect_owed_floors(peer, &mut pass.floors);
                     pass.groups.entry(gid).or_default().push(peer);
@@ -345,9 +360,16 @@ impl RibManager {
             Phase::Cap(after, over) => {
                 let peers = pass.peer_batch(self, after, RELEASE_MEMBERS_PER_POLL);
                 for &peer in &peers {
-                    if self.cap_release_owed_peer(peer, over, &mut pass.floors)
-                        && pass.departure.is_some()
-                    {
+                    let evicted = self.cap_release_owed_peer(peer, over, &mut pass.floors);
+                    if evicted {
+                        // The receiver recovers through its whole-table resync.
+                        self.note_paced_fallback(
+                            pass.paced_job(),
+                            PacedFallbackCause::OwedRowCap,
+                            peer,
+                        );
+                    }
+                    if evicted && pass.departure.is_some() {
                         // Cursor probes are fixed-size. Give an eviction its own
                         // recovery budget before continuing with the remaining peers.
                         self.settle_eor_after_pass();
@@ -758,11 +780,13 @@ impl RibManager {
                     rows.next_hop_override.into(),
                 )
             };
-            if self
-                .try_send_and_commit_outbound_update(peer, batch)
-                .is_err()
-            {
+            if let Err(failure) = self.try_send_and_commit_outbound_update(peer, batch) {
                 self.mark_outbound_dirty(peer);
+                self.note_paced_fallback(
+                    PacedJob::ReleaseFanout,
+                    failure.paced_fallback_cause(),
+                    peer,
+                );
             } else if self
                 .initial_group_admitted_counts(peer)
                 .map(|counts| counts[v6])
@@ -876,6 +900,10 @@ mod tests {
             pass.groups.values().map(Vec::len).sum::<usize>(),
             peers.len()
         );
+        crate::manager::tests::assert_paced_fallbacks(
+            &manager.metrics,
+            &[("source_departure", "missing_proof", 1.0)],
+        );
 
         for &peer in &peers[16..18] {
             manager.owe_whole_family(peer, OwedFamily::IPV4_UNICAST);
@@ -886,5 +914,13 @@ mod tests {
         assert_eq!(visit(&mut manager, &mut pass), 1);
         assert_eq!(visit(&mut manager, &mut pass), 14);
         assert!(matches!(pass.phase, Phase::Finish));
+        // Each evicted receiver recovers through its whole-table resync.
+        crate::manager::tests::assert_paced_fallbacks(
+            &manager.metrics,
+            &[
+                ("source_departure", "missing_proof", 1.0),
+                ("source_departure", "owed_row_cap", 2.0),
+            ],
+        );
     }
 }

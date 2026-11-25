@@ -441,6 +441,86 @@ fn sends_without_waiting(manager: &mut RibManager, n: u8, rx: mpsc::Receiver<Out
     );
 }
 
+// A paced join counts no fallback, and neither does a join whose table is
+// below the pacing threshold, which is one turn by design. The published
+// group's founder joined below the default threshold too.
+#[test]
+fn a_paced_join_and_a_join_below_the_threshold_count_no_fallback() {
+    let Published {
+        mut manager,
+        tx: _tx,
+        ..
+    } = published();
+    let mut joiner = [(100, rs_client(&mut manager, 100, 1 << 12))];
+    let (_, paced) = advance_until_complete(&mut manager, &mut joiner, ROWS, 1);
+    assert!(paced[0], "the joiner was not paced");
+    manager.initial_member_replays.min_routes = Some(usize::MAX);
+    let mut small = [(101, rs_client(&mut manager, 101, 1 << 12))];
+    let (_, paced) = advance_until_complete(&mut manager, &mut small, ROWS, 1);
+    assert!(!paced[0], "the small-table joiner was paced");
+    crate::manager::tests::assert_paced_fallbacks(&manager.metrics, &[]);
+}
+
+// An unpaced shape counts `ineligible_shape` only when its one-turn initial
+// table carries the unicast table, on the inline and the deferred
+// registration path alike. EVPN-only and family-less peers send none.
+#[test]
+fn an_unpaced_shape_counts_only_a_unicast_initial_table() {
+    let flowspec = [(Afi::Ipv4, Safi::Unicast), (Afi::Ipv4, Safi::FlowSpec)];
+    for deferred in [false, true] {
+        let Published {
+            mut manager,
+            tx: _tx,
+            ..
+        } = published();
+        if !deferred {
+            manager.initial_dump_defer_min_routes = usize::MAX;
+        }
+        let _evpn = client(
+            &mut manager,
+            100,
+            1 << 12,
+            None,
+            &[(Afi::L2Vpn, Safi::Evpn)],
+        );
+        let _none = client(&mut manager, 101, 1 << 12, None, &[]);
+        settle(&mut manager);
+        crate::manager::tests::assert_paced_fallbacks(&manager.metrics, &[]);
+        let _mixed = client(&mut manager, 102, 1 << 14, None, &flowspec);
+        assert_eq!(
+            manager
+                .pending_initial_registrations
+                .contains(&receiver(102)),
+            deferred
+        );
+        settle(&mut manager);
+        assert!(manager.outbound_peers.contains_key(&receiver(102)));
+        crate::manager::tests::assert_paced_fallbacks(
+            &manager.metrics,
+            &[("initial_replay", "ineligible_shape", 1.0)],
+        );
+    }
+}
+
+// With a slot free, the same table's proof reservation is refused when its
+// replay starts. The joiner sends in one turn and counts the refusal.
+#[test]
+fn a_refused_proof_reservation_counts_its_one_turn_send() {
+    let Published {
+        mut manager,
+        tx: _tx,
+        ..
+    } = published();
+    manager.pending_group_admitted.set_test_peer_limit(ROWS);
+    let mut joiner = [(100, rs_client(&mut manager, 100, 1 << 12))];
+    let (_, paced) = advance_until_complete(&mut manager, &mut joiner, ROWS, 1);
+    assert!(!paced[0], "the joiner was paced");
+    crate::manager::tests::assert_paced_fallbacks(
+        &manager.metrics,
+        &[("initial_replay", "peer_limit", 1.0)],
+    );
+}
+
 // A table the per-peer proof limit refuses can never start a paced replay,
 // so a full set of slots must not hold it: it takes its one-turn send.
 #[test]
@@ -876,6 +956,15 @@ fn a_joiner_refused_its_own_pacing_shares_a_fallback_leaders_turn() {
             "{refusal}: the joiner did not share the leader's turn"
         );
         assert_eq!((joiner_rows, joiner_ends), (ROWS, 1), "{refusal}");
+        let cause = if refusal == "prefix_limit" {
+            "prefix_limit"
+        } else {
+            "proof_budget"
+        };
+        crate::manager::tests::assert_paced_fallbacks(
+            &manager.metrics,
+            &[("initial_replay", cause, 1.0)],
+        );
     }
 }
 

@@ -631,6 +631,10 @@ async fn pending_policy_change_rechecks_previously_staged_route() {
     });
     expected.remove(&denied);
     finish(&mut manager);
+    crate::manager::tests::assert_paced_fallbacks(
+        &manager.metrics,
+        &[("first_group_build", "group_changed", 1.0)],
+    );
     assert_initial(&mut rx, &expected, &DUAL).await;
     assert!(rx.is_empty());
 }

@@ -1533,6 +1533,10 @@ fn per_client_best_release_matches_the_ranking_for_every_client() {
     });
     drain_unicast_release(&mut manager);
     assert!(manager.dirty_peers.contains(&client(SLOW)));
+    crate::manager::tests::assert_paced_fallbacks(
+        &manager.metrics,
+        &[("release_fanout", "writer_unavailable", 1.0)],
+    );
     let expected = |n: usize| sent.table(client(n), rs_control(n));
     for (n, receiver) in receivers.iter_mut().enumerate() {
         if n == SLOW {

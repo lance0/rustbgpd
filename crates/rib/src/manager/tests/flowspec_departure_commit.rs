@@ -93,6 +93,14 @@ fn flowspec_departure_refusal_keeps_old_until_recovery_withdraws_it_once() {
         } else {
             assert!(manager.dirty_peers.contains(&peer));
         }
+        // A refused member handed to the dirty resync counts; owed rows
+        // stay paced.
+        let expected: &[_] = match refusal {
+            Refusal::Writer => &[("source_departure", "writer_unavailable", 1.0)],
+            Refusal::Credit => &[],
+            Refusal::Encoder => &[("source_departure", "commit_refused", 1.0)],
+        };
+        crate::manager::tests::assert_paced_fallbacks(&manager.metrics, expected);
         if matches!(refusal, Refusal::Writer) {
             fill.release(); // Also proves refusal happened after the encoder snapshot.
         }

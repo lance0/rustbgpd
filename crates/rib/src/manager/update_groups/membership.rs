@@ -1,3 +1,4 @@
+use super::super::initial_member_replay::{PacedFallbackCause, PacedJob};
 use super::{
     AdjRibOut, ExactExportKey, FastMap, GroupMembership, GroupRibOut, HashSet, PolicyChain,
     RegroupBaseline, RibManager, VpnRibRouteKey,
@@ -110,13 +111,22 @@ impl RibManager {
         // Owed keys were recorded against the old ownership. Capture admitted
         // OLD before marking dirty so regroup recovery retains its withdrawals.
         let replaying = self.abort_initial_member_replay(peer);
+        if replaying {
+            self.note_paced_fallback(
+                PacedJob::InitialReplay,
+                PacedFallbackCause::GroupChanged,
+                peer,
+            );
+        }
         if self.drop_peer_owing(peer) || replaying {
             let marked = self.mark_outbound_dirty(peer);
             #[cfg(feature = "bench-internals")]
             if marked && replaying {
                 self.observe_initial_replay(
                     peer,
-                    super::super::BenchReplayEvent::Dirty("group_changed"),
+                    super::super::BenchReplayEvent::Dirty(
+                        PacedFallbackCause::GroupChanged.as_str(),
+                    ),
                 );
             }
             #[cfg(not(feature = "bench-internals"))]
@@ -849,7 +859,15 @@ impl RibManager {
         self.pending_registration_key(peer, record)
     }
 
-    pub(in crate::manager) fn eligible_initial_member_replay(&self, peer: PeerId) -> bool {
+    /// The Loc-RIB size from which an initial table is paced.
+    #[cfg_attr(
+        not(test),
+        expect(
+            clippy::unused_self,
+            reason = "tests override the threshold per manager"
+        )
+    )]
+    pub(in crate::manager) fn initial_member_replay_min_routes(&self) -> usize {
         #[cfg(test)]
         let threshold = self
             .initial_member_replays
@@ -857,7 +875,11 @@ impl RibManager {
             .unwrap_or(super::super::INITIAL_DUMP_DEFER_MIN_ROUTES);
         #[cfg(not(test))]
         let threshold = super::super::INITIAL_DUMP_DEFER_MIN_ROUTES;
-        self.loc_rib.len() >= threshold.max(crate::loc_rib::REGISTRATION_PAGE_SIZE + 1)
+        threshold.max(crate::loc_rib::REGISTRATION_PAGE_SIZE + 1)
+    }
+
+    pub(in crate::manager) fn eligible_initial_member_replay(&self, peer: PeerId) -> bool {
+        self.loc_rib.len() >= self.initial_member_replay_min_routes()
             && self
                 .live_sessions
                 .get(&peer)

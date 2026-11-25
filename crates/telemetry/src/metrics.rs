@@ -805,6 +805,7 @@ struct BgpMetricsInner {
     update_group_recovery_peak_bytes: IntGauge,
     update_group_recovery_limit_bytes: IntGaugeVec,
     update_group_recovery_fallback: IntCounterVec,
+    rib_paced_fallback: IntCounterVec,
     update_group_runner_up_entries: IntGauge,
     update_group_interned_chains: IntGauge,
     update_group_keys: IntGauge,
@@ -2255,6 +2256,21 @@ impl BgpMetrics {
         ).expect("valid metric definition");
         for cause in crate::reason_labels::UpdateGroupRecoveryFallbackCause::ALL {
             update_group_recovery_fallback.with_label_values(&[cause.as_str()]);
+        }
+        let rib_paced_fallback = IntCounterVec::new(
+            Opts::new(
+                "bgp_rib_paced_fallback_total",
+                "Paced RIB jobs that handed their work to a one-turn path (dirty \
+                 resync, one-turn initial table or synchronous group build), by job \
+                 and cause.",
+            ),
+            &["job", "cause"],
+        )
+        .expect("valid metric definition");
+        for job in crate::reason_labels::PacedJob::ALL {
+            for cause in crate::reason_labels::PacedFallbackCause::ALL {
+                rib_paced_fallback.with_label_values(&[job.as_str(), cause.as_str()]);
+            }
         }
 
         let update_group_runner_up_entries = IntGauge::new(
@@ -3753,6 +3769,9 @@ impl BgpMetrics {
             .register(Box::new(update_group_recovery_fallback.clone()))
             .expect("register update group recovery fallback");
         registry
+            .register(Box::new(rib_paced_fallback.clone()))
+            .expect("register rib paced fallback");
+        registry
             .register(Box::new(update_group_recovery_limit_bytes.clone()))
             .expect("register update group recovery limits");
         registry
@@ -4262,6 +4281,7 @@ impl BgpMetrics {
             update_group_recovery_peak_bytes,
             update_group_recovery_limit_bytes,
             update_group_recovery_fallback,
+            rib_paced_fallback,
             update_group_runner_up_entries,
             update_group_interned_chains,
             update_group_keys,
@@ -6058,6 +6078,18 @@ impl BgpMetrics {
         self.0
             .update_group_recovery_fallback
             .with_label_values(&[cause.as_str()])
+            .inc();
+    }
+
+    /// Record one paced RIB job's fallback to a one-turn path.
+    pub fn record_rib_paced_fallback(
+        &self,
+        job: crate::reason_labels::PacedJob,
+        cause: crate::reason_labels::PacedFallbackCause,
+    ) {
+        self.0
+            .rib_paced_fallback
+            .with_label_values(&[job.as_str(), cause.as_str()])
             .inc();
     }
 
@@ -12055,6 +12087,30 @@ mod tests {
                 0.0
             };
             assert_eq!(metric.get_counter().get_value(), expected);
+        }
+    }
+
+    #[test]
+    fn paced_fallback_counter_exports_every_job_and_cause() {
+        use crate::reason_labels::{PacedFallbackCause, PacedJob};
+        let metrics = BgpMetrics::new();
+        metrics.record_rib_paced_fallback(PacedJob::InitialReplay, PacedFallbackCause::Lag);
+        let families = metrics.registry().gather();
+        let family = families
+            .iter()
+            .find(|family| family.name() == "bgp_rib_paced_fallback_total")
+            .unwrap();
+        assert_eq!(
+            family.get_metric().len(),
+            PacedJob::ALL.len() * PacedFallbackCause::ALL.len()
+        );
+        for metric in family.get_metric() {
+            let labels = metric.get_label();
+            assert_eq!(labels.len(), 2);
+            assert_eq!(labels[0].name(), "cause");
+            assert_eq!(labels[1].name(), "job");
+            let hit = labels[0].value() == "lag" && labels[1].value() == "initial_replay";
+            assert_eq!(metric.get_counter().get_value(), f64::from(u8::from(hit)));
         }
     }
 

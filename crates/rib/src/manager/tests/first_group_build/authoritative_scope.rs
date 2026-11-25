@@ -63,6 +63,13 @@ fn authoritative_destination_requires_one_single_best_unicast_family() {
                 manager.advance_first_group_build();
             }
         }
+        // An unpaged reload is a one-turn replacement of the member's table.
+        let expected: &[_] = if paged {
+            &[]
+        } else {
+            &[("reload_build", "ineligible_shape", 1.0)]
+        };
+        crate::manager::tests::assert_paced_fallbacks(&manager.metrics, expected);
         let deferred = ack.try_recv().expect("one terminal reply").unwrap();
         if deferred.is_empty() {
             assert_eq!(manager.export_policy_for(peer), Some(&destination));
@@ -106,4 +113,48 @@ fn authoritative_batch_with_two_destinations_preserves_the_existing_handoff() {
         assert_eq!(manager.grouped_member_of(peer), Some(old));
         assert!(manager.export_policy_for(peer).is_none());
     }
+}
+
+// A batch that leaves every member's export policy as its group's already is
+// moves nothing, so its one-turn completion counts no fallback.
+#[test]
+fn an_authoritative_batch_that_moves_nothing_counts_no_fallback() {
+    let (mut manager, _primary, _) = fixture(0);
+    let peer = receiver(1);
+    let _writer = join(&mut manager, peer, 1, &[(Afi::Ipv4, Safi::Unicast)]);
+    // An ORF receiver keeps a private Adj-RIB-Out, and keeps its installed
+    // policy here too.
+    let private = receiver(2);
+    let (tx, _private_out) = mpsc::channel(32);
+    let mut up = test_peer_up(private, 1, tx);
+    let RibUpdate::PeerUp {
+        negotiated_orf_recv,
+        ..
+    } = &mut up
+    else {
+        unreachable!()
+    };
+    *negotiated_orf_recv = vec![(Afi::Ipv4, Safi::Unicast)];
+    manager.handle_update(up);
+    assert!(manager.grouped_member_of(private).is_none());
+    assert!(manager.outbound_peers.contains_key(&private));
+    let prefix = prefixes(1)[0];
+    manager.handle_update(test_routes_received(
+        peer_v4(SOURCE),
+        vec![route(prefix, SOURCE, 100)],
+    ));
+    drain_route_chunks(&mut manager);
+    let (reply, mut ack) = oneshot::channel();
+    manager.handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+        replacements: [peer, private]
+            .map(|peer| PeerExportPolicyReplacement {
+                peer,
+                export_policy: None,
+            })
+            .into(),
+        reply,
+    });
+    assert!(manager.first_group_build.is_none());
+    ack.try_recv().expect("one terminal reply").unwrap();
+    crate::manager::tests::assert_paced_fallbacks(&manager.metrics, &[]);
 }

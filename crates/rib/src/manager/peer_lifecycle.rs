@@ -2960,9 +2960,15 @@ impl RibManager {
     /// registers the CURRENT session's negotiated state.
     pub(super) fn complete_outbound_registration(&mut self, peer: PeerId) {
         let pace = self.eligible_initial_member_replay(peer);
+        let unpaced = if pace {
+            None
+        } else {
+            self.unpaced_initial_table_cause(peer, false)
+        };
         if self.install_outbound_registration(peer)
             && !(pace && self.start_initial_member_replay(peer))
         {
+            self.note_unpaced_initial_table(peer, unpaced);
             self.send_initial_table(peer);
         }
     }
@@ -3276,11 +3282,17 @@ impl RibManager {
         self.set_registration_slot_wait(false);
         self.note_replay_slot_wait(leader, None);
         let pace = self.eligible_initial_member_replay(leader);
+        let unpaced = if pace {
+            None
+        } else {
+            self.unpaced_initial_table_cause(leader, false)
+        };
         if !self.install_outbound_registration(leader)
             || (pace && self.start_initial_member_replay(leader))
         {
             return;
         }
+        self.note_unpaced_initial_table(leader, unpaced);
         super::with_executor_handoff(|| {
             self.with_replacement_readiness(|manager| {
                 let members = if pace {
@@ -3406,9 +3418,13 @@ impl RibManager {
         let mut cohort = vec![leader];
         let mut regrouped = Vec::new();
         for peer in members {
+            // The cohort took only joiners that cannot pace.
+            let unpaced =
+                self.unpaced_initial_table_cause(peer, self.eligible_initial_member_replay(peer));
             if !self.install_outbound_registration(peer) {
                 continue;
             }
+            self.note_unpaced_initial_table(peer, unpaced);
             // The admission profile predicts membership; the installed
             // registration decides it. A joiner that lands elsewhere still
             // gets its table in this turn, on the ordinary path.

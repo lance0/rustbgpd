@@ -457,6 +457,14 @@ fn ingest_rounds(pcb: bool) -> (usize, usize, bool) {
             overflows += 1;
         }
     }
+    // A single-best founder's overflow restarts its scan, which is not a
+    // one-turn fallback.
+    let expected: &[_] = if pcb {
+        &[("per_client_best_build", "scan_repair_limit", 1.0)]
+    } else {
+        &[]
+    };
+    crate::manager::tests::assert_paced_fallbacks(&manager.metrics, expected);
     (overflows, rounds, manager.grouped_member_of(peer).is_some())
 }
 
