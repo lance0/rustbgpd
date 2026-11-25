@@ -28,6 +28,23 @@ enum Phase {
     Send,
 }
 
+/// An initial replay sends a cold member its table. A reconcile repairs a
+/// member whose replay lost track of its changes: it rescans the Loc-RIB
+/// with every key reconciled against admission (R1), then sweeps the
+/// admitted proof for keys the Loc-RIB no longer holds (R2). Both owe the
+/// End-of-RIB the replay owed when it started.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    Initial,
+    Reconcile,
+}
+
+/// Re-arms after which a reconcile's scan stops overflowing.
+// ponytail: past this, the member's repair log grows with every distinct
+// changed key (at most the Loc-RIB) and sustained churn can still hold its
+// End-of-RIB back. The shared lag bound replaces both (S5).
+const REARMS_BEFORE_UNBOUNDED_REPAIRS: u16 = 4;
+
 struct Replay {
     gid: usize,
     table_stamp: u64,
@@ -38,6 +55,14 @@ struct Replay {
     // Page keys left when a poll spent its unit budget. An RS-control
     // member's slot may search the prefix's fallback rows.
     carry: VecDeque<Prefix>,
+    mode: Mode,
+    // A reconcile restarts its scan at its next turn. Until then the scan is
+    // stopped: the rescan revisits every key, so nothing needs recording.
+    rewind: bool,
+    rearms: u16,
+    // R2's position: the last proof key it visited, and whether it is done.
+    swept: Option<Key>,
+    sweep_done: bool,
 }
 
 /// What a paceable registration waits for before its replay can start.
@@ -112,7 +137,7 @@ impl RibManager {
         self.initial_member_replays
             .members
             .get(&peer)
-            .is_some_and(|replay| replay.changes.unsent())
+            .is_some_and(|replay| replay.mode == Mode::Reconcile || replay.changes.unsent())
     }
 
     /// What `peer`'s paceable registration waits for, if anything: a slot
@@ -274,6 +299,11 @@ impl RibManager {
                 phase: Phase::PrepareProof(None),
                 changes,
                 carry: VecDeque::new(),
+                mode: Mode::Initial,
+                rewind: false,
+                rearms: 0,
+                swept: None,
+                sweep_done: false,
             },
         );
         self.initial_member_replays.ready.push_back(peer);
@@ -428,11 +458,64 @@ impl RibManager {
         true
     }
 
+    /// Rewind a replay that lost track of its member's table into a paced
+    /// reconcile, or hand it to the dirty resync when it cannot reconcile:
+    /// its proof is gone, another owner already marked it dirty, or the
+    /// cause needs more than its unicast table (a regroup moves its
+    /// withdrawal duties; an ORF change filters at the commit). `true` while
+    /// the replay stays live.
     pub(super) fn recover_initial_member_replay(
         &mut self,
         peer: PeerId,
         cause: PacedFallbackCause,
-    ) {
+    ) -> bool {
+        use PacedFallbackCause as Cause;
+        let reconcilable = match cause {
+            Cause::ScanRepairLimit
+            | Cause::ChangeOutsideScan
+            | Cause::ReleaseFanout
+            | Cause::SelectionRelease => true,
+            Cause::ForcedResync => !self.peer_orf_filters.contains_key(&peer),
+            _ => false,
+        };
+        if reconcilable
+            && !self.dirty_peers.contains(&peer)
+            && self
+                .pending_group_admitted
+                .initial_replay_sparse_len(peer)
+                .is_some()
+            && let Some(replay) = self.initial_member_replays.members.get_mut(&peer)
+        {
+            replay.mode = Mode::Reconcile;
+            replay.rewind = true;
+            replay.rearms = replay.rearms.saturating_add(1);
+            replay.changes = ReplayChanges::coalescing();
+            replay.carry.clear();
+            replay.swept = None;
+            replay.sweep_done = false;
+            let rearms = replay.rearms;
+            self.loc_rib.stop_member_replay_scan(peer);
+            let replays = &mut self.initial_member_replays;
+            if !replays.ready.contains(&peer) && !replays.blocked.contains(&peer) {
+                replays.ready.push_back(peer);
+            }
+            if cause == Cause::ForcedResync {
+                // Every reconcile row is a forced replay.
+                self.force_outbound_peers.remove(&peer);
+                self.refresh_eor_retry(peer);
+            }
+            tracing::debug!(
+                %peer,
+                cause = cause.as_str(),
+                rearms,
+                "paced initial replay rewinds into a reconcile"
+            );
+            #[cfg(feature = "bench-internals")]
+            self.observe_initial_replay(peer, BenchReplayEvent::Reconciled(cause.as_str()));
+            #[cfg(test)]
+            super::slice_timing::record_work("initial_replay_reconciles", 1);
+            return true;
+        }
         self.note_paced_fallback(PacedJob::InitialReplay, cause, peer);
         self.abort_initial_member_replay(peer);
         let marked = self.mark_outbound_dirty(peer);
@@ -442,6 +525,22 @@ impl RibManager {
         }
         #[cfg(not(feature = "bench-internals"))]
         let _ = marked;
+        false
+    }
+
+    /// Restart a reconcile's scan from its first bucket. The proof stays.
+    fn rewind_initial_member_replay(&mut self, peer: PeerId) {
+        let replay = self
+            .initial_member_replays
+            .members
+            .get_mut(&peer)
+            .expect("live replay");
+        replay.rewind = false;
+        let unbounded = replay.rearms > REARMS_BEFORE_UNBOUNDED_REPAIRS;
+        self.loc_rib.start_member_replay_scan(peer);
+        if unbounded {
+            self.loc_rib.lift_member_replay_repair_limit(peer);
+        }
     }
 
     fn advance_initial_member_replay(&mut self, peer: PeerId) {
@@ -467,6 +566,7 @@ impl RibManager {
             return;
         }
         let gid = job.gid;
+        let rewind = job.rewind;
         let invalidation = if self.grouped_member_of(peer) != Some(gid)
             || self
                 .group_ribs
@@ -479,18 +579,21 @@ impl RibManager {
                 self.group_recovery_fallback(peer)
                     .map_or(PacedFallbackCause::AlreadyDirty, Into::into),
             )
-        } else if self.loc_rib.member_replay_scan_status(peer) == RegistrationScanStatus::Overflow {
-            Some(PacedFallbackCause::ScanRepairLimit)
+        } else if self
+            .pending_group_admitted
+            .initial_replay_sparse_len(peer)
+            .is_none()
+        {
+            Some(PacedFallbackCause::MissingProof)
         } else {
-            match self.pending_group_admitted.initial_replay_sparse_len(peer) {
-                None => Some(PacedFallbackCause::MissingProof),
-                Some(rows) if rows > REGISTRATION_PAGE_SIZE => {
-                    Some(PacedFallbackCause::SparseKeyLimit)
-                }
-                Some(_) => None,
+            if rewind {
+                self.rewind_initial_member_replay(peer);
             }
+            (self.loc_rib.member_replay_scan_status(peer) == RegistrationScanStatus::Overflow)
+                .then_some(PacedFallbackCause::ScanRepairLimit)
         };
         if let Some(cause) = invalidation {
+            // A reconcile is scheduled again and rewinds at its next turn.
             self.recover_initial_member_replay(peer, cause);
             return;
         }
@@ -498,11 +601,20 @@ impl RibManager {
             self.initial_member_replays.blocked.push_back(peer);
             return;
         }
-        if let Phase::PrepareProof(after) = job.phase {
+        if let Phase::PrepareProof(after) = self.initial_member_replays.members[&peer].phase {
             self.prepare_initial_member_proof_page(peer, gid, after);
             return;
         }
-        if !self.complete_initial_member_replay(peer) {
+        if self.complete_initial_member_replay(peer) {
+            return;
+        }
+        let replay = &self.initial_member_replays.members[&peer];
+        if replay.mode == Mode::Reconcile
+            && replay.carry.is_empty()
+            && self.loc_rib.member_replay_scan_status(peer) == RegistrationScanStatus::Ready
+        {
+            self.sweep_initial_member_page(peer, gid);
+        } else {
             self.send_initial_member_page(peer, gid);
         }
     }
@@ -516,6 +628,8 @@ impl RibManager {
         let job = &self.initial_member_replays.members[&peer];
         if job.changes.has_pending()
             || !job.carry.is_empty()
+            || job.rewind
+            || (job.mode == Mode::Reconcile && !job.sweep_done)
             || self.loc_rib.member_replay_scan_status(peer) != RegistrationScanStatus::Ready
             || self.dirty_peers.contains(&peer)
         {
@@ -591,6 +705,7 @@ impl RibManager {
             .members
             .get_mut(&peer)
             .expect("live replay");
+        let reconcile = replay.mode == Mode::Reconcile;
         if replay.carry.is_empty() {
             let page = self.loc_rib.take_member_replay_page(peer);
             #[cfg(test)]
@@ -622,8 +737,9 @@ impl RibManager {
             // including when the received winner has its own Add-Path ID.
             let key = ExactExportKey::Unicast(prefix, 0);
             let sent = admitted.contains(&key);
-            // A coalesced key reconciles its current row against admission.
-            if replay.changes.coalesced(&prefix) {
+            // A coalesced key reconciles its current row against admission,
+            // and so does every key a reconcile visits.
+            if reconcile || replay.changes.coalesced(&prefix) {
                 reconciled.push(prefix);
             } else if sent || replay.changes.owns_absent(&prefix) {
                 continue;
@@ -674,6 +790,69 @@ impl RibManager {
             .changes
             .settle_coalesced(&reconciled);
         self.apply_initial_replay_page_policy(peer, gid, &keys);
+        if self.outbound_channel_full(peer) || !self.complete_initial_member_replay(peer) {
+            self.initial_member_replays.ready.push_back(peer);
+        }
+    }
+
+    /// R2: withdraw admitted keys whose current slot is gone, one page of
+    /// proof positions at a time in key order. R1 visited every key the
+    /// Loc-RIB holds; a key it dropped while the replay had lost track of
+    /// its changes has no scan repair and is found only here.
+    fn sweep_initial_member_page(&mut self, peer: PeerId, gid: usize) {
+        let Ok(mut operation) = self.begin_outbound_operation(peer, 1) else {
+            self.initial_member_replays.blocked.push_back(peer);
+            return;
+        };
+        let rs_control = self.rs_control_context(peer);
+        let Some(admitted) = self.pending_group_admitted.get(&peer) else {
+            self.recover_initial_member_replay(peer, PacedFallbackCause::MissingProof);
+            return;
+        };
+        let replay = &self.initial_member_replays.members[&peer];
+        let (keys, next, visited) = admitted.sweep_unicast(replay.swept, REGISTRATION_PAGE_SIZE);
+        let group = &self.group_ribs[&gid];
+        let mut units = 0;
+        let mut withdraw = Vec::new();
+        let mut prior = FastSet::default();
+        for prefix in keys {
+            units += 1;
+            let slot = group.replay_slot(peer, &prefix, rs_control);
+            if rs_control.is_some() {
+                units += group.rs_fallback_searched(&prefix, slot.as_ref());
+            }
+            if slot.is_none() {
+                withdraw.push((prefix, 0));
+                prior.insert(ExactExportKey::Unicast(prefix, 0));
+            }
+        }
+        #[cfg(test)]
+        {
+            super::slice_timing::record_work("initial_member_replay_visits", visited);
+            super::slice_timing::record_work("initial_member_replay_units", units);
+            super::slice_timing::record_work("initial_member_replay_swept", withdraw.len());
+        }
+        #[cfg(not(test))]
+        let _ = (units, visited);
+        if !withdraw.is_empty() {
+            let batch = OutboundCommitBatch {
+                slot: operation.slot(),
+                force_unicast_replay: true,
+                unicast_otc_prechecked: true,
+                withdraw,
+                ..OutboundCommitBatch::default()
+            };
+            if !self.commit_initial_member_batch(peer, batch, prior) {
+                return;
+            }
+        }
+        let replay = self
+            .initial_member_replays
+            .members
+            .get_mut(&peer)
+            .expect("live replay");
+        replay.sweep_done = next.is_none();
+        replay.swept = next;
         if self.outbound_channel_full(peer) || !self.complete_initial_member_replay(peer) {
             self.initial_member_replays.ready.push_back(peer);
         }

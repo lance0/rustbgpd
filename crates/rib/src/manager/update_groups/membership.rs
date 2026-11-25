@@ -1108,6 +1108,8 @@ impl RibManager {
                     "destination_build_with_installed_tables"
                 });
             }
+            #[cfg(test)]
+            crate::manager::slice_timing::record_work("synchronous_group_builds", 1);
             self.replacement_checkpoint(true);
             let mut group = GroupRibOut::new(
                 // `share()`, not `clone()`: the snapshot must keep

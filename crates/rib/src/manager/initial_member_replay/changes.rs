@@ -186,10 +186,16 @@ impl RibManager {
             .members
             .get_mut(&peer)
             .expect("active replay");
-        if matches!(replay.phase, Phase::PrepareProof(_)) {
+        // A pending rewind revisits every key.
+        if matches!(replay.phase, Phase::PrepareProof(_)) || replay.rewind {
             return Ok(());
         }
-        if self.group_ribs[&replay.gid].per_client_best || rs_control {
+        // A reconcile reconciles every key it visits, so each change is a
+        // repair whatever the group's shape.
+        if self.group_ribs[&replay.gid].per_client_best
+            || rs_control
+            || replay.mode == super::Mode::Reconcile
+        {
             // The member's slot reads the winner, its runner-up and, toward
             // an RS-control receiver, the source tags and fallback rows. The
             // last three change without a Loc-RIB write, so record the keys

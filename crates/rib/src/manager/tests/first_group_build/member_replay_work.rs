@@ -24,9 +24,16 @@ async fn cold_join(pages: u16, member: Member) -> ReplayWork {
     cold_join_holding(pages, member, false).await
 }
 
+async fn cold_join_holding(pages: u16, member: Member, hold_last: bool) -> ReplayWork {
+    cold_join_with(pages, member, hold_last, 0).await
+}
+
 /// `hold_last` keeps the newest envelope, and its operation latch, alive
 /// across the next actor poll so the replay parks behind its own writer.
-async fn cold_join_holding(pages: u16, member: Member, hold_last: bool) -> ReplayWork {
+/// A nonzero `burst` lands that many new prefixes from another source after
+/// the first page, more than the scan's repair log holds, so the replay
+/// rewinds into a reconcile.
+async fn cold_join_with(pages: u16, member: Member, hold_last: bool, burst: u16) -> ReplayWork {
     const TAG: u32 = 0xfde8_0007;
     let with_policy = member == Member::Policy;
     let (mut manager, tx, _) = fixture(0);
@@ -72,6 +79,7 @@ async fn cold_join_holding(pages: u16, member: Member, hold_last: bool) -> Repla
     let mut seen = HashSet::new();
     let mut markers = 0;
     let mut held = None;
+    let mut burst_sent = burst == 0;
     poll_fn(|cx| {
         let before = visits();
         let result = actor.as_mut().poll(cx);
@@ -83,13 +91,28 @@ async fn cold_join_holding(pages: u16, member: Member, hold_last: bool) -> Repla
         while let Ok(update) = rx.try_recv() {
             for row in update.announce.iter() {
                 assert_eq!(markers, 0);
-                assert!(seen.insert(row.prefix), "duplicate {:?}", row.prefix);
+                // A reconcile resends the rows its rescan visits.
+                assert!(
+                    seen.insert(row.prefix) || burst != 0,
+                    "duplicate {:?}",
+                    row.prefix
+                );
                 assert_eq!(row.communities().contains(&TAG), with_policy);
             }
             for family in &update.end_of_rib {
                 assert_eq!(*family, (Afi::Ipv4, Safi::Unicast));
-                assert_eq!(seen.len(), rows, "early End-of-RIB");
+                assert_eq!(seen.len(), rows + usize::from(burst), "early End-of-RIB");
                 markers += 1;
+            }
+            if !burst_sent {
+                burst_sent = true;
+                let routes = (0..burst)
+                    .map(|i| route(prefixes(u16::try_from(rows).unwrap() + i)[0], OTHER, 100))
+                    .collect();
+                let tx = tx.as_ref().expect("input open");
+                tx.try_send(test_routes_received(peer_v4(OTHER), routes))
+                    .unwrap();
+                cx.waker().wake_by_ref();
             }
             if hold_last {
                 held = Some(update);
@@ -123,6 +146,36 @@ async fn initial_member_replay_bounds_visits_per_physical_poll() {
             "{work:?}"
         );
         assert!(work.polls >= 2 * usize::from(pages), "{work:?}");
+    }
+}
+
+// Overflow mid-replay rewinds into a reconcile. Its rescan and proof sweep
+// run in pages: per-poll work stays at one page however large the table, and
+// total work stays linear in it.
+#[tokio::test]
+async fn reconcile_bounds_visits_per_physical_poll() {
+    const BURST: u16 = 4_200;
+    for member in [Member::Plain, Member::PerClientBest] {
+        for pages in [8, 32] {
+            let reconciles = || {
+                crate::manager::slice_timing::group_work()
+                    .get("initial_replay_reconciles")
+                    .copied()
+                    .unwrap_or(0)
+            };
+            let before = reconciles();
+            let work = cold_join_with(pages, member, false, BURST).await;
+            eprintln!("reconcile {member:?}, pages={pages}, {work:?}");
+            assert_eq!(reconciles() - before, 1, "{member:?} pages={pages}");
+            let rows = usize::from(pages) * REGISTRATION_PAGE_SIZE + usize::from(BURST);
+            assert!(
+                work.peak <= REGISTRATION_PAGE_SIZE,
+                "{member:?} pages={pages}: {work:?}"
+            );
+            // The initial proof and partial walk, the rescan's bucket visits
+            // and repairs, and the proof sweep: each at most once per row.
+            assert!(work.total <= 5 * rows, "{member:?} pages={pages}: {work:?}");
+        }
     }
 }
 

@@ -10405,7 +10405,10 @@ impl RibManager {
                                 self.group_recovery_fallback(peer)
                                     .map_or(PacedFallbackCause::AlreadyDirty, Into::into)
                             };
-                            self.recover_initial_member_replay(peer, cause);
+                            // A reconcile rescans the member's whole table.
+                            if self.recover_initial_member_replay(peer, cause) {
+                                break 'member;
+                            }
                         } else {
                             // The replay scan delivers current winners and repairs against
                             // actual admission. The live pass owns its policy evaluations.

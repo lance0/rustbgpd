@@ -82,6 +82,8 @@ struct RegistrationScan {
     displaced: Option<VecDeque<Option<Route>>>,
     queued: FastSet<Prefix>,
     overflow: bool,
+    // A reconcile that re-armed too often keeps every repair instead.
+    unbounded: bool,
 }
 
 impl RegistrationScan {
@@ -106,7 +108,7 @@ impl RegistrationScan {
         if self.overflow {
             return;
         }
-        if self.repairs.len() == REGISTRATION_REPAIR_LIMIT {
+        if self.repairs.len() == REGISTRATION_REPAIR_LIMIT && !self.unbounded {
             self.overflow = !self.queued.contains(&key);
         } else if self.queued.insert(key) {
             self.repairs.push_back(key);
@@ -120,7 +122,7 @@ impl RegistrationScan {
     /// keys cannot fit, even if some already have a pending repair.
     fn record_changes(&mut self, changes: &HashSet<Prefix>) {
         debug_assert!(self.displaced.is_none());
-        if changes.len() > REGISTRATION_REPAIR_LIMIT {
+        if changes.len() > REGISTRATION_REPAIR_LIMIT && !self.unbounded {
             self.overflow = true;
         }
         if !self.overflow {
@@ -516,6 +518,15 @@ impl LocRib {
             .as_ref()
             .and_then(|scans| scans.members.get(&peer))
             .is_some_and(|scan| scan.queued.contains(&prefix))
+    }
+
+    /// Let the member's repair log grow past its cap instead of overflowing.
+    pub(crate) fn lift_member_replay_repair_limit(&mut self, peer: PeerId) {
+        self.registration_scans
+            .as_mut()
+            .and_then(|scans| scans.members.get_mut(&peer))
+            .expect("active replay")
+            .unbounded = true;
     }
 
     /// Queue a repair for a group change that wrote no Loc-RIB row. `false`

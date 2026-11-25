@@ -419,6 +419,42 @@ impl<'a> AdmittedKeyView<'a> {
         }
     }
 
+    /// Up to `visits` positions of an initial replay's proof after `after`,
+    /// in key order: the admitted unicast prefixes among them, the last key
+    /// visited (`None` once the sweep reached the end) and the positions
+    /// visited. Its universe and sparse overlay are sorted and disjoint.
+    pub(in crate::manager) fn sweep_unicast(
+        self,
+        after: Option<Key>,
+        visits: usize,
+    ) -> (Vec<Prefix>, Option<Key>, usize) {
+        let start =
+            |keys: &[Key]| after.map_or(0, |after| keys.partition_point(|key| *key <= after));
+        let (mut base, mut sparse) = (start(self.universe), start(self.sparse));
+        let mut admitted = Vec::new();
+        let mut last = None;
+        for visited in 0..visits {
+            let (key, admit) = match (self.universe.get(base), self.sparse.get(sparse)) {
+                (None, None) => return (admitted, None, visited),
+                (Some(&key), next) if next.is_none_or(|next| key < *next) => {
+                    let index = base;
+                    base += 1;
+                    (key, self.words[index / 64] & (1_u64 << (index % 64)) != 0)
+                }
+                (_, next) => {
+                    sparse += 1;
+                    (*next.expect("the sparse key sorts first"), true)
+                }
+            };
+            if admit && let Key::Unicast(prefix, _) = key {
+                admitted.push(prefix);
+            }
+            last = Some(key);
+        }
+        let done = base == self.universe.len() && sparse == self.sparse.len();
+        (admitted, if done { None } else { last }, visits)
+    }
+
     pub(in crate::manager) fn unicast_prefix_paths(
         self,
         prefix: Prefix,
