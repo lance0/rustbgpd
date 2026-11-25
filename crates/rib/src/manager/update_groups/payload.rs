@@ -732,6 +732,13 @@ impl GroupStageOutput {
         !self.source_exclusion_unsafe.contains(&member)
     }
 
+    /// Whether the shared announcement carries a locally originated route.
+    /// `shared_source_counts` is keyed by every shared route's source.
+    pub(in crate::manager) fn shared_announce_has_local(&self) -> bool {
+        self.shared_source_counts
+            .contains_key(&crate::manager::helpers::LOCAL_PEER)
+    }
+
     /// Whether own-source exclusion leaves an announcement or the shared
     /// payload carries a withdrawal. If neither is true, the historical
     /// per-member matrix correctly emits no envelope for this member.

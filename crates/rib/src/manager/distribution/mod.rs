@@ -4247,6 +4247,13 @@ impl RibManager {
         // Retain the existing Arc and slow-path candidate-key vector for the
         // original reservation bound; no route body or OLD proof is copied.
         let common_unicast_candidates = Arc::clone(&batch.unicast.announce);
+        // Only a `LOCAL_PEER` route has a local export source. Every later
+        // `announce` is a subset of this one, so a shared group emission
+        // without one needs no per-row provenance scan.
+        let announce_may_hold_local = !group_stage.is_some_and(|stage| {
+            Arc::ptr_eq(&batch.unicast.announce, &stage.shared_announce)
+                && !stage.shared_announce_has_local()
+        });
         let mut common_probe_input = None;
         let OutboundCommitBatch {
             otc_blocked: _,
@@ -5643,15 +5650,23 @@ impl RibManager {
             | (u8::from(rtc_changed) << 6);
         #[cfg(feature = "bench-internals")]
         let bench_commit_started = bench_per_client_best_resync.then(std::time::Instant::now);
-        let committed_local_sources: crate::fast_hash::FastMap<_, _> = announce
-            .iter()
-            .filter(|route| announce_source_exclusion != Some(route.peer))
-            .filter_map(|route| {
-                self.replacement_checkpoint(false);
-                self.exported_local_source(peer, route, &local_sources)
-                    .map(|source| ((route.prefix, route.path_id), source))
-            })
-            .collect();
+        let committed_local_sources: crate::fast_hash::FastMap<_, _> = if announce_may_hold_local {
+            #[cfg(test)]
+            {
+                self.adj_rib_out_commit_stats.local_source_scan_visits += announce.len();
+            }
+            announce
+                .iter()
+                .filter(|route| announce_source_exclusion != Some(route.peer))
+                .filter_map(|route| {
+                    self.replacement_checkpoint(false);
+                    self.exported_local_source(peer, route, &local_sources)
+                        .map(|source| ((route.prefix, route.path_id), source))
+                })
+                .collect()
+        } else {
+            crate::fast_hash::FastMap::default()
+        };
         if has_committed_route_payload {
             #[cfg(any(test, feature = "bench-internals"))]
             {
