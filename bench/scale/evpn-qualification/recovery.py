@@ -736,7 +736,7 @@ def check_wire(leg, clients, routes):
     # Receivers are independent and a timed cell's captures take minutes to
     # decode in one process. map() keeps peer order, so the report and the
     # first failing peer's error are the sequential ones.
-    # ponytail: a fixed pool size; more workers finish sooner but raise the
+    # A fixed pool size; more workers finish sooner but raise the
     # one-minute load average the next cell's quiet-host gate waits out.
     with ProcessPoolExecutor(max_workers=min(WIRE_WORKERS, clients)) as pool:
         for rows in pool.map(partial(check_peer_wire, leg, clients, routes, boundaries, refreshes), range(clients)):

@@ -45,7 +45,7 @@ stat_sample() {
         printf "%d,%d,%d", value["anon"] / 1024, value["file"] / 1024, value["file_mapped"] / 1024
     }' "$cgroup/memory.stat"
 }
-# ponytail: liveness via /proc existence, not `kill -0` — kill -0 reports
+# Liveness via /proc existence, not `kill -0` — kill -0 reports
 # EPERM (failure) for other users' live processes, e.g. container daemons.
 while [ -d "/proc/$root" ]; do
     total=0

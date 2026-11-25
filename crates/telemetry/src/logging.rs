@@ -85,7 +85,7 @@ impl Visit for PeerKeyVisitor {
 /// level costs nothing per message; its fields then accompany the
 /// session's events under any `RUST_LOG`, before and after a reload.
 ///
-/// ponytail: one read lock and a scope walk per event while any per-peer
+/// One read lock and a scope walk per event while any per-peer
 /// level is set; a lock-free swap if that shows up in a profile.
 struct PeerLevelFilter(SharedPeerLevels);
 

@@ -610,7 +610,7 @@ impl StaleSessionMessageKind {
 /// every resolve. Cloned children share the underlying atomic, so
 /// increments through the memo are indistinguishable from
 /// `with_label_values(..).inc()` to `gather()`.
-// ponytail: single slot — alternating label sets within one loop fall
+// Limit: a single slot — alternating label sets within one loop fall
 // back to per-call resolution (today's cost); widen to a tiny LRU if a
 // profile ever shows thrash.
 struct PolicyRoutesMemo {
@@ -11789,7 +11789,7 @@ mod tests {
     /// `populate_all_peer_families`, and to
     /// [`BgpMetrics::reap_peer_series`] — the three are cross-checked
     /// by the tests below.
-    // ponytail: a family declared but never recorded is invisible to
+    // A family declared but never recorded is invisible to
     // `gather()`, so no runtime check can catch one that is added and
     // left unpopulated; this list plus the struct doc comment is the
     // practical ceiling.

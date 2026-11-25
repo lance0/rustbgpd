@@ -1171,7 +1171,7 @@ mod linux {
         // arm reads at most `RECV_BUDGET` datagrams before the loop re-selects
         // (readiness is kept when the budget ran out, so a still-loaded
         // socket is picked up again on the very next turn).
-        // ponytail: a sustained flood on an earlier rx arm can delay the later
+        // A sustained flood on an earlier rx arm can delay the later
         // ones (biased arm order: single-hop v4, v6, then multihop v4, v6);
         // rotate the rx arms per turn if that ever matters.
         loop {

@@ -1004,7 +1004,7 @@ impl RibManager {
                 })
     }
 
-    // ponytail: past the restart bound, sustained ingest completes the founder
+    // Past the restart bound, sustained ingest completes the founder
     // through the one-turn `ensure_group_table`. LAN-3470 paces it instead.
     fn count_pcb_build_overflow(&mut self, job: &FirstGroupBuild) {
         let Some(record) = self

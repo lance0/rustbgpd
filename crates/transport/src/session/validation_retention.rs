@@ -41,7 +41,7 @@ use crate::{ImportRevalidation, ValidationDelta};
 
 /// Retained validation rejects per session before the store gives up and the
 /// peer falls back to Route Refresh.
-// ponytail: fixed bound, add a knob if a real table needs more retained rejects.
+// Fixed bound, add a knob if a real table needs more retained rejects.
 pub const VALIDATION_REJECT_LIMIT: usize = 65_536;
 
 /// Routes replayed per run-loop turn, so reads, timers and commands
@@ -252,7 +252,7 @@ impl ValidationRetention {
                 .copied()
                 .collect(),
             ValidationDelta::Aspa(Some(changed)) => {
-                // ponytail: one pass over retained entries with one AS_PATH check
+                // One pass over retained entries with one AS_PATH check
                 // per distinct attribute set (the RIB's ASPA prefilter shape); add an
                 // ASN index if ASPA deltas show up in the session work budget.
                 let mut hits: HashMap<*const AttrSet, bool> = HashMap::new();

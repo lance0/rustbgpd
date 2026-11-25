@@ -1859,7 +1859,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             // guard), so the drain-everything path proceeds unguarded.
             // On a failed dump the entire L3 apply phase is skipped —
             // fail closed, never mutate off an unknown ownership view.
-            // ponytail: this adds one netlink dump set per pass with
+            // This adds one netlink dump set per pass with
             // L3 config; gate on non-empty plans if it ever shows up
             // in profiles.
             let l3_live: Option<crate::l3_adoption::L3AdoptionDump> = if intent.ip_vrfs.is_empty() {

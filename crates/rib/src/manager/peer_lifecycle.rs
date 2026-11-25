@@ -1081,7 +1081,7 @@ impl RibManager {
     /// The tracked peer that now publishes under `peer`'s label, once a newer
     /// identity superseded it ([`PeerId::supersede`]): a tearing-down handle
     /// leaves the label's gauges at that peer's values instead of zero.
-    // ponytail: scans every tracked peer, but only for a superseded handle
+    // Scans every tracked peer, but only for a superseded handle
     // (a replaced retained speaker or a re-add racing its predecessor's
     // cleanup); a label index if those ever become frequent.
     fn label_successor(&self, peer: PeerId) -> Option<PeerId> {

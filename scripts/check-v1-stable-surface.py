@@ -970,7 +970,7 @@ def cfg_attribute(text: str, position: int) -> tuple[str, int, int] | None:
 def cfg_is_test_only(predicate: str) -> bool:
     """Whether a cfg predicate names the `test` token, other than a bare `not(test)`.
 
-    ponytail: conservative, not a cfg evaluator. `any(test, x)` or
+    Deliberately conservative, not a cfg evaluator. `any(test, x)` or
     `not(all(test, x))` items are also treated as test-only, so evidence they
     hold is ignored (fails closed); only a bare `not(test)` is kept.
     """
@@ -1094,7 +1094,7 @@ def emitted_label_values(
         rf"\.{re.escape(binding.group(1))}\s*\.with_label_values\(\s*&\s*"
         r"(?:\[([^\]]*)\]|(\w+)\s*\(([^()]*)\)|(\w+)\s*\))"
     )
-    # ponytail: a shape check, not a Rust parser. Each traced identifier must
+    # A shape check, not a Rust parser. Each traced identifier must
     # have exactly one binding in the setter (its parameter, its `for` header, or
     # one `let name = helper(..);`); any other `let` or assignment of it, and
     # any shape not matched here, fails closed as no evidence.
@@ -1221,7 +1221,7 @@ def emitted_label_values(
 def variant_label_values(sources: dict[str, str], enum: str, variant: str, method: str) -> set[str]:
     """The string literal `method` returns for `Enum::Variant`.
 
-    ponytail: a shape check by name, not a Rust parser. `enum Enum` must be
+    A shape check by name, not a Rust parser. `enum Enum` must be
     declared in exactly one file with exactly one inherent `impl Enum` there,
     holding one `fn method(self) -> &'static str` whose body is one
     `match self { .. }` whose arms are all unguarded or-patterns of the
@@ -1309,7 +1309,7 @@ def split_top_level(text: str, separator: str) -> list[str]:
 def pass_through_elements(source: str, helper: str, arguments: str) -> list[str]:
     """A label helper's returned array, rewritten in terms of one call's arguments.
 
-    ponytail: a shape check, not a Rust parser. The helper must be defined once
+    A shape check, not a Rust parser. The helper must be defined once
     in the metric source, and its body must be `let` statements binding no
     returned identifier and `assert!`-family statements, then one tail array of
     its own parameters or string literals, with no `return`. Any other shape
@@ -1349,7 +1349,7 @@ def pass_through_elements(source: str, helper: str, arguments: str) -> list[str]
 def label_method_values(sources: dict[str, str], path: str, method: str, depth: int = 0) -> set[str]:
     """String literals a `receiver.method()` label call returns.
 
-    ponytail: a shape check resolved by name, not receiver type or a Rust parser.
+    A shape check resolved by name, not receiver type or a Rust parser.
     The method must be the only `fn method(self) -> &'static str` in the calling
     crate, and its body exactly one `match self { .. }` whose arms are each a
     string literal or one delegated `binding.method()` meeting the same rule.

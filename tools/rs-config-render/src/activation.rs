@@ -645,7 +645,7 @@ mod unix {
     fn drain(pipe: Option<impl Read + Send + 'static>) -> mpsc::Receiver<io::Result<Vec<u8>>> {
         let (sender, receiver) = mpsc::channel();
         match pipe {
-            // ponytail: a reader still blocked at the deadline stays parked
+            // A reader still blocked at the deadline stays parked
             // until whoever holds the pipe closes it; this process exits first.
             Some(pipe) => {
                 thread::spawn(move || {

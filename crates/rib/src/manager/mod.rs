@@ -3115,7 +3115,7 @@ impl RibManager {
             || self.attr_intern_gc_displaced >= ATTR_INTERN_GC_DISPLACED_LIMIT
             || now >= deadline
         {
-            // ponytail: each sweep is still O(global table); this bounds its
+            // Each sweep is still O(global table); this bounds its
             // frequency, not its latency. Revisit incremental collection if a
             // single large-table sweep exceeds the actor work budget.
             self.gc_attr_intern();

@@ -429,7 +429,7 @@ pub(super) struct UpdateGroupRegistry {
     /// is what keeps a no-op reload key-stable.
     // Retired payloads leave empty slots: IDs are never reassigned, including
     // when a previously retired policy is installed again.
-    // ponytail: historical slots and scans still grow with retired contents;
+    // Historical slots and scans still grow with retired contents;
     // compact with generation-tagged IDs only if measured metadata cost warrants it.
     chains: Vec<Option<PolicyChain>>,
     optional_chain_owner: Option<OptionalChainOwner>,
