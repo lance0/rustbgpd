@@ -214,7 +214,7 @@ struct Desired {
 pub struct Bridge {
     injection: Injection,
     control: Control,
-    // ponytail: one lock serializes detector requests and reconcile passes,
+    // One lock serializes detector requests and reconcile passes,
     // which makes ordering trivial (a replay can never race a withdraw). A
     // pass over a very large set delays detector requests until it finishes.
     desired: Arc<Mutex<Desired>>,

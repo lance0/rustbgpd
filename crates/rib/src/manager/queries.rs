@@ -617,7 +617,7 @@ impl RibManager {
     /// keys is exhausted:
     /// unicast hands over to VPN, VPN closes the dump with one
     /// End-of-RIB per streamed family (dump→EoR→live ordering).
-    // ponytail: each chunk re-scans the family's key set (O(table) per
+    // Each chunk re-scans the family's key set (O(table) per
     // chunk, O(table²/N) per dump) — swap the scan for a sorted index
     // or key snapshot if dump CPU at DFZ scale ever bites; allocation
     // is already bounded per chunk.
@@ -2308,7 +2308,7 @@ impl RibManager {
                 .iter()
                 .map(|candidate| match candidate.peer {
                     Some(peer) => export(self, peer, route),
-                    // ponytail: a row label only, pinned once per address; S3
+                    // A row label only, pinned once per address; S3
                     // gives export rows the managed neighbor's own handle.
                     None => not_established_export(
                         PeerId::from_addr(candidate.addr),

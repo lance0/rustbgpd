@@ -26,7 +26,7 @@ const LINK_CHECK_RETRY: Duration = Duration::from_millis(100);
 pub(super) const BFD_SCOPE_RETRY: Duration = Duration::from_secs(1);
 /// How often link-local BFD scopes are re-resolved by interface name when no
 /// link monitor reports changes.
-// ponytail: a fixed poll; a recreated interface is followed within this
+// A fixed poll; a recreated interface is followed within this
 // bound instead of at once, which the monitor path does on Linux.
 pub(super) const BFD_SCOPE_POLL: Duration = Duration::from_secs(5);
 

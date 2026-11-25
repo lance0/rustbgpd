@@ -3561,7 +3561,7 @@ impl AdjRibIn {
 
     /// Global (SAFI 133) `FlowSpec` routes stored per AFI as `[IPv4, IPv6]`.
     /// VPN rules (SAFI 134) are not counted.
-    // ponytail: O(FlowSpec routes) walk per publish; FlowSpec tables are
+    // Limit: O(FlowSpec routes) walk per publish; FlowSpec tables are
     // small rule sets. Maintain a per-AFI counter if they grow large.
     #[must_use]
     pub fn flowspec_lens(&self) -> [usize; 2] {

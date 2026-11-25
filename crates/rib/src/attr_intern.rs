@@ -24,7 +24,7 @@
 use crate::adj_rib_out::{RetirementCheckpoint, RetirementProgress};
 
 //
-// ponytail: gc remains an O(table) sweep. Receive-path frequency is bounded,
+// The gc pass remains an O(table) sweep. Receive-path frequency is bounded,
 // but each sweep still visits the global table. Revisit incremental sweeping
 // if a single large-table sweep exceeds the actor work budget.
 

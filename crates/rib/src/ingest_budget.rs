@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// 4,096-byte IPv4 UPDATE carries about 1,008 routes, so two of them close
 /// the gate; at two whole windows they would not, and a third would be
 /// queued.
-// ponytail: one fixed budget for every session and family. Make it a
+// One fixed budget for every session and family. Make it a
 // per-neighbor setting if a source needs a deeper pipeline than one message
 // in progress and one decoded ahead.
 pub const INGEST_BUDGET_ROUTES: usize = 1536;

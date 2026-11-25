@@ -232,7 +232,7 @@ impl RibManager {
 
     /// Publish the row credit in use and the live whole-table operations,
     /// summed over every peer.
-    // ponytail: one pass over the peers per loop iteration; keep running
+    // One pass over the peers per loop iteration; keep running
     // totals in the credit and latch if a profile at thousands of peers
     // shows it.
     pub(super) fn sample_outbound_credit_gauges(&self) {
