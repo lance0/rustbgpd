@@ -441,6 +441,25 @@ fn sends_without_waiting(manager: &mut RibManager, n: u8, rx: mpsc::Receiver<Out
     );
 }
 
+// With a slot free, the same table's proof reservation is refused when its
+// replay starts. The joiner sends in one turn and counts the refusal.
+#[test]
+fn a_refused_proof_reservation_counts_its_one_turn_send() {
+    let Published {
+        mut manager,
+        tx: _tx,
+        ..
+    } = published();
+    manager.pending_group_admitted.set_test_peer_limit(ROWS);
+    let mut joiner = [(100, rs_client(&mut manager, 100, 1 << 12))];
+    let (_, paced) = advance_until_complete(&mut manager, &mut joiner, ROWS, 1);
+    assert!(!paced[0], "the joiner was paced");
+    crate::manager::tests::assert_paced_fallbacks(
+        &manager.metrics,
+        &[("initial_replay", "peer_limit", 1.0)],
+    );
+}
+
 // A table the per-peer proof limit refuses can never start a paced replay,
 // so a full set of slots must not hold it: it takes its one-turn send.
 #[test]
@@ -876,6 +895,15 @@ fn a_joiner_refused_its_own_pacing_shares_a_fallback_leaders_turn() {
             "{refusal}: the joiner did not share the leader's turn"
         );
         assert_eq!((joiner_rows, joiner_ends), (ROWS, 1), "{refusal}");
+        let cause = if refusal == "prefix_limit" {
+            "prefix_limit"
+        } else {
+            "proof_budget"
+        };
+        crate::manager::tests::assert_paced_fallbacks(
+            &manager.metrics,
+            &[("initial_replay", cause, 1.0)],
+        );
     }
 }
 

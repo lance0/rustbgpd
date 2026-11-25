@@ -290,6 +290,18 @@ impl OutboundCommitFailure {
             Self::Refused(reason) => reason.as_str(),
         }
     }
+
+    /// The paced-job fallback cause for a page this failure stopped.
+    pub(in crate::manager) const fn paced_fallback_cause(
+        self,
+    ) -> super::initial_member_replay::PacedFallbackCause {
+        match self {
+            Self::WriterUnavailable => {
+                super::initial_member_replay::PacedFallbackCause::WriterUnavailable
+            }
+            Self::Refused(_) => super::initial_member_replay::PacedFallbackCause::CommitRefused,
+        }
+    }
 }
 
 /// One owned outbound payload at the RIB-to-session commit boundary.
@@ -10369,17 +10381,15 @@ impl RibManager {
                             || self.force_outbound_peers.contains(&peer)
                             || self.dirty_peers.contains(&peer)
                         {
-                            let cause =
-                                super::initial_member_replay::ReplayCause::from_label(|| {
-                                    if RELEASING {
-                                        "release_fanout"
-                                    } else if self.force_outbound_peers.contains(&peer) {
-                                        "forced_resync"
-                                    } else {
-                                        self.group_recovery_fallback(peer)
-                                            .map_or("already_dirty", |cause| cause.as_str())
-                                    }
-                                });
+                            use super::initial_member_replay::PacedFallbackCause;
+                            let cause = if RELEASING {
+                                PacedFallbackCause::ReleaseFanout
+                            } else if self.force_outbound_peers.contains(&peer) {
+                                PacedFallbackCause::ForcedResync
+                            } else {
+                                self.group_recovery_fallback(peer)
+                                    .map_or(PacedFallbackCause::AlreadyDirty, Into::into)
+                            };
                             self.recover_initial_member_replay(peer, cause);
                         } else {
                             // The replay scan delivers current winners and repairs against

@@ -5810,20 +5810,31 @@ impl RibManager {
                 session_id,
                 export_policy,
             } => {
+                let mut fallback = None;
                 if let Some(record) = self.live_sessions.get_mut(&peer).and_then(|sessions| {
                     sessions
                         .iter_mut()
                         .find(|record| record.session_id == session_id)
                 }) {
-                    if self
+                    if let Some(job) = self
                         .first_group_build
                         .as_ref()
-                        .is_some_and(|job| job.founded_by(peer, record))
+                        .filter(|job| job.founded_by(peer, record))
                         && record.export_policy != export_policy
                     {
+                        if !record.registration_policy_fallback {
+                            fallback = Some(job.paced_job());
+                        }
                         record.registration_policy_fallback = true;
                     }
                     record.export_policy = export_policy;
+                }
+                if let Some(job) = fallback {
+                    self.note_paced_fallback(
+                        job,
+                        initial_member_replay::PacedFallbackCause::GroupChanged,
+                        peer,
+                    );
                 }
             }
             RibUpdate::SetPeerPolicyContext {

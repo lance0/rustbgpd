@@ -48,6 +48,10 @@ async fn sparse_reservation_refusal_recovers_a_withdrawal_queued_behind_it() {
     manager.advance_pending_initial_registration();
     assert!(manager.dirty_peers.contains(&peer));
     assert!(!manager.is_initial_member_replay(peer));
+    crate::manager::tests::assert_paced_fallbacks(
+        &manager.metrics,
+        &[("initial_replay", "allocation_failure", 1.0)],
+    );
     // The failed replay page hands the prior wire view to dirty recovery.
     assert!(
         manager

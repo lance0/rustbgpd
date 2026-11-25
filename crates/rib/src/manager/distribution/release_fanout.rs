@@ -1,6 +1,7 @@
 //! One unicast release batch. The actor owns this transaction until every member
 //! has received the staged delta or transferred it to corrective resync.
 
+use super::super::initial_member_replay::{PacedFallbackCause, PacedJob};
 use super::super::outbound_owing::CursorFloors;
 use super::super::source_departure::{DEPARTURE_MEMBERS_PER_POLL, RECEIVER_ROWS_PER_POLL};
 use super::super::update_groups::{GroupRibOut, GroupStageOutput, ReleaseFallback};
@@ -272,6 +273,12 @@ impl RibManager {
                             super::super::update_groups::RecoveryFallbackCause::MissingProof,
                         );
                         self.mark_outbound_dirty_inner(peer, false);
+                        let job = if pass.departure.is_some() {
+                            PacedJob::SourceDeparture
+                        } else {
+                            PacedJob::ReleaseFanout
+                        };
+                        self.note_paced_fallback(job, PacedFallbackCause::MissingProof, peer);
                     }
                     self.collect_owed_floors(peer, &mut pass.floors);
                     pass.groups.entry(gid).or_default().push(peer);
@@ -758,11 +765,13 @@ impl RibManager {
                     rows.next_hop_override.into(),
                 )
             };
-            if self
-                .try_send_and_commit_outbound_update(peer, batch)
-                .is_err()
-            {
+            if let Err(failure) = self.try_send_and_commit_outbound_update(peer, batch) {
                 self.mark_outbound_dirty(peer);
+                self.note_paced_fallback(
+                    PacedJob::ReleaseFanout,
+                    failure.paced_fallback_cause(),
+                    peer,
+                );
             } else if self
                 .initial_group_admitted_counts(peer)
                 .map(|counts| counts[v6])
@@ -875,6 +884,10 @@ mod tests {
         assert_eq!(
             pass.groups.values().map(Vec::len).sum::<usize>(),
             peers.len()
+        );
+        crate::manager::tests::assert_paced_fallbacks(
+            &manager.metrics,
+            &[("source_departure", "missing_proof", 1.0)],
         );
 
         for &peer in &peers[16..18] {

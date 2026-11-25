@@ -1169,6 +1169,46 @@ fn counter_metric_value(metrics: &BgpMetrics, name: &str, labels: &[(&str, &str)
         .map_or(0.0, |metric| metric.get_counter().get_value())
 }
 
+/// Assert the nonzero `bgp_rib_paced_fallback_total` series, as
+/// `(job, cause, count)`, every other job and cause staying at zero.
+#[track_caller]
+pub(in crate::manager) fn assert_paced_fallbacks(
+    metrics: &BgpMetrics,
+    expected: &[(&str, &str, f64)],
+) {
+    let families = metrics.registry().gather();
+    let family = families
+        .iter()
+        .find(|family| family.name() == "bgp_rib_paced_fallback_total")
+        .expect("paced fallback counter is registered");
+    let mut actual: Vec<_> = family
+        .get_metric()
+        .iter()
+        .filter(|metric| metric.get_counter().get_value() != 0.0)
+        .map(|metric| {
+            let label = |name| {
+                metric
+                    .get_label()
+                    .iter()
+                    .find(|label| label.name() == name)
+                    .map(|label| label.value().to_owned())
+                    .unwrap()
+            };
+            (
+                label("job"),
+                label("cause"),
+                metric.get_counter().get_value(),
+            )
+        })
+        .collect();
+    actual.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    let expected: Vec<_> = expected
+        .iter()
+        .map(|&(job, cause, count)| (job.to_owned(), cause.to_owned(), count))
+        .collect();
+    assert_eq!(actual, expected);
+}
+
 fn histogram_sample_counts_by_label(
     metrics: &BgpMetrics,
     name: &str,

@@ -21,24 +21,7 @@ use crate::loc_rib::{REGISTRATION_PAGE_SIZE, RegistrationScanStatus};
 use crate::update::{ExactExportKey, OutboundRouteUpdate, RouteQueryKey, route_query_key};
 use rustbgpd_wire::Prefix;
 
-// The non-benchmark failure path carries only success/failure, and never
-// evaluates the diagnostic (including any extra lookups it needs).
-#[derive(Clone, Copy)]
-pub(super) struct ReplayCause {
-    #[cfg(feature = "bench-internals")]
-    label: &'static str,
-}
-
-impl ReplayCause {
-    pub(super) fn from_label(label: impl FnOnce() -> &'static str) -> Self {
-        #[cfg(not(feature = "bench-internals"))]
-        let _ = label;
-        Self {
-            #[cfg(feature = "bench-internals")]
-            label: label(),
-        }
-    }
-}
+pub(super) use rustbgpd_telemetry::reason_labels::{PacedFallbackCause, PacedJob};
 
 enum Phase {
     PrepareProof(Option<RouteQueryKey>),
@@ -203,19 +186,19 @@ impl RibManager {
 
     /// Peer state that refuses a paced replay whatever the free slots, so
     /// waiting for one would not help.
-    fn replay_peer_refusal(&self, peer: PeerId) -> Option<ReplayCause> {
+    fn replay_peer_refusal(&self, peer: PeerId) -> Option<PacedFallbackCause> {
         if self.dirty_peers.contains(&peer) {
-            Some(ReplayCause::from_label(|| "already_dirty"))
+            Some(PacedFallbackCause::AlreadyDirty)
         } else if self.outbound_prefix_limits.contains_key(&peer)
             || self.configured_outbound_limit(peer)
         {
             // A waiting registration installs its configured limits only
             // when it registers.
-            Some(ReplayCause::from_label(|| "prefix_limit"))
+            Some(PacedFallbackCause::PrefixLimit)
         } else if self.retain_initial_group_admitted(peer) {
-            Some(ReplayCause::from_label(|| "retained_proof"))
+            Some(PacedFallbackCause::RetainedProof)
         } else if self.peer_orf_pending.contains_key(&peer) {
-            Some(ReplayCause::from_label(|| "orf_pending"))
+            Some(PacedFallbackCause::OrfPending)
         } else {
             None
         }
@@ -238,16 +221,15 @@ impl RibManager {
 
     pub(super) fn start_initial_member_replay(&mut self, peer: PeerId) -> bool {
         let Some(gid) = self.grouped_member_of(peer) else {
-            return self
-                .refuse_initial_member_replay(peer, ReplayCause::from_label(|| "ungrouped"));
+            return self.refuse_initial_member_replay(peer, PacedFallbackCause::Ungrouped);
         };
         let group = &self.group_ribs[&gid];
         let refusal = if self.initial_member_replays.members.len()
             >= super::peer_lifecycle::MAX_JOIN_COHORT
         {
-            Some(ReplayCause::from_label(|| "replay_cap"))
+            Some(PacedFallbackCause::ReplayCap)
         } else if group.evpn_table_stamp == 0 {
-            Some(ReplayCause::from_label(|| "unpublished_table"))
+            Some(PacedFallbackCause::UnpublishedTable)
         } else {
             self.replay_peer_refusal(peer)
         };
@@ -266,17 +248,17 @@ impl RibManager {
         match enrollment {
             Ok(true) => {}
             Ok(false) => {
-                return self
-                    .refuse_initial_member_replay(peer, ReplayCause::from_label(|| "proof_state"));
+                return self.refuse_initial_member_replay(peer, PacedFallbackCause::ProofState);
             }
             Err(error) => {
+                // The registration sends its table in its own turn.
+                let cause = super::update_groups::RecoveryFallbackCause::from(error.cause);
+                self.note_paced_fallback(PacedJob::InitialReplay, cause.into(), peer);
                 #[cfg(feature = "bench-internals")]
                 self.observe_initial_replay(
                     peer,
                     BenchReplayEvent::EnrollmentRefused(error.cause.as_str()),
                 );
-                #[cfg(not(feature = "bench-internals"))]
-                let _ = error;
                 return false;
             }
         }
@@ -315,12 +297,54 @@ impl RibManager {
     }
 
     /// The registration sends its table in its own turn instead.
-    fn refuse_initial_member_replay(&self, peer: PeerId, cause: ReplayCause) -> bool {
+    fn refuse_initial_member_replay(&self, peer: PeerId, cause: PacedFallbackCause) -> bool {
+        self.note_paced_fallback(PacedJob::InitialReplay, cause, peer);
         #[cfg(feature = "bench-internals")]
-        self.observe_initial_replay(peer, BenchReplayEvent::Refused(cause.label));
-        #[cfg(not(feature = "bench-internals"))]
-        let _ = (self, peer, cause);
+        self.observe_initial_replay(peer, BenchReplayEvent::Refused(cause.as_str()));
         false
+    }
+
+    /// Why a large initial table goes out in one turn when its pending
+    /// registration cannot take a paced replay at all, read before the
+    /// registration installs. A replay that starts and is refused counts its
+    /// own cause, and so does a first-group build that fell back. Below the
+    /// pacing threshold, one turn is the intended path, not a fallback.
+    pub(super) fn unpaced_initial_table_cause(
+        &self,
+        peer: PeerId,
+        eligible: bool,
+    ) -> Option<PacedFallbackCause> {
+        if self.loc_rib.len() < self.initial_member_replay_min_routes()
+            || self
+                .live_sessions
+                .get(&peer)
+                .and_then(|sessions| sessions.last())
+                .is_some_and(|record| record.registration_policy_fallback)
+        {
+            return None;
+        }
+        Some(if eligible {
+            self.replay_peer_refusal(peer)
+                .unwrap_or(PacedFallbackCause::ProofBudget)
+        } else {
+            PacedFallbackCause::IneligibleShape
+        })
+    }
+
+    /// Count one paced job's fallback to a one-turn path.
+    pub(super) fn note_paced_fallback(
+        &self,
+        job: PacedJob,
+        cause: PacedFallbackCause,
+        peer: PeerId,
+    ) {
+        self.metrics.record_rib_paced_fallback(job, cause);
+        tracing::debug!(
+            %peer,
+            job = job.as_str(),
+            cause = cause.as_str(),
+            "paced job fell back to a one-turn path"
+        );
     }
 
     pub(super) fn abort_initial_member_replay(&mut self, peer: PeerId) -> bool {
@@ -374,15 +398,20 @@ impl RibManager {
         true
     }
 
-    pub(super) fn recover_initial_member_replay(&mut self, peer: PeerId, cause: ReplayCause) {
+    pub(super) fn recover_initial_member_replay(
+        &mut self,
+        peer: PeerId,
+        cause: PacedFallbackCause,
+    ) {
+        self.note_paced_fallback(PacedJob::InitialReplay, cause, peer);
         self.abort_initial_member_replay(peer);
         let marked = self.mark_outbound_dirty(peer);
         #[cfg(feature = "bench-internals")]
         if marked {
-            self.observe_initial_replay(peer, BenchReplayEvent::Dirty(cause.label));
+            self.observe_initial_replay(peer, BenchReplayEvent::Dirty(cause.as_str()));
         }
         #[cfg(not(feature = "bench-internals"))]
-        let _ = (cause, marked);
+        let _ = marked;
     }
 
     fn advance_initial_member_replay(&mut self, peer: PeerId) {
@@ -414,19 +443,19 @@ impl RibManager {
                 .get(&gid)
                 .is_none_or(|g| g.evpn_table_stamp != job.table_stamp)
         {
-            Some(ReplayCause::from_label(|| "group_changed"))
+            Some(PacedFallbackCause::GroupChanged)
         } else if self.dirty_peers.contains(&peer) {
-            Some(ReplayCause::from_label(|| {
+            Some(
                 self.group_recovery_fallback(peer)
-                    .map_or("already_dirty", |cause| cause.as_str())
-            }))
+                    .map_or(PacedFallbackCause::AlreadyDirty, Into::into),
+            )
         } else if self.loc_rib.member_replay_scan_status(peer) == RegistrationScanStatus::Overflow {
-            Some(ReplayCause::from_label(|| "scan_repair_limit"))
+            Some(PacedFallbackCause::ScanRepairLimit)
         } else {
             match self.pending_group_admitted.initial_replay_sparse_len(peer) {
-                None => Some(ReplayCause::from_label(|| "missing_proof")),
+                None => Some(PacedFallbackCause::MissingProof),
                 Some(rows) if rows > REGISTRATION_PAGE_SIZE => {
-                    Some(ReplayCause::from_label(|| "sparse_key_limit"))
+                    Some(PacedFallbackCause::SparseKeyLimit)
                 }
                 Some(_) => None,
             }
@@ -497,7 +526,7 @@ impl RibManager {
             .pending_group_admitted
             .extend_initial_replay_universe(peer, keys)
         {
-            self.recover_initial_member_replay(peer, ReplayCause::from_label(|| "missing_proof"));
+            self.recover_initial_member_replay(peer, PacedFallbackCause::MissingProof);
             return;
         }
         #[cfg(test)]
@@ -542,7 +571,7 @@ impl RibManager {
             replay.carry = page.keys.into();
         }
         let Some(admitted) = self.pending_group_admitted.get(&peer) else {
-            self.recover_initial_member_replay(peer, ReplayCause::from_label(|| "missing_proof"));
+            self.recover_initial_member_replay(peer, PacedFallbackCause::MissingProof);
             return;
         };
         let group = &self.group_ribs[&gid];
@@ -630,11 +659,11 @@ impl RibManager {
         let commit =
             self.try_send_and_commit_outbound_update_with_group_prior(peer, batch, prior, None);
         if let Err(failure) = commit {
-            self.recover_initial_member_replay(peer, ReplayCause::from_label(|| failure.as_str()));
+            self.recover_initial_member_replay(peer, failure.paced_fallback_cause());
             return false;
         }
         if let Some(failure) = self.group_recovery_fallback(peer) {
-            self.recover_initial_member_replay(peer, ReplayCause::from_label(|| failure.as_str()));
+            self.recover_initial_member_replay(peer, failure.into());
             return false;
         }
         self.advance_advertised_pages();

@@ -104,6 +104,191 @@ impl UpdateGroupRecoveryFallbackCause {
     }
 }
 
+/// Paced RIB jobs whose fallbacks `bgp_rib_paced_fallback_total` counts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PacedJob {
+    /// A cold registration's first group table, built a page at a time.
+    FirstGroupBuild,
+    /// A per-client-best founder's first group table.
+    PerClientBestBuild,
+    /// An export-policy reload's destination table.
+    ReloadBuild,
+    /// A grouped member's initial table, replayed a page at a time.
+    InitialReplay,
+    /// A departed source's withdrawals, delivered to members in pages.
+    SourceDeparture,
+    /// A selection-release fan-out, delivered to members in pages.
+    ReleaseFanout,
+}
+
+impl PacedJob {
+    /// Every job label.
+    pub const ALL: [Self; 6] = [
+        Self::FirstGroupBuild,
+        Self::PerClientBestBuild,
+        Self::ReloadBuild,
+        Self::InitialReplay,
+        Self::SourceDeparture,
+        Self::ReleaseFanout,
+    ];
+
+    /// Canonical job label shared by metrics and diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::FirstGroupBuild => "first_group_build",
+            Self::PerClientBestBuild => "per_client_best_build",
+            Self::ReloadBuild => "reload_build",
+            Self::InitialReplay => "initial_replay",
+            Self::SourceDeparture => "source_departure",
+            Self::ReleaseFanout => "release_fanout",
+        }
+    }
+}
+
+/// Why a paced RIB job handed its work to a one-turn path: the dirty
+/// resync, a one-turn initial table, or a synchronous group build.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PacedFallbackCause {
+    /// The member's group or its published table changed under the job.
+    GroupChanged,
+    /// The member was already marked for an outbound resync.
+    AlreadyDirty,
+    /// Changes behind the scan overflowed its repair log.
+    ScanRepairLimit,
+    /// A change reached the member outside its scan's repair scope.
+    ChangeOutsideScan,
+    /// Too many prefixes were added behind the replay's proof walk.
+    SparseKeyLimit,
+    /// The member's admitted-key proof was missing or incomplete.
+    MissingProof,
+    /// The member's proof would exceed the per-peer recovery cap.
+    PeerLimit,
+    /// All proofs would exceed the per-daemon recovery cap.
+    DaemonLimit,
+    /// A proof allocation or capacity calculation failed.
+    AllocationFailure,
+    /// The member's writer was full, closed or not registered.
+    WriterUnavailable,
+    /// A fail-closed outbound commit gate refused the page.
+    CommitRefused,
+    /// A selection-release fan-out reached the member.
+    ReleaseFanout,
+    /// An outbound refresh or ORF change forced the member's resync.
+    ForcedResync,
+    /// A family selection release, or a partial one, was pending.
+    SelectionRelease,
+    /// The registration's shape cannot take a paced job.
+    IneligibleShape,
+    /// The member has no update group.
+    Ungrouped,
+    /// Every paced replay slot was taken.
+    ReplayCap,
+    /// The member's group table was not published yet.
+    UnpublishedTable,
+    /// The member has an outbound prefix limit.
+    PrefixLimit,
+    /// The member's admitted proof is held while selection deferral holds
+    /// its initial table.
+    RetainedProof,
+    /// The member's initial table waits for its ORF ROUTE-REFRESH.
+    OrfPending,
+    /// The member's admitted-proof record could not start a replay.
+    ProofState,
+    /// The replay's proof fits under neither recovery cap.
+    ProofBudget,
+    /// The export policy could not be evaluated privately.
+    PolicyEvaluation,
+    /// A session or validation snapshot the job depends on changed.
+    SourceChanged,
+    /// Ingest kept the job behind for its whole turn budget.
+    Lag,
+    /// Another paced build held the build slot.
+    SlotBusy,
+    /// A clean policy transition was in progress.
+    CleanTransition,
+}
+
+impl PacedFallbackCause {
+    /// Every bounded fallback cause.
+    pub const ALL: [Self; 28] = [
+        Self::GroupChanged,
+        Self::AlreadyDirty,
+        Self::ScanRepairLimit,
+        Self::ChangeOutsideScan,
+        Self::SparseKeyLimit,
+        Self::MissingProof,
+        Self::PeerLimit,
+        Self::DaemonLimit,
+        Self::AllocationFailure,
+        Self::WriterUnavailable,
+        Self::CommitRefused,
+        Self::ReleaseFanout,
+        Self::ForcedResync,
+        Self::SelectionRelease,
+        Self::IneligibleShape,
+        Self::Ungrouped,
+        Self::ReplayCap,
+        Self::UnpublishedTable,
+        Self::PrefixLimit,
+        Self::RetainedProof,
+        Self::OrfPending,
+        Self::ProofState,
+        Self::ProofBudget,
+        Self::PolicyEvaluation,
+        Self::SourceChanged,
+        Self::Lag,
+        Self::SlotBusy,
+        Self::CleanTransition,
+    ];
+
+    /// Canonical cause label shared by metrics and diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::GroupChanged => "group_changed",
+            Self::AlreadyDirty => "already_dirty",
+            Self::ScanRepairLimit => "scan_repair_limit",
+            Self::ChangeOutsideScan => "change_outside_scan",
+            Self::SparseKeyLimit => "sparse_key_limit",
+            Self::MissingProof => "missing_proof",
+            Self::PeerLimit => "peer_limit",
+            Self::DaemonLimit => "daemon_limit",
+            Self::AllocationFailure => "allocation_failure",
+            Self::WriterUnavailable => "writer_unavailable",
+            Self::CommitRefused => "commit_refused",
+            Self::ReleaseFanout => "release_fanout",
+            Self::ForcedResync => "forced_resync",
+            Self::SelectionRelease => "selection_release",
+            Self::IneligibleShape => "ineligible_shape",
+            Self::Ungrouped => "ungrouped",
+            Self::ReplayCap => "replay_cap",
+            Self::UnpublishedTable => "unpublished_table",
+            Self::PrefixLimit => "prefix_limit",
+            Self::RetainedProof => "retained_proof",
+            Self::OrfPending => "orf_pending",
+            Self::ProofState => "proof_state",
+            Self::ProofBudget => "proof_budget",
+            Self::PolicyEvaluation => "policy_evaluation",
+            Self::SourceChanged => "source_changed",
+            Self::Lag => "lag",
+            Self::SlotBusy => "slot_busy",
+            Self::CleanTransition => "clean_transition",
+        }
+    }
+}
+
+impl From<UpdateGroupRecoveryFallbackCause> for PacedFallbackCause {
+    fn from(cause: UpdateGroupRecoveryFallbackCause) -> Self {
+        match cause {
+            UpdateGroupRecoveryFallbackCause::PeerLimit => Self::PeerLimit,
+            UpdateGroupRecoveryFallbackCause::DaemonLimit => Self::DaemonLimit,
+            UpdateGroupRecoveryFallbackCause::AllocationFailure => Self::AllocationFailure,
+            UpdateGroupRecoveryFallbackCause::MissingProof => Self::MissingProof,
+        }
+    }
+}
+
 /// Bounded causes reported while processing a malformed UPDATE.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MalformedUpdateReason {
@@ -799,8 +984,8 @@ mod tests {
     use super::{
         EvpnRecoveryExhaustionCause, ExactExportReason, GrEorGraceReleaseReason,
         ImportRejectReason, MalformedUpdateDisposition, MalformedUpdateReason,
-        NextHopOwnershipBlockReason, OtcBlockReason, OutboundCommitRefusal, RrLoopReason,
-        SessionDownReason,
+        NextHopOwnershipBlockReason, OtcBlockReason, OutboundCommitRefusal, PacedFallbackCause,
+        PacedJob, RrLoopReason, SessionDownReason,
     };
 
     fn assert_snake_case(label: &str) {
@@ -815,6 +1000,29 @@ mod tests {
             !label.starts_with('_') && !label.ends_with('_'),
             "reason label {label:?} must not start or end with '_'"
         );
+    }
+
+    #[test]
+    fn paced_fallback_labels_are_snake_case_distinct_and_documented() {
+        let operations = include_str!("../../../docs/reference/operations.md");
+        let section = operations
+            .split_once("### Paced-job fallbacks")
+            .and_then(|(_, rest)| rest.split("\n### ").next())
+            .expect("operations reference documents paced-job fallbacks");
+        assert!(section.contains("`bgp_rib_paced_fallback_total{job,cause}`"));
+        let jobs = PacedJob::ALL.map(PacedJob::as_str);
+        let causes = PacedFallbackCause::ALL.map(PacedFallbackCause::as_str);
+        for labels in [&jobs[..], &causes[..]] {
+            let mut seen = std::collections::HashSet::new();
+            for label in labels {
+                assert_snake_case(label);
+                assert!(seen.insert(label), "duplicate label {label}");
+                assert!(
+                    section.contains(&format!("`{label}`")),
+                    "undocumented paced-fallback label {label}"
+                );
+            }
+        }
     }
 
     #[test]

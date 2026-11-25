@@ -1141,9 +1141,7 @@ impl RibManager {
                     if matches!(replay_kind, FamilyReplayKind::SelectionRelease) {
                         self.recover_initial_member_replay(
                             peer,
-                            super::initial_member_replay::ReplayCause::from_label(
-                                || "selection_release",
-                            ),
+                            super::initial_member_replay::PacedFallbackCause::SelectionRelease,
                         );
                     }
                     return FamilyReplayOutcome::Deferred;

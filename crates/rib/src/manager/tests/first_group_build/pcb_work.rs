@@ -457,6 +457,12 @@ fn ingest_rounds(pcb: bool) -> (usize, usize, bool) {
             overflows += 1;
         }
     }
+    if pcb {
+        crate::manager::tests::assert_paced_fallbacks(
+            &manager.metrics,
+            &[("per_client_best_build", "scan_repair_limit", 1.0)],
+        );
+    }
     (overflows, rounds, manager.grouped_member_of(peer).is_some())
 }
 

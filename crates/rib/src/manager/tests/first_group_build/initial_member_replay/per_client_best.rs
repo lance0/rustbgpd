@@ -590,6 +590,10 @@ fn per_client_best_churn_above_the_repair_limit_recovers_with_one_resync() {
         paced.turn();
         assert!(!paced.replaying(), "overflow retired the replay");
         assert!(paced.manager.dirty_peers.contains(&receiver(1)));
+        crate::manager::tests::assert_paced_fallbacks(
+            &paced.manager.metrics,
+            &[("initial_replay", "scan_repair_limit", 1.0)],
+        );
         for _ in 0..64 {
             paced.manager.resync_dirty_peers_bounded();
             paced.read();
