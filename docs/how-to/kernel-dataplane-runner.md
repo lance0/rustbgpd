@@ -129,7 +129,9 @@ issue #187) so reviewers can distinguish real stability from flake masking.
   replication flood rows against FRR 10.7.1.
 - M121: EVPN all-active forwarding against FRR 10.7.1: preference-DF cells, the
   default-modulo hazard, and the ADR-0140 core-isolation hold, checked against
-  the CE's kernel LACP state.
+  the CE's kernel LACP state. The job first tries FRR's dynamic VXLAN FDB entry
+  with a nexthop group on the runner kernel; a kernel that rejects it (fixed
+  upstream by Linux `7308ef8b4a67`) skips the lab with a warning.
 - M123: RFC 9785 Don't-Preempt recovery against Nokia SR Linux 25.10.1.
 - Docker netns selectors, in job order — `fdb_nhg`, `fib_runtime`,
   `blackhole_discard`, `bfd_runtime`, `dataplane_vlan_fdb`, `peer_sync_local_fdb`,

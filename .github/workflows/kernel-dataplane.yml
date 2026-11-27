@@ -755,15 +755,27 @@ jobs:
   m121:
     needs: [prime_dev_image]
     name: M121 — EVPN all-active forwarding (FRR 10.7.1)
-    # The Ubuntu 24.04 and 26.04 Azure images carry a linux-azure kernel that rejects
-    # FRR's dynamic VXLAN FDB entries referencing a nexthop group. This pin is temporary:
-    # restore ubuntu-latest once a corrected kernel (Linux fix 7308ef8b4a67) ships on those images.
-    runs-on: ubuntu-22.04
+    # Some hosted kernels reject FRR's dynamic VXLAN FDB entries that reference a
+    # nexthop group (fixed upstream by Linux 7308ef8b4a67), so M121 cannot pass there.
+    # The first step tries that exact entry on the host kernel, which FRR's containers
+    # share. On a rejection the lab steps are skipped with a warning and a summary line;
+    # the verdict is republished for the check aggregate.
+    runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      kernel_fdb_nhg: ${{ steps.fdb_nhg.outputs.verdict }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Probe the kernel for FRR's VXLAN FDB nexthop entry
+        id: fdb_nhg
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/m121
+          python3 tests/interop/scripts/m121_fdb_nhg_probe.py | tee /tmp/m121/kernel-fdb-nhg-probe.json
       - uses: ./.github/actions/setup-dataplane-host
+        if: steps.fdb_nhg.outputs.verdict == 'supported'
       - name: Run M121 (deploy + test + destroy with retry)
+        if: steps.fdb_nhg.outputs.verdict == 'supported'
         uses: ./.github/actions/run-interop-test
         with:
           label: M121
@@ -1240,6 +1252,19 @@ jobs:
                   "TCP-AO lane ran nothing"
               )
               failed = True
+          # m121 skips its lab only when the kernel probe saw the known FDB
+          # nexthop rejection; any other success must have run the lab.
+          fdb_nhg = needs["m121"].get("outputs", {}).get("kernel_fdb_nhg")
+          if run_labs == "true" and needs["m121"].get("result") == "success":
+              if fdb_nhg == "rejected":
+                  print(
+                      "::warning::m121=success without the lab: the runner kernel "
+                      "rejects VXLAN FDB nexthop entries, so all-active forwarding "
+                      "did not run in this Kernel Dataplane run"
+                  )
+              elif fdb_nhg != "supported":
+                  print(f"::error::m121 succeeded with kernel_fdb_nhg={fdb_nhg!r}")
+                  failed = True
           if excused:
               print(
                   "::warning::m43=skipped (bird3 archive unavailable upstream): "
