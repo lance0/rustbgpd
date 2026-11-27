@@ -755,9 +755,10 @@ jobs:
   m121:
     needs: [prime_dev_image]
     name: M121 — EVPN all-active forwarding (FRR 10.7.1)
-    # Ubuntu 26.04's Azure kernel rejects FRR's dynamic VXLAN FDB entries with a nexthop ID.
-    # Restore ubuntu-latest after M121 passes on 26.04 with Linux fix 7308ef8b4a67.
-    runs-on: ubuntu-24.04
+    # The Ubuntu 24.04 and 26.04 Azure images carry a linux-azure kernel that rejects
+    # FRR's dynamic VXLAN FDB entries referencing a nexthop group. This pin is temporary:
+    # restore ubuntu-latest once a corrected kernel (Linux fix 7308ef8b4a67) ships on those images.
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
