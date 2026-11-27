@@ -1766,6 +1766,14 @@ impl GroupRibOut {
         )
     }
 
+    /// The staged winner at `prefix`, path ID zero, before any member's
+    /// split horizon or RFC 7947 control: the slot every member it serves
+    /// shares.
+    pub(in crate::manager) fn replay_winner(&self, prefix: &Prefix) -> Option<AdvEntry<'_>> {
+        let staged = self.table.get(prefix, 0)?;
+        Some(self.staged_entry(staged, prefix, 0))
+    }
+
     /// [`Self::adv_entry_for`] at path ID zero for the paced initial
     /// replay, whose fallback searches tests count.
     pub(in crate::manager) fn replay_slot(

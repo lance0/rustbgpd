@@ -9904,8 +9904,9 @@ impl RibManager {
         changed: &HashSet<Prefix>,
         targets: &HashSet<PeerId>,
     ) {
+        let cohorts = self.cohort_scans_of(targets);
         self.loc_rib
-            .record_targeted_replay_changes(targets, changed);
+            .record_targeted_replay_changes(targets, &cohorts, changed);
         self.distribute_changes_inner(
             changed,
             changed,

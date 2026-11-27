@@ -382,6 +382,29 @@ impl<'a> AdmittedKeyView<'a> {
         Key::try_from(key).is_ok_and(|key| self.contains_key(key))
     }
 
+    /// How many of these unicast keys at path ID zero are admitted, given
+    /// each key's position in this view's universe as
+    /// [`AdmittedRecovery::replay_universe_positions`] resolved it. A
+    /// universe key is admitted by its mask bit alone; any other key by the
+    /// sparse overlay.
+    pub(in crate::manager) fn admitted_unicast(
+        self,
+        rows: impl Iterator<Item = (u32, Prefix)>,
+    ) -> usize {
+        rows.filter(|&(position, prefix)| {
+            if position == EMPTY_SLOT {
+                !self.sparse.is_empty()
+                    && self.sparse.binary_search(&Key::Unicast(prefix, 0)).is_ok()
+            } else {
+                let index = position as usize;
+                self.words
+                    .get(index / 64)
+                    .is_some_and(|word| word & (1_u64 << (index % 64)) != 0)
+            }
+        })
+        .count()
+    }
+
     /// Visit one prefix's admitted path IDs without walking unrelated keys.
     pub(in crate::manager) fn visit_unicast_prefix_paths(
         self,
@@ -2351,6 +2374,7 @@ impl AdmittedRecovery {
         &mut self,
         handle: SnapshotHandle,
         keys: impl Iterator<Item = Key>,
+        enrolled: &[PeerId],
     ) -> bool {
         let Some(snapshot) = self
             .snapshot_index(handle)
@@ -2363,7 +2387,10 @@ impl AdmittedRecovery {
         // reconcile, admits keys into its overlay while the others still
         // walk. A universe key must be admitted by its mask bit alone, so a
         // key any such overlay holds stays out of the universe.
-        let overlays: SmallVec<[usize; 0]> = (0..self.records.len())
+        // Only a peer that enrolled with this universe references it.
+        let overlays: SmallVec<[usize; 0]> = enrolled
+            .iter()
+            .filter_map(|peer| self.index(*peer).ok())
             .filter(|&index| {
                 let record = &self.records[index];
                 record.snapshot == Some(handle) && !record.keys.0.is_empty()
@@ -2392,6 +2419,24 @@ impl AdmittedRecovery {
             universe.push(key);
         }
         true
+    }
+
+    /// Each unicast prefix's position, at path ID zero, in replay universe
+    /// `handle`, or the empty marker for a key the universe lacks. One
+    /// lookup per key then serves every member that shares the universe.
+    pub(in crate::manager) fn replay_universe_positions(
+        &self,
+        handle: SnapshotHandle,
+        prefixes: impl Iterator<Item = Prefix>,
+    ) -> Vec<u32> {
+        let (universe, index) = Self::universe(&self.snapshots, Some(handle));
+        prefixes
+            .map(|prefix| {
+                universe_position(universe, index, &Key::Unicast(prefix, 0))
+                    .and_then(|position| u32::try_from(position).ok())
+                    .unwrap_or(EMPTY_SLOT)
+            })
+            .collect()
     }
 
     pub(in crate::manager) fn initial_replay_sparse_len(&self, peer: PeerId) -> Option<usize> {
@@ -3377,7 +3422,8 @@ mod tests {
         for start in (0..rows).step_by(63) {
             assert!(ledger.extend_initial_replay_universe(
                 universe,
-                (start..(start + 63).min(rows)).map(|n| key(u32::try_from(n).unwrap()))
+                (start..(start + 63).min(rows)).map(|n| key(u32::try_from(n).unwrap())),
+                &[who],
             ));
         }
         let prepared = ledger.get(&who).unwrap();
@@ -3428,7 +3474,7 @@ mod tests {
         let who = peer(1);
         ledger.insert_empty(who).unwrap();
         let universe = ledger.begin_initial_replay(who, 64, None).unwrap().unwrap();
-        assert!(ledger.extend_initial_replay_universe(universe, (0..64).map(slot_key)));
+        assert!(ledger.extend_initial_replay_universe(universe, (0..64).map(slot_key), &[who]));
         // Even keys above the universe, admitted in order: one sorted run.
         for start in (0..sparse).step_by(PAGE as usize) {
             let page = (start..(start + PAGE).min(sparse)).map(|n| slot_key(1_000 + 2 * n));
@@ -3504,7 +3550,7 @@ mod tests {
         assert_eq!(ledger.bytes() - seeded - first, rows as usize / 8);
         assert!(first - rows as usize / 8 >= rows as usize * size_of::<Key>());
         assert_eq!(ledger.snapshots.len(), 1);
-        assert!(ledger.extend_initial_replay_universe(universe, (0..rows).map(key)));
+        assert!(ledger.extend_initial_replay_universe(universe, (0..rows).map(key), &[a, b]));
 
         // The same keys with different outcomes, plus one outside the universe.
         let outside = key(rows + 7);

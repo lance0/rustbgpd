@@ -457,7 +457,18 @@ holds under [Restart](#restart)).
   each adds a mask of one bit per key and the keys it admitted that the
   shared set lacks. A joiner that arrives while that set is still in use
   shares it too, unless an earlier member finished with more than one such
-  key per 16 in the set: it then starts a new one. Waiters start in
+  key per 16 in the set: it then starts a new one. The joiners that share
+  a set also share one scan of the Loc-RIB and one log of its pages and of
+  the keys changed behind it, so the table is scanned once however many of
+  them join. A page none of whose keys a joiner holds goes to it as rows
+  resolved once for all of them (keys that carry an RFC 7947 control
+  community for the route server's ASN are still resolved per joiner). A
+  late joiner starts at the scan's position and completes when the scan
+  comes back around to it. Each joiner works through the log at its own
+  writer's pace; one that falls 64 pages behind the newest, or whose scan
+  overflows its 4,096 changed keys, leaves the shared scan and rescans on
+  its own in pages (the reconcile above), so a stalled peer does not hold
+  the others back. Waiters start in
   arrival order: behind one waiting for budget, no later joiner starts even
   if its smaller table would fit. A joiner does not wait when no paged join
   is in progress, when its table would not fit even after every paged join

@@ -1,5 +1,10 @@
 //! Replay a published single-best group through the registration lane. A full
 //! writer parks with its exact admitted-key proof and its scan position intact.
+//!
+//! Members that join one group table under the same view ride one scan of
+//! the Loc-RIB. The cohort keeps the pages it took in a log, and each member
+//! works through that log at its own writer's pace. A member that falls a
+//! whole log behind leaves the scan and reconciles on its own.
 
 mod changes;
 
@@ -9,17 +14,21 @@ mod observation;
 pub use observation::BenchReplayEvent;
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 use changes::ReplayChanges;
 use tokio::sync::mpsc;
 
-use super::distribution::OutboundCommitBatch;
+use super::distribution::{
+    LazyCleanGroupPrior, OutboundCommitBatch, SharedUnicastPrecommit, SharedUnicastProbeCache,
+};
 use super::update_groups::admitted_recovery::{
     Failure, Key, OnReservationRefusal, ReplayRoom, SnapshotHandle,
 };
 use super::{PeerId, RibManager};
 use crate::fast_hash::FastSet;
-use crate::loc_rib::{REGISTRATION_PAGE_SIZE, RegistrationScanStatus};
+use crate::loc_rib::{REGISTRATION_PAGE_SIZE, RegistrationScanStatus, ScanBoundary};
+use crate::route::Route;
 use crate::update::{ExactExportKey, OutboundRouteUpdate, RouteQueryKey, route_query_key};
 use rustbgpd_wire::{Afi, Prefix, Safi};
 
@@ -36,6 +45,10 @@ enum Phase {
 /// mask over that universe plus its own sparse overlay, so one member's
 /// admissions and withdrawals never show in another's. The ledger counts the
 /// members; the last reference retires the universe.
+///
+/// They also share one scan of the Loc-RIB. The pages the cohort took from
+/// it stay in a log until every rider has worked through them, so the scan
+/// visits each bucket once per pass however many members ride it.
 struct Cohort {
     handle: SnapshotHandle,
     key: CohortKey,
@@ -46,6 +59,57 @@ struct Cohort {
     // The largest overlay a member completed with: keys the table gained
     // after the walk passed them.
     overlay: usize,
+    // Every peer that enrolled with this universe, including one that has
+    // since left the scan: only these can hold a proof that references it.
+    enrolled: Vec<PeerId>,
+    // The cohort's Loc-RIB scan, live while a member rides it.
+    scan: Option<u32>,
+    riders: usize,
+    // Pages taken from the scan that some rider has not worked through,
+    // oldest first, and the sequence number of the first.
+    log: VecDeque<LogPage>,
+    base: u64,
+    // Group changes staged for a rider.
+    staged: u64,
+}
+
+/// A rider may fall this many pages behind the newest before it leaves the
+/// scan for its own reconcile. A parked writer holds its member back while
+/// the others advance; the log holds at most this many pages for it.
+const COHORT_LOG_PAGES: usize = 64;
+
+/// One page of the cohort's scan: discovered buckets or changed keys.
+struct LogPage {
+    keys: Vec<Prefix>,
+    shared: Option<SharedPage>,
+}
+
+/// What every rider's slot shares at a page's keys, resolved once: the
+/// staged winner of each key that RFC 7947 control leaves alone for the
+/// cohort's view. A member takes these rows as they are, less the ones it
+/// sourced. `private` keys carry a control community for the view's RS ASN,
+/// so each member resolves its own slot there.
+struct SharedPage {
+    // The cohort's staged changes and its scan's change notifications when
+    // the rows were read. Any later change makes them stale.
+    epoch: (u64, u64),
+    routes: Arc<Vec<Route>>,
+    actions: Arc<Vec<Option<rustbgpd_policy::NextHopAction>>>,
+    // Each page key's position in the cohort's universe.
+    positions: Vec<u32>,
+    private: Vec<Prefix>,
+    prefixes: Arc<HashSet<Prefix>>,
+    encode: Arc<crate::update::SharedGroupEncode>,
+    probes: SharedUnicastProbeCache,
+}
+
+/// A rider's place on its cohort's scan: the boundary at which the scan has
+/// passed every bucket since the member joined, and the next log page the
+/// member works through.
+#[derive(Clone, Copy)]
+struct Lap {
+    end: ScanBoundary,
+    seq: u64,
 }
 
 /// The group, its table stamp at enrollment and the view class: the
@@ -91,6 +155,9 @@ struct Replay {
     // The cohort universe the member's proof references. An adopted proof
     // keeps its own form and has none.
     universe: Option<SnapshotHandle>,
+    // The member rides its cohort's scan. Without one it reconciles on a
+    // scan of its own.
+    lap: Option<Lap>,
     phase: Phase,
     changes: ReplayChanges,
     // Page keys left when a poll spent its unit budget. An RS-control
@@ -152,6 +219,7 @@ pub(super) struct InitialMemberReplays {
     // Live universes, oldest first. One whose last reference is gone is
     // dropped at the next enrollment.
     cohorts: Vec<Cohort>,
+    next_scan: u32,
     ready: VecDeque<PeerId>,
     blocked: VecDeque<PeerId>,
     registration_due: bool,
@@ -176,6 +244,9 @@ pub(super) struct InitialMemberReplays {
     // The synchronous reference arm of the resync oracles.
     #[cfg(test)]
     pub(super) resync_in_one_turn: bool,
+    // A cohort log depth below [`COHORT_LOG_PAGES`], for tables of a few pages.
+    #[cfg(test)]
+    pub(super) cohort_log_pages: Option<usize>,
 }
 
 impl InitialMemberReplays {
@@ -415,7 +486,7 @@ impl RibManager {
             }
         };
         self.refresh_group_recovery_gauges();
-        self.loc_rib.start_member_replay_scan(peer);
+        let lap = self.join_cohort_scan(universe);
         let previous = self.initial_member_replays.members.insert(
             peer,
             Replay {
@@ -424,6 +495,7 @@ impl RibManager {
                 session: self.outbound_session_ids[&peer],
                 sender: self.outbound_peers[&peer].clone(),
                 universe: Some(universe),
+                lap: Some(lap),
                 // A late joiner whose cohort has walked the table sends at
                 // its first turn.
                 phase: Phase::PrepareProof,
@@ -482,15 +554,31 @@ impl RibManager {
         };
         let ledger = &self.pending_group_admitted;
         let cohorts = &mut self.initial_member_replays.cohorts;
-        cohorts.retain(|cohort| ledger.replay_universe_capacity(cohort.handle).is_some());
-        if !cohorts.iter().any(|cohort| cohort.handle == universe) {
-            cohorts.push(Cohort {
-                handle: universe,
-                key,
-                after: None,
-                walked: false,
-                overlay: 0,
+        // A rider whose proof was dropped still leaves its scan at its turn.
+        cohorts.retain(|cohort| {
+            cohort.riders != 0 || ledger.replay_universe_capacity(cohort.handle).is_some()
+        });
+        let index = cohorts
+            .iter()
+            .position(|cohort| cohort.handle == universe)
+            .unwrap_or_else(|| {
+                cohorts.push(Cohort {
+                    handle: universe,
+                    key,
+                    after: None,
+                    walked: false,
+                    overlay: 0,
+                    enrolled: Vec::new(),
+                    scan: None,
+                    riders: 0,
+                    log: VecDeque::new(),
+                    base: 0,
+                    staged: 0,
+                });
+                cohorts.len() - 1
             });
+        if !cohorts[index].enrolled.contains(&peer) {
+            cohorts[index].enrolled.push(peer);
         }
         Ok(Some(universe))
     }
@@ -592,7 +680,7 @@ impl RibManager {
         self.initial_member_replays.slot_wait = None;
         self.initial_member_replays.ready.retain(|p| *p != peer);
         self.initial_member_replays.blocked.retain(|p| *p != peer);
-        self.loc_rib.stop_member_replay_scan(peer);
+        self.stop_replay_scan(peer, replay.lap.is_some(), replay.universe);
         self.refresh_eor_retry(peer);
         true
     }
@@ -717,7 +805,9 @@ impl RibManager {
                 // Every reconcile row is a forced replay.
                 replay.forced |= cause == Cause::ForcedResync;
                 let rearms = replay.rearms;
-                self.loc_rib.stop_member_replay_scan(peer);
+                // A rider leaves its cohort's scan: the rescan is its own.
+                let (rode, universe) = (replay.lap.take().is_some(), replay.universe);
+                self.stop_replay_scan(peer, rode, universe);
                 let replays = &mut self.initial_member_replays;
                 if !replays.ready.contains(&peer) && !replays.blocked.contains(&peer) {
                     replays.ready.push_back(peer);
@@ -916,6 +1006,7 @@ impl RibManager {
                 sender: self.outbound_peers[&peer].clone(),
                 // The captured proof is the member's admission: nothing to prepare.
                 universe: None,
+                lap: None,
                 phase: Phase::Send,
                 changes: ReplayChanges::coalescing(),
                 carry: VecDeque::new(),
@@ -1056,7 +1147,7 @@ impl RibManager {
             if rewind {
                 self.rewind_initial_member_replay(peer);
             }
-            (self.loc_rib.member_replay_scan_status(peer) == RegistrationScanStatus::Overflow)
+            (self.replay_scan_status(peer) == RegistrationScanStatus::Overflow)
                 .then_some(PacedFallbackCause::ScanRepairLimit)
         };
         if let Some(cause) = invalidation {
@@ -1078,7 +1169,7 @@ impl RibManager {
         if self.complete_initial_member_replay(peer) {
             return;
         }
-        let ready = self.loc_rib.member_replay_scan_status(peer) == RegistrationScanStatus::Ready;
+        let ready = self.replay_scan_status(peer) == RegistrationScanStatus::Ready;
         let discovered = self.loc_rib.member_replay_discovery_finished(peer);
         let replay = self
             .initial_member_replays
@@ -1117,7 +1208,7 @@ impl RibManager {
             || !job.carry.is_empty()
             || job.rewind
             || (job.mode == Mode::Reconcile && !(job.sweep_done && job.denials_done))
-            || self.loc_rib.member_replay_scan_status(peer) != RegistrationScanStatus::Ready
+            || self.replay_scan_status(peer) != RegistrationScanStatus::Ready
             || self.dirty_peers.contains(&peer)
         {
             return false;
@@ -1191,10 +1282,11 @@ impl RibManager {
                 visits += 1;
                 Key::Unicast(row.prefix, row.path_id)
             });
-        if !self
-            .pending_group_admitted
-            .extend_initial_replay_universe(cohort.handle, keys)
-        {
+        if !self.pending_group_admitted.extend_initial_replay_universe(
+            cohort.handle,
+            keys,
+            &cohort.enrolled,
+        ) {
             self.recover_initial_member_replay(peer, PacedFallbackCause::MissingProof);
             return false;
         }
@@ -1232,15 +1324,14 @@ impl RibManager {
             .get_mut(&peer)
             .expect("live replay");
         let reconcile = replay.mode == Mode::Reconcile;
-        if replay.carry.is_empty() {
-            let page = self.loc_rib.take_member_replay_page(peer);
-            #[cfg(test)]
-            super::slice_timing::record_work(
-                "initial_member_replay_visits",
-                page.bucket_visits + page.repairs,
-            );
-            replay.carry = page.keys.into();
+        if replay.carry.is_empty() && !self.fill_replay_carry(peer, gid, &mut operation) {
+            return;
         }
+        let replay = self
+            .initial_member_replays
+            .members
+            .get_mut(&peer)
+            .expect("live replay");
         let Some(admitted) = self.pending_group_admitted.get(&peer) else {
             self.recover_initial_member_replay(peer, PacedFallbackCause::MissingProof);
             return;
@@ -1305,7 +1396,7 @@ impl RibManager {
                 withdraw,
                 ..OutboundCommitBatch::with_unicast(routes.into(), actions.into())
             };
-            if !self.commit_initial_member_batch(peer, batch, prior) {
+            if !self.commit_initial_member_batch(peer, batch, prior, None) {
                 return;
             }
         }
@@ -1380,7 +1471,7 @@ impl RibManager {
                 withdraw,
                 ..OutboundCommitBatch::default()
             };
-            if !self.commit_initial_member_batch(peer, batch, prior) {
+            if !self.commit_initial_member_batch(peer, batch, prior, None) {
                 return;
             }
         }
@@ -1442,10 +1533,11 @@ impl RibManager {
         peer: PeerId,
         mut batch: OutboundCommitBatch,
         prior: FastSet<ExactExportKey>,
+        shared: Option<SharedUnicastPrecommit<'_>>,
     ) -> bool {
         batch.on_proof_refusal = OnReservationRefusal::StopBeforeSend;
         let commit =
-            self.try_send_and_commit_outbound_update_with_group_prior(peer, batch, prior, None);
+            self.try_send_and_commit_outbound_update_with_group_prior(peer, batch, prior, shared);
         if let Err(failure) = commit {
             self.recover_initial_member_replay(peer, failure.paced_fallback_cause());
             return false;
@@ -1456,5 +1548,480 @@ impl RibManager {
         }
         self.advance_advertised_pages();
         true
+    }
+
+    /// Stop the scan `peer` read: its place on the scan of `universe`'s
+    /// cohort when it `rode` one, else its own scan.
+    fn stop_replay_scan(&mut self, peer: PeerId, rode: bool, universe: Option<SnapshotHandle>) {
+        if rode {
+            self.leave_cohort_scan(universe);
+        } else {
+            self.loc_rib.stop_member_replay_scan(peer);
+        }
+    }
+
+    /// Take the next page of keys for `peer` to resolve one by one: from its
+    /// own scan, or what its cohort's page leaves to it. `false` when the
+    /// cohort's page was sent as shared rows, or the replay recovered.
+    fn fill_replay_carry(
+        &mut self,
+        peer: PeerId,
+        gid: usize,
+        operation: &mut crate::outbound_credit::OutboundOperation,
+    ) -> bool {
+        let keys = if self.initial_member_replays.members[&peer].lap.is_some() {
+            let Some(keys) = self.take_cohort_page(peer, gid, operation) else {
+                return false;
+            };
+            keys
+        } else {
+            let page = self.loc_rib.take_member_replay_page(peer);
+            #[cfg(test)]
+            super::slice_timing::record_work(
+                "initial_member_replay_visits",
+                page.bucket_visits + page.repairs,
+            );
+            page.keys
+        };
+        let replay = self
+            .initial_member_replays
+            .members
+            .get_mut(&peer)
+            .expect("live replay");
+        replay.carry = keys.into();
+        true
+    }
+
+    /// Put a member on the scan of the cohort that owns `universe`, starting
+    /// the scan with its first rider. The member completes one pass later.
+    fn join_cohort_scan(&mut self, universe: SnapshotHandle) -> Lap {
+        let replays = &mut self.initial_member_replays;
+        let cohort = replays
+            .cohorts
+            .iter_mut()
+            .find(|cohort| cohort.handle == universe)
+            .expect("enrolled cohort");
+        let scan = if let Some(scan) = cohort.scan {
+            scan
+        } else {
+            let scan = replays.next_scan;
+            replays.next_scan = replays.next_scan.wrapping_add(1);
+            self.loc_rib.start_cohort_replay_scan(scan);
+            cohort.scan = Some(scan);
+            scan
+        };
+        cohort.riders += 1;
+        Lap {
+            end: self.loc_rib.cohort_replay_lap_end(scan),
+            seq: cohort.base + cohort.log.len() as u64,
+        }
+    }
+
+    /// A rider of `universe`'s cohort left its scan. The last one stops the
+    /// scan and drops its log; otherwise the log gives up the pages only
+    /// that rider still needed.
+    fn leave_cohort_scan(&mut self, universe: Option<SnapshotHandle>) {
+        let cohorts = &mut self.initial_member_replays.cohorts;
+        let Some(index) = cohorts
+            .iter()
+            .position(|cohort| Some(cohort.handle) == universe)
+        else {
+            return;
+        };
+        let cohort = &mut cohorts[index];
+        cohort.riders = cohort.riders.saturating_sub(1);
+        if cohort.riders == 0 {
+            if let Some(scan) = cohort.scan.take() {
+                self.loc_rib.stop_cohort_replay_scan(scan);
+            }
+            cohort.log.clear();
+            cohort.base = 0;
+        } else {
+            self.trim_cohort_log(index);
+        }
+    }
+
+    /// The riders of cohort `index` with the log page each works through next.
+    fn cohort_riders(&self, index: usize) -> impl Iterator<Item = (PeerId, u64)> + '_ {
+        let replays = &self.initial_member_replays;
+        let cohort = &replays.cohorts[index];
+        cohort.enrolled.iter().filter_map(|peer| {
+            let replay = replays.members.get(peer)?;
+            (replay.universe == Some(cohort.handle)).then_some((*peer, replay.lap?.seq))
+        })
+    }
+
+    /// Drop the log pages every rider has worked through.
+    fn trim_cohort_log(&mut self, index: usize) {
+        let oldest = self.cohort_riders(index).map(|(_, seq)| seq).min();
+        let cohort = &mut self.initial_member_replays.cohorts[index];
+        while oldest.is_none_or(|oldest| cohort.base < oldest) && cohort.log.pop_front().is_some() {
+            cohort.base += 1;
+        }
+    }
+
+    /// A rider's cohort, its scan and its place on it.
+    fn ride(&self, peer: PeerId) -> Option<(usize, u32, Lap)> {
+        let replays = &self.initial_member_replays;
+        let replay = replays.members.get(&peer)?;
+        let lap = replay.lap?;
+        let index = replays
+            .cohorts
+            .iter()
+            .position(|cohort| Some(cohort.handle) == replay.universe)?;
+        Some((index, replays.cohorts[index].scan?, lap))
+    }
+
+    /// The state of the scan `peer` reads: its own, or its cohort's as the
+    /// member sees it. A rider is ready once the scan has passed every
+    /// bucket since it joined, it has worked through the whole log, and no
+    /// changed key waits for a page.
+    fn replay_scan_status(&self, peer: PeerId) -> RegistrationScanStatus {
+        let replays = &self.initial_member_replays;
+        if replays.members[&peer].lap.is_none() {
+            return self.loc_rib.member_replay_scan_status(peer);
+        }
+        let Some((index, scan, lap)) = self.ride(peer) else {
+            // The cohort is gone: the member reconciles on its own.
+            return RegistrationScanStatus::Overflow;
+        };
+        let cohort = &replays.cohorts[index];
+        if self.loc_rib.cohort_replay_overflowed(scan) {
+            RegistrationScanStatus::Overflow
+        } else if lap.seq == cohort.base + cohort.log.len() as u64
+            && !self.loc_rib.cohort_replay_repairs_pending(scan)
+            && self.loc_rib.cohort_replay_lap_reached(scan, lap.end)
+        {
+            RegistrationScanStatus::Ready
+        } else {
+            RegistrationScanStatus::Scanning
+        }
+    }
+
+    /// Queue a repair at `prefix` on the scan `peer` reads. `false` once
+    /// that scan's repair log has overflowed.
+    pub(super) fn record_replay_scan_change(&mut self, peer: PeerId, prefix: Prefix) -> bool {
+        if self.initial_member_replays.members[&peer].lap.is_none() {
+            return self.loc_rib.record_member_replay_change(peer, prefix);
+        }
+        self.ride(peer)
+            .is_some_and(|(_, scan, _)| self.loc_rib.record_cohort_replay_change(scan, prefix))
+    }
+
+    /// Whether the scan `peer` reads holds a queued repair at `prefix`.
+    pub(super) fn replay_scan_change_recorded(&self, peer: PeerId, prefix: Prefix) -> bool {
+        if self.initial_member_replays.members[&peer].lap.is_none() {
+            return self.loc_rib.member_replay_change_recorded(peer, prefix);
+        }
+        self.ride(peer)
+            .is_some_and(|(_, scan, _)| self.loc_rib.cohort_replay_change_recorded(scan, prefix))
+    }
+
+    pub(super) fn replay_scan_overflowed(&self, peer: PeerId) -> bool {
+        self.replay_scan_status(peer) == RegistrationScanStatus::Overflow
+    }
+
+    /// A group change was staged for rider `peer`: rows its cohort resolved
+    /// before it are stale.
+    pub(super) fn note_cohort_staged(&mut self, peer: PeerId) {
+        if let Some((index, ..)) = self.ride(peer) {
+            self.initial_member_replays.cohorts[index].staged += 1;
+        }
+    }
+
+    /// The cohort scans `targets` ride.
+    pub(in crate::manager) fn cohort_scans_of(&self, targets: &HashSet<PeerId>) -> Vec<u32> {
+        let mut scans: Vec<u32> = targets
+            .iter()
+            .filter_map(|peer| Some(self.ride(*peer)?.1))
+            .collect();
+        scans.sort_unstable();
+        scans.dedup();
+        scans
+    }
+
+    /// The riders of each live cohort scan and the pages its log holds.
+    #[cfg(test)]
+    pub(super) fn cohort_scan_riders(&self) -> Vec<(usize, usize)> {
+        let cohorts = &self.initial_member_replays.cohorts;
+        cohorts
+            .iter()
+            .filter(|cohort| cohort.scan.is_some())
+            .map(|cohort| (cohort.riders, cohort.log.len()))
+            .collect()
+    }
+
+    /// Whether `peer` rides its cohort's scan.
+    #[cfg(test)]
+    pub(super) fn rides_cohort_scan(&self, peer: PeerId) -> bool {
+        self.ride(peer).is_some()
+    }
+
+    /// Advance rider `peer` to its next log page, taking one from the
+    /// cohort's scan when it has worked through the log. Returns the
+    /// cohort, its scan and the page's sequence number, or `None` when the
+    /// scan had no keys for it this turn.
+    fn next_cohort_page(&mut self, peer: PeerId) -> Option<(usize, u32, u64)> {
+        let (index, scan, lap) = self.ride(peer).expect("rider");
+        let cohort = &self.initial_member_replays.cohorts[index];
+        if lap.seq == cohort.base + cohort.log.len() as u64 {
+            #[cfg(test)]
+            let depth = self
+                .initial_member_replays
+                .cohort_log_pages
+                .unwrap_or(COHORT_LOG_PAGES);
+            #[cfg(not(test))]
+            let depth = COHORT_LOG_PAGES;
+            if cohort.log.len() >= depth {
+                self.evict_cohort_laggards(index);
+            }
+            // A member that has seen every bucket takes only repairs: the
+            // rest of the pass belongs to riders that joined later.
+            let discover = !self.loc_rib.cohort_replay_lap_reached(scan, lap.end);
+            let page = self.loc_rib.take_cohort_replay_page(scan, discover);
+            #[cfg(test)]
+            {
+                let visits = page.bucket_visits + page.repairs;
+                super::slice_timing::record_work("initial_member_replay_visits", visits);
+                super::slice_timing::record_work("cohort_scan_pages", 1);
+            }
+            if page.keys.is_empty() {
+                return None;
+            }
+            self.initial_member_replays.cohorts[index]
+                .log
+                .push_back(LogPage {
+                    keys: page.keys,
+                    shared: None,
+                });
+        }
+        let replay = self
+            .initial_member_replays
+            .members
+            .get_mut(&peer)
+            .expect("live replay");
+        replay.lap.as_mut().expect("rider").seq += 1;
+        Some((index, scan, lap.seq))
+    }
+
+    /// Rider `peer`'s next page of its cohort's log. A page whose keys the
+    /// member holds none of goes out as the rows the cohort resolved once,
+    /// and `None` is returned: the page is sent, or the replay recovered.
+    /// Otherwise the keys the member must resolve one by one are returned:
+    /// all of them when it holds some, none when it holds every one.
+    fn take_cohort_page(
+        &mut self,
+        peer: PeerId,
+        gid: usize,
+        operation: &mut crate::outbound_credit::OutboundOperation,
+    ) -> Option<Vec<Prefix>> {
+        let Some((index, scan, seq)) = self.next_cohort_page(peer) else {
+            return Some(Vec::new());
+        };
+        let replays = &self.initial_member_replays;
+        let cohort = &replays.cohorts[index];
+        let at = usize::try_from(seq - cohort.base).expect("log index");
+        // A key with a change the member has not settled reconciles against
+        // its own admission.
+        if replays.members[&peer].changes.touches(&cohort.log[at].keys) {
+            let keys = cohort.log[at].keys.clone();
+            self.trim_cohort_log(index);
+            return Some(keys);
+        }
+        let epoch = (cohort.staged, self.loc_rib.cohort_replay_recorded(scan));
+        if cohort.log[at]
+            .shared
+            .as_ref()
+            .is_none_or(|shared| shared.epoch != epoch)
+        {
+            let shared = self.resolve_cohort_page(gid, index, at, epoch);
+            self.initial_member_replays.cohorts[index].log[at].shared = Some(shared);
+        }
+        let page = &self.initial_member_replays.cohorts[index].log[at];
+        let shared = page.shared.as_ref().expect("resolved above");
+        let held = self.pending_group_admitted.get(&peer).map(|admitted| {
+            admitted.admitted_unicast(
+                shared
+                    .positions
+                    .iter()
+                    .copied()
+                    .zip(page.keys.iter().copied()),
+            )
+        });
+        if held == Some(page.keys.len()) {
+            // A second pass over keys the member already holds, with no
+            // change of its own to settle: nothing to send.
+            #[cfg(test)]
+            super::slice_timing::record_work("cohort_held_pages", 1);
+            self.trim_cohort_log(index);
+            return Some(Vec::new());
+        }
+        if held != Some(0) {
+            // The member holds some of these keys, from a repair or an
+            // earlier pass: each key reconciles against its admission.
+            let keys = page.keys.clone();
+            self.trim_cohort_log(index);
+            return Some(keys);
+        }
+        self.send_shared_page(peer, gid, (index, at, seq), operation);
+        None
+    }
+
+    /// Send rider `peer` the rows its cohort resolved for the log page at
+    /// `at` (sequence `seq`) of cohort `index`, none of whose keys it holds,
+    /// and leave it the keys only it can resolve.
+    fn send_shared_page(
+        &mut self,
+        peer: PeerId,
+        gid: usize,
+        (index, at, seq): (usize, usize, u64),
+        operation: &mut crate::outbound_credit::OutboundOperation,
+    ) {
+        let page = &mut self.initial_member_replays.cohorts[index].log[at];
+        let shared = page.shared.as_mut().expect("resolved page");
+        let epoch = shared.epoch;
+        let routes = Arc::clone(&shared.routes);
+        let actions = Arc::clone(&shared.actions);
+        let prefixes = Arc::clone(&shared.prefixes);
+        let encode = Arc::clone(&shared.encode);
+        let mut probes = std::mem::take(&mut shared.probes);
+        let mut carry = shared.private.clone();
+        // Where the member sourced the winner, a per-client-best group
+        // serves it the runner-up, which only the member's own slot names.
+        if self.group_ribs[&gid].per_client_best {
+            carry.extend(
+                routes
+                    .iter()
+                    .filter(|route| route.peer == peer)
+                    .map(|route| route.prefix),
+            );
+        }
+        #[cfg(test)]
+        {
+            super::slice_timing::record_work("initial_member_replay_units", routes.len());
+            super::slice_timing::record_work("cohort_shared_rows", routes.len());
+        }
+        // A page whose every row the member sourced would be an envelope
+        // that carries nothing once transport drops them.
+        if routes.iter().any(|route| route.peer != peer) {
+            let batch = OutboundCommitBatch {
+                slot: operation.slot(),
+                force_unicast_replay: true,
+                unicast_otc_prechecked: true,
+                // Transport drops the rows this member sourced.
+                announce_source_exclusion: Some(peer),
+                shared_group_encode: Some(encode),
+                ..OutboundCommitBatch::with_unicast(routes, actions)
+            };
+            let precommit = SharedUnicastPrecommit {
+                group_id: gid,
+                probe_cache: &mut probes,
+                // The member holds none of these keys.
+                lazy_group_prior: Some(LazyCleanGroupPrior { peer, deltas: &[] }),
+            };
+            let sent =
+                self.commit_initial_member_batch(peer, batch, FastSet::default(), Some(precommit));
+            // The page keeps the first member's probes for the others.
+            if let Some((index, ..)) = self.ride(peer)
+                && let cohort = &mut self.initial_member_replays.cohorts[index]
+                && let Some(page) = seq
+                    .checked_sub(cohort.base)
+                    .and_then(|at| cohort.log.get_mut(usize::try_from(at).ok()?))
+                && let Some(shared) = &mut page.shared
+                && shared.epoch == epoch
+            {
+                shared.probes = probes;
+            }
+            if !sent {
+                return;
+            }
+        }
+        self.trim_cohort_log(index);
+        self.apply_initial_replay_page_policy(peer, gid, &prefixes);
+        let replay = self
+            .initial_member_replays
+            .members
+            .get_mut(&peer)
+            .expect("live replay");
+        replay.carry = carry.into();
+        if self.outbound_channel_full(peer) || !self.complete_initial_member_replay(peer) {
+            self.initial_member_replays.ready.push_back(peer);
+        }
+    }
+
+    /// Resolve what every rider shares at log page `at` of cohort `index`:
+    /// one universe lookup and one winner per key, whatever the riders.
+    fn resolve_cohort_page(
+        &self,
+        gid: usize,
+        index: usize,
+        at: usize,
+        epoch: (u64, u64),
+    ) -> SharedPage {
+        use super::distribution::rs_control::rs_control_route_tagged;
+
+        let cohort = &self.initial_member_replays.cohorts[index];
+        let keys = &cohort.log[at].keys;
+        let view = cohort.key.2;
+        let group = &self.group_ribs[&gid];
+        let mut routes = Vec::with_capacity(keys.len());
+        let mut actions = Vec::with_capacity(keys.len());
+        let mut private = Vec::new();
+        for prefix in keys {
+            let Some(entry) = group.replay_winner(prefix) else {
+                continue;
+            };
+            // RFC 7947 decides on the source's control communities and
+            // scrubs the post-policy route's. A winner that carries neither
+            // for the view's RS ASN is the same row toward every member.
+            let tagged = view.is_some_and(|rs_asn| {
+                let (communities, large) =
+                    group.source_control_for_route(entry.route, entry.source_attrs);
+                rs_control_route_tagged(communities, large, rs_asn)
+                    || rs_control_route_tagged(
+                        entry.route.communities(),
+                        entry.route.large_communities(),
+                        rs_asn,
+                    )
+            });
+            if tagged {
+                private.push(*prefix);
+            } else {
+                routes.push(entry.route.clone());
+                actions.push(entry.nh.cloned());
+            }
+        }
+        #[cfg(test)]
+        super::slice_timing::record_work("cohort_page_resolves", keys.len());
+        SharedPage {
+            epoch,
+            routes: routes.into(),
+            actions: actions.into(),
+            positions: self
+                .pending_group_admitted
+                .replay_universe_positions(cohort.handle, keys.iter().copied()),
+            private,
+            prefixes: Arc::new(keys.iter().copied().collect()),
+            encode: Arc::default(),
+            probes: SharedUnicastProbeCache::default(),
+        }
+    }
+
+    /// The log of cohort `index` is full: the riders still at its oldest
+    /// page leave the scan, each into a reconcile of its own, so the scan
+    /// can take its next page. No rider waits for another's writer longer
+    /// than the log is deep.
+    fn evict_cohort_laggards(&mut self, index: usize) {
+        let base = self.initial_member_replays.cohorts[index].base;
+        let laggards: Vec<PeerId> = self
+            .cohort_riders(index)
+            .filter(|(_, seq)| *seq == base)
+            .map(|(peer, _)| peer)
+            .collect();
+        for peer in laggards {
+            #[cfg(test)]
+            super::slice_timing::record_work("cohort_scan_evictions", 1);
+            self.recover_initial_member_replay(peer, PacedFallbackCause::ScanRepairLimit);
+        }
     }
 }
