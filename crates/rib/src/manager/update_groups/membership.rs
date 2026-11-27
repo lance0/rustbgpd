@@ -1,4 +1,4 @@
-use super::super::initial_member_replay::{PacedFallbackCause, PacedJob};
+use super::super::initial_member_replay::PacedFallbackCause;
 use super::{
     AdjRibOut, ExactExportKey, FastMap, GroupMembership, GroupRibOut, HashSet, PolicyChain,
     RegroupBaseline, RibManager, VpnRibRouteKey,
@@ -110,16 +110,13 @@ impl RibManager {
         }
         // Owed keys were recorded against the old ownership. Capture admitted
         // OLD before marking dirty so regroup recovery retains its withdrawals.
-        let replaying = self.abort_initial_member_replay(peer);
-        if replaying {
-            self.note_paced_fallback(
-                PacedJob::InitialReplay,
-                PacedFallbackCause::GroupChanged,
-                peer,
-            );
-        }
+        let replaying =
+            self.fall_back_initial_member_replay(peer, PacedFallbackCause::GroupChanged);
         if self.drop_peer_owing(peer) || replaying {
             let marked = self.mark_outbound_dirty(peer);
+            if marked && replaying {
+                self.restore_resync_episode(peer);
+            }
             #[cfg(feature = "bench-internals")]
             if marked && replaying {
                 self.observe_initial_replay(
@@ -840,9 +837,21 @@ impl RibManager {
         peer: PeerId,
         record: &super::super::LiveSessionRecord,
     ) -> Option<super::GroupKey> {
+        if !self.paced_session_shape(record) {
+            return None;
+        }
+        self.pending_registration_key(peer, record)
+    }
+
+    /// Whether a session's grouped unicast table can be sent in pages: an
+    /// initial replay, or the reconcile of a member that fell behind.
+    pub(in crate::manager) fn paced_session_shape(
+        &self,
+        record: &super::super::LiveSessionRecord,
+    ) -> bool {
         use rustbgpd_wire::{Afi, Safi};
 
-        if record.registration_policy_fallback
+        !(record.registration_policy_fallback
             || record.local_role.is_some()
             || (record.per_client_best && (!record.is_ebgp || record.export_policy.is_some()))
             || record.sendable_families.is_empty()
@@ -852,11 +861,7 @@ impl RibManager {
             })
             // With a local RR, export to a non-client depends on each source's
             // current client status, which can change without a Loc-RIB write.
-            || (self.cluster_id.is_some() && !record.is_ebgp && !record.route_reflector_client)
-        {
-            return None;
-        }
-        self.pending_registration_key(peer, record)
+            || (self.cluster_id.is_some() && !record.is_ebgp && !record.route_reflector_client))
     }
 
     /// The Loc-RIB size from which an initial table is paced.

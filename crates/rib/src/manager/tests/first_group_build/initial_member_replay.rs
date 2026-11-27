@@ -2,6 +2,7 @@
 mod authoritative_regroup;
 mod change_overflow;
 mod exact_refusal;
+mod grouped_resync;
 mod per_client_best;
 mod reconcile;
 mod reservation;

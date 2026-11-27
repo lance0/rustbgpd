@@ -21,6 +21,13 @@ pub enum BenchReplayEvent {
     /// The replay lost track of its changes for this cause and rewound into
     /// a paced reconcile; it still ends with `Completed`.
     Reconciled(&'static str),
+    /// The resync tick enrolled a paced reconcile for a grouped member that
+    /// fell behind, instead of its one-turn resync. It ends with
+    /// `Completed`, or `Dirty` when it falls back.
+    ResyncReconcile,
+    /// A dirty grouped member's one-turn resync was built: its counted
+    /// fallback cause, or `None` where one turn is the intended path.
+    ResyncOneTurn(Option<&'static str>),
 }
 
 pub(super) type ReplayObserver = Box<dyn Fn(PeerId, u64, BenchReplayEvent) + Send + Sync>;

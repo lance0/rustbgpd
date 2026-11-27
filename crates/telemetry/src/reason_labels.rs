@@ -119,17 +119,20 @@ pub enum PacedJob {
     SourceDeparture,
     /// A selection-release fan-out, delivered to members in pages.
     ReleaseFanout,
+    /// A grouped member's resync after it fell behind, reconciled in pages.
+    GroupedResync,
 }
 
 impl PacedJob {
     /// Every job label.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::FirstGroupBuild,
         Self::PerClientBestBuild,
         Self::ReloadBuild,
         Self::InitialReplay,
         Self::SourceDeparture,
         Self::ReleaseFanout,
+        Self::GroupedResync,
     ];
 
     /// Canonical job label shared by metrics and diagnostics.
@@ -142,6 +145,7 @@ impl PacedJob {
             Self::InitialReplay => "initial_replay",
             Self::SourceDeparture => "source_departure",
             Self::ReleaseFanout => "release_fanout",
+            Self::GroupedResync => "grouped_resync",
         }
     }
 }

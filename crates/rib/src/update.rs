@@ -2474,10 +2474,11 @@ pub struct NeighborRibSnapshot {
 /// gauges sample.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct OutboundConvergence {
-    /// Peers marked dirty and awaiting an outbound resync.
+    /// Peers marked dirty and awaiting an outbound resync, including a
+    /// grouped member whose resync is reconciling in pages.
     pub pending_peers: usize,
     /// Whole seconds since the oldest current dirty episode began; 0 when
-    /// no peer is dirty.
+    /// no peer is dirty. A reconciling resync keeps its episode's start.
     pub oldest_pending_secs: u64,
 }
 
@@ -2485,7 +2486,8 @@ pub struct OutboundConvergence {
 /// advertised count.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OutboundResyncState {
-    /// The peer missed outbound delivery and waits for a full export resync.
+    /// The peer missed outbound delivery and waits for a full export resync,
+    /// or its resync is reconciling in pages.
     pub pending: bool,
     /// Whole seconds the current resync has been pending; `None` when not
     /// pending.

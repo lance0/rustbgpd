@@ -77,6 +77,10 @@ struct Replay {
     // Once R1 has visited every key, repair and sweep turns alternate, so a
     // change before every turn cannot hold R2 back.
     sweep_due: bool,
+    // A reconcile the resync tick enrolled for a member that fell behind,
+    // with the start of its dirty episode. It owes no End-of-RIB of its own,
+    // and the member counts as pending a resync until it completes.
+    resync: Option<tokio::time::Instant>,
 }
 
 /// What a paceable registration waits for before its replay can start.
@@ -113,10 +117,18 @@ pub(super) struct InitialMemberReplays {
     // Groups published for a founder that then waited for a slot. One no
     // queued registration claims is retired.
     founder_groups: Vec<usize>,
+    // Members whose replay fell back to the dirty resync, by session, with
+    // the dirty-episode start of a resync reconcile: that resync runs in one
+    // turn, the fallback the replay counted. Enrolling it again could repeat
+    // the refusal or the lag that ended the replay.
+    one_turn: HashMap<PeerId, (u64, Option<tokio::time::Instant>)>,
     #[cfg(feature = "bench-internals")]
     observer: Option<observation::ReplayObserver>,
     #[cfg(test)]
     pub(super) min_routes: Option<usize>,
+    // The synchronous reference arm of the resync oracles.
+    #[cfg(test)]
+    pub(super) resync_in_one_turn: bool,
 }
 
 impl InitialMemberReplays {
@@ -330,6 +342,7 @@ impl RibManager {
                 swept: None,
                 sweep_done: false,
                 sweep_due: false,
+                resync: None,
             },
         );
         self.initial_member_replays.ready.push_back(peer);
@@ -501,23 +514,38 @@ impl RibManager {
         cause: PacedFallbackCause,
     ) -> bool {
         use PacedFallbackCause as Cause;
+        // Another owner may have marked the member dirty. When the member
+        // could reconcile a resync in pages, the reconcile is that resync.
+        let dirty = self.dirty_peers.contains(&peer);
         let reconcilable = match cause {
             Cause::ScanRepairLimit
             | Cause::ChangeOutsideScan
             | Cause::ReleaseFanout
-            | Cause::SelectionRelease => true,
+            | Cause::SelectionRelease
+            | Cause::AlreadyDirty => true,
             Cause::ForcedResync => !self.peer_orf_filters.contains_key(&peer),
             _ => false,
-        };
+        } && (!dirty || self.resync_reconcile_refusal(peer, true).is_ok());
         let mut cause = cause;
         if reconcilable
-            && !self.dirty_peers.contains(&peer)
             && self
                 .pending_group_admitted
                 .initial_replay_sparse_len(peer)
                 .is_some()
-            && let Some(replay) = self.initial_member_replays.members.get_mut(&peer)
+            && self.initial_member_replays.members.contains_key(&peer)
         {
+            // The dirty mark's force bit holds as a forced resync's does.
+            let marked_force =
+                dirty && self.dirty_peers.remove(&peer) && self.force_outbound_peers.remove(&peer);
+            if dirty {
+                self.refresh_eor_retry(peer);
+            }
+            let replay = self
+                .initial_member_replays
+                .members
+                .get_mut(&peer)
+                .expect("live replay");
+            replay.forced |= marked_force;
             // A pending rewind already covers every later cause, such as the
             // next batch of a paged release.
             let pending = replay.rewind;
@@ -566,16 +594,247 @@ impl RibManager {
                 return true;
             }
         }
-        self.note_paced_fallback(PacedJob::InitialReplay, cause, peer);
-        self.abort_initial_member_replay(peer);
+        if !self.fall_back_initial_member_replay(peer, cause) {
+            self.note_paced_fallback(PacedJob::InitialReplay, cause, peer);
+        }
         let marked = self.mark_outbound_dirty(peer);
+        if marked {
+            self.restore_resync_episode(peer);
+        }
         #[cfg(feature = "bench-internals")]
         if marked {
             self.observe_initial_replay(peer, BenchReplayEvent::Dirty(cause.as_str()));
         }
-        #[cfg(not(feature = "bench-internals"))]
-        let _ = marked;
         false
+    }
+
+    /// End `peer`'s replay for a fallback to its dirty resync, counting the
+    /// fallback for its job. That resync then runs in one turn: enrolling
+    /// it again could repeat the refusal or the lag that ended the replay.
+    /// `false` without a replay.
+    pub(super) fn fall_back_initial_member_replay(
+        &mut self,
+        peer: PeerId,
+        cause: PacedFallbackCause,
+    ) -> bool {
+        let Some(replay) = self.initial_member_replays.members.get(&peer) else {
+            return false;
+        };
+        let (session, resync) = (replay.session, replay.resync);
+        let job = if resync.is_some() {
+            PacedJob::GroupedResync
+        } else {
+            PacedJob::InitialReplay
+        };
+        self.note_paced_fallback(job, cause, peer);
+        self.abort_initial_member_replay(peer);
+        self.initial_member_replays
+            .one_turn
+            .insert(peer, (session, resync));
+        true
+    }
+
+    /// A resync reconcile that fell back keeps its dirty episode's start
+    /// once the member is marked dirty again.
+    pub(super) fn restore_resync_episode(&mut self, peer: PeerId) {
+        if let Some(&(_, Some(since))) = self.initial_member_replays.one_turn.get(&peer) {
+            self.dirty_since.insert(peer, since);
+        }
+    }
+
+    /// Why dirty `peer`'s resync cannot reconcile in pages, or its group
+    /// when it can. `Err(None)` keeps the one-turn resync without counting
+    /// a fallback: an ungrouped receiver (the owed row cursor paces it), a
+    /// table below the pacing threshold, a selection hold, an owed-row cap
+    /// eviction (counted as `owed_row_cap`), a selection-held rebuild, or a
+    /// replay that already counted the fallback that made the member dirty.
+    /// `live`: the member's replay already runs, so it takes no new slot.
+    pub(super) fn resync_reconcile_refusal(
+        &self,
+        peer: PeerId,
+        live: bool,
+    ) -> Result<usize, Option<PacedFallbackCause>> {
+        use PacedFallbackCause as Cause;
+        let Some(gid) = self.grouped_member_of(peer) else {
+            return Err(None);
+        };
+        let session = self.outbound_session_ids.get(&peer).copied();
+        let Some(record) = session.and_then(|session| {
+            self.live_sessions
+                .get(&peer)?
+                .iter()
+                .rev()
+                .find(|record| record.session_id == session)
+        }) else {
+            return Err(None);
+        };
+        #[cfg(test)]
+        let reference = self.initial_member_replays.resync_in_one_turn;
+        #[cfg(not(test))]
+        let reference = false;
+        if reference
+            || self.loc_rib.len() < self.initial_member_replay_min_routes()
+            || self.owed_row_evicted.contains(&peer)
+            || self.held_rebuilds.iter().any(|peers| peers.contains(&peer))
+            || record.selection_initial_pending
+            || record.selection_partial_pending.contains(&true)
+            || self.selection_resync_held(peer)
+            || self.selection_release_resync_pending(peer)
+            || (!live
+                && session.is_some_and(|session| {
+                    self.initial_member_replays
+                        .one_turn
+                        .get(&peer)
+                        .is_some_and(|(owner, _)| *owner == session)
+                }))
+        {
+            return Err(None);
+        }
+        let cause = if !self.paced_session_shape(record)
+            || self
+                .peer_otc_blocked
+                .get(&peer)
+                .is_some_and(|blocked| !blocked.is_empty())
+        {
+            Cause::IneligibleShape
+        } else if self.pending_regroup_baseline.contains_key(&peer) {
+            // The member still owes the withdrawals of the group it left.
+            Cause::GroupChanged
+        } else if self
+            .group_ribs
+            .get(&gid)
+            .is_none_or(|group| group.evpn_table_stamp == 0)
+        {
+            Cause::UnpublishedTable
+        } else if self.outbound_prefix_limits.contains_key(&peer)
+            || self.configured_outbound_limit(peer)
+        {
+            Cause::PrefixLimit
+        } else if self.peer_orf_pending.contains_key(&peer) {
+            Cause::OrfPending
+        } else if let Some(fallback) = self.group_recovery_fallback(peer) {
+            fallback.into()
+        } else if !self.pending_group_admitted.contains_key(&peer) {
+            Cause::MissingProof
+        } else if !live
+            && self.initial_member_replays.members.len() >= super::peer_lifecycle::MAX_JOIN_COHORT
+        {
+            Cause::ReplayCap
+        } else {
+            return Ok(gid);
+        };
+        Err(Some(cause))
+    }
+
+    /// The resync tick's unit for dirty `peer`. An eligible grouped member
+    /// enrolls a paced reconcile of its table instead of building it whole
+    /// in this turn: R1 rescans the Loc-RIB against the member's captured
+    /// proof, which is what it was sent, and R2 sweeps that proof for keys
+    /// that are gone. The reconcile owes no End-of-RIB of its own; a marker
+    /// the member already owes stays held until it completes. `Err` leaves
+    /// the one-turn resync to run, with the cause
+    /// [`Self::grouped_resync_ran`] counts once it is built.
+    pub(super) fn reconcile_grouped_resync(
+        &mut self,
+        peer: PeerId,
+    ) -> Result<(), Option<PacedFallbackCause>> {
+        let gid = self.resync_reconcile_refusal(peer, false)?;
+        let adopted = self.pending_group_admitted.begin_reconcile(peer);
+        debug_assert!(adopted, "a complete proof was checked");
+        let forced = self.force_outbound_peers.remove(&peer);
+        self.dirty_peers.remove(&peer);
+        self.initial_member_replays.one_turn.remove(&peer);
+        let since = self
+            .dirty_since
+            .get(&peer)
+            .copied()
+            .unwrap_or_else(tokio::time::Instant::now);
+        self.initial_member_replays.members.insert(
+            peer,
+            Replay {
+                gid,
+                table_stamp: self.group_ribs[&gid].evpn_table_stamp,
+                session: self.outbound_session_ids[&peer],
+                sender: self.outbound_peers[&peer].clone(),
+                // The captured proof is the member's admission: nothing to prepare.
+                phase: Phase::Send,
+                changes: ReplayChanges::coalescing(),
+                carry: VecDeque::new(),
+                mode: Mode::Reconcile,
+                // R1 starts at the member's first turn, after any source departure.
+                rewind: true,
+                rearms: 0,
+                forced,
+                swept: None,
+                sweep_done: false,
+                sweep_due: false,
+                resync: Some(since),
+            },
+        );
+        self.initial_member_replays.ready.push_back(peer);
+        // The export counters a one-turn resync replays, synthesized from
+        // the group as a join's are.
+        self.start_initial_replay_policy(peer, gid);
+        // R1 revisits every Loc-RIB key's denials; a denied route that left
+        // while the member was dirty is in its history alone.
+        // Proportional to the member's retained denials, not its table.
+        if let Some(history) = self.policy_filtered_routes.get(&peer) {
+            let departed: HashSet<Prefix> = history
+                .keys()
+                .copied()
+                .filter(|prefix| self.loc_rib.get(prefix).is_none())
+                .collect();
+            if !departed.is_empty() {
+                self.apply_initial_replay_page_policy(peer, gid, &departed);
+            }
+        }
+        self.refresh_group_recovery_gauges();
+        self.refresh_eor_retry(peer);
+        tracing::debug!(%peer, forced, "grouped resync enrolls a paced reconcile");
+        #[cfg(feature = "bench-internals")]
+        self.observe_initial_replay(peer, BenchReplayEvent::ResyncReconcile);
+        #[cfg(test)]
+        super::slice_timing::record_work("grouped_resync_reconciles", 1);
+        Ok(())
+    }
+
+    /// The resync tick's one-turn unit for `peer` ran. When it built the
+    /// table, count `fallback`, the cause [`Self::reconcile_grouped_resync`]
+    /// refused with; a unit refused before the build retries uncounted. A
+    /// later resync of the member may reconcile again.
+    pub(super) fn grouped_resync_ran(
+        &mut self,
+        peer: PeerId,
+        built: bool,
+        fallback: Option<PacedFallbackCause>,
+    ) {
+        if built && let Some(cause) = fallback {
+            self.note_paced_fallback(PacedJob::GroupedResync, cause, peer);
+        }
+        #[cfg(feature = "bench-internals")]
+        if built && self.grouped_member_of(peer).is_some() {
+            self.observe_initial_replay(
+                peer,
+                BenchReplayEvent::ResyncOneTurn(fallback.map(PacedFallbackCause::as_str)),
+            );
+        }
+        self.initial_member_replays.one_turn.remove(&peer);
+    }
+
+    /// The dirty-episode start of each member a resync reconcile repairs.
+    pub(super) fn resync_reconciles(&self) -> impl Iterator<Item = tokio::time::Instant> + '_ {
+        self.initial_member_replays
+            .members
+            .values()
+            .filter_map(|replay| replay.resync)
+    }
+
+    /// The dirty-episode start of `peer`'s resync reconcile, if one runs.
+    pub(super) fn resync_reconcile_since(&self, peer: PeerId) -> Option<tokio::time::Instant> {
+        self.initial_member_replays
+            .members
+            .get(&peer)
+            .and_then(|replay| replay.resync)
     }
 
     /// Restart a reconcile's scan from its first bucket. The proof stays.
@@ -700,6 +959,7 @@ impl RibManager {
             return false;
         }
         debug_assert!(!job.changes.unsent(), "a coalesced key outlived its repair");
+        let job_gid = job.gid;
         // End-of-RIB waits for the rest of an UPDATE whose first chunks applied.
         if !self.pending_route_batches.is_empty() {
             self.initial_member_replays.ready.push_back(peer);
@@ -709,6 +969,15 @@ impl RibManager {
         #[cfg(feature = "bench-internals")]
         self.observe_initial_replay(peer, BenchReplayEvent::Completed);
         self.complete_initial_selection_replay(peer);
+        // A reconcile that took over a dirty member's resync also retires
+        // the residue the group kept for it, as a completed resync does.
+        if self
+            .group_ribs
+            .get(&job_gid)
+            .is_some_and(|group| group.dirty_members.contains(&peer))
+        {
+            self.clear_grouped_member_synced(peer);
+        }
         self.retire_completed_initial_group_admitted(peer);
         self.settle_free_eor(peer);
         true

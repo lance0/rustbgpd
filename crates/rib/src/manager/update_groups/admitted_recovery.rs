@@ -2217,6 +2217,23 @@ impl AdmittedRecovery {
         Ok(handle.is_some())
     }
 
+    /// Adopt a member's captured proof, empty or not, for a paced reconcile.
+    /// Its admitted keys stay as they are and no universe is built: the
+    /// reconcile reads admission from this proof, sweeps it, and commits its
+    /// pages into it as an initial replay's do. `false` without a complete
+    /// proof.
+    pub(in crate::manager) fn begin_reconcile(&mut self, peer: PeerId) -> bool {
+        let Ok(index) = self.index(peer) else {
+            return false;
+        };
+        let record = &mut self.records[index];
+        if record.state != State::Complete {
+            return false;
+        }
+        record.initial_replay = true;
+        true
+    }
+
     /// Where an initial replay over `rows` table rows (its mask, keyed
     /// universe and headers) fits: in the daemon budget now, only once the
     /// live initial replays release theirs, or under neither limit.
@@ -3111,6 +3128,45 @@ mod tests {
             visits < 100,
             "range count must not walk the unrelated 4096-key universe: {visits}"
         );
+    }
+
+    // A dirty member's captured proof is what it was sent. A reconcile
+    // adopts it as it stands: no new universe, no new charge, and its
+    // commits keep admission exact.
+    #[test]
+    fn a_reconcile_adopts_a_captured_proof_as_it_stands() {
+        let mut ledger = AdmittedRecovery::new();
+        let who = peer(1);
+        assert!(!ledger.begin_reconcile(who), "no proof");
+        assert!(ledger.begin_capture(who).unwrap());
+        for n in [3, 9, 12] {
+            ledger.push_capture(who, key(n)).unwrap();
+        }
+        assert!(!ledger.begin_reconcile(who), "a capture still open");
+        ledger.seal_capture(who).unwrap();
+        let charge = ledger.bytes();
+        assert!(ledger.begin_reconcile(who));
+        assert_eq!(ledger.initial_replay_sparse_len(who), Some(3));
+        assert_eq!(ledger.bytes(), charge);
+        let (swept, next, _) = ledger.get(&who).unwrap().sweep_unicast(None, 2);
+        assert_eq!(swept, [key(3), key(9)]);
+        let (swept, next, _) = ledger.get(&who).unwrap().sweep_unicast(next, 2);
+        assert_eq!((swept.as_slice(), next), (&[key(12)][..], None));
+        ledger.reserve_admitted(who, [key(5)].into_iter()).unwrap();
+        ledger
+            .apply_reserved_admitted_with_checkpoint(
+                who,
+                [key(5)].into_iter(),
+                [key(9)].into_iter(),
+                &mut |_| {},
+            )
+            .unwrap();
+        assert_eq!(
+            ledger.get(&who).unwrap().iter().collect::<Vec<_>>(),
+            [key(3).into(), key(5).into(), key(12).into()]
+        );
+        assert!(ledger.remove(&who));
+        assert_eq!(ledger.bytes(), size_of::<AdmittedRecovery>());
     }
 
     #[test]

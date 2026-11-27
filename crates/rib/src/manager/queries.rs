@@ -4494,12 +4494,12 @@ impl RibManager {
         peer: PeerId,
         initial_proof: Option<bool>,
     ) -> crate::update::OutboundResyncState {
-        let pending = self.dirty_peers.contains(&peer);
+        let reconciling = self.resync_reconcile_since(peer);
+        let pending = self.dirty_peers.contains(&peer) || reconciling.is_some();
         crate::update::OutboundResyncState {
             pending,
-            dirty_secs: self
-                .dirty_since
-                .get(&peer)
+            dirty_secs: reconciling
+                .or_else(|| self.dirty_since.get(&peer).copied())
                 .filter(|_| pending)
                 .map(|since| since.elapsed().as_secs()),
             advertised_count_pending: self.private_unicast_admission_incomplete(peer)
