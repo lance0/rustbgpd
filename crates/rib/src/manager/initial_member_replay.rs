@@ -267,11 +267,25 @@ impl RibManager {
     /// still waiting reads the RS-control setting its session will install.
     fn replay_cohort_key(&self, peer: PeerId, gid: usize) -> Option<CohortKey> {
         let stamp = self.group_ribs.get(&gid)?.evpn_table_stamp;
-        let view = self.peer_rs_control.get(&peer).copied().or_else(|| {
-            let session = self.live_sessions.get(&peer)?.last()?.session_id;
-            *self.pending_peer_rs_control.get(&(peer, session))?
-        });
+        // The pending setting is consumed when the session installs: while it
+        // is there, the installed one belongs to an older session.
+        let pending = self
+            .live_sessions
+            .get(&peer)
+            .and_then(|sessions| sessions.last())
+            .and_then(|record| self.pending_peer_rs_control.get(&(peer, record.session_id)));
+        let view = match pending {
+            Some(view) => *view,
+            None => self.peer_rs_control.get(&peer).copied(),
+        };
         Some((gid, stamp, view))
+    }
+
+    /// The largest overlay a member completed with, per universe.
+    #[cfg(test)]
+    pub(super) fn replay_cohort_overlays(&self) -> Vec<usize> {
+        let cohorts = &self.initial_member_replays.cohorts;
+        cohorts.iter().map(|cohort| cohort.overlay).collect()
     }
 
     /// The newest live universe of cohort `key` a joiner may share.

@@ -2358,8 +2358,11 @@ impl AdmittedRecovery {
         else {
             return false;
         };
-        // No member sends before its universe is complete, so no overlay
-        // holds a key yet; the check keeps the two disjoint regardless.
+        // A member that fell back mid-walk keeps its record and reference
+        // while it is dirty, and its resync, in one turn or adopted by a
+        // reconcile, admits keys into its overlay while the others still
+        // walk. A universe key must be admitted by its mask bit alone, so a
+        // key any such overlay holds stays out of the universe.
         let overlays: SmallVec<[usize; 0]> = (0..self.records.len())
             .filter(|&index| {
                 let record = &self.records[index];

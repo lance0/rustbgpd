@@ -749,6 +749,125 @@ fn a_late_joiner_starts_a_new_universe_once_the_table_has_moved() {
     assert_eq!(universes(&manager), 2);
 }
 
+fn turn(manager: &mut RibManager) {
+    manager.wake_initial_member_replay();
+    manager.advance_pending_initial_registration();
+}
+
+// Events while the cohort still walks its table. The member that carried
+// the first page leaves, a third member enrolls into the half-built
+// universe, and the remaining member rewinds into a reconcile before it has
+// sent anything. The walk continues from the cohort's cursor, once, and
+// both members end with the exact table.
+#[test]
+fn a_cohort_keeps_one_walk_through_a_departure_a_joiner_and_a_rewind() {
+    use crate::manager::initial_member_replay::PacedFallbackCause;
+
+    let Published {
+        mut manager,
+        tx: _tx,
+        ..
+    } = published();
+    let before = work("initial_member_proof_walk_rows");
+    let walked = || work("initial_member_proof_walk_rows") - before;
+    let _first = rs_client(&mut manager, 1, 1 << 12);
+    let second = rs_client(&mut manager, 2, 1 << 12);
+    settle(&mut manager);
+    for _ in 0..1_000 {
+        if walked() >= REGISTRATION_PAGE_SIZE {
+            break;
+        }
+        turn(&mut manager);
+    }
+    assert!(
+        (REGISTRATION_PAGE_SIZE..ROWS).contains(&walked()),
+        "walked {}",
+        walked()
+    );
+    // Member 1 took the first page of the walk.
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: receiver(1),
+        session_id: 1,
+    });
+    drain_source_departure(&mut manager);
+    assert!(!manager.is_initial_member_replay(receiver(1)));
+    let third = rs_client(&mut manager, 3, 1 << 12);
+    settle(&mut manager);
+    assert!(manager.is_initial_member_replay(receiver(3)));
+    assert_eq!(manager.pending_group_admitted.replay_universes(), 1);
+    assert!(
+        manager.recover_initial_member_replay(receiver(2), PacedFallbackCause::ScanRepairLimit),
+        "member 2 did not rewind"
+    );
+    assert!(walked() < ROWS, "the walk ended before the events");
+
+    let mut members = [(2, second), (3, third)];
+    let (peak, paced) = advance_until_complete(&mut manager, &mut members, ROWS, 1);
+    assert!(paced.iter().all(|paced| *paced) && peak <= REGISTRATION_PAGE_SIZE);
+    assert!(
+        (ROWS..=ROWS + usize::from(PAGES)).contains(&walked()),
+        "walked {}",
+        walked()
+    );
+    assert!(manager.dirty_peers.is_empty());
+    assert_eq!(manager.pending_group_admitted.replay_universes(), 0);
+}
+
+// A late joiner shares a universe walked before the table gained prefixes.
+// It admits those through its own overlay and still receives every row.
+#[test]
+fn a_late_joiner_admits_keys_its_shared_universe_lacks() {
+    let Published {
+        mut manager,
+        tx: _tx,
+        ..
+    } = published();
+    let before = work("initial_member_proof_walk_rows");
+    // Its one-slot writer parks the member that holds the universe.
+    let _holder = rs_client(&mut manager, 1, 1);
+    settle(&mut manager);
+    for _ in 0..1_000 {
+        if work("initial_member_proof_walk_rows") - before >= ROWS {
+            break;
+        }
+        turn(&mut manager);
+    }
+    assert!(work("initial_member_proof_walk_rows") - before >= ROWS);
+    assert!(manager.is_initial_member_replay(receiver(1)));
+    // Fewer new prefixes than one key in 16 of the universe.
+    let extra = ROWS / 32;
+    let new = (0..u16::try_from(extra).unwrap())
+        .map(|n| route(prefixes(u16::try_from(ROWS).unwrap() + n)[0], SOURCE, 100))
+        .collect();
+    manager.handle_update(test_routes_received(peer_v4(SOURCE), new));
+    drain_route_chunks(&mut manager);
+
+    let late = receiver(3);
+    let mut rx = rs_client(&mut manager, 3, 1 << 12);
+    settle(&mut manager);
+    assert!(manager.is_initial_member_replay(late));
+    assert_eq!(manager.pending_group_admitted.replay_universes(), 1);
+    let mut seen = HashSet::new();
+    let mut markers = 0;
+    for _ in 0..100_000 {
+        if markers == 1 {
+            break;
+        }
+        turn(&mut manager);
+        while let Ok(update) = rx.try_recv() {
+            for row in update.announce.iter() {
+                assert!(seen.insert(row.prefix), "duplicate row");
+            }
+            markers += update.end_of_rib.len();
+        }
+    }
+    assert_eq!((seen.len(), markers), (ROWS + extra, 1));
+    // The overlay the joiner completed with: its last page completes in
+    // the turn that admits it, so a sample between turns would miss it.
+    assert_eq!(manager.replay_cohort_overlays(), [extra]);
+    assert!(manager.dirty_peers.is_empty());
+}
+
 /// A dual-stack table and an IPv4 one, with one parked IPv4 replay holding
 /// proof budget. Returns the parked writer and that replay's proof charge.
 fn budget_shape() -> (Published, mpsc::Receiver<OutboundRouteUpdate>, usize) {
