@@ -4733,14 +4733,19 @@ impl RibManager {
 
     fn outbound_convergence(&self) -> crate::update::OutboundConvergence {
         let now = tokio::time::Instant::now();
-        // A member whose resync reconciles in pages is still pending.
+        // A member whose resync reconciles in pages is still pending, once
+        // even while a new dirty mark waits for its reconcile to take it.
         crate::update::OutboundConvergence {
-            pending_peers: self.dirty_peers.len() + self.resync_reconciles().count(),
+            pending_peers: self.dirty_peers.len()
+                + self
+                    .resync_reconciles()
+                    .filter(|(peer, _)| !self.dirty_peers.contains(peer))
+                    .count(),
             oldest_pending_secs: self
                 .dirty_peers
                 .iter()
                 .filter_map(|peer| self.dirty_since.get(peer).copied())
-                .chain(self.resync_reconciles())
+                .chain(self.resync_reconciles().map(|(_, since)| since))
                 .map(|since| now.saturating_duration_since(since).as_secs())
                 .max()
                 .unwrap_or(0),

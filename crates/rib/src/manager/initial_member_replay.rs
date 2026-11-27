@@ -39,18 +39,20 @@ enum Mode {
     Reconcile,
 }
 
-/// Repair-log overflows a replay may rewind from before it takes the dirty
-/// resync with cause `lag`.
-// Interim liveness bound: churn that overflows every rescan would otherwise
-// re-arm forever and hold End-of-RIB back. After this many overflow re-arms
-// the replay takes one counted dirty resync, trading a rare whole-table turn
-// for a capped repair log and certain completion. The shared lag bound
-// replaces this with a forced bounded unit and a paced restart.
-const MAX_OVERFLOW_REARMS: u16 = 8;
+/// Rewinds a replay may take before it takes the dirty resync with cause
+/// `lag`.
+// Interim liveness bound: churn that overflows every rescan, or a member
+// marked dirty again faster than its rescan finishes, would otherwise re-arm
+// forever and hold the replay back. After this many rewinds the replay takes
+// one counted dirty resync, trading a rare whole-table turn for a capped
+// repair log and certain completion. A rewind still pending is not counted
+// again. The shared lag bound replaces this with a forced bounded unit and a
+// paced restart.
+const MAX_REARMS: u16 = 8;
 
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "rewind, forced resync, sweep completion and the sweep's turn are independent replay states"
+    reason = "rewind, forced resync, sweep completion, the sweep's turn and denial completion are independent replay states"
 )]
 struct Replay {
     gid: usize,
@@ -66,7 +68,7 @@ struct Replay {
     // A reconcile restarts its scan at its next turn. Until then the scan is
     // stopped: the rescan revisits every key, so nothing needs recording.
     rewind: bool,
-    // Repair-log overflows this replay rewound from.
+    // Rewinds this replay took after its scan had started.
     rearms: u16,
     // The reconcile consumed a forced resync, which holds until R1 has
     // resent every row. A fallback before then must force its resync.
@@ -77,6 +79,12 @@ struct Replay {
     // Once R1 has visited every key, repair and sweep turns alternate, so a
     // change before every turn cannot hold R2 back.
     sweep_due: bool,
+    // R3's position in the member's denial history: the last prefix it
+    // visited, and whether it is done. A denied prefix that left the
+    // Loc-RIB while the replay had lost track of its changes is in that
+    // history alone, so neither R1 nor R2 reaches it.
+    denied: Option<Prefix>,
+    denials_done: bool,
     // A reconcile the resync tick enrolled for a member that fell behind,
     // with the start of its dirty episode. It owes no End-of-RIB of its own,
     // and the member counts as pending a resync until it completes.
@@ -325,7 +333,7 @@ impl RibManager {
         }
         self.refresh_group_recovery_gauges();
         self.loc_rib.start_member_replay_scan(peer);
-        self.initial_member_replays.members.insert(
+        let previous = self.initial_member_replays.members.insert(
             peer,
             Replay {
                 gid,
@@ -342,9 +350,12 @@ impl RibManager {
                 swept: None,
                 sweep_done: false,
                 sweep_due: false,
+                denied: None,
+                denials_done: true,
                 resync: None,
             },
         );
+        debug_assert!(previous.is_none(), "a live replay was overwritten");
         self.initial_member_replays.ready.push_back(peer);
         self.set_initial_group_admitted_counts(peer, [0; 6]);
         self.start_initial_replay_policy(peer, gid);
@@ -549,7 +560,7 @@ impl RibManager {
             // A pending rewind already covers every later cause, such as the
             // next batch of a paged release.
             let pending = replay.rewind;
-            if cause == Cause::ScanRepairLimit && !pending {
+            if !pending {
                 replay.rearms += 1;
             }
             if pending {
@@ -560,7 +571,7 @@ impl RibManager {
                 }
                 return true;
             }
-            if replay.rearms > MAX_OVERFLOW_REARMS {
+            if replay.rearms > MAX_REARMS {
                 cause = Cause::Lag;
             } else {
                 replay.mode = Mode::Reconcile;
@@ -569,6 +580,8 @@ impl RibManager {
                 replay.carry.clear();
                 replay.swept = None;
                 replay.sweep_done = false;
+                replay.denied = None;
+                replay.denials_done = false;
                 // Every reconcile row is a forced replay.
                 replay.forced |= cause == Cause::ForcedResync;
                 let rearms = replay.rearms;
@@ -734,10 +747,23 @@ impl RibManager {
     /// the member already owes stays held until it completes. `Err` leaves
     /// the one-turn resync to run, with the cause
     /// [`Self::grouped_resync_ran`] counts once it is built.
+    ///
+    /// A member whose replay is already live (parked on a full writer, or
+    /// its rewind held behind a source departure) keeps it: the replay takes
+    /// the mark as it would at its next turn, rewinding with its proof and
+    /// force bit, or falling back and counting why.
     pub(super) fn reconcile_grouped_resync(
         &mut self,
         peer: PeerId,
     ) -> Result<(), Option<PacedFallbackCause>> {
+        if self.is_initial_member_replay(peer) {
+            let cause = self
+                .group_recovery_fallback(peer)
+                .map_or(PacedFallbackCause::AlreadyDirty, Into::into);
+            if self.recover_initial_member_replay(peer, cause) {
+                return Ok(());
+            }
+        }
         let gid = self.resync_reconcile_refusal(peer, false)?;
         let adopted = self.pending_group_admitted.begin_reconcile(peer);
         debug_assert!(adopted, "a complete proof was checked");
@@ -749,7 +775,7 @@ impl RibManager {
             .get(&peer)
             .copied()
             .unwrap_or_else(tokio::time::Instant::now);
-        self.initial_member_replays.members.insert(
+        let previous = self.initial_member_replays.members.insert(
             peer,
             Replay {
                 gid,
@@ -768,26 +794,19 @@ impl RibManager {
                 swept: None,
                 sweep_done: false,
                 sweep_due: false,
+                // R1 revisits every Loc-RIB key's denials; R3 pages through
+                // the history for denied routes that left while the member
+                // was dirty.
+                denied: None,
+                denials_done: false,
                 resync: Some(since),
             },
         );
+        debug_assert!(previous.is_none(), "a live replay was overwritten");
         self.initial_member_replays.ready.push_back(peer);
         // The export counters a one-turn resync replays, synthesized from
         // the group as a join's are.
         self.start_initial_replay_policy(peer, gid);
-        // R1 revisits every Loc-RIB key's denials; a denied route that left
-        // while the member was dirty is in its history alone.
-        // Proportional to the member's retained denials, not its table.
-        if let Some(history) = self.policy_filtered_routes.get(&peer) {
-            let departed: HashSet<Prefix> = history
-                .keys()
-                .copied()
-                .filter(|prefix| self.loc_rib.get(prefix).is_none())
-                .collect();
-            if !departed.is_empty() {
-                self.apply_initial_replay_page_policy(peer, gid, &departed);
-            }
-        }
         self.refresh_group_recovery_gauges();
         self.refresh_eor_retry(peer);
         tracing::debug!(%peer, forced, "grouped resync enrolls a paced reconcile");
@@ -821,12 +840,14 @@ impl RibManager {
         self.initial_member_replays.one_turn.remove(&peer);
     }
 
-    /// The dirty-episode start of each member a resync reconcile repairs.
-    pub(super) fn resync_reconciles(&self) -> impl Iterator<Item = tokio::time::Instant> + '_ {
+    /// Each member a resync reconcile repairs, with its dirty-episode start.
+    pub(super) fn resync_reconciles(
+        &self,
+    ) -> impl Iterator<Item = (PeerId, tokio::time::Instant)> + '_ {
         self.initial_member_replays
             .members
-            .values()
-            .filter_map(|replay| replay.resync)
+            .iter()
+            .filter_map(|(peer, replay)| Some((*peer, replay.resync?)))
     }
 
     /// The dirty-episode start of `peer`'s resync reconcile, if one runs.
@@ -928,14 +949,19 @@ impl RibManager {
             .expect("live replay");
         if replay.mode == Mode::Reconcile
             && replay.carry.is_empty()
-            && (ready || (discovered && replay.sweep_due && !replay.sweep_done))
+            && (ready
+                || (discovered && replay.sweep_due && !(replay.sweep_done && replay.denials_done)))
         {
             // R1 has resent every row. Repairs queued since then reconcile
             // their keys against the current slot and admission, including
             // keys this sweep has already passed.
             replay.forced = false;
             replay.sweep_due = false;
-            self.sweep_initial_member_page(peer, gid);
+            if replay.sweep_done && !replay.denials_done {
+                self.sweep_initial_member_denials(peer, gid);
+            } else {
+                self.sweep_initial_member_page(peer, gid);
+            }
         } else {
             replay.sweep_due = true;
             self.send_initial_member_page(peer, gid);
@@ -952,7 +978,7 @@ impl RibManager {
         if job.changes.has_pending()
             || !job.carry.is_empty()
             || job.rewind
-            || (job.mode == Mode::Reconcile && !job.sweep_done)
+            || (job.mode == Mode::Reconcile && !(job.sweep_done && job.denials_done))
             || self.loc_rib.member_replay_scan_status(peer) != RegistrationScanStatus::Ready
             || self.dirty_peers.contains(&peer)
         {
@@ -1198,6 +1224,47 @@ impl RibManager {
             .expect("live replay");
         replay.sweep_done = next.is_none();
         replay.swept = next;
+        if self.outbound_channel_full(peer) || !self.complete_initial_member_replay(peer) {
+            self.initial_member_replays.ready.push_back(peer);
+        }
+    }
+
+    /// R3: reconcile one page of the member's denial history, in prefix
+    /// order, for prefixes the Loc-RIB no longer holds. R1 reconciled the
+    /// denials of every key the Loc-RIB holds, and the live passes keep
+    /// them current; a prefix that left while the replay had lost track of
+    /// its changes is found only here.
+    fn sweep_initial_member_denials(&mut self, peer: PeerId, gid: usize) {
+        use std::ops::Bound::{Excluded, Unbounded};
+
+        let after = self.initial_member_replays.members[&peer].denied;
+        let mut visits = 0;
+        let mut last = None;
+        let departed: HashSet<Prefix> = self
+            .policy_filtered_routes
+            .get(&peer)
+            .into_iter()
+            .flat_map(|history| history.range((after.map_or(Unbounded, Excluded), Unbounded)))
+            .take(REGISTRATION_PAGE_SIZE)
+            .map(|(prefix, _)| {
+                visits += 1;
+                last = Some(*prefix);
+                *prefix
+            })
+            .filter(|prefix| self.loc_rib.get(prefix).is_none())
+            .collect();
+        #[cfg(test)]
+        super::slice_timing::record_work("initial_member_replay_denial_visits", visits);
+        if !departed.is_empty() {
+            self.apply_initial_replay_page_policy(peer, gid, &departed);
+        }
+        let replay = self
+            .initial_member_replays
+            .members
+            .get_mut(&peer)
+            .expect("live replay");
+        replay.denials_done = visits < REGISTRATION_PAGE_SIZE;
+        replay.denied = last;
         if self.outbound_channel_full(peer) || !self.complete_initial_member_replay(peer) {
             self.initial_member_replays.ready.push_back(peer);
         }

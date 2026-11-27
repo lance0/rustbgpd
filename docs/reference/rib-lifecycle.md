@@ -436,9 +436,12 @@ holds under [Restart](#restart)).
   of a one-turn resync: it rescans the table in pages, sending each key's
   current row against what the member was sent, then sweeps the member's
   admitted keys in pages to withdraw those the table no longer holds.
-  End-of-RIB still follows the complete table, once. Churn that overflows
-  the repair log on more than 8 rescans takes one resync instead (counted as
-  `lag`), so the repair log stays capped and the join completes. A regroup or a lost
+  It also pages through the member's export-policy denials for routes that
+  left the table meanwhile. End-of-RIB still follows the complete table,
+  once. A replay that rewinds more than 8 times (repair-log overflows, or
+  dirty marks and refreshes arriving faster than its rescan finishes) takes
+  one resync instead (counted as `lag`), so the repair log stays capped and
+  the join completes. A regroup or a lost
   admitted-key proof still takes the resync, at the 10 ms backlog cadence,
   and so does a dirty mark from another path that the member's resync could
   not reconcile either (see Group member, below); otherwise the replay
@@ -697,7 +700,8 @@ against what it holds.
   member's Adj-RIB-Out listing is refused, and it counts in
   `bgp_rib_outbound_dirty_peers`, until then. A full writer parks the
   reconcile at its cursor without a new dirty mark, and another dirty mark
-  restarts the rescan. Tests:
+  restarts the rescan, as a dirty mark the tick finds on it does; more than
+  8 rewinds take one resync counted `lag`. Tests:
   [`grouped_resync.rs`](../../crates/rib/src/manager/tests/first_group_build/initial_member_replay/grouped_resync.rs).
 - Any other member is resent its table in one whole-table operation
   outside the credit. At a table of at least 10,000 routes that is counted

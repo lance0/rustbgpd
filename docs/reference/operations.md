@@ -2211,7 +2211,7 @@ routes that are exempt from the hold.
 | `proof_budget` | The replay's proof fits under neither recovery cap, for a joiner that shares another registration's one-turn send. A joiner that sends alone reports `peer_limit` or `daemon_limit` instead |
 | `policy_evaluation` | The export policy could not be evaluated privately, page by page |
 | `source_changed` | A session or RPKI/ASPA snapshot the reload depends on changed |
-| `lag` | Ingest kept the reload behind for 64 turns, or rewound its scan 64 times. For `initial_replay`, churn overflowed the replay's repair log on more than 8 rescans |
+| `lag` | Ingest kept the reload behind for 64 turns, or rewound its scan 64 times. For `initial_replay` and `grouped_resync`, the replay rewound more than 8 times: churn overflowed its repair log, or dirty marks, forced refreshes or releases arrived faster than its rescan could finish |
 | `slot_busy` | Another paced build held the build slot |
 | `clean_transition` | A clean policy transition was in progress |
 | `owed_row_cap` | The receiver fell behind the owed-row list cap during the job and was evicted to a whole-table resync; `bgp_rib_outbound_owing_fallback_total` counts the same eviction |
@@ -2224,9 +2224,9 @@ End-of-RIB once, after the complete table. That covers `scan_repair_limit`,
 `forced_resync`. Those causes count for `initial_replay` only when the member
 cannot reconcile: its admitted-key proof is gone, it is already marked for a
 resync it could not take in pages, or an ORF filter is installed on a forced
-resync. A replay whose repair
-log overflows on more than 8 rescans takes the resync with cause `lag`, so
-churn cannot hold its End-of-RIB back indefinitely.
+resync. A replay that rewinds more than 8 times, whether its repair log
+overflowed or new dirty marks or refreshes kept arriving, takes the resync
+with cause `lag`, so churn cannot hold its End-of-RIB back indefinitely.
 
 A `grouped_resync` counts when a group member that fell behind, at a table of
 at least 10,000 routes, still takes its table in one turn: `ineligible_shape`

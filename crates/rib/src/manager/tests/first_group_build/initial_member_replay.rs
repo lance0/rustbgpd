@@ -32,6 +32,22 @@ fn member(
     policy: bool,
     orf_hold: bool,
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
+    member_with(
+        manager,
+        peer,
+        capacity,
+        policy.then(|| community_chain(TAG)),
+        orf_hold,
+    )
+}
+
+fn member_with(
+    manager: &mut RibManager,
+    peer: PeerId,
+    capacity: usize,
+    policy: Option<rustbgpd_policy::PolicyChain>,
+    orf_hold: bool,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (out, rx) = mpsc::channel(capacity);
     let mut up = test_peer_up(peer, 7, out);
     let RibUpdate::PeerUp {
@@ -46,7 +62,7 @@ fn member(
     };
     *is_ebgp = false;
     *route_reflector_client = true;
-    *export_policy = policy.then(|| community_chain(TAG));
+    *export_policy = policy;
     if orf_hold {
         negotiated_orf_recv.push(FAMILY);
     }

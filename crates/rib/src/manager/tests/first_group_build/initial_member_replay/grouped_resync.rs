@@ -5,7 +5,22 @@
 //! changes while it is dirty, then drives the resync a turn at a time.
 use super::*;
 use crate::loc_rib::REGISTRATION_PAGE_SIZE;
+use crate::manager::tests::update_groups::deny_statement;
 use crate::update::{RoutePageError, RouteQueryScope};
+
+/// The denying export policy denies every route at this preference or above.
+const DENY_FROM: u32 = 150;
+/// The first of the routes only OTHER holds, each denied, in a denying run.
+const DENIED: u16 = 20_000;
+
+fn denying_policy() -> rustbgpd_policy::PolicyChain {
+    let mut terms = community_chain(TAG).policies;
+    let mut deny = deny_statement(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0));
+    deny.prefix = None;
+    deny.match_local_pref_ge = Some(DENY_FROM);
+    terms[0].policy.entries.insert(0, deny);
+    rustbgpd_policy::PolicyChain::from_named(terms)
+}
 
 /// Whole-table units: dirty resync builds (K1), one-turn initial tables (K2)
 /// and synchronous group builds (K3).
@@ -43,6 +58,8 @@ struct Lagged {
     last_turn: (usize, usize),
     before: [usize; 3],
     reconciles: usize,
+    /// Routes at this preference or above are denied toward the member.
+    deny_from: u32,
 }
 
 impl Lagged {
@@ -50,20 +67,47 @@ impl Lagged {
     /// fills under churn until a pass marks it dirty, then `missed` more
     /// changes land while it is dirty.
     fn new(rows: u16, capacity: usize, missed: u16) -> Self {
+        Self::build(rows, capacity, missed, None)
+    }
+
+    /// As [`Self::new`], behind an export policy that denies every route
+    /// at [`DENY_FROM`] or above. OTHER alone holds `denied` more routes,
+    /// all denied, which it withdraws while the member is dirty: those
+    /// denials are then in the member's history alone.
+    fn denying(rows: u16, missed: u16, denied: u16) -> Self {
+        Self::build(rows, 2, missed, Some(denied))
+    }
+
+    fn build(rows: u16, capacity: usize, missed: u16, denied: Option<u16>) -> Self {
         let (mut manager, tx, _) = fixture(0);
         let routes = (0..rows)
             .map(|i| route(prefixes(i)[0], SOURCE, 100))
             .collect();
         manager.handle_update(test_routes_received(peer_v4(SOURCE), routes));
         drain_route_chunks(&mut manager);
-        let model = (0..rows)
+        let mut model: Model = (0..rows)
             .map(|i| (prefixes(i)[0], BTreeMap::from([(SOURCE, 100)])))
             .collect();
+        let gone: Vec<Prefix> = (0..denied.unwrap_or(0))
+            .map(|i| prefixes(DENIED + i)[0])
+            .collect();
+        if !gone.is_empty() {
+            let routes = gone
+                .iter()
+                .map(|&prefix| route(prefix, OTHER, 200))
+                .collect();
+            manager.handle_update(test_routes_received(peer_v4(OTHER), routes));
+            drain_route_chunks(&mut manager);
+            for &prefix in &gone {
+                model.insert(prefix, BTreeMap::from([(OTHER, 200)]));
+            }
+        }
         let peer = receiver(1);
         // The initial table goes out in one turn; only the resync is paced.
         manager.first_group_build_min_routes = usize::MAX;
         manager.initial_member_replays.min_routes = Some(usize::MAX);
-        let rx = member(&mut manager, peer, capacity, false, false);
+        let policy = denied.map(|_| denying_policy());
+        let rx = member_with(&mut manager, peer, capacity, policy, false);
         finish(&mut manager);
         let mut lagged = Self {
             manager,
@@ -76,6 +120,11 @@ impl Lagged {
             last_turn: (0, 0),
             before: [0; 3],
             reconciles: 0,
+            deny_from: if denied.is_some() {
+                DENY_FROM
+            } else {
+                u32::MAX
+            },
         };
         lagged.read();
         assert_eq!(lagged.markers, 1, "initial End-of-RIB");
@@ -96,6 +145,22 @@ impl Lagged {
                 _ => lagged.set(rows + n, OTHER, Some(100)),
             }
         }
+        if !gone.is_empty() {
+            let mut update = test_routes_received(peer_v4(OTHER), Vec::new());
+            let RibUpdate::RoutesReceived { withdrawn, .. } = &mut update else {
+                unreachable!()
+            };
+            withdrawn.extend(gone.iter().map(|&prefix| (prefix, 0)));
+            lagged.manager.handle_update(update);
+            drain_route_chunks(&mut lagged.manager);
+            for prefix in &gone {
+                lagged.model.remove(prefix);
+            }
+            assert!(
+                lagged.denials().iter().any(|key| key.prefix == gone[0]),
+                "the dirty member's history lost a departed denial"
+            );
+        }
         assert!(lagged.manager.dirty_peers.contains(&peer));
         lagged.read();
         lagged.before = whole_table_units(&lagged.manager);
@@ -108,7 +173,7 @@ impl Lagged {
             .iter()
             .filter_map(|(prefix, paths)| {
                 let (source, pref) = paths.iter().max_by_key(|(_, pref)| **pref)?;
-                Some((*prefix, (peer_v4(*source), *pref)))
+                (*pref < self.deny_from).then(|| (*prefix, (peer_v4(*source), *pref)))
             })
             .collect()
     }
@@ -162,6 +227,25 @@ impl Lagged {
             }
             self.markers += page.end_of_rib.len();
         }
+    }
+
+    /// The member's retained export-policy denials.
+    fn denials(&self) -> HashSet<PolicyFilteredRouteKey> {
+        crate::manager::tests::retained_policy_rejection_keys(&self.manager, self.peer)
+    }
+
+    /// The member's export-policy permits and denials.
+    fn policy_counters(&self) -> (u64, u64) {
+        self.manager
+            .export_policy_counters
+            .get(&self.peer)
+            .map(crate::update::ExportPolicyCounters::snapshot)
+            .map_or((0, 0), |stats| {
+                (
+                    stats.export_policy_routes_permitted,
+                    stats.export_policy_routes_denied,
+                )
+            })
     }
 
     fn reconciling(&self) -> bool {
@@ -614,4 +698,214 @@ fn an_owed_end_of_rib_follows_the_reconciled_table() {
     assert_eq!(lagged.markers, 2, "the owed marker, once");
     assert_eq!(lagged.units(), [0; 3]);
     crate::manager::tests::assert_paced_fallbacks(&lagged.manager.metrics, &[]);
+}
+
+// A dirty mark the resync tick finds on a member whose reconcile is live
+// (parked on a full writer, or its rewind held behind a source departure)
+// is the reconcile's to take: it rewinds with its proof and force bit. The
+// tick never enrolls a second replay over it, and the member counts once
+// as pending a resync meanwhile.
+#[test]
+fn a_tick_leaves_a_dirty_mark_to_the_live_reconcile() {
+    for forced in [false, true] {
+        let mut lagged = Lagged::new(V4_ROWS, 2, 30);
+        lagged.tick();
+        for _ in 0..3 {
+            lagged.turn();
+        }
+        assert!(lagged.reconciling());
+        if forced {
+            lagged.manager.force_outbound_peers.insert(lagged.peer);
+        }
+        assert!(lagged.manager.mark_outbound_dirty(lagged.peer));
+        assert_eq!(
+            lagged.manager.outbound_convergence().pending_peers,
+            1,
+            "forced={forced}: the member counted twice"
+        );
+        lagged.tick();
+        assert!(lagged.reconciling(), "forced={forced}");
+        assert!(!lagged.manager.dirty_peers.contains(&lagged.peer));
+        lagged.settle(|_, _| {});
+        lagged.assert_paced();
+    }
+}
+
+// The same for a joining member: a dirty mark the tick finds mid-join
+// rewinds its replay into a reconcile, which still ends with the complete
+// table and one End-of-RIB.
+#[test]
+fn a_tick_leaves_a_dirty_mark_to_the_live_initial_replay() {
+    let (mut manager, _tx, expected) = replay_fixture();
+    let peer = receiver(1);
+    let mut rx = member(&mut manager, peer, 1, false, false);
+    let first = first_page(&mut manager, &mut rx);
+    let mut state: Inventory = first
+        .announce
+        .iter()
+        .map(|row| (row.prefix, (row.peer, row.local_pref())))
+        .collect();
+    let before = whole_table_units(&manager);
+    assert!(manager.mark_outbound_dirty(peer));
+    manager.resync_dirty_peers_bounded();
+    assert!(manager.is_initial_member_replay(peer));
+    assert!(!manager.dirty_peers.contains(&peer));
+    drop(first);
+    let mut markers = 0;
+    for _ in 0..20_000 {
+        manager.wake_initial_member_replay();
+        manager.advance_pending_initial_registration();
+        while let Ok(page) = rx.try_recv() {
+            for &(prefix, _) in page.unicast_withdrawals() {
+                assert!(state.remove(&prefix).is_some(), "withdrew unsent {prefix}");
+            }
+            for row in page.announce.iter() {
+                state.insert(row.prefix, (row.peer, row.local_pref()));
+            }
+            if !page.end_of_rib.is_empty() {
+                assert_eq!(state, expected, "early End-of-RIB");
+                markers += page.end_of_rib.len();
+            }
+        }
+        if !manager.is_initial_member_replay(peer) {
+            break;
+        }
+    }
+    assert_eq!(markers, 1);
+    assert!(rx.is_empty() && !manager.dirty_peers.contains(&peer));
+    let after = whole_table_units(&manager);
+    assert_eq!([0, 1, 2].map(|i| after[i] - before[i]), [0; 3]);
+    crate::manager::tests::assert_paced_fallbacks(&manager.metrics, &[]);
+}
+
+// A member marked dirty again faster than its reconcile can finish cannot
+// rewind forever: after the rewind bound it takes one resync counted `lag`.
+#[test]
+fn a_member_remarked_faster_than_its_reconcile_takes_one_lag_resync() {
+    let mut lagged = Lagged::new(V4_ROWS, 2, 30);
+    lagged.tick();
+    let mut turns = 0;
+    while lagged.reconciling() {
+        turns += 1;
+        assert!(turns < 200, "the reconcile neither completed nor lagged");
+        if turns % 2 == 0 {
+            lagged.manager.mark_outbound_dirty(lagged.peer);
+        }
+        lagged.turn();
+    }
+    lagged.settle(|_, _| {});
+    lagged.assert_exact();
+    assert_eq!(lagged.units()[0], 1, "one counted resync");
+    crate::manager::tests::assert_paced_fallbacks(
+        &lagged.manager.metrics,
+        &[("grouped_resync", "lag", 1.0)],
+    );
+}
+
+/// Member 1 falls behind a denying export policy while OTHER withdraws
+/// its 300 denied routes; the resync then runs with seeded changes before
+/// each turn. `one_turn` takes the synchronous resync, the reference.
+/// Returns the member's table, its retained denials and its permit and deny
+/// counters.
+fn denied_resync(
+    one_turn: bool,
+    seed: u64,
+) -> (Inventory, HashSet<PolicyFilteredRouteKey>, (u64, u64)) {
+    let mut lagged = Lagged::denying(V4_ROWS, 30, 300);
+    lagged.manager.initial_member_replays.resync_in_one_turn = one_turn;
+    let mut rng = seed;
+    let mut next = move |bound: u16| {
+        rng = rng
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        u16::try_from((rng >> 33) % u64::from(bound)).unwrap()
+    };
+    lagged.tick();
+    assert_eq!(lagged.reconciling(), !one_turn);
+    for _ in 0..64 {
+        // Rows SOURCE holds, and routes only OTHER held.
+        let i = if next(2) == 0 {
+            next(V4_ROWS)
+        } else {
+            DENIED + next(300)
+        };
+        let pref = [None, Some(120), Some(200)][usize::from(next(3))];
+        lagged.set(i, OTHER, pref);
+        if lagged.reconciling() {
+            lagged.turn();
+        } else {
+            lagged.tick();
+        }
+    }
+    lagged.settle(|_, _| {});
+    lagged.assert_exact();
+    assert_eq!(lagged.reconciles(), usize::from(!one_turn));
+    let denials = lagged.denials();
+    for key in &denials {
+        let best = lagged.manager.loc_rib.get(&key.prefix);
+        assert!(
+            best.is_some_and(|route| route.local_pref() >= DENY_FROM),
+            "seed={seed} one_turn={one_turn}: a stale denial of {}",
+            key.prefix
+        );
+    }
+    (lagged.state.clone(), denials, lagged.policy_counters())
+}
+
+// The paced resync of a member behind a denying export policy leaves the
+// denial history and the export counters the synchronous resync does,
+// including for denied routes that left the Loc-RIB while it was dirty.
+#[test]
+fn a_reconciled_resync_retires_the_denials_of_departed_routes() {
+    for seed in [1, 7, 42] {
+        let paced = denied_resync(false, seed);
+        let reference = denied_resync(true, seed);
+        assert_eq!(paced.0, reference.0, "seed={seed}: table");
+        assert_eq!(paced.1, reference.1, "seed={seed}: retained denials");
+        assert_eq!(
+            paced.2, reference.2,
+            "seed={seed}: permit and deny counters"
+        );
+    }
+}
+
+// The departed denials are reconciled one page of history per turn, from 8
+// to 32 pages, and the reconcile completes only once they are.
+#[test]
+fn a_denial_history_reconciles_one_page_per_turn_from_8_to_32_pages() {
+    const VISITS: &str = "initial_member_replay_denial_visits";
+    for pages in [8_u16, 32] {
+        let denied = pages * u16::try_from(REGISTRATION_PAGE_SIZE).unwrap();
+        let mut lagged = Lagged::denying(V4_ROWS, 30, denied);
+        let start = work(VISITS);
+        lagged.tick();
+        let mut peak = work(VISITS) - start;
+        let mut turns = 0;
+        while lagged.reconciling() {
+            let before = work(VISITS);
+            lagged.turn();
+            peak = peak.max(work(VISITS) - before);
+            turns += 1;
+            assert!(
+                turns < 50 * usize::from(pages),
+                "the reconcile never completed"
+            );
+        }
+        let total = work(VISITS) - start;
+        eprintln!("pages={pages}: peak={peak} total denial visits={total} turns={turns}");
+        assert!(peak <= REGISTRATION_PAGE_SIZE, "pages={pages}: peak {peak}");
+        assert!(
+            total >= usize::from(denied)
+                && total <= usize::from(denied) + 2 * REGISTRATION_PAGE_SIZE,
+            "pages={pages}: {total}"
+        );
+        assert!(
+            lagged
+                .denials()
+                .iter()
+                .all(|key| key.prefix < prefixes(DENIED)[0]),
+            "pages={pages}: a departed denial outlived the reconcile"
+        );
+        lagged.assert_paced();
+    }
 }
