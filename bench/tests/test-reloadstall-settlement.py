@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Exercise SIGHUP settlement with tiny real daemon/reloadstall sessions.
 
-The last case injects metrics: pending until the engine observes receiver
-barriers, then rejected_no_effect. It tests harness sequencing, NOT a real
-runtime rollback. Logs and generated inputs are retained in --artifact-dir.
+The update-wait cases run the unrelated-UPDATE wait probe in a reload that
+changes every member and in flapstorm mode, and check its summary line. The last case injects metrics:
+pending until the engine observes receiver barriers, then rejected_no_effect.
+It tests harness sequencing, NOT a real runtime rollback. Logs and generated
+inputs are retained in --artifact-dir.
 """
 
 import argparse
@@ -57,12 +59,30 @@ def run_case(args, name, **kind):
     raise AssertionError(f"{name}: probed ports were taken on all {ATTEMPTS} attempts")
 
 
-def run_attempt(args, name, attempt, *, dualstack=False, rejected=False, injected=False):
+def check_update_wait(text, phase):
+    lines = [line for line in text.splitlines() if line.startswith("update_wait_summary ")]
+    assert len(lines) == 1, text
+    summary = json.loads(lines[0].removeprefix("update_wait_summary "))
+    assert summary["sent"] > 0 and summary["arrived"] == summary["sent"], summary
+    assert summary["unarrived"] == 0 and summary["invalid"] == 0, summary
+    assert summary["witness_other_updates"] == 0, summary
+    assert summary["member_probe_updates"] == 0, summary
+    assert summary["max_us"] > 0 and summary["max_us"] >= summary["p99_us"], summary
+    phases = {row["phase"]: row for row in summary["phases"]}
+    assert {"control", phase} <= phases.keys(), summary
+    assert sum(row["n"] for row in summary["phases"]) == summary["arrived"], summary
+    return summary
+
+
+def run_attempt(args, name, attempt, *, dualstack=False, rejected=False, injected=False,
+                probe=None):
+    flap = probe == "flap"
     dest = args.artifact_dir / name / f"attempt-{attempt}"
     dest.mkdir(parents=True)
     env = {key: value for key, value in os.environ.items()
            if not key.startswith(("GEN_", "RELOADSTALL_"))}
-    env.update(GEN_DUALSTACK=str(int(dualstack)), GEN_FILTER_COUNT="4" if dualstack else "0")
+    env.update(GEN_DUALSTACK=str(int(dualstack)), GEN_FILTER_COUNT="4" if dualstack else "0",
+               GEN_UPDATE_WAIT="1" if probe else "0")
     # Keep the generated UDS path below sun_path's limit, even in deep CI checkouts.
     with tempfile.TemporaryDirectory(prefix="rls-", dir="/tmp") as temporary:
         scenario = Path(temporary)
@@ -95,7 +115,9 @@ def run_attempt(args, name, attempt, *, dualstack=False, rejected=False, injecte
                 env.update(RELOADSTALL_DUALSTACK=str(int(dualstack)),
                            RELOADSTALL_FILTER_COUNT="4" if dualstack else "0",
                            RELOADSTALL_CYCLE_QUIESCE_SECS="1",
-                           RELOADSTALL_RELOAD_METRICS_ADDR=metrics_address)
+                           RELOADSTALL_UPDATE_WAIT="1" if probe else "0")
+                if not flap:
+                    env["RELOADSTALL_RELOAD_METRICS_ADDR"] = metrics_address
                 if rejected:
                     env["RELOADSTALL_STAGE_CMD"] = shlex.join([
                         sys.executable, "-c",
@@ -130,11 +152,13 @@ def run_attempt(args, name, attempt, *, dualstack=False, rejected=False, injecte
                     thread = threading.Thread(target=fixture.serve_forever)
                     thread.start()
                     env["RELOADSTALL_RELOAD_METRICS_ADDR"] = f"127.0.0.1:{fixture.server_port}"
+                mode = ["0", "1", "12", "--flapstorm", "1", "--flap-rounds", "1"] if flap \
+                    else ["2", "1", "12"]
                 with engine_log.open("w") as log:
                     result = subprocess.run([
                         str(args.harness), "12", "600", bgp_port, str(daemon.pid),
                         str(scenario / "member.rpol"), str(scenario / "gen-a.rpol"),
-                        str(scenario / "gen-b.rpol"), "2", "1", "12"], env=env,
+                        str(scenario / "gen-b.rpol"), *mode], env=env,
                         # Above the engine's 120 s connect window, so its own error surfaces.
                         stdout=log, stderr=subprocess.STDOUT, timeout=180)
                 (dest / "engine.exit").write_text(f"{result.returncode}\n")
@@ -157,11 +181,24 @@ def run_attempt(args, name, attempt, *, dualstack=False, rejected=False, injecte
                                    (dest / "injected-metrics.jsonl").read_text().splitlines()]
                         assert not samples[0]["receiver_barriers_complete"], samples
                         assert samples[-1]["receiver_barriers_complete"], samples
+                elif flap:
+                    assert result.returncode == 0, text
+                    assert "flapstorm_csv,1," in text, text
                 else:
                     assert result.returncode == 0, text
                     for reload in (1, 2):
                         assert text.index(f"reload {reload} daemon_applied") < text.index(
                             f"reloadstall_csv,{reload},"), text
+                summary = {"case": name, "attempts": attempt,
+                           "engine_exit": result.returncode, "assertions": "pass",
+                           "metrics_injected_not_runtime_rollback": injected}
+                if probe:
+                    wait = check_update_wait(text, "flap1_rejoin" if flap else "reload1")
+                    summary["update_wait"] = {key: wait[key] for key in ("sent", "max_us", "p99_us")}
+                if flap:
+                    (dest / "result.json").write_text(json.dumps(summary, indent=2) + "\n")
+                    print(json.dumps(summary), flush=True)
+                    return
                 # Use the runner's actual marker translation to check the soak receipt too.
                 shell = ('source "$1"; CYCLES_LOG="$2"; '
                          'while IFS= read -r line; do handle_line "$line"; done < "$3"')
@@ -176,9 +213,6 @@ def run_attempt(args, name, attempt, *, dualstack=False, rejected=False, injecte
                 assert runner.returncode == (1 if rejected or injected else 0), cycles
                 if rejected or injected:
                     assert "ABORT: reload 1 failed: daemon SIGHUP outcome rejected_no_effect" in cycles
-                summary = {"case": name, "attempts": attempt,
-                           "engine_exit": result.returncode, "assertions": "pass",
-                           "metrics_injected_not_runtime_rollback": injected}
                 (dest / "result.json").write_text(json.dumps(summary, indent=2) + "\n")
                 print(json.dumps(summary), flush=True)
             finally:
@@ -216,6 +250,8 @@ def main():
                 log.write(f"{hashlib.file_digest(source, 'sha256').hexdigest()}  {binary}\n")
     run_case(args, "native-success")
     run_case(args, "dualstack-filter-success", dualstack=True)
+    run_case(args, "update-wait-reload", probe="reload")
+    run_case(args, "update-wait-flap", probe="flap")
     run_case(args, "native-rejection", rejected=True)
     run_case(args, "receiver-complete-then-rejected", injected=True)
 

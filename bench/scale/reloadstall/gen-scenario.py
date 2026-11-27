@@ -74,6 +74,15 @@ Dual-stack extension: setting `GEN_DUALSTACK=1` gives every neighbor
 IPv4-only one. Inventory counts belong to the harness: its optional
 `RELOADSTALL_IPV4_PREFIXES` changes the mix without changing this config.
 
+Update-wait extension: `GEN_UPDATE_WAIT=1` adds two route-server neighbors after
+the fleet for the harness's `RELOADSTALL_UPDATE_WAIT=1` probe: a source (stub
+index `n_peers`) whose import chain admits only `198.18.0.0/24` and whose
+export chain rejects everything, and a witness (`n_peers + 1`) with the
+reverse. Every fleet export chain first rejects that prefix. The pair's chains
+are identical in both generations, so no reload touches them. It defaults to
+`RELOADSTALL_UPDATE_WAIT`. Absent, the emitted files are byte-for-byte the
+historical ones.
+
 Filtering extension: setting `GEN_FILTER_COUNT=K` (K >= 1) makes generation B
 a filtering change instead of a permit-set-preserving one: `member-out`
 rejects the named prefix-set `filtered` (base indexes `0..K` of every emitted
@@ -161,6 +170,13 @@ if evpn not in ("0", "1"):
 evpn = evpn == "1"
 if evpn and (ibgp_rr_asn is None or dualstack or filter_count):
     sys.exit("GEN_EVPN requires GEN_IBGP_RR_ASN and excludes GEN_DUALSTACK/GEN_FILTER_COUNT")
+# Defaults to the harness knob, so one variable configures both sides.
+update_wait = os.environ.get("GEN_UPDATE_WAIT", os.environ.get("RELOADSTALL_UPDATE_WAIT", "0"))
+if update_wait not in ("0", "1"):
+    sys.exit("GEN_UPDATE_WAIT must be 0 or 1")
+update_wait = update_wait == "1"
+if update_wait and ibgp_rr_asn is not None:
+    sys.exit("GEN_UPDATE_WAIT needs the route-server policy section; it excludes GEN_IBGP_RR_ASN")
 converged_rejoin = os.environ.get("GEN_CONVERGED_REJOIN", "0")
 if converged_rejoin not in ("0", "1"):
     sys.exit("GEN_CONVERGED_REJOIN must be 0 or 1")
@@ -292,6 +308,11 @@ for fname, reject_prefix, community in GENERATIONS:
     # Reads peer context, so no changed peer is update-grouped; matches no stub.
     if export_peer_context:
         filter_term = "    term peer-gate { if peer.asn == 64496 { reject } }\n" + filter_term
+    # The wait probe's prefix reaches only its witness.
+    probe_term = (
+        "    term drop-probe { if route.prefix in wait_probe { reject } }\n" if update_wait else ""
+    )
+    filter_term = probe_term + filter_term
     # Every changed pair rejects the filtered set, like member-out.
     pair_policies = "".join(
         f"""
@@ -304,9 +325,21 @@ policy member-out-{k} {{
     stable_policy = pair_policies + """
 
 policy stable-out {
-    term tag { add community 65400:9000; accept }
+""" + probe_term + """    term tag { add community 65400:9000; accept }
 }
 """ if mixed_export_only else ""
+    probe_policies = """
+prefix-set wait_probe { 198.18.0.0/24 }
+
+policy probe-only {
+    term probe { if route.prefix in wait_probe { accept } }
+    term rest { reject }
+}
+
+policy probe-none {
+    term rest { reject }
+}
+""" if update_wait else ""
     rpki_term = (
         "    term reject-rpki-invalid { if route.rpki == invalid { reject } }\n"
         if rpki_cache is not None else ""
@@ -324,7 +357,7 @@ policy stable-out {
 policy member-out {{
 {filter_term}    term tag {{ add community {community}; accept }}
 }}
-{stable_policy}
+{stable_policy}{probe_policies}
 """
     )
 
@@ -414,6 +447,22 @@ for i in range(n_peers):
     elif pair_of[i] > 0:
         neighbor.append(f'export_policy_chain = ["member-out-{pair_of[i]}"]')
     config += neighbor + [""]
+if update_wait:
+    # Source then witness; route-server transparency keeps the sequence MED.
+    for i, (import_chain, export_chain) in ((n_peers, ("probe-only", "probe-none")),
+                                            (n_peers + 1, ("probe-none", "probe-only"))):
+        config += [
+            "[[neighbors]]",
+            f'address = "{stub_addr(i)}"',
+            f"remote_asn = {stub_asn(i)}",
+            "route_server_client = true",
+            'families = ["ipv4_unicast", "ipv6_unicast"]' if dualstack
+            else 'families = ["ipv4_unicast"]',
+            "hold_time = 180",
+            f'import_policy_chain = ["{import_chain}"]',
+            f'export_policy_chain = ["{export_chain}"]',
+            "",
+        ]
 (out / "config.toml").write_text("\n".join(config))
 if evpn:
     text = "\n".join(config)
@@ -441,6 +490,8 @@ filter_note = (
 )
 if export_peer_context:
     filter_note += ", export_peer_context(changed chains ungrouped)"
+if update_wait:
+    filter_note += f", update_wait(source={stub_addr(n_peers)}, witness={stub_addr(n_peers + 1)})"
 if export_pairs > 1:
     filter_note += (
         f", export_pairs={export_pairs}(cohort={export_cohort}, "

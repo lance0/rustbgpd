@@ -183,6 +183,19 @@
 //!   {stage="actor_poll"}` from each scrape (it resets on every render) in
 //!   `reloadstall_actor_scrape_csv`, the reload-window max and SIGHUP outcome
 //!   in `reloadstall_actor_csv`, and the run max in `reloadstall_actor_run_csv`.
+//!
+//! Unrelated-UPDATE wait extension — additive; absent, nothing changes:
+//! - `RELOADSTALL_UPDATE_WAIT=1` (reload or flapstorm mode, with a scenario
+//!   generated with `GEN_UPDATE_WAIT=1`): from churn start to the end of the
+//!   run, an extra source session (stub `n_peers`) announces `198.18.0.0/24`
+//!   every 20 ms with MED = sequence, and an extra witness session (stub
+//!   `n_peers + 1`) records each receipt. Route-server policy isolates the pair
+//!   from the fleet in both directions, and the run fails if either side sees
+//!   the other's traffic. The run ends with one `update_wait_summary {json}`
+//!   line: max, p99 and p50 wait over the whole run and per phase (`warmup`,
+//!   `control`, `flapN_{pre,withdraw,down,rejoin,quiesce}`, `reloadN`,
+//!   `reloadN_quiesce`, `tripN`, `final_quiesce`), and fails if a sample never
+//!   arrives. See `update_wait.rs` for the definition.
 
 // Event.other and Ctx.n_peers are recorded for the observation/context
 // model but not read by the percentile analysis; keep them so the
@@ -213,6 +226,7 @@ use tokio::net::{TcpSocket, TcpStream};
 use tokio::sync::{mpsc, watch};
 
 mod recovery_mass_dirty;
+mod update_wait;
 
 /// Receivers on every runtime worker reallocate their frame buffers and NLRI
 /// vectors in the same instant when the daemon delivers a coalesced
@@ -1528,6 +1542,8 @@ struct Ctx {
     /// window: gap stats are not consumed there, and 24 h of events at
     /// churn cadence across 1000 observers would exhaust host memory.
     record_events: AtomicBool,
+    /// `RELOADSTALL_UPDATE_WAIT=1`: the whole-run unrelated-UPDATE wait probe.
+    wait_probe: Option<update_wait::WaitProbe>,
 }
 
 /// Contiguous disjoint slices: the first remainder members receive one extra.
@@ -2670,7 +2686,18 @@ fn start_stub(ctx: Arc<Ctx>, i: u32, stream: TcpStream, track_rejoin: bool) -> S
                             }
                         };
                         let [total_prefixes, total_prefixes6] = rctx.totals;
-                        let nlri = split_unicast_families(&parsed);
+                        let mut nlri = split_unicast_families(&parsed);
+                        if let Some(probe) = rctx.wait_probe.as_ref() {
+                            // Member export chains reject the probe prefix; a receipt
+                            // fails the probe, and is kept out of every other measure.
+                            if update_wait::WaitProbe::take(&mut nlri, &parsed.attributes).is_some()
+                            {
+                                probe.member_receipt();
+                                if nlri.families() == 0 {
+                                    continue;
+                                }
+                            }
+                        }
                         let mut base = 0u32;
                         let mut other =
                             u32::try_from(nlri.v4_wd.len() + nlri.v6_wd.len()).unwrap_or(0);
@@ -3624,6 +3651,7 @@ async fn run_flapstorm(
          rss_mib,sessions_up,parse_errors"
     );
     for round in 1..=rounds {
+        update_wait::set_phase(ctx, format!("flap{round}_pre"));
         if let Some(addr) = metrics_addr {
             let up = ctx
                 .obs
@@ -3664,6 +3692,7 @@ async fn run_flapstorm(
         };
         let cpu_before = process_cpu_seconds(pid);
         let cpu_window = Instant::now();
+        update_wait::set_phase(ctx, format!("flap{round}_withdraw"));
         println!("flap {round} close wall_us={}", wall_us());
         let t_close = now_us(ctx);
         // Simultaneous close: abort both split-half tasks per flapped stub.
@@ -3675,6 +3704,7 @@ async fn run_flapstorm(
             observer.established.store(false, Ordering::Relaxed);
         }
         wait_flap_completion(ctx, k as usize, round, "withdraw").await;
+        update_wait::set_phase(ctx, format!("flap{round}_down"));
         let cpu_after = process_cpu_seconds(pid);
         let window_s = cpu_window.elapsed().as_secs_f64();
         let flush_after = match failover_metrics_addr {
@@ -3747,6 +3777,7 @@ async fn run_flapstorm(
 
         // Re-arm before any flapped session returns, so no announce is missed.
         arm_survivors(ctx, k, flap_prefixes, total, FLAP_TRACK_ANNOUNCES);
+        update_wait::set_phase(ctx, format!("flap{round}_rejoin"));
         let mut reconnect_retries = 0u32;
         let mut recovered_peers = 0u32;
         for i in 0..k {
@@ -3777,6 +3808,7 @@ async fn run_flapstorm(
         }
         wait_flap_completion(ctx, k as usize, round, "reannounce").await;
         report_rejoin_completion(ctx, k, round).await;
+        update_wait::set_phase(ctx, format!("flap{round}_quiesce"));
         let reann_s: Vec<f64> = survivors
             .clone()
             .filter_map(|i| completion_us(ctx, i))
@@ -4812,6 +4844,20 @@ fn main() {
         .unwrap_or("127.0.0.1:9179")
         .parse()
         .expect("RELOADSTALL_REJOIN_METRICS_ADDR must be a SocketAddr");
+    let wait_probe = match std::env::var("RELOADSTALL_UPDATE_WAIT").as_deref() {
+        Err(_) | Ok("0") => None,
+        Ok("1") if (flapstorm.is_some() || reloads > 0) && !convergence_only => {
+            Some(update_wait::WaitProbe::new(n_peers))
+        }
+        Ok("1") => {
+            eprintln!("RELOADSTALL_UPDATE_WAIT=1 requires a reload or flapstorm run");
+            std::process::exit(2);
+        }
+        Ok(_) => {
+            eprintln!("RELOADSTALL_UPDATE_WAIT must be 0 or 1");
+            std::process::exit(2);
+        }
+    };
     assert!(
         rejoin_metrics_addr.ip().is_loopback() && rejoin_metrics_addr.port() > 0,
         "RELOADSTALL_REJOIN_METRICS_ADDR must be loopback with nonzero port"
@@ -4837,7 +4883,17 @@ fn main() {
             parse_errors: AtomicU64::new(0),
             churn_cycles: AtomicU64::new(0),
             record_events: AtomicBool::new(true),
+            wait_probe,
         });
+        if let Some(probe) = ctx.wait_probe.as_ref() {
+            println!(
+                "# update_wait source={} witness={} prefix={} interval_ms={}",
+                probe.source,
+                probe.witness,
+                update_wait::prefix(),
+                update_wait::INTERVAL.as_millis()
+            );
+        }
         println!(
             "# reloadstall peers={n_peers} changed_peers={changed_peers} \
              stable_peers={} prefixes={total} per_peer={per_peer} pid={pid}",
@@ -5132,6 +5188,7 @@ fn main() {
 
         // --- Start churn: last CHURNERS stubs flap a dedicated block. ---
         let churn_tasks = start_churn(no_churn, &stubs, &ctx);
+        let wait_probe_task = update_wait::start(&ctx).await;
         if !no_churn {
             // Let churn reach steady state.
             tokio::time::sleep(Duration::from_secs(3)).await;
@@ -5141,6 +5198,7 @@ fn main() {
         if !no_churn {
             *ctx.churn_writes.lock().unwrap() = Some(Vec::new());
         }
+        update_wait::set_phase(&ctx, "control");
         let cs = now_us(&ctx);
         tokio::time::sleep(Duration::from_secs(control_secs)).await;
         let ce = now_us(&ctx);
@@ -5188,6 +5246,7 @@ fn main() {
                 notification_checkpoint(addr, ("initial_drained", 0, up, completed, expected as u32, errors), &mut prior_high).await;
             }
             if converged_rejoin {
+                update_wait::set_phase(&ctx, "converged_rejoin");
                 if let Err(error) = run_converged_rejoin(
                     &ctx, &mut stubs, k, flap_rounds, pid, rejoin_metrics_addr,
                 ).await {
@@ -5207,6 +5266,7 @@ fn main() {
                 )
                 .await;
             }
+            update_wait::finish(&ctx, wait_probe_task).await;
             println!("done rss_mib={}", rss_mib(pid));
             let parse_errors = ctx.parse_errors.load(Ordering::Relaxed);
             if parse_errors > 0 {
@@ -5390,6 +5450,7 @@ fn main() {
                 .as_deref()
                 .map(|path| (path.to_owned(), daemon_log_len(path)));
             let t_hup = now_us(&ctx);
+            update_wait::set_phase(&ctx, format!("reload{r}"));
             let mut actor_window = reload_before.map(|before| {
                 ActorWindow::new(r, before, actor_pre_us, actor_stage_us, daemon_log_at_trigger)
             });
@@ -5876,6 +5937,7 @@ fn main() {
                 );
             }
             drain_cycle_events(&ctx.obs);
+            update_wait::set_phase(&ctx, format!("reload{r}_quiesce"));
             // Quiesce between cycles (soak mode overrides the historical 20 s
             // to self-pace the whole window).
             tokio::time::sleep(Duration::from_secs(cycle_quiesce_secs)).await;
@@ -5892,6 +5954,7 @@ fn main() {
                 // This reload's actor row is already printed; a trip-cycle
                 // failure exits inside `run_trip_cycle` without the run row,
                 // which only the soak (never a sweep) runs.
+                update_wait::set_phase(&ctx, format!("trip{}", r / trip_every));
                 run_trip_cycle(
                     &ctx,
                     &mut stubs,
@@ -5917,8 +5980,10 @@ fn main() {
         let hold = final_quiesce_secs(reloads, trip_every, final_quiesce);
         if hold > 0 {
             println!("final quiesce {hold}s");
+            update_wait::set_phase(&ctx, "final_quiesce");
             tokio::time::sleep(Duration::from_secs(hold)).await;
         }
+        update_wait::finish(&ctx, wait_probe_task).await;
 
         let parse_errors = ctx.parse_errors.load(Ordering::Relaxed);
         let up = ctx
@@ -6075,6 +6140,7 @@ mod tests {
             parse_errors: AtomicU64::new(0),
             churn_cycles: AtomicU64::new(0),
             record_events: AtomicBool::new(true),
+            wait_probe: None,
         })
     }
 
@@ -7519,6 +7585,7 @@ mod tests {
             parse_errors: AtomicU64::new(0),
             churn_cycles: AtomicU64::new(0),
             record_events: AtomicBool::new(true),
+            wait_probe: None,
         };
         let mut extras = vec![Vec::new(); 12];
         extras[2] = vec![0, 3];
@@ -8794,6 +8861,7 @@ mod tests {
             parse_errors: AtomicU64::new(0),
             churn_cycles: AtomicU64::new(0),
             record_events: AtomicBool::new(true),
+            wait_probe: None,
         };
         let push = |t_us, families| {
             ctx.obs[0].events.lock().unwrap().push(Event {
