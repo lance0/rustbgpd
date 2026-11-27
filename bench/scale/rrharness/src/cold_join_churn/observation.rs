@@ -89,7 +89,7 @@ impl ReplayObservation {
                     "budget_refusal"
                 } else if matches!(*cause, "selection_release" | "release_fanout") {
                     "selection_release_to_dirty"
-                } else if *cause == "scan_repair_limit" {
+                } else if matches!(*cause, "scan_repair_limit" | "lag") {
                     "replay_to_dirty"
                 } else {
                     return Err(invalid_stat(format!(
@@ -223,6 +223,8 @@ mod tests {
 
         for (cause, expected) in [
             ("scan_repair_limit", "replay_to_dirty"),
+            // A reconcile that overflowed on every rescan takes one resync.
+            ("lag", "replay_to_dirty"),
             ("daemon_limit", "budget_refusal"),
             ("allocation_failure", "budget_refusal"),
         ] {

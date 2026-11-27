@@ -41,11 +41,11 @@ enum Mode {
 
 /// Repair-log overflows a replay may rewind from before it takes the dirty
 /// resync with cause `lag`.
-// ponytail: interim liveness bound. Churn that overflows every rescan would
-// otherwise re-arm forever and hold End-of-RIB back; this trades a rare
-// counted whole-table turn for a capped repair log and certain completion.
-// The shared lag bound replaces it with a forced bounded unit and a paced
-// restart (S5).
+// Interim liveness bound: churn that overflows every rescan would otherwise
+// re-arm forever and hold End-of-RIB back. After this many overflow re-arms
+// the replay takes one counted dirty resync, trading a rare whole-table turn
+// for a capped repair log and certain completion. The shared lag bound
+// replaces this with a forced bounded unit and a paced restart.
 const MAX_OVERFLOW_REARMS: u16 = 8;
 
 struct Replay {

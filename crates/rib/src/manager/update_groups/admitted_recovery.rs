@@ -2508,12 +2508,23 @@ impl AdmittedRecovery {
             return Ok(false);
         };
         let (universe, key_index) = Self::universe(&self.snapshots, self.records[index].snapshot);
+        let record = &self.records[index];
         let result = Self::union_len(
-            &self.records[index].keys.0,
+            &record.keys.0,
             (universe, key_index),
             announcements,
             checkpoint,
         )
+        .and_then(|len| {
+            // An initial replay also reserves one slot per new key, where
+            // its page merges into the sorted overlay.
+            let scratch = if record.initial_replay {
+                len - record.keys.0.len()
+            } else {
+                0
+            };
+            len.checked_add(scratch).ok_or_else(Self::overflow)
+        })
         .and_then(|capacity| self.grow_keys(index, capacity, checkpoint));
         if let Err(error) = result {
             // A replay refuses the envelope before enqueue. Its old proof is
@@ -2708,6 +2719,7 @@ impl AdmittedRecovery {
                 record.masked -= 1;
             }
         }
+        let merge_tail = record.initial_replay;
         let keys = &mut record.keys.0;
         let mut withdrawals = withdrawals;
         let mut withdrawn = withdrawals.next();
@@ -2760,21 +2772,54 @@ impl AdmittedRecovery {
             }
         }
         if needs_sort {
-            // The admitted keys before `old_len` are one sorted run. A stable
-            // sort finds it and merges in the page's new keys: linear in the
-            // overlay, not a whole re-sort per page.
-            checkpoint(true);
-            keys.sort_by(|left, right| {
-                checkpoint(false);
-                left.cmp(right)
-            });
-            keys.dedup_by(|left, right| {
-                checkpoint(false);
-                left == right
-            });
-            checkpoint(true);
+            // An initial replay's overlay grows a page per commit. Its
+            // reserved scratch slots let the page merge into the sorted run
+            // in work linear in the overlay, without allocating; a whole
+            // re-sort per page would be quadratic over the join.
+            if merge_tail && keys.capacity() - keys.len() >= keys.len() - old_len {
+                Self::merge_sorted_tail(keys, old_len, checkpoint);
+            } else {
+                Self::sort_keys(keys, checkpoint);
+            }
         }
         true
+    }
+
+    /// Merge the unsorted, unique keys after `old_len` into the sorted run
+    /// before it. The capacity holds a copy of the tail, so this allocates
+    /// nothing.
+    fn merge_sorted_tail(keys: &mut Keys, old_len: usize, checkpoint: &mut impl FnMut(bool)) {
+        checkpoint(true);
+        keys[old_len..].sort_unstable_by(|left, right| {
+            checkpoint(false);
+            left.cmp(right)
+        });
+        let len = keys.len();
+        for index in old_len..len {
+            checkpoint(false);
+            let key = keys[index];
+            keys.push(key);
+        }
+        // Fill [0, len) from the back. Position `run + tail - 1` is never an
+        // unread key of the run, which ends at `run`.
+        let (mut run, mut tail) = (old_len, len - old_len);
+        while tail > 0 {
+            checkpoint(false);
+            let next = keys[len + tail - 1];
+            if run > 0 && keys[run - 1] > next {
+                keys[run + tail - 1] = keys[run - 1];
+                run -= 1;
+            } else {
+                keys[run + tail - 1] = next;
+                tail -= 1;
+            }
+        }
+        keys.truncate(len);
+        keys.dedup_by(|left, right| {
+            checkpoint(false);
+            left == right
+        });
+        checkpoint(true);
     }
 
     #[expect(
