@@ -121,7 +121,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 # Ships the daemon + CLI plus the development-only helpers the
 # containerlab topologies and soak harnesses expect. Runs as root so
 # labs can program links/netns freely.
-FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS dev
+FROM debian:bookworm-slim@sha256:e67eeead736ff7bbe258ef088bff683635c561b1fcfefad0806c1df4ab49ce0e AS dev
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     iproute2 \
@@ -153,7 +153,7 @@ CMD ["rustbgpd", "/etc/rustbgpd/config.toml"]
 # that don't, e.g. some Kubernetes setups). Kernel-dataplane features
 # (Linux FIB / EVPN VTEP) additionally need CAP_NET_ADMIN — see
 # docs/how-to/deployment.md.
-FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS runtime
+FROM debian:bookworm-slim@sha256:e67eeead736ff7bbe258ef088bff683635c561b1fcfefad0806c1df4ab49ce0e AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \

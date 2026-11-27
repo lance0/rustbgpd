@@ -89,7 +89,7 @@ jobs:
       # and runs the four checks against deny.toml. Pinned to a
       # release tag for reproducibility, matching the audit job.
       - name: Run cargo deny
-        uses: EmbarkStudios/cargo-deny-action@70f81531115945ba6eb6b941ec9d39d063438eb9 # v2
+        uses: EmbarkStudios/cargo-deny-action@17aeb3c839e42274e2b8adf721c8c65edfdc74dd # v2
         with:
           manifest-path: Cargo.toml
           arguments: --workspace --all-features
