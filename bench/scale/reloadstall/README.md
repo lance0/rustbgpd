@@ -627,6 +627,24 @@ reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
   retention (`resident` minus `allocated`). A gauge the daemon does not export
   prints `absent`, never 0; a failed scrape fails the run. The IXP matrix sets
   it for rustbgpd flapstorm cells.
+- `RELOADSTALL_UPDATE_WAIT=1` — optional, reload or flapstorm mode: the
+  whole-run unrelated-UPDATE wait probe. From churn start to the end of the
+  run, the highest stable stub below the churners announces `198.18.0.0/24`
+  every 20 ms with its sequence number as MED, and the next stub down records
+  each receipt. The wait runs from just before the source writes the UPDATE to
+  the witness's receipt, the quantity rrharness's cold-join marker train
+  reports. A receipt also completes every earlier sample still pending (the
+  daemon may send only the newest path; these count as `coalesced`). Every
+  other observer measure ignores the prefix, so gap and completion figures are
+  unchanged. The run prints one `update_wait_summary {json}` line with `max_us`,
+  `p99_us`, `p50_us` and the worst sample's sequence and phase over the whole
+  run, plus `n`, `max_us` and `p99_us` per phase (`warmup`, `control`,
+  `flapN_pre`, `flapN_withdraw`, `flapN_down`, `flapN_rejoin`, `flapN_quiesce`,
+  `reloadN`, `reloadN_quiesce`, `tripN`, `final_quiesce`), and fails if any
+  sample never arrives. Both stubs must lie above stub 0 and every flapped or
+  reload-changed member, so a reload run needs `changed_peers` below
+  `n_peers - 9`. The probe adds one UPDATE per 20 ms of fan-out to every
+  member.
 - `RELOADSTALL_SESSION_NOTIFICATION_METRICS_ADDR` — optional B2 receipt seam,
   valid only with `--flapstorm`. It must be a loopback socket address with a
   nonzero port. The exact 700-peer/400400-prefix/50-flap shape polls the
