@@ -18,6 +18,9 @@ pub enum BenchReplayEvent {
     Completed,
     /// The actor handed replay to dirty resync after this guard fired.
     Dirty(&'static str),
+    /// The replay lost track of its changes for this cause and rewound into
+    /// a paced reconcile; it still ends with `Completed`.
+    Reconciled(&'static str),
 }
 
 pub(super) type ReplayObserver = Box<dyn Fn(PeerId, u64, BenchReplayEvent) + Send + Sync>;

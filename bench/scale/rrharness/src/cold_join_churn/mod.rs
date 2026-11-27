@@ -445,10 +445,14 @@ async fn trial(rows: usize, tagged: bool, cell: Cell, mode: &str) -> io::Result<
     match (cell, receipt.disposition) {
         (Cell::Clean, "paced_complete")
         | (Cell::BudgetControl, "budget_refusal")
-        | (Cell::Burst, "replay_to_dirty")
-        | (Cell::Mixed, "replay_to_dirty" | "selection_release_to_dirty" | "paced_complete") => {
-            Ok(())
-        }
+        | (Cell::Burst, "reconcile_complete")
+        | (
+            Cell::Mixed,
+            "replay_to_dirty"
+            | "selection_release_to_dirty"
+            | "paced_complete"
+            | "reconcile_complete",
+        ) => Ok(()),
         _ => Err(invalid_stat(format!(
             "unexpected {} for {mode}",
             receipt.disposition

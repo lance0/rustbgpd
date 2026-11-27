@@ -419,6 +419,42 @@ impl<'a> AdmittedKeyView<'a> {
         }
     }
 
+    /// Up to `visits` positions of an initial replay's proof after `after`,
+    /// in key order: the admitted keys among them, the last key
+    /// visited (`None` once the sweep reached the end) and the positions
+    /// visited. Its universe and sparse overlay are sorted and disjoint.
+    pub(in crate::manager) fn sweep_unicast(
+        self,
+        after: Option<Key>,
+        visits: usize,
+    ) -> (Vec<Key>, Option<Key>, usize) {
+        let start =
+            |keys: &[Key]| after.map_or(0, |after| keys.partition_point(|key| *key <= after));
+        let (mut base, mut sparse) = (start(self.universe), start(self.sparse));
+        let mut admitted = Vec::new();
+        let mut last = None;
+        for visited in 0..visits {
+            let (key, admit) = match (self.universe.get(base), self.sparse.get(sparse)) {
+                (None, None) => return (admitted, None, visited),
+                (Some(&key), next) if next.is_none_or(|next| key < *next) => {
+                    let index = base;
+                    base += 1;
+                    (key, self.words[index / 64] & (1_u64 << (index % 64)) != 0)
+                }
+                (_, next) => {
+                    sparse += 1;
+                    (*next.expect("the sparse key sorts first"), true)
+                }
+            };
+            if admit {
+                admitted.push(key);
+            }
+            last = Some(key);
+        }
+        let done = base == self.universe.len() && sparse == self.sparse.len();
+        (admitted, if done { None } else { last }, visits)
+    }
+
     pub(in crate::manager) fn unicast_prefix_paths(
         self,
         prefix: Prefix,
@@ -2472,12 +2508,23 @@ impl AdmittedRecovery {
             return Ok(false);
         };
         let (universe, key_index) = Self::universe(&self.snapshots, self.records[index].snapshot);
+        let record = &self.records[index];
         let result = Self::union_len(
-            &self.records[index].keys.0,
+            &record.keys.0,
             (universe, key_index),
             announcements,
             checkpoint,
         )
+        .and_then(|len| {
+            // An initial replay also reserves one slot per new key, where
+            // its page merges into the sorted overlay.
+            let scratch = if record.initial_replay {
+                len - record.keys.0.len()
+            } else {
+                0
+            };
+            len.checked_add(scratch).ok_or_else(Self::overflow)
+        })
         .and_then(|capacity| self.grow_keys(index, capacity, checkpoint));
         if let Err(error) = result {
             // A replay refuses the envelope before enqueue. Its old proof is
@@ -2672,6 +2719,7 @@ impl AdmittedRecovery {
                 record.masked -= 1;
             }
         }
+        let merge_tail = record.initial_replay;
         let keys = &mut record.keys.0;
         let mut withdrawals = withdrawals;
         let mut withdrawn = withdrawals.next();
@@ -2724,9 +2772,54 @@ impl AdmittedRecovery {
             }
         }
         if needs_sort {
-            Self::sort_keys(keys, checkpoint);
+            // An initial replay's overlay grows a page per commit. Its
+            // reserved scratch slots let the page merge into the sorted run
+            // in work linear in the overlay, without allocating; a whole
+            // re-sort per page would be quadratic over the join.
+            if merge_tail && keys.capacity() - keys.len() >= keys.len() - old_len {
+                Self::merge_sorted_tail(keys, old_len, checkpoint);
+            } else {
+                Self::sort_keys(keys, checkpoint);
+            }
         }
         true
+    }
+
+    /// Merge the unsorted, unique keys after `old_len` into the sorted run
+    /// before it. The capacity holds a copy of the tail, so this allocates
+    /// nothing.
+    fn merge_sorted_tail(keys: &mut Keys, old_len: usize, checkpoint: &mut impl FnMut(bool)) {
+        checkpoint(true);
+        keys[old_len..].sort_unstable_by(|left, right| {
+            checkpoint(false);
+            left.cmp(right)
+        });
+        let len = keys.len();
+        for index in old_len..len {
+            checkpoint(false);
+            let key = keys[index];
+            keys.push(key);
+        }
+        // Fill [0, len) from the back. Position `run + tail - 1` is never an
+        // unread key of the run, which ends at `run`.
+        let (mut run, mut tail) = (old_len, len - old_len);
+        while tail > 0 {
+            checkpoint(false);
+            let next = keys[len + tail - 1];
+            if run > 0 && keys[run - 1] > next {
+                keys[run + tail - 1] = keys[run - 1];
+                run -= 1;
+            } else {
+                keys[run + tail - 1] = next;
+                tail -= 1;
+            }
+        }
+        keys.truncate(len);
+        keys.dedup_by(|left, right| {
+            checkpoint(false);
+            left == right
+        });
+        checkpoint(true);
     }
 
     #[expect(
@@ -3078,6 +3171,64 @@ mod tests {
         assert!(ledger.remove(&who));
         assert_retained_credit(&ledger);
         assert_eq!(ledger.bytes(), size_of::<AdmittedRecovery>());
+    }
+
+    /// Checkpoints (one per comparison or visited key) to admit one page of
+    /// new prefixes, in hash order, behind a sparse overlay of `sparse` keys.
+    fn sparse_page_work(sparse: u32) -> usize {
+        const PAGE: u32 = 1_024;
+        let mut ledger = AdmittedRecovery::new();
+        let who = peer(1);
+        ledger.insert_empty(who).unwrap();
+        assert!(ledger.begin_initial_replay(who, 64).unwrap());
+        assert!(ledger.extend_initial_replay_universe(who, (0..64).map(slot_key)));
+        // Even keys above the universe, admitted in order: one sorted run.
+        for start in (0..sparse).step_by(PAGE as usize) {
+            let page = (start..(start + PAGE).min(sparse)).map(|n| slot_key(1_000 + 2 * n));
+            ledger.apply_admitted(who, page, [].into_iter()).unwrap();
+        }
+        assert_eq!(ledger.initial_replay_sparse_len(who), Some(sparse as usize));
+        // Odd keys spread over the overlay, in a scrambled order.
+        let page: Vec<_> = (0..PAGE)
+            .map(|n| slot_key(1_001 + 2 * ((n * 7_919) % PAGE) * (sparse / PAGE)))
+            .collect();
+        ledger.reserve_admitted(who, page.iter().copied()).unwrap();
+        let mut work = 0;
+        ledger
+            .apply_reserved_admitted_with_checkpoint(
+                who,
+                page.into_iter(),
+                [].into_iter(),
+                &mut |_| work += 1,
+            )
+            .unwrap();
+        assert_eq!(
+            ledger.initial_replay_sparse_len(who),
+            Some((sparse + PAGE) as usize)
+        );
+        let view = ledger.get(&who).unwrap();
+        let keys: Vec<_> = view.iter().collect();
+        assert!(
+            keys.windows(2).all(|pair| {
+                Key::try_from(&pair[0]).unwrap() < Key::try_from(&pair[1]).unwrap()
+            })
+        );
+        work
+    }
+
+    // A page of new prefixes merges into the sorted overlay. Re-sorting the
+    // whole overlay per page would cost S log S comparisons, quadratic over
+    // a join that keeps adding prefixes.
+    #[test]
+    fn a_page_of_new_sparse_keys_merges_in_linear_work() {
+        for sparse in [16_384, 65_536] {
+            let work = sparse_page_work(sparse);
+            eprintln!("sparse={sparse}: {work}");
+            assert!(
+                work <= 4 * sparse as usize + 32 * 1_024,
+                "sparse={sparse}: {work} checkpoints"
+            );
+        }
     }
 
     #[test]

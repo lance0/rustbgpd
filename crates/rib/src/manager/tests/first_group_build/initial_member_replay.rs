@@ -3,6 +3,7 @@ mod authoritative_regroup;
 mod change_overflow;
 mod exact_refusal;
 mod per_client_best;
+mod reconcile;
 mod reservation;
 mod source_departure;
 

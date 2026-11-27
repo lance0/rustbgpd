@@ -429,8 +429,20 @@ holds under [Restart](#restart)).
   changed control community. Every such change during the join repairs that
   key from the member's current slot. Each page also counts the fallback
   rows a per-client-best route-server client's slot searched, so a page of
-  crowded prefixes spreads across turns. More than about 4,096 changed keys
-  during the join fall back to one resync of the member's table. A joiner
+  crowded prefixes spreads across turns. When the replay loses track of the
+  member's changes (more than about 4,096 changed keys during the join, a
+  change outside its scan, a selection release, or a forced outbound
+  refresh without an ORF filter), it rewinds into a paced reconcile instead
+  of a one-turn resync: it rescans the table in pages, sending each key's
+  current row against what the member was sent, then sweeps the member's
+  admitted keys in pages to withdraw those the table no longer holds.
+  End-of-RIB still follows the complete table, once. Churn that overflows
+  the repair log on more than 8 rescans takes one resync instead (counted as
+  `lag`), so the repair log stays capped and the join completes. A regroup, a lost
+  admitted-key proof or a member another path already marked dirty still
+  takes the resync, at the 10 ms backlog cadence. Tests:
+  [`reconcile.rs`](../../crates/rib/src/manager/tests/first_group_build/initial_member_replay/reconcile.rs).
+  A joiner
   that would be paged, including the founder of a group built while it
   waited, waits in the registration queue while 64 paged joins are in
   progress, or while their admitted-key proofs leave no room for its table

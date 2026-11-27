@@ -158,8 +158,6 @@ pub enum PacedFallbackCause {
     ScanRepairLimit,
     /// A change reached the member outside its scan's repair scope.
     ChangeOutsideScan,
-    /// Too many prefixes were added behind the replay's proof walk.
-    SparseKeyLimit,
     /// The member's admitted-key proof was missing or incomplete.
     MissingProof,
     /// The member's proof would exceed the per-peer recovery cap.
@@ -213,12 +211,11 @@ pub enum PacedFallbackCause {
 
 impl PacedFallbackCause {
     /// Every bounded fallback cause.
-    pub const ALL: [Self; 29] = [
+    pub const ALL: [Self; 28] = [
         Self::GroupChanged,
         Self::AlreadyDirty,
         Self::ScanRepairLimit,
         Self::ChangeOutsideScan,
-        Self::SparseKeyLimit,
         Self::MissingProof,
         Self::PeerLimit,
         Self::DaemonLimit,
@@ -253,7 +250,6 @@ impl PacedFallbackCause {
             Self::AlreadyDirty => "already_dirty",
             Self::ScanRepairLimit => "scan_repair_limit",
             Self::ChangeOutsideScan => "change_outside_scan",
-            Self::SparseKeyLimit => "sparse_key_limit",
             Self::MissingProof => "missing_proof",
             Self::PeerLimit => "peer_limit",
             Self::DaemonLimit => "daemon_limit",

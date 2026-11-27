@@ -6,6 +6,8 @@
   after its initial routes. A source session going down during the join, or
   more concurrent changes than the replay's change log holds, is sent with the
   remaining pages instead of restarting the member's whole table. A departure
-  that changes more than about 4,096 best paths, or more than 1,024 new
-  prefixes arriving during the join, still falls back to a full resync of the
-  member's table.
+  or burst that changes more than about 4,096 best paths during the join
+  rewinds the member into a paced reconcile of its table instead of a
+  one-turn resync, and End-of-RIB still follows the complete table. Churn
+  that overflows the reconcile on more than 8 rescans takes one resync,
+  counted with cause `lag`.

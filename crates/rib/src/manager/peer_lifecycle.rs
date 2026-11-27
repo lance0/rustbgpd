@@ -3601,6 +3601,8 @@ impl RibManager {
         peer: PeerId,
         cohort: Option<&mut GroupReplay>,
     ) {
+        #[cfg(test)]
+        super::slice_timing::record_work("initial_table_turns", 1);
         let readiness = self.replacement_readiness.clone();
         let checkpoint_at = |stage| {
             super::replacement_readiness_checkpoint_at(&readiness, stage, false);

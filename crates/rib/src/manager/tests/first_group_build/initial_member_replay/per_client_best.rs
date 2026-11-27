@@ -560,10 +560,10 @@ fn per_client_best_listing_refuses_while_a_slot_repair_is_unsent() {
 }
 
 // Distinct changes faster than a page drains overflow the member's repairs.
-// The replay then takes the known-cost path, one resync of the current table,
-// and still sends one marker.
+// The replay rewinds into a paced reconcile of the current table, keeps its
+// writer, builds no whole-table resync and still sends one marker.
 #[test]
-fn per_client_best_churn_above_the_repair_limit_recovers_with_one_resync() {
+fn per_client_best_churn_above_the_repair_limit_reconciles_in_pages() {
     for shape in [PCB_RS, RS] {
         let mut paced = Run::start(true, shape);
         while paced.table.len() < 1024 {
@@ -588,19 +588,87 @@ fn per_client_best_churn_above_the_repair_limit_recovers_with_one_resync() {
         ));
         drain_route_chunks(&mut paced.manager);
         paced.turn();
-        assert!(!paced.replaying(), "overflow retired the replay");
-        assert!(paced.manager.dirty_peers.contains(&receiver(1)));
-        crate::manager::tests::assert_paced_fallbacks(
-            &paced.manager.metrics,
-            &[("initial_replay", "scan_repair_limit", 1.0)],
-        );
-        for _ in 0..64 {
-            paced.manager.resync_dirty_peers_bounded();
-            paced.read();
-        }
+        assert!(paced.replaying(), "overflow retired the replay");
         assert!(!paced.manager.dirty_peers.contains(&receiver(1)));
-        assert_eq!(paced.markers, 1);
-        assert!(paced.manager.adj_rib_out_commit_stats.resync_builds > paced.builds);
+        for _ in 0..1024 {
+            if !paced.replaying() {
+                break;
+            }
+            paced.turn();
+        }
+        assert!(!paced.replaying(), "the reconcile did not finish");
+        paced.read();
+        crate::manager::tests::assert_paced_fallbacks(&paced.manager.metrics, &[]);
+        paced.assert_paced();
+        assert_eq!(paced.table, reference(shape, &changes), "{shape:?}");
+    }
+}
+
+// A reconcile that has passed every key sees a change to one key's runner-up
+// (per-client best) or fallback row (route-server control), with no new
+// Loc-RIB best. The member's slot moved, so that key must still be repaired.
+#[test]
+fn a_reconcile_repairs_a_slot_that_moves_without_a_best_change() {
+    let change = |source, n: u16, pref| Change {
+        source,
+        prefix: prefixes(n)[0],
+        pref: Some(pref),
+        suppress: false,
+    };
+    for shape in [PCB, PCB_RS] {
+        let (setup, moved) = if shape.rs {
+            // The preferred path is suppressed toward member 1, whose RS view
+            // falls back to OTHER's row.
+            (vec![], change(1, 3, 250))
+        } else {
+            // Member 1's own path wins, so its slot is the runner-up.
+            (vec![change(3, 1, 400)], change(0, 1, 250))
+        };
+        let mut paced = Run::start(true, shape);
+        for setup in &setup {
+            setup.apply(&mut paced.manager);
+        }
+        while paced.table.len() < 1024 {
+            paced.turn();
+        }
+        let (reply, _result) = oneshot::channel();
+        paced.manager.handle_update(RibUpdate::RefreshPeerOutbound {
+            peer: receiver(1),
+            reply,
+        });
+        for _ in 0..1024 {
+            if paced.manager.initial_member_replay_sweeping(receiver(1)) || !paced.replaying() {
+                break;
+            }
+            paced.turn();
+        }
+        assert!(
+            paced.manager.initial_member_replay_sweeping(receiver(1)),
+            "{shape:?}: the reconcile did not reach its sweep"
+        );
+        let best = |manager: &RibManager| {
+            manager
+                .loc_rib
+                .get(&moved.prefix)
+                .map(|route| (route.peer, route.local_pref()))
+        };
+        let before = best(&paced.manager);
+        moved.apply(&mut paced.manager);
+        assert_eq!(best(&paced.manager), before, "{shape:?}: the best moved");
+        for _ in 0..1024 {
+            if !paced.replaying() {
+                break;
+            }
+            paced.turn();
+        }
+        assert!(
+            !paced.replaying(),
+            "{shape:?}: the reconcile did not finish"
+        );
+        paced.read();
+        paced.assert_paced();
+        let mut changes = setup;
+        changes.push(moved);
         assert_eq!(paced.table, reference(shape, &changes), "{shape:?}");
     }
 }

@@ -527,8 +527,8 @@ first base route.
 | Cell | Churn during the replay | Expected result |
 | --- | --- | --- |
 | `clean` | none | `paced_complete` |
-| `mixed` | one source hard flap plus the sustained stream below | reported: `paced_complete` or a fallback with its cause |
-| `burst` | one UPDATE with 8,192 new prefixes, above the 4,096-key scan repair cap (and the 1,024-key sparse admission overlay that new prefixes use) | `replay_to_dirty` (control: the detector must fire) |
+| `mixed` | one source hard flap plus the sustained stream below | reported: `paced_complete`, `reconcile_complete` or a fallback, with its cause |
+| `burst` | one UPDATE with 8,192 new prefixes, above the 4,096-key scan repair cap | `reconcile_complete` with cause `scan_repair_limit` (control: the detector must fire, and the replay recovers in pages) |
 | `budget-control` | none; the per-peer admitted-proof budget is cut to 64 KiB | `budget_refusal` (control) |
 
 `mixed` uses these rates:
@@ -547,8 +547,9 @@ A 1,000,000-row `mixed` run fails unless all eight stream sources both
 announce and withdraw during the replay. At every size, the flap and the
 stream must overlap the replay.
 
-The RIB reports the replay's enrollment, completion, or handoff to dirty
-resync, with the guard that fired, through a bench-only observer
+The RIB reports the replay's enrollment, each rewind into a paced reconcile,
+completion, or handoff to dirty resync, with the guard that fired, through a
+bench-only observer
 (`RibManager::with_bench_initial_replay_observer`, behind `bench-internals`).
 A production build does not compile the observer or the cause labels. A
 handoff with an unexpected cause, a missing terminal event, or a fallback
@@ -572,6 +573,8 @@ The window is reset at PeerUp, then read and reset at the first base route
 (build), at End-of-RIB (replay) and at the final fence (post). A poll is charged
 to the phase in which it ends. A fallback resync runs before End-of-RIB, so
 its whole-table turn appears in `replay_max_poll_us` and in the marker waits.
+For `reconcile_complete`, `fallback=1` and `fallback_us` mark the first rewind
+into a paced reconcile; the disposition tells it from a dirty resync.
 
 ### Timed campaign
 

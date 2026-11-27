@@ -511,11 +511,29 @@ impl LocRib {
             .status()
     }
 
+    /// Whether the member's scan has visited every bucket; repairs may
+    /// still be queued.
+    pub(crate) fn member_replay_discovery_finished(&self, peer: PeerId) -> bool {
+        self.registration_scans
+            .as_ref()
+            .and_then(|scans| scans.members.get(&peer))
+            .is_some_and(|scan| scan.discovery_finished)
+    }
+
     pub(crate) fn member_replay_change_recorded(&self, peer: PeerId, prefix: Prefix) -> bool {
         self.registration_scans
             .as_ref()
             .and_then(|scans| scans.members.get(&peer))
             .is_some_and(|scan| scan.queued.contains(&prefix))
+    }
+
+    /// The member's queued repairs, for tests that bound its log.
+    #[cfg(test)]
+    pub(crate) fn member_replay_repairs(&self, peer: PeerId) -> Option<usize> {
+        self.registration_scans
+            .as_ref()
+            .and_then(|scans| scans.members.get(&peer))
+            .map(|scan| scan.repairs.len())
     }
 
     /// Queue a repair for a group change that wrote no Loc-RIB row. `false`
