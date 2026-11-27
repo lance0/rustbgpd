@@ -122,6 +122,16 @@ fn published_shape(rows: usize, dual: bool) -> Published {
     }
 }
 
+/// Leave the proof budget room for `tables` paced tables: each a mask, its
+/// keys and their bucket index, plus header slack below half a table.
+fn limit_proof_budget(manager: &mut RibManager, tables: usize) {
+    use crate::manager::update_groups::admitted_recovery::Key;
+
+    let table = ROWS * (size_of::<Key>() + 6 * size_of::<u32>() / 4) + ROWS / 8 + 1024;
+    let ledger = &mut manager.pending_group_admitted;
+    ledger.set_test_daemon_limit(ledger.bytes() + tables * table + table / 2);
+}
+
 async fn rejoin(joiners: u8) -> Rejoin {
     Box::pin(rejoin_within(joiners, None)).await
 }
@@ -135,13 +145,7 @@ async fn rejoin_within(joiners: u8, replays: Option<usize>) -> Rejoin {
         ..
     } = published();
     if let Some(replays) = replays {
-        // A table's mask, keys and their bucket index, plus header slack
-        // below half a table.
-        use crate::manager::update_groups::admitted_recovery::Key;
-
-        let table = ROWS * (size_of::<Key>() + 6 * size_of::<u32>() / 4) + ROWS / 8 + 1024;
-        let ledger = &mut manager.pending_group_admitted;
-        ledger.set_test_daemon_limit(ledger.bytes() + replays * table + table / 2);
+        limit_proof_budget(&mut manager, replays);
     }
     let clients: Vec<_> = (1..=joiners)
         .map(|n| (rs_client(&mut manager, n, 1 << 12), ROWS, 1))
@@ -608,15 +612,85 @@ fn a_replacement_session_that_cannot_pace_stops_waiting() {
     );
 }
 
-// The proof budget has room for two paced tables at a time. The other
-// joiners wait for a replay to end instead of sending a whole table in one
-// turn under a refused enrollment.
+// The proof budget has room for two tables. A join cohort shares one key
+// universe and each member adds its mask alone, so every replay slot
+// starts at once: none waits for another's proof to be released.
+#[test]
+fn a_cohort_at_the_replay_cap_fits_a_budget_of_two_tables() {
+    let Published {
+        mut manager,
+        tx: _tx,
+        ..
+    } = published();
+    limit_proof_budget(&mut manager, 2);
+    let _parked = fill_replay_slots(&mut manager);
+    assert!(manager.pending_initial_registrations.is_empty());
+    assert_eq!(manager.pending_group_admitted.replay_universes(), 1);
+}
+
+fn work(stage: &str) -> usize {
+    crate::manager::slice_timing::group_work()
+        .get(stage)
+        .copied()
+        .unwrap_or(0)
+}
+
+// The walk of the group table that fills the proof universe runs once per
+// cohort, whichever members' turns carry its pages: its rows do not grow
+// with the joiners.
 #[tokio::test]
-async fn joiners_past_the_proof_budget_wait_for_a_replay_to_end() {
-    let work = Box::pin(rejoin_within(8, Some(2))).await;
-    eprintln!("{work:?}");
-    assert!(work.peak_rows <= REGISTRATION_PAGE_SIZE, "{work:?}");
-    assert!(work.polls >= 8 * usize::from(PAGES), "{work:?}");
+async fn a_join_cohort_walks_its_group_table_once() {
+    let mut walked = Vec::new();
+    for joiners in [8, 32] {
+        let before = work("initial_member_proof_walk_rows");
+        Box::pin(rejoin(joiners)).await;
+        walked.push(work("initial_member_proof_walk_rows") - before);
+    }
+    eprintln!("proof walk rows at 8 and 32 joiners: {walked:?}");
+    assert_eq!(walked[0], walked[1], "{walked:?}");
+    // Each page after the first revisits the row it seeks from.
+    assert!(
+        (ROWS..=ROWS + usize::from(PAGES)).contains(&walked[0]),
+        "{walked:?}"
+    );
+}
+
+/// Proof bytes the ledger holds for `joiners` parked replays of one group.
+fn parked_cohort_bytes(joiners: u8) -> usize {
+    let Published {
+        mut manager,
+        tx: _tx,
+        ..
+    } = published();
+    let before = manager.pending_group_admitted.bytes();
+    let _parked: Vec<_> = (1..=joiners)
+        .map(|n| rs_client(&mut manager, n, 1))
+        .collect();
+    settle(&mut manager);
+    assert!((1..=joiners).all(|n| manager.is_initial_member_replay(receiver(n))));
+    manager.pending_group_admitted.bytes() - before
+}
+
+// A cohort member adds one mask bit per key and its record to the proof
+// bytes, flat from 8 to 32 members; the 32-byte keys and their bucket index
+// are held once for the cohort.
+#[test]
+fn a_cohort_member_adds_its_mask_to_the_proof_bytes() {
+    use crate::manager::update_groups::admitted_recovery::Key;
+
+    let (small, large) = (parked_cohort_bytes(8), parked_cohort_bytes(32));
+    let member = (large - small) / 24;
+    let universe = small.saturating_sub(8 * member);
+    eprintln!(
+        "rows={ROWS}: proof bytes at 8 and 32 members: {small}, {large}; \
+         per member {member}; universe {universe}"
+    );
+    // One bit per key, plus the record and its share of the record array.
+    assert!(member <= ROWS / 8 + 512, "per member: {member}");
+    assert!(
+        (ROWS * size_of::<Key>()..=ROWS * (size_of::<Key>() + 6) + 1024).contains(&universe),
+        "universe: {universe}"
+    );
 }
 
 /// A dual-stack table and an IPv4 one, with one parked IPv4 replay holding

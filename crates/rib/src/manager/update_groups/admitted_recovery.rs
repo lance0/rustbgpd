@@ -2235,6 +2235,15 @@ impl AdmittedRecovery {
         Ok(handle)
     }
 
+    /// Live replay universes.
+    #[cfg(test)]
+    pub(in crate::manager) fn replay_universes(&self) -> usize {
+        self.snapshots
+            .iter()
+            .filter(|snapshot| snapshot.keyed)
+            .count()
+    }
+
     /// The key capacity of a live replay universe.
     pub(in crate::manager) fn replay_universe_capacity(
         &self,
@@ -3461,6 +3470,131 @@ mod tests {
                 "sparse={sparse}: {work} checkpoints"
             );
         }
+    }
+
+    // Two members of one join cohort reference one universe. Each admits
+    // and withdraws through its own mask and overlay: neither sees the
+    // other's keys, a member that fails leaves the other's proof whole, and
+    // the last reference retires the universe with all its credit.
+    #[test]
+    fn cohort_members_share_a_universe_and_keep_their_own_admission() {
+        let mut ledger = AdmittedRecovery::new();
+        let (a, b) = (peer(1), peer(2));
+        let rows = 256_u32;
+        let key = slot_key;
+        ledger.insert_empty(a).unwrap();
+        ledger.insert_empty(b).unwrap();
+        let seeded = ledger.bytes();
+        let universe = ledger
+            .begin_initial_replay(a, rows as usize, None)
+            .unwrap()
+            .unwrap();
+        let first = ledger.bytes() - seeded;
+        assert_eq!(
+            ledger.begin_initial_replay(b, 1, Some(universe)).unwrap(),
+            Some(universe)
+        );
+        // The second member pays for one mask bit per universe key.
+        assert_eq!(ledger.bytes() - seeded - first, rows as usize / 8);
+        assert!(first - rows as usize / 8 >= rows as usize * size_of::<Key>());
+        assert_eq!(ledger.snapshots.len(), 1);
+        assert!(ledger.extend_initial_replay_universe(universe, (0..rows).map(key)));
+
+        // The same keys with different outcomes, plus one outside the universe.
+        let outside = key(rows + 7);
+        ledger
+            .apply_admitted(a, [key(1), key(2), outside].into_iter(), [].into_iter())
+            .unwrap();
+        ledger
+            .apply_admitted(b, [key(2), key(3)].into_iter(), [].into_iter())
+            .unwrap();
+        ledger
+            .apply_admitted(a, [].into_iter(), [key(2)].into_iter())
+            .unwrap();
+        let admitted = |ledger: &AdmittedRecovery, who| {
+            ledger
+                .get(&who)
+                .unwrap()
+                .iter()
+                .collect::<Vec<ExactExportKey>>()
+        };
+        assert_eq!(admitted(&ledger, a), [key(1).into(), outside.into()]);
+        assert_eq!(admitted(&ledger, b), [key(2).into(), key(3).into()]);
+        assert!(!ledger.get(&b).unwrap().contains(&outside.into()));
+        assert_retained_credit(&ledger);
+
+        // B withdraws a key only A admitted: B's proof fails closed alone.
+        assert_eq!(
+            ledger
+                .apply_admitted(b, [].into_iter(), [key(1)].into_iter())
+                .unwrap_err()
+                .cause,
+            FailureCause::MissingProof
+        );
+        assert_eq!(admitted(&ledger, a), [key(1).into(), outside.into()]);
+        assert_eq!(
+            ledger.replay_universe_capacity(universe),
+            Some(rows as usize)
+        );
+        assert_retained_credit(&ledger);
+
+        // A late joiner naming the live universe shares it; a retired one
+        // is replaced, never revived.
+        let late = peer(3);
+        ledger.insert_empty(late).unwrap();
+        assert_eq!(
+            ledger
+                .begin_initial_replay(late, 1, Some(universe))
+                .unwrap(),
+            Some(universe)
+        );
+        assert!(admitted(&ledger, late).is_empty());
+        assert!(ledger.remove(&a));
+        assert_eq!(
+            ledger.replay_universe_capacity(universe),
+            Some(rows as usize)
+        );
+        assert!(ledger.remove(&late));
+        assert_eq!(ledger.replay_universe_capacity(universe), None);
+        assert!(ledger.snapshots.is_empty());
+        assert_retained_credit(&ledger);
+        ledger.insert_empty(late).unwrap();
+        let fresh = ledger
+            .begin_initial_replay(late, 64, Some(universe))
+            .unwrap()
+            .unwrap();
+        assert_ne!(fresh, universe);
+        assert_eq!(ledger.replay_universe_capacity(fresh), Some(64));
+    }
+
+    // A joiner whose cohort already holds its universe needs room for its
+    // mask alone, where a first member needs the whole universe.
+    #[test]
+    fn a_cohort_member_fits_where_a_second_universe_would_not() {
+        let rows = 4_096;
+        let mut ledger = AdmittedRecovery::new();
+        ledger.insert_empty(peer(1)).unwrap();
+        let before = ledger.bytes();
+        let universe = ledger.begin_initial_replay(peer(1), rows, None).unwrap();
+        let table = ledger.bytes() - before;
+        ledger.set_test_daemon_limit(ledger.bytes() + table / 2);
+        assert_eq!(
+            ledger.initial_replay_room(rows, None),
+            ReplayRoom::AfterReplays
+        );
+        assert_eq!(ledger.initial_replay_room(rows, universe), ReplayRoom::Fits);
+        // Sixty-three more members fit the room half a table leaves.
+        for n in 2..=64 {
+            ledger.insert_empty(peer(n)).unwrap();
+            assert_eq!(
+                ledger
+                    .begin_initial_replay(peer(n), rows, universe)
+                    .unwrap(),
+                universe
+            );
+        }
+        assert_eq!(ledger.snapshots.len(), 1);
+        assert_retained_credit(&ledger);
     }
 
     #[test]

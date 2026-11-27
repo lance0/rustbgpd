@@ -5,6 +5,8 @@
 //! repair of its current slot.
 use rustbgpd_policy::{Policy, PolicyAction, PolicyChain};
 
+mod cohort;
+
 use super::*;
 use crate::manager::tests::lifecycle::test_session_routes_received;
 use crate::manager::tests::update_groups::deny_statement;
