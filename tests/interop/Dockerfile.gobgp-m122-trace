@@ -31,7 +31,7 @@ RUN set -eux; \
     sha256sum /tmp/m122-gobgp-fsm-trace.patch | cut -d' ' -f1 > /usr/local/share/gobgp-m122/patch-sha256; \
     sha256sum /usr/local/bin/gobgp /usr/local/bin/gobgpd > /usr/local/share/gobgp-m122/binaries.sha256
 
-FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
+FROM debian:bookworm-slim@sha256:e67eeead736ff7bbe258ef088bff683635c561b1fcfefad0806c1df4ab49ce0e
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl iproute2 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /usr/local/bin/gobgp /usr/local/bin/gobgp
