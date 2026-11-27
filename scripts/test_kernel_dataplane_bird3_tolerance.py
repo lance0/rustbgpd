@@ -53,6 +53,7 @@ def needs_context(
     bird3_result: str | None = None,
     m43_result: str | None = None,
     tcp_ao_supported: str | None = "true",
+    kernel_fdb_nhg: str | None = "supported",
 ) -> dict[str, dict]:
     default = "success" if run_labs == "true" else "skipped"
     needs = {job: {"result": default} for job in EXPECTED_JOBS}
@@ -66,6 +67,8 @@ def needs_context(
     needs["m43"] = {"result": m43_result or default}
     if tcp_ao_supported is not None:
         needs["m43"]["outputs"] = {"tcp_ao_supported": tcp_ao_supported}
+    if kernel_fdb_nhg is not None:
+        needs["m121"]["outputs"] = {"kernel_fdb_nhg": kernel_fdb_nhg}
     return needs
 
 
@@ -116,6 +119,21 @@ class Bird3ToleranceTests(unittest.TestCase):
                 result = run_aggregate(needs_context(tcp_ao_supported=tcp_ao))
                 self.assertEqual(1, result.returncode, result.stdout)
                 self.assertIn("every TCP-AO step was disabled", result.stdout)
+
+    def test_m121_kernel_rejection_passes_loudly(self) -> None:
+        # The only tolerated lab-less m121 success is the probe's known
+        # kernel rejection, and it must be named in the aggregate log.
+        result = run_aggregate(needs_context(kernel_fdb_nhg="rejected"))
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("::warning::m121=success without the lab", result.stdout)
+        self.assertNotIn("without the lab", run_aggregate(needs_context()).stdout)
+
+    def test_m121_success_without_a_probe_verdict_fails(self) -> None:
+        for verdict in ("error", None):
+            with self.subTest(kernel_fdb_nhg=verdict):
+                result = run_aggregate(needs_context(kernel_fdb_nhg=verdict))
+                self.assertEqual(1, result.returncode, result.stdout)
+                self.assertIn("m121 succeeded with kernel_fdb_nhg=", result.stdout)
 
     def test_excused_skip_needs_no_tcp_ao_output(self) -> None:
         # A skipped job publishes no outputs; the excused bird3 skip must

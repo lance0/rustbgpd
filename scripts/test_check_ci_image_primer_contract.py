@@ -1166,6 +1166,9 @@ class PrimerContractTests(unittest.TestCase):
             # A live m43 republishes its TCP-AO probe verdict; the aggregate
             # requires it whenever the labs ran.
             needs["m43"]["outputs"] = {"tcp_ao_supported": "true"}
+        if "m121" in needs and needs["m121"]["result"] == "success":
+            # A live m121 republishes its kernel FDB nexthop probe verdict.
+            needs["m121"]["outputs"] = {"kernel_fdb_nhg": "supported"}
         return subprocess.run(
             ["python3", "-c", textwrap.dedent(script)],
             check=False,
