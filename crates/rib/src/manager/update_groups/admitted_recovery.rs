@@ -2695,13 +2695,22 @@ impl AdmittedRecovery {
         let (universe, key_index) = Self::universe(&self.snapshots, self.records[index].snapshot);
         let record = &mut self.records[index];
         let prior = record.entries();
+        // Every key the mutation touches passes a checkpoint.
+        let mut visits = 0;
         let applied = Self::apply_reserved_keys(
             record,
             (universe, key_index),
             announcements,
             withdrawals,
-            checkpoint,
+            &mut |slice| {
+                visits += 1;
+                checkpoint(slice);
+            },
         );
+        #[cfg(test)]
+        crate::manager::slice_timing::record_work("admitted_proof_visits", visits);
+        #[cfg(not(test))]
+        let _ = visits;
         self.entries = self.entries - prior + record.entries();
         if !applied {
             return Err(self.fail(index, self.missing_proof(peer), checkpoint));
@@ -2738,18 +2747,7 @@ impl AdmittedRecovery {
         }
         let merge_tail = record.initial_replay;
         let keys = &mut record.keys.0;
-        let mut withdrawals = withdrawals;
-        let mut withdrawn = withdrawals.next();
-        if withdrawn.is_some() {
-            keys.retain(|key| {
-                checkpoint(false);
-                while withdrawn.is_some_and(|withdrawal| withdrawal < *key) {
-                    checkpoint(false);
-                    withdrawn = withdrawals.next();
-                }
-                withdrawn != Some(*key)
-            });
-        }
+        Self::remove_sorted_keys(keys, withdrawals, checkpoint);
         let old_len = keys.len();
         let singleton = announcements.size_hint().1.is_some_and(|upper| upper <= 1);
         let mut needs_sort = false;
@@ -2802,9 +2800,40 @@ impl AdmittedRecovery {
         true
     }
 
+    /// Remove the sorted, unique `withdrawals` from sorted `keys`. Each one
+    /// costs a search, so a page of withdrawals touches a page of keys
+    /// however large the proof; the keys after the first removal shift
+    /// once, segment by segment.
+    fn remove_sorted_keys(
+        keys: &mut Keys,
+        withdrawals: impl Iterator<Item = Key>,
+        checkpoint: &mut impl FnMut(bool),
+    ) {
+        // Keys before `read` are settled; the kept ones end at `write`.
+        let (mut read, mut write) = (0, None);
+        for key in withdrawals {
+            checkpoint(false);
+            let Ok(found) = keys[read..].binary_search(&key) else {
+                continue;
+            };
+            let at = read + found;
+            let to = write.unwrap_or(read);
+            keys.copy_within(read..at, to);
+            write = Some(to + at - read);
+            read = at + 1;
+        }
+        if let Some(to) = write {
+            let len = keys.len();
+            keys.copy_within(read..len, to);
+            keys.truncate(to + len - read);
+        }
+    }
+
     /// Merge the unsorted, unique keys after `old_len` into the sorted run
     /// before it. The capacity holds a copy of the tail, so this allocates
-    /// nothing.
+    /// nothing. Each tail key finds its place by search, so a page of new
+    /// keys touches a page of keys however large the run; the run keys above
+    /// the smallest one shift once, segment by segment.
     fn merge_sorted_tail(keys: &mut Keys, old_len: usize, checkpoint: &mut impl FnMut(bool)) {
         checkpoint(true);
         keys[old_len..].sort_unstable_by(|left, right| {
@@ -2817,25 +2846,26 @@ impl AdmittedRecovery {
             let key = keys[index];
             keys.push(key);
         }
-        // Fill [0, len) from the back. Position `run + tail - 1` is never an
-        // unread key of the run, which ends at `run`.
-        let (mut run, mut tail) = (old_len, len - old_len);
+        // Fill [0, len) from the back: the run is [0, run), the placed keys
+        // [end, len), and the tail copy waits at [len, len + tail).
+        let (mut run, mut tail, mut end) = (old_len, len - old_len, len);
         while tail > 0 {
             checkpoint(false);
             let next = keys[len + tail - 1];
-            if run > 0 && keys[run - 1] > next {
-                keys[run + tail - 1] = keys[run - 1];
-                run -= 1;
-            } else {
-                keys[run + tail - 1] = next;
-                tail -= 1;
+            let at = keys[..run].partition_point(|prior| *prior < next);
+            let duplicate = (at < run && keys[at] == next) || (end < len && keys[end] == next);
+            keys.copy_within(at..run, end - (run - at));
+            end -= run - at;
+            run = at;
+            if !duplicate {
+                end -= 1;
+                keys[end] = next;
             }
+            tail -= 1;
         }
-        keys.truncate(len);
-        keys.dedup_by(|left, right| {
-            checkpoint(false);
-            left == right
-        });
+        // A dropped duplicate leaves a gap between the run and the placed keys.
+        keys.copy_within(end..len, run);
+        keys.truncate(run + len - end);
         checkpoint(true);
     }
 
@@ -3167,6 +3197,78 @@ mod tests {
         );
         assert!(ledger.remove(&who));
         assert_eq!(ledger.bytes(), size_of::<AdmittedRecovery>());
+    }
+
+    // A reconcile's commits edit an adopted flat proof a page at a time.
+    // Each touches about a page of keys, from 8 to 32 pages of proof, and
+    // the proof stays exact.
+    #[test]
+    fn a_reconcile_page_edits_a_page_of_a_flat_proof_from_8_to_32_pages() {
+        const PAGE: u32 = 1_024;
+        let wide = |i: u32| {
+            Key::Unicast(
+                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from(0x0a00_0000 + i), 32)),
+                0,
+            )
+        };
+        let mut peaks = Vec::new();
+        for pages in [8, 32] {
+            let mut ledger = AdmittedRecovery::new();
+            let who = peer(1);
+            assert!(ledger.begin_capture(who).unwrap());
+            // Even addresses are admitted; odd ones arrive during the reconcile.
+            let mut model = std::collections::BTreeSet::new();
+            for i in 0..pages * PAGE {
+                ledger.push_capture(who, wide(2 * i)).unwrap();
+                model.insert(wide(2 * i));
+            }
+            ledger.seal_capture(who).unwrap();
+            assert!(ledger.begin_reconcile(who));
+            let mut peak = 0;
+            for round in 0..8 {
+                // A page of withdrawals across the whole proof, and new keys
+                // across it too.
+                let withdrawals: Vec<Key> =
+                    (0..PAGE).map(|j| wide(2 * (j * pages + round))).collect();
+                let announcements: Vec<Key> = (0..64)
+                    .map(|j| wide(2 * (j * pages * PAGE / 64 + round) + 1))
+                    .collect();
+                ledger
+                    .reserve_admitted(who, announcements.iter().copied())
+                    .unwrap();
+                let mut visits = 0;
+                assert!(
+                    ledger
+                        .apply_reserved_admitted_with_checkpoint(
+                            who,
+                            announcements.iter().copied(),
+                            withdrawals.iter().copied(),
+                            &mut |_| visits += 1,
+                        )
+                        .unwrap()
+                );
+                peak = usize::max(peak, visits);
+                for key in &withdrawals {
+                    model.remove(key);
+                }
+                model.extend(announcements);
+            }
+            eprintln!("pages={pages}: peak proof visits per commit={peak}");
+            let proof: Vec<ExactExportKey> = ledger.get(&who).unwrap().iter().collect();
+            let expected: Vec<ExactExportKey> = model.into_iter().map(Into::into).collect();
+            assert_eq!(proof, expected, "pages={pages}: the proof");
+            // Validation, the mask lookup and the edit: a few checkpoints
+            // per key of the commit, none per key of the proof.
+            assert!(
+                peak <= 4 * usize::try_from(PAGE + 64).unwrap(),
+                "pages={pages}: a commit touched {peak} proof keys"
+            );
+            peaks.push(peak);
+        }
+        assert!(
+            peaks[1] <= peaks[0] + 64,
+            "proof edits grew with the proof: {peaks:?}"
+        );
     }
 
     #[test]
