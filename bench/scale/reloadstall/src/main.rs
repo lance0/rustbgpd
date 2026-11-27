@@ -2688,8 +2688,8 @@ fn start_stub(ctx: Arc<Ctx>, i: u32, stream: TcpStream, track_rejoin: bool) -> S
                         let [total_prefixes, total_prefixes6] = rctx.totals;
                         let mut nlri = split_unicast_families(&parsed);
                         if let Some(probe) = rctx.wait_probe.as_ref() {
-                            // Member export chains reject the probe prefix; a receipt
-                            // fails the probe, and is kept out of every other measure.
+                            // Members receive the probe prefix (fleet chains carry no
+                            // probe term); count it and keep it out of every other measure.
                             if update_wait::WaitProbe::take(&mut nlri, &parsed.attributes).is_some()
                             {
                                 probe.member_receipt();

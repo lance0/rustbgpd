@@ -10,16 +10,18 @@
 //! source writes it (rrharness stamps at its FIFO admission), so a stalled
 //! socket lengthens the wait rather than delaying the stamp.
 //!
-//! The scenario generator (`GEN_UPDATE_WAIT=1`) isolates the pair by
+//! The scenario generator (`GEN_UPDATE_WAIT=1`) isolates the pair by its own
 //! route-server policy. The witness's export chain admits only the probe
 //! prefix and the source's admits nothing, so neither session ever queues
-//! fleet rows: no table, flap fan-out or reload re-export. Every member's
-//! export chain rejects the probe prefix, so the probe costs one session's
-//! fan-out, not the fleet's. Both pair chains are identical in every policy
-//! generation, so a reload that changes every member leaves the pair alone.
-//! The run checks the isolation: the witness counts every other UPDATE it
-//! receives (`witness_other_updates`), members count probe receipts
-//! (`member_probe_updates`), and either being nonzero fails the run.
+//! fleet rows: no table, flap fan-out or reload re-export. Fleet chains get no
+//! probe term: an export denial in a member's update group rules out the
+//! daemon's clean shared reload transition, so the probe would change the
+//! path it measures. Members therefore receive the probe prefix, one small
+//! UPDATE per tick each; their readers strip it before any other accounting
+//! and count it as `member_probe_updates` (report-only). Both pair chains are
+//! identical in every policy generation, so a reload that changes every member
+//! leaves the pair alone. The witness counts every other UPDATE it receives
+//! (`witness_other_updates`), and a nonzero count fails the run.
 //!
 //! Each UPDATE replaces the previous one, so the daemon may send only the
 //! newest pending path. A receipt of sequence `s` completes every earlier
@@ -57,7 +59,7 @@ struct State {
     invalid: u64,
     /// Witness UPDATEs carrying anything but the probe prefix (End-of-RIB excepted).
     witness_other: u64,
-    /// Fleet UPDATEs carrying the probe prefix.
+    /// Fleet UPDATEs carrying the probe prefix (report-only).
     member_receipts: u64,
     session_error: Option<String>,
 }
@@ -130,7 +132,7 @@ impl WaitProbe {
         self.state.lock().unwrap().witness_other += 1;
     }
 
-    /// A fleet member received the probe prefix its export chain should reject.
+    /// A fleet member received the probe prefix.
     pub(crate) fn member_receipt(&self) {
         self.state.lock().unwrap().member_receipts += 1;
     }
@@ -232,10 +234,10 @@ impl WaitProbe {
             Some(format!("{unarrived} sample(s) never reached the witness"))
         } else if state.invalid > 0 {
             Some(format!("{} invalid probe receipt(s)", state.invalid))
-        } else if state.witness_other > 0 || state.member_receipts > 0 {
+        } else if state.witness_other > 0 {
             Some(format!(
-                "pair not isolated: witness received {} other UPDATE(s), members {} probe UPDATE(s)",
-                state.witness_other, state.member_receipts
+                "pair not isolated: witness received {} other UPDATE(s)",
+                state.witness_other
             ))
         } else {
             None
@@ -536,7 +538,7 @@ mod tests {
     }
 
     #[test]
-    fn traffic_outside_the_pair_or_a_session_error_fails_the_probe() {
+    fn witness_traffic_or_a_session_error_fails_the_probe() {
         let clean = || {
             let probe = WaitProbe::new(12);
             probe.sent(0);
@@ -555,7 +557,7 @@ mod tests {
             summary_field(&probe.summary().0, "member_probe_updates"),
             "1"
         );
-        assert!(probe.summary().1.is_some());
+        assert_eq!(probe.summary().1, None, "member receipts are report-only");
         let probe = clean();
         probe.session_error("stub 13 reader: daemon closed the session".into());
         assert!(probe

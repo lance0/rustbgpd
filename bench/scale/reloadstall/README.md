@@ -639,16 +639,22 @@ reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
   receipt: the quantity rrharness's cold-join marker train reports (stamped at
   its FIFO admission), so a stalled socket shows as wait.
 
-  Route-server policy isolates the pair. The witness's export chain admits only
-  the probe prefix and the source's admits nothing, so neither session ever
-  queues fleet rows (table transfer, flap fan-out or reload re-export). Every
-  member's export chain rejects the probe prefix, so the probe costs one
-  session's fan-out and leaves gap, completion and rejoin figures unchanged.
-  The pair's chains are the same in both generations, so a reload that changes
-  every member (the IXP S2 shape) is probed too. The run checks the isolation:
-  the summary reports `witness_other_updates` (non-probe UPDATEs at the
-  witness, End-of-RIB excepted) and `member_probe_updates` (probe UPDATEs at
-  any member), and fails if either is nonzero.
+  The pair's own route-server policy isolates it. The witness's export chain
+  admits only the probe prefix and the source's admits nothing, so neither
+  session ever queues fleet rows (table transfer, flap fan-out or reload
+  re-export). The probe adds no export denial to the fleet: a denied route in
+  a member's update group rules out the daemon's clean shared reload
+  transition (ADR-0105), so a fleet probe term would change the path the probe
+  measures. Members therefore receive the probe prefix, one small UPDATE per
+  20 ms each; their readers strip it before every other measure. The pair's
+  chains are the same in both generations, so a reload that changes every
+  member (the IXP S2 shape) is probed too. The summary reports
+  `witness_other_updates` (non-probe UPDATEs at the witness, End-of-RIB
+  excepted), and the run fails if it is nonzero; `member_probe_updates`
+  (probe UPDATEs at members) is report-only. The settlement smoke
+  (`bench/tests/test-reloadstall-settlement.py`) runs each probe case beside a
+  probe-off twin and fails unless paced-fallback counts and export-policy
+  transition outcomes match.
 
   A receipt also completes every earlier sample still pending (the daemon may
   send only the newest path; these count as `coalesced`). The run prints one
