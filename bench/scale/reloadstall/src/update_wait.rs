@@ -5,8 +5,10 @@
 //! when each one arrives. The wait is the quantity rrharness's cold-join
 //! marker train reports: the time from handing the UPDATE to the daemon's
 //! ordinary input path until an already converged witness receives it. Here
-//! the input path is the source session's socket, and the send time is taken
-//! immediately before the writer writes the encoded UPDATE.
+//! a sample is stamped when the 20 ms ticker fires, before the UPDATE is handed
+//! to the source stub's writer channel (rrharness stamps at its FIFO
+//! admission), so a stalled writer or socket lengthens the wait rather than
+//! delaying the stamp.
 //!
 //! Both stubs sit below the churners and above every flapped or reload-changed
 //! member, so neither the source nor the witness has a table transfer or
@@ -23,7 +25,7 @@ use std::sync::Mutex;
 use super::*;
 
 pub(crate) const INTERVAL: Duration = Duration::from_millis(20);
-/// A sent sample with no receipt this long after the probe stops fails the run.
+/// A queued sample with no receipt this long after the probe stops fails the run.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) fn prefix() -> Ipv4Prefix {
@@ -32,15 +34,18 @@ pub(crate) fn prefix() -> Ipv4Prefix {
 
 /// The probe's source and witness: the two highest stubs below the churners.
 /// Stub 0 is the max-prefix trip member, and reload mode changes the first
-/// `changed_peers`, so both must lie above `max(1, flapped or changed)`.
+/// `changed_peers`, so both must lie above `max(1, flapped or changed)`. The
+/// converged rejoin also refreshes the full table of survivors `K` and `K + 1`.
 pub(crate) fn stubs(
     n_peers: u32,
     changed_peers: u32,
     flapstorm: Option<u32>,
+    converged_rejoin: bool,
 ) -> Option<(u32, u32)> {
     let source = n_peers.checked_sub(CHURNERS + 1)?;
     let observer = source.checked_sub(1)?;
-    let floor = flapstorm.unwrap_or(changed_peers).max(1);
+    let refreshed = if converged_rejoin { 2 } else { 0 };
+    let floor = flapstorm.map_or(changed_peers, |k| k + refreshed).max(1);
     (observer >= floor).then_some((source, observer))
 }
 
@@ -65,6 +70,8 @@ pub(crate) struct WaitProbe {
     pub(crate) source: u32,
     pub(crate) observer: u32,
     state: Mutex<State>,
+    /// Set by [`finish`]; the train stops at its next tick.
+    stop: AtomicBool,
 }
 
 /// The probe prefix in one daemon UPDATE.
@@ -80,6 +87,7 @@ impl WaitProbe {
             source,
             observer,
             state: Mutex::default(),
+            stop: AtomicBool::new(false),
         };
         probe.set_phase("warmup".to_owned());
         probe
@@ -89,13 +97,9 @@ impl WaitProbe {
         self.state.lock().unwrap().phases.push(label);
     }
 
-    /// Writer side, immediately before the write. Sequences start at 1.
-    pub(crate) fn sent(&self, seq: u32, at_us: u64) {
+    /// Record a sample before its UPDATE is queued; returns its sequence (from 1).
+    fn sent(&self, at_us: u64) -> u32 {
         let mut state = self.state.lock().unwrap();
-        if seq as usize != state.samples.len() + 1 {
-            state.invalid += 1;
-            return;
-        }
         let phase = state.phases.len() - 1;
         state.samples.push(Sample {
             sent_us: at_us,
@@ -103,6 +107,7 @@ impl WaitProbe {
             arrived_us: None,
             direct: false,
         });
+        u32::try_from(state.samples.len()).unwrap()
     }
 
     /// Witness side. A receipt older than one already recorded changes nothing.
@@ -207,10 +212,7 @@ impl WaitProbe {
         } else if unarrived > 0 {
             Some(format!("{unarrived} sample(s) never reached the witness"))
         } else if state.invalid > 0 {
-            Some(format!(
-                "{} invalid probe write(s) or receipt(s)",
-                state.invalid
-            ))
+            Some(format!("{} invalid probe receipt(s)", state.invalid))
         } else {
             None
         };
@@ -237,20 +239,22 @@ pub(crate) fn start(ctx: &Arc<Ctx>, stubs: &[Stub]) -> Option<tokio::task::JoinH
     let probe = ctx.wait_probe.as_ref()?;
     let tx = stubs[probe.source as usize].tx.clone();
     let base = base_attrs(probe.source);
+    let ctx = Arc::clone(ctx);
     Some(tokio::spawn(async move {
+        let probe = ctx.wait_probe.as_ref().unwrap();
         let mut tick = tokio::time::interval(INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        for seq in 1u32.. {
+        loop {
             tick.tick().await;
+            // Stop only between samples, so every recorded sample was queued.
+            if probe.stop.load(Ordering::Acquire) {
+                return;
+            }
+            let seq = probe.sent(now_us(&ctx));
             let mut attrs = base.clone();
             attrs.push(PathAttribute::Med(seq));
             let mut message = announce_msgs_packed(&attrs, &[prefix()], 1, false);
-            let outbound = Outbound {
-                message: message.pop().unwrap(),
-                replay: None,
-                probe: Some(seq),
-            };
-            if tx.send(outbound).await.is_err() {
+            if tx.send(message.pop().unwrap().into()).await.is_err() {
                 return;
             }
         }
@@ -262,9 +266,17 @@ pub(crate) async fn finish(ctx: &Ctx, task: Option<tokio::task::JoinHandle<()>>)
     let (Some(probe), Some(task)) = (ctx.wait_probe.as_ref(), task) else {
         return;
     };
-    task.abort();
-    let _ = task.await;
+    probe.stop.store(true, Ordering::Release);
     let deadline = Instant::now() + DRAIN_TIMEOUT;
+    // A train still blocked on a full writer channel at the deadline leaves
+    // its sample unreceived, which fails the summary below.
+    let mut task = task;
+    if tokio::time::timeout_at(deadline.into(), &mut task)
+        .await
+        .is_err()
+    {
+        task.abort();
+    }
     while probe.outstanding() > 0 && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -289,10 +301,10 @@ mod tests {
     #[test]
     fn a_receipt_completes_every_earlier_pending_sample_at_its_time() {
         let probe = WaitProbe::new(3, 2);
-        probe.sent(1, 1_000);
-        probe.sent(2, 21_000);
+        assert_eq!(probe.sent(1_000), 1);
+        probe.sent(21_000);
         probe.set_phase("reload1".to_owned());
-        probe.sent(3, 41_000);
+        assert_eq!(probe.sent(41_000), 3);
         // A long turn holds 1 and 2; the daemon sends only the newest path.
         probe.arrived(Some(2), 300_000);
         // An older receipt after a newer one changes nothing.
@@ -320,8 +332,8 @@ mod tests {
     fn a_missing_receipt_or_an_unsent_sequence_fails_the_probe() {
         let probe = WaitProbe::new(3, 2);
         assert!(probe.summary().1.is_some(), "no samples is not a pass");
-        probe.sent(1, 0);
-        probe.sent(2, 20_000);
+        probe.sent(0);
+        probe.sent(20_000);
         probe.arrived(Some(1), 5_000);
         assert_eq!(
             probe.summary().1.as_deref(),
@@ -334,6 +346,23 @@ mod tests {
         let (json, error) = probe.summary();
         assert_eq!(summary_field(&json, "invalid"), "2");
         assert!(error.is_some());
+    }
+
+    #[test]
+    fn a_sample_queued_but_never_written_fails_the_probe() {
+        // The train records a sample before handing it to the writer, so a
+        // sample still queued when the probe stops is outstanding, never absent.
+        let probe = WaitProbe::new(3, 2);
+        probe.sent(0);
+        probe.arrived(Some(1), 2_000);
+        probe.sent(20_000);
+        assert_eq!(probe.outstanding(), 1);
+        let (json, error) = probe.summary();
+        assert_eq!(summary_field(&json, "sent"), "2");
+        assert_eq!(
+            error.as_deref(),
+            Some("1 sample(s) never reached the witness")
+        );
     }
 
     #[test]
@@ -363,17 +392,26 @@ mod tests {
     #[test]
     fn probe_stubs_avoid_churners_flapped_changed_and_trip_members() {
         // 700 peers: churners are 692..700.
-        assert_eq!(stubs(700, 600, None), Some((691, 690)));
-        assert_eq!(stubs(700, 700, Some(50)), Some((691, 690)));
+        assert_eq!(stubs(700, 600, None, false), Some((691, 690)));
+        assert_eq!(stubs(700, 700, Some(50), false), Some((691, 690)));
         assert_eq!(
-            stubs(700, 700, None),
+            stubs(700, 700, None, false),
             None,
             "every observer changes on reload"
         );
-        assert_eq!(stubs(12, 2, None), Some((3, 2)));
-        assert_eq!(stubs(12, 3, None), None);
-        assert_eq!(stubs(11, 0, Some(0)), Some((2, 1)));
-        assert_eq!(stubs(10, 0, Some(0)), None, "stub 0 is the trip member");
-        assert_eq!(stubs(8, 0, Some(0)), None);
+        assert_eq!(stubs(12, 2, None, false), Some((3, 2)));
+        assert_eq!(stubs(12, 3, None, false), None);
+        assert_eq!(stubs(11, 0, Some(0), false), Some((2, 1)));
+        assert_eq!(
+            stubs(10, 0, Some(0), false),
+            None,
+            "stub 0 is the trip member"
+        );
+        assert_eq!(stubs(8, 0, Some(0), false), None);
+        // The converged rejoin refreshes survivors K and K + 1.
+        assert_eq!(stubs(700, 700, Some(50), true), Some((691, 690)));
+        assert_eq!(stubs(12, 12, Some(1), false), Some((3, 2)));
+        assert_eq!(stubs(12, 12, Some(1), true), None, "witness 2 is refreshed");
+        assert_eq!(stubs(13, 13, Some(1), true), Some((4, 3)));
     }
 }

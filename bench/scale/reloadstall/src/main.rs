@@ -193,8 +193,9 @@
 //!   and p50 wait over the whole run and per phase (`warmup`, `control`,
 //!   `flapN_{pre,withdraw,down,rejoin,quiesce}`, `reloadN`, `reloadN_quiesce`,
 //!   `tripN`, `final_quiesce`), and
-//!   fails if a sample never arrives. Both stubs must lie above stub 0 and every
-//!   flapped or reload-changed member. See `update_wait.rs` for the definition.
+//!   fails if a sample never arrives. Both stubs must lie above stub 0, every
+//!   flapped or reload-changed member and, with `--converged-rejoin`, the two
+//!   survivors it refreshes. See `update_wait.rs` for the definition.
 
 // Event.other and Ctx.n_peers are recorded for the observation/context
 // model but not read by the percentile analysis; keep them so the
@@ -1183,8 +1184,6 @@ struct Stub {
 struct Outbound {
     message: Message,
     replay: Option<ReplayWrite>,
-    /// Wait-probe sequence, timestamped by the writer just before the write.
-    probe: Option<u32>,
 }
 
 struct ReplayWrite {
@@ -1198,7 +1197,6 @@ impl From<Message> for Outbound {
         Self {
             message,
             replay: None,
-            probe: None,
         }
     }
 }
@@ -1956,7 +1954,6 @@ async fn enqueue_replay(
                     nlri,
                     last: index == last,
                 }),
-                probe: None,
             })
             .await
             .is_err()
@@ -2546,9 +2543,6 @@ fn start_stub(ctx: Arc<Ctx>, i: u32, stream: TcpStream, track_rejoin: bool) -> S
                     Some(outbound) = tx_rx.recv() => {
                         let msg = outbound.message;
                         let bytes = encode_message(&msg).map_err(|e| format!("encode: {e}"))?;
-                        if let (Some(seq), Some(probe)) = (outbound.probe, writer_ctx.wait_probe.as_ref()) {
-                            probe.sent(seq, now_us(&writer_ctx));
-                        }
                         writer.write_all(&bytes).await.map_err(|e| format!("write: {e}"))?;
                         if let Some(replay) = outbound.replay {
                             let counts = refresh_accounting(&writer_ctx.obs[i as usize], replay.ipv6);
@@ -4857,12 +4851,14 @@ fn main() {
     let wait_probe = match std::env::var("RELOADSTALL_UPDATE_WAIT").as_deref() {
         Err(_) | Ok("0") => None,
         Ok("1") => {
-            let Some((source, observer)) = update_wait::stubs(n_peers, changed_peers, flapstorm)
-                .filter(|_| (flapstorm.is_some() || reloads > 0) && !convergence_only)
+            let Some((source, observer)) =
+                update_wait::stubs(n_peers, changed_peers, flapstorm, converged_rejoin)
+                    .filter(|_| (flapstorm.is_some() || reloads > 0) && !convergence_only)
             else {
                 eprintln!(
                     "RELOADSTALL_UPDATE_WAIT=1 requires a reload or flapstorm run with two stable \
-                     stubs below the churners, above stub 0 and every flapped or changed member"
+                     stubs below the churners, above stub 0, every flapped or changed member and \
+                     the two survivors a converged rejoin refreshes"
                 );
                 std::process::exit(2);
             };
