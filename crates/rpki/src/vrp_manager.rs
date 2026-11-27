@@ -1049,7 +1049,7 @@ impl VrpManager {
                 // "announce X then withdraw X" in one serial would leave X
                 // present. Robustness-only: correct caches never send both
                 // sides for one record in one serial.
-                // ponytail: the delta is applied to a copy of the cache's
+                // The delta is applied to a copy of the cache's
                 // set, the same order of work as the merged rebuild below;
                 // apply in place with an undo list if deltas ever get hot.
                 let mut table =
@@ -1225,7 +1225,7 @@ impl VrpManager {
     // one-entry incremental. Fine at real-world shapes: RTR serial-notify
     // deltas are tiny next to the ~600k-VRP global table, and rebuilds are
     // O(total log total) on a single manager task off the hot path.
-    // ponytail: revisit with per-family incremental table maintenance only if
+    // Revisit with per-family incremental table maintenance only if
     // caches ever stream high-rate deltas.
     /// The merged VRP table once `server`'s set is `next` (`None`: removed),
     /// or `None` when there is nothing new to distribute.

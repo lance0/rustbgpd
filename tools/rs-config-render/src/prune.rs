@@ -157,7 +157,7 @@ pub fn prune(options: &Options<'_>) -> Result<Plan, Error> {
                     continue;
                 }
                 if activation::valid_digest(&name) {
-                    // ponytail: publication order = directory mtime (set when the
+                    // Publication order = directory mtime (set when the
                     // generation was staged, immediately before its rename into
                     // place); the receipt carries no timestamp to prefer.
                     generations.insert(name, metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH));

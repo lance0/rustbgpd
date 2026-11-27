@@ -172,7 +172,7 @@ pub(super) enum StreamTerminal {
 
 #[derive(Default)]
 struct ProgressiveStateInner {
-    // ponytail: unlike the route inventory, retirement does not pace these
+    // Unlike the route inventory, retirement does not pace these
     // chunks; whichever holds the cell's last reference drops them in one
     // turn. Envelopes give up their reference once a member's cursor holds
     // the stream, so that is normally the last member's cursor, cleared when

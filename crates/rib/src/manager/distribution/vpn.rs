@@ -175,7 +175,7 @@ impl RibManager {
             };
 
             if key_send_max > 0 {
-                // ponytail: the multipath arm stages a ranked top-N and is
+                // The multipath arm stages a ranked top-N and is
                 // not gate-traced per candidate — an explain dry run gets
                 // this summary note instead of a per-rank ladder.
                 target.gate(

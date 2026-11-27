@@ -269,7 +269,7 @@ impl GnmiService {
     /// gNMI keys a neighbor by its address. An interface-only neighbor with
     /// no learned address has none (ADR-0142), so it is left out until it
     /// binds one.
-    // ponytail: unbound interface-only neighbors are invisible to gNMI;
+    // Unbound interface-only neighbors are invisible to gNMI;
     // give them an interface key when gNMI learns that identity.
     pub(crate) fn with_peer_snapshot<F, Fut>(
         asn: u32,
@@ -605,7 +605,7 @@ impl GnmiService {
                     let (mut caches, mut delivered) = state;
                     let mut updates = Vec::new();
                     let mut deletes = Vec::new();
-                    // ponytail: each due path filters its own copy of a shared
+                    // Each due path filters its own copy of a shared
                     // render, so a tick costs at most MAX_SUBSCRIPTIONS times the
                     // rendered bound; merge paths with identical controls if that
                     // ever matters.

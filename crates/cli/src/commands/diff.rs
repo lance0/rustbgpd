@@ -406,7 +406,7 @@ async fn run(connection: Connection, opts: &AdvertisedDiffOpts) -> Result<(Strin
         entries: Vec::new(),
     };
 
-    // ponytail: peers are processed one at a time and each peer's snapshot
+    // Peers are processed one at a time and each peer's snapshot
     // bucket is dropped after its diff, so peak memory is one peer's table
     // per side, never both full sides; finer within-peer page-by-page
     // release only if a single peer's full table ever hurts.

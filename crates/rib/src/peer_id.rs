@@ -59,7 +59,7 @@ pub struct PeerId {
 /// resolving its endpoint until this many neighbors have been released after
 /// it, so a query reply or event that left the RIB with the handle still
 /// renders the neighbor it named, however late it is converted.
-// ponytail: a count bound, not a reader lifetime; a reply converted after
+// A count bound, not a reader lifetime; a reply converted after
 // 1024 later deletions renders `peer#<index>.<generation>`. Per-reply endpoint
 // capture if that window ever matters.
 const REUSE_QUARANTINE: usize = 1024;
@@ -195,7 +195,7 @@ impl Slots {
                 generation: slot.generation,
             };
         }
-        // ponytail: 2^32 slots live or retired at once would exhaust the
+        // Limit: 2^32 slots live or retired at once would exhaust the
         // index; each slot serves about 2^32 handles before it retires, so
         // reaching this needs billions of concurrent neighbors.
         let index = u32::try_from(self.entries.len())
@@ -343,7 +343,7 @@ fn lock() -> MutexGuard<'static, Slots> {
 fn write<T>(f: impl FnOnce(&mut Slots) -> T) -> T {
     let mut slots = lock();
     let out = f(&mut slots);
-    // ponytail: copies and re-sorts every slot on each allocate, release or
+    // Copies and re-sorts every slot on each allocate, release or
     // rebind, so N neighbor changes cost O(N * slots log slots); neighbors
     // change rarely. Per-slot cells if bulk churn at large peer counts shows.
     TABLE
