@@ -463,6 +463,8 @@ holds under [Restart](#restart)).
   them join. A page none of whose keys a joiner holds goes to it as rows
   resolved once for all of them (keys that carry an RFC 7947 control
   community for the route server's ASN are still resolved per joiner). A
+  change to a row drops the resolved rows of the pages that hold its key,
+  not of the others. A
   late joiner starts at the scan's position and completes when the scan
   comes back around to it. Each joiner works through the log at its own
   writer's pace; one that falls 64 pages behind the newest, or whose scan

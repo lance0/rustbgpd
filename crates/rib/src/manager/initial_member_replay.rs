@@ -69,8 +69,6 @@ struct Cohort {
     // oldest first, and the sequence number of the first.
     log: VecDeque<LogPage>,
     base: u64,
-    // Group changes staged for a rider.
-    staged: u64,
 }
 
 /// A rider may fall this many pages behind the newest before it leaves the
@@ -81,24 +79,30 @@ const COHORT_LOG_PAGES: usize = 64;
 /// One page of the cohort's scan: discovered buckets or changed keys.
 struct LogPage {
     keys: Vec<Prefix>,
+    // Set by the first rider to take the page.
     shared: Option<SharedPage>,
 }
 
-/// What every rider's slot shares at a page's keys, resolved once: the
-/// staged winner of each key that RFC 7947 control leaves alone for the
-/// cohort's view. A member takes these rows as they are, less the ones it
-/// sourced. `private` keys carry a control community for the view's RS ASN,
-/// so each member resolves its own slot there.
+/// What a page's keys resolve to once for every rider.
 struct SharedPage {
-    // The cohort's staged changes and its scan's change notifications when
-    // the rows were read. Any later change makes them stale.
-    epoch: (u64, u64),
+    // Each page key's position in the cohort's universe. The universe is
+    // complete before any rider sends, so these outlive the rows.
+    positions: Vec<u32>,
+    prefixes: Arc<HashSet<Prefix>>,
+    // Resolved for the first rider that holds none of the page's keys, and
+    // dropped when the group table is written at one of them.
+    rows: Option<SharedRows>,
+}
+
+/// What every rider's slot shares at a page's keys: the staged winner of
+/// each key that RFC 7947 control leaves alone for the cohort's view. A
+/// member takes these rows as they are, less the ones it sourced. `private`
+/// keys carry a control community for the view's RS ASN, so each member
+/// resolves its own slot there.
+struct SharedRows {
     routes: Arc<Vec<Route>>,
     actions: Arc<Vec<Option<rustbgpd_policy::NextHopAction>>>,
-    // Each page key's position in the cohort's universe.
-    positions: Vec<u32>,
     private: Vec<Prefix>,
-    prefixes: Arc<HashSet<Prefix>>,
     encode: Arc<crate::update::SharedGroupEncode>,
     probes: SharedUnicastProbeCache,
 }
@@ -573,7 +577,6 @@ impl RibManager {
                     riders: 0,
                     log: VecDeque::new(),
                     base: 0,
-                    staged: 0,
                 });
                 cohorts.len() - 1
             });
@@ -740,6 +743,7 @@ impl RibManager {
         let dirty = self.dirty_peers.contains(&peer);
         let reconcilable = match cause {
             Cause::ScanRepairLimit
+            | Cause::CohortLag
             | Cause::ChangeOutsideScan
             | Cause::ReleaseFanout
             | Cause::SelectionRelease
@@ -825,7 +829,7 @@ impl RibManager {
                 #[cfg(feature = "bench-internals")]
                 self.observe_initial_replay(peer, BenchReplayEvent::Reconciled(cause.as_str()));
                 #[cfg(test)]
-                super::slice_timing::record_work("initial_replay_reconciles", 1);
+                Self::count_reconcile(cause);
                 return true;
             }
         }
@@ -841,6 +845,13 @@ impl RibManager {
             self.observe_initial_replay(peer, BenchReplayEvent::Dirty(cause.as_str()));
         }
         false
+    }
+
+    /// Count a reconcile, in total and under its cause's label.
+    #[cfg(test)]
+    fn count_reconcile(cause: PacedFallbackCause) {
+        super::slice_timing::record_work("initial_replay_reconciles", 1);
+        super::slice_timing::record_work(cause.as_str(), 1);
     }
 
     /// End `peer`'s replay for a fallback to its dirty resync, counting the
@@ -1620,6 +1631,11 @@ impl RibManager {
     /// A rider of `universe`'s cohort left its scan. The last one stops the
     /// scan and drops its log; otherwise the log gives up the pages only
     /// that rider still needed.
+    ///
+    /// Either way the pages are dropped in this turn, up to
+    /// [`COHORT_LOG_PAGES`] of them with their resolved rows. That drop is
+    /// not paced. If it shows in a poll, the replacement is to move the
+    /// pages to a list that each replay turn drops one page from.
     fn leave_cohort_scan(&mut self, universe: Option<SnapshotHandle>) {
         let cohorts = &mut self.initial_member_replays.cohorts;
         let Some(index) = cohorts
@@ -1636,6 +1652,15 @@ impl RibManager {
             }
             cohort.log.clear();
             cohort.base = 0;
+            // No page of this table is left to keep current.
+            let gid = cohort.key.0;
+            if !cohorts
+                .iter()
+                .any(|cohort| cohort.key.0 == gid && cohort.scan.is_some())
+                && let Some(group) = self.group_ribs.get_mut(&gid)
+            {
+                group.cohort_writes = None;
+            }
         } else {
             self.trim_cohort_log(index);
         }
@@ -1651,7 +1676,8 @@ impl RibManager {
         })
     }
 
-    /// Drop the log pages every rider has worked through.
+    /// Drop the log pages every rider has worked through, in this turn (see
+    /// [`Self::leave_cohort_scan`] for the limit).
     fn trim_cohort_log(&mut self, index: usize) {
         let oldest = self.cohort_riders(index).map(|(_, seq)| seq).min();
         let cohort = &mut self.initial_member_replays.cohorts[index];
@@ -1719,14 +1745,6 @@ impl RibManager {
 
     pub(super) fn replay_scan_overflowed(&self, peer: PeerId) -> bool {
         self.replay_scan_status(peer) == RegistrationScanStatus::Overflow
-    }
-
-    /// A group change was staged for rider `peer`: rows its cohort resolved
-    /// before it are stale.
-    pub(super) fn note_cohort_staged(&mut self, peer: PeerId) {
-        if let Some((index, ..)) = self.ride(peer) {
-            self.initial_member_replays.cohorts[index].staged += 1;
-        }
     }
 
     /// The cohort scans `targets` ride.
@@ -1815,11 +1833,11 @@ impl RibManager {
         gid: usize,
         operation: &mut crate::outbound_credit::OutboundOperation,
     ) -> Option<Vec<Prefix>> {
-        let Some((index, scan, seq)) = self.next_cohort_page(peer) else {
+        let Some((index, _, seq)) = self.next_cohort_page(peer) else {
             return Some(Vec::new());
         };
-        let replays = &self.initial_member_replays;
-        let cohort = &replays.cohorts[index];
+        let replays = &mut self.initial_member_replays;
+        let cohort = &mut replays.cohorts[index];
         let at = usize::try_from(seq - cohort.base).expect("log index");
         // A key with a change the member has not settled reconciles against
         // its own admission.
@@ -1828,14 +1846,15 @@ impl RibManager {
             self.trim_cohort_log(index);
             return Some(keys);
         }
-        let epoch = (cohort.staged, self.loc_rib.cohort_replay_recorded(scan));
-        if cohort.log[at]
-            .shared
-            .as_ref()
-            .is_none_or(|shared| shared.epoch != epoch)
-        {
-            let shared = self.resolve_cohort_page(gid, index, at, epoch);
-            self.initial_member_replays.cohorts[index].log[at].shared = Some(shared);
+        let page = &mut cohort.log[at];
+        if page.shared.is_none() {
+            page.shared = Some(SharedPage {
+                positions: self
+                    .pending_group_admitted
+                    .replay_universe_positions(cohort.handle, page.keys.iter().copied()),
+                prefixes: Arc::new(page.keys.iter().copied().collect()),
+                rows: None,
+            });
         }
         let page = &self.initial_member_replays.cohorts[index].log[at];
         let shared = page.shared.as_ref().expect("resolved above");
@@ -1877,15 +1896,25 @@ impl RibManager {
         (index, at, seq): (usize, usize, u64),
         operation: &mut crate::outbound_credit::OutboundOperation,
     ) {
+        self.settle_cohort_writes(gid);
+        if self.initial_member_replays.cohorts[index].log[at]
+            .shared
+            .as_ref()
+            .is_some_and(|shared| shared.rows.is_none())
+        {
+            let rows = self.resolve_cohort_rows(gid, index, at);
+            let page = &mut self.initial_member_replays.cohorts[index].log[at];
+            page.shared.as_mut().expect("resolved page").rows = Some(rows);
+        }
         let page = &mut self.initial_member_replays.cohorts[index].log[at];
         let shared = page.shared.as_mut().expect("resolved page");
-        let epoch = shared.epoch;
-        let routes = Arc::clone(&shared.routes);
-        let actions = Arc::clone(&shared.actions);
         let prefixes = Arc::clone(&shared.prefixes);
-        let encode = Arc::clone(&shared.encode);
-        let mut probes = std::mem::take(&mut shared.probes);
-        let mut carry = shared.private.clone();
+        let rows = shared.rows.as_mut().expect("resolved rows");
+        let routes = Arc::clone(&rows.routes);
+        let actions = Arc::clone(&rows.actions);
+        let encode = Arc::clone(&rows.encode);
+        let mut probes = std::mem::take(&mut rows.probes);
+        let mut carry = rows.private.clone();
         // Where the member sourced the winner, a per-client-best group
         // serves it the runner-up, which only the member's own slot names.
         if self.group_ribs[&gid].per_client_best {
@@ -1910,7 +1939,7 @@ impl RibManager {
                 unicast_otc_prechecked: true,
                 // Transport drops the rows this member sourced.
                 announce_source_exclusion: Some(peer),
-                shared_group_encode: Some(encode),
+                shared_group_encode: Some(Arc::clone(&encode)),
                 ..OutboundCommitBatch::with_unicast(routes, actions)
             };
             let precommit = SharedUnicastPrecommit {
@@ -1928,9 +1957,10 @@ impl RibManager {
                     .checked_sub(cohort.base)
                     .and_then(|at| cohort.log.get_mut(usize::try_from(at).ok()?))
                 && let Some(shared) = &mut page.shared
-                && shared.epoch == epoch
+                && let Some(rows) = &mut shared.rows
+                && Arc::ptr_eq(&rows.encode, &encode)
             {
-                shared.probes = probes;
+                rows.probes = probes;
             }
             if !sent {
                 return;
@@ -1949,15 +1979,39 @@ impl RibManager {
         }
     }
 
-    /// Resolve what every rider shares at log page `at` of cohort `index`:
-    /// one universe lookup and one winner per key, whatever the riders.
-    fn resolve_cohort_page(
-        &self,
-        gid: usize,
-        index: usize,
-        at: usize,
-        epoch: (u64, u64),
-    ) -> SharedPage {
+    /// Drop the resolved rows of every log page that holds a key written
+    /// to group `gid`'s table since the last look, and keep listening. Only
+    /// those pages are resolved again; a burst of more keys than the
+    /// table's write list holds drops the rows of every page.
+    fn settle_cohort_writes(&mut self, gid: usize) {
+        let Some(group) = self.group_ribs.get_mut(&gid) else {
+            return;
+        };
+        let writes = group.cohort_writes.get_or_insert_default();
+        if writes.keys.is_empty() {
+            return;
+        }
+        let every = std::mem::take(&mut writes.overflow);
+        let keys = std::mem::take(&mut writes.keys);
+        let cohorts = &mut self.initial_member_replays.cohorts;
+        for cohort in cohorts.iter_mut().filter(|cohort| cohort.key.0 == gid) {
+            for shared in cohort
+                .log
+                .iter_mut()
+                .filter_map(|page| page.shared.as_mut())
+            {
+                if shared.rows.is_some()
+                    && (every || keys.iter().any(|key| shared.prefixes.contains(key)))
+                {
+                    shared.rows = None;
+                }
+            }
+        }
+    }
+
+    /// Resolve the rows every rider shares at log page `at` of cohort
+    /// `index`: one winner per key, whatever the riders.
+    fn resolve_cohort_rows(&self, gid: usize, index: usize, at: usize) -> SharedRows {
         use super::distribution::rs_control::rs_control_route_tagged;
 
         let cohort = &self.initial_member_replays.cohorts[index];
@@ -1993,15 +2047,10 @@ impl RibManager {
         }
         #[cfg(test)]
         super::slice_timing::record_work("cohort_page_resolves", keys.len());
-        SharedPage {
-            epoch,
+        SharedRows {
             routes: routes.into(),
             actions: actions.into(),
-            positions: self
-                .pending_group_admitted
-                .replay_universe_positions(cohort.handle, keys.iter().copied()),
             private,
-            prefixes: Arc::new(keys.iter().copied().collect()),
             encode: Arc::default(),
             probes: SharedUnicastProbeCache::default(),
         }
@@ -2021,7 +2070,7 @@ impl RibManager {
         for peer in laggards {
             #[cfg(test)]
             super::slice_timing::record_work("cohort_scan_evictions", 1);
-            self.recover_initial_member_replay(peer, PacedFallbackCause::ScanRepairLimit);
+            self.recover_initial_member_replay(peer, PacedFallbackCause::CohortLag);
         }
     }
 }

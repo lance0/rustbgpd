@@ -190,8 +190,6 @@ impl RibManager {
         stage: &GroupStageOutput,
     ) -> Result<(), PacedFallbackCause> {
         let rs_control = self.rs_control_context(peer).is_some();
-        // Rows the member's cohort resolved before this stage are stale.
-        self.note_cohort_staged(peer);
         let replay = &self.initial_member_replays.members[&peer];
         // A pending rewind revisits every key.
         if matches!(replay.phase, Phase::PrepareProof) || replay.rewind {

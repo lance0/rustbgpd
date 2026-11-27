@@ -365,3 +365,115 @@ fn a_rehash_mid_pass_leaves_a_late_joiner_no_missed_key() {
     let all: FastSet<_> = routes[..grown].iter().map(|route| route.prefix).collect();
     assert_eq!(seen, all);
 }
+
+// A shard that rehashes while the cohort's scan is inside it rewinds the
+// scan to that shard's first bucket. On a table split into shards, the
+// first rider and a late joiner whose pass ends at the next shard boundary
+// both pass the rehashed shard once, and both still see every key.
+#[test]
+fn a_rehash_of_the_shard_under_the_scan_rewinds_it_for_riders_that_pass_it_once() {
+    let count = 3 * crate::fast_hash::SHARD_SPLIT_AT / 2;
+    let mut loc = LocRib::new();
+    let routes: Vec<_> = (0..u32::try_from(4 * count).unwrap())
+        .map(registration_route)
+        .collect();
+    for route in &routes[..count] {
+        assert!(loc.recompute(route.prefix, [route].into_iter()));
+    }
+    assert!(loc.routes.shards().len() > 1);
+    let cursor = |loc: &LocRib| {
+        let scan = &loc.registration_scans.as_ref().unwrap().cohorts[&1];
+        (scan.shard, scan.bucket)
+    };
+    // What the first rider and the late joiner have seen.
+    let mut seen = [FastSet::default(), FastSet::default()];
+    let mut take = |loc: &mut LocRib, discover: bool, riders: std::ops::Range<usize>| {
+        let page = loc.take_cohort_replay_page(1, discover);
+        for rider in riders {
+            seen[rider].extend(page.keys.iter().copied());
+        }
+    };
+
+    loc.start_cohort_replay_scan(1);
+    let first = loc.cohort_replay_lap_end(1);
+    take(&mut loc, true, 0..1);
+    // The late rider joins inside shard 0: its pass ends at shard 1.
+    assert!(cursor(&loc).0 == 0 && cursor(&loc).1 != 0);
+    let late = loc.cohort_replay_lap_end(1);
+    assert_eq!(late, ScanBoundary { lap: 1, shard: 1 });
+    while cursor(&loc).0 < 2 || cursor(&loc).1 == 0 {
+        take(&mut loc, true, 0..2);
+    }
+    assert_eq!(cursor(&loc).0, 2, "the scan is not inside shard 2");
+
+    // Grow the table until shard 2 rehashes. Each new key is a repair.
+    let buckets = loc.routes.shards()[2].num_buckets();
+    let mut grown = count;
+    while loc.routes.shards()[2].num_buckets() == buckets {
+        let route = &routes[grown];
+        assert!(loc.recompute(route.prefix, [route].into_iter()));
+        grown += 1;
+        while loc.cohort_replay_repairs_pending(1) {
+            take(&mut loc, false, 0..2);
+        }
+    }
+    assert!(!loc.cohort_replay_overflowed(1));
+    assert_eq!(cursor(&loc).0, 2);
+
+    for (rider, end) in [first, late].into_iter().enumerate() {
+        for _ in 0..10_000 {
+            if loc.cohort_replay_lap_reached(1, end) && !loc.cohort_replay_repairs_pending(1) {
+                break;
+            }
+            take(&mut loc, true, rider..2);
+        }
+        assert!(loc.cohort_replay_lap_reached(1, end));
+    }
+    let all: FastSet<_> = routes[..grown].iter().map(|route| route.prefix).collect();
+    assert!(seen[0] == all, "the first rider missed keys");
+    assert!(seen[1] == all, "the late joiner missed keys");
+}
+
+// The single table splits into shards while the cohort's scan is inside
+// it, which moves every key. The scan rewinds to the first bucket of shard
+// 0, so the rider that started the pass sees every key before its pass
+// ends. Without the rewind it would miss the keys of shard 0 that sat past
+// the cursor in the single table.
+#[test]
+fn a_split_under_the_scan_rewinds_it_for_the_rider_that_started_the_pass() {
+    let split = crate::fast_hash::SHARD_SPLIT_AT;
+    let count = split - 512;
+    let mut loc = LocRib::new();
+    let routes: Vec<_> = (0..u32::try_from(split + 512).unwrap())
+        .map(registration_route)
+        .collect();
+    for route in &routes[..count] {
+        assert!(loc.recompute(route.prefix, [route].into_iter()));
+    }
+    assert_eq!(loc.routes.shards().len(), 1);
+    loc.start_cohort_replay_scan(1);
+    let end = loc.cohort_replay_lap_end(1);
+    let mut seen = FastSet::default();
+    for _ in 0..8 {
+        seen.extend(loc.take_cohort_replay_page(1, true).keys);
+    }
+    assert!(!seen.is_empty() && seen.len() < count);
+    for route in &routes[count..] {
+        assert!(loc.recompute(route.prefix, [route].into_iter()));
+    }
+    assert!(loc.routes.shards().len() > 1, "the table never split");
+    for _ in 0..10_000 {
+        if loc.cohort_replay_lap_reached(1, end) && !loc.cohort_replay_repairs_pending(1) {
+            break;
+        }
+        assert!(!loc.cohort_replay_overflowed(1));
+        seen.extend(loc.take_cohort_replay_page(1, true).keys);
+    }
+    assert!(loc.cohort_replay_lap_reached(1, end));
+    let all: FastSet<_> = routes.iter().map(|route| route.prefix).collect();
+    assert!(
+        seen == all,
+        "the rider missed {} keys",
+        all.len() - seen.len()
+    );
+}

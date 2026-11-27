@@ -55,6 +55,28 @@ impl Cohort {
             builds,
             parked: None,
         };
+        // Member 1 is the source of the winner at a fifth of the keys,
+        // before any member has received one, and another fifth changes
+        // with them: the scan's pages carry rows a rider sourced itself
+        // among rows it did not.
+        let mut sourced = test_session_routes_received(peer_v4(SOURCES[3]), 1, vec![]);
+        let RibUpdate::RoutesReceived { announced, .. } = &mut sourced else {
+            unreachable!()
+        };
+        announced.extend(
+            (0..ROWS)
+                .filter(|n| n % 5 == 1)
+                .map(|n| input(prefixes(n)[0], SOURCES[3], 400, false)),
+        );
+        cohort.manager.handle_update(sourced);
+        drain_route_chunks(&mut cohort.manager);
+        let others = (0..ROWS)
+            .filter(|n| n % 5 == 2)
+            .map(|n| input(prefixes(n)[0], SOURCE, PREFS[0] + 1, false))
+            .collect();
+        let manager = &mut cohort.manager;
+        manager.handle_update(test_routes_received(peer_v4(SOURCE), others));
+        drain_route_chunks(manager);
         for n in [2, 3] {
             cohort.join(n, 1);
         }

@@ -91,8 +91,6 @@ struct RegistrationScan {
     // A cohort's scan wraps to its first bucket instead of finishing: the
     // passes it has completed.
     lap: Option<u32>,
-    // Change notifications received, queued or not.
-    recorded: u64,
     rewinds: u16,
     repair_due: bool,
     track_candidates: bool,
@@ -122,7 +120,6 @@ impl RegistrationScan {
     }
 
     fn record(&mut self, key: Prefix, previous: Option<&Route>) {
-        self.recorded += 1;
         if self.overflow {
             return;
         }
@@ -140,7 +137,6 @@ impl RegistrationScan {
     /// keys cannot fit, even if some already have a pending repair.
     fn record_changes(&mut self, changes: &HashSet<Prefix>) {
         debug_assert!(self.displaced.is_none());
-        self.recorded += 1;
         if changes.len() > REGISTRATION_REPAIR_LIMIT {
             self.overflow = true;
         }
@@ -631,6 +627,9 @@ impl LocRib {
     /// there the scan passes every shard whole at least once, so a rehash
     /// that rewinds a shard's pass cannot split the member's view of it. A
     /// member that joins inside a shard sees the rest of that shard twice.
+    ///
+    /// The bound on that rounding: at most one shard read again, which is
+    /// one extra pass of a table below 16,384 routes, still a single shard.
     pub(crate) fn cohort_replay_lap_end(&self, id: u32) -> ScanBoundary {
         let scan = self.cohort_scan(id);
         let lap = scan.lap.expect("circular scan") + 1;
@@ -662,11 +661,6 @@ impl LocRib {
     /// Whether cohort `id`'s scan holds changed keys no page has taken.
     pub(crate) fn cohort_replay_repairs_pending(&self, id: u32) -> bool {
         !self.cohort_scan(id).repairs.is_empty()
-    }
-
-    /// The change notifications cohort `id`'s scan has received.
-    pub(crate) fn cohort_replay_recorded(&self, id: u32) -> u64 {
-        self.cohort_scan(id).recorded
     }
 
     pub(crate) fn cohort_replay_change_recorded(&self, id: u32, prefix: Prefix) -> bool {

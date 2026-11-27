@@ -801,6 +801,34 @@ pub(in crate::manager) struct GroupRibOut {
     /// writers ([`Self::apply_delta`], [`Self::commit_rs_transitions`])
     /// record here, so the fenced re-check revisits exactly these keys.
     pub(in crate::manager) inventory_log: Option<ShardedMap<(Prefix, u32), ()>>,
+    /// Unicast keys whose staged row at path ID zero or source-control
+    /// input changed since the join cohorts replaying this table last
+    /// looked; `None` while no cohort holds resolved rows of it. Both table
+    /// writers record here, as for [`Self::inventory_log`].
+    pub(in crate::manager) cohort_writes: Option<CohortWrites>,
+}
+
+/// The keys [`GroupRibOut::cohort_writes`] holds, up to [`Self::LIMIT`].
+/// Past that it records only that more changed: a reader then treats every
+/// key as changed.
+#[derive(Default)]
+pub(in crate::manager) struct CohortWrites {
+    pub(in crate::manager) keys: Vec<Prefix>,
+    pub(in crate::manager) overflow: bool,
+}
+
+impl CohortWrites {
+    /// One lookup per key against each page of a cohort's log (at most 64)
+    /// stays within one page of work.
+    const LIMIT: usize = 16;
+
+    fn note(&mut self, prefix: Prefix) {
+        if self.keys.len() < Self::LIMIT {
+            self.keys.push(prefix);
+        } else {
+            self.overflow = true;
+        }
+    }
 }
 
 /// Placeholder target for group-level policy-denial records; restamped
@@ -981,6 +1009,7 @@ impl GroupRibOut {
             llgr,
             per_client_best,
             inventory_log: None,
+            cohort_writes: None,
         }
     }
 
@@ -1183,6 +1212,11 @@ impl GroupRibOut {
         let key = (delta.prefix, delta.path_id);
         if let Some(log) = &mut self.inventory_log {
             log.insert(key, ());
+        }
+        if delta.path_id == 0
+            && let Some(writes) = &mut self.cohort_writes
+        {
+            writes.note(delta.prefix);
         }
         if let Some(old) = self.table.get(&delta.prefix, delta.path_id) {
             let old_peer = old.peer;
@@ -1687,6 +1721,11 @@ impl GroupRibOut {
             let key = (transition.prefix, transition.path_id);
             if let Some(log) = &mut self.inventory_log {
                 log.insert(key, ());
+            }
+            if transition.path_id == 0
+                && let Some(writes) = &mut self.cohort_writes
+            {
+                writes.note(transition.prefix);
             }
             match &transition.source_attrs {
                 Some(attrs) => {
