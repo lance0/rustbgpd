@@ -48,6 +48,10 @@ enum Mode {
 // replaces this with a forced bounded unit and a paced restart.
 const MAX_OVERFLOW_REARMS: u16 = 8;
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "rewind, forced resync, sweep completion and the sweep's turn are independent replay states"
+)]
 struct Replay {
     gid: usize,
     table_stamp: u64,
@@ -70,6 +74,9 @@ struct Replay {
     // R2's position: the last proof key it visited, and whether it is done.
     swept: Option<Key>,
     sweep_done: bool,
+    // Once R1 has visited every key, repair and sweep turns alternate, so a
+    // change before every turn cannot hold R2 back.
+    sweep_due: bool,
 }
 
 /// What a paceable registration waits for before its replay can start.
@@ -322,6 +329,7 @@ impl RibManager {
                 forced: false,
                 swept: None,
                 sweep_done: false,
+                sweep_due: false,
             },
         );
         self.initial_member_replays.ready.push_back(peer);
@@ -653,16 +661,24 @@ impl RibManager {
             return;
         }
         let ready = self.loc_rib.member_replay_scan_status(peer) == RegistrationScanStatus::Ready;
+        let discovered = self.loc_rib.member_replay_discovery_finished(peer);
         let replay = self
             .initial_member_replays
             .members
             .get_mut(&peer)
             .expect("live replay");
-        if replay.mode == Mode::Reconcile && replay.carry.is_empty() && ready {
-            // R1 has resent every row.
+        if replay.mode == Mode::Reconcile
+            && replay.carry.is_empty()
+            && (ready || (discovered && replay.sweep_due && !replay.sweep_done))
+        {
+            // R1 has resent every row. Repairs queued since then reconcile
+            // their keys against the current slot and admission, including
+            // keys this sweep has already passed.
             replay.forced = false;
+            replay.sweep_due = false;
             self.sweep_initial_member_page(peer, gid);
         } else {
+            replay.sweep_due = true;
             self.send_initial_member_page(peer, gid);
         }
     }

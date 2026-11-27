@@ -499,3 +499,76 @@ async fn a_forced_reconcile_that_falls_back_keeps_its_resync_forced() {
         sent.difference(&resent).count()
     );
 }
+
+/// Apply one page; a marker must find the table equal to `expected`.
+fn apply_counting_markers(
+    state: &mut Inventory,
+    expected: &Inventory,
+    markers: &mut usize,
+    page: OutboundRouteUpdate,
+) {
+    let marker = !page.end_of_rib.is_empty();
+    apply_page(
+        state,
+        &OutboundRouteUpdate {
+            end_of_rib: Vec::new(),
+            ..page
+        },
+    );
+    if marker {
+        *markers += 1;
+        assert_eq!(
+            *state, *expected,
+            "End-of-RIB before the table was complete"
+        );
+    }
+}
+
+// One key changes before every reconcile turn. The writer keeps up, so the
+// repair log never overflows and the `lag` bound never fires: the proof sweep
+// must still advance while repairs drain, and End-of-RIB follows once.
+#[tokio::test(start_paused = true)]
+async fn single_key_churn_before_every_turn_still_completes_the_reconcile() {
+    let (mut manager, tx, base) = replay_fixture();
+    let peer = receiver(1);
+    let mut rx = member(&mut manager, peer, 64, false, false);
+    let first = first_page(&mut manager, &mut rx);
+    let mut state = inventory(&first);
+    drop(first);
+    assert!(manager.recover_initial_member_replay(peer, PacedFallbackCause::ChangeOutsideScan));
+    let key = prefixes(V4_ROWS)[0];
+    let mut with_key = base.clone();
+    with_key.insert(key, (peer_v4(OTHER), 100));
+    let mut present = false;
+    let mut markers = 0;
+    let mut turns = 0;
+    while manager.is_initial_member_replay(peer) {
+        turns += 1;
+        // 21 turns: R1 alternates its discovery pages with repairs, then R2
+        // alternates its three sweep pages with repairs.
+        assert!(turns <= 24, "the reconcile never completed under churn");
+        present = !present;
+        manager.handle_update(if present {
+            new_routes(OTHER, V4_ROWS, 1, 100)
+        } else {
+            withdraw(OTHER, &[key])
+        });
+        drain_route_chunks(&mut manager);
+        manager.advance_pending_initial_registration();
+        let expected = if present { &with_key } else { &base };
+        while let Ok(page) = rx.try_recv() {
+            apply_counting_markers(&mut state, expected, &mut markers, page);
+        }
+    }
+    eprintln!("reconcile completed after {turns} turns");
+    let expected = if present { with_key } else { base };
+    let actor = tokio::spawn(manager.run_actor());
+    drop(tx);
+    let manager = actor.await.unwrap();
+    while let Ok(page) = rx.try_recv() {
+        apply_counting_markers(&mut state, &expected, &mut markers, page);
+    }
+    assert_eq!(markers, 1, "End-of-RIB count");
+    assert_eq!(state, expected);
+    crate::manager::tests::assert_paced_fallbacks(&manager.metrics, &[]);
+}
