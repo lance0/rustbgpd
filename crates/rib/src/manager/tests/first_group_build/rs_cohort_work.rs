@@ -693,6 +693,62 @@ fn a_cohort_member_adds_its_mask_to_the_proof_bytes() {
     );
 }
 
+// A member that completes with many keys its universe lacks shows the table
+// has moved away from it: the next joiner starts a new universe instead of
+// carrying those keys in its own overlay. Until then a late joiner shares
+// the live one.
+#[test]
+fn a_late_joiner_starts_a_new_universe_once_the_table_has_moved() {
+    let Published {
+        mut manager,
+        tx: _tx,
+        ..
+    } = published();
+    let universes = |manager: &RibManager| manager.pending_group_admitted.replay_universes();
+    let mut first = rs_client(&mut manager, 1, 1 << 12);
+    // A parked member keeps the first universe alive.
+    let _parked = rs_client(&mut manager, 2, 1);
+    settle(&mut manager);
+    assert_eq!(universes(&manager), 1);
+    let mut rows = 0;
+    let mut grown = false;
+    for _ in 0..100_000 {
+        if !manager.is_initial_member_replay(receiver(1)) {
+            break;
+        }
+        manager.wake_initial_member_replay();
+        manager.advance_pending_initial_registration();
+        while let Ok(update) = first.try_recv() {
+            rows += update.announce.len();
+        }
+        // New prefixes land once the walk has passed: the universe lacks them.
+        if rows > 0 && !grown {
+            grown = true;
+            let extra = u16::try_from(ROWS / 8).unwrap();
+            let new = (0..extra)
+                .map(|n| route(prefixes(u16::try_from(ROWS).unwrap() + n)[0], SOURCE, 100))
+                .collect();
+            manager.handle_update(test_routes_received(peer_v4(SOURCE), new));
+            drain_route_chunks(&mut manager);
+        }
+    }
+    assert!(grown && !manager.is_initial_member_replay(receiver(1)));
+    assert!(manager.is_initial_member_replay(receiver(2)));
+    let _late = rs_client(&mut manager, 3, 1);
+    settle(&mut manager);
+    assert!(manager.is_initial_member_replay(receiver(3)));
+    assert_eq!(
+        universes(&manager),
+        2,
+        "the late joiner shared a stale universe"
+    );
+    // The next joiner shares the new universe.
+    let _next = rs_client(&mut manager, 4, 1);
+    settle(&mut manager);
+    assert!(manager.is_initial_member_replay(receiver(4)));
+    assert_eq!(universes(&manager), 2);
+}
+
 /// A dual-stack table and an IPv4 one, with one parked IPv4 replay holding
 /// proof budget. Returns the parked writer and that replay's proof charge.
 fn budget_shape() -> (Published, mpsc::Receiver<OutboundRouteUpdate>, usize) {

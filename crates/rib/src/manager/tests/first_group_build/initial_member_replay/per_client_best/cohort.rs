@@ -25,7 +25,7 @@ impl Cohort {
     fn start(paced: bool, shape: Shape) -> Self {
         let Run {
             manager,
-            _primary,
+            _primary: primary,
             founder,
             rx,
             builds,
@@ -33,7 +33,7 @@ impl Cohort {
         } = Run::start(paced, shape);
         let mut cohort = Self {
             manager,
-            _primary,
+            _primary: primary,
             founder,
             shape,
             members: vec![Member {

@@ -269,6 +269,16 @@ impl Snapshot {
             + self.slot_positions.capacity() * size_of::<u32>()
     }
 
+    /// The keys a member's mask spans. A replay universe fills in pages, so
+    /// its members' masks span its whole capacity from the start.
+    fn mask_keys(&self) -> usize {
+        if self.keyed {
+            self.keys.capacity()
+        } else {
+            self.keys.len()
+        }
+    }
+
     /// The key buckets of a keyed universe; empty for any other pool.
     fn key_index(&self) -> &[u32] {
         if self.keyed {
@@ -1272,14 +1282,7 @@ impl AdmittedRecovery {
             let snapshot = &self.snapshots[self
                 .snapshot_index(handle)
                 .ok_or_else(|| self.missing_proof(peer))?];
-            // A replay universe fills in pages: its members' masks span its
-            // whole capacity from the start.
-            let keys = if replay {
-                snapshot.keys.capacity()
-            } else {
-                snapshot.keys.len()
-            };
-            (Self::shared_words(keys)?, snapshot.charge())
+            (Self::shared_words(snapshot.mask_keys())?, snapshot.charge())
         } else {
             (
                 words,
@@ -3548,7 +3551,7 @@ mod tests {
                 .unwrap(),
             Some(universe)
         );
-        assert!(admitted(&ledger, late).is_empty());
+        assert_eq!(admitted(&ledger, late), []);
         assert!(ledger.remove(&a));
         assert_eq!(
             ledger.replay_universe_capacity(universe),
