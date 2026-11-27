@@ -185,17 +185,17 @@
 //!   in `reloadstall_actor_csv`, and the run max in `reloadstall_actor_run_csv`.
 //!
 //! Unrelated-UPDATE wait extension — additive; absent, nothing changes:
-//! - `RELOADSTALL_UPDATE_WAIT=1` (reload or flapstorm mode): from churn start
-//!   to the end of the run, the highest stable stub below the churners
-//!   announces `198.18.0.0/24` every 20 ms with MED = sequence, and the next
-//!   stub down records each receipt. Every other observer measure ignores the
-//!   prefix. The run ends with one `update_wait_summary {json}` line: max, p99
-//!   and p50 wait over the whole run and per phase (`warmup`, `control`,
-//!   `flapN_{pre,withdraw,down,rejoin,quiesce}`, `reloadN`, `reloadN_quiesce`,
-//!   `tripN`, `final_quiesce`), and
-//!   fails if a sample never arrives. Both stubs must lie above stub 0, every
-//!   flapped or reload-changed member and, with `--converged-rejoin`, the two
-//!   survivors it refreshes. See `update_wait.rs` for the definition.
+//! - `RELOADSTALL_UPDATE_WAIT=1` (reload or flapstorm mode, with a scenario
+//!   generated with `GEN_UPDATE_WAIT=1`): from churn start to the end of the
+//!   run, an extra source session (stub `n_peers`) announces `198.18.0.0/24`
+//!   every 20 ms with MED = sequence, and an extra witness session (stub
+//!   `n_peers + 1`) records each receipt. Route-server policy isolates the pair
+//!   from the fleet in both directions, and the run fails if either side sees
+//!   the other's traffic. The run ends with one `update_wait_summary {json}`
+//!   line: max, p99 and p50 wait over the whole run and per phase (`warmup`,
+//!   `control`, `flapN_{pre,withdraw,down,rejoin,quiesce}`, `reloadN`,
+//!   `reloadN_quiesce`, `tripN`, `final_quiesce`), and fails if a sample never
+//!   arrives. See `update_wait.rs` for the definition.
 
 // Event.other and Ctx.n_peers are recorded for the observation/context
 // model but not read by the percentile analysis; keep them so the
@@ -2688,15 +2688,11 @@ fn start_stub(ctx: Arc<Ctx>, i: u32, stream: TcpStream, track_rejoin: bool) -> S
                         let [total_prefixes, total_prefixes6] = rctx.totals;
                         let mut nlri = split_unicast_families(&parsed);
                         if let Some(probe) = rctx.wait_probe.as_ref() {
-                            if let Some(seen) =
-                                update_wait::WaitProbe::take(&mut nlri, &parsed.attributes)
+                            // Member export chains reject the probe prefix; a receipt
+                            // fails the probe, and is kept out of every other measure.
+                            if update_wait::WaitProbe::take(&mut nlri, &parsed.attributes).is_some()
                             {
-                                if let (true, update_wait::Seen::Announced(med)) =
-                                    (i == probe.observer, seen)
-                                {
-                                    probe.arrived(med, now_us(&rctx));
-                                }
-                                // A probe-only UPDATE is invisible to every other measure.
+                                probe.member_receipt();
                                 if nlri.families() == 0 {
                                     continue;
                                 }
@@ -4850,19 +4846,12 @@ fn main() {
         .expect("RELOADSTALL_REJOIN_METRICS_ADDR must be a SocketAddr");
     let wait_probe = match std::env::var("RELOADSTALL_UPDATE_WAIT").as_deref() {
         Err(_) | Ok("0") => None,
+        Ok("1") if (flapstorm.is_some() || reloads > 0) && !convergence_only => {
+            Some(update_wait::WaitProbe::new(n_peers))
+        }
         Ok("1") => {
-            let Some((source, observer)) =
-                update_wait::stubs(n_peers, changed_peers, flapstorm, converged_rejoin)
-                    .filter(|_| (flapstorm.is_some() || reloads > 0) && !convergence_only)
-            else {
-                eprintln!(
-                    "RELOADSTALL_UPDATE_WAIT=1 requires a reload or flapstorm run with two stable \
-                     stubs below the churners, above stub 0, every flapped or changed member and \
-                     the two survivors a converged rejoin refreshes"
-                );
-                std::process::exit(2);
-            };
-            Some(update_wait::WaitProbe::new(source, observer))
+            eprintln!("RELOADSTALL_UPDATE_WAIT=1 requires a reload or flapstorm run");
+            std::process::exit(2);
         }
         Ok(_) => {
             eprintln!("RELOADSTALL_UPDATE_WAIT must be 0 or 1");
@@ -4898,9 +4887,9 @@ fn main() {
         });
         if let Some(probe) = ctx.wait_probe.as_ref() {
             println!(
-                "# update_wait source={} observer={} prefix={} interval_ms={}",
+                "# update_wait source={} witness={} prefix={} interval_ms={}",
                 probe.source,
-                probe.observer,
+                probe.witness,
                 update_wait::prefix(),
                 update_wait::INTERVAL.as_millis()
             );
@@ -5199,7 +5188,7 @@ fn main() {
 
         // --- Start churn: last CHURNERS stubs flap a dedicated block. ---
         let churn_tasks = start_churn(no_churn, &stubs, &ctx);
-        let wait_probe_task = update_wait::start(&ctx, &stubs);
+        let wait_probe_task = update_wait::start(&ctx).await;
         if !no_churn {
             // Let churn reach steady state.
             tokio::time::sleep(Duration::from_secs(3)).await;

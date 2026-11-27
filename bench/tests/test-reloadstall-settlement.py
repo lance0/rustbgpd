@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Exercise SIGHUP settlement with tiny real daemon/reloadstall sessions.
 
-The update-wait cases run the unrelated-UPDATE wait probe in reload and
-flapstorm mode and check its summary line. The last case injects metrics:
+The update-wait cases run the unrelated-UPDATE wait probe in a reload that
+changes every member and in flapstorm mode, and check its summary line. The last case injects metrics:
 pending until the engine observes receiver barriers, then rejected_no_effect.
 It tests harness sequencing, NOT a real runtime rollback. Logs and generated
 inputs are retained in --artifact-dir.
@@ -65,6 +65,8 @@ def check_update_wait(text, phase):
     summary = json.loads(lines[0].removeprefix("update_wait_summary "))
     assert summary["sent"] > 0 and summary["arrived"] == summary["sent"], summary
     assert summary["unarrived"] == 0 and summary["invalid"] == 0, summary
+    assert summary["witness_other_updates"] == 0, summary
+    assert summary["member_probe_updates"] == 0, summary
     assert summary["max_us"] > 0 and summary["max_us"] >= summary["p99_us"], summary
     phases = {row["phase"]: row for row in summary["phases"]}
     assert {"control", phase} <= phases.keys(), summary
@@ -75,12 +77,12 @@ def check_update_wait(text, phase):
 def run_attempt(args, name, attempt, *, dualstack=False, rejected=False, injected=False,
                 probe=None):
     flap = probe == "flap"
-    changed = "2" if probe == "reload" else "12"
     dest = args.artifact_dir / name / f"attempt-{attempt}"
     dest.mkdir(parents=True)
     env = {key: value for key, value in os.environ.items()
            if not key.startswith(("GEN_", "RELOADSTALL_"))}
-    env.update(GEN_DUALSTACK=str(int(dualstack)), GEN_FILTER_COUNT="4" if dualstack else "0")
+    env.update(GEN_DUALSTACK=str(int(dualstack)), GEN_FILTER_COUNT="4" if dualstack else "0",
+               GEN_UPDATE_WAIT="1" if probe else "0")
     # Keep the generated UDS path below sun_path's limit, even in deep CI checkouts.
     with tempfile.TemporaryDirectory(prefix="rls-", dir="/tmp") as temporary:
         scenario = Path(temporary)
@@ -91,7 +93,7 @@ def run_attempt(args, name, attempt, *, dualstack=False, rejected=False, injecte
             metrics_address = f"127.0.0.1:{metrics.getsockname()[1]}"
         with (dest / "generator.log").open("w") as log:
             subprocess.run([sys.executable, str(REPO / "bench/scale/reloadstall/gen-scenario.py"),
-                            "12", str(scenario), bgp_port, changed], env=env, check=True,
+                            "12", str(scenario), bgp_port, "12"], env=env, check=True,
                            stdout=log, stderr=subprocess.STDOUT)
         config = scenario / "config.toml"
         rendered = config.read_text().replace("127.0.0.1:9179", metrics_address)
@@ -150,8 +152,8 @@ def run_attempt(args, name, attempt, *, dualstack=False, rejected=False, injecte
                     thread = threading.Thread(target=fixture.serve_forever)
                     thread.start()
                     env["RELOADSTALL_RELOAD_METRICS_ADDR"] = f"127.0.0.1:{fixture.server_port}"
-                mode = ["0", "1", changed, "--flapstorm", "1", "--flap-rounds", "1"] if flap \
-                    else ["2", "1", changed]
+                mode = ["0", "1", "12", "--flapstorm", "1", "--flap-rounds", "1"] if flap \
+                    else ["2", "1", "12"]
                 with engine_log.open("w") as log:
                     result = subprocess.run([
                         str(args.harness), "12", "600", bgp_port, str(daemon.pid),

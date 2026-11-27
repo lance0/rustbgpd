@@ -627,25 +627,37 @@ reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
   retention (`resident` minus `allocated`). A gauge the daemon does not export
   prints `absent`, never 0; a failed scrape fails the run. The IXP matrix sets
   it for rustbgpd flapstorm cells.
-- `RELOADSTALL_UPDATE_WAIT=1` — optional, reload or flapstorm mode: the
-  whole-run unrelated-UPDATE wait probe. From churn start to the end of the
-  run, the highest stable stub below the churners announces `198.18.0.0/24`
-  every 20 ms with its sequence number as MED, and the next stub down records
-  each receipt. The wait runs from the tick that hands the UPDATE to the
-  source's writer to the witness's receipt, the quantity rrharness's cold-join
-  marker train reports (stamped at its FIFO admission), so a stalled writer or
-  socket shows as wait. A receipt also completes every earlier sample still pending (the
-  daemon may send only the newest path; these count as `coalesced`). Every
-  other observer measure ignores the prefix, so gap and completion figures are
-  unchanged. The run prints one `update_wait_summary {json}` line with `max_us`,
-  `p99_us`, `p50_us` and the worst sample's sequence and phase over the whole
-  run, plus `n`, `max_us` and `p99_us` per phase (`warmup`, `control`,
-  `flapN_pre`, `flapN_withdraw`, `flapN_down`, `flapN_rejoin`, `flapN_quiesce`,
-  `reloadN`, `reloadN_quiesce`, `tripN`, `final_quiesce`), and fails if any
-  queued sample never arrives. Both stubs must lie above stub 0, every flapped or
-  reload-changed member and, with `--converged-rejoin`, the two survivors it
-  refreshes, so a reload run needs `changed_peers` below `n_peers - 9`. The probe adds one UPDATE per 20 ms of fan-out to every
-  member.
+- `RELOADSTALL_UPDATE_WAIT=1` — optional, reload or flapstorm mode, rustbgpd
+  scenarios only: the whole-run unrelated-UPDATE wait probe. The generator
+  must emit the probe pair (`GEN_UPDATE_WAIT=1`, which defaults to this
+  variable, so the IXP matrix needs only `RELOADSTALL_UPDATE_WAIT=1`). From
+  churn start to the end of the run, an extra source session (stub index
+  `n_peers`) announces `198.18.0.0/24` every 20 ms with its sequence number as
+  MED, and an extra witness session (`n_peers + 1`) records each receipt. Both
+  start only after the daemon's End-of-RIB on each session. The wait runs from
+  the tick, immediately before the source writes the UPDATE, to the witness's
+  receipt: the quantity rrharness's cold-join marker train reports (stamped at
+  its FIFO admission), so a stalled socket shows as wait.
+
+  Route-server policy isolates the pair. The witness's export chain admits only
+  the probe prefix and the source's admits nothing, so neither session ever
+  queues fleet rows (table transfer, flap fan-out or reload re-export). Every
+  member's export chain rejects the probe prefix, so the probe costs one
+  session's fan-out and leaves gap, completion and rejoin figures unchanged.
+  The pair's chains are the same in both generations, so a reload that changes
+  every member (the IXP S2 shape) is probed too. The run checks the isolation:
+  the summary reports `witness_other_updates` (non-probe UPDATEs at the
+  witness, End-of-RIB excepted) and `member_probe_updates` (probe UPDATEs at
+  any member), and fails if either is nonzero.
+
+  A receipt also completes every earlier sample still pending (the daemon may
+  send only the newest path; these count as `coalesced`). The run prints one
+  `update_wait_summary {json}` line with `max_us`, `p99_us`, `p50_us` and the
+  worst sample's sequence and phase over the whole run, plus `n`, `max_us` and
+  `p99_us` per phase (`warmup`, `control`, `flapN_pre`, `flapN_withdraw`,
+  `flapN_down`, `flapN_rejoin`, `flapN_quiesce`, `reloadN`, `reloadN_quiesce`,
+  `tripN`, `final_quiesce`), and fails if a recorded sample never arrives or
+  a probe session fails.
 - `RELOADSTALL_SESSION_NOTIFICATION_METRICS_ADDR` — optional B2 receipt seam,
   valid only with `--flapstorm`. It must be a loopback socket address with a
   nonzero port. The exact 700-peer/400400-prefix/50-flap shape polls the
