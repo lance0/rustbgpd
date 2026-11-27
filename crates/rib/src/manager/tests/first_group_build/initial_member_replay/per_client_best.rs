@@ -771,3 +771,127 @@ async fn refresh_mid_replay(shape: Shape) {
     drop((primary, founder));
     let _ = actor.await.unwrap();
 }
+
+/// Member 1 joins in one turn and falls behind, missing a seeded set of
+/// changes; the resync tick then runs its resync while more changes land
+/// between turns. `one_turn` takes the synchronous resync, the reference.
+/// Returns the member's table, its End-of-RIB count, its export-policy
+/// permits and denials, and the whole-table resyncs and reconciles the
+/// resync took.
+fn lagged_resync(
+    shape: Shape,
+    one_turn: bool,
+    seed: u64,
+) -> (Table, usize, (u64, u64), usize, usize) {
+    let mut run = Run::start(false, shape);
+    settle(&mut run.manager);
+    run.read();
+    assert_eq!(run.markers, 1);
+    run.manager.initial_member_replays.min_routes = Some(1);
+    run.manager.initial_member_replays.resync_in_one_turn = one_turn;
+    let hot: Vec<Prefix> = run.table.keys().copied().step_by(31).take(HOT).collect();
+    let mut rng = seed;
+    let mut next = move |bound: usize| {
+        rng = rng
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        usize::try_from(rng >> 33).unwrap() % bound
+    };
+    let change = |next: &mut dyn FnMut(usize) -> usize| {
+        let source = next(SOURCES.len());
+        Change {
+            source,
+            prefix: hot[next(HOT)],
+            pref: (next(4) != 0).then(|| {
+                if source == 3 {
+                    400
+                } else {
+                    50 + 50 * u32::try_from(next(6)).unwrap()
+                }
+            }),
+            suppress: next(2) == 0,
+        }
+    };
+    assert!(run.manager.mark_outbound_dirty(receiver(1)));
+    for _ in 0..48 {
+        change(&mut next).apply(&mut run.manager);
+    }
+    run.read();
+    let builds = run.manager.adj_rib_out_commit_stats.resync_builds;
+    let reconciles = || {
+        crate::manager::slice_timing::group_work()
+            .get("grouped_resync_reconciles")
+            .copied()
+            .unwrap_or(0)
+    };
+    let enrolled = reconciles();
+    run.manager.resync_dirty_peers_bounded();
+    run.read();
+    assert_eq!(run.replaying(), !one_turn, "{shape:?}");
+    for _ in 0..64 {
+        change(&mut next).apply(&mut run.manager);
+        run.turn();
+    }
+    for _ in 0..10_000 {
+        if !run.replaying() && !run.manager.dirty_peers.contains(&receiver(1)) {
+            break;
+        }
+        run.turn();
+        run.manager.resync_dirty_peers_bounded();
+    }
+    assert!(!run.replaying(), "{shape:?}: the resync never completed");
+    run.read();
+    let policy = run
+        .manager
+        .export_policy_counters
+        .get(&receiver(1))
+        .map(crate::update::ExportPolicyCounters::snapshot)
+        .map_or((0, 0), |stats| {
+            (
+                stats.export_policy_routes_permitted,
+                stats.export_policy_routes_denied,
+            )
+        });
+    (
+        run.table,
+        run.markers,
+        policy,
+        run.manager.adj_rib_out_commit_stats.resync_builds - builds,
+        reconciles() - enrolled,
+    )
+}
+
+// The paced resync of a member that fell behind ends with the table the
+// synchronous resync of the same input gives, for every shape and seed:
+// runner-up substitution, the member's own RFC 7947 view and the control
+// scrub included. It builds no whole table and sends no End-of-RIB.
+#[test]
+fn grouped_resync_reconcile_matches_the_synchronous_resync() {
+    const PLAIN: Shape = Shape { rs: false, ..RS };
+    for shape in SHAPES.into_iter().chain([PLAIN]) {
+        for seed in [1, 7, 42] {
+            let (paced, markers, policy, builds, reconciles) = lagged_resync(shape, false, seed);
+            let (reference, reference_markers, reference_policy, reference_builds, _) =
+                lagged_resync(shape, true, seed);
+            assert_eq!(
+                paced, reference,
+                "{shape:?} seed={seed}: the reconciled table differs from the synchronous resync"
+            );
+            assert_eq!(
+                policy, reference_policy,
+                "{shape:?} seed={seed}: export-policy counters"
+            );
+            assert_eq!(
+                (markers, reference_markers),
+                (1, 1),
+                "{shape:?} seed={seed}"
+            );
+            assert_eq!(
+                (builds, reconciles),
+                (0, 1),
+                "{shape:?} seed={seed}: whole-table resyncs and reconciles"
+            );
+            assert_eq!(reference_builds, 1, "{shape:?} seed={seed}");
+        }
+    }
+}

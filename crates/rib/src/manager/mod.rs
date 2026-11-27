@@ -4733,13 +4733,20 @@ impl RibManager {
 
     fn outbound_convergence(&self) -> crate::update::OutboundConvergence {
         let now = tokio::time::Instant::now();
+        // A member whose resync reconciles in pages is still pending, once
+        // even while a new dirty mark waits for its reconcile to take it.
         crate::update::OutboundConvergence {
-            pending_peers: self.dirty_peers.len(),
+            pending_peers: self.dirty_peers.len()
+                + self
+                    .resync_reconciles()
+                    .filter(|(peer, _)| !self.dirty_peers.contains(peer))
+                    .count(),
             oldest_pending_secs: self
                 .dirty_peers
                 .iter()
-                .filter_map(|peer| self.dirty_since.get(peer))
-                .map(|since| now.saturating_duration_since(*since).as_secs())
+                .filter_map(|peer| self.dirty_since.get(peer).copied())
+                .chain(self.resync_reconciles().map(|(_, since)| since))
+                .map(|since| now.saturating_duration_since(since).as_secs())
                 .max()
                 .unwrap_or(0),
         }
@@ -4874,6 +4881,10 @@ impl RibManager {
         outcome
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the tick's lanes and its dirty-unit loop share one poll budget in one actor turn"
+    )]
     fn resync_dirty_peers_with_readiness(&mut self, include_markers: bool) -> bool {
         self.recover_late_release_join();
         // ADR-0113 capacity recovery is family-scoped and already coalesced.
@@ -4943,6 +4954,18 @@ impl RibManager {
             };
             self.dirty_resync_cursor = Some(last);
             attempted.extend(ring.iter().copied());
+            self.take_late_joins_for_resync(last);
+            // An eligible grouped member reconciles its table in pages
+            // instead of building it whole in this turn.
+            let Err(fallback) = self.reconcile_grouped_resync(last) else {
+                if !self.dirty_unit_remains(&attempted) {
+                    return recovered;
+                }
+                if poll_start.elapsed() >= self.flush_poll_budget {
+                    return true;
+                }
+                continue;
+            };
             let selected: BTreeSet<PeerId> = ring.into_iter().collect();
             let withheld: Vec<PeerId> = self.dirty_peers.difference(&selected).copied().collect();
             // A withheld peer re-marked during this pass continues its
@@ -4965,11 +4988,13 @@ impl RibManager {
             let evicted = self.owed_row_evicted.remove(&last);
             let rebuilds = self.take_due_held_rebuilds(last);
             let recovery = evicted || rebuilds.contains(&true);
-            self.take_late_joins_for_resync(last);
             #[cfg(feature = "bench-internals")]
             self.bench_group_capture_resync_slice(last);
             let built = self.distribute_changes_without_stale_flush(recovery.then_some(last));
             let still_dirty = self.dirty_peers.contains(&last);
+            if built || !still_dirty {
+                self.grouped_resync_ran(last, built, fallback);
+            }
             if evicted && still_dirty {
                 self.owed_row_evicted.insert(last);
             }
@@ -5001,17 +5026,20 @@ impl RibManager {
             if recovery && built {
                 return recovered;
             }
-            let unattempted_remain = self
-                .dirty_peers
-                .iter()
-                .any(|peer| !attempted.contains(peer) && self.dirty_unit_due(*peer));
-            if !unattempted_remain {
+            if !self.dirty_unit_remains(&attempted) {
                 return recovered;
             }
             if poll_start.elapsed() >= self.flush_poll_budget {
                 return true;
             }
         }
+    }
+
+    /// Whether a due dirty unit this tick has not attempted remains.
+    fn dirty_unit_remains(&self, attempted: &HashSet<PeerId>) -> bool {
+        self.dirty_peers
+            .iter()
+            .any(|peer| !attempted.contains(peer) && self.dirty_unit_due(*peer))
     }
 
     /// Complete one deferred outbound registration (LAN-475), targeting the

@@ -61,6 +61,17 @@ impl ReplayObservation {
         use BenchReplayEvent::{Completed, Dirty, Enrolled, EnrollmentRefused, Reconciled};
 
         let events = self.events.lock().expect("replay observations");
+        // A later resync of the joiner is not part of its join.
+        let join = events
+            .iter()
+            .position(|(_, event)| {
+                matches!(
+                    event,
+                    BenchReplayEvent::ResyncReconcile | BenchReplayEvent::ResyncOneTurn(_)
+                )
+            })
+            .unwrap_or(events.len());
+        let events = &events[..join];
         // A replay that rewound into a reconcile keeps its terminal events;
         // the first rewind names the cause.
         let reconciled = events.iter().find_map(|(at, event)| match event {

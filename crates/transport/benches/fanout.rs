@@ -3010,9 +3010,11 @@ fn bench_route_refresh_group_member(c: &mut Criterion) {
 }
 
 /// `GROUP_JOINERS` RR clients of one exporter group beside the empty ingress group go dirty together and
-/// hold admitted-key proofs; timed is their full dirty resync through the
-/// production resync timer, one member per slice. Fixture construction, the
-/// dirty marks (proof capture) and receipt checks stay outside.
+/// hold admitted-key proofs; timed is their full dirty resync: the
+/// production resync timer, which enrolls each member's paced reconcile,
+/// then every reconcile turn to completion. Fixture construction, the dirty
+/// marks (proof capture), draining the writers and receipt checks stay
+/// outside.
 fn bench_grouped_dirty_resync(c: &mut Criterion) {
     let mut group = c.benchmark_group("grouped_dirty_resync");
     group.sample_size(10);
@@ -3042,15 +3044,24 @@ fn bench_grouped_dirty_resync(c: &mut Criterion) {
                     assert!(manager.bench_mark_joined_peer_dirty(index));
                 }
                 let started = Instant::now();
-                let held = manager.bench_resync_dirty_peers();
+                manager.bench_resync_dirty_peers();
                 accumulated += started.elapsed();
+                let mut rows = vec![0; receivers.len()];
+                accumulated += manager.bench_finish_initial_replays(|| {
+                    for (receiver, rows) in receivers.iter_mut().zip(&mut rows) {
+                        while let Ok(response) = receiver.try_recv() {
+                            assert!(response.unicast_withdrawals().next().is_none());
+                            assert!(
+                                response.end_of_rib.is_empty(),
+                                "a resync owes no End-of-RIB"
+                            );
+                            *rows += response.announce.len();
+                        }
+                    }
+                });
+                let held = manager.bench_resync_dirty_peers();
                 assert_eq!(held, (0, 0), "every member syncs and releases its proof");
-                for receiver in &mut receivers {
-                    let response = receiver.try_recv().expect("resync response");
-                    assert_eq!(response.announce.len(), routes);
-                    assert!(response.unicast_withdrawals().next().is_none());
-                    assert!(receiver.try_recv().is_err());
-                }
+                assert!(rows.iter().all(|&rows| rows == routes), "{rows:?}");
             }
             accumulated
         });
