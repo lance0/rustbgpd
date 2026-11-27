@@ -2760,23 +2760,15 @@ impl AdmittedRecovery {
                     record.masked += 1;
                 }
             } else if singleton {
-                let Err(position) = keys.binary_search_by(|old| {
-                    checkpoint(false);
-                    old.cmp(&key)
-                }) else {
+                // One search and one move of the keys above it: a low key
+                // costs no per-key work however large the proof.
+                let Err(position) = keys.binary_search(&key) else {
                     continue;
                 };
                 if keys.len() == keys.capacity() {
                     return false;
                 }
-                let end = keys.len();
-                keys.push(key);
-                // A singleton before a small high-key suffix need not sort
-                // every already admitted key. Account for every moved slot.
-                for displaced in (position..end).rev() {
-                    checkpoint(false);
-                    keys.swap(displaced, displaced + 1);
-                }
+                keys.insert(position, key);
             } else if keys[..old_len].binary_search(&key).is_err() {
                 if keys.len() == keys.capacity() {
                     return false;
@@ -3199,9 +3191,10 @@ mod tests {
         assert_eq!(ledger.bytes(), size_of::<AdmittedRecovery>());
     }
 
-    // A reconcile's commits edit an adopted flat proof a page at a time.
-    // Each touches about a page of keys, from 8 to 32 pages of proof, and
-    // the proof stays exact.
+    // A reconcile's commits edit an adopted flat proof a page at a time,
+    // and its repairs admit single new keys low in it. Each commit touches
+    // about its own keys, from 8 to 32 pages of proof, and the proof stays
+    // exact.
     #[test]
     fn a_reconcile_page_edits_a_page_of_a_flat_proof_from_8_to_32_pages() {
         const PAGE: u32 = 1_024;
@@ -3252,6 +3245,28 @@ mod tests {
                     model.remove(key);
                 }
                 model.extend(announcements);
+                // A repair page that admits one new key below the rest of
+                // the proof, a page of times over.
+                for low in 0..PAGE {
+                    let key = wide(2 * (round * PAGE + low) + 1);
+                    if model.contains(&key) {
+                        continue;
+                    }
+                    ledger.reserve_admitted(who, std::iter::once(key)).unwrap();
+                    let mut visits = 0;
+                    assert!(
+                        ledger
+                            .apply_reserved_admitted_with_checkpoint(
+                                who,
+                                std::iter::once(key),
+                                std::iter::empty(),
+                                &mut |_| visits += 1,
+                            )
+                            .unwrap()
+                    );
+                    peak = usize::max(peak, visits);
+                    model.insert(key);
+                }
             }
             eprintln!("pages={pages}: peak proof visits per commit={peak}");
             let proof: Vec<ExactExportKey> = ledger.get(&who).unwrap().iter().collect();
