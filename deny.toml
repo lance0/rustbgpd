@@ -13,6 +13,8 @@
 # chrono).
 
 [advisories]
+# Keep transitive dependencies in scope (cargo-deny 0.22 defaults to workspace only).
+unmaintained = "all"
 ignore = [
     # `paste` unmaintained (informational). The sole remaining chain is
     # tikv-jemalloc-ctl → paste; this is a build-time proc-macro surface.
