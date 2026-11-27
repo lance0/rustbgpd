@@ -78,8 +78,10 @@ Update-wait extension: `GEN_UPDATE_WAIT=1` adds two route-server neighbors after
 the fleet for the harness's `RELOADSTALL_UPDATE_WAIT=1` probe: a source (stub
 index `n_peers`) whose import chain admits only `198.18.0.0/24` and whose
 export chain rejects everything, and a witness (`n_peers + 1`) with the
-reverse. Every fleet export chain first rejects that prefix. The pair's chains
-are identical in both generations, so no reload touches them. It defaults to
+reverse. Only the pair's own chains isolate it: fleet chains get no probe
+term, because any export denial in a member's group rules out the daemon's
+clean shared reload transition. The pair's chains are identical in both
+generations, so no reload touches them. It defaults to
 `RELOADSTALL_UPDATE_WAIT`. Absent, the emitted files are byte-for-byte the
 historical ones.
 
@@ -308,11 +310,6 @@ for fname, reject_prefix, community in GENERATIONS:
     # Reads peer context, so no changed peer is update-grouped; matches no stub.
     if export_peer_context:
         filter_term = "    term peer-gate { if peer.asn == 64496 { reject } }\n" + filter_term
-    # The wait probe's prefix reaches only its witness.
-    probe_term = (
-        "    term drop-probe { if route.prefix in wait_probe { reject } }\n" if update_wait else ""
-    )
-    filter_term = probe_term + filter_term
     # Every changed pair rejects the filtered set, like member-out.
     pair_policies = "".join(
         f"""
@@ -325,14 +322,12 @@ policy member-out-{k} {{
     stable_policy = pair_policies + """
 
 policy stable-out {
-""" + probe_term + """    term tag { add community 65400:9000; accept }
+    term tag { add community 65400:9000; accept }
 }
 """ if mixed_export_only else ""
     probe_policies = """
-prefix-set wait_probe { 198.18.0.0/24 }
-
 policy probe-only {
-    term probe { if route.prefix in wait_probe { accept } }
+    term probe { if route.prefix == 198.18.0.0/24 { accept } }
     term rest { reject }
 }
 

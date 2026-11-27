@@ -2,7 +2,12 @@
 """Exercise SIGHUP settlement with tiny real daemon/reloadstall sessions.
 
 The update-wait cases run the unrelated-UPDATE wait probe in a reload that
-changes every member and in flapstorm mode, and check its summary line. The last case injects metrics:
+changes every member and in flapstorm mode, and check its summary line. Their
+probe-off twins (native-success, flap) use the same table, large enough for the
+daemon's paced jobs, and every pair must record the same paced-fallback counts
+by job and cause and the same export-policy transition outcomes: the probe must
+never change an eligibility decision.
+The last case injects metrics:
 pending until the engine observes receiver barriers, then rejected_no_effect.
 It tests harness sequencing, NOT a real runtime rollback. Logs and generated
 inputs are retained in --artifact-dir.
@@ -13,6 +18,7 @@ import hashlib
 import http.server
 import json
 import os
+import re
 from pathlib import Path
 import shlex
 import shutil
@@ -27,6 +33,10 @@ import urllib.request
 REPO = Path(__file__).resolve().parents[2]
 BARRIER = "reload 1 receiver_barriers_complete awaiting_daemon_settlement"
 ATTEMPTS = 3
+# Above the daemon's 10,000-route threshold for paced reload and join builds.
+PACED_PREFIXES = "12000"
+DECISIONS = ("bgp_rib_paced_fallback_total{", "bgp_rib_policy_transition_total{")
+DECISION = re.compile(r'^(bgp_rib_\w+_total)\{([^}]*)\} (\d+)$')
 
 
 class PortCollision(Exception):
@@ -66,7 +76,7 @@ def check_update_wait(text, phase):
     assert summary["sent"] > 0 and summary["arrived"] == summary["sent"], summary
     assert summary["unarrived"] == 0 and summary["invalid"] == 0, summary
     assert summary["witness_other_updates"] == 0, summary
-    assert summary["member_probe_updates"] == 0, summary
+    assert summary["member_probe_updates"] > 0, summary
     assert summary["max_us"] > 0 and summary["max_us"] >= summary["p99_us"], summary
     phases = {row["phase"]: row for row in summary["phases"]}
     assert {"control", phase} <= phases.keys(), summary
@@ -74,9 +84,25 @@ def check_update_wait(text, phase):
     return summary
 
 
+def pacing_decisions(address):
+    """Nonzero paced-fallback (job, cause) and policy-transition outcome counts."""
+    with urllib.request.urlopen(f"http://{address}/metrics", timeout=5) as reply:
+        text = reply.read().decode()
+    counts = {}
+    for line in text.splitlines():
+        if line.startswith(DECISIONS):
+            match = DECISION.match(line)
+            assert match, line
+            if int(match[3]):
+                counts[f"{match[1]}{{{match[2]}}}"] = int(match[3])
+    return counts
+
+
 def run_attempt(args, name, attempt, *, dualstack=False, rejected=False, injected=False,
-                probe=None):
-    flap = probe == "flap"
+                mode="reload", wait=False):
+    flap = mode == "flap"
+    probe = mode if wait else None
+    prefixes = "600" if dualstack or rejected or injected else PACED_PREFIXES
     dest = args.artifact_dir / name / f"attempt-{attempt}"
     dest.mkdir(parents=True)
     env = {key: value for key, value in os.environ.items()
@@ -152,13 +178,13 @@ def run_attempt(args, name, attempt, *, dualstack=False, rejected=False, injecte
                     thread = threading.Thread(target=fixture.serve_forever)
                     thread.start()
                     env["RELOADSTALL_RELOAD_METRICS_ADDR"] = f"127.0.0.1:{fixture.server_port}"
-                mode = ["0", "1", "12", "--flapstorm", "1", "--flap-rounds", "1"] if flap \
+                engine_mode = ["0", "1", "12", "--flapstorm", "1", "--flap-rounds", "1"] if flap \
                     else ["2", "1", "12"]
                 with engine_log.open("w") as log:
                     result = subprocess.run([
-                        str(args.harness), "12", "600", bgp_port, str(daemon.pid),
+                        str(args.harness), "12", prefixes, bgp_port, str(daemon.pid),
                         str(scenario / "member.rpol"), str(scenario / "gen-a.rpol"),
-                        str(scenario / "gen-b.rpol"), *mode], env=env,
+                        str(scenario / "gen-b.rpol"), *engine_mode], env=env,
                         # Above the engine's 120 s connect window, so its own error surfaces.
                         stdout=log, stderr=subprocess.STDOUT, timeout=180)
                 (dest / "engine.exit").write_text(f"{result.returncode}\n")
@@ -192,13 +218,15 @@ def run_attempt(args, name, attempt, *, dualstack=False, rejected=False, injecte
                 summary = {"case": name, "attempts": attempt,
                            "engine_exit": result.returncode, "assertions": "pass",
                            "metrics_injected_not_runtime_rollback": injected}
+                if not (rejected or injected):
+                    summary["pacing_decisions"] = pacing_decisions(metrics_address)
                 if probe:
-                    wait = check_update_wait(text, "flap1_rejoin" if flap else "reload1")
-                    summary["update_wait"] = {key: wait[key] for key in ("sent", "max_us", "p99_us")}
+                    waits = check_update_wait(text, "flap1_rejoin" if flap else "reload1")
+                    summary["update_wait"] = {key: waits[key] for key in ("sent", "max_us", "p99_us")}
                 if flap:
                     (dest / "result.json").write_text(json.dumps(summary, indent=2) + "\n")
                     print(json.dumps(summary), flush=True)
-                    return
+                    return summary
                 # Use the runner's actual marker translation to check the soak receipt too.
                 shell = ('source "$1"; CYCLES_LOG="$2"; '
                          'while IFS= read -r line; do handle_line "$line"; done < "$3"')
@@ -215,6 +243,7 @@ def run_attempt(args, name, attempt, *, dualstack=False, rejected=False, injecte
                     assert "ABORT: reload 1 failed: daemon SIGHUP outcome rejected_no_effect" in cycles
                 (dest / "result.json").write_text(json.dumps(summary, indent=2) + "\n")
                 print(json.dumps(summary), flush=True)
+                return summary
             finally:
                 if fixture:
                     fixture.shutdown()
@@ -248,10 +277,14 @@ def main():
         for binary in (args.daemon, args.harness):
             with binary.open("rb") as source:
                 log.write(f"{hashlib.file_digest(source, 'sha256').hexdigest()}  {binary}\n")
-    run_case(args, "native-success")
+    pairs = [(run_case(args, "native-success"), run_case(args, "update-wait-reload", wait=True)),
+             (run_case(args, "flap", mode="flap"),
+              run_case(args, "update-wait-flap", mode="flap", wait=True))]
+    for off, on in pairs:
+        assert off["pacing_decisions"] == on["pacing_decisions"], (
+            f"the wait probe changed an eligibility decision: {off['case']} "
+            f"{off['pacing_decisions']} != {on['case']} {on['pacing_decisions']}")
     run_case(args, "dualstack-filter-success", dualstack=True)
-    run_case(args, "update-wait-reload", probe="reload")
-    run_case(args, "update-wait-flap", probe="flap")
     run_case(args, "native-rejection", rejected=True)
     run_case(args, "receiver-complete-then-rejected", injected=True)
 
