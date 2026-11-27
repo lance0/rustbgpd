@@ -8,6 +8,9 @@ use crate::loc_rib::REGISTRATION_PAGE_SIZE;
 use crate::manager::tests::update_groups::deny_statement;
 use crate::update::{RoutePageError, RouteQueryScope};
 
+/// Keys a proof mutation touches, counted per commit.
+const PROOF_VISITS: &str = "admitted_proof_visits";
+
 /// The denying export policy denies every route at this preference or above.
 const DENY_FROM: u32 = 150;
 /// The first of the routes only OTHER holds, each denied, in a denying run.
@@ -373,13 +376,16 @@ fn a_grouped_resync_sends_one_page_per_turn_from_8_to_32_pages() {
         let mut lagged = Lagged::new(rows, 2, 90);
         let visits = work("initial_member_replay_visits");
         let mut peak = lagged.tick();
+        let mut proof_peak = 0;
         let mut turns = 0;
         while lagged.reconciling() {
             let before = work("initial_member_replay_visits");
+            let proof = work(PROOF_VISITS);
             let rows = lagged.turn();
             peak = peak
                 .max(rows)
                 .max(work("initial_member_replay_visits") - before);
+            proof_peak = proof_peak.max(work(PROOF_VISITS) - proof);
             turns += 1;
             assert!(
                 turns < 50 * usize::from(pages),
@@ -387,8 +393,15 @@ fn a_grouped_resync_sends_one_page_per_turn_from_8_to_32_pages() {
             );
         }
         let total = work("initial_member_replay_visits") - visits;
-        eprintln!("pages={pages}: peak={peak} total visits={total} turns={turns}");
+        eprintln!(
+            "pages={pages}: peak={peak} proof peak={proof_peak} total visits={total} turns={turns}"
+        );
         assert!(peak <= REGISTRATION_PAGE_SIZE, "pages={pages}: peak {peak}");
+        // A page's proof commit touches its own keys, not the whole proof.
+        assert!(
+            proof_peak <= 2 * REGISTRATION_PAGE_SIZE,
+            "pages={pages}: proof peak {proof_peak}"
+        );
         // R1's bucket visits and R2's proof sweep, each about once per row.
         assert!(total <= 4 * usize::from(rows), "pages={pages}: {total}");
         lagged.assert_paced();
@@ -733,7 +746,8 @@ fn a_tick_leaves_a_dirty_mark_to_the_live_reconcile() {
 
 // The same for a joining member: a dirty mark the tick finds mid-join
 // rewinds its replay into a reconcile, which still ends with the complete
-// table and one End-of-RIB.
+// table and one End-of-RIB. The member stays pending a resync, from that
+// mark's episode start, until the replay completes.
 #[test]
 fn a_tick_leaves_a_dirty_mark_to_the_live_initial_replay() {
     let (mut manager, _tx, expected) = replay_fixture();
@@ -747,12 +761,20 @@ fn a_tick_leaves_a_dirty_mark_to_the_live_initial_replay() {
         .collect();
     let before = whole_table_units(&manager);
     assert!(manager.mark_outbound_dirty(peer));
+    let since = manager.dirty_since[&peer];
     manager.resync_dirty_peers_bounded();
     assert!(manager.is_initial_member_replay(peer));
     assert!(!manager.dirty_peers.contains(&peer));
     drop(first);
     let mut markers = 0;
     for _ in 0..20_000 {
+        assert_eq!(manager.outbound_convergence().pending_peers, 1);
+        assert!(manager.neighbor_rib_snapshot(peer).outbound_resync.pending);
+        assert_eq!(
+            manager.resync_reconcile_since(peer),
+            Some(since),
+            "episode start"
+        );
         manager.wake_initial_member_replay();
         manager.advance_pending_initial_registration();
         while let Ok(page) = rx.try_recv() {
@@ -773,6 +795,8 @@ fn a_tick_leaves_a_dirty_mark_to_the_live_initial_replay() {
     }
     assert_eq!(markers, 1);
     assert!(rx.is_empty() && !manager.dirty_peers.contains(&peer));
+    assert_eq!(manager.outbound_convergence().pending_peers, 0);
+    assert!(!manager.neighbor_rib_snapshot(peer).outbound_resync.pending);
     let after = whole_table_units(&manager);
     assert_eq!([0, 1, 2].map(|i| after[i] - before[i]), [0; 3]);
     crate::manager::tests::assert_paced_fallbacks(&manager.metrics, &[]);
@@ -908,4 +932,27 @@ fn a_denial_history_reconciles_one_page_per_turn_from_8_to_32_pages() {
         );
         lagged.assert_paced();
     }
+}
+
+// A reconcile that falls back owes the member a one-turn resync. A session
+// that ends before that resync runs takes the debt with it.
+#[test]
+fn a_session_that_ends_before_its_owed_resync_leaves_no_debt() {
+    let mut lagged = Lagged::new(V4_ROWS, 2, 30);
+    lagged.tick();
+    assert!(lagged.reconciling());
+    let _ = lagged.manager.recover_initial_member_replay(
+        lagged.peer,
+        crate::manager::initial_member_replay::PacedFallbackCause::MissingProof,
+    );
+    assert!(lagged.manager.one_turn_resync_owed(lagged.peer));
+    lagged.manager.handle_update(RibUpdate::PeerDown {
+        peer: lagged.peer,
+        session_id: 7,
+    });
+    drain_source_departure(&mut lagged.manager);
+    assert!(
+        !lagged.manager.one_turn_resync_owed(lagged.peer),
+        "the departed session's one-turn resync is still owed"
+    );
 }

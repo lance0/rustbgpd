@@ -85,10 +85,14 @@ struct Replay {
     // history alone, so neither R1 nor R2 reaches it.
     denied: Option<Prefix>,
     denials_done: bool,
-    // A reconcile the resync tick enrolled for a member that fell behind,
-    // with the start of its dirty episode. It owes no End-of-RIB of its own,
-    // and the member counts as pending a resync until it completes.
-    resync: Option<tokio::time::Instant>,
+    // A reconcile the resync tick enrolled for a member that fell behind. It
+    // owes no End-of-RIB of its own, and its fallback counts for the
+    // grouped resync.
+    resync: bool,
+    // The start of the dirty episode this replay took over, at enrollment
+    // or from a later dirty mark. The member counts as pending a resync
+    // until the replay completes.
+    dirty_since: Option<tokio::time::Instant>,
 }
 
 /// What a paceable registration waits for before its replay can start.
@@ -126,7 +130,7 @@ pub(super) struct InitialMemberReplays {
     // queued registration claims is retired.
     founder_groups: Vec<usize>,
     // Members whose replay fell back to the dirty resync, by session, with
-    // the dirty-episode start of a resync reconcile: that resync runs in one
+    // the start of the dirty episode the replay had taken over: that resync runs in one
     // turn, the fallback the replay counted. Enrolling it again could repeat
     // the refusal or the lag that ended the replay.
     one_turn: HashMap<PeerId, (u64, Option<tokio::time::Instant>)>,
@@ -172,6 +176,12 @@ impl RibManager {
             .members
             .get(&peer)
             .is_some_and(|replay| replay.mode == Mode::Reconcile || replay.changes.unsent())
+    }
+
+    /// Whether `peer` owes a one-turn resync its replay's fallback counted.
+    #[cfg(test)]
+    pub(super) fn one_turn_resync_owed(&self, peer: PeerId) -> bool {
+        self.initial_member_replays.one_turn.contains_key(&peer)
     }
 
     /// Whether `peer`'s reconcile has passed every key (R1) and swept part
@@ -352,7 +362,8 @@ impl RibManager {
                 sweep_due: false,
                 denied: None,
                 denials_done: true,
-                resync: None,
+                resync: false,
+                dirty_since: None,
             },
         );
         debug_assert!(previous.is_none(), "a live replay was overwritten");
@@ -458,6 +469,9 @@ impl RibManager {
     }
 
     pub(super) fn abort_initial_member_replay(&mut self, peer: PeerId) -> bool {
+        // Teardown and replacement end any owed one-turn resync with the
+        // session; a fallback records its own entry after this.
+        self.initial_member_replays.one_turn.remove(&peer);
         let Some(replay) = self.initial_member_replays.members.remove(&peer) else {
             return false;
         };
@@ -548,6 +562,12 @@ impl RibManager {
             // The dirty mark's force bit holds as a forced resync's does.
             let marked_force =
                 dirty && self.dirty_peers.remove(&peer) && self.force_outbound_peers.remove(&peer);
+            let episode = dirty.then(|| {
+                self.dirty_since
+                    .get(&peer)
+                    .copied()
+                    .unwrap_or_else(tokio::time::Instant::now)
+            });
             if dirty {
                 self.refresh_eor_retry(peer);
             }
@@ -557,6 +577,10 @@ impl RibManager {
                 .get_mut(&peer)
                 .expect("live replay");
             replay.forced |= marked_force;
+            // The replay now owes the member the resync that mark asked for.
+            if let Some(since) = episode {
+                replay.dirty_since.get_or_insert(since);
+            }
             // A pending rewind already covers every later cause, such as the
             // next batch of a paged release.
             let pending = replay.rewind;
@@ -633,8 +657,8 @@ impl RibManager {
         let Some(replay) = self.initial_member_replays.members.get(&peer) else {
             return false;
         };
-        let (session, resync) = (replay.session, replay.resync);
-        let job = if resync.is_some() {
+        let (session, since) = (replay.session, replay.dirty_since);
+        let job = if replay.resync {
             PacedJob::GroupedResync
         } else {
             PacedJob::InitialReplay
@@ -643,7 +667,7 @@ impl RibManager {
         self.abort_initial_member_replay(peer);
         self.initial_member_replays
             .one_turn
-            .insert(peer, (session, resync));
+            .insert(peer, (session, since));
         true
     }
 
@@ -799,7 +823,8 @@ impl RibManager {
                 // was dirty.
                 denied: None,
                 denials_done: false,
-                resync: Some(since),
+                resync: true,
+                dirty_since: Some(since),
             },
         );
         debug_assert!(previous.is_none(), "a live replay was overwritten");
@@ -840,22 +865,23 @@ impl RibManager {
         self.initial_member_replays.one_turn.remove(&peer);
     }
 
-    /// Each member a resync reconcile repairs, with its dirty-episode start.
+    /// Each member whose replay took over a dirty episode, with its start:
+    /// a resync reconcile, or a join that consumed a later dirty mark.
     pub(super) fn resync_reconciles(
         &self,
     ) -> impl Iterator<Item = (PeerId, tokio::time::Instant)> + '_ {
         self.initial_member_replays
             .members
             .iter()
-            .filter_map(|(peer, replay)| Some((*peer, replay.resync?)))
+            .filter_map(|(peer, replay)| Some((*peer, replay.dirty_since?)))
     }
 
-    /// The dirty-episode start of `peer`'s resync reconcile, if one runs.
+    /// The start of the dirty episode `peer`'s replay took over, if any.
     pub(super) fn resync_reconcile_since(&self, peer: PeerId) -> Option<tokio::time::Instant> {
         self.initial_member_replays
             .members
             .get(&peer)
-            .and_then(|replay| replay.resync)
+            .and_then(|replay| replay.dirty_since)
     }
 
     /// Restart a reconcile's scan from its first bucket. The proof stays.
