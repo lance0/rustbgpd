@@ -451,7 +451,13 @@ holds under [Restart](#restart)).
   that would be paged, including the founder of a group built while it
   waited, waits in the registration queue while 64 paged joins are in
   progress, or while their admitted-key proofs leave no room for its table
-  in the 512 MiB proof budget, until one of them ends. Waiters start in
+  in the 512 MiB proof budget, until one of them ends. Joiners of one
+  group whose table has not been replaced share one set of proof keys,
+  filled by one walk of the group table and charged to the budget once;
+  each adds a mask of one bit per key and the keys it admitted that the
+  shared set lacks. A joiner that arrives while that set is still in use
+  shares it too, unless an earlier member finished with more than one such
+  key per 16 in the set: it then starts a new one. Waiters start in
   arrival order: behind one waiting for budget, no later joiner starts even
   if its smaller table would fit. A joiner does not wait when no paged join
   is in progress, when its table would not fit even after every paged join

@@ -269,6 +269,16 @@ impl Snapshot {
             + self.slot_positions.capacity() * size_of::<u32>()
     }
 
+    /// The keys a member's mask spans. A replay universe fills in pages, so
+    /// its members' masks span its whole capacity from the start.
+    fn mask_keys(&self) -> usize {
+        if self.keyed {
+            self.keys.capacity()
+        } else {
+            self.keys.len()
+        }
+    }
+
     /// The key buckets of a keyed universe; empty for any other pool.
     fn key_index(&self) -> &[u32] {
         if self.keyed {
@@ -1261,15 +1271,18 @@ impl AdmittedRecovery {
             .0
             .checked_mul(size_of::<Key>())
             .ok_or_else(Self::overflow)?;
+        // A replay universe serves replays alone, and a group pool never does.
         let reused = hint.filter(|handle| {
-            self.snapshot_index(*handle)
-                .is_some_and(|index| slot_source.is_none() || self.snapshots[index].indexed)
+            self.snapshot_index(*handle).is_some_and(|index| {
+                let snapshot = &self.snapshots[index];
+                snapshot.keyed == replay && (slot_source.is_none() || snapshot.indexed)
+            })
         });
         let (actual_words, snapshot_charge) = if let Some(handle) = reused {
             let snapshot = &self.snapshots[self
                 .snapshot_index(handle)
                 .ok_or_else(|| self.missing_proof(peer))?];
-            (Self::shared_words(snapshot.keys.len())?, snapshot.charge())
+            (Self::shared_words(snapshot.mask_keys())?, snapshot.charge())
         } else {
             (
                 words,
@@ -1316,11 +1329,9 @@ impl AdmittedRecovery {
                 attempted_daemon_bytes: daemon,
             });
         }
-        if !replay {
-            for _ in 0..actual_words {
-                checkpoint(false);
-                self.records[index].words.push(0);
-            }
+        for _ in 0..actual_words {
+            checkpoint(false);
+            self.records[index].words.push(0);
         }
         self.used -= size_of::<Words>();
         // The mask precedes the key/pool allocations. Pool growth is the last
@@ -2188,33 +2199,61 @@ impl AdmittedRecovery {
         self.insert_record(peer, State::Complete, checkpoint)
     }
 
-    /// Prepay the two empty buffers of a private snapshot. Neither initialization
-    /// nor retirement visits the table; each preparation page appends its own keys
-    /// and unset mask words. The group never receives this snapshot's handle.
+    /// Start `peer`'s initial replay proof over a key universe of
+    /// `table_rows` capacity, and return that universe's handle. `shared`
+    /// names a live universe the member's join cohort already holds: the
+    /// member then takes a reference and pays for its own mask alone.
+    /// Otherwise the universe's two empty buffers are prepaid here, once for
+    /// every member that later shares it. Neither path visits the table:
+    /// [`Self::extend_initial_replay_universe`] appends the keys in pages.
+    /// The group never receives this handle. `None` when the member's proof
+    /// is not complete and empty.
     pub(in crate::manager) fn begin_initial_replay(
         &mut self,
         peer: PeerId,
         table_rows: usize,
-    ) -> Result<bool, Failure> {
+        shared: Option<SnapshotHandle>,
+    ) -> Result<Option<SnapshotHandle>, Failure> {
         let Ok(index) = self.index(peer) else {
-            return Ok(false);
+            return Ok(None);
         };
         let record = &self.records[index];
         if record.state != State::Complete || record.entries() != 0 || record.snapshot.is_some() {
-            return Ok(false);
+            return Ok(None);
         }
+        let rows = shared
+            .and_then(|handle| self.replay_universe_capacity(handle))
+            .unwrap_or(table_rows);
         let handle = self.attach_snapshot_with_checkpoint(
             index,
-            None,
-            table_rows,
+            shared,
+            rows,
             std::iter::empty(),
-            (table_rows, 0),
+            (rows, 0),
             None,
             true,
             &mut |_| {},
         )?;
         self.records[index].initial_replay = handle.is_some();
-        Ok(handle.is_some())
+        Ok(handle)
+    }
+
+    /// Live replay universes.
+    #[cfg(test)]
+    pub(in crate::manager) fn replay_universes(&self) -> usize {
+        self.snapshots
+            .iter()
+            .filter(|snapshot| snapshot.keyed)
+            .count()
+    }
+
+    /// The key capacity of a live replay universe.
+    pub(in crate::manager) fn replay_universe_capacity(
+        &self,
+        handle: SnapshotHandle,
+    ) -> Option<usize> {
+        let snapshot = &self.snapshots[self.snapshot_index(handle)?];
+        snapshot.keyed.then(|| snapshot.keys.capacity())
     }
 
     /// Adopt a member's captured proof, empty or not, for a paced reconcile.
@@ -2234,71 +2273,106 @@ impl AdmittedRecovery {
         true
     }
 
-    /// Where an initial replay over `rows` table rows (its mask, keyed
-    /// universe and headers) fits: in the daemon budget now, only once the
-    /// live initial replays release theirs, or under neither limit.
-    pub(in crate::manager) fn initial_replay_room(&self, rows: usize) -> ReplayRoom {
+    /// Where an initial replay over `rows` table rows fits: in the daemon
+    /// budget now, only once the live initial replays release theirs, or
+    /// under neither limit. A member of a join cohort that already holds the
+    /// `shared` universe needs its own mask and header alone; any other
+    /// replay also pays for its keyed universe.
+    pub(in crate::manager) fn initial_replay_room(
+        &self,
+        rows: usize,
+        shared: Option<SnapshotHandle>,
+    ) -> ReplayRoom {
+        let shared = shared.and_then(|handle| self.replay_universe_capacity(handle));
+        let rows = shared.unwrap_or(rows);
         let growth = if self.snapshots.len() == self.snapshots.capacity() {
             (self.snapshots.capacity() * 2).max(1) * size_of::<Snapshot>() + size_of::<Snapshots>()
         } else {
             0
         };
-        let Some(needed) = Self::shared_words(rows).ok().and_then(|words| {
-            words
-                .checked_mul(size_of::<u64>())?
-                .checked_add(rows.checked_mul(size_of::<Key>())?)?
-                .checked_add(key_index_len(rows).checked_mul(size_of::<u32>())?)?
-                .checked_add(
-                    size_of::<Record>()
-                        + size_of::<Words>()
-                        + 2 * size_of::<Snapshot>()
-                        + size_of::<Keys>()
-                        + size_of::<SlotPositions>(),
-                )
+        let Some((member, universe)) = Self::shared_words(rows).ok().and_then(|words| {
+            Some((
+                words
+                    .checked_mul(size_of::<u64>())?
+                    .checked_add(size_of::<Record>() + size_of::<Words>())?,
+                rows.checked_mul(size_of::<Key>())?
+                    .checked_add(key_index_len(rows).checked_mul(size_of::<u32>())?)?
+                    .checked_add(
+                        2 * size_of::<Snapshot>() + size_of::<Keys>() + size_of::<SlotPositions>(),
+                    )?,
+            ))
         }) else {
             return ReplayRoom::Never;
         };
-        let daemon = needed.saturating_add(growth);
-        if needed > self.peer_limit {
+        let Some(alone) = member.checked_add(universe) else {
+            return ReplayRoom::Never;
+        };
+        // The universe counts toward each member's own limit, shared or not.
+        if alone > self.peer_limit {
             return ReplayRoom::Never;
         }
-        if self.used.saturating_add(daemon) <= self.daemon_limit {
+        let now = if shared.is_some() {
+            member
+        } else {
+            alone.saturating_add(growth)
+        };
+        if self.used.saturating_add(now) <= self.daemon_limit {
             return ReplayRoom::Fits;
         }
-        let replays: usize = (0..self.records.len())
-            .filter(|&index| self.records[index].initial_replay)
-            .map(|index| self.peer_charge(index))
+        // Once the live replays end, their universes go with them: each is
+        // counted once, however many members share it.
+        let replays: usize = self
+            .records
+            .iter()
+            .filter(|record| record.initial_replay)
+            .map(Record::charge)
+            .chain(
+                self.snapshots
+                    .iter()
+                    .filter(|snapshot| snapshot.keyed)
+                    .map(Snapshot::charge),
+            )
             .sum();
-        if self.used.saturating_sub(replays).saturating_add(daemon) <= self.daemon_limit {
+        let after = alone.saturating_add(growth);
+        if self.used.saturating_sub(replays).saturating_add(after) <= self.daemon_limit {
             ReplayRoom::AfterReplays
         } else {
             ReplayRoom::Never
         }
     }
 
-    /// Group churn can shrink the table or add a prefix behind the walk. Such
-    /// keys stay in the ordinary sparse overlay when first admitted.
+    /// Append one page of the group table's keys, in key order, to a replay
+    /// universe every member of its join cohort shares. Group churn can
+    /// shrink the table or add a prefix behind the walk. Such keys stay in a
+    /// member's ordinary sparse overlay when first admitted, and so does a
+    /// key a member's overlay already holds: a universe key is admitted by
+    /// its mask bit alone. `false` once the universe is gone.
     pub(in crate::manager) fn extend_initial_replay_universe(
         &mut self,
-        peer: PeerId,
+        handle: SnapshotHandle,
         keys: impl Iterator<Item = Key>,
     ) -> bool {
-        let Ok(index) = self.index(peer) else {
-            return false;
-        };
-        let record = &self.records[index];
-        let Some(snapshot) = record
-            .snapshot
-            .filter(|_| record.initial_replay)
-            .and_then(|handle| self.snapshot_index(handle))
+        let Some(snapshot) = self
+            .snapshot_index(handle)
+            .filter(|index| self.snapshots[*index].keyed)
         else {
             return false;
         };
-        let record = &mut self.records[index];
+        // A member that fell back mid-walk keeps its record and reference
+        // while it is dirty, and its resync, in one turn or adopted by a
+        // reconcile, admits keys into its overlay while the others still
+        // walk. A universe key must be admitted by its mask bit alone, so a
+        // key any such overlay holds stays out of the universe.
+        let overlays: SmallVec<[usize; 0]> = (0..self.records.len())
+            .filter(|&index| {
+                let record = &self.records[index];
+                record.snapshot == Some(handle) && !record.keys.0.is_empty()
+            })
+            .collect();
+        let records = &self.records;
         let Snapshot {
             keys: universe,
             slot_positions,
-            keyed,
             ..
         } = &mut self.snapshots[snapshot];
         for key in keys {
@@ -2306,18 +2380,15 @@ impl AdmittedRecovery {
                 break;
             }
             if universe.last().is_some_and(|last| key <= *last)
-                || record.keys.0.binary_search(&key).is_ok()
+                || overlays
+                    .iter()
+                    .any(|&index| records[index].keys.0.binary_search(&key).is_ok())
             {
                 continue;
             }
-            if universe.len().is_multiple_of(64) {
-                record.words.push(0);
-            }
-            if *keyed {
-                // The pool's capacity is below the empty-bucket marker.
-                let position = u32::try_from(universe.len()).expect("checked at creation");
-                index_key(slot_positions, &key, position);
-            }
+            // The pool's capacity is below the empty-bucket marker.
+            let position = u32::try_from(universe.len()).expect("checked at creation");
+            index_key(slot_positions, &key, position);
             universe.push(key);
         }
         true
@@ -3293,7 +3364,10 @@ mod tests {
         let rows = 4_096;
         let key = slot_key;
         ledger.insert_empty(who).unwrap();
-        assert!(ledger.begin_initial_replay(who, rows).unwrap());
+        let universe = ledger
+            .begin_initial_replay(who, rows, None)
+            .unwrap()
+            .unwrap();
         let seed_charge = ledger.bytes();
         // An ordinary announcement before the preparation cursor sees this
         // identity stays sparse. Preparation must not mirror it in the mask.
@@ -3302,7 +3376,7 @@ mod tests {
             .unwrap();
         for start in (0..rows).step_by(63) {
             assert!(ledger.extend_initial_replay_universe(
-                who,
+                universe,
                 (start..(start + 63).min(rows)).map(|n| key(u32::try_from(n).unwrap()))
             ));
         }
@@ -3353,8 +3427,8 @@ mod tests {
         let mut ledger = AdmittedRecovery::new();
         let who = peer(1);
         ledger.insert_empty(who).unwrap();
-        assert!(ledger.begin_initial_replay(who, 64).unwrap());
-        assert!(ledger.extend_initial_replay_universe(who, (0..64).map(slot_key)));
+        let universe = ledger.begin_initial_replay(who, 64, None).unwrap().unwrap();
+        assert!(ledger.extend_initial_replay_universe(universe, (0..64).map(slot_key)));
         // Even keys above the universe, admitted in order: one sorted run.
         for start in (0..sparse).step_by(PAGE as usize) {
             let page = (start..(start + PAGE).min(sparse)).map(|n| slot_key(1_000 + 2 * n));
@@ -3404,6 +3478,131 @@ mod tests {
         }
     }
 
+    // Two members of one join cohort reference one universe. Each admits
+    // and withdraws through its own mask and overlay: neither sees the
+    // other's keys, a member that fails leaves the other's proof whole, and
+    // the last reference retires the universe with all its credit.
+    #[test]
+    fn cohort_members_share_a_universe_and_keep_their_own_admission() {
+        let mut ledger = AdmittedRecovery::new();
+        let (a, b) = (peer(1), peer(2));
+        let rows = 256_u32;
+        let key = slot_key;
+        ledger.insert_empty(a).unwrap();
+        ledger.insert_empty(b).unwrap();
+        let seeded = ledger.bytes();
+        let universe = ledger
+            .begin_initial_replay(a, rows as usize, None)
+            .unwrap()
+            .unwrap();
+        let first = ledger.bytes() - seeded;
+        assert_eq!(
+            ledger.begin_initial_replay(b, 1, Some(universe)).unwrap(),
+            Some(universe)
+        );
+        // The second member pays for one mask bit per universe key.
+        assert_eq!(ledger.bytes() - seeded - first, rows as usize / 8);
+        assert!(first - rows as usize / 8 >= rows as usize * size_of::<Key>());
+        assert_eq!(ledger.snapshots.len(), 1);
+        assert!(ledger.extend_initial_replay_universe(universe, (0..rows).map(key)));
+
+        // The same keys with different outcomes, plus one outside the universe.
+        let outside = key(rows + 7);
+        ledger
+            .apply_admitted(a, [key(1), key(2), outside].into_iter(), [].into_iter())
+            .unwrap();
+        ledger
+            .apply_admitted(b, [key(2), key(3)].into_iter(), [].into_iter())
+            .unwrap();
+        ledger
+            .apply_admitted(a, [].into_iter(), [key(2)].into_iter())
+            .unwrap();
+        let admitted = |ledger: &AdmittedRecovery, who| {
+            ledger
+                .get(&who)
+                .unwrap()
+                .iter()
+                .collect::<Vec<ExactExportKey>>()
+        };
+        assert_eq!(admitted(&ledger, a), [key(1).into(), outside.into()]);
+        assert_eq!(admitted(&ledger, b), [key(2).into(), key(3).into()]);
+        assert!(!ledger.get(&b).unwrap().contains(&outside.into()));
+        assert_retained_credit(&ledger);
+
+        // B withdraws a key only A admitted: B's proof fails closed alone.
+        assert_eq!(
+            ledger
+                .apply_admitted(b, [].into_iter(), [key(1)].into_iter())
+                .unwrap_err()
+                .cause,
+            FailureCause::MissingProof
+        );
+        assert_eq!(admitted(&ledger, a), [key(1).into(), outside.into()]);
+        assert_eq!(
+            ledger.replay_universe_capacity(universe),
+            Some(rows as usize)
+        );
+        assert_retained_credit(&ledger);
+
+        // A late joiner naming the live universe shares it; a retired one
+        // is replaced, never revived.
+        let late = peer(3);
+        ledger.insert_empty(late).unwrap();
+        assert_eq!(
+            ledger
+                .begin_initial_replay(late, 1, Some(universe))
+                .unwrap(),
+            Some(universe)
+        );
+        assert_eq!(admitted(&ledger, late), []);
+        assert!(ledger.remove(&a));
+        assert_eq!(
+            ledger.replay_universe_capacity(universe),
+            Some(rows as usize)
+        );
+        assert!(ledger.remove(&late));
+        assert_eq!(ledger.replay_universe_capacity(universe), None);
+        assert!(ledger.snapshots.is_empty());
+        assert_retained_credit(&ledger);
+        ledger.insert_empty(late).unwrap();
+        let fresh = ledger
+            .begin_initial_replay(late, 64, Some(universe))
+            .unwrap()
+            .unwrap();
+        assert_ne!(fresh, universe);
+        assert_eq!(ledger.replay_universe_capacity(fresh), Some(64));
+    }
+
+    // A joiner whose cohort already holds its universe needs room for its
+    // mask alone, where a first member needs the whole universe.
+    #[test]
+    fn a_cohort_member_fits_where_a_second_universe_would_not() {
+        let rows = 4_096;
+        let mut ledger = AdmittedRecovery::new();
+        ledger.insert_empty(peer(1)).unwrap();
+        let before = ledger.bytes();
+        let universe = ledger.begin_initial_replay(peer(1), rows, None).unwrap();
+        let table = ledger.bytes() - before;
+        ledger.set_test_daemon_limit(ledger.bytes() + table / 2);
+        assert_eq!(
+            ledger.initial_replay_room(rows, None),
+            ReplayRoom::AfterReplays
+        );
+        assert_eq!(ledger.initial_replay_room(rows, universe), ReplayRoom::Fits);
+        // Sixty-three more members fit the room half a table leaves.
+        for n in 2..=64 {
+            ledger.insert_empty(peer(n)).unwrap();
+            assert_eq!(
+                ledger
+                    .begin_initial_replay(peer(n), rows, universe)
+                    .unwrap(),
+                universe
+            );
+        }
+        assert_eq!(ledger.snapshots.len(), 1);
+        assert_retained_credit(&ledger);
+    }
+
     #[test]
     fn initial_replay_refusal_leaves_the_empty_seed_for_fallback() {
         let who = peer(1);
@@ -3413,7 +3612,10 @@ mod tests {
             let before = ledger.bytes();
             ledger.allocation_countdown = Some(fault);
             assert_eq!(
-                ledger.begin_initial_replay(who, 256).unwrap_err().cause,
+                ledger
+                    .begin_initial_replay(who, 256, None)
+                    .unwrap_err()
+                    .cause,
                 FailureCause::AllocationFailure
             );
             assert_eq!(ledger.bytes(), before);
@@ -3425,7 +3627,10 @@ mod tests {
         ledger.insert_empty(who).unwrap();
         let before = ledger.bytes();
         assert_eq!(
-            ledger.begin_initial_replay(who, 100_000).unwrap_err().cause,
+            ledger
+                .begin_initial_replay(who, 100_000, None)
+                .unwrap_err()
+                .cause,
             FailureCause::PeerLimit
         );
         assert_eq!(ledger.bytes(), before);
