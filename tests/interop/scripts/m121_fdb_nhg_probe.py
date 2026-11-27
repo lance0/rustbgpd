@@ -22,8 +22,10 @@ import json
 import os
 import subprocess
 import sys
+from typing import Any
 
 UPSTREAM_FIX = '7308ef8b4a67'
+PROBE_ERRORS = (RuntimeError, OSError, subprocess.SubprocessError, ValueError)
 REJECTIONS = ('nexthop fdb cannot be dynamic', 'cannot make a nexthop fdb dynamic')
 GROUP = '536870913'
 # Mirrors one M121 leaf: VNI 100 over a 10.211.0.0/24 underlay, learning off,
@@ -65,7 +67,7 @@ def fdb_command(ns, mac, state, group=GROUP):
 def try_form(runner, ns, mac, state, group=GROUP):
     argv = fdb_command(ns, mac, state, group)
     rc, _, stderr = runner(argv)
-    result = dict(command=' '.join(argv), rc=rc, stderr=stderr.strip(), row_installed=False)
+    result: dict[str, Any] = dict(command=' '.join(argv), rc=rc, stderr=stderr.strip(), row_installed=False)
     if rc == 0:
         show_rc, out, show_err = runner(['ip', 'netns', 'exec', ns, 'bridge', '-j', 'fdb', 'show', 'dev', 'vx100'])
         if show_rc != 0:
@@ -84,7 +86,7 @@ def try_form(runner, ns, mac, state, group=GROUP):
 
 def probe(runner=run, ns=None, group=GROUP):
     ns = ns or f'm121-fdb-probe-{os.getpid()}'
-    record = dict(kernel=os.uname().release, namespace=ns, verdict='error')
+    record: dict[str, Any] = dict(kernel=os.uname().release, namespace=ns, verdict='error')
     try:
         rc, _, err = runner(['ip', 'netns', 'add', ns])
         if rc != 0:
@@ -94,12 +96,19 @@ def probe(runner=run, ns=None, group=GROUP):
                 rc, _, err = runner(['ip', 'netns', 'exec', ns] + argv)
                 if rc != 0:
                     raise RuntimeError(f'{" ".join(argv)} failed: {err.strip()}')
-            for name, (mac, state) in FORMS.items():
-                record[name] = try_form(runner, ns, mac, state, group)
+            dynamic = try_form(runner, ns, *FORMS['frr_dynamic'], group)
+            record['frr_dynamic'] = dynamic
+            record['verdict'] = dynamic['result']
+            # Report only: no failure of the static attempt may reach the verdict.
+            mac, state = FORMS['rustbgpd_static']
+            try:
+                record['rustbgpd_static'] = try_form(runner, ns, mac, state, group)
+            except PROBE_ERRORS as error:
+                record['rustbgpd_static'] = dict(command=' '.join(fdb_command(ns, mac, state, group)),
+                                                 result='error', error=str(error))
         finally:
             runner(['ip', 'netns', 'del', ns])
-        record['verdict'] = record['frr_dynamic']['result']
-    except (RuntimeError, OSError, subprocess.SubprocessError, ValueError) as error:
+    except PROBE_ERRORS as error:
         record['error'] = str(error)
     return record
 

@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 
@@ -13,7 +14,7 @@ import m121_fdb_nhg_probe as probe
 REJECTED = 'Error: A nexthop fdb cannot be dynamic.\n'
 
 
-def fake_kernel(dynamic_error=None, static_error=None, setup_error=None):
+def fake_kernel(dynamic_error=None, static_error=None, setup_error=None, static_raise=None):
     """Return a runner that installs rows unless told to fail, and its call log."""
     calls, rows = [], []
 
@@ -23,6 +24,8 @@ def fake_kernel(dynamic_error=None, static_error=None, setup_error=None):
             return 2, '', 'Error: Unknown device type.\n'
         if 'fdb' in argv and 'replace' in argv:
             mac, state = argv[argv.index('replace') + 1], argv[-3]
+            if state == 'permanent' and static_raise:
+                raise static_raise
             error = dynamic_error if state == 'dynamic' else static_error
             if error:
                 return 255, '', error
@@ -72,6 +75,22 @@ class ProbeVerdictTests(unittest.TestCase):
         self.assertEqual(record['rustbgpd_static']['result'], 'rejected')
         runner, _ = fake_kernel(dynamic_error=REJECTED, static_error='Error: Invalid argument.\n')
         self.assertEqual(probe.probe(runner, ns='t')['verdict'], 'rejected')
+
+    def test_static_form_failure_never_changes_the_verdict(self):
+        # A static-form timeout, failed show or bad JSON must stay inside
+        # rustbgpd_static; the FRR verdict alone decides skip or run.
+        failures = [subprocess.TimeoutExpired(['bridge'], 30), RuntimeError('bridge fdb show failed'),
+                    json.JSONDecodeError('Expecting value', '', 0)]
+        for dynamic_error, verdict in ((REJECTED, 'rejected'), (None, 'supported')):
+            for failure in failures:
+                with self.subTest(verdict=verdict, failure=type(failure).__name__):
+                    runner, calls = fake_kernel(dynamic_error=dynamic_error, static_raise=failure)
+                    record = probe.probe(runner, ns='t')
+                    self.assertEqual(record['verdict'], verdict)
+                    self.assertEqual(record['rustbgpd_static']['result'], 'error')
+                    self.assertIn(str(failure), record['rustbgpd_static']['error'])
+                    self.assertEqual(reported(record)[:2], (0, f'verdict={verdict}\n'))
+                    self.assertEqual(calls[-1], ['ip', 'netns', 'del', 't'])
 
     def test_other_failures_fail_the_job_instead_of_skipping(self):
         # An unrelated refusal, an exit 0 without the row, and a broken setup
