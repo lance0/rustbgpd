@@ -187,7 +187,7 @@ impl RibManager {
             .get_mut(&peer)
             .expect("active replay");
         // A pending rewind revisits every key.
-        if matches!(replay.phase, Phase::PrepareProof(_)) || replay.rewind {
+        if matches!(replay.phase, Phase::PrepareProof) || replay.rewind {
             return Ok(());
         }
         // A reconcile reconciles every key it visits, so each change is a

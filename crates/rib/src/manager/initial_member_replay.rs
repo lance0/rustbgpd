@@ -14,7 +14,9 @@ use changes::ReplayChanges;
 use tokio::sync::mpsc;
 
 use super::distribution::OutboundCommitBatch;
-use super::update_groups::admitted_recovery::{Key, OnReservationRefusal, ReplayRoom};
+use super::update_groups::admitted_recovery::{
+    Key, OnReservationRefusal, ReplayRoom, SnapshotHandle,
+};
 use super::{PeerId, RibManager};
 use crate::fast_hash::FastSet;
 use crate::loc_rib::{REGISTRATION_PAGE_SIZE, RegistrationScanStatus};
@@ -24,9 +26,36 @@ use rustbgpd_wire::{Afi, Prefix, Safi};
 pub(super) use rustbgpd_telemetry::reason_labels::{PacedFallbackCause, PacedJob};
 
 enum Phase {
-    PrepareProof(Option<RouteQueryKey>),
+    /// The member's cohort has not walked its whole group table yet.
+    PrepareProof,
     Send,
 }
+
+/// Members replaying one group table under the same view share one key
+/// universe: the table's keys, walked once. Each member's proof is its own
+/// mask over that universe plus its own sparse overlay, so one member's
+/// admissions and withdrawals never show in another's. The ledger counts the
+/// members; the last reference retires the universe.
+struct Cohort {
+    handle: SnapshotHandle,
+    key: CohortKey,
+    // The shared walk of the group table: its next seek, and whether it has
+    // reached the end.
+    after: Option<RouteQueryKey>,
+    walked: bool,
+    // The largest overlay a member completed with: keys the table gained
+    // after the walk passed them.
+    overlay: usize,
+}
+
+/// The group, its table stamp at enrollment and the view class: the
+/// route-server ASN under RFC 7947 control, or none.
+type CohortKey = (usize, u64, Option<u32>);
+
+/// A late joiner starts a new universe once a member's overlay passed one
+/// key in this many of the universe: past that, the keys the old universe
+/// lacks cost each member more than its mask.
+const COHORT_OVERLAY_DIVISOR: usize = 16;
 
 /// An initial replay sends a cold member its table. A reconcile repairs a
 /// member whose replay lost track of its changes: it rescans the Loc-RIB
@@ -59,6 +88,9 @@ struct Replay {
     table_stamp: u64,
     session: u64,
     sender: mpsc::Sender<OutboundRouteUpdate>,
+    // The cohort universe the member's proof references. An adopted proof
+    // keeps its own form and has none.
+    universe: Option<SnapshotHandle>,
     phase: Phase,
     changes: ReplayChanges,
     // Page keys left when a poll spent its unit budget. An RS-control
@@ -117,6 +149,9 @@ impl SlotWait {
 #[derive(Default)]
 pub(super) struct InitialMemberReplays {
     members: HashMap<PeerId, Replay>,
+    // Live universes, oldest first. One whose last reference is gone is
+    // dropped at the next enrollment.
+    cohorts: Vec<Cohort>,
     ready: VecDeque<PeerId>,
     blocked: VecDeque<PeerId>,
     registration_due: bool,
@@ -220,10 +255,37 @@ impl RibManager {
         if !self.eligible_initial_member_replay(peer) || self.replay_peer_refusal(peer).is_some() {
             return None;
         }
+        let (rows, gid) = self.pending_replay_rows(peer);
+        let shared = gid.and_then(|gid| self.replay_cohort(self.replay_cohort_key(peer, gid)?));
         let room = self
             .pending_group_admitted
-            .initial_replay_room(self.pending_replay_rows(peer));
+            .initial_replay_room(rows, shared);
         (room != ReplayRoom::Never).then_some(room)
+    }
+
+    /// The cohort `peer` would join in published group `gid`. A registration
+    /// still waiting reads the RS-control setting its session will install.
+    fn replay_cohort_key(&self, peer: PeerId, gid: usize) -> Option<CohortKey> {
+        let stamp = self.group_ribs.get(&gid)?.evpn_table_stamp;
+        let view = self.peer_rs_control.get(&peer).copied().or_else(|| {
+            let session = self.live_sessions.get(&peer)?.last()?.session_id;
+            *self.pending_peer_rs_control.get(&(peer, session))?
+        });
+        Some((gid, stamp, view))
+    }
+
+    /// The newest live universe of cohort `key` a joiner may share.
+    fn replay_cohort(&self, key: CohortKey) -> Option<SnapshotHandle> {
+        let cohort = self
+            .initial_member_replays
+            .cohorts
+            .iter()
+            .rev()
+            .find(|cohort| cohort.key == key)?;
+        let rows = self
+            .pending_group_admitted
+            .replay_universe_capacity(cohort.handle)?;
+        (cohort.overlay.saturating_mul(COHORT_OVERLAY_DIVISOR) <= rows).then_some(cohort.handle)
     }
 
     /// [`Self::replay_slot_wait`] for a registration completed outside the
@@ -321,12 +383,15 @@ impl RibManager {
         } else {
             ReplayChanges::default()
         };
+        let rows = group.table.len();
+        let key = self.replay_cohort_key(peer, gid).expect("published group");
+        let shared = self.replay_cohort(key);
         let enrollment = self
             .pending_group_admitted
-            .begin_initial_replay(peer, group.table.len());
-        match enrollment {
-            Ok(true) => {}
-            Ok(false) => {
+            .begin_initial_replay(peer, rows, shared);
+        let universe = match enrollment {
+            Ok(Some(universe)) => universe,
+            Ok(None) => {
                 return self.refuse_initial_member_replay(peer, PacedFallbackCause::ProofState);
             }
             Err(error) => {
@@ -340,7 +405,23 @@ impl RibManager {
                 );
                 return false;
             }
-        }
+        };
+        let ledger = &self.pending_group_admitted;
+        let cohorts = &mut self.initial_member_replays.cohorts;
+        cohorts.retain(|cohort| ledger.replay_universe_capacity(cohort.handle).is_some());
+        let walked = match cohorts.iter().find(|cohort| cohort.handle == universe) {
+            Some(cohort) => cohort.walked,
+            None => {
+                cohorts.push(Cohort {
+                    handle: universe,
+                    key,
+                    after: None,
+                    walked: false,
+                    overlay: 0,
+                });
+                false
+            }
+        };
         self.refresh_group_recovery_gauges();
         self.loc_rib.start_member_replay_scan(peer);
         let previous = self.initial_member_replays.members.insert(
@@ -350,7 +431,13 @@ impl RibManager {
                 table_stamp,
                 session: self.outbound_session_ids[&peer],
                 sender: self.outbound_peers[&peer].clone(),
-                phase: Phase::PrepareProof(None),
+                universe: Some(universe),
+                // A late joiner's cohort may have walked the table already.
+                phase: if walked {
+                    Phase::Send
+                } else {
+                    Phase::PrepareProof
+                },
                 changes,
                 carry: VecDeque::new(),
                 mode: Mode::Initial,
@@ -807,6 +894,7 @@ impl RibManager {
                 session: self.outbound_session_ids[&peer],
                 sender: self.outbound_peers[&peer].clone(),
                 // The captured proof is the member's admission: nothing to prepare.
+                universe: None,
                 phase: Phase::Send,
                 changes: ReplayChanges::coalescing(),
                 carry: VecDeque::new(),
@@ -959,8 +1047,11 @@ impl RibManager {
             self.initial_member_replays.blocked.push_back(peer);
             return;
         }
-        if let Phase::PrepareProof(after) = self.initial_member_replays.members[&peer].phase {
-            self.prepare_initial_member_proof_page(peer, gid, after);
+        if matches!(
+            self.initial_member_replays.members[&peer].phase,
+            Phase::PrepareProof
+        ) && !self.prepare_initial_member_proof_page(peer, gid)
+        {
             return;
         }
         if self.complete_initial_member_replay(peer) {
@@ -1012,10 +1103,22 @@ impl RibManager {
         }
         debug_assert!(!job.changes.unsent(), "a coalesced key outlived its repair");
         let job_gid = job.gid;
+        let universe = job.universe;
         // End-of-RIB waits for the rest of an UPDATE whose first chunks applied.
         if !self.pending_route_batches.is_empty() {
             self.initial_member_replays.ready.push_back(peer);
             return true;
+        }
+        // What the member admitted outside its universe measures how far the
+        // table has moved from it, for the next joiner.
+        if let Some(overlay) = self.pending_group_admitted.initial_replay_sparse_len(peer)
+            && let Some(cohort) = self
+                .initial_member_replays
+                .cohorts
+                .iter_mut()
+                .find(|cohort| Some(cohort.handle) == universe)
+        {
+            cohort.overlay = cohort.overlay.max(overlay);
         }
         self.abort_initial_member_replay(peer);
         #[cfg(feature = "bench-internals")]
@@ -1035,41 +1138,58 @@ impl RibManager {
         true
     }
 
-    fn prepare_initial_member_proof_page(
-        &mut self,
-        peer: PeerId,
-        gid: usize,
-        after: Option<RouteQueryKey>,
-    ) {
+    /// One page of the cohort's walk of its group table, taken by whichever
+    /// member's turn comes: the walk runs once however many members share
+    /// the universe. `true` once the walk has ended and `peer` may send in
+    /// this turn.
+    fn prepare_initial_member_proof_page(&mut self, peer: PeerId, gid: usize) -> bool {
+        let replays = &mut self.initial_member_replays;
+        let universe = replays.members[&peer].universe;
+        let Some(cohort) = replays
+            .cohorts
+            .iter_mut()
+            .find(|cohort| Some(cohort.handle) == universe)
+        else {
+            self.recover_initial_member_replay(peer, PacedFallbackCause::MissingProof);
+            return false;
+        };
+        if cohort.walked {
+            replays.members.get_mut(&peer).expect("live replay").phase = Phase::Send;
+            return true;
+        }
         let table = &self.group_ribs[&gid].table;
         let mut last = None;
         // The ordered iterator revisits the one single-best row at its inclusive seek.
-        let mut visits = usize::from(after.is_some());
+        let mut visits = usize::from(cohort.after.is_some());
         let remaining = REGISTRATION_PAGE_SIZE - visits;
-        let keys = table.iter_ordered_from(after).take(remaining).map(|row| {
-            last = Some(route_query_key(row));
-            visits += 1;
-            Key::Unicast(row.prefix, row.path_id)
-        });
+        let keys = table
+            .iter_ordered_from(cohort.after)
+            .take(remaining)
+            .map(|row| {
+                last = Some(route_query_key(row));
+                visits += 1;
+                Key::Unicast(row.prefix, row.path_id)
+            });
         if !self
             .pending_group_admitted
-            .extend_initial_replay_universe(peer, keys)
+            .extend_initial_replay_universe(cohort.handle, keys)
         {
             self.recover_initial_member_replay(peer, PacedFallbackCause::MissingProof);
-            return;
+            return false;
         }
         #[cfg(test)]
-        super::slice_timing::record_work("initial_member_replay_visits", visits);
-        self.initial_member_replays
-            .members
-            .get_mut(&peer)
-            .expect("live replay")
-            .phase = if visits == REGISTRATION_PAGE_SIZE {
-            Phase::PrepareProof(last)
+        {
+            super::slice_timing::record_work("initial_member_replay_visits", visits);
+            super::slice_timing::record_work("initial_member_proof_walk_rows", visits);
+        }
+        if visits == REGISTRATION_PAGE_SIZE {
+            cohort.after = last;
         } else {
-            Phase::Send
-        };
-        self.initial_member_replays.ready.push_back(peer);
+            cohort.walked = true;
+            replays.members.get_mut(&peer).expect("live replay").phase = Phase::Send;
+        }
+        replays.ready.push_back(peer);
+        false
     }
 
     fn send_initial_member_page(&mut self, peer: PeerId, gid: usize) {
