@@ -41,7 +41,7 @@ finishes the unit it is in, and one unit can be a whole table.
 
 | Shape | [Session comes up](#session-comes-up) | [Steady state](#steady-state) | [Receiver falls behind](#receiver-falls-behind) | [Refresh, ORF, RTC](#refresh-orf-and-rt-constrain) | [Policy change](#policy-or-config-change) | [Restart](#restart) | [Session ends](#session-ends) |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Plain unicast, grouped | Table build **paced** ([receipt](../perf/first-group-build-registration-2026-11.md)); initial table **paced** from 10,000 routes | **paced** by read gate and window | Resync **one turn** per member | **one turn** per request; queued requests share it | Nothing filtered: **bounded turns**, updates held until commit. Otherwise one shared turn | **paced** between batches; input held inside a batch | Selection **one turn**. Large fanout **paced** |
+| Plain unicast, grouped | Table build **paced** ([receipt](../perf/first-group-build-registration-2026-11.md)); initial table **paced** from 10,000 routes | **paced** by read gate and window | Resync **paced** from 10,000 routes | **one turn** per request; queued requests share it | Nothing filtered: **bounded turns**, updates held until commit. Otherwise one shared turn | **paced** between batches; input held inside a batch | Selection **one turn**. Large fanout **paced** |
 | Group-shareable export policy | Single-best unicast table build and initial table **paced** | As plain | As plain | As plain | As plain | As plain; not measured with policy | As plain. Policy shape not measured |
 | Route-server control, single best | Table build **one turn**, with the first client's control index; initial table **paced** from 10,000 routes, also for each client of a rejoining cohort | As plain; not measured | As plain; not measured | As plain; not measured | As plain; not measured | As plain; not measured | As plain; not measured |
 | Configured role | Table build and initial table together in **one turn**; not measured | As plain; not measured | As plain; not measured | As plain; not measured | As plain if nothing is OTC-blocked; not measured | As plain; not measured | As plain. Role shape not measured |
@@ -438,9 +438,11 @@ holds under [Restart](#restart)).
   admitted keys in pages to withdraw those the table no longer holds.
   End-of-RIB still follows the complete table, once. Churn that overflows
   the repair log on more than 8 rescans takes one resync instead (counted as
-  `lag`), so the repair log stays capped and the join completes. A regroup, a lost
-  admitted-key proof or a member another path already marked dirty still
-  takes the resync, at the 10 ms backlog cadence. Tests:
+  `lag`), so the repair log stays capped and the join completes. A regroup or a lost
+  admitted-key proof still takes the resync, at the 10 ms backlog cadence,
+  and so does a dirty mark from another path that the member's resync could
+  not reconcile either (see Group member, below); otherwise the replay
+  reconciles that resync. Tests:
   [`reconcile.rs`](../../crates/rib/src/manager/tests/first_group_build/initial_member_replay/reconcile.rs).
   A joiner
   that would be paged, including the founder of a group built while it
@@ -683,7 +685,27 @@ the same metric (`owing_fallback`).
 **Group member.** A shared family has no owed set. A member whose channel
 cannot take a group update is marked dirty, and the group keeps what the
 member missed. The resync tick then resends the member its table as a diff
-against what it holds: one whole-table operation outside the credit.
+against what it holds.
+
+- A member whose initial table would be paged (see the paged replay above)
+  with a table of at least 10,000 routes resyncs through the same paced
+  reconcile a replay rewinds into. The tick enrolls it instead of building
+  its table: the reconcile rescans the table in pages against the keys the
+  member was sent, then sweeps those keys in pages to withdraw what the
+  table no longer holds. A resync owes no End-of-RIB of its own; a marker
+  the member already owed is held until the reconcile completes. The
+  member's Adj-RIB-Out listing is refused, and it counts in
+  `bgp_rib_outbound_dirty_peers`, until then. A full writer parks the
+  reconcile at its cursor without a new dirty mark, and another dirty mark
+  restarts the rescan. Tests:
+  [`grouped_resync.rs`](../../crates/rib/src/manager/tests/first_group_build/initial_member_replay/grouped_resync.rs).
+- Any other member is resent its table in one whole-table operation
+  outside the credit. At a table of at least 10,000 routes that is counted
+  in `bgp_rib_paced_fallback_total` with job `grouped_resync`: a shape whose
+  initial table is not paged, a lost admitted-key proof, an outbound prefix
+  limit, a regroup's withdrawals still owed, or 64 paced replays already
+  running. A reconcile that falls back after it starts counts once. A
+  selection hold is not counted.
 
 Before an ordinary pass changes a group's unicast table, it records the
 previously admitted keys for clean members whose writers are full. Eligible

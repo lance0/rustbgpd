@@ -2159,8 +2159,8 @@ before the next episode.
 
 The RIB splits large unicast work into bounded turns: a cold group's first
 table, a per-client-best founder's table, an export-policy reload's destination
-table, a member's initial table, a source departure and a selection-release
-fan-out. When one of these jobs cannot continue, it hands its work to a
+table, a member's initial table, a source departure, a selection-release
+fan-out, and the resync of a group member that fell behind. When one of these jobs cannot continue, it hands its work to a
 one-turn path: the member's dirty resync, a one-turn initial table, or a
 synchronous group build. The table stays exact, but that turn's work grows with
 the table and other peers wait behind it. See the
@@ -2185,11 +2185,12 @@ routes that are exempt from the hold.
 | `initial_replay` | A grouped member's initial table |
 | `source_departure` | Withdrawals and replacements after a source session ends |
 | `release_fanout` | Rows released by RFC 4724 selection deferral |
+| `grouped_resync` | The resync of a group member that fell behind, from 10,000 routes |
 
 | `cause` | Meaning |
 |---------|---------|
 | `group_changed` | The member's group, or the group table the job builds, changed under it |
-| `already_dirty` | The member was already marked for an outbound resync |
+| `already_dirty` | The member was already marked for an outbound resync that it could not take in pages |
 | `scan_repair_limit` | More rows changed behind the job's scan than its repair log holds (4,096) |
 | `change_outside_scan` | A change reached the member outside its scan's repair scope |
 | `missing_proof` | The member's admitted-key proof was missing |
@@ -2222,9 +2223,21 @@ End-of-RIB once, after the complete table. That covers `scan_repair_limit`,
 `change_outside_scan`, `release_fanout`, `selection_release` and
 `forced_resync`. Those causes count for `initial_replay` only when the member
 cannot reconcile: its admitted-key proof is gone, it is already marked for a
-resync, or an ORF filter is installed on a forced resync. A replay whose repair
+resync it could not take in pages, or an ORF filter is installed on a forced
+resync. A replay whose repair
 log overflows on more than 8 rescans takes the resync with cause `lag`, so
 churn cannot hold its End-of-RIB back indefinitely.
+
+A `grouped_resync` counts when a group member that fell behind, at a table of
+at least 10,000 routes, still takes its table in one turn: `ineligible_shape`
+(its initial table would not be paged either, or a route toward it is
+OTC-blocked), `group_changed` (it still owes a regroup's withdrawals, or its
+group changed during the reconcile), `prefix_limit`, `orf_pending`,
+`missing_proof` or a proof cap, or `replay_cap` when 64 paced replays already
+run. A reconcile that falls back after it
+starts counts its own cause once, as an `initial_replay` does. A selection
+hold, an owed-row cap eviction and a table below the threshold are not
+counted.
 
 Occasional fallbacks are expected: a regroup or a flap during a join takes
 one. A rate that tracks ingest, such as `scan_repair_limit` on every first
@@ -2610,7 +2623,7 @@ name it.
 | `bgp_rib_outbound_owing_flips_total` | Private families a receiver began to owe whole rather than route by route: its owed set exceeded its byte cap (a quarter of the family's Loc-RIB plus the peer's Adj-RIB-Out at the estimated per-key cost, with a 64-key floor), or a FlowSpec, BGP-LS or RT-Constrain update was deferred by spent credit or a full channel, or joined an already owed whole-family pass; an RFC 4724 selection release also owes the released family whole to each such receiver. An IPv4 or IPv6 unicast, labeled-unicast or VPN family, or EVPN, owed whole drains as bounded steps over the routes that changed since, each an ordinary update charged against the receiver's credit; its owed set is kept and stops growing, and the family stays owed whole (so it is counted once) until that set is empty and every later change has been sent. Any other family (FlowSpec, BGP-LS, RT-Constrain) drains by one family-scoped diff once credit and channel capacity are available |
 | `bgp_rib_outbound_eviction_recovery_seconds{outcome}` | Wall-clock duration of one receiver's whole-table recovery by the resync tick: after the owed-row list cap evicts it, or after a resync inside an EVPN or labeled-unicast selection hold left the rows of the held family it holds to a rebuild that follows the release. Timing starts after whole-table operation preflight and ends after that receiver's build, commit handling and cleanup. `processed` means the data commit succeeded or the diff needed no send. `commit_refused` counts a build whose data commit failed. A retry can supply another observation. Other dirty resyncs and preflight refusals supply none. Both outcomes start at zero. The debug event `owed-row cap eviction recovery built` carries the peer, elapsed duration and commit refusal flag. |
 | `bgp_rib_outbound_owed_drain_step_seconds{scope}` | Wall-clock duration of one owed-route drain step toward one receiver on the RIB actor. The closed `scope` set is `cursor` (up to 1,024 routes of an IPv4 or IPv6 unicast, labeled-unicast or VPN family, or of EVPN, owed whole, sent as a charged ordinary update), `keyed` (up to 1,024 routes of a receiver's owed set) and `whole` (one whole-family pass of a FlowSpec, BGP-LS or RT-Constrain family, including one sent for a waiting End-of-RIB). A step runs to completion, so every other peer's updates wait for it; a resync tick runs steps for about 25 ms. `cursor` and `keyed` steps do not grow with the table; a `whole` step does. Bucket edges include 0.05 and 0.25. Every series is exported at 0 from startup |
-| `bgp_rib_outbound_dirty_peers` | Peers currently marked dirty and awaiting outbound resync, sampled from the RIB's dirty set once per manager loop iteration. A healthy episode returns to 0 within seconds; under steady churn it can stay above 0 while every peer keeps resyncing. `rbgp doctor` and `rbgp neighbor` identify the peers |
+| `bgp_rib_outbound_dirty_peers` | Peers currently marked dirty and awaiting outbound resync, sampled from the RIB's dirty set once per manager loop iteration. A group member whose resync reconciles in pages counts until the reconcile completes. A healthy episode returns to 0 within seconds; under steady churn it can stay above 0 while every peer keeps resyncing. `rbgp doctor` and `rbgp neighbor` identify the peers |
 | `bgp_rib_outbound_dirty_oldest_seconds` | Age in whole seconds of the oldest current dirty episode, 0 when no peer is dirty; sampled with `bgp_rib_outbound_dirty_peers`. An episode starts when a peer becomes dirty and ends when its resync completes, so the value tracks the longest-waiting peer, not churn. `BgpOutboundResyncStalled` fires at 900 seconds |
 | `bgp_rib_paced_fallback_total{job,cause}` | Paced RIB jobs (first-group build, per-client-best build, reload build, initial replay, source departure, selection release) that handed their work to a one-turn path. See [Paced-job fallbacks](#paced-job-fallbacks) for the labels |
 | `bgp_rib_outbound_credit_rows` | Private-family rows held by ordinary outbound updates that are queued for, or being sent by, sessions, summed over every peer: the row credit in use. When a peer spends its credit, private-family changes become owed keys and drain from current state once credit returns. A credit refusal that reaches the commit boundary instead increments `bgp_outbound_commit_refusals_total{reason="outbound_credit"}` and schedules resync. Sampled once per manager loop iteration |
