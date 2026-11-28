@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv6Addr};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use prometheus::{
@@ -644,8 +644,8 @@ struct BgpMetricsInner {
     /// See [`RibPeerSeries`]: advanced after every removal of a series a
     /// binding may hold.
     peer_series_epoch: AtomicU64,
-    /// See [`BgpMetrics::rib_peer_series_resolves`].
-    peer_series_resolves: AtomicU64,
+    /// See [`BgpMetrics::rib_series_resolves`].
+    series_resolves: AtomicU64,
 
     // ── Session ────────────────────────────────────────────────────
     state_transitions: IntCounterVec,
@@ -716,6 +716,10 @@ struct BgpMetricsInner {
     rib_prefixes: IntGaugeVec,
     rib_adj_out_prefixes: IntGaugeVec,
     rib_loc_prefixes: IntGaugeVec,
+    /// `rib_loc_prefixes` children for IPv4 then IPv6 unicast, which every
+    /// selection pass republishes. The family set is closed and nothing
+    /// removes these series, so each is resolved once, on first use.
+    rib_loc_unicast: [OnceLock<IntGauge>; 2],
     rib_attr_intern_global_size: IntGauge,
     injection_lease_expiries: IntCounterVec,
     injection_leases: IntGauge,
@@ -794,6 +798,11 @@ struct BgpMetricsInner {
     rib_route_refresh_actor_duration_seconds: HistogramVec,
     rib_actor_work_duration_seconds: HistogramVec,
     rib_actor_turn_duration_seconds: HistogramVec,
+    /// Children of the two actor histograms, by `RIB_ACTOR_WORK_UNITS` and
+    /// `RibActorTurnKind::ALL` position. Both label sets are closed and
+    /// nothing removes these series, so each child is resolved once.
+    rib_actor_work_children: [OnceLock<prometheus::Histogram>; RIB_ACTOR_WORK_UNITS.len()],
+    rib_actor_turn_children: [OnceLock<prometheus::Histogram>; RibActorTurnKind::ALL.len()],
     rib_readiness_query_wait_seconds: HistogramVec,
     peer_manager_operator_query_wait_seconds: HistogramVec,
     stall: StallMetrics,
@@ -4155,7 +4164,7 @@ impl BgpMetrics {
             render_slot: Arc::new(tokio::sync::Semaphore::new(1)),
             instance_id: NEXT_METRICS_INSTANCE_ID.fetch_add(1, Ordering::Relaxed),
             peer_series_epoch: AtomicU64::new(0),
-            peer_series_resolves: AtomicU64::new(0),
+            series_resolves: AtomicU64::new(0),
             state_transitions,
             session_notification_outstanding_value,
             session_notification_outstanding_high_watermark_value,
@@ -4206,6 +4215,7 @@ impl BgpMetrics {
             rib_prefixes,
             rib_adj_out_prefixes,
             rib_loc_prefixes,
+            rib_loc_unicast: Default::default(),
             rib_attr_intern_global_size,
             injection_lease_expiries,
             injection_leases,
@@ -4274,6 +4284,8 @@ impl BgpMetrics {
             rib_route_refresh_actor_duration_seconds,
             rib_actor_work_duration_seconds,
             rib_actor_turn_duration_seconds,
+            rib_actor_work_children: Default::default(),
+            rib_actor_turn_children: Default::default(),
             rib_readiness_query_wait_seconds,
             peer_manager_operator_query_wait_seconds,
             stall,
@@ -4741,6 +4753,7 @@ impl BgpMetrics {
         // retired right after their children are removed rather than after
         // the scans of every other family: a write between the two lands on
         // a removed child.
+        let rib_in = Self::reap_peer_series_from_vec(&inner.rib_prefixes, peer);
         let adj_rib_out = Self::reap_peer_series_from_vec(&inner.rib_adj_out_prefixes, peer);
         let update_group = Self::reap_peer_series_from_vec(&inner.peer_update_group, peer);
         let usage = Self::reap_peer_series_from_vec(&inner.outbound_prefix_usage, peer);
@@ -4754,10 +4767,9 @@ impl BgpMetrics {
         if policy_routes > 0 {
             POLICY_ROUTES_REAP_EPOCH.fetch_add(1, Ordering::Release);
         }
-        if adj_rib_out + usage + blocking + update_group + policy_routes > 0 {
+        if rib_in + adj_rib_out + usage + blocking + update_group + policy_routes > 0 {
             self.retire_peer_series_bindings();
         }
-        Self::reap_peer_series_from_vec(&inner.rib_prefixes, peer);
         Self::reap_peer_series_from_vec(&inner.gr_active_peers, peer);
         Self::reap_peer_series_from_vec(&inner.gr_stale_routes, peer);
         Self::reap_peer_series_from_vec(&inner.gr_timer_expired, peer);
@@ -5477,9 +5489,23 @@ impl BgpMetrics {
 
     /// Set the number of prefixes in the Loc-RIB for an AFI/SAFI.
     pub fn set_loc_rib_prefixes(&self, family: &str, count: i64) {
-        self.0
-            .rib_loc_prefixes
-            .with_label_values(&[family])
+        let inner = &self.0;
+        let slot = match family {
+            "ipv4_unicast" => 0,
+            "ipv6_unicast" => 1,
+            _ => {
+                inner
+                    .rib_loc_prefixes
+                    .with_label_values(&[family])
+                    .set(count);
+                return;
+            }
+        };
+        inner.rib_loc_unicast[slot]
+            .get_or_init(|| {
+                inner.series_resolves.fetch_add(1, Ordering::Relaxed);
+                inner.rib_loc_prefixes.with_label_values(&[family])
+            })
             .set(count);
     }
 
@@ -7256,18 +7282,48 @@ impl BgpMetrics {
     /// Components may service readiness internally or run consecutively; their
     /// durations do not bound readiness latency.
     pub fn observe_rib_actor_work(&self, work_unit: &str, duration: std::time::Duration) {
-        self.0
-            .rib_actor_work_duration_seconds
-            .with_label_values(&[work_unit])
+        let inner = &self.0;
+        let Some(slot) = RIB_ACTOR_WORK_UNITS
+            .iter()
+            .position(|unit| *unit == work_unit)
+        else {
+            inner
+                .rib_actor_work_duration_seconds
+                .with_label_values(&[work_unit])
+                .observe(duration.as_secs_f64());
+            return;
+        };
+        inner.rib_actor_work_children[slot]
+            .get_or_init(|| {
+                inner.series_resolves.fetch_add(1, Ordering::Relaxed);
+                inner
+                    .rib_actor_work_duration_seconds
+                    .with_label_values(&[work_unit])
+            })
             .observe(duration.as_secs_f64());
     }
 
     /// Observe one RIB actor turn: the synchronous handling of one inbound
     /// message of `kind`.
     pub fn observe_rib_actor_turn(&self, kind: RibActorTurnKind, duration: std::time::Duration) {
-        self.0
-            .rib_actor_turn_duration_seconds
-            .with_label_values(&[kind.as_str()])
+        let inner = &self.0;
+        let Some(slot) = RibActorTurnKind::ALL
+            .iter()
+            .position(|candidate| *candidate == kind)
+        else {
+            inner
+                .rib_actor_turn_duration_seconds
+                .with_label_values(&[kind.as_str()])
+                .observe(duration.as_secs_f64());
+            return;
+        };
+        inner.rib_actor_turn_children[slot]
+            .get_or_init(|| {
+                inner.series_resolves.fetch_add(1, Ordering::Relaxed);
+                inner
+                    .rib_actor_turn_duration_seconds
+                    .with_label_values(&[kind.as_str()])
+            })
             .observe(duration.as_secs_f64());
     }
 
@@ -8145,6 +8201,9 @@ pub struct RibPeerSeries {
 #[derive(Debug, Default)]
 struct BoundPeerSeries {
     epoch: u64,
+    /// IPv4 then IPv6 unicast, which every route chunk writes.
+    rib_in_unicast: [Option<IntGauge>; 2],
+    rib_in: Vec<(&'static str, IntGauge)>,
     /// IPv4 then IPv6 unicast, which every route-bearing commit writes.
     adj_rib_out_unicast: [Option<IntGauge>; 2],
     adj_rib_out: Vec<(&'static str, IntGauge)>,
@@ -8155,37 +8214,35 @@ struct BoundPeerSeries {
     policy_routes: Vec<(String, &'static str, &'static str, IntCounter)>,
 }
 
-/// The child of `vec` for `[peer, family]`, resolved once into `slots`.
-/// Each resolve counts in `resolves`.
+/// The `family` child `resolve` returns, resolved once into `slots`. Each
+/// resolve counts in `resolves`.
 fn bound_gauge<'a>(
     slots: &'a mut Vec<(&'static str, IntGauge)>,
     resolves: &AtomicU64,
-    vec: &IntGaugeVec,
-    peer: &str,
     family: &'static str,
+    resolve: impl FnOnce() -> IntGauge,
 ) -> &'a IntGauge {
     let at = slots
         .iter()
         .position(|(bound, _)| *bound == family)
         .unwrap_or_else(|| {
             resolves.fetch_add(1, Ordering::Relaxed);
-            slots.push((family, vec.with_label_values(&[peer, family])));
+            slots.push((family, resolve()));
             slots.len() - 1
         });
     &slots[at].1
 }
 
-/// The child of `vec` for `labels`, resolved once into `slot`. Each resolve
+/// The child `resolve` returns, resolved once into `slot`. Each resolve
 /// counts in `resolves`.
 fn bound_slot<'a>(
     slot: &'a mut Option<IntGauge>,
     resolves: &AtomicU64,
-    vec: &IntGaugeVec,
-    labels: &[&str],
+    resolve: impl FnOnce() -> IntGauge,
 ) -> &'a IntGauge {
     slot.get_or_insert_with(|| {
         resolves.fetch_add(1, Ordering::Relaxed);
-        vec.with_label_values(labels)
+        resolve()
     })
 }
 
@@ -8212,29 +8269,45 @@ impl RibPeerSeries {
         bound
     }
 
-    /// [`BgpMetrics::set_adj_rib_out_prefixes`] through the binding, for
-    /// each `(family, count)`.
-    pub fn set_adj_rib_out_prefixes(&self, counts: impl IntoIterator<Item = (&'static str, i64)>) {
+    /// [`BgpMetrics::set_rib_prefixes`] through the binding.
+    pub fn set_rib_prefixes(&self, family: &'static str, count: i64) {
         let inner = &self.metrics.0;
+        let resolve = || inner.rib_prefixes.with_label_values(&[&self.label, family]);
         let mut bound = self.bound();
-        for (family, count) in counts {
-            let gauge = match family {
-                "ipv4_unicast" | "ipv6_unicast" => bound_slot(
-                    &mut bound.adj_rib_out_unicast[usize::from(family == "ipv6_unicast")],
-                    &inner.peer_series_resolves,
-                    &inner.rib_adj_out_prefixes,
-                    &[&self.label, family],
-                ),
-                _ => bound_gauge(
-                    &mut bound.adj_rib_out,
-                    &inner.peer_series_resolves,
-                    &inner.rib_adj_out_prefixes,
-                    &self.label,
-                    family,
-                ),
-            };
-            gauge.set(count);
-        }
+        let gauge = match family {
+            "ipv4_unicast" | "ipv6_unicast" => bound_slot(
+                &mut bound.rib_in_unicast[usize::from(family == "ipv6_unicast")],
+                &inner.series_resolves,
+                resolve,
+            ),
+            _ => bound_gauge(&mut bound.rib_in, &inner.series_resolves, family, resolve),
+        };
+        gauge.set(count);
+    }
+
+    /// [`BgpMetrics::set_adj_rib_out_prefixes`] through the binding.
+    pub fn set_adj_rib_out_prefixes(&self, family: &'static str, count: i64) {
+        let inner = &self.metrics.0;
+        let resolve = || {
+            inner
+                .rib_adj_out_prefixes
+                .with_label_values(&[&self.label, family])
+        };
+        let mut bound = self.bound();
+        let gauge = match family {
+            "ipv4_unicast" | "ipv6_unicast" => bound_slot(
+                &mut bound.adj_rib_out_unicast[usize::from(family == "ipv6_unicast")],
+                &inner.series_resolves,
+                resolve,
+            ),
+            _ => bound_gauge(
+                &mut bound.adj_rib_out,
+                &inner.series_resolves,
+                family,
+                resolve,
+            ),
+        };
+        gauge.set(count);
     }
 
     /// [`BgpMetrics::set_outbound_prefix_usage`] through the binding, for
@@ -8261,16 +8334,14 @@ impl RibPeerSeries {
             let labels = [self.label.as_str(), family];
             bound_slot(
                 &mut bound.outbound_usage[slot],
-                &inner.peer_series_resolves,
-                &inner.outbound_prefix_usage,
-                &labels,
+                &inner.series_resolves,
+                || inner.outbound_prefix_usage.with_label_values(&labels),
             )
             .set(i64::try_from(usage).unwrap_or(i64::MAX));
             bound_slot(
                 &mut bound.outbound_blocking[slot],
-                &inner.peer_series_resolves,
-                &inner.outbound_prefix_blocking,
-                &labels,
+                &inner.series_resolves,
+                || inner.outbound_prefix_blocking.with_label_values(&labels),
             )
             .set(i64::from(blocking));
         }
@@ -8280,12 +8351,9 @@ impl RibPeerSeries {
     pub fn set_peer_update_group(&self, group_id: i64) {
         let inner = &self.metrics.0;
         let mut bound = self.bound();
-        bound_slot(
-            &mut bound.update_group,
-            &inner.peer_series_resolves,
-            &inner.peer_update_group,
-            &[&self.label],
-        )
+        bound_slot(&mut bound.update_group, &inner.series_resolves, || {
+            inner.peer_update_group.with_label_values(&[&self.label])
+        })
         .set(group_id);
     }
 
@@ -8309,7 +8377,7 @@ impl RibPeerSeries {
                 bound_policy == policy && *bound_direction == direction && *bound_action == action
             })
             .unwrap_or_else(|| {
-                inner.peer_series_resolves.fetch_add(1, Ordering::Relaxed);
+                inner.series_resolves.fetch_add(1, Ordering::Relaxed);
                 let counter = inner.policy_routes.with_label_values(&[
                     &self.label,
                     policy,
@@ -8336,13 +8404,14 @@ impl BgpMetrics {
         }
     }
 
-    /// How many children every [`RibPeerSeries`] of this registry has
-    /// resolved through its vec: a work count for tests, which stays flat
-    /// while bindings reuse their children.
+    /// How many children the RIB actor's bindings ([`RibPeerSeries`]) and
+    /// cached per-update series of this registry have resolved through their
+    /// vecs: a work count for tests, which stays flat while they reuse their
+    /// children.
     #[doc(hidden)]
     #[must_use]
-    pub fn rib_peer_series_resolves(&self) -> u64 {
-        self.0.peer_series_resolves.load(Ordering::Relaxed)
+    pub fn rib_series_resolves(&self) -> u64 {
+        self.0.series_resolves.load(Ordering::Relaxed)
     }
 }
 
@@ -11682,6 +11751,7 @@ mod tests {
                     "bgp_outbound_prefix_blocking{",
                     "bgp_policy_routes_total{",
                     "bgp_peer_update_group{",
+                    "bgp_rib_prefixes{",
                 ]
                 .iter()
                 .any(|family| line.starts_with(family))
@@ -11707,13 +11777,14 @@ mod tests {
         let peer = "10.0.0.9";
         let series = m.rib_peer_series(peer.to_owned());
         let publish = |n: u8| {
-            series.set_adj_rib_out_prefixes([("ipv4_unicast", i64::from(n))]);
+            series.set_adj_rib_out_prefixes("ipv4_unicast", i64::from(n));
             series.set_outbound_prefix_usage([(
                 "ipv4_unicast",
                 usize::from(n),
                 n.is_multiple_of(2),
             )]);
             series.set_peer_update_group(i64::from(n));
+            series.set_rib_prefixes("ipv4_unicast", i64::from(n) + 100);
             series.record_policy_routes_by("export-v4", "export", "permit", 1);
         };
         let expect = |n: u8, policy: u64| {
@@ -11733,6 +11804,10 @@ mod tests {
                     ),
                     format!(
                         r#"bgp_rib_adj_out_prefixes{{family="ipv4_unicast",peer="{peer}"}} {n}"#
+                    ),
+                    format!(
+                        r#"bgp_rib_prefixes{{family="ipv4_unicast",peer="{peer}"}} {}"#,
+                        u16::from(n) + 100
                     ),
                 ]
             );
@@ -11775,6 +11850,63 @@ mod tests {
         expect(10, 1);
     }
 
+    /// The Loc-RIB unicast gauges and the actor work and turn histograms
+    /// resolve each child once and then reuse it: repeated writes add no
+    /// resolves, and the scrape matches the unbound vec writes. Red proof:
+    /// resolving the child on every write adds a resolve per write.
+    #[test]
+    fn closed_set_rib_actor_series_resolve_once() {
+        let m = BgpMetrics::new();
+        let reference = BgpMetrics::new();
+        let before = m.rib_series_resolves();
+        for round in 1..=3_u8 {
+            let count = i64::from(round) * 10;
+            m.set_loc_rib_prefixes("ipv4_unicast", count);
+            m.set_loc_rib_prefixes("ipv6_unicast", count + 1);
+            m.observe_rib_actor_work(
+                "route_chunk",
+                std::time::Duration::from_millis(u64::from(round)),
+            );
+            m.observe_rib_actor_turn(
+                RibActorTurnKind::Routes,
+                std::time::Duration::from_millis(2),
+            );
+            reference
+                .0
+                .rib_loc_prefixes
+                .with_label_values(&["ipv4_unicast"])
+                .set(count);
+            reference
+                .0
+                .rib_loc_prefixes
+                .with_label_values(&["ipv6_unicast"])
+                .set(count + 1);
+            reference
+                .0
+                .rib_actor_work_duration_seconds
+                .with_label_values(&["route_chunk"])
+                .observe(std::time::Duration::from_millis(u64::from(round)).as_secs_f64());
+            reference
+                .0
+                .rib_actor_turn_duration_seconds
+                .with_label_values(&[RibActorTurnKind::Routes.as_str()])
+                .observe(std::time::Duration::from_millis(2).as_secs_f64());
+        }
+        assert_eq!(m.rib_series_resolves() - before, 4, "one resolve per child");
+        let families = |m: &BgpMetrics| -> Vec<String> {
+            gather_text(m)
+                .lines()
+                .filter(|line| {
+                    line.starts_with("bgp_rib_loc_prefixes{")
+                        || line.starts_with("bgp_rib_actor_work_duration_seconds")
+                        || line.starts_with("bgp_rib_actor_turn_duration_seconds")
+                })
+                .map(str::to_owned)
+                .collect()
+        };
+        assert_eq!(families(&m), families(&reference));
+    }
+
     /// One call carrying an unknown usage between two known ones for the
     /// same family scrapes the last value, as the unbound writer would.
     /// Red proof: keeping the cached usage child across the removal in the
@@ -11805,17 +11937,19 @@ mod tests {
         for (index, binding) in (0u8..).zip(bindings) {
             let n = round * 10 + index;
             let peer = binding.label();
-            binding.set_adj_rib_out_prefixes([
-                ("ipv4_unicast", i64::from(n)),
-                ("l2vpn_evpn", i64::from(n + 1)),
-            ]);
+            binding.set_adj_rib_out_prefixes("ipv4_unicast", i64::from(n));
+            binding.set_adj_rib_out_prefixes("l2vpn_evpn", i64::from(n + 1));
             binding.set_outbound_prefix_usage([("ipv6_unicast", usize::from(n), round % 2 == 1)]);
             binding.set_peer_update_group(i64::from(round));
+            binding.set_rib_prefixes("ipv4_unicast", i64::from(n) + 5);
+            binding.set_rib_prefixes("l2vpn_evpn", i64::from(n) + 6);
             binding.record_policy_routes_by("inline", "export", "deny", u64::from(n));
             unbound.set_adj_rib_out_prefixes(peer, "ipv4_unicast", i64::from(n));
             unbound.set_adj_rib_out_prefixes(peer, "l2vpn_evpn", i64::from(n + 1));
             unbound.set_outbound_prefix_usage(peer, "ipv6_unicast", usize::from(n), round % 2 == 1);
             unbound.set_peer_update_group(peer, i64::from(round));
+            unbound.set_rib_prefixes(peer, "ipv4_unicast", i64::from(n) + 5);
+            unbound.set_rib_prefixes(peer, "l2vpn_evpn", i64::from(n) + 6);
             unbound.record_policy_routes_by(peer, "inline", "export", "deny", u64::from(n));
         }
     }
@@ -11858,7 +11992,7 @@ mod tests {
         bindings[1] = bound.rib_peer_series(peers[1].to_owned());
         publish_bound_and_unbound(&bindings, &unbound, 2);
         let rejoined = rib_peer_series_lines(&bound);
-        assert_eq!(rejoined.len(), 18, "{rejoined:#?}");
+        assert_eq!(rejoined.len(), 24, "{rejoined:#?}");
         assert_eq!(rejoined, rib_peer_series_lines(&unbound));
     }
 

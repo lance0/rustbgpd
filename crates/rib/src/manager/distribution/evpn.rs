@@ -53,8 +53,8 @@ impl RibManager {
             }
             rib.evpn_len()
         };
-        self.metrics
-            .set_rib_prefixes(&peer.label(), "l2vpn_evpn", gauge_val(evpn_len));
+        self.peer_series(peer)
+            .set_rib_prefixes("l2vpn_evpn", gauge_val(evpn_len));
         self.decrement_refresh_stale_count(peer, Afi::L2Vpn, Safi::Evpn, removed_stale_count);
         self.update_peer_refresh_metrics(peer);
         if !affected.is_empty() {
@@ -117,8 +117,8 @@ impl RibManager {
             }
             rib.evpn_len()
         };
-        self.metrics
-            .set_rib_prefixes(&peer.label(), "l2vpn_evpn", gauge_val(evpn_len));
+        self.peer_series(peer)
+            .set_rib_prefixes("l2vpn_evpn", gauge_val(evpn_len));
         self.decrement_refresh_stale_count(peer, Afi::L2Vpn, Safi::Evpn, removed_stale_count);
         self.update_peer_refresh_metrics(peer);
         if !affected.is_empty() {

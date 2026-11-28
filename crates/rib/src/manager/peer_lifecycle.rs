@@ -1076,6 +1076,7 @@ impl RibManager {
                 &label.map_or_else(|| peer.label(), |label| label.to_string()),
             );
         }
+        self.peer_metric_series.remove(&peer);
     }
 
     /// The tracked peer that now publishes under `peer`'s label, once a newer
@@ -1142,6 +1143,8 @@ impl RibManager {
         // Idempotent, and it covers every family's retained routes.
         self.peer_down_teardown(peer);
         self.forget_helper_stale_exempt(peer);
+        // The label may follow the endpoint: the next `PeerUp` binds again.
+        self.peer_metric_series.remove(&peer);
         // Live: checked above, and only this actor releases handles.
         let _ = peer.rebind(endpoint);
     }
@@ -1947,7 +1950,6 @@ impl RibManager {
         self.invalidate_evpn_feed_completion(peer);
         self.retire_evpn_recovery(peer);
         let was_registered = self.outbound_peers.remove(&peer).is_some();
-        self.peer_metric_series.remove(&peer);
         self.outbound_session_ids.remove(&peer);
         self.untrack_release_peer(peer);
         // Owed keys belong to the ended session; a new one's initial table
@@ -2232,6 +2234,7 @@ impl RibManager {
             self.drop_staged_session_context(peer, session_id);
             return;
         }
+        self.bind_peer_series(peer);
         let supersedes = supersedes
             .map(std::num::NonZeroU64::get)
             .filter(|&old| old != session_id);
@@ -3137,9 +3140,25 @@ impl RibManager {
 
     /// Seed metric series, keeping the held UC/VPN admitted counts of a
     /// re-activated record that already carries them.
-    /// The metric binding of `peer`'s outbound registration, or a fresh
-    /// unbound one for a peer without a registration, which resolves its
-    /// label and children as the unbound `BgpMetrics` methods do.
+    /// Bind `peer`'s metric series if it has no binding yet. A binding lives
+    /// from the peer's first `PeerUp` (or outbound registration, whichever
+    /// the RIB handles first) until its `PeerDeleted` or an endpoint rebind,
+    /// so it covers the Adj-RIB-In of an import-only or retained peer as
+    /// well as an outbound registration.
+    fn bind_peer_series(
+        &mut self,
+        peer: PeerId,
+    ) -> Arc<rustbgpd_telemetry::metrics::RibPeerSeries> {
+        Arc::clone(
+            self.peer_metric_series
+                .entry(peer)
+                .or_insert_with(|| Arc::new(self.metrics.rib_peer_series(peer.label()))),
+        )
+    }
+
+    /// `peer`'s metric binding ([`Self::bind_peer_series`]), or a fresh
+    /// unbound one for a peer without one, which resolves its label and
+    /// children as the unbound `BgpMetrics` methods do.
     pub(in crate::manager) fn peer_series(
         &self,
         peer: PeerId,
@@ -3150,13 +3169,12 @@ impl RibManager {
         )
     }
 
-    /// Bind the registration's metric series ([`Self::peer_series`]) and
+    /// Bind the registration's metric series ([`Self::bind_peer_series`]) and
     /// publish its initial values.
     fn initialize_outbound_registration_gauges(&mut self, peer: PeerId) {
-        let series = Arc::new(self.metrics.rib_peer_series(peer.label()));
-        self.peer_metric_series.insert(peer, Arc::clone(&series));
+        let series = self.bind_peer_series(peer);
         let unicast = crate::manager::helpers::UNICAST_FAMILIES;
-        crate::manager::helpers::set_rib_prefixes(&self.metrics, series.label(), unicast, [0, 0]);
+        crate::manager::helpers::set_bound_rib_prefixes(&series, unicast, [0, 0]);
         // Selective steady-state refresh relies on every family series already
         // existing. Eager zeroes also keep scrape shape stable for a peer that
         // never advertises one of the negotiated families.
@@ -3181,7 +3199,7 @@ impl RibManager {
                 _ => None,
             };
             let count = retained.zip(slot).map_or(0, |(counts, slot)| counts[slot]);
-            series.set_adj_rib_out_prefixes([(family, super::helpers::gauge_val(count))]);
+            series.set_adj_rib_out_prefixes(family, super::helpers::gauge_val(count));
         }
     }
 

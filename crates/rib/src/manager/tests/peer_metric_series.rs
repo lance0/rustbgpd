@@ -13,7 +13,8 @@ use crate::test_support::peer_v4;
 const SOURCE: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
 
 /// The families a binding writes.
-const BOUND: [&str; 5] = [
+const BOUND: [&str; 6] = [
+    "bgp_rib_prefixes",
     "bgp_rib_adj_out_prefixes",
     "bgp_outbound_prefix_usage",
     "bgp_outbound_prefix_blocking",
@@ -215,11 +216,11 @@ fn work_per_announcement(members: u8) -> (usize, u64) {
         .collect();
     announce(&mut manager, source, routes([1]));
     let labels = LABELS_FORMATTED.get();
-    let resolves = metrics.rib_peer_series_resolves();
+    let resolves = metrics.rib_series_resolves();
     announce(&mut manager, source, routes([2]));
     (
         LABELS_FORMATTED.get() - labels,
-        metrics.rib_peer_series_resolves() - resolves,
+        metrics.rib_series_resolves() - resolves,
     )
 }
 
@@ -232,4 +233,98 @@ fn work_per_announcement(members: u8) -> (usize, u64) {
 #[test]
 fn commits_format_no_label_and_resolve_no_child_after_registration() {
     assert_eq!(work_per_announcement(8), work_per_announcement(32));
+}
+
+/// `PeerId::label` calls and children resolved during one round in which
+/// each of `sources` registered sources sends one announce chunk, with one
+/// member receiving the results.
+fn work_per_ingest_round(sources: u8) -> (usize, u64) {
+    let (_tx, rx) = mpsc::channel(1);
+    let metrics = BgpMetrics::new();
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let mut member = peer_up(&mut manager, target(2), 1);
+    let source_routes = |index: u8, round: u8| {
+        let addr = Ipv4Addr::new(10, 0, 2, index);
+        vec![crate::test_support::make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(198, 18, index, round), 32),
+            addr,
+        )]
+    };
+    // Each source keeps its session's outbound receiver, so no registration
+    // drops and re-registers inside the measured round.
+    let mut source_receivers: Vec<_> = (0..sources)
+        .map(|index| peer_up(&mut manager, peer_v4(Ipv4Addr::new(10, 0, 2, index)), 0))
+        .collect();
+    for index in 0..sources {
+        let addr = Ipv4Addr::new(10, 0, 2, index);
+        announce(&mut manager, peer_v4(addr), source_routes(index, 1));
+    }
+    // Every session's queue has room for the measured round, so no commit
+    // fails on a full queue (a refusal formats the label it counts under).
+    for receiver in source_receivers.iter_mut().chain([&mut member]) {
+        while receiver.try_recv().is_ok() {}
+    }
+    let labels = LABELS_FORMATTED.get();
+    let resolves = metrics.rib_series_resolves();
+    for index in 0..sources {
+        let addr = Ipv4Addr::new(10, 0, 2, index);
+        announce(&mut manager, peer_v4(addr), source_routes(index, 2));
+    }
+    (
+        LABELS_FORMATTED.get() - labels,
+        metrics.rib_series_resolves() - resolves,
+    )
+}
+
+/// Work count on the ingest path: once every source is registered, an
+/// announce chunk formats no label and resolves no child, whether for the
+/// source's Adj-RIB-In gauges, the Loc-RIB gauges or the actor's work and
+/// turn histograms, so both counts are flat from 8 to 32 sources. Red
+/// proofs: bypassing the source's binding grows the label count with the
+/// sources (it did on the parent), and resolving the Loc-RIB or actor
+/// histogram children on every write grows the resolve count.
+#[test]
+fn ingest_chunks_format_no_label_and_resolve_no_child_after_registration() {
+    assert_eq!(work_per_ingest_round(8), work_per_ingest_round(32));
+}
+
+fn rib_in(metrics: &BgpMetrics, peer: &str) -> Option<f64> {
+    bound_samples(metrics, Some(peer))
+        .into_iter()
+        .find(|(key, _)| key.starts_with("bgp_rib_prefixes{family=\"ipv4_unicast\""))
+        .map(|(_, value)| value)
+}
+
+/// An import-only source (its outbound registration deferred, so it has no
+/// RIB-written series but its Adj-RIB-In gauges) has those gauges reaped by
+/// the peer manager while the RIB still holds its binding. Its next chunk
+/// publishes them again with the chunk's count through the same binding.
+/// Red proof: reaping `bgp_rib_prefixes` after the epoch advance and leaving
+/// it out of the bound families' removal count, as before this binding
+/// existed, keeps the removed child, and the series stays absent.
+#[test]
+fn an_import_only_sources_binding_resolves_again_after_a_reap() {
+    let (tx, rx) = mpsc::channel(8);
+    let metrics = BgpMetrics::new();
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let source = peer_v4(SOURCE);
+    register_deferred_test_peer(&mut manager, &tx, source, 0);
+    announce(&mut manager, source, routes([1]));
+    let label = source.label();
+    assert!(manager.peer_metric_series.contains_key(&source));
+    assert!(!manager.outbound_peers.contains_key(&source));
+    assert_eq!(rib_in(&metrics, &label), Some(1.0));
+
+    metrics.reap_peer_series(&label);
+    assert_eq!(rib_in(&metrics, &label), None);
+    announce(&mut manager, source, routes([2]));
+    assert!(
+        manager.peer_metric_series.contains_key(&source),
+        "the same binding"
+    );
+    assert_eq!(
+        rib_in(&metrics, &label),
+        Some(2.0),
+        "the chunk after the reap publishes under the label again"
+    );
 }

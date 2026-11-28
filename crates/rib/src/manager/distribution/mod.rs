@@ -6131,14 +6131,14 @@ impl RibManager {
                 );
             }
             if evpn_changed {
-                peer_series.set_adj_rib_out_prefixes([(
+                peer_series.set_adj_rib_out_prefixes(
                     "l2vpn_evpn",
                     gauge_val(if evpn_group_owned {
                         evpn_admitted_count
                     } else {
                         rib_out.evpn_len()
                     }),
-                )]);
+                );
             }
             if bgpls_changed {
                 crate::manager::helpers::set_adj_rib_out_prefixes(
@@ -6162,7 +6162,7 @@ impl RibManager {
                 );
             }
             if rtc_changed {
-                peer_series.set_adj_rib_out_prefixes([("rtc", gauge_val(rib_out.rtc_len()))]);
+                peer_series.set_adj_rib_out_prefixes("rtc", gauge_val(rib_out.rtc_len()));
             }
             if evpn_changed {
                 self.settle_export_attr_gc(evpn_displaced);
