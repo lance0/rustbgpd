@@ -203,28 +203,33 @@ fn membership_churn_leaves_the_bound_families_scrape_unchanged() {
     assert_eq!(bound_samples(&metrics, None), before);
 }
 
-/// `PeerId::label` calls of one route-bearing announcement to `members`
-/// registered targets.
-fn labels_formatted_per_announcement(members: u8) -> usize {
+/// `PeerId::label` calls and metric children resolved through their vecs
+/// during one route-bearing announcement to `members` registered targets.
+fn work_per_announcement(members: u8) -> (usize, u64) {
     let (_tx, rx) = mpsc::channel(1);
-    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let metrics = BgpMetrics::new();
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
     let source = peer_v4(SOURCE);
     let _receivers: Vec<_> = (0..members)
         .map(|index| peer_up(&mut manager, target(10 + index), 1))
         .collect();
     announce(&mut manager, source, routes([1]));
-    let before = LABELS_FORMATTED.get();
+    let labels = LABELS_FORMATTED.get();
+    let resolves = metrics.rib_peer_series_resolves();
     announce(&mut manager, source, routes([2]));
-    LABELS_FORMATTED.get() - before
+    (
+        LABELS_FORMATTED.get() - labels,
+        metrics.rib_peer_series_resolves() - resolves,
+    )
 }
 
 /// Work count: after registration, committing an announcement to every
-/// member formats no member's label, so the count is flat from 8 to 32
-/// members. Red on the parent, which formatted labels per member commit.
+/// member neither formats a member's label nor resolves a member's metric
+/// child through its vec, so both counts are flat from 8 to 32 members.
+/// Red proofs: bypassing the bindings grows the label count with the
+/// members (it did on the parent), and resetting every binding on each
+/// write grows the resolve count.
 #[test]
-fn commits_format_no_member_label_after_registration() {
-    assert_eq!(
-        labels_formatted_per_announcement(8),
-        labels_formatted_per_announcement(32)
-    );
+fn commits_format_no_label_and_resolve_no_child_after_registration() {
+    assert_eq!(work_per_announcement(8), work_per_announcement(32));
 }
