@@ -30,6 +30,8 @@ use super::helpers::{
     vpn_routes_equal_for_target,
 };
 use super::update_groups::GroupMembership;
+#[cfg(test)]
+use super::update_groups::admitted_recovery::AdmittedKeyView;
 use super::update_groups::admitted_recovery::{
     AdmittedRecovery, OnReservationRefusal, SnapshotHandle,
 };
@@ -312,6 +314,48 @@ fn fresh_positions<'a>(
         && fresh.positions.len() == routes.len()
         && ledger.masks_universe(peer, fresh.universe))
     .then_some(fresh.positions.as_slice())
+}
+
+/// After a fresh page's rows were admitted from their positions: the proof
+/// holds every row the member did not source and none it did, and gained
+/// exactly those keys, each in the universe mask or the overlay as its
+/// position says. The reservation covered the page, so the apply succeeds.
+#[cfg(test)]
+fn assert_fresh_rows_admitted<'a>(
+    ledger: &AdmittedRecovery,
+    peer: PeerId,
+    before: Option<[usize; 2]>,
+    applied: &Result<bool, super::update_groups::admitted_recovery::Failure>,
+    rows: impl Iterator<Item = (&'a crate::route::Route, &'a u32)>,
+    source_exclusion: Option<PeerId>,
+) {
+    use super::update_groups::admitted_recovery::uncounted;
+
+    assert_eq!(
+        applied.as_ref().ok(),
+        Some(&true),
+        "{peer}: fresh rows not admitted"
+    );
+    uncounted(|| {
+        let proof = ledger.get(&peer).expect("applied proof");
+        let mut gained = [0, 0];
+        for (route, position) in rows {
+            let key = crate::update::ExactExportKey::Unicast(route.prefix, route.path_id);
+            let excluded = source_exclusion == Some(route.peer);
+            assert_eq!(proof.contains(&key), !excluded, "{peer}: {}", route.prefix);
+            if !excluded {
+                gained[usize::from(AdmittedKeyView::outside(fresh_position(route, *position)))] +=
+                    1;
+            }
+        }
+        let before = before.expect("proof before the apply");
+        let after = proof.shape();
+        assert_eq!(
+            [after[0] - before[0], after[1] - before[1]],
+            gained,
+            "{peer}: the mask and the overlay gained other keys than the page's"
+        );
+    });
 }
 
 /// A fresh row's resolved position; a row at any other path ID was not
@@ -6259,7 +6303,9 @@ impl RibManager {
             if let Err(error) =
                 self.with_summary_recovery_ledger(None, |ledger, _, readiness, live| {
                     if let Some(positions) = known {
-                        return ledger.apply_reserved_positioned_with_checkpoint(
+                        #[cfg(test)]
+                        let before = ledger.get(&peer).map(AdmittedKeyView::shape);
+                        let applied = ledger.apply_reserved_positioned_with_checkpoint(
                             peer,
                             announce
                                 .iter()
@@ -6280,6 +6326,16 @@ impl RibManager {
                                 super::checkpoint_with_summary_reader(readiness, None, force, live);
                             },
                         );
+                        #[cfg(test)]
+                        assert_fresh_rows_admitted(
+                            ledger,
+                            peer,
+                            before,
+                            &applied,
+                            announce.iter().zip(positions),
+                            announce_source_exclusion,
+                        );
+                        return applied;
                     }
                     let admitted = announce
                         .iter()

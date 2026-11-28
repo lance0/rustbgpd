@@ -423,7 +423,30 @@ impl<'a> AdmittedKeyView<'a> {
         let position = universe_position(self.universe, self.index, &Key::Unicast(prefix, 0))
             .and_then(|position| u32::try_from(position).ok())
             .unwrap_or(EMPTY_SLOT);
-        (position, self.admitted_at(position, prefix))
+        let admitted = self.admitted_at(position, prefix);
+        // A universe key is admitted by its mask bit alone: an overlay copy
+        // of one would make a held key read as not sent.
+        #[cfg(test)]
+        uncounted(|| {
+            assert_eq!(
+                admitted,
+                self.contains_key(Key::Unicast(prefix, 0)),
+                "{prefix}: the mask bit and the overlay disagree"
+            );
+        });
+        (position, admitted)
+    }
+
+    /// The masked universe keys and the overlay keys of this view, and
+    /// whether a resolved position is outside the universe.
+    #[cfg(test)]
+    pub(in crate::manager) fn shape(self) -> [usize; 2] {
+        [self.masked, self.sparse.len()]
+    }
+
+    #[cfg(test)]
+    pub(in crate::manager) fn outside(position: Option<u32>) -> bool {
+        position.is_none_or(|position| position == EMPTY_SLOT)
     }
 
     /// Visit one prefix's admitted path IDs without walking unrelated keys.
@@ -3630,6 +3653,27 @@ mod tests {
 
     // Two members of one join cohort reference one universe. Each admits
     // and withdraws through its own mask and overlay: neither sees the
+    // A replay reads a universe key's admission from its mask bit alone. An
+    // overlay copy of a universe key would make it read as not sent, and
+    // the replay would skip a withdrawal it owes; the lookup's test-build
+    // check fails on one.
+    #[test]
+    #[should_panic(expected = "the mask bit and the overlay disagree")]
+    fn an_overlay_copy_of_a_universe_key_fails_the_replay_lookup() {
+        let mut ledger = AdmittedRecovery::new();
+        let who = peer(1);
+        ledger.insert_empty(who).unwrap();
+        let universe = ledger.begin_initial_replay(who, 64, None).unwrap().unwrap();
+        assert!(ledger.extend_initial_replay_universe(universe, (0..64).map(slot_key), &[who]));
+        let Key::Unicast(prefix, 0) = slot_key(3) else {
+            unreachable!()
+        };
+        assert!(!ledger.get(&who).unwrap().locate_unicast(prefix).1);
+        let index = ledger.index(who).unwrap();
+        ledger.records[index].keys.0.push(slot_key(3));
+        let _ = ledger.get(&who).unwrap().locate_unicast(prefix);
+    }
+
     // other's keys, a member that fails leaves the other's proof whole, and
     // the last reference retires the universe with all its credit.
     #[test]
