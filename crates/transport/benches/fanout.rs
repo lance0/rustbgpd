@@ -1759,7 +1759,15 @@ fn assert_initial_page(
             "unexpected or duplicate initial route"
         );
     }
-    assert!(initial.announce_source_exclusion.is_none());
+    // A page the join cohort shares names the joiner, so that transport
+    // drops the rows it sourced. This joiner sources none.
+    let joiner = RibManager::bench_peer_address(0);
+    assert!(
+        initial
+            .announce_source_exclusion
+            .is_none_or(|peer| peer == joiner)
+    );
+    assert!(initial.announce.iter().all(|route| route.peer != joiner));
     assert!(initial.unicast_withdrawals().next().is_none());
     assert!(initial.end_of_rib.is_empty());
     assert!(initial.refresh_markers.is_empty());
@@ -1777,7 +1785,12 @@ fn assert_initial_page(
     assert!(initial.rtc_withdraw.is_empty());
     assert!(initial.otc_blocked.is_empty());
     assert!(!initial.request_refresh_all_negotiated);
-    assert!(initial.shared_group_encode.is_none());
+    // Only a page the join cohort shares carries the encode cell, and it
+    // carries the joiner's exclusion with it.
+    assert_eq!(
+        initial.shared_group_encode.is_some(),
+        initial.announce_source_exclusion.is_some()
+    );
     let snapshot = initial
         .exact_export_snapshot
         .expect("route-bearing initial dump must retain the real session snapshot");

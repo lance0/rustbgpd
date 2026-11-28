@@ -2192,6 +2192,7 @@ routes that are exempt from the hold.
 | `group_changed` | The member's group, or the group table the job builds, changed under it |
 | `already_dirty` | The member was already marked for an outbound resync that it could not take in pages |
 | `scan_repair_limit` | More rows changed behind the job's scan than its repair log holds (4,096) |
+| `cohort_lag` | A joiner fell 64 pages behind the Loc-RIB scan it shares with the other joiners of its group, because its writer stayed full while theirs drained, and left that scan |
 | `change_outside_scan` | A change reached the member outside its scan's repair scope |
 | `missing_proof` | The member's admitted-key proof was missing |
 | `peer_limit`, `daemon_limit`, `allocation_failure` | The member's admitted-key proof did not fit, as for `bgp_update_group_recovery_fallback_total`. A joiner whose replay reservation is refused as it starts reports the cap it hit |
@@ -2219,7 +2220,7 @@ routes that are exempt from the hold.
 An `initial_replay` that loses track of its member's changes is not counted
 when it recovers in pages: it rewinds into a paced reconcile, which rescans the
 table against what the member was sent, withdraws what is gone and still sends
-End-of-RIB once, after the complete table. That covers `scan_repair_limit`,
+End-of-RIB once, after the complete table. That covers `scan_repair_limit`, `cohort_lag`,
 `change_outside_scan`, `release_fanout`, `selection_release` and
 `forced_resync`. Those causes count for `initial_replay` only when the member
 cannot reconcile: its admitted-key proof is gone, it is already marked for a

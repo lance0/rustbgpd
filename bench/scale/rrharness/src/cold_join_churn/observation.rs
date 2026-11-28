@@ -100,7 +100,7 @@ impl ReplayObservation {
                     "budget_refusal"
                 } else if matches!(*cause, "selection_release" | "release_fanout") {
                     "selection_release_to_dirty"
-                } else if matches!(*cause, "scan_repair_limit" | "lag") {
+                } else if matches!(*cause, "scan_repair_limit" | "cohort_lag" | "lag") {
                     "replay_to_dirty"
                 } else {
                     return Err(invalid_stat(format!(

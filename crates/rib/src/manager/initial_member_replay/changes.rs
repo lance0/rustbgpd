@@ -123,6 +123,15 @@ impl ReplayChanges {
         self.coalesced.contains(prefix)
     }
 
+    /// Whether any of `prefixes` has a change this member has not settled:
+    /// a coalesced repair, or a withdrawal it owns.
+    pub(super) fn touches(&self, prefixes: &[Prefix]) -> bool {
+        (!self.coalesced.is_empty() || !self.absent.is_empty())
+            && prefixes
+                .iter()
+                .any(|prefix| self.coalesced.contains(prefix) || self.absent.contains(prefix))
+    }
+
     pub(super) fn settle_coalesced(&mut self, prefixes: &[Prefix]) {
         for prefix in prefixes {
             self.coalesced.remove(prefix);
@@ -181,21 +190,16 @@ impl RibManager {
         stage: &GroupStageOutput,
     ) -> Result<(), PacedFallbackCause> {
         let rs_control = self.rs_control_context(peer).is_some();
-        let replay = self
-            .initial_member_replays
-            .members
-            .get_mut(&peer)
-            .expect("active replay");
+        let replay = &self.initial_member_replays.members[&peer];
         // A pending rewind revisits every key.
         if matches!(replay.phase, Phase::PrepareProof) || replay.rewind {
             return Ok(());
         }
+        let gid = replay.gid;
+        let reconcile = replay.mode == super::Mode::Reconcile;
         // A reconcile reconciles every key it visits, so each change is a
         // repair whatever the group's shape.
-        if self.group_ribs[&replay.gid].per_client_best
-            || rs_control
-            || replay.mode == super::Mode::Reconcile
-        {
+        if self.group_ribs[&gid].per_client_best || rs_control || reconcile {
             // The member's slot reads the winner, its runner-up and, toward
             // an RS-control receiver, the source tags and fallback rows. The
             // last three change without a Loc-RIB write, so record the keys
@@ -221,10 +225,15 @@ impl RibManager {
                         .filter(|_| rs_control),
                 );
             for prefix in keys {
-                if !self.loc_rib.record_member_replay_change(peer, prefix) {
+                if !self.record_replay_scan_change(peer, prefix) {
                     return Err(PacedFallbackCause::ScanRepairLimit);
                 }
-                replay.changes.coalesce(prefix);
+                self.initial_member_replays
+                    .members
+                    .get_mut(&peer)
+                    .expect("active replay")
+                    .changes
+                    .coalesce(prefix);
             }
             return Ok(());
         }
@@ -234,20 +243,18 @@ impl RibManager {
         for delta in &stage.deltas {
             // A write outside the scan's repair scope must go to the normal
             // resync before the receiver can settle its initial table.
-            if !self
-                .loc_rib
-                .member_replay_change_recorded(peer, delta.prefix)
-            {
-                return Err(
-                    if self.loc_rib.member_replay_scan_status(peer)
-                        == crate::loc_rib::RegistrationScanStatus::Overflow
-                    {
-                        PacedFallbackCause::ScanRepairLimit
-                    } else {
-                        PacedFallbackCause::ChangeOutsideScan
-                    },
-                );
+            if !self.replay_scan_change_recorded(peer, delta.prefix) {
+                return Err(if self.replay_scan_overflowed(peer) {
+                    PacedFallbackCause::ScanRepairLimit
+                } else {
+                    PacedFallbackCause::ChangeOutsideScan
+                });
             }
+            let replay = self
+                .initial_member_replays
+                .members
+                .get_mut(&peer)
+                .expect("active replay");
             // After the first overflow, every later change joins the repairs
             // too. The log then only drains, so churn faster than one change
             // per writer operation cannot hold pages back past that drain.
@@ -303,7 +310,7 @@ impl RibManager {
                 unicast_otc_prechecked: true,
                 ..batch
             };
-            if !self.commit_initial_member_batch(peer, batch, prior.into_iter().collect()) {
+            if !self.commit_initial_member_batch(peer, batch, prior.into_iter().collect(), None) {
                 return;
             }
         }

@@ -302,6 +302,15 @@ fn count_comparison() {
     KEY_COMPARISONS.with(|count| count.set(count.get() + 1));
 }
 
+/// Run a test-only cross-check without charging its lookups to
+/// [`KEY_COMPARISONS`].
+#[cfg(test)]
+pub(in crate::manager) fn uncounted(check: impl FnOnce()) {
+    let before = KEY_COMPARISONS.with(std::cell::Cell::get);
+    check();
+    KEY_COMPARISONS.with(|count| count.set(before));
+}
+
 /// Open-addressed buckets for `count` keys: at most two-thirds full and
 /// never full, so every probe ends.
 fn key_index_len(count: usize) -> usize {
@@ -380,6 +389,64 @@ impl<'a> AdmittedKeyView<'a> {
 
     pub(in crate::manager) fn contains(self, key: &ExactExportKey) -> bool {
         Key::try_from(key).is_ok_and(|key| self.contains_key(key))
+    }
+
+    /// How many of these unicast keys at path ID zero are admitted, given
+    /// each key's position in this view's universe as
+    /// [`AdmittedRecovery::replay_universe_positions`] resolved it. A
+    /// universe key is admitted by its mask bit alone; any other key by the
+    /// sparse overlay.
+    pub(in crate::manager) fn admitted_unicast(
+        self,
+        rows: impl Iterator<Item = (u32, Prefix)>,
+    ) -> usize {
+        rows.filter(|&(position, prefix)| self.admitted_at(position, prefix))
+            .count()
+    }
+
+    fn admitted_at(self, position: u32, prefix: Prefix) -> bool {
+        if position == EMPTY_SLOT {
+            !self.sparse.is_empty() && self.sparse.binary_search(&Key::Unicast(prefix, 0)).is_ok()
+        } else {
+            let index = position as usize;
+            self.words
+                .get(index / 64)
+                .is_some_and(|word| word & (1_u64 << (index % 64)) != 0)
+        }
+    }
+
+    /// The position of `prefix`, at path ID zero, in this view's universe
+    /// (the empty marker where the universe lacks it), and whether the key
+    /// is admitted: one lookup serves the admission test and the commit of
+    /// the key's row.
+    pub(in crate::manager) fn locate_unicast(self, prefix: Prefix) -> (u32, bool) {
+        let position = universe_position(self.universe, self.index, &Key::Unicast(prefix, 0))
+            .and_then(|position| u32::try_from(position).ok())
+            .unwrap_or(EMPTY_SLOT);
+        let admitted = self.admitted_at(position, prefix);
+        // A universe key is admitted by its mask bit alone: an overlay copy
+        // of one would make a held key read as not sent.
+        #[cfg(test)]
+        uncounted(|| {
+            assert_eq!(
+                admitted,
+                self.contains_key(Key::Unicast(prefix, 0)),
+                "{prefix}: the mask bit and the overlay disagree"
+            );
+        });
+        (position, admitted)
+    }
+
+    /// The masked universe keys and the overlay keys of this view, and
+    /// whether a resolved position is outside the universe.
+    #[cfg(test)]
+    pub(in crate::manager) fn shape(self) -> [usize; 2] {
+        [self.masked, self.sparse.len()]
+    }
+
+    #[cfg(test)]
+    pub(in crate::manager) fn outside(position: Option<u32>) -> bool {
+        position.is_none_or(|position| position == EMPTY_SLOT)
     }
 
     /// Visit one prefix's admitted path IDs without walking unrelated keys.
@@ -674,6 +741,13 @@ impl AdmittedRecovery {
 
     pub(in crate::manager) fn contains_record(&self, peer: PeerId) -> bool {
         self.index(peer).is_ok()
+    }
+
+    /// Whether `peer`'s proof is a mask over universe `handle`, so a
+    /// position resolved against that universe names the member's own bit.
+    pub(in crate::manager) fn masks_universe(&self, peer: PeerId, handle: SnapshotHandle) -> bool {
+        self.index(peer)
+            .is_ok_and(|index| self.records[index].snapshot == Some(handle))
     }
 
     #[expect(
@@ -2351,6 +2425,7 @@ impl AdmittedRecovery {
         &mut self,
         handle: SnapshotHandle,
         keys: impl Iterator<Item = Key>,
+        enrolled: &[PeerId],
     ) -> bool {
         let Some(snapshot) = self
             .snapshot_index(handle)
@@ -2363,7 +2438,10 @@ impl AdmittedRecovery {
         // reconcile, admits keys into its overlay while the others still
         // walk. A universe key must be admitted by its mask bit alone, so a
         // key any such overlay holds stays out of the universe.
-        let overlays: SmallVec<[usize; 0]> = (0..self.records.len())
+        // Only a peer that enrolled with this universe references it.
+        let overlays: SmallVec<[usize; 0]> = enrolled
+            .iter()
+            .filter_map(|peer| self.index(*peer).ok())
             .filter(|&index| {
                 let record = &self.records[index];
                 record.snapshot == Some(handle) && !record.keys.0.is_empty()
@@ -2392,6 +2470,24 @@ impl AdmittedRecovery {
             universe.push(key);
         }
         true
+    }
+
+    /// Each unicast prefix's position, at path ID zero, in replay universe
+    /// `handle`, or the empty marker for a key the universe lacks. One
+    /// lookup per key then serves every member that shares the universe.
+    pub(in crate::manager) fn replay_universe_positions(
+        &self,
+        handle: SnapshotHandle,
+        prefixes: impl Iterator<Item = Prefix>,
+    ) -> Vec<u32> {
+        let (universe, index) = Self::universe(&self.snapshots, Some(handle));
+        prefixes
+            .map(|prefix| {
+                universe_position(universe, index, &Key::Unicast(prefix, 0))
+                    .and_then(|position| u32::try_from(position).ok())
+                    .unwrap_or(EMPTY_SLOT)
+            })
+            .collect()
     }
 
     pub(in crate::manager) fn initial_replay_sparse_len(&self, peer: PeerId) -> Option<usize> {
@@ -2596,24 +2692,62 @@ impl AdmittedRecovery {
             return Ok(false);
         };
         let (universe, key_index) = Self::universe(&self.snapshots, self.records[index].snapshot);
-        let record = &self.records[index];
-        let result = Self::union_len(
-            &record.keys.0,
+        let len = Self::union_len(
+            &self.records[index].keys.0,
             (universe, key_index),
             announcements,
             checkpoint,
-        )
-        .and_then(|len| {
-            // An initial replay also reserves one slot per new key, where
-            // its page merges into the sorted overlay.
-            let scratch = if record.initial_replay {
-                len - record.keys.0.len()
-            } else {
-                0
-            };
-            len.checked_add(scratch).ok_or_else(Self::overflow)
-        })
-        .and_then(|capacity| self.grow_keys(index, capacity, checkpoint));
+        );
+        self.reserve_len(index, len, on_refusal, checkpoint)
+    }
+
+    /// [`Self::reserve_admitted_with_checkpoint`] for keys the member holds
+    /// none of, given each key's position in the member's universe as the
+    /// caller resolved it, or `None` for a key it did not resolve. Only a
+    /// key outside the universe needs a slot, so no key is looked up. A
+    /// key that was not resolved is counted as one.
+    pub(in crate::manager) fn reserve_fresh_with_checkpoint(
+        &mut self,
+        peer: PeerId,
+        positions: impl Iterator<Item = Option<u32>>,
+        on_refusal: OnReservationRefusal,
+        checkpoint: &mut impl FnMut(bool),
+    ) -> Result<bool, Failure> {
+        let Some(index) = self.complete_index(peer, checkpoint)? else {
+            return Ok(false);
+        };
+        let outside = positions
+            .filter(|position| position.is_none_or(|position| position == EMPTY_SLOT))
+            .count();
+        let len = self.records[index]
+            .keys
+            .0
+            .len()
+            .checked_add(outside)
+            .ok_or_else(Self::overflow);
+        self.reserve_len(index, len, on_refusal, checkpoint)
+    }
+
+    fn reserve_len(
+        &mut self,
+        index: usize,
+        len: Result<usize, Failure>,
+        on_refusal: OnReservationRefusal,
+        checkpoint: &mut impl FnMut(bool),
+    ) -> Result<bool, Failure> {
+        let record = &self.records[index];
+        let result = len
+            .and_then(|len| {
+                // An initial replay also reserves one slot per new key, where
+                // its page merges into the sorted overlay.
+                let scratch = if record.initial_replay {
+                    len - record.keys.0.len()
+                } else {
+                    0
+                };
+                len.checked_add(scratch).ok_or_else(Self::overflow)
+            })
+            .and_then(|capacity| self.grow_keys(index, capacity, checkpoint));
         if let Err(error) = result {
             // A replay refuses the envelope before enqueue. Its old proof is
             // still exact and may be the sole record of a queued withdrawal.
@@ -2683,7 +2817,13 @@ impl AdmittedRecovery {
         A: Clone + Iterator<Item = Key>,
         W: Clone + Iterator<Item = Key>,
     {
-        self.apply_admitted_inner(peer, announcements, withdrawals, true, checkpoint)
+        self.apply_admitted_inner(
+            peer,
+            announcements.map(|key| (key, None)),
+            withdrawals,
+            true,
+            checkpoint,
+        )
     }
 
     /// Apply a sent batch whose announcements are a subset of a set this proof
@@ -2702,7 +2842,30 @@ impl AdmittedRecovery {
         A: Clone + Iterator<Item = Key>,
         W: Clone + Iterator<Item = Key>,
     {
-        self.apply_admitted_inner(peer, announcements, withdrawals, false, checkpoint)
+        self.apply_admitted_inner(
+            peer,
+            announcements.map(|key| (key, None)),
+            withdrawals,
+            false,
+            checkpoint,
+        )
+    }
+
+    /// [`Self::apply_reserved_admitted_with_checkpoint`] for announcements
+    /// alone, each with its position in the member's universe as the caller
+    /// resolved it (the empty marker where the universe lacks the key), or
+    /// `None` for a key it did not resolve. A resolved universe key sets
+    /// its mask bit without a lookup.
+    pub(in crate::manager) fn apply_reserved_positioned_with_checkpoint<A>(
+        &mut self,
+        peer: PeerId,
+        announcements: A,
+        checkpoint: &mut impl FnMut(bool),
+    ) -> Result<bool, Failure>
+    where
+        A: Clone + Iterator<Item = (Key, Option<u32>)>,
+    {
+        self.apply_admitted_inner(peer, announcements, std::iter::empty(), false, checkpoint)
     }
 
     fn apply_admitted_inner<A, W>(
@@ -2714,7 +2877,7 @@ impl AdmittedRecovery {
         checkpoint: &mut impl FnMut(bool),
     ) -> Result<bool, Failure>
     where
-        A: Clone + Iterator<Item = Key>,
+        A: Clone + Iterator<Item = (Key, Option<u32>)>,
         W: Clone + Iterator<Item = Key>,
     {
         let Some(index) = self.complete_index(peer, checkpoint)? else {
@@ -2756,7 +2919,7 @@ impl AdmittedRecovery {
         if reserve
             && !self.reserve_admitted_with_checkpoint(
                 peer,
-                announcements.clone(),
+                announcements.clone().map(|(key, _)| key),
                 OnReservationRefusal::ContinueWithFallback,
                 checkpoint,
             )?
@@ -2797,7 +2960,7 @@ impl AdmittedRecovery {
         checkpoint: &mut impl FnMut(bool),
     ) -> bool
     where
-        A: Iterator<Item = Key>,
+        A: Iterator<Item = (Key, Option<u32>)>,
         W: Clone + Iterator<Item = Key>,
     {
         // Replay only after complete validation and reservation. Each direct
@@ -2822,12 +2985,21 @@ impl AdmittedRecovery {
         let old_len = keys.len();
         let singleton = announcements.size_hint().1.is_some_and(|upper| upper <= 1);
         let mut needs_sort = false;
-        for key in announcements {
+        for (key, known) in announcements {
             checkpoint(false);
-            if let Some(position) = universe_position(universe, key_index, &key) {
+            let position = match known {
+                // The caller resolved the key against this universe.
+                Some(position) => (position != EMPTY_SLOT).then_some(position as usize),
+                None => universe_position(universe, key_index, &key),
+            };
+            if let Some(position) = position {
+                debug_assert_eq!(universe.get(position), Some(&key));
                 let bit = 1_u64 << (position % 64);
-                if record.words[position / 64] & bit == 0 {
-                    record.words[position / 64] |= bit;
+                let Some(word) = record.words.get_mut(position / 64) else {
+                    return false;
+                };
+                if *word & bit == 0 {
+                    *word |= bit;
                     record.masked += 1;
                 }
             } else if singleton {
@@ -3377,7 +3549,8 @@ mod tests {
         for start in (0..rows).step_by(63) {
             assert!(ledger.extend_initial_replay_universe(
                 universe,
-                (start..(start + 63).min(rows)).map(|n| key(u32::try_from(n).unwrap()))
+                (start..(start + 63).min(rows)).map(|n| key(u32::try_from(n).unwrap())),
+                &[who],
             ));
         }
         let prepared = ledger.get(&who).unwrap();
@@ -3428,7 +3601,7 @@ mod tests {
         let who = peer(1);
         ledger.insert_empty(who).unwrap();
         let universe = ledger.begin_initial_replay(who, 64, None).unwrap().unwrap();
-        assert!(ledger.extend_initial_replay_universe(universe, (0..64).map(slot_key)));
+        assert!(ledger.extend_initial_replay_universe(universe, (0..64).map(slot_key), &[who]));
         // Even keys above the universe, admitted in order: one sorted run.
         for start in (0..sparse).step_by(PAGE as usize) {
             let page = (start..(start + PAGE).min(sparse)).map(|n| slot_key(1_000 + 2 * n));
@@ -3480,6 +3653,27 @@ mod tests {
 
     // Two members of one join cohort reference one universe. Each admits
     // and withdraws through its own mask and overlay: neither sees the
+    // A replay reads a universe key's admission from its mask bit alone. An
+    // overlay copy of a universe key would make it read as not sent, and
+    // the replay would skip a withdrawal it owes; the lookup's test-build
+    // check fails on one.
+    #[test]
+    #[should_panic(expected = "the mask bit and the overlay disagree")]
+    fn an_overlay_copy_of_a_universe_key_fails_the_replay_lookup() {
+        let mut ledger = AdmittedRecovery::new();
+        let who = peer(1);
+        ledger.insert_empty(who).unwrap();
+        let universe = ledger.begin_initial_replay(who, 64, None).unwrap().unwrap();
+        assert!(ledger.extend_initial_replay_universe(universe, (0..64).map(slot_key), &[who]));
+        let Key::Unicast(prefix, 0) = slot_key(3) else {
+            unreachable!()
+        };
+        assert!(!ledger.get(&who).unwrap().locate_unicast(prefix).1);
+        let index = ledger.index(who).unwrap();
+        ledger.records[index].keys.0.push(slot_key(3));
+        let _ = ledger.get(&who).unwrap().locate_unicast(prefix);
+    }
+
     // other's keys, a member that fails leaves the other's proof whole, and
     // the last reference retires the universe with all its credit.
     #[test]
@@ -3504,7 +3698,7 @@ mod tests {
         assert_eq!(ledger.bytes() - seeded - first, rows as usize / 8);
         assert!(first - rows as usize / 8 >= rows as usize * size_of::<Key>());
         assert_eq!(ledger.snapshots.len(), 1);
-        assert!(ledger.extend_initial_replay_universe(universe, (0..rows).map(key)));
+        assert!(ledger.extend_initial_replay_universe(universe, (0..rows).map(key), &[a, b]));
 
         // The same keys with different outcomes, plus one outside the universe.
         let outside = key(rows + 7);

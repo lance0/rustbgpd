@@ -54,13 +54,27 @@ pub(crate) struct RegistrationPage {
 #[derive(Default)]
 struct RegistrationScans {
     build: Option<RegistrationScan>,
+    // A member reconciling on its own.
     members: BTreeMap<PeerId, RegistrationScan>,
+    // One circular scan per join cohort, shared by every member riding it.
+    cohorts: BTreeMap<u32, RegistrationScan>,
 }
 
 impl RegistrationScans {
     fn iter_mut(&mut self) -> impl Iterator<Item = &mut RegistrationScan> {
-        self.build.iter_mut().chain(self.members.values_mut())
+        self.build
+            .iter_mut()
+            .chain(self.members.values_mut())
+            .chain(self.cohorts.values_mut())
     }
+}
+
+/// A shard boundary of a circular scan: the scan has reached it once its
+/// cursor is at or past the start of `shard` in pass `lap`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct ScanBoundary {
+    lap: u32,
+    shard: usize,
 }
 
 /// Changes behind the cursor include replacements and withdrawals, so callers
@@ -74,6 +88,9 @@ struct RegistrationScan {
     shard: usize,
     bucket: usize,
     discovery_finished: bool,
+    // A cohort's scan wraps to its first bucket instead of finishing: the
+    // passes it has completed.
+    lap: Option<u32>,
     rewinds: u16,
     repair_due: bool,
     track_candidates: bool,
@@ -494,7 +511,7 @@ impl LocRib {
             .and_then(|scans| scans.build.as_mut())
             .expect("registration owns a scan");
         let skip_queued = scan.displaced.is_some() || scan.track_candidates;
-        Self::take_scan_page(&self.routes, scan, skip_queued)
+        Self::take_scan_page(&self.routes, scan, skip_queued, true)
     }
 
     pub(crate) fn start_member_replay_scan(&mut self, peer: PeerId) {
@@ -554,13 +571,15 @@ impl LocRib {
             .as_mut()
             .and_then(|scans| scans.members.get_mut(&peer))
             .expect("active replay");
-        Self::take_scan_page(&self.routes, scan, true)
+        Self::take_scan_page(&self.routes, scan, true, true)
     }
 
     /// A dataset can restage a group without changing a Loc-RIB winner.
+    /// `cohorts` are the shared scans the targets ride.
     pub(crate) fn record_targeted_replay_changes(
         &mut self,
         targets: &HashSet<PeerId>,
+        cohorts: &[u32],
         changes: &HashSet<Prefix>,
     ) {
         let Some(scans) = &mut self.registration_scans else {
@@ -571,6 +590,104 @@ impl LocRib {
                 scan.record_changes(changes);
             }
         }
+        for id in cohorts {
+            if let Some(scan) = scans.cohorts.get_mut(id) {
+                scan.record_changes(changes);
+            }
+        }
+    }
+
+    /// Start cohort `id`'s circular scan at the first bucket.
+    pub(crate) fn start_cohort_replay_scan(&mut self, id: u32) {
+        let scans = self.registration_scans.get_or_insert_with(Box::default);
+        let scan = RegistrationScan {
+            lap: Some(0),
+            ..RegistrationScan::default()
+        };
+        let previous = scans.cohorts.insert(id, scan);
+        assert!(previous.is_none(), "cohort scan already registered");
+    }
+
+    pub(crate) fn stop_cohort_replay_scan(&mut self, id: u32) {
+        if let Some(scans) = self.registration_scans.as_mut() {
+            scans.cohorts.remove(&id);
+            self.release_idle_registration_scans();
+        }
+    }
+
+    fn cohort_scan(&self, id: u32) -> &RegistrationScan {
+        self.registration_scans
+            .as_ref()
+            .and_then(|scans| scans.cohorts.get(&id))
+            .expect("live cohort scan")
+    }
+
+    /// Where a member joining cohort `id`'s scan now completes: the first
+    /// shard boundary at or after the cursor, one pass later. From here to
+    /// there the scan passes every shard whole at least once, so a rehash
+    /// that rewinds a shard's pass cannot split the member's view of it. A
+    /// member that joins inside a shard sees the rest of that shard twice.
+    ///
+    /// The bound on that rounding: at most one shard read again, which is
+    /// one extra pass of a table below 16,384 routes, still a single shard.
+    pub(crate) fn cohort_replay_lap_end(&self, id: u32) -> ScanBoundary {
+        let scan = self.cohort_scan(id);
+        let lap = scan.lap.expect("circular scan") + 1;
+        let shard = scan.shard + usize::from(scan.bucket != 0);
+        if shard == self.routes.shards().len() {
+            ScanBoundary {
+                lap: lap + 1,
+                shard: 0,
+            }
+        } else {
+            ScanBoundary { lap, shard }
+        }
+    }
+
+    /// Whether cohort `id`'s scan has reached `end`.
+    pub(crate) fn cohort_replay_lap_reached(&self, id: u32, end: ScanBoundary) -> bool {
+        let scan = self.cohort_scan(id);
+        let cursor = ScanBoundary {
+            lap: scan.lap.expect("circular scan"),
+            shard: scan.shard,
+        };
+        cursor >= end
+    }
+
+    pub(crate) fn cohort_replay_overflowed(&self, id: u32) -> bool {
+        self.cohort_scan(id).overflow
+    }
+
+    /// Whether cohort `id`'s scan holds changed keys no page has taken.
+    pub(crate) fn cohort_replay_repairs_pending(&self, id: u32) -> bool {
+        !self.cohort_scan(id).repairs.is_empty()
+    }
+
+    pub(crate) fn cohort_replay_change_recorded(&self, id: u32, prefix: Prefix) -> bool {
+        self.cohort_scan(id).queued.contains(&prefix)
+    }
+
+    /// Queue a repair for a group change that wrote no Loc-RIB row. `false`
+    /// once the cohort's repair log has overflowed.
+    pub(crate) fn record_cohort_replay_change(&mut self, id: u32, prefix: Prefix) -> bool {
+        let scan = self
+            .registration_scans
+            .as_mut()
+            .and_then(|scans| scans.cohorts.get_mut(&id))
+            .expect("live cohort scan");
+        scan.record(prefix, None);
+        !scan.overflow
+    }
+
+    /// The cohort's next page: queued repairs, or with `discover` the next
+    /// buckets of its pass. A page never crosses the end of a pass.
+    pub(crate) fn take_cohort_replay_page(&mut self, id: u32, discover: bool) -> RegistrationPage {
+        let scan = self
+            .registration_scans
+            .as_mut()
+            .and_then(|scans| scans.cohorts.get_mut(&id))
+            .expect("live cohort scan");
+        Self::take_scan_page(&self.routes, scan, true, discover)
     }
 
     pub(crate) fn stop_member_replay_scan(&mut self, peer: PeerId) {
@@ -581,11 +698,9 @@ impl LocRib {
     }
 
     fn release_idle_registration_scans(&mut self) {
-        if self
-            .registration_scans
-            .as_ref()
-            .is_some_and(|scans| scans.build.is_none() && scans.members.is_empty())
-        {
+        if self.registration_scans.as_ref().is_some_and(|scans| {
+            scans.build.is_none() && scans.members.is_empty() && scans.cohorts.is_empty()
+        }) {
             self.registration_scans = None;
         }
     }
@@ -594,6 +709,7 @@ impl LocRib {
         routes: &ShardedMap<Prefix, (Route, SystemTime)>,
         scan: &mut RegistrationScan,
         skip_queued: bool,
+        discover: bool,
     ) -> RegistrationPage {
         let mut page = RegistrationPage {
             keys: Vec::new(),
@@ -610,7 +726,10 @@ impl LocRib {
         // many keys as one route chunk can change, so a peer whose messages
         // span several chunks cannot fill the log. Discovery keeps the turns
         // on which the log is at most half full, at least one per message.
-        if scan.discovery_finished || (scan.repair_due && !scan.repairs.is_empty()) || scan.behind()
+        if scan.discovery_finished
+            || !discover
+            || (scan.repair_due && !scan.repairs.is_empty())
+            || scan.behind()
         {
             scan.repair_due = false;
             let count = scan.repairs.len().min(REGISTRATION_PAGE_SIZE);
@@ -655,7 +774,14 @@ impl LocRib {
                 break;
             }
         }
-        scan.discovery_finished = scan.shard == shards.len();
+        if let Some(lap) = &mut scan.lap {
+            if scan.shard == shards.len() {
+                *lap += 1;
+                scan.shard = 0;
+            }
+        } else {
+            scan.discovery_finished = scan.shard == shards.len();
+        }
         scan.repair_due = true;
         page
     }
