@@ -224,7 +224,6 @@ impl RibManager {
                         .chain(stage.rs_priors.iter().map(|(prefix, _)| *prefix))
                         .filter(|_| rs_control),
                 );
-            let keys: Vec<Prefix> = keys.collect();
             for prefix in keys {
                 if !self.record_replay_scan_change(peer, prefix) {
                     return Err(PacedFallbackCause::ScanRepairLimit);

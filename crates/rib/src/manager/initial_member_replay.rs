@@ -1669,10 +1669,11 @@ impl RibManager {
     /// The riders of cohort `index` with the log page each works through next.
     fn cohort_riders(&self, index: usize) -> impl Iterator<Item = (PeerId, u64)> + '_ {
         let replays = &self.initial_member_replays;
-        let cohort = &replays.cohorts[index];
-        cohort.enrolled.iter().filter_map(|peer| {
-            let replay = replays.members.get(peer)?;
-            (replay.universe == Some(cohort.handle)).then_some((*peer, replay.lap?.seq))
+        let handle = replays.cohorts[index].handle;
+        // The live replays are bounded by the replay slots; the cohort's
+        // enrollment list also keeps every peer that has since finished.
+        replays.members.iter().filter_map(move |(peer, replay)| {
+            (replay.universe == Some(handle)).then_some((*peer, replay.lap?.seq))
         })
     }
 
@@ -2062,11 +2063,12 @@ impl RibManager {
     /// than the log is deep.
     fn evict_cohort_laggards(&mut self, index: usize) {
         let base = self.initial_member_replays.cohorts[index].base;
-        let laggards: Vec<PeerId> = self
+        let mut laggards: Vec<PeerId> = self
             .cohort_riders(index)
             .filter(|(_, seq)| *seq == base)
             .map(|(peer, _)| peer)
             .collect();
+        laggards.sort_unstable();
         for peer in laggards {
             #[cfg(test)]
             super::slice_timing::record_work("cohort_scan_evictions", 1);

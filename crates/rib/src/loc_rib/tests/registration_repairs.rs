@@ -304,7 +304,10 @@ fn a_cohort_scan_wraps_and_serves_a_late_joiner_one_whole_pass() {
     assert!(late > first && !loc.cohort_replay_lap_reached(7, first));
     let joined = buckets();
 
-    early.extend(ride_until(&mut loc, 7, first));
+    // What the scan carried between the late rider's joining and the end
+    // of the first rider's pass.
+    let between = ride_until(&mut loc, 7, first);
+    early.extend(between.iter().copied());
     assert_eq!(early, all, "the first rider's pass missed keys");
     assert_eq!(
         buckets() - before,
@@ -318,9 +321,8 @@ fn a_cohort_scan_wraps_and_serves_a_late_joiner_one_whole_pass() {
         seen.len() < all.len(),
         "the rest of the pass was the whole table"
     );
-    // What it saw between joining and the end of the first rider's pass.
-    seen.extend(early.iter().copied());
-    assert_eq!(seen, all);
+    seen.extend(between);
+    assert!(seen == all, "the late joiner missed keys");
     let ridden = buckets() - joined;
     assert!(
         (total..total + total / 4).contains(&ridden),
