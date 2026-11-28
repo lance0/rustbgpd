@@ -7,6 +7,7 @@ use std::sync::Arc;
 use rustbgpd_policy::RouteFamily;
 use rustbgpd_rpki::{AspaInvalidHop, AspaTable, AspaVerificationResult, VrpTable};
 use rustbgpd_telemetry::BgpMetrics;
+use rustbgpd_telemetry::metrics::RibPeerSeries;
 use rustbgpd_wire::{
     Afi, AspaValidation, LlgrFamily, Prefix, RpkiValidation, Safi, VpnAddressFamily, VpnRouteKey,
 };
@@ -88,15 +89,25 @@ pub(super) fn set_local_flowspec_prefixes(metrics: &BgpMetrics, rib: &crate::adj
     set_rib_prefixes(metrics, &peer, VPN_FLOWSPEC_FAMILIES, vpn);
 }
 
-/// Publish one `bgp_rib_adj_out_prefixes` family pair for a peer.
-pub(super) fn set_adj_rib_out_prefixes(
-    metrics: &BgpMetrics,
-    peer: &str,
-    families: [&str; 2],
+/// Publish one `bgp_rib_prefixes` family pair for a peer through its binding.
+pub(super) fn set_bound_rib_prefixes(
+    series: &RibPeerSeries,
+    families: [&'static str; 2],
     counts: [usize; 2],
 ) {
     for (family, count) in families.into_iter().zip(counts) {
-        metrics.set_adj_rib_out_prefixes(peer, family, gauge_val(count));
+        series.set_rib_prefixes(family, gauge_val(count));
+    }
+}
+
+/// Publish one `bgp_rib_adj_out_prefixes` family pair for a peer.
+pub(super) fn set_adj_rib_out_prefixes(
+    series: &RibPeerSeries,
+    families: [&'static str; 2],
+    counts: [usize; 2],
+) {
+    for (family, count) in families.into_iter().zip(counts) {
+        series.set_adj_rib_out_prefixes(family, gauge_val(count));
     }
 }
 

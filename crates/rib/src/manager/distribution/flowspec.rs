@@ -67,16 +67,14 @@ impl RibManager {
             (rib.unicast_lens(), rib.flowspec_lens())
         };
 
-        let peer_label = peer.label();
-        crate::manager::helpers::set_rib_prefixes(
-            &self.metrics,
-            &peer_label,
+        let series = self.peer_series(peer);
+        crate::manager::helpers::set_bound_rib_prefixes(
+            &series,
             crate::manager::helpers::UNICAST_FAMILIES,
             rib_len,
         );
-        crate::manager::helpers::set_rib_prefixes(
-            &self.metrics,
-            &peer_label,
+        crate::manager::helpers::set_bound_rib_prefixes(
+            &series,
             crate::manager::helpers::FLOWSPEC_FAMILIES,
             flowspec_len,
         );
@@ -129,16 +127,14 @@ impl RibManager {
             (rib.unicast_lens(), rib.flowspec_lens())
         };
 
-        let peer_label = peer.label();
-        crate::manager::helpers::set_rib_prefixes(
-            &self.metrics,
-            &peer_label,
+        let series = self.peer_series(peer);
+        crate::manager::helpers::set_bound_rib_prefixes(
+            &series,
             crate::manager::helpers::UNICAST_FAMILIES,
             rib_len,
         );
-        crate::manager::helpers::set_rib_prefixes(
-            &self.metrics,
-            &peer_label,
+        crate::manager::helpers::set_bound_rib_prefixes(
+            &series,
             crate::manager::helpers::FLOWSPEC_FAMILIES,
             flowspec_len,
         );

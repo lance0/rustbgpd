@@ -326,7 +326,15 @@ async fn two_vpn_afis_accepting_differently_through_the_actor_loop_fit() {
     const V6_ROWS: u32 = 10_000;
     let mut rows: Vec<_> = (0..V4_ROWS).map(|i| med_row(SOURCE, P4, i, 0)).collect();
     rows.extend((0..V6_ROWS).map(|i| med_row(SOURCE, P6, i, tenth_med(i))));
-    let (receivers, _) = actor_walk(rows, vec![], 0, Some(deny_med_chain()), 400, false).await;
+    let (receivers, _) = Box::pin(actor_walk(
+        rows,
+        vec![],
+        0,
+        Some(deny_med_chain()),
+        400,
+        false,
+    ))
+    .await;
     assert_eq!(
         receivers[0].wire.table.len(),
         (V4_ROWS + V6_ROWS / 10) as usize
@@ -343,8 +351,15 @@ async fn a_send_all_vpn_walk_through_the_run_loop_fits() {
     let rows = (0..ROWS)
         .map(|i| med_row(SOURCE, P4, i, tenth_med(i)))
         .collect();
-    let (receivers, last) =
-        actor_walk(rows, vec![], u32::MAX, Some(deny_med_chain()), 6_000, true).await;
+    let (receivers, last) = Box::pin(actor_walk(
+        rows,
+        vec![],
+        u32::MAX,
+        Some(deny_med_chain()),
+        6_000,
+        true,
+    ))
+    .await;
     assert_eq!(receivers[0].wire.table.len(), (ROWS / 10) as usize);
     assert_eq!(last.rows, (ROWS / 10) as usize, "{last:?}");
     assert_fitted(last.capacities[0], last.rows, "run loop: route index");
@@ -568,7 +583,15 @@ async fn a_filtered_vpn_release_with_relabels_ahead_through_the_actor_loop_fits(
             .collect(),
         withdrawn: vec![],
     };
-    let (receivers, _) = actor_walk(rows, vec![again], 0, Some(deny_med_chain()), 400, false).await;
+    let (receivers, _) = Box::pin(actor_walk(
+        rows,
+        vec![again],
+        0,
+        Some(deny_med_chain()),
+        400,
+        false,
+    ))
+    .await;
     assert_eq!(receivers[0].wire.table.len(), (ROWS / 10) as usize);
 }
 
@@ -800,15 +823,22 @@ async fn a_clustered_vpn_release_through_the_run_loop_fits() {
                 .collect(),
             withdrawn: vec![],
         };
-        let (receivers, last) =
-            actor_walk(rows, vec![rejected], 0, Some(deny_med_chain()), 600, true).await;
+        let (receivers, last) = Box::pin(actor_walk(
+            rows,
+            vec![rejected],
+            0,
+            Some(deny_med_chain()),
+            600,
+            true,
+        ))
+        .await;
         assert_eq!(receivers[0].wire.table.len(), ACCEPTED_KEYS as usize);
         assert_eq!(last.rows, ACCEPTED_KEYS as usize, "{last:?}");
         assert_fitted(last.capacities[0], last.rows, "run loop: route index");
         assert_fitted(last.capacities[1], last.keys, "run loop: key index");
         last.capacities
     };
-    let (head, control) = with_control_async(shape).await;
+    let (head, control) = Box::pin(with_control_async(shape)).await;
     assert_at_or_below_control(&head, &control, "clustered release, run loop");
 }
 
@@ -945,7 +975,15 @@ async fn denied_again_after_a_release(held: bool) -> [usize; 2] {
     } else {
         (vec![], vec![vpn_pass(mixed()), again])
     };
-    let (receivers, last) = actor_walk(rows, after, 0, Some(deny_med_chain()), 800, true).await;
+    let (receivers, last) = Box::pin(actor_walk(
+        rows,
+        after,
+        0,
+        Some(deny_med_chain()),
+        800,
+        true,
+    ))
+    .await;
     assert_eq!(receivers[0].wire.table.len(), 4_096);
     assert_fitted(last.capacities[0], last.rows, "run loop: route index");
     assert_fitted(last.capacities[1], last.keys, "run loop: key index");
@@ -956,7 +994,7 @@ async fn denied_again_after_a_release(held: bool) -> [usize; 2] {
 /// rebuild, against 1.75 times.
 #[tokio::test(start_paused = true)]
 async fn denied_keys_logged_again_after_a_vpn_release_through_the_run_loop_fit() {
-    let (head, control) = with_control_async(|| denied_again_after_a_release(true)).await;
+    let (head, control) = Box::pin(with_control_async(|| denied_again_after_a_release(true))).await;
     assert_at_or_below_control(&head, &control, "denied again after a release");
 }
 
@@ -964,7 +1002,8 @@ async fn denied_keys_logged_again_after_a_vpn_release_through_the_run_loop_fit()
 /// rate per key read: 7 times, against 1.75 times.
 #[tokio::test(start_paused = true)]
 async fn denied_keys_logged_again_after_an_empty_vpn_release_through_the_run_loop_fit() {
-    let (head, control) = with_control_async(|| denied_again_after_a_release(false)).await;
+    let (head, control) =
+        Box::pin(with_control_async(|| denied_again_after_a_release(false))).await;
     assert_at_or_below_control(&head, &control, "denied again after an empty release");
 }
 

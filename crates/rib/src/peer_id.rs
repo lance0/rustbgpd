@@ -322,6 +322,12 @@ thread_local! {
         RefCell::new(Cache::new(&TABLE.published));
 }
 
+#[cfg(test)]
+thread_local! {
+    /// [`PeerId::label`] calls on this thread, for work-count tests.
+    pub(crate) static LABELS_FORMATTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn read<T>(f: impl FnOnce(&Snapshot) -> T) -> T {
     let mut f = Some(f);
     let cached = SNAPSHOT.try_with(|cache| {
@@ -507,6 +513,8 @@ impl PeerId {
     /// endpoint. A handle whose slot was reused labels as `peer#<index>.<generation>`.
     #[must_use]
     pub fn label(self) -> String {
+        #[cfg(test)]
+        LABELS_FORMATTED.set(LABELS_FORMATTED.get() + 1);
         if let Some(addr) = self.pinned_v4() {
             return rustbgpd_telemetry::peer_label(IpAddr::V4(addr));
         }
