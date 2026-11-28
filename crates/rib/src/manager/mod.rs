@@ -70,6 +70,7 @@ use std::task::{Context, Poll, Wake, Waker};
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rpki::VrpTable;
 use rustbgpd_telemetry::BgpMetrics;
+use rustbgpd_telemetry::metrics::RibPeerSeries;
 use rustbgpd_telemetry::metrics::RibPolicyTransitionOutcome;
 use rustbgpd_telemetry::metrics::StaleSessionMessageKind as Kind;
 use rustbgpd_telemetry::metrics::StaleSessionMessageKind::{
@@ -746,6 +747,10 @@ pub struct RibManager {
     /// coalesced family-scoped recovery intent for those limits (ADR-0113).
     outbound_limit_control: outbound_prefix_limits::OutboundLimitControl,
     outbound_peers: HashMap<PeerId, mpsc::Sender<OutboundRouteUpdate>>,
+    /// The `peer` label and per-commit metric children of every registered
+    /// outbound peer, bound at registration and dropped with it
+    /// ([`Self::peer_series`]).
+    peer_metric_series: HashMap<PeerId, Arc<RibPeerSeries>>,
     /// Outbound row credit and live whole-table operation of every peer
     /// that has registered for outbound updates, kept across `PeerDown`,
     /// collision supersede and re-registration: envelopes of an earlier
@@ -3244,6 +3249,7 @@ impl RibManager {
             outbound_prefix_limits: HashMap::new(),
             outbound_limit_control: outbound_prefix_limits::OutboundLimitControl::default(),
             outbound_peers: HashMap::new(),
+            peer_metric_series: HashMap::new(),
             outbound_credit: HashMap::new(),
             // A test-only override; production sizes the credit itself.
             outbound_row_credit_override: {

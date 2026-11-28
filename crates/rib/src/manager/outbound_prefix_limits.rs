@@ -981,11 +981,11 @@ impl RibManager {
     /// headroom series instead of keeping a stale finite value.
     pub(in crate::manager) fn refresh_outbound_limit_gauges(&mut self, peer: PeerId) {
         self.replacement_checkpoint(true);
-        let peer_label = peer.label();
+        let series = self.peer_series(peer);
         for row in self.outbound_prefix_limit_rows(peer) {
             self.replacement_checkpoint(false);
             self.metrics.set_outbound_prefix_capacity(
-                &peer_label,
+                series.label(),
                 &row.family,
                 usize::try_from(row.usage).unwrap_or(usize::MAX),
                 row.limit,
@@ -1000,17 +1000,25 @@ impl RibManager {
     /// limit creates them, and every limit apply, including the removal of
     /// the last one, refreshes all live peers. Per-envelope commits of every
     /// member of a pass then skip removing series that do not exist.
+    ///
+    /// It publishes the values of [`Self::outbound_prefix_limit_rows`]
+    /// through the registration's metric binding, without building the rows.
     pub(in crate::manager) fn refresh_outbound_usage_gauges(&self, peer: PeerId) {
-        let peer_label = peer.label();
-        for row in self.outbound_prefix_limit_rows(peer) {
-            debug_assert!(row.limit.is_none());
-            self.metrics.set_outbound_prefix_usage(
-                &peer_label,
-                &row.family,
-                usize::try_from(row.usage).unwrap_or(usize::MAX),
-                row.blocking,
-            );
+        if !self.outbound_peers.contains_key(&peer) {
+            return;
         }
+        let grouped = self.grouped_member_of(peer).is_some();
+        let limits = self.outbound_prefix_limits.get(&peer);
+        self.peer_series(peer)
+            .set_outbound_prefix_usage(LIMITED_FAMILIES.map(|afi| {
+                let family = limits.and_then(|limits| limits.family(afi));
+                debug_assert!(family.and_then(|family| family.limit).is_none());
+                (
+                    family_label(afi),
+                    self.outbound_family_usage(peer, afi, grouped),
+                    family.is_some_and(|family| family.blocking),
+                )
+            }));
     }
 
     /// Install this registration's effective limits before its initial feed

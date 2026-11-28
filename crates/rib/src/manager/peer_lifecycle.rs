@@ -1947,6 +1947,7 @@ impl RibManager {
         self.invalidate_evpn_feed_completion(peer);
         self.retire_evpn_recovery(peer);
         let was_registered = self.outbound_peers.remove(&peer).is_some();
+        self.peer_metric_series.remove(&peer);
         self.outbound_session_ids.remove(&peer);
         self.untrack_release_peer(peer);
         // Owed keys belong to the ended session; a new one's initial table
@@ -3136,10 +3137,26 @@ impl RibManager {
 
     /// Seed metric series, keeping the held UC/VPN admitted counts of a
     /// re-activated record that already carries them.
-    fn initialize_outbound_registration_gauges(&self, peer: PeerId) {
-        let peer_label = peer.label();
+    /// The metric binding of `peer`'s outbound registration, or a fresh
+    /// unbound one for a peer without a registration, which resolves its
+    /// label and children as the unbound `BgpMetrics` methods do.
+    pub(in crate::manager) fn peer_series(
+        &self,
+        peer: PeerId,
+    ) -> Arc<rustbgpd_telemetry::metrics::RibPeerSeries> {
+        self.peer_metric_series.get(&peer).map_or_else(
+            || Arc::new(self.metrics.rib_peer_series(peer.label())),
+            Arc::clone,
+        )
+    }
+
+    /// Bind the registration's metric series ([`Self::peer_series`]) and
+    /// publish its initial values.
+    fn initialize_outbound_registration_gauges(&mut self, peer: PeerId) {
+        let series = Arc::new(self.metrics.rib_peer_series(peer.label()));
+        self.peer_metric_series.insert(peer, Arc::clone(&series));
         let unicast = crate::manager::helpers::UNICAST_FAMILIES;
-        crate::manager::helpers::set_rib_prefixes(&self.metrics, &peer_label, unicast, [0, 0]);
+        crate::manager::helpers::set_rib_prefixes(&self.metrics, series.label(), unicast, [0, 0]);
         // Selective steady-state refresh relies on every family series already
         // existing. Eager zeroes also keep scrape shape stable for a peer that
         // never advertises one of the negotiated families.
@@ -3164,11 +3181,7 @@ impl RibManager {
                 _ => None,
             };
             let count = retained.zip(slot).map_or(0, |(counts, slot)| counts[slot]);
-            self.metrics.set_adj_rib_out_prefixes(
-                &peer_label,
-                family,
-                super::helpers::gauge_val(count),
-            );
+            series.set_adj_rib_out_prefixes([(family, super::helpers::gauge_val(count))]);
         }
     }
 

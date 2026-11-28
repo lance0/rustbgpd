@@ -1839,6 +1839,7 @@ mod owed_vpn_cursor;
 mod paced_selection_release;
 mod paged_query;
 mod peer_identity;
+mod peer_metric_series;
 mod per_client_best;
 mod policy;
 mod policy_filtered_inventory;

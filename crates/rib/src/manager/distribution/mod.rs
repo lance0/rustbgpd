@@ -3162,8 +3162,7 @@ impl RibManager {
                             .grouped_advertised_unicast_lens(member.peer)
                             .unwrap_or_default();
                         crate::manager::helpers::set_adj_rib_out_prefixes(
-                            &manager.metrics,
-                            &member.peer.label(),
+                            &manager.peer_series(member.peer),
                             crate::manager::helpers::UNICAST_FAMILIES,
                             advertised,
                         );
@@ -5693,10 +5692,10 @@ impl RibManager {
                 self.adj_rib_out_commit_stats.last_family_gauge_write_mask =
                     family_gauge_write_mask;
             }
-            // Formatting once per route-bearing commit replaces the former
-            // seven identical allocations. EoR/refresh-only envelopes never
-            // enter this block and therefore retain their zero label cost.
-            let peer_label = peer.label();
+            // One binding lookup per route-bearing commit, which neither
+            // formats the label nor resolves a gauge through its vec.
+            // EoR/refresh-only envelopes never enter this block.
+            let peer_series = self.peer_series(peer);
             let loc_rib_len = self.loc_rib.len();
             let hold_active = self.helper_stale_may_hold(peer);
             #[cfg(test)]
@@ -5941,67 +5940,56 @@ impl RibManager {
             let lens = rib_out.family_lens();
             if unicast_changed {
                 crate::manager::helpers::set_adj_rib_out_prefixes(
-                    &self.metrics,
-                    &peer_label,
+                    &peer_series,
                     crate::manager::helpers::UNICAST_FAMILIES,
                     grouped_unicast_lens.unwrap_or(lens.unicast),
                 );
             }
             if flowspec_changed {
                 crate::manager::helpers::set_adj_rib_out_prefixes(
-                    &self.metrics,
-                    &peer_label,
+                    &peer_series,
                     crate::manager::helpers::FLOWSPEC_FAMILIES,
                     lens.flowspec,
                 );
                 crate::manager::helpers::set_adj_rib_out_prefixes(
-                    &self.metrics,
-                    &peer_label,
+                    &peer_series,
                     crate::manager::helpers::VPN_FLOWSPEC_FAMILIES,
                     lens.flowspec_vpn,
                 );
             }
             if evpn_changed {
-                self.metrics.set_adj_rib_out_prefixes(
-                    &peer_label,
+                peer_series.set_adj_rib_out_prefixes([(
                     "l2vpn_evpn",
                     gauge_val(if evpn_group_owned {
                         evpn_admitted_count
                     } else {
                         rib_out.evpn_len()
                     }),
-                );
+                )]);
             }
             if bgpls_changed {
                 crate::manager::helpers::set_adj_rib_out_prefixes(
-                    &self.metrics,
-                    &peer_label,
+                    &peer_series,
                     crate::manager::helpers::LINKSTATE_FAMILIES,
                     lens.bgpls,
                 );
             }
             if vpn_changed {
                 crate::manager::helpers::set_adj_rib_out_prefixes(
-                    &self.metrics,
-                    &peer_label,
+                    &peer_series,
                     crate::manager::helpers::L3VPN_FAMILIES,
                     grouped_vpn_lens.unwrap_or(lens.vpn),
                 );
             }
             if labeled_changed {
                 crate::manager::helpers::set_adj_rib_out_prefixes(
-                    &self.metrics,
-                    &peer_label,
+                    &peer_series,
                     crate::manager::helpers::LABELED_FAMILIES,
                     lens.labeled,
                 );
             }
             if rtc_changed {
-                self.metrics.set_adj_rib_out_prefixes(
-                    &peer_label,
-                    "rtc",
-                    gauge_val(rib_out.rtc_len()),
-                );
+                peer_series.set_adj_rib_out_prefixes([("rtc", gauge_val(rib_out.rtc_len()))]);
             }
             if evpn_changed {
                 self.settle_export_attr_gc(evpn_displaced);
@@ -7883,8 +7871,7 @@ impl RibManager {
                 .grouped_advertised_unicast_lens(peer)
                 .unwrap_or_default();
             crate::manager::helpers::set_adj_rib_out_prefixes(
-                &self.metrics,
-                &peer.label(),
+                &self.peer_series(peer),
                 crate::manager::helpers::UNICAST_FAMILIES,
                 advertised,
             );
@@ -11862,7 +11849,8 @@ impl RibManager {
                         .unwrap_or_default();
                     let loc_rib = &self.loc_rib;
                     let loc_rib_len = loc_rib.len();
-                    let target_peer_label = peer.label();
+                    let target_series = self.peer_series(peer);
+                    let target_peer_label = target_series.label();
                     let mut export_tally = crate::update::NeighborPolicyStats::default();
                     let policy_stats = &mut export_tally;
 
@@ -11959,7 +11947,7 @@ impl RibManager {
                                 &mut export_memo,
                                 &metrics,
                                 policy_stats,
-                                &target_peer_label,
+                                target_peer_label,
                                 &mut unicast,
                                 is_force,
                                 &mut || checkpoint(),
@@ -12016,7 +12004,7 @@ impl RibManager {
                                 &mut export_memo,
                                 &metrics,
                                 policy_stats,
-                                &target_peer_label,
+                                target_peer_label,
                                 &mut unicast,
                                 is_force,
                                 &mut || checkpoint(),
@@ -12056,7 +12044,7 @@ impl RibManager {
                                 &mut export_memo,
                                 &metrics,
                                 policy_stats,
-                                &target_peer_label,
+                                target_peer_label,
                                 &mut unicast,
                                 is_force,
                                 &mut || checkpoint(),
@@ -12073,7 +12061,7 @@ impl RibManager {
                                 peer_group: target_peer_group,
                                 metrics: &metrics,
                                 policy_stats: &mut *policy_stats,
-                                peer_label: &target_peer_label,
+                                peer_label: target_peer_label,
                             };
                             Self::distribute_single_best_prefix_with_checkpoint(
                                 loc_rib,
@@ -12137,7 +12125,7 @@ impl RibManager {
                             export_pol.as_ref(),
                             &metrics,
                             policy_stats,
-                            &target_peer_label,
+                            target_peer_label,
                             &mut fs_announce,
                             &mut fs_withdraw,
                             &mut export_memo,
@@ -12192,7 +12180,7 @@ impl RibManager {
                                                 peer_group: target_peer_group,
                                                 metrics: &metrics,
                                                 policy_stats: &mut *policy_stats,
-                                                peer_label: &target_peer_label,
+                                                peer_label: target_peer_label,
                                             },
                                             target_is_ebgp,
                                             interpret_rfc1997,
@@ -12275,7 +12263,7 @@ impl RibManager {
                             export_pol.as_ref(),
                             &metrics,
                             policy_stats,
-                            &target_peer_label,
+                            target_peer_label,
                             &mut bgpls_announce,
                             &mut bgpls_withdraw,
                             is_force,
@@ -12317,7 +12305,7 @@ impl RibManager {
                                     peer_group: target_peer_group,
                                     metrics: &metrics,
                                     policy_stats: &mut *policy_stats,
-                                    peer_label: &target_peer_label,
+                                    peer_label: target_peer_label,
                                 };
                                 Self::stage_vpn_routes_with_checkpoint(
                                     &vpn_labeled_context,
@@ -12350,7 +12338,7 @@ impl RibManager {
                                     peer_group: target_peer_group,
                                     metrics: &metrics,
                                     policy_stats: &mut *policy_stats,
-                                    peer_label: &target_peer_label,
+                                    peer_label: target_peer_label,
                                 };
                                 Self::stage_labeled_routes_with_checkpoint(
                                     &vpn_labeled_context,
@@ -12388,7 +12376,7 @@ impl RibManager {
                             export_pol.as_ref(),
                             &metrics,
                             policy_stats,
-                            &target_peer_label,
+                            target_peer_label,
                             &mut rtc_announce,
                             &mut rtc_withdraw,
                             is_force,

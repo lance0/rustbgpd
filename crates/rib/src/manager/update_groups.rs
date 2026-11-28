@@ -4467,19 +4467,13 @@ impl RibManager {
             let vpn = self
                 .grouped_vpn_advertised_lens(peer)
                 .unwrap_or_else(|| private.map_or([0; 2], |lens| lens.vpn));
-            let label = peer.label();
+            let series = self.peer_series(peer);
             super::helpers::set_adj_rib_out_prefixes(
-                &self.metrics,
-                &label,
+                &series,
                 super::helpers::UNICAST_FAMILIES,
                 unicast,
             );
-            super::helpers::set_adj_rib_out_prefixes(
-                &self.metrics,
-                &label,
-                super::helpers::L3VPN_FAMILIES,
-                vpn,
-            );
+            super::helpers::set_adj_rib_out_prefixes(&series, super::helpers::L3VPN_FAMILIES, vpn);
             if self.outbound_prefix_limits.contains_key(&peer) {
                 self.refresh_outbound_limit_gauges(peer);
             } else {
@@ -4692,7 +4686,7 @@ impl RibManager {
     /// (integer adds — no per-(prefix × peer) prometheus lookups).
     fn bump_export_counters(&mut self, peer: PeerId, rows: &[(Option<String>, PolicyAction, u64)]) {
         let mut stats = crate::update::NeighborPolicyStats::default();
-        let peer_label = peer.label();
+        let series = self.peer_series(peer);
         for (policy, action, n) in rows {
             self.replacement_checkpoint(false);
             if *n == 0 {
@@ -4710,8 +4704,7 @@ impl RibManager {
                     "deny"
                 }
             };
-            self.metrics.record_policy_routes_by(
-                &peer_label,
+            series.record_policy_routes_by(
                 policy.as_deref().unwrap_or("inline"),
                 "export",
                 action_label,
@@ -5102,7 +5095,7 @@ impl RibManager {
                 fallback += 1;
                 rustbgpd_telemetry::BgpMetrics::UPDATE_GROUP_UNGROUPED
             };
-            self.metrics.set_peer_update_group(&peer.label(), group_id);
+            self.peer_series(*peer).set_peer_update_group(group_id);
         }
         self.metrics
             .set_update_groups(i64::try_from(member_counts.len()).unwrap_or(i64::MAX));
