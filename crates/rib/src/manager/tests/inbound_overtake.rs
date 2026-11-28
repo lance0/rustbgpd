@@ -45,7 +45,8 @@ fn down(from: Ipv4Addr) -> RibUpdate {
 
 pub(super) type Log = Arc<Mutex<Vec<String>>>;
 
-/// One receiver's UPDATE stream as `A <prefix> <source>` and `W <prefix>`.
+/// One receiver's UPDATE stream as `A <prefix> <source>`, `W <prefix>` and
+/// `E <family>` for an End-of-RIB marker, which follows its envelope's rows.
 fn record(wire: &Log, update: &OutboundRouteUpdate) {
     let mut wire = wire.lock().unwrap();
     for &(key, _) in update.unicast_withdrawals() {
@@ -55,6 +56,9 @@ fn record(wire: &Log, update: &OutboundRouteUpdate) {
         if update.announce_source_exclusion != Some(route.peer) {
             wire.push(format!("A {:?} {}", route.prefix, route.peer));
         }
+    }
+    for (afi, safi) in &update.end_of_rib {
+        wire.push(format!("E {afi:?}/{safi:?}"));
     }
 }
 
@@ -1092,17 +1096,22 @@ async fn an_outbound_prefix_limit_keeps_arrival_order_for_the_capped_slot() {
     let (manager, order) = Box::pin(run(tx, manager, &log, queue)).await;
     assert_eq!(overtakes(&manager), [], "{order:?}");
     let passed = format!("{:?}", Prefix::V4(prefix(900_000)));
-    let wire = wires[0].lock().unwrap().clone();
+    let routes = |wire: &Log| -> Vec<String> {
+        wire.lock()
+            .unwrap()
+            .iter()
+            .filter(|event| !event.starts_with("E "))
+            .cloned()
+            .collect()
+    };
+    let wire = routes(&wires[0]);
     assert_eq!(wire.len(), 1, "one slot: {wire:?}");
     assert!(
         !wire[0].contains(&passed),
         "the later UPDATE took the capped receiver's slot: {wire:?}"
     );
     // An uncapped receiver holds everything.
-    assert_eq!(
-        wires[1].lock().unwrap().len(),
-        usize::try_from(TABLE).unwrap() + 1
-    );
+    assert_eq!(routes(&wires[1]).len(), usize::try_from(TABLE).unwrap() + 1);
 }
 
 /// The remaining owners that hold queued primaries each keep the lane
@@ -1453,4 +1462,98 @@ async fn flowspec_validation_keeps_the_queue_in_arrival_order() {
     let (lane, passed) = Box::pin(rule_events(false)).await;
     assert_eq!(lane, fifo, "the receiver's FlowSpec stream changed");
     assert!(passed == 0.0, "an UPDATE passed with validation enabled");
+}
+
+/// A family that becomes sendable on a registered session exports its table
+/// and then End-of-RIB. An UPDATE queued behind that unlock is announced
+/// after the marker; had it passed the unlock it would ride inside the
+/// table, before the marker. A live session's context change is a barrier,
+/// so the receiver's sequence around End-of-RIB is that of arrival order.
+#[tokio::test(start_paused = true)]
+async fn an_update_behind_a_live_family_unlock_follows_its_end_of_rib() {
+    const TABLE: u32 = 1_100;
+    let mut sequences = Vec::new();
+    for strict in [true, false] {
+        let (tx, mut manager, log, _wires) = wired_fleet(1, 2);
+        manager.parked.strict_fifo = strict;
+        // A registered receiver with no sendable family yet.
+        let late = peer_v4(Ipv4Addr::new(192, 0, 2, 250));
+        let (outbound_tx, outbound_rx) = mpsc::channel(4096);
+        let mut up = test_peer_up(late, 1, outbound_tx);
+        let RibUpdate::PeerUp {
+            sendable_families, ..
+        } = &mut up
+        else {
+            unreachable!()
+        };
+        sendable_families.clear();
+        manager.handle_update(up);
+        let wire = collect(outbound_rx);
+        let queue = vec![
+            rows(source(0), 0, TABLE),
+            RibUpdate::PeerFamilySendable {
+                peer: late,
+                session_id: 1,
+                family: (Afi::Ipv4, Safi::Unicast),
+                add_path_send_limit: None,
+            },
+            rows(OTHER, 900_000, 1),
+        ];
+        let (manager, order) = Box::pin(run(tx, manager, &log, queue)).await;
+        assert_eq!(overtakes(&manager), [], "strict={strict}: {order:?}");
+        let wire = wire.lock().unwrap().clone();
+        let marker = wire
+            .iter()
+            .rposition(|event| event.starts_with("E "))
+            .unwrap_or_else(|| panic!("strict={strict}: no End-of-RIB: {} events", wire.len()));
+        let passed = format!("{:?}", Prefix::V4(prefix(900_000)));
+        let announced = wire
+            .iter()
+            .position(|event| event.contains(&passed))
+            .expect("the UPDATE reaches the receiver");
+        assert!(
+            announced > marker,
+            "strict={strict}: the UPDATE was announced before End-of-RIB"
+        );
+        // The table before the marker in any order, then the UPDATE.
+        let mut before: Vec<_> = wire[..=marker].to_vec();
+        before.sort();
+        sequences.push((before, wire[marker + 1..].to_vec()));
+    }
+    assert_eq!(sequences[0], sequences[1]);
+}
+
+/// Every session sends `PeerAddPathLimits` right after its `PeerUp`. With
+/// no Paths-Limit entry it changes nothing a receiver is sent, so a small
+/// UPDATE passes it even though its session is registered or about to be;
+/// with an entry it can resend that session's table, and keeps FIFO.
+#[tokio::test(start_paused = true)]
+async fn an_empty_paths_limit_message_is_passed_and_one_with_entries_is_not() {
+    let joiner = peer_v4(source(1));
+    let limits = |limits: Vec<((Afi, Safi), u32)>| RibUpdate::PeerAddPathLimits {
+        peer: joiner,
+        session_id: STAGED,
+        limits,
+    };
+    let (tx, manager, log) = fleet(2, 8);
+    let queue = vec![
+        rows(source(0), 0, MEMBER_ROWS),
+        registering_peer_up(joiner, STAGED),
+        limits(Vec::new()),
+        rows(OTHER, 900_000, 1),
+    ];
+    let (manager, order) = Box::pin(run(tx, manager, &log, queue)).await;
+    assert_eq!(position(&order, 1), 0, "{order:?}");
+    assert_eq!(overtakes(&manager), [("receive".to_owned(), 1.0)]);
+
+    Box::pin(assert_fifo(
+        "Paths-Limit entries behind their PeerUp",
+        vec![
+            rows(source(0), 0, MEMBER_ROWS),
+            registering_peer_up(joiner, STAGED),
+            limits(vec![((Afi::Ipv4, Safi::Unicast), 4)]),
+        ],
+        rows(OTHER, 900_000, 1),
+    ))
+    .await;
 }

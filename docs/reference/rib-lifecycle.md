@@ -240,7 +240,8 @@ table, and hands updates to each session over a bounded channel.
     registers. It never passes a message of its own session, a route message
     that carries one of its prefixes, the session-up or session-down of a
     session that holds one of its prefixes, or a context change of a session
-    that is already registered. A session's own updates and every prefix's
+    that is already registered, such as a family that becomes sendable and
+    exports its table and End-of-RIB. A session's own updates and every prefix's
     updates therefore keep their arrival order; two sessions' updates for
     different prefixes may not.
   - **What closes the lane:** End-of-RIB, a refresh, an ORF update, a policy

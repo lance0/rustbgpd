@@ -11,7 +11,12 @@
 //! with one message per window, which shows every state a prefix passes
 //! through. Each run's stream for a prefix must be that reference with some
 //! intermediate states left out: the same order, the same end, and no state
-//! the reference never shows.
+//! the reference never shows. End-of-RIB markers are events too: each run
+//! must send a receiver the same markers in the same order. Which rows a
+//! paced replay has sent by the time its marker leaves depends on how its
+//! pages interleave with other input even in strict arrival order, so the
+//! table at a marker is pinned by the deterministic family-unlock test
+//! instead.
 
 use super::exportability::ReusableExactExportEncoder;
 use super::inbound_overtake::{Log, collect, overtakes, prefix, source, wired_fleet};
@@ -52,6 +57,7 @@ fn receiver(index: u16) -> PeerId {
 
 /// The queue for `seed`. A receiver that rejoins gets a new writer, whose
 /// wire log replaces the old one in `wires`.
+#[expect(clippy::too_many_lines, reason = "one arm per generated message kind")]
 fn queue(seed: u64, wires: &mut [Log], stable: &mut [bool]) -> Vec<RibUpdate> {
     let mut rng = Rng(seed);
     // The session each source's next message names, and whether it is up.
@@ -122,7 +128,15 @@ fn queue(seed: u64, wires: &mut [Log], stable: &mut [bool]) -> Vec<RibUpdate> {
                 let index = u16::try_from(rng.below(u32::from(RECEIVERS))).unwrap();
                 let peer = receiver(index);
                 let session = receiver_sessions[usize::from(index)];
-                match rng.below(3) {
+                match rng.below(4) {
+                    // A family unlock on the live session: its table (none
+                    // here) and an End-of-RIB marker in mid-stream.
+                    3 => queue.push(RibUpdate::PeerFamilySendable {
+                        peer,
+                        session_id: session,
+                        family: (Afi::Ipv6, Safi::Unicast),
+                        add_path_send_limit: None,
+                    }),
                     0 => queue.push(RibUpdate::RouteRefreshRequest {
                         queued: Arc::default(),
                         session_id: session,
@@ -164,6 +178,9 @@ fn queue(seed: u64, wires: &mut [Log], stable: &mut [bool]) -> Vec<RibUpdate> {
 fn table(wire: &Log) -> BTreeMap<String, String> {
     let mut table = BTreeMap::new();
     for event in wire.lock().unwrap().iter() {
+        if event.starts_with("E ") {
+            continue;
+        }
         if let Some(key) = event.strip_prefix("W ") {
             table.remove(key);
         } else {
@@ -178,6 +195,9 @@ fn table(wire: &Log) -> BTreeMap<String, String> {
 fn sequences(wire: &Log) -> BTreeMap<String, Vec<String>> {
     let mut sequences: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for event in wire.lock().unwrap().iter() {
+        if event.starts_with("E ") {
+            continue;
+        }
         let (key, state) = if let Some(key) = event.strip_prefix("W ") {
             (key, "W".to_owned())
         } else {
@@ -189,11 +209,23 @@ fn sequences(wire: &Log) -> BTreeMap<String, Vec<String>> {
     sequences
 }
 
+/// The End-of-RIB markers a receiver was sent, in order.
+fn markers(wire: &Log) -> Vec<String> {
+    wire.lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| event.strip_prefix("E ").map(str::to_owned))
+        .collect()
+}
+
 /// Whether `stream` is `reference` with intermediate states left out.
 fn coalesces(stream: &[String], reference: &[String]) -> bool {
     let mut rest = reference.iter();
     stream.iter().all(|state| rest.any(|seen| seen == state)) && stream.last() == reference.last()
 }
+
+/// One stable receiver's per-prefix sequences and its End-of-RIB markers.
+type Streams = (BTreeMap<String, Vec<String>>, Vec<String>);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Mode {
@@ -223,11 +255,7 @@ struct Outcome {
 
 /// The outcome, each stable receiver's per-prefix streams and the overtakes.
 /// `capped` gives receiver 0 an outbound prefix limit.
-async fn outcome(
-    seed: u64,
-    mode: Mode,
-    capped: bool,
-) -> (Outcome, Vec<BTreeMap<String, Vec<String>>>, f64) {
+async fn outcome(seed: u64, mode: Mode, capped: bool) -> (Outcome, Vec<Streams>, f64) {
     let (tx, mut manager, _log, mut wires) = wired_fleet(SOURCES, RECEIVERS);
     manager.parked.strict_fifo = mode != Mode::Lane;
     if mode == Mode::Reference {
@@ -272,7 +300,7 @@ async fn outcome(
         .iter()
         .zip(&stable)
         .filter(|(_, stable)| **stable)
-        .map(|(wire, _)| sequences(wire))
+        .map(|(wire, _)| (sequences(wire), markers(wire)))
         .collect();
     (outcome, streams, passed)
 }
@@ -281,6 +309,7 @@ async fn outcome(
 async fn the_lane_leaves_the_tables_strict_fifo_leaves() {
     let mut passed = 0.0;
     let mut compared = 0;
+    let mut marked = 0;
     for seed in SEEDS {
         // Every eighth seed caps a receiver, which closes the lane.
         let capped = seed % 8 == 0;
@@ -314,7 +343,14 @@ async fn the_lane_leaves_the_tables_strict_fifo_leaves() {
         }
         for (name, streams) in [("FIFO", &fifo_streams), ("lane", &lane_streams)] {
             assert_eq!(streams.len(), shown.len(), "seed {seed}");
-            for (at, (stream, reference)) in streams.iter().zip(&shown).enumerate() {
+            for (at, ((stream, marks), (reference, shown_marks))) in
+                streams.iter().zip(&shown).enumerate()
+            {
+                assert_eq!(
+                    marks, shown_marks,
+                    "seed {seed}: {name} stable receiver {at} was sent different End-of-RIB markers"
+                );
+                marked += marks.len();
                 assert_eq!(
                     stream.keys().collect::<Vec<_>>(),
                     reference.keys().collect::<Vec<_>>(),
@@ -334,10 +370,12 @@ async fn the_lane_leaves_the_tables_strict_fifo_leaves() {
         passed += count;
     }
     eprintln!(
-        "overtakes across {} seeds: {passed}; {compared} per-receiver prefix streams compared",
+        "overtakes across {} seeds: {passed}; {compared} per-receiver prefix streams and \
+         {marked} End-of-RIB markers compared",
         SEEDS.len()
     );
     assert!(passed >= 64.0, "the oracle exercised {passed} overtakes");
     assert!(compared > 1_000, "{compared} streams compared");
+    assert!(marked > 100, "{marked} End-of-RIB markers compared");
     assert!(PACED_DEPARTURE.get(), "no seed paced a source departure");
 }

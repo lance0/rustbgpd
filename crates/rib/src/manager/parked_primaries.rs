@@ -18,7 +18,9 @@
 //!   context staged for a session that has not registered. Any other kind
 //!   is a barrier, and a new kind is a barrier until it is listed. Context
 //!   of a live session is a barrier too: it changes what later exports see
-//!   without resyncing earlier ones;
+//!   without resyncing earlier ones, or resends a table. The one exception
+//!   is an empty `PeerAddPathLimits`, which every session sends after its
+//!   `PeerUp` and which changes nothing;
 //! - none of its prefixes appears in a route message ahead, so cross-source
 //!   order on a shared prefix holds;
 //! - no `PeerUp` or `PeerDown` ahead belongs to a session whose Adj-RIB-In
@@ -93,6 +95,8 @@ enum Parked<'a> {
     Reset(PeerId),
     /// Session context, naming the session it belongs to.
     Context(PeerId, u64),
+    /// A session message that changes nothing a receiver is sent.
+    Inert(PeerId),
     /// Everything else: nothing behind it may pass.
     Barrier,
 }
@@ -133,6 +137,12 @@ fn classify(update: &RibUpdate) -> Parked<'_> {
             }
         }
         RibUpdate::PeerUp { peer, .. } | RibUpdate::PeerDown { peer, .. } => Parked::Reset(*peer),
+        // Sent once per session right after its `PeerUp`. With no entry it
+        // installs an empty map and changes no effective limit, so it
+        // exports nothing: inert even on a live session.
+        RibUpdate::PeerAddPathLimits { peer, limits, .. } if limits.is_empty() => {
+            Parked::Inert(*peer)
+        }
         RibUpdate::PeerAddPathLimits {
             peer, session_id, ..
         }
@@ -271,6 +281,7 @@ impl Ahead {
                 *self.sessions.entry(peer).or_default() += 1;
                 *self.resets.entry(peer).or_default() += 1;
             }
+            Parked::Inert(peer) => *self.sessions.entry(peer).or_default() += 1,
             Parked::Context(peer, session)
                 if !live(peer, session) && !self.resets.contains_key(&peer) =>
             {
@@ -299,7 +310,7 @@ impl Ahead {
                 forget(&mut self.sessions, &peer);
                 forget(&mut self.resets, &peer);
             }
-            Parked::Context(peer, _) => forget(&mut self.sessions, &peer),
+            Parked::Context(peer, _) | Parked::Inert(peer) => forget(&mut self.sessions, &peer),
             Parked::Barrier => {}
         }
     }
