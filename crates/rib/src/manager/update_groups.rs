@@ -801,6 +801,34 @@ pub(in crate::manager) struct GroupRibOut {
     /// writers ([`Self::apply_delta`], [`Self::commit_rs_transitions`])
     /// record here, so the fenced re-check revisits exactly these keys.
     pub(in crate::manager) inventory_log: Option<ShardedMap<(Prefix, u32), ()>>,
+    /// Unicast keys whose staged row at path ID zero or source-control
+    /// input changed since the join cohorts replaying this table last
+    /// looked; `None` while no cohort holds resolved rows of it. Both table
+    /// writers record here, as for [`Self::inventory_log`].
+    pub(in crate::manager) cohort_writes: Option<CohortWrites>,
+}
+
+/// The keys [`GroupRibOut::cohort_writes`] holds, up to [`Self::LIMIT`].
+/// Past that it records only that more changed: a reader then treats every
+/// key as changed.
+#[derive(Default)]
+pub(in crate::manager) struct CohortWrites {
+    pub(in crate::manager) keys: Vec<Prefix>,
+    pub(in crate::manager) overflow: bool,
+}
+
+impl CohortWrites {
+    /// One lookup per key against each page of a cohort's log (at most 64)
+    /// stays within one page of work.
+    const LIMIT: usize = 16;
+
+    fn note(&mut self, prefix: Prefix) {
+        if self.keys.len() < Self::LIMIT {
+            self.keys.push(prefix);
+        } else {
+            self.overflow = true;
+        }
+    }
 }
 
 /// Placeholder target for group-level policy-denial records; restamped
@@ -981,6 +1009,7 @@ impl GroupRibOut {
             llgr,
             per_client_best,
             inventory_log: None,
+            cohort_writes: None,
         }
     }
 
@@ -1183,6 +1212,11 @@ impl GroupRibOut {
         let key = (delta.prefix, delta.path_id);
         if let Some(log) = &mut self.inventory_log {
             log.insert(key, ());
+        }
+        if delta.path_id == 0
+            && let Some(writes) = &mut self.cohort_writes
+        {
+            writes.note(delta.prefix);
         }
         if let Some(old) = self.table.get(&delta.prefix, delta.path_id) {
             let old_peer = old.peer;
@@ -1688,6 +1722,11 @@ impl GroupRibOut {
             if let Some(log) = &mut self.inventory_log {
                 log.insert(key, ());
             }
+            if transition.path_id == 0
+                && let Some(writes) = &mut self.cohort_writes
+            {
+                writes.note(transition.prefix);
+            }
             match &transition.source_attrs {
                 Some(attrs) => {
                     self.insert_source_attrs(key, attrs);
@@ -1764,6 +1803,14 @@ impl GroupRibOut {
             path_id,
             rs_control,
         )
+    }
+
+    /// The staged winner at `prefix`, path ID zero, before any member's
+    /// split horizon or RFC 7947 control: the slot every member it serves
+    /// shares.
+    pub(in crate::manager) fn replay_winner(&self, prefix: &Prefix) -> Option<AdvEntry<'_>> {
+        let staged = self.table.get(prefix, 0)?;
+        Some(self.staged_entry(staged, prefix, 0))
     }
 
     /// [`Self::adv_entry_for`] at path ID zero for the paced initial
@@ -3281,6 +3328,44 @@ impl RibManager {
             record.selection_initial_admitted = counts;
             record.selection_initial_admitted_valid = true;
         }
+    }
+
+    /// [`Self::planned_initial_group_admitted_counts`] for a replay page at
+    /// path ID zero that the member holds none of, with nothing withdrawn.
+    /// Each row it does not source is a new key. A grouped unicast identity
+    /// is path ID zero, so it is a new prefix too, and no key needs a
+    /// lookup.
+    pub(super) fn planned_fresh_initial_group_admitted_counts(
+        &self,
+        peer: PeerId,
+        announce: &[Route],
+        source_exclusion: Option<PeerId>,
+    ) -> Option<[usize; 6]> {
+        let mut counts = self.initial_group_admitted_counts(peer)?;
+        #[cfg(test)]
+        if let Some(admitted) = self.initial_group_admitted(peer) {
+            admitted_recovery::uncounted(|| {
+                for route in announce {
+                    assert!(
+                        source_exclusion == Some(route.peer)
+                            || (!admitted.contains(&ExactExportKey::Unicast(route.prefix, 0))
+                                && admitted.unicast_prefix_paths(route.prefix, &mut |_| {}) == 0),
+                        "{peer} already holds {} of a fresh replay page",
+                        route.prefix
+                    );
+                }
+            });
+        }
+        for route in announce {
+            self.replacement_checkpoint(false);
+            if source_exclusion == Some(route.peer) {
+                continue;
+            }
+            let slot = usize::from(matches!(route.prefix, Prefix::V6(_)));
+            counts[slot] = counts[slot].checked_add(1)?;
+            counts[4 + slot] = counts[4 + slot].checked_add(1)?;
+        }
+        Some(counts)
     }
 
     /// Unique final ANN/WD identities, with ANN winning same-key overlap.

@@ -160,6 +160,9 @@ pub enum PacedFallbackCause {
     AlreadyDirty,
     /// Changes behind the scan overflowed its repair log.
     ScanRepairLimit,
+    /// The member fell a whole log behind the Loc-RIB scan its join cohort
+    /// shares.
+    CohortLag,
     /// A change reached the member outside its scan's repair scope.
     ChangeOutsideScan,
     /// The member's admitted-key proof was missing or incomplete.
@@ -215,10 +218,11 @@ pub enum PacedFallbackCause {
 
 impl PacedFallbackCause {
     /// Every bounded fallback cause.
-    pub const ALL: [Self; 28] = [
+    pub const ALL: [Self; 29] = [
         Self::GroupChanged,
         Self::AlreadyDirty,
         Self::ScanRepairLimit,
+        Self::CohortLag,
         Self::ChangeOutsideScan,
         Self::MissingProof,
         Self::PeerLimit,
@@ -253,6 +257,7 @@ impl PacedFallbackCause {
             Self::GroupChanged => "group_changed",
             Self::AlreadyDirty => "already_dirty",
             Self::ScanRepairLimit => "scan_repair_limit",
+            Self::CohortLag => "cohort_lag",
             Self::ChangeOutsideScan => "change_outside_scan",
             Self::MissingProof => "missing_proof",
             Self::PeerLimit => "peer_limit",

@@ -170,6 +170,7 @@ async fn a_reconcile_withdraws_admitted_keys_the_loc_rib_dropped_during_the_over
 async fn every_reconcilable_cause_rewinds_without_a_whole_table_unit() {
     for cause in [
         PacedFallbackCause::ScanRepairLimit,
+        PacedFallbackCause::CohortLag,
         PacedFallbackCause::ChangeOutsideScan,
         PacedFallbackCause::ReleaseFanout,
         PacedFallbackCause::ForcedResync,

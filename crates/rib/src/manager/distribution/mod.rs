@@ -30,7 +30,11 @@ use super::helpers::{
     vpn_routes_equal_for_target,
 };
 use super::update_groups::GroupMembership;
-use super::update_groups::admitted_recovery::OnReservationRefusal;
+#[cfg(test)]
+use super::update_groups::admitted_recovery::AdmittedKeyView;
+use super::update_groups::admitted_recovery::{
+    AdmittedRecovery, OnReservationRefusal, SnapshotHandle,
+};
 use super::{
     AuthoritativeTransitionReceipt, PendingRouteChunk, PendingRoutesReceived,
     PolicyFilteredRouteKey, RibManager, UnicastPrefixPeers,
@@ -269,6 +273,97 @@ pub(in crate::manager) struct SharedUnicastPrecommit<'a> {
     pub(in crate::manager) lazy_group_prior: Option<LazyCleanGroupPrior<'a>>,
 }
 
+/// A paced replay page's unicast rows, none of which the member holds, with
+/// each row's position at path ID zero in the member's proof universe (the
+/// ledger's empty marker where the universe lacks the key). The commit then
+/// reserves, counts and admits the rows without looking any key up.
+pub(in crate::manager) struct FreshUnicast {
+    pub(in crate::manager) universe: SnapshotHandle,
+    /// One per announced route, in order.
+    pub(in crate::manager) positions: Arc<Vec<u32>>,
+}
+
+impl FreshUnicast {
+    /// The positions a key-by-key page looked up, where its proof masks a
+    /// `universe` and the page is `fresh`: it neither resends nor withdraws
+    /// a row the member holds.
+    pub(in crate::manager) fn page(
+        universe: Option<SnapshotHandle>,
+        fresh: bool,
+        positions: Vec<u32>,
+    ) -> Option<Self> {
+        universe.filter(|_| fresh).map(|universe| Self {
+            universe,
+            positions: positions.into(),
+        })
+    }
+}
+
+/// The positions of a batch's fresh rows, while `routes` is still the
+/// payload the batch arrived with and `peer`'s proof still masks the
+/// universe they were resolved against. Any gate that filtered the payload
+/// leaves the commit to its per-key lookups.
+fn fresh_positions<'a>(
+    fresh: Option<&'a (Arc<Vec<crate::route::Route>>, FreshUnicast)>,
+    ledger: &AdmittedRecovery,
+    peer: PeerId,
+    routes: &Arc<Vec<crate::route::Route>>,
+) -> Option<&'a [u32]> {
+    let (given, fresh) = fresh?;
+    (Arc::ptr_eq(given, routes)
+        && fresh.positions.len() == routes.len()
+        && ledger.masks_universe(peer, fresh.universe))
+    .then_some(fresh.positions.as_slice())
+}
+
+/// After a fresh page's rows were admitted from their positions: the proof
+/// holds every row the member did not source and none it did, and gained
+/// exactly those keys, each in the universe mask or the overlay as its
+/// position says. The reservation covered the page, so the apply succeeds.
+#[cfg(test)]
+fn assert_fresh_rows_admitted<'a>(
+    ledger: &AdmittedRecovery,
+    peer: PeerId,
+    before: Option<[usize; 2]>,
+    applied: &Result<bool, super::update_groups::admitted_recovery::Failure>,
+    rows: impl Iterator<Item = (&'a crate::route::Route, &'a u32)>,
+    source_exclusion: Option<PeerId>,
+) {
+    use super::update_groups::admitted_recovery::uncounted;
+
+    assert_eq!(
+        applied.as_ref().ok(),
+        Some(&true),
+        "{peer}: fresh rows not admitted"
+    );
+    uncounted(|| {
+        let proof = ledger.get(&peer).expect("applied proof");
+        let mut gained = [0, 0];
+        for (route, position) in rows {
+            let key = crate::update::ExactExportKey::Unicast(route.prefix, route.path_id);
+            let excluded = source_exclusion == Some(route.peer);
+            assert_eq!(proof.contains(&key), !excluded, "{peer}: {}", route.prefix);
+            if !excluded {
+                gained[usize::from(AdmittedKeyView::outside(fresh_position(route, *position)))] +=
+                    1;
+            }
+        }
+        let before = before.expect("proof before the apply");
+        let after = proof.shape();
+        assert_eq!(
+            [after[0] - before[0], after[1] - before[1]],
+            gained,
+            "{peer}: the mask and the overlay gained other keys than the page's"
+        );
+    });
+}
+
+/// A fresh row's resolved position; a row at any other path ID was not
+/// resolved.
+fn fresh_position(route: &crate::route::Route, position: u32) -> Option<u32> {
+    (route.path_id == 0).then_some(position)
+}
+
 /// Why an outbound transaction did not reach the peer writer. The commit
 /// ladder records the matching metric before returning it; callers keep the
 /// peer dirty so the resync timer retries the transaction.
@@ -335,6 +430,8 @@ pub(in crate::manager) struct OutboundCommitBatch<'a> {
     pub(in crate::manager) staged_departure_group: Option<usize>,
     pub(in crate::manager) announce_source_exclusion: Option<PeerId>,
     pub(in crate::manager) shared_group_encode: Option<Arc<crate::update::SharedGroupEncode>>,
+    /// The announced rows are a replay page the member holds none of.
+    pub(in crate::manager) fresh_unicast: Option<FreshUnicast>,
     /// Staging's exact-export snapshot ([`UnicastDistributionResult`]); the
     /// commit probes with it rather than a fresh one.
     pub(in crate::manager) exact_export_snapshot:
@@ -3696,6 +3793,12 @@ impl RibManager {
         let retirement_observer = self.replacement_readiness_test_hook.clone();
         self.replacement_checkpoint(false);
 
+        // Positions hold for the payload as it arrived, before any gate.
+        let fresh_unicast = batch
+            .fresh_unicast
+            .take()
+            .filter(|_| batch.vpn_announce.is_empty() && batch.vpn_withdraw.is_empty())
+            .map(|fresh| (Arc::clone(&batch.unicast.announce), fresh));
         let mut owns_refresh_prior = false;
         if batch
             .evpn_complete_feed
@@ -4049,7 +4152,32 @@ impl RibManager {
                 if empty {
                     self.prepare_empty_group_recovery_admission(peer, candidates.clone());
                 }
+                let known = fresh_positions(
+                    fresh_unicast.as_ref(),
+                    &self.pending_group_admitted,
+                    peer,
+                    &batch.unicast.announce,
+                );
                 match self.with_summary_recovery_ledger(None, |ledger, _, readiness, live| {
+                    let mut checkpoint = |force| {
+                        super::checkpoint_with_summary_reader(readiness, None, force, live);
+                    };
+                    if let Some(positions) = known {
+                        return ledger.reserve_fresh_with_checkpoint(
+                            peer,
+                            batch
+                                .unicast
+                                .announce
+                                .iter()
+                                .zip(positions)
+                                .filter(|(route, _)| {
+                                    batch.announce_source_exclusion != Some(route.peer)
+                                })
+                                .map(|(route, position)| fresh_position(route, *position)),
+                            batch.on_proof_refusal,
+                            &mut checkpoint,
+                        );
+                    }
                     ledger.reserve_admitted_with_checkpoint(
                         peer,
                         candidates
@@ -4058,9 +4186,7 @@ impl RibManager {
                             })
                             .flatten(),
                         batch.on_proof_refusal,
-                        &mut |force| {
-                            super::checkpoint_with_summary_reader(readiness, None, force, live);
-                        },
+                        &mut checkpoint,
                     )
                 }) {
                     Ok(true) => held_proof_reserved = true,
@@ -4283,6 +4409,8 @@ impl RibManager {
             mut shared_group_encode,
             // Taken above for this commit's probes.
             exact_export_snapshot: _,
+            // Taken at entry, with the payload it describes.
+            fresh_unicast: _,
             shared_withdraw,
             withdraw,
             end_of_rib,
@@ -5292,8 +5420,33 @@ impl RibManager {
             if proof.is_empty() {
                 self.prepare_empty_group_recovery_admission(peer, admitted.clone());
             }
+            let known = common_candidate_keys
+                .is_none()
+                .then(|| {
+                    fresh_positions(
+                        fresh_unicast.as_ref(),
+                        &self.pending_group_admitted,
+                        peer,
+                        &common_unicast_candidates,
+                    )
+                })
+                .flatten();
             if let Err(error) =
                 self.with_summary_recovery_ledger(None, |ledger, _, readiness, live| {
+                    if let Some(positions) = known {
+                        return ledger.reserve_fresh_with_checkpoint(
+                            peer,
+                            common_unicast_candidates
+                                .iter()
+                                .zip(positions)
+                                .filter(|(route, _)| announce_source_exclusion != Some(route.peer))
+                                .map(|(route, position)| fresh_position(route, *position)),
+                            on_proof_refusal,
+                            &mut |force| {
+                                super::checkpoint_with_summary_reader(readiness, None, force, live);
+                            },
+                        );
+                    }
                     ledger.reserve_admitted_with_checkpoint(
                         peer,
                         admitted
@@ -5602,14 +5755,34 @@ impl RibManager {
         let mut initial_admitted_counts = if refused_withdrawals {
             refused_withdrawal_counts
         } else {
-            self.planned_initial_group_admitted_counts(
-                peer,
-                &announce,
-                &withdraw,
-                announce_source_exclusion,
-                &vpn_announce,
-                &vpn_withdraw,
-            )
+            // Rows the member holds none of are counted without a lookup,
+            // while no gate above filtered them or added a withdrawal.
+            let fresh = withdraw.is_empty()
+                && vpn_withdraw.is_empty()
+                && fresh_positions(
+                    fresh_unicast.as_ref(),
+                    &self.pending_group_admitted,
+                    peer,
+                    &announce,
+                )
+                .is_some()
+                && announce.iter().all(|route| route.path_id == 0);
+            if fresh {
+                self.planned_fresh_initial_group_admitted_counts(
+                    peer,
+                    &announce,
+                    announce_source_exclusion,
+                )
+            } else {
+                self.planned_initial_group_admitted_counts(
+                    peer,
+                    &announce,
+                    &withdraw,
+                    announce_source_exclusion,
+                    &vpn_announce,
+                    &vpn_withdraw,
+                )
+            }
         };
         let grouped_unicast_lens = initial_admitted_counts
             .map(|counts| [counts[0], counts[1]])
@@ -6103,10 +6276,55 @@ impl RibManager {
                         .iter()
                         .map(|key| Key::Vpn(key.nlri_key, key.path_id)),
                 );
+            let known = (withdraw.is_empty() && vpn_withdraw.is_empty())
+                .then(|| {
+                    fresh_positions(
+                        fresh_unicast.as_ref(),
+                        &self.pending_group_admitted,
+                        peer,
+                        &announce,
+                    )
+                })
+                .flatten();
             // The pre-send reservation above covered every candidate; this
             // batch only filtered them, so the commit skips a second count.
             if let Err(error) =
                 self.with_summary_recovery_ledger(None, |ledger, _, readiness, live| {
+                    if let Some(positions) = known {
+                        #[cfg(test)]
+                        let before = ledger.get(&peer).map(AdmittedKeyView::shape);
+                        let applied = ledger.apply_reserved_positioned_with_checkpoint(
+                            peer,
+                            announce
+                                .iter()
+                                .zip(positions)
+                                .inspect(|_| {
+                                    super::checkpoint_with_summary_reader(
+                                        readiness, None, false, live,
+                                    );
+                                })
+                                .filter(|(route, _)| announce_source_exclusion != Some(route.peer))
+                                .map(|(route, position)| {
+                                    (
+                                        Key::Unicast(route.prefix, route.path_id),
+                                        fresh_position(route, *position),
+                                    )
+                                }),
+                            &mut |force| {
+                                super::checkpoint_with_summary_reader(readiness, None, force, live);
+                            },
+                        );
+                        #[cfg(test)]
+                        assert_fresh_rows_admitted(
+                            ledger,
+                            peer,
+                            before,
+                            &applied,
+                            announce.iter().zip(positions),
+                            announce_source_exclusion,
+                        );
+                        return applied;
+                    }
                     let admitted = announce
                         .iter()
                         .inspect(|_| {
@@ -9891,8 +10109,9 @@ impl RibManager {
         changed: &HashSet<Prefix>,
         targets: &HashSet<PeerId>,
     ) {
+        let cohorts = self.cohort_scans_of(targets);
         self.loc_rib
-            .record_targeted_replay_changes(targets, changed);
+            .record_targeted_replay_changes(targets, &cohorts, changed);
         self.distribute_changes_inner(
             changed,
             changed,

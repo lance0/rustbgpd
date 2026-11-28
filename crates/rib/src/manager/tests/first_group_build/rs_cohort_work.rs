@@ -1417,3 +1417,5 @@ fn a_change_that_ends_a_wait_wakes_the_queue() {
     let [(_, rx)] = waiter;
     sends_without_waiting(&mut manager, n, rx);
 }
+
+mod shared_scan;
