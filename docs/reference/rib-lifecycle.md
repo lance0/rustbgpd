@@ -235,12 +235,14 @@ table, and hands updates to each session over a bounded channel.
     another session may be admitted ahead of them, one at each seam: between
     two queued messages, and between two key pages of a paced departure.
     `bgp_rib_inbound_overtake_total{seam}` counts them.
-  - **What it may pass:** other sessions' session-up, session-down, session
-    context and unicast route messages. It never passes a message of its own
-    session, a route message that carries one of its prefixes, or the
-    session-up or session-down of a session that holds one of its prefixes.
-    A session's own updates and every prefix's updates therefore keep their
-    arrival order.
+  - **What it may pass:** other sessions' session-up, session-down and
+    unicast route messages, and the context a session stages before it
+    registers. It never passes a message of its own session, a route message
+    that carries one of its prefixes, the session-up or session-down of a
+    session that holds one of its prefixes, or a context change of a session
+    that is already registered. A session's own updates and every prefix's
+    updates therefore keep their arrival order; two sessions' updates for
+    different prefixes may not.
   - **What closes the lane:** End-of-RIB, a refresh, an ORF update, a policy
     change, an injected route, a query, any other message kind, a due
     stale-route or hold timer that is draining the input queued before its
@@ -248,10 +250,18 @@ table, and hands updates to each session over a bounded channel.
     strict arrival order.
   - **Configurations that keep strict arrival order throughout:** a defined
     conditional advertisement, because one prefix then gates another's
-    export, and any configured outbound prefix limit, because unrelated
-    prefixes then compete for a receiver's capped slots in arrival order.
-    The lane also stays closed while more than 64 sessions' session-up or
-    session-down messages are queued at once.
+    export; any configured outbound prefix limit, because unrelated prefixes
+    then compete for a receiver's capped slots in arrival order; and RFC
+    9117 FlowSpec validation, because a rule's feasibility depends on
+    covering and more-specific unicast prefixes. The lane also stays closed
+    while a planned restart's selection deferral may still hold a family,
+    and while more than 64 sessions' session-up or session-down messages are
+    queued at once.
+  - **The trade:** the small UPDATEs served between queued departures each
+    cost one distribution pass, so in a 50-member simultaneous flap on a
+    700-member server the withdrawals reach surviving members about 1.45
+    times slower at the median. The departure rule below bounds that at
+    about 1.5 times.
   - **Bounds:** after each such UPDATE the queue's head is admitted before
     the next one, so queued work always advances. A paced departure lets one
     pass per 16,384 receiver-keys of its own completed pages, as the first

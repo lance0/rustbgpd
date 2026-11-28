@@ -5430,7 +5430,12 @@ impl RibManager {
     ///   condition's last path is not independent of an UPDATE for the gated
     ///   prefix;
     /// - an outbound prefix limit is configured: unrelated prefixes compete
-    ///   for a receiver's capped slots in arrival order.
+    ///   for a receiver's capped slots in arrival order;
+    /// - RFC 9117 `FlowSpec` validation is enabled: a rule's feasibility
+    ///   depends on covering and more-specific unicast prefixes, which
+    ///   exact-prefix disjointness does not see;
+    /// - a restart's selection deferral may still hold a family: a queued
+    ///   `PeerUp` can arm the hold for every prefix of that family.
     fn take_overtake(&mut self, seam: RibInboundOvertakeSeam) -> Overtake {
         #[cfg(test)]
         if self.parked.strict_fifo {
@@ -5450,12 +5455,23 @@ impl RibManager {
             || !self.pending_route_batches.is_empty()
             || self.conditional_advertisements.any_defined()
             || self.outbound_limit_configured()
+            || self.flowspec_validation_enabled()
+            || self
+                .selection_deferral
+                .as_ref()
+                .is_some_and(selection_deferral::SelectionDeferral::may_hold)
         {
             return Overtake::Keep;
         }
         // A read-ahead that hashed rows or probed tables ends the poll even
         // without a candidate, so that work never precedes other work in it.
-        let keep = if self.parked.read_ahead(&mut self.rx, &self.ribs) == 0 {
+        let sessions = &self.live_sessions;
+        let live = |peer: PeerId, session_id: u64| {
+            sessions
+                .get(&peer)
+                .is_some_and(|records| records.iter().any(|r| r.session_id == session_id))
+        };
+        let keep = if self.parked.read_ahead(&mut self.rx, &self.ribs, &live) == 0 {
             Overtake::Keep
         } else {
             Overtake::Read
@@ -5490,18 +5506,18 @@ impl RibManager {
         // while giving operator reads and the executor their ordinary seam.
         if !self.traced_route_chunk() {
             let parked = self.first_group_deferred_intents.len();
-            // This seam yields below whatever it admits, so a read-ahead
-            // that found nothing still shares its poll only with one
-            // admission.
-            let update = match self.take_overtake(RibInboundOvertakeSeam::Drain) {
-                Overtake::Admit(update) => Some(*update),
-                Overtake::Read | Overtake::Keep => self.try_recv_primary(),
+            // A read-ahead that hashed rows or probed tables takes this
+            // poll: it admits nothing, serves the queries below and yields.
+            let (update, read) = match self.take_overtake(RibInboundOvertakeSeam::Drain) {
+                Overtake::Admit(update) => (Some(*update), false),
+                Overtake::Read => (None, true),
+                Overtake::Keep => (self.try_recv_primary(), false),
             };
             if let Some(update) = update {
                 self.traced(PostCommitWork::PrimaryUpdate, |manager| {
                     manager.handle_update(update);
                 });
-            } else if parked == self.first_group_deferred_intents.len() {
+            } else if !read && parked == self.first_group_deferred_intents.len() {
                 return false;
             }
         }

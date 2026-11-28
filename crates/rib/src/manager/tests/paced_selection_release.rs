@@ -1701,3 +1701,58 @@ async fn a_staged_release_delivery_keeps_the_overtake_lane_closed() {
     ));
     assert_eq!(manager.parked.len(), 0, "a closed lane reads nothing");
 }
+
+/// While a restart's selection deferral may still hold a family, a queued
+/// `PeerUp` can arm the hold for every prefix of it, so nothing passes
+/// queued session work: with the gate dormant, and with it armed.
+#[tokio::test(start_paused = true)]
+async fn a_selection_deferral_that_may_hold_keeps_the_overtake_lane_closed() {
+    use crate::manager::Overtake;
+    use rustbgpd_telemetry::metrics::RibInboundOvertakeSeam;
+    for armed in [false, true] {
+        let (tx, rx) = mpsc::channel(16);
+        let mut manager = if armed {
+            gated_source(rx)
+        } else {
+            held_families(rx, &[(peer_v4(SOURCE), FAMILY)])
+        };
+        let deferral = manager.selection_deferral.as_ref().unwrap();
+        assert!(deferral.may_hold());
+        assert_eq!(deferral.is_gated(FAMILY), armed);
+        let other = Ipv4Addr::new(198, 51, 100, 77);
+        let small = Ipv4Addr::new(198, 51, 100, 78);
+        let table = (0..600_u32)
+            .map(|n| make_route(Ipv4Prefix::new(Ipv4Addr::from(0x0b00_0000 + n), 32), other))
+            .collect();
+        tx.try_send(super::lifecycle::test_routes_received(
+            peer_v4(other),
+            table,
+        ))
+        .unwrap();
+        tx.try_send(super::lifecycle::test_routes_received(
+            peer_v4(small),
+            vec![make_route(
+                Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 9), 32),
+                small,
+            )],
+        ))
+        .unwrap();
+        assert!(
+            matches!(
+                manager.take_overtake(RibInboundOvertakeSeam::Drain),
+                Overtake::Keep
+            ),
+            "armed={armed}"
+        );
+        assert_eq!(manager.parked.len(), 0, "armed={armed}: nothing is read");
+        // The same queue passes once the deferral is gone.
+        manager.selection_deferral = None;
+        assert!(
+            matches!(
+                manager.take_overtake(RibInboundOvertakeSeam::Drain),
+                Overtake::Admit(_)
+            ),
+            "armed={armed}"
+        );
+    }
+}

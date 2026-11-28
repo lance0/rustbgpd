@@ -15,6 +15,8 @@ use crate::manager::source_departure::take_departure_pages;
 const OTHER: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 200);
 /// Routes of one rejoining member in the measured flap shape.
 const MEMBER_ROWS: u32 = 572;
+/// A session no source has registered: context that names it is staging.
+const STAGED: u64 = 9;
 
 pub(super) fn source(index: u8) -> Ipv4Addr {
     Ipv4Addr::new(198, 51, 100, 10 + index)
@@ -385,7 +387,7 @@ async fn a_small_update_passes_another_sessions_context_and_routes() {
         rows(source(0), 0, MEMBER_ROWS),
         RibUpdate::SetPeerRsControl {
             peer: peer_v4(source(1)),
-            session_id: 0,
+            session_id: STAGED,
             rs_control_asn: None,
         },
         rows(OTHER, 900_000, u32::try_from(OVERTAKE_ROWS).unwrap()),
@@ -403,7 +405,7 @@ async fn an_update_never_passes_its_own_sessions_messages() {
             "context",
             RibUpdate::SetPeerRsControl {
                 peer: peer_v4(OTHER),
-                session_id: 0,
+                session_id: STAGED,
                 rs_control_asn: None,
             },
         ),
@@ -629,7 +631,7 @@ async fn one_seam_inspects_a_bounded_number_of_queued_messages() {
     use crate::manager::parked_primaries::{INSPECT_MESSAGES_PER_SEAM, PARK_LIMIT};
     let context = || RibUpdate::SetPeerRsControl {
         peer: peer_v4(source(1)),
-        session_id: 0,
+        session_id: STAGED,
         rs_control_asn: None,
     };
     let (tx, mut manager, _log) = fleet(2, 2);
@@ -745,7 +747,7 @@ async fn the_head_advances_between_overtakes() {
     let mut queue = vec![rows(source(0), 0, MEMBER_ROWS)];
     queue.extend((1..HEADS).map(|index| RibUpdate::SetPeerRsControl {
         peer: peer_v4(source(index)),
-        session_id: 0,
+        session_id: STAGED,
         rs_control_asn: None,
     }));
     queue
@@ -980,7 +982,10 @@ async fn parked_and_hashed_rows_stay_within_their_caps() {
         .unwrap();
     tx.try_send(rows(OTHER, 900_000, 1)).unwrap();
     for _ in 0..4 {
-        let work = manager.parked.read_ahead(&mut manager.rx, &manager.ribs);
+        let work =
+            manager
+                .parked
+                .read_ahead(&mut manager.rx, &manager.ribs, &|_: PeerId, _: u64| false);
         assert_eq!(work, 0, "nothing that could pass has arrived");
     }
     assert_eq!(
@@ -1000,7 +1005,10 @@ async fn parked_and_hashed_rows_stay_within_their_caps() {
     assert!(manager.parked.take().is_some());
     let mut seams = 0;
     while manager.parked.candidate().is_none() {
-        let work = manager.parked.read_ahead(&mut manager.rx, &manager.ribs);
+        let work =
+            manager
+                .parked
+                .read_ahead(&mut manager.rx, &manager.ribs, &|_: PeerId, _: u64| false);
         assert!(
             (1..=INSPECT_WORK_PER_SEAM).contains(&work),
             "{work} hashes in one seam"
@@ -1154,4 +1162,295 @@ async fn a_full_read_buffer_an_owed_rebuild_or_an_ingest_stall_keeps_the_lane_cl
             "{case}: the lane reopens"
         );
     }
+}
+
+/// Session context is passable only as staging for a session that has not
+/// registered. A context change of a live session takes effect for later
+/// exports without resyncing earlier ones, so an UPDATE behind it keeps
+/// FIFO. The handler itself tells the two apart by the live session record.
+#[tokio::test(start_paused = true)]
+async fn a_live_sessions_context_change_keeps_fifo_and_staging_is_passed() {
+    let context = |session_id: u64| RibUpdate::SetPeerPolicyContext {
+        peer: peer_v4(source(1)),
+        session_id,
+        peer_group: Some("moved".to_owned()),
+    };
+    // Source 1 registered session 0.
+    Box::pin(assert_fifo(
+        "live context",
+        vec![rows(source(0), 0, MEMBER_ROWS), context(0)],
+        rows(OTHER, 900_000, 1),
+    ))
+    .await;
+    // Staging for the session a queued PeerUp ahead is about to register.
+    Box::pin(assert_fifo(
+        "context behind its PeerUp",
+        vec![
+            rows(source(0), 0, MEMBER_ROWS),
+            registering_peer_up(peer_v4(source(1)), STAGED),
+            context(STAGED),
+        ],
+        rows(OTHER, 900_000, 1),
+    ))
+    .await;
+    // Staging for a session nobody has registered is passed.
+    let (tx, manager, log) = fleet(2, 8);
+    let queue = vec![
+        rows(source(0), 0, MEMBER_ROWS),
+        context(STAGED),
+        rows(OTHER, 900_000, 1),
+    ];
+    let (manager, order) = Box::pin(run(tx, manager, &log, queue)).await;
+    assert_eq!(position(&order, 1), 0, "{order:?}");
+    assert_eq!(overtakes(&manager), [("receive".to_owned(), 1.0)]);
+}
+
+/// At the drain seam a read-ahead that hashed rows takes the whole poll: it
+/// admits neither a parked UPDATE nor the head, and the head is admitted by
+/// the next call.
+#[tokio::test(start_paused = true)]
+async fn a_drain_seam_that_hashed_rows_admits_nothing_in_that_poll() {
+    let (tx, mut manager, log) = fleet(2, 2);
+    tx.try_send(rows(source(0), 0, MEMBER_ROWS)).unwrap();
+    tx.try_send(rows(source(1), 1_000, MEMBER_ROWS)).unwrap();
+    // It shares a prefix with the first table, so it does not pass.
+    tx.try_send(rows(OTHER, 0, 1)).unwrap();
+    log.lock().unwrap().clear();
+    assert!(manager.drain_ready_updates().await, "the seam did work");
+    assert!(
+        log.lock().unwrap().is_empty(),
+        "a primary was dispatched in the poll that hashed rows"
+    );
+    assert_eq!(manager.parked.len(), 3);
+    assert_eq!(
+        manager.parked.indexed_rows(),
+        2 * usize::try_from(MEMBER_ROWS).unwrap()
+    );
+    assert!(manager.drain_ready_updates().await);
+    assert_eq!(log.lock().unwrap().len(), 1, "the head is admitted next");
+}
+
+/// Reading ahead counts each parked message once: 512 messages behind one
+/// head are about 512 visits, not one pass over the deque per message.
+#[tokio::test(start_paused = true)]
+async fn counting_parked_messages_is_linear_in_the_messages_read() {
+    use crate::manager::parked_primaries::{INSPECT_MESSAGES_PER_SEAM, take_count_visits};
+    let (tx, mut manager, _log) = fleet(2, 2);
+    tx.try_send(rows(source(0), 0, MEMBER_ROWS)).unwrap();
+    for _ in 0..INSPECT_MESSAGES_PER_SEAM {
+        tx.try_send(RibUpdate::SetPeerRsControl {
+            peer: peer_v4(source(1)),
+            session_id: STAGED,
+            rs_control_asn: None,
+        })
+        .unwrap();
+    }
+    take_count_visits();
+    let noop = |_: PeerId, _: u64| false;
+    manager
+        .parked
+        .read_ahead(&mut manager.rx, &manager.ribs, &noop);
+    assert_eq!(manager.parked.len(), INSPECT_MESSAGES_PER_SEAM + 1);
+    let visits = take_count_visits();
+    assert!(
+        visits <= INSPECT_MESSAGES_PER_SEAM + 1,
+        "{visits} entries visited to count {INSPECT_MESSAGES_PER_SEAM} messages"
+    );
+    // A returned head is counted with the tail, still once each.
+    let head = manager.parked.take().unwrap();
+    manager.parked.put(head);
+    tx.try_send(rows(OTHER, 900_000, 1)).unwrap();
+    manager
+        .parked
+        .read_ahead(&mut manager.rx, &manager.ribs, &noop);
+    assert!(manager.parked.candidate().is_some());
+    assert!(take_count_visits() <= 3);
+}
+
+/// The table probes of the final check are charged to the seam's budget
+/// before they run: 32,768 parked rows fill one seam, and the probes of a
+/// 16-row UPDATE against 64 parked session ends wait for the next.
+#[tokio::test(start_paused = true)]
+async fn table_probes_are_reserved_within_the_seam_budget() {
+    use crate::manager::parked_primaries::{INSPECT_WORK_PER_SEAM, RESET_SESSIONS_LIMIT};
+    const TABLES: u8 = 32;
+    let ends = u8::try_from(RESET_SESSIONS_LIMIT).unwrap();
+    let (tx, mut manager, _log) = fleet(TABLES + ends, 2);
+    for index in 0..TABLES {
+        tx.try_send(rows(source(index), u32::from(index) * 2_000, 1_024))
+            .unwrap();
+    }
+    for index in 0..ends {
+        tx.try_send(down(source(TABLES + index))).unwrap();
+    }
+    tx.try_send(rows(OTHER, 900_000, u32::try_from(OVERTAKE_ROWS).unwrap()))
+        .unwrap();
+    let noop = |_: PeerId, _: u64| false;
+    let first = manager
+        .parked
+        .read_ahead(&mut manager.rx, &manager.ribs, &noop);
+    assert_eq!(first, INSPECT_WORK_PER_SEAM, "the hashes fill the seam");
+    assert!(manager.parked.candidate().is_none(), "the probes wait");
+    let second = manager
+        .parked
+        .read_ahead(&mut manager.rx, &manager.ribs, &noop);
+    assert_eq!(second, usize::from(ends) * OVERTAKE_ROWS);
+    assert!(manager.parked.candidate().is_some());
+}
+
+/// A small UPDATE parked behind the head is a route message like any other:
+/// another session's UPDATE passes it when their prefixes differ and keeps
+/// FIFO behind it when they share one. Order between two sessions on
+/// different prefixes is not arrival order anywhere in the lane.
+#[tokio::test(start_paused = true)]
+async fn a_small_update_ahead_is_passed_only_on_different_prefixes() {
+    // Source 0's own small UPDATE cannot pass its 17-row table; another
+    // session's can pass both.
+    let (tx, manager, log) = fleet(2, 8);
+    let queue = vec![
+        rows(source(0), 0, 17),
+        rows(source(0), 100, 2),
+        rows(OTHER, 900_000, 1),
+    ];
+    let (manager, order) = Box::pin(run(tx, manager, &log, queue)).await;
+    assert_eq!(
+        order,
+        [
+            other(1),
+            format!("routes:{}:17", source(0)),
+            format!("routes:{}:2", source(0)),
+        ]
+    );
+    assert_eq!(overtakes(&manager), [("receive".to_owned(), 1.0)]);
+    // The same prefix as the small UPDATE ahead: arrival order.
+    Box::pin(assert_fifo(
+        "shared with a small UPDATE ahead",
+        vec![rows(source(0), 0, 17), rows(source(0), 100, 2)],
+        rows(OTHER, 101, 1),
+    ))
+    .await;
+}
+
+/// With RFC 9117 validation, a rule's feasibility depends on covering and
+/// more-specific unicast prefixes. A owns the cover and a rule that B's
+/// more-specific route makes infeasible. If B's withdrawal passed A's
+/// queued session end, the rule would become feasible and be exported, then
+/// withdrawn; in arrival order it is never exported. Validation keeps the
+/// queue in strict arrival order.
+#[tokio::test(start_paused = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one fixture: the cover, the rule, the conflicting route and the queue"
+)]
+async fn flowspec_validation_keeps_the_queue_in_arrival_order() {
+    use rustbgpd_wire::{AsPath, AsPathSegment};
+    async fn rule_events(strict: bool) -> (Vec<String>, f64) {
+        let path = |asn: u32| {
+            AttrSet::new(vec![PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![asn])],
+            })])
+        };
+        let (tx, rx) = mpsc::channel(64);
+        let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+            .with_flowspec_validation(65_000);
+        manager.outbound_row_credit_override = None;
+        super::distribution_window::untimed_window(&mut manager);
+        manager.parked.strict_fifo = strict;
+        let (owner, rival, bulk) = (source(0), source(1), source(2));
+        for from in [owner, rival, bulk] {
+            register_test_peer(&mut manager, peer_v4(from), 0);
+        }
+        let receiver = peer_v4(Ipv4Addr::new(192, 0, 2, 200));
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(256);
+        let mut up = test_peer_up(receiver, 1, outbound_tx);
+        let RibUpdate::PeerUp {
+            sendable_families, ..
+        } = &mut up
+        else {
+            unreachable!()
+        };
+        sendable_families.extend(ipv4_flowspec_sendable());
+        manager.handle_update(up);
+        let events = Log::default();
+        let seen = Arc::clone(&events);
+        tokio::spawn(async move {
+            while let Some(update) = outbound_rx.recv().await.map(delivered) {
+                let mut seen = seen.lock().unwrap();
+                seen.extend(
+                    update
+                        .flowspec_announce
+                        .iter()
+                        .map(|_| "announce".to_owned()),
+                );
+                seen.extend(
+                    update
+                        .flowspec_withdraw
+                        .iter()
+                        .map(|_| "withdraw".to_owned()),
+                );
+            }
+        });
+
+        let mut cover = make_route(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 0, 0), 16), owner);
+        cover.attributes = path(65_001);
+        let mut rule = make_flowspec_route(owner);
+        rule.attributes = path(65_001);
+        let specific = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 25);
+        let mut conflicting = make_route(specific, rival);
+        conflicting.attributes = path(65_002);
+        let mut announcement = test_routes_received(peer_v4(owner), vec![cover]);
+        let RibUpdate::RoutesReceived {
+            flowspec_announced, ..
+        } = &mut announcement
+        else {
+            unreachable!()
+        };
+        flowspec_announced.push(rule.clone());
+        for update in [
+            announcement,
+            test_routes_received(peer_v4(rival), vec![conflicting]),
+        ] {
+            manager.handle_update(update);
+            drain_route_chunks(&mut manager);
+            while manager.process_flowspec_validation_chunk() {}
+        }
+        assert!(
+            manager
+                .loc_rib
+                .get_flowspec(&rule.selection_key())
+                .is_none(),
+            "the more-specific route makes the rule infeasible"
+        );
+        // The rule was exported while it was feasible and withdrawn since.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(*events.lock().unwrap(), ["announce", "withdraw"]);
+        events.lock().unwrap().clear();
+
+        let mut withdrawal = test_routes_received(peer_v4(rival), Vec::new());
+        let RibUpdate::RoutesReceived { withdrawn, .. } = &mut withdrawal else {
+            unreachable!()
+        };
+        withdrawn.push((Prefix::V4(specific), 0));
+        // A table, the end of the owner's session, then the withdrawal.
+        tx.try_send(rows(bulk, 0, 1_100)).unwrap();
+        tx.try_send(down(owner)).unwrap();
+        tx.try_send(withdrawal).unwrap();
+        let actor = tokio::spawn(manager.run_actor());
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        drop(tx);
+        let manager = actor.await.unwrap();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let passed = overtakes(&manager).iter().map(|(_, count)| count).sum();
+        let events = events.lock().unwrap().clone();
+        (events, passed)
+    }
+    let (fifo, _) = Box::pin(rule_events(true)).await;
+    assert_eq!(
+        fifo,
+        [] as [String; 0],
+        "arrival order never exports the rule"
+    );
+    let (lane, passed) = Box::pin(rule_events(false)).await;
+    assert_eq!(lane, fifo, "the receiver's FlowSpec stream changed");
+    assert!(passed == 0.0, "an UPDATE passed with validation enabled");
 }

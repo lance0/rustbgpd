@@ -14,9 +14,11 @@
 //! - it is unicast-only route input of at most [`OVERTAKE_ROWS`] rows;
 //! - nothing from its own session is ahead, so per-session order holds;
 //! - everything ahead is on the passable allowlist ([`classify`]): another
-//!   session's `PeerUp`, `PeerDown`, session context or unicast-only route
-//!   input. Any other kind is a barrier, and a new kind is a barrier until
-//!   it is listed;
+//!   session's `PeerUp`, `PeerDown`, unicast-only route input, or session
+//!   context staged for a session that has not registered. Any other kind
+//!   is a barrier, and a new kind is a barrier until it is listed. Context
+//!   of a live session is a barrier too: it changes what later exports see
+//!   without resyncing earlier ones;
 //! - none of its prefixes appears in a route message ahead, so cross-source
 //!   order on a shared prefix holds;
 //! - no `PeerUp` or `PeerDown` ahead belongs to a session whose Adj-RIB-In
@@ -89,8 +91,8 @@ enum Parked<'a> {
     },
     /// Session bring-up or teardown: it resets the session's Adj-RIB-In.
     Reset(PeerId),
-    /// Session context.
-    Session(PeerId),
+    /// Session context, naming the session it belongs to.
+    Context(PeerId, u64),
     /// Everything else: nothing behind it may pass.
     Barrier,
 }
@@ -131,18 +133,42 @@ fn classify(update: &RibUpdate) -> Parked<'_> {
             }
         }
         RibUpdate::PeerUp { peer, .. } | RibUpdate::PeerDown { peer, .. } => Parked::Reset(*peer),
-        RibUpdate::PeerAddPathLimits { peer, .. }
-        | RibUpdate::PeerFamilySendable { peer, .. }
-        | RibUpdate::PeerSlowState { peer, .. }
-        | RibUpdate::SetPeerSessionExportPolicy { peer, .. }
-        | RibUpdate::SetPeerSourceContext { peer, .. }
-        | RibUpdate::SetPeerPolicyContext { peer, .. }
-        | RibUpdate::SetPeerExportPolicyCounters { peer, .. }
-        | RibUpdate::SetPeerExportContext { peer, .. }
-        | RibUpdate::SetPeerWithheldFamilies { peer, .. }
-        | RibUpdate::SetPeerRsControl { peer, .. }
-        | RibUpdate::SetPeerExportEncoder { peer, .. }
-        | RibUpdate::SetPeerGracefulRestartContext { peer, .. } => Parked::Session(*peer),
+        RibUpdate::PeerAddPathLimits {
+            peer, session_id, ..
+        }
+        | RibUpdate::PeerFamilySendable {
+            peer, session_id, ..
+        }
+        | RibUpdate::PeerSlowState {
+            peer, session_id, ..
+        }
+        | RibUpdate::SetPeerSessionExportPolicy {
+            peer, session_id, ..
+        }
+        | RibUpdate::SetPeerSourceContext {
+            peer, session_id, ..
+        }
+        | RibUpdate::SetPeerPolicyContext {
+            peer, session_id, ..
+        }
+        | RibUpdate::SetPeerExportPolicyCounters {
+            peer, session_id, ..
+        }
+        | RibUpdate::SetPeerExportContext {
+            peer, session_id, ..
+        }
+        | RibUpdate::SetPeerWithheldFamilies {
+            peer, session_id, ..
+        }
+        | RibUpdate::SetPeerRsControl {
+            peer, session_id, ..
+        }
+        | RibUpdate::SetPeerExportEncoder {
+            peer, session_id, ..
+        }
+        | RibUpdate::SetPeerGracefulRestartContext {
+            peer, session_id, ..
+        } => Parked::Context(*peer, *session_id),
         _ => Parked::Barrier,
     }
 }
@@ -167,9 +193,10 @@ enum Indexed {
     Counted,
     /// Counted, and its rows are in the prefix index.
     Hashed,
-    /// Counted, and a route message with more rows than one seam may hash:
-    /// a barrier, its rows are never hashed.
-    Oversized,
+    /// Counted as a barrier and nothing else: a kind off the allowlist, a
+    /// context change of a live session, or a route message with more rows
+    /// than one seam may hash.
+    Barrier,
 }
 
 struct Entry {
@@ -222,7 +249,15 @@ fn forget<K: std::hash::Hash + Eq>(counts: &mut FastMap<K, usize>, key: &K) {
 }
 
 impl Ahead {
-    fn count(&mut self, update: &RibUpdate) {
+    /// Count `update` for the messages behind it. Returns `false` when it
+    /// is a barrier, which is counted as nothing else.
+    ///
+    /// Session context is passable only as staging for a session that has
+    /// not registered: `live` says whether the session it names is
+    /// registered now, and a parked `PeerUp` ahead says it soon will be. A
+    /// context change of a live session takes effect for later exports
+    /// without resyncing earlier ones, so nothing may pass it.
+    fn count(&mut self, update: &RibUpdate, live: &impl Fn(PeerId, u64) -> bool) -> bool {
         match classify(update) {
             Parked::Routes {
                 peer,
@@ -236,11 +271,20 @@ impl Ahead {
                 *self.sessions.entry(peer).or_default() += 1;
                 *self.resets.entry(peer).or_default() += 1;
             }
-            Parked::Session(peer) => *self.sessions.entry(peer).or_default() += 1,
-            Parked::Barrier => self.barriers += 1,
+            Parked::Context(peer, session)
+                if !live(peer, session) && !self.resets.contains_key(&peer) =>
+            {
+                *self.sessions.entry(peer).or_default() += 1;
+            }
+            Parked::Context(..) | Parked::Barrier => {
+                self.barriers += 1;
+                return false;
+            }
         }
+        true
     }
 
+    /// Undo [`Self::count`] of a message that was not a barrier.
     fn uncount(&mut self, update: &RibUpdate) {
         match classify(update) {
             Parked::Routes {
@@ -255,8 +299,8 @@ impl Ahead {
                 forget(&mut self.sessions, &peer);
                 forget(&mut self.resets, &peer);
             }
-            Parked::Session(peer) => forget(&mut self.sessions, &peer),
-            Parked::Barrier => self.barriers -= 1,
+            Parked::Context(peer, _) => forget(&mut self.sessions, &peer),
+            Parked::Barrier => {}
         }
     }
 
@@ -335,6 +379,18 @@ impl Ahead {
             self.resets.len() * (announced.len() + withdrawn.len()),
         )
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Entries [`ParkedPrimaries::count_parked`] has visited on this thread.
+    static COUNT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Entries counted on this thread since the last call.
+#[cfg(test)]
+pub(super) fn take_count_visits() -> usize {
+    COUNT_VISITS.replace(0)
 }
 
 fn small_routes(update: &RibUpdate) -> bool {
@@ -457,26 +513,43 @@ impl ParkedPrimaries {
                 self.ahead.unhash(&entry.update);
                 self.ahead.uncount(&entry.update);
             }
-            Indexed::Oversized => {
-                self.ahead.barriers -= 1;
-                self.ahead.uncount(&entry.update);
-            }
+            Indexed::Barrier => self.ahead.barriers -= 1,
         }
         entry.update
     }
 
     /// Count every parked entry that is not, except the last `keep`.
-    fn count_parked(&mut self, keep: usize) {
+    ///
+    /// Uncounted entries are a run at the head (returned heads) and a run
+    /// at the tail (the newest messages), so only those two runs are
+    /// visited: the cost is the entries counted, not the deque's length.
+    fn count_parked(&mut self, keep: usize, live: &impl Fn(PeerId, u64) -> bool) {
         if self.uncounted <= keep {
             return;
         }
         let end = self.entries.len() - keep;
-        for entry in self.entries.iter_mut().take(end) {
-            if entry.indexed == Indexed::No {
-                self.ahead.count(&entry.update);
-                entry.indexed = Indexed::Counted;
-                self.uncounted -= 1;
-            }
+        let mut tail = end;
+        while tail > 0 && self.entries[tail - 1].indexed == Indexed::No {
+            tail -= 1;
+        }
+        let head = self
+            .entries
+            .iter()
+            .take(tail)
+            .take_while(|entry| entry.indexed == Indexed::No)
+            .count();
+        // FIFO order: a parked `PeerUp` must be counted before the context
+        // messages behind it.
+        for at in (0..head).chain(tail..end) {
+            #[cfg(test)]
+            COUNT_VISITS.set(COUNT_VISITS.get() + 1);
+            let entry = &mut self.entries[at];
+            entry.indexed = if self.ahead.count(&entry.update, live) {
+                Indexed::Counted
+            } else {
+                Indexed::Barrier
+            };
+            self.uncounted -= 1;
         }
     }
 
@@ -485,9 +558,15 @@ impl ParkedPrimaries {
     /// budget ran out first; the next seam resumes.
     ///
     /// A route message with more rows than a whole seam may hash is counted
-    /// as a barrier instead, and its rows are never hashed.
-    fn decide_tail(&mut self, ribs: &HashMap<PeerId, AdjRibIn>, work: &mut usize) -> bool {
-        self.count_parked(1);
+    /// as a barrier instead, and its rows are never hashed. The table probes
+    /// of the final check are reserved against the budget before they run.
+    fn decide_tail(
+        &mut self,
+        ribs: &HashMap<PeerId, AdjRibIn>,
+        live: &impl Fn(PeerId, u64) -> bool,
+        work: &mut usize,
+    ) -> bool {
+        self.count_parked(1, live);
         let ahead = self.entries.len() - 1;
         for entry in self.entries.iter_mut().take(ahead) {
             if entry.indexed != Indexed::Counted {
@@ -498,8 +577,9 @@ impl ParkedPrimaries {
                 continue;
             }
             if rows > INSPECT_WORK_PER_SEAM {
+                self.ahead.uncount(&entry.update);
                 self.ahead.barriers += 1;
-                entry.indexed = Indexed::Oversized;
+                entry.indexed = Indexed::Barrier;
             } else if *work > 0 && *work + rows > INSPECT_WORK_PER_SEAM {
                 return false;
             } else {
@@ -508,10 +588,16 @@ impl ParkedPrimaries {
                 *work += rows;
             }
         }
-        self.tail_pending = false;
         let Some(tail) = self.entries.back() else {
+            self.tail_pending = false;
             return true;
         };
+        // Worst case: every row of the tail against every reset session.
+        let probes = self.ahead.resets.len() * route_rows(&tail.update);
+        if *work > 0 && *work + probes > INSPECT_WORK_PER_SEAM {
+            return false;
+        }
+        self.tail_pending = false;
         let (passes, lookups) = self.ahead.passes(&tail.update, ribs);
         *work += lookups;
         if passes {
@@ -527,11 +613,13 @@ impl ParkedPrimaries {
     /// That is zero unless a message that could pass arrived: a parked
     /// message is only counted, and its rows are hashed when a small UPDATE
     /// from a session with nothing parked arrives behind it. Nothing is read
-    /// while the head is itself a small UPDATE, which is never passed.
+    /// while the head is itself a small UPDATE, which is not worth passing.
+    /// `live` says whether a session is registered now.
     pub(super) fn read_ahead(
         &mut self,
         rx: &mut mpsc::Receiver<RibUpdate>,
         ribs: &HashMap<PeerId, AdjRibIn>,
+        live: &impl Fn(PeerId, u64) -> bool,
     ) -> usize {
         if self.peek(rx).is_none_or(small_routes) {
             return 0;
@@ -542,7 +630,7 @@ impl ParkedPrimaries {
             && work < INSPECT_WORK_PER_SEAM
         {
             if self.tail_pending {
-                if !self.decide_tail(ribs, &mut work) {
+                if !self.decide_tail(ribs, live, &mut work) {
                     break;
                 }
                 continue;
@@ -550,7 +638,7 @@ impl ParkedPrimaries {
             if self.entries.len() >= PARK_LIMIT || rx.is_empty() {
                 break;
             }
-            self.count_parked(0);
+            self.count_parked(0, live);
             if self.ahead.barriers > 0 || self.ahead.parked_rows >= PARK_ROW_LIMIT {
                 break;
             }
@@ -589,8 +677,10 @@ impl ParkedPrimaries {
             .binary_search_by_key(&seq, |entry| entry.seq)
             .expect("a candidate is parked until it leaves");
         // The head is admitted by the ordinary FIFO path, and a head that is
-        // itself a small UPDATE is not worth passing: small UPDATEs keep
-        // their arrival order among themselves.
+        // itself a small UPDATE is not worth passing: it costs what the
+        // candidate costs. A small UPDATE parked behind the head is passed
+        // like any other route message, when its session and prefixes
+        // differ.
         let small_head = self
             .entries
             .front()
