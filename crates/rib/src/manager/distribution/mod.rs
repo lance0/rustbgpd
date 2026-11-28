@@ -123,6 +123,11 @@ pub(in crate::manager) struct DistributionWindow {
     /// Ingest permits of the drained session messages, returned once the
     /// window's distribution pass has run.
     permits: Vec<crate::ingest_budget::IngestPermit>,
+    /// The window was opened by an UPDATE that passed the queue's head. It
+    /// takes in one queued message, the head, and then settles: the pass
+    /// distributes the UPDATE with one table, not with the two that share a
+    /// window in arrival order, so it stays below that pass.
+    pub(in crate::manager) passed_head: bool,
 }
 
 impl DistributionWindow {
@@ -9264,7 +9269,8 @@ impl RibManager {
         let window = &self.distribution_window;
         // The ingest-stall fault injection must see every message on its
         // own receive; coalescing would bypass the stall.
-        if self.test_ingest_stall.is_some()
+        if (window.passed_head && window.messages >= 2)
+            || self.test_ingest_stall.is_some()
             || self.primary_read_ahead_cutoff_reached()
             || !self.pending_route_batches.is_empty()
             || window.messages >= limits.messages

@@ -321,9 +321,9 @@ async fn a_one_row_update_behind_member_tables_waits_a_flat_number_of_messages()
 }
 
 /// Under a steady supply of eligible small UPDATEs the queue still advances:
-/// each overtake is followed by a FIFO admission before the next one (here a
-/// whole distribution window of two member tables), and candidates leave in
-/// their own arrival order.
+/// each overtake is followed by a FIFO admission before the next one (the
+/// table that joins the UPDATE's window), and candidates leave in their own
+/// arrival order.
 #[tokio::test(start_paused = true)]
 async fn overtakes_alternate_with_the_fifo_head_in_arrival_order() {
     const TABLES: u8 = 8;
@@ -345,21 +345,15 @@ async fn overtakes_alternate_with_the_fifo_head_in_arrival_order() {
     let (manager, order) = Box::pin(run(tx, manager, &log, queue)).await;
     let label = |index: u8, count: u32| format!("routes:{}:{count}", source(index));
     let mut expected = Vec::new();
-    for round in 0..TABLES / 2 {
+    for round in 0..TABLES {
         expected.push(label(TABLES + round, u32::from(round) + 1));
-        expected.push(label(2 * round, MEMBER_ROWS));
-        expected.push(label(2 * round + 1, MEMBER_ROWS));
+        expected.push(label(round, MEMBER_ROWS));
     }
-    // The tables are gone: the rest is the queue itself.
-    expected.extend((TABLES / 2..SMALL).map(|index| label(TABLES + index, u32::from(index) + 1)));
     assert_eq!(order, expected);
-    let heads_between: Vec<usize> = order
-        .split(|seen| !seen.ends_with(&format!(":{MEMBER_ROWS}")))
-        .map(<[String]>::len)
-        .filter(|&heads| heads > 0)
-        .collect();
-    assert_eq!(heads_between, [2; 4], "head admissions after each overtake");
-    assert_eq!(overtakes(&manager), [("receive".to_owned(), 4.0)]);
+    assert_eq!(
+        overtakes(&manager),
+        [("receive".to_owned(), f64::from(TABLES))]
+    );
 }
 
 /// Run `ahead` then [`OTHER`]'s `last` and require strict FIFO: `last` is
@@ -1556,4 +1550,44 @@ async fn an_empty_paths_limit_message_is_passed_and_one_with_entries_is_not() {
         rows(OTHER, 900_000, 1),
     ))
     .await;
+}
+
+/// The window an overtaken UPDATE opens takes in one queued table, the
+/// head, and settles. In arrival order two such tables share a window, so
+/// the pass that carries the UPDATE is smaller than that one, not larger.
+#[tokio::test(start_paused = true)]
+async fn an_overtaken_updates_window_takes_in_one_queued_table() {
+    let (tx, mut manager, log) = fleet(3, 2);
+    for index in 0..3 {
+        tx.try_send(rows(source(index), u32::from(index) * 1_000, MEMBER_ROWS))
+            .unwrap();
+    }
+    tx.try_send(rows(OTHER, 900_000, 1)).unwrap();
+    log.lock().unwrap().clear();
+    // The UPDATE is admitted; its chunk runs and the head joins its window;
+    // the head's chunk runs and the window settles.
+    for _ in 0..3 {
+        assert!(manager.drain_ready_updates().await);
+    }
+    assert_eq!(
+        *log.lock().unwrap(),
+        [
+            format!("{}@0", other(1)),
+            format!("routes:{}:{MEMBER_ROWS}@0", source(0)),
+        ],
+        "the UPDATE's window took in more than the head"
+    );
+    assert!(manager.pending_route_batches.is_empty());
+    assert!(
+        manager.pending_distribute_affected.is_empty(),
+        "the window settled"
+    );
+    assert_eq!(manager.parked.len(), 2, "two tables are still queued");
+    // Arrival order resumes, and those two tables share a window as before.
+    for _ in 0..3 {
+        assert!(manager.drain_ready_updates().await);
+    }
+    assert_eq!(log.lock().unwrap().len(), 4);
+    assert!(manager.pending_route_batches.is_empty());
+    assert!(manager.pending_distribute_affected.is_empty());
 }

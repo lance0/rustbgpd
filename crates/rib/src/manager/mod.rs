@@ -5494,6 +5494,9 @@ impl RibManager {
         };
         self.charge_primary_admission();
         self.parked.admitted(true);
+        // No batch is pending here, so this UPDATE opens the next window:
+        // mark it, so it takes in one queued message and no more.
+        self.distribution_window.passed_head = true;
         self.metrics.record_rib_inbound_overtake(seam);
         Overtake::Admit(Box::new(update))
     }
