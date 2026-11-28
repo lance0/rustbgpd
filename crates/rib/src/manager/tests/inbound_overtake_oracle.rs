@@ -11,12 +11,13 @@
 //! with one message per window, which shows every state a prefix passes
 //! through. Each run's stream for a prefix must be that reference with some
 //! intermediate states left out: the same order, the same end, and no state
-//! the reference never shows. End-of-RIB markers are events too: each run
-//! must send a receiver the same markers in the same order. Which rows a
-//! paced replay has sent by the time its marker leaves depends on how its
-//! pages interleave with other input even in strict arrival order, so the
-//! table at a marker is pinned by the deterministic family-unlock test
-//! instead.
+//! the reference never shows. A repeat of the state just sent, such as a
+//! route refresh answer, is not a state change and is left out of both.
+//! End-of-RIB markers are events too: each run must send a receiver the same
+//! markers in the same order. Which rows a paced replay has sent by the time
+//! its marker leaves depends on how its pages interleave with other input
+//! even in strict arrival order, so the table at a marker is pinned by the
+//! deterministic family-unlock test instead.
 
 use super::exportability::ReusableExactExportEncoder;
 use super::inbound_overtake::{Log, collect, overtakes, prefix, source, wired_fleet};
@@ -191,7 +192,13 @@ fn table(wire: &Log) -> BTreeMap<String, String> {
     table
 }
 
-/// What a receiver was sent for each prefix, in order: `A <source>` or `W`.
+/// What a receiver was sent for each prefix, in order: `A <source>` or `W`,
+/// with a repeat of the state just sent left out. A route refresh answer
+/// repeats the receiver's current state for every prefix it holds, and an
+/// answer deferred behind a live whole-table update goes out on a later
+/// resync tick, after however many queued messages the actor has applied by
+/// then. That depends on when the receiver's writer ran, so a repeat is not
+/// part of the order a run must keep.
 fn sequences(wire: &Log) -> BTreeMap<String, Vec<String>> {
     let mut sequences: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for event in wire.lock().unwrap().iter() {
@@ -204,7 +211,10 @@ fn sequences(wire: &Log) -> BTreeMap<String, Vec<String>> {
             let (key, from) = event.strip_prefix("A ").unwrap().rsplit_once(' ').unwrap();
             (key, format!("A {from}"))
         };
-        sequences.entry(key.to_owned()).or_default().push(state);
+        let states = sequences.entry(key.to_owned()).or_default();
+        if states.last() != Some(&state) {
+            states.push(state);
+        }
     }
     sequences
 }
