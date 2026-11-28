@@ -1255,6 +1255,89 @@ fn bench_rib_pipeline(c: &mut Criterion) {
     group.finish();
 }
 
+/// Ingest through the actor's own loop with the whole input queued: the
+/// primary intake, route chunks and selection, with no receiver. `tables`
+/// is one source's full-size messages; `small` is one-route messages from
+/// eight sources, the shape whose per-message intake cost shows most.
+fn bench_actor_ingest(c: &mut Criterion) {
+    use rustbgpd_rib::{RibManager, RibUpdate};
+    use rustbgpd_telemetry::BgpMetrics;
+    use tokio::sync::mpsc;
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("runtime builds");
+    let mut group = c.benchmark_group("rib_actor_ingest");
+    group.sample_size(20);
+    for (name, messages, rows, sources) in [
+        ("tables", 64_usize, 1024_usize, 1_u32),
+        ("small", 8192, 1, 8),
+    ] {
+        let prefixes = generate_prefixes(messages * rows);
+        let batches: Vec<Vec<Route>> = prefixes
+            .chunks(rows)
+            .zip((1..=sources).cycle())
+            .map(|(chunk, source)| chunk.iter().map(|p| make_route(*p, source)).collect())
+            .collect();
+        group.bench_function(BenchmarkId::new(name, format!("{messages}x{rows}")), |b| {
+            b.iter_batched(
+                || {
+                    let (tx, rx) = mpsc::channel(messages + 64);
+                    let (query_tx, query_rx) = mpsc::channel(8);
+                    let manager = RibManager::new(rx, query_rx, None, None, BgpMetrics::new());
+                    for source in 1..=sources {
+                        let (outbound_tx, _outbound_rx) = mpsc::channel(8);
+                        tx.try_send(RibUpdate::PeerUp {
+                            supersedes: None,
+                            peer: make_route(prefixes[0], source).peer,
+                            session_id: 0,
+                            peer_asn: 65001,
+                            peer_router_id: Ipv4Addr::new(192, 0, 2, 254),
+                            outbound_tx,
+                            export_policy: None,
+                            sendable_families: Vec::new(),
+                            is_ebgp: true,
+                            route_reflector_client: false,
+                            orr_vantage: None,
+                            per_client_best: false,
+                            interpret_rfc1997: true,
+                            add_path_send_families: Vec::new(),
+                            add_path_send_max: 0,
+                            negotiated_orf_recv: Vec::new(),
+                            negotiated_llgr_families: Vec::new(),
+                        })
+                        .expect("channel has room");
+                    }
+                    for batch in &batches {
+                        tx.try_send(RibUpdate::RoutesReceived {
+                            peer: batch[0].peer,
+                            session_id: 0,
+                            announced: batch.clone(),
+                            withdrawn: Vec::new(),
+                            flowspec_announced: Vec::new(),
+                            flowspec_withdrawn: Vec::new(),
+                            evpn_announced: Vec::new(),
+                            evpn_withdrawn: Vec::new(),
+                            validated_with: None,
+                        })
+                        .expect("channel has room");
+                    }
+                    // The actor ends once it has drained the closed channel.
+                    drop(tx);
+                    (manager, query_tx)
+                },
+                |(manager, query_tx)| {
+                    runtime.block_on(manager.run());
+                    query_tx
+                },
+                BatchSize::LargeInput,
+            );
+        });
+    }
+    group.finish();
+}
+
 fn bench_bulk_initial_load(c: &mut Criterion) {
     let mut group = c.benchmark_group("bulk_initial_load");
     group.sample_size(10);
@@ -1570,6 +1653,7 @@ criterion_group!(
     bench_loc_rib_recompute,
     bench_loc_rib_steady,
     bench_rib_pipeline,
+    bench_actor_ingest,
     bench_bulk_initial_load,
     bench_announce_validation,
     bench_route_churn,

@@ -586,6 +586,11 @@ impl RibManager {
         (!canceled()).then_some(rows)
     }
 
+    /// Whether RFC 9117 receive-side validation is enabled.
+    pub(super) fn flowspec_validation_enabled(&self) -> bool {
+        self.flowspec_validation.local_as.is_some()
+    }
+
     /// Enable startup-only RFC 9117 receive-side `FlowSpec` validation.
     #[must_use]
     pub fn with_flowspec_validation(mut self, local_as: u32) -> Self {

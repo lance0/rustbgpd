@@ -40,6 +40,7 @@ mod lease_expiry;
 mod outbound_credit;
 mod outbound_owing;
 mod outbound_prefix_limits;
+mod parked_primaries;
 mod peer_lifecycle;
 mod queries;
 mod replacement_summaries;
@@ -70,6 +71,7 @@ use std::task::{Context, Poll, Wake, Waker};
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rpki::VrpTable;
 use rustbgpd_telemetry::BgpMetrics;
+use rustbgpd_telemetry::metrics::RibInboundOvertakeSeam;
 use rustbgpd_telemetry::metrics::RibPeerSeries;
 use rustbgpd_telemetry::metrics::RibPolicyTransitionOutcome;
 use rustbgpd_telemetry::metrics::StaleSessionMessageKind as Kind;
@@ -1327,10 +1329,11 @@ pub struct RibManager {
     /// Progress of the current distribution window against its bounds.
     distribution_window: distribution::DistributionWindow,
     distribution_window_limits: distribution::DistributionWindowLimits,
-    /// A primary update received while deciding whether to extend a
-    /// distribution window, held until the run loop's next ordinary receive
-    /// so a non-extending update keeps its FIFO position.
-    primary_lookahead: Option<RibUpdate>,
+    /// Primary updates received from the channel and not yet admitted, in
+    /// FIFO order. A consumer that peeks the head, to decide whether to
+    /// extend a distribution window or coalesce it, leaves it here, so a
+    /// message that is not consumed keeps its FIFO position.
+    parked: parked_primaries::ParkedPrimaries,
     /// BGP-LS UPDATEs dispatched since one changed an ORR topology input
     /// without the cache being rebuilt for it; zero when the cache is
     /// current. Nonzero only while the next queued primary update is another
@@ -1633,6 +1636,11 @@ impl ExpiryCutoffs {
         self.0[timer as usize].map_or(0, |(_, remaining)| remaining)
     }
 
+    /// Whether any timer has captured the backlog it counts down.
+    fn armed(&self) -> bool {
+        self.0.iter().any(Option::is_some)
+    }
+
     fn clear(&mut self, timer: ExpiryTimer) {
         self.0[timer as usize] = None;
     }
@@ -1672,6 +1680,17 @@ const RTC_EOR_HOLD_CAP: std::time::Duration = std::time::Duration::from_secs(60)
 /// [`RTC_EOR_HOLD_CAP`]: a peer that never refreshes then deletes its stale
 /// routes, as it would at an immediate End-of-RIB.
 const ORF_EOR_HOLD_CAP: std::time::Duration = RTC_EOR_HOLD_CAP;
+
+/// What an intake seam's look at the overtake lane did.
+enum Overtake {
+    /// A parked UPDATE passes the head.
+    Admit(Box<RibUpdate>),
+    /// Nothing passes, but the read-ahead hashed rows or probed tables: the
+    /// seam yields before any other work.
+    Read,
+    /// Nothing passes and nothing was spent: strict FIFO.
+    Keep,
+}
 
 /// Actor work units accounted between a transition's terminal commit poll and
 /// the first general or summary query dispatched afterwards.
@@ -3492,7 +3511,7 @@ impl RibManager {
             first_group_commit_remaining: None,
             first_group_deferred_intents: VecDeque::new(),
             first_group_general_head: None,
-            primary_lookahead: None,
+            parked: parked_primaries::ParkedPrimaries::default(),
             orr_rebuild_owed_updates: 0,
             route_page_table_version: Some(initial_route_page_version()),
             route_page_advertised_version: Some(initial_route_page_version()),
@@ -5235,13 +5254,11 @@ impl RibManager {
         if self.release_primary_has_room() {
             return true;
         }
-        if self.primary_lookahead.is_none() {
-            self.primary_lookahead = self.rx.try_recv().ok();
-        }
+        self.parked.peek(&mut self.rx);
         self.first_group_allows_lookahead()
             && self
-                .primary_lookahead
-                .as_ref()
+                .parked
+                .head()
                 .is_none_or(|update| !self.release_fences_read(update))
     }
 
@@ -5251,7 +5268,7 @@ impl RibManager {
             || self.first_group_replay_due()
             || (!self.release_primary_has_room() && self.release_fences_read(&update))
         {
-            self.primary_lookahead = Some(update);
+            self.parked.put(update);
             return None;
         }
         match self.first_group_primary_intake(&update) {
@@ -5262,7 +5279,7 @@ impl RibManager {
                 return None;
             }
             first_group_order::Intake::Hold => {
-                self.primary_lookahead = Some(update);
+                self.parked.put(update);
                 self.seal_first_group_commit_frontier();
                 return None;
             }
@@ -5279,16 +5296,14 @@ impl RibManager {
         {
             return None;
         }
-        let update = self
-            .primary_lookahead
-            .take()
-            .or_else(|| self.rx.try_recv().ok())?;
+        let update = self.parked.take().or_else(|| self.rx.try_recv().ok())?;
         self.admit_primary(update)
     }
 
     /// Coalescers admit from lookahead directly. Like ordinary receives,
     /// they charge the message once, independently of its later route chunks.
     fn charge_primary_admission(&mut self) {
+        self.parked.admitted(false);
         self.expiry_cutoffs.charge();
         if let Some(remaining) = &mut self.first_group_commit_remaining {
             *remaining = remaining
@@ -5375,18 +5390,115 @@ impl RibManager {
     /// Cancel-safe receive of the next primary update, the held lookahead
     /// first: the lookahead is taken only by a poll that completes.
     async fn recv_primary(
-        lookahead: &mut Option<RibUpdate>,
+        parked: &mut parked_primaries::ParkedPrimaries,
         rx: &mut mpsc::Receiver<RibUpdate>,
     ) -> Option<RibUpdate> {
-        match lookahead.take() {
+        match parked.take() {
             Some(update) => Some(update),
             None => rx.recv().await,
         }
     }
 
-    /// Queued primary updates, including the held lookahead.
+    /// Queued primary updates, including the parked ones.
     fn primary_backlog(&self) -> usize {
-        self.rx.len() + usize::from(self.primary_lookahead.is_some())
+        self.rx.len() + self.parked.len()
+    }
+
+    /// Whether any receiver, registered or only configured, has an outbound
+    /// prefix limit.
+    fn outbound_limit_configured(&self) -> bool {
+        !self.outbound_prefix_limits.is_empty() || self.outbound_limit_control.configured()
+    }
+
+    /// The overtake lane: at an intake seam, remove the first parked small
+    /// unicast UPDATE that may pass everything queued ahead of it
+    /// ([`parked_primaries`] has the rules).
+    ///
+    /// The lane is closed, and nothing is read ahead, while any owner
+    /// counts or holds queued primaries: an armed expiry cutoff, a captured
+    /// first-group commit frontier, a first-group build with its deferred
+    /// intents or retained session end, a staged release delivery, an owed
+    /// ORR rebuild, or an admitted route batch that has not finished. At the
+    /// drain and receive seams it also stays closed until the head has been
+    /// admitted once since the last overtake.
+    ///
+    /// It is also closed while export depends on more than the route and its
+    /// receiver's policy, because passing a message could then change what a
+    /// receiver is sent:
+    /// - a conditional advertisement is defined: a condition prefix gates
+    ///   another prefix's export, so a session end that removes the
+    ///   condition's last path is not independent of an UPDATE for the gated
+    ///   prefix;
+    /// - an outbound prefix limit is configured: unrelated prefixes compete
+    ///   for a receiver's capped slots in arrival order;
+    /// - RFC 9117 `FlowSpec` validation is enabled: a rule's feasibility
+    ///   depends on covering and more-specific unicast prefixes, which
+    ///   exact-prefix disjointness does not see;
+    /// - a restart's selection deferral may still hold a family: a queued
+    ///   `PeerUp` can arm the hold for every prefix of that family.
+    fn take_overtake(&mut self, seam: RibInboundOvertakeSeam) -> Overtake {
+        #[cfg(test)]
+        if self.parked.strict_fifo {
+            return Overtake::Keep;
+        }
+        if (self.parked.head_owed() && seam != RibInboundOvertakeSeam::Departure)
+            || self.expiry_cutoffs.armed()
+            || self.first_group_commit_remaining.is_some()
+            || self.first_group_build.is_some()
+            || !self.first_group_deferred_intents.is_empty()
+            || self.session_end_retained()
+            || self.first_group_replay_due()
+            || self.release_delivery_pending()
+            || !self.release_primary_has_room()
+            || self.orr_rebuild_owed_updates > 0
+            || self.test_ingest_stall.is_some()
+            || !self.pending_route_batches.is_empty()
+            || self.conditional_advertisements.any_defined()
+            || self.outbound_limit_configured()
+            || self.flowspec_validation_enabled()
+            || self
+                .selection_deferral
+                .as_ref()
+                .is_some_and(selection_deferral::SelectionDeferral::may_hold)
+        {
+            return Overtake::Keep;
+        }
+        // A read-ahead that hashed rows or probed tables ends the poll even
+        // without a candidate, so that work never precedes other work in it.
+        let sessions = &self.live_sessions;
+        let live = |peer: PeerId, session_id: u64| {
+            sessions
+                .get(&peer)
+                .is_some_and(|records| records.iter().any(|r| r.session_id == session_id))
+        };
+        let keep = if self.parked.read_ahead(&mut self.rx, &self.ribs, &live) == 0 {
+            Overtake::Keep
+        } else {
+            Overtake::Read
+        };
+        let Some(candidate) = self.parked.candidate() else {
+            return keep;
+        };
+        if !matches!(
+            self.first_group_primary_intake(candidate),
+            first_group_order::Intake::Apply
+        ) || self
+            .source_departure
+            .as_ref()
+            .is_some_and(|work| !work.independent(candidate))
+        {
+            return keep;
+        }
+        let Some(update) = self.parked.take_candidate() else {
+            return keep;
+        };
+        self.charge_primary_admission();
+        self.parked.admitted(true);
+        // No batch is pending here, so this UPDATE opens the next window:
+        // mark it, so it takes in one queued message and no more.
+        self.distribution_window.passed_head = true;
+        self.metrics.record_rib_inbound_overtake(seam);
+        Overtake::Admit(Box::new(update))
     }
 
     /// Apply one queued actor unit before timer or idle-only work. Returning
@@ -5397,11 +5509,18 @@ impl RibManager {
         // while giving operator reads and the executor their ordinary seam.
         if !self.traced_route_chunk() {
             let parked = self.first_group_deferred_intents.len();
-            if let Some(update) = self.try_recv_primary() {
+            // A read-ahead that hashed rows or probed tables takes this
+            // poll: it admits nothing, serves the queries below and yields.
+            let (update, read) = match self.take_overtake(RibInboundOvertakeSeam::Drain) {
+                Overtake::Admit(update) => (Some(*update), false),
+                Overtake::Read => (None, true),
+                Overtake::Keep => (self.try_recv_primary(), false),
+            };
+            if let Some(update) = update {
                 self.traced(PostCommitWork::PrimaryUpdate, |manager| {
                     manager.handle_update(update);
                 });
-            } else if parked == self.first_group_deferred_intents.len() {
+            } else if !read && parked == self.first_group_deferred_intents.len() {
                 return false;
             }
         }
@@ -8052,12 +8171,10 @@ impl RibManager {
         if self.orr_rebuild_owed_updates < ORR_REBUILD_COALESCE_MAX
             && !self.primary_read_ahead_cutoff_reached()
         {
-            if self.primary_lookahead.is_none() {
-                self.primary_lookahead = self.rx.try_recv().ok();
-            }
+            self.parked.peek(&mut self.rx);
             if self.first_group_allows_lookahead()
                 && matches!(
-                    self.primary_lookahead.as_ref().map(RibUpdate::unmetered),
+                    self.parked.head().map(RibUpdate::unmetered),
                     Some(RibUpdate::BgpLsRoutesReceived { .. })
                 )
             {
@@ -8405,9 +8522,10 @@ impl RibManager {
                 // next unit may cost as much as the longest one so far.
                 let started = source_departure::quiet_clock();
                 let budget = source_departure::QUIET_LOOP_BUDGET.min(self.flush_poll_budget);
+                let mut first = true;
                 loop {
                     let unit = source_departure::quiet_clock();
-                    let departed = self.poll_source_departure_turn();
+                    let departed = self.poll_source_departure_unit(std::mem::take(&mut first));
                     #[cfg(test)]
                     {
                         self.departure_units_this_turn += 1;
@@ -9036,6 +9154,20 @@ impl RibManager {
                 self.drain_readiness_queries(None);
                 self.drain_queries(QUERY_BUDGET_PER_CHUNK);
                 tokio::task::yield_now().await;
+            } else if accept_primary
+                && let Some(passed) = match self.take_overtake(RibInboundOvertakeSeam::Receive) {
+                    Overtake::Admit(update) => Some(Some(update)),
+                    Overtake::Read => Some(None),
+                    Overtake::Keep => None,
+                }
+            {
+                if let Some(update) = passed {
+                    self.traced(PostCommitWork::PrimaryUpdate, |manager| {
+                        manager.handle_update(*update);
+                    });
+                    self.drain_general_queries_if_unfenced();
+                }
+                tokio::task::yield_now().await;
             } else if maintenance_progress {
                 // Do not sleep while validation remains queued, but admit a
                 // primary update between slices instead of monopolizing turns.
@@ -9069,7 +9201,7 @@ impl RibManager {
                             None => query_rx_open = false,
                         }
                     }
-                    update = Self::recv_primary(&mut self.primary_lookahead, &mut self.rx), if accept_primary => {
+                    update = Self::recv_primary(&mut self.parked, &mut self.rx), if accept_primary => {
                         match update {
                             Some(update) => {
                                 let Some(update) = self.admit_primary(update) else {
@@ -9170,7 +9302,7 @@ impl RibManager {
                             None => query_rx_open = false,
                         }
                     }
-                    update = Self::recv_primary(&mut self.primary_lookahead, &mut self.rx), if accept_primary => {
+                    update = Self::recv_primary(&mut self.parked, &mut self.rx), if accept_primary => {
                         match update {
                             Some(update) => {
                                 let Some(update) = self.admit_primary(update) else {

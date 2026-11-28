@@ -117,6 +117,10 @@ impl Counts {
 /// staging turn itself asserts its page bound.
 async fn feed_counts(feed: Feed, messages: u32, rows: u32, joiner: bool) -> Counts {
     let (mut manager, primary, marker) = feed_fixture(feed, messages, rows);
+    // A first-group build keeps the queue in arrival order. The arm without
+    // a joiner is its FIFO reference, so it does not let the marker pass the
+    // feed either.
+    manager.parked.strict_fifo = true;
     let table = manager.loc_rib.len();
     let mut counts = Counts::default();
     let founder = receiver(1);
@@ -417,4 +421,23 @@ async fn actor_registers_the_joiner_during_a_multi_chunk_stream() {
             actor_case(feed, messages, rows).await;
         }
     }
+}
+
+/// A live first-group build keeps the queue in strict arrival order: the
+/// overtake lane is closed and reads nothing ahead of the channel.
+#[tokio::test]
+async fn a_live_first_group_build_keeps_the_overtake_lane_closed() {
+    use crate::manager::Overtake;
+    let (mut manager, primary, marker) = feed_fixture(Feed::Announce, 4, 1024);
+    let _founder = join(&mut manager, receiver(1), 1, &DUAL);
+    assert!(manager.first_group_build.is_some());
+    primary
+        .try_send(feed_message(Feed::Announce, 0, 1024))
+        .unwrap();
+    primary.try_send(marker_message(marker)).unwrap();
+    assert!(matches!(
+        manager.take_overtake(RibInboundOvertakeSeam::Drain),
+        Overtake::Keep
+    ));
+    assert_eq!(manager.parked.len(), 0, "a closed lane reads nothing");
 }

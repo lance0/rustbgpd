@@ -297,7 +297,7 @@ async fn replayed_reload_keeps_later_routes_behind_retained_session_and_policy_c
         if older_policy {
             assert!(manager.loc_rib.get(&Prefix::V4(independent)).is_none());
         }
-        assert!(manager.primary_lookahead.as_ref().is_some_and(|head| {
+        assert!(manager.parked.head().is_some_and(|head| {
             head.session_peer() == Some(if older_policy { source } else { members[0] })
         }));
 

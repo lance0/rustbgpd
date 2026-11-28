@@ -360,6 +360,14 @@ pub(in crate::manager) struct OutboundLimitControl {
 }
 
 impl OutboundLimitControl {
+    /// Whether the running configuration names any outbound prefix limit,
+    /// including one for a neighbor that has not registered yet.
+    pub(in crate::manager) fn configured(&self) -> bool {
+        !(self.config.neighbors.is_empty()
+            && self.config.interfaces.is_empty()
+            && self.config.groups.is_empty())
+    }
+
     #[cfg(test)]
     pub(in crate::manager) fn advance_epoch_for_test(&mut self) {
         self.epoch = self.epoch.wrapping_add(1);

@@ -10945,7 +10945,7 @@ async fn queued_refresh_keeps_route_mutations_between_cohorts() {
         .collect();
     assert!(fleet.manager.drain_ready_updates().await);
     assert!(matches!(
-        fleet.manager.primary_lookahead,
+        fleet.manager.parked.head(),
         Some(RibUpdate::RoutesReceived { .. })
     ));
     assert!(later.iter().all(|flag| flag.load(Ordering::Acquire)));
@@ -11361,7 +11361,7 @@ fn route_refresh_services_interior_readiness_and_fences_other_lanes() {
                     general.lock().unwrap().try_recv(),
                     Err(oneshot::error::TryRecvError::Empty)
                 ));
-                // Refresh admission may hold the mutation in primary_lookahead;
+                // Refresh admission may hold the mutation at the parked head;
                 // the assertion below checks its preserved FIFO position.
                 if observed != "refresh" {
                     return;

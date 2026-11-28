@@ -180,7 +180,7 @@ async fn pending_session_writer_orders_its_eor_but_later_config_allows_other_ing
     // slow-state change commits.
     assert!(manager.first_group_commit_frontier_reached());
     assert!(
-        matches!(manager.primary_lookahead, Some(RibUpdate::EndOfRib { peer, .. }) if peer == incumbent)
+        matches!(manager.parked.head(), Some(RibUpdate::EndOfRib { peer, .. }) if *peer == incumbent)
     );
     assert!(manager.take_first_group_deferred_intent().is_none());
     assert!(matches!(
@@ -1268,8 +1268,8 @@ async fn peer_up_after_a_retained_session_end_stays_behind_it() {
     assert!(manager.drain_ready_updates().await);
     assert!(!manager.drain_ready_updates().await);
     assert!(matches!(
-        manager.primary_lookahead,
-        Some(RibUpdate::PeerUp { peer, session_id: 2, .. }) if peer == incumbent
+        manager.parked.head(),
+        Some(RibUpdate::PeerUp { peer, session_id: 2, .. }) if *peer == incumbent
     ));
     assert!(manager.first_group_commit_frontier_reached());
     assert_eq!(manager.outbound_session_ids.get(&incumbent), Some(&1));
@@ -1456,8 +1456,8 @@ async fn full_window_holds_the_ninth_session_end_at_the_head() {
     while manager.drain_ready_updates().await {}
     assert_eq!(manager.first_group_deferred_intents.len(), 8);
     assert!(matches!(
-        manager.primary_lookahead,
-        Some(RibUpdate::PeerDown { peer, .. }) if peer == peers[8]
+        manager.parked.head(),
+        Some(RibUpdate::PeerDown { peer, .. }) if *peer == peers[8]
     ));
     assert!(manager.first_group_commit_frontier_reached());
     assert!(manager.loc_rib.get(&marker).is_none());
@@ -1534,8 +1534,8 @@ async fn same_peer_routes_and_end_of_rib_stay_behind_a_retained_session_end() {
         assert_eq!(manager.first_group_deferred_intents.len(), 1);
         assert!(
             manager
-                .primary_lookahead
-                .as_ref()
+                .parked
+                .head()
                 .is_some_and(|head| head.session_peer() == Some(incumbent)),
             "the peer's own input passed its retained session end"
         );
@@ -1593,8 +1593,8 @@ async fn assert_held_behind_a_retained_session_end(
     assert_eq!(manager.first_group_deferred_intents.len(), 1);
     assert!(
         manager
-            .primary_lookahead
-            .as_ref()
+            .parked
+            .head()
             .is_some_and(|head| std::mem::discriminant(head) == held),
         "{kind:?} passed the retained session end"
     );

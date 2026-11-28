@@ -315,7 +315,7 @@ async fn family_unlock_holds_the_head_behind_a_session_end_during_optional_evict
         assert_eq!(manager.first_group_deferred_intents.len(), 2);
         assert!(manager.session_end_retained());
         assert!(
-            manager.primary_lookahead.as_ref().is_some_and(
+            manager.parked.head().is_some_and(
                 |head| std::mem::discriminant(head) == std::mem::discriminant(&state())
             ),
             "the state change passed the retained session end"

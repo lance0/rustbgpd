@@ -2476,3 +2476,100 @@ async fn gr_restarter_deferred_eor_follows_the_table_of_a_multi_group_orf() {
     drop(tx);
     handle.await.unwrap();
 }
+
+/// A DEFER filter installs for later announcements without sweeping, so a
+/// small announcement queued behind it must be exported under it. Passing
+/// the queued filter would export the route under the old one, and nothing
+/// would withdraw it. The filter update keeps strict arrival order behind it.
+#[tokio::test]
+async fn an_update_queued_behind_a_defer_filter_is_exported_under_it() {
+    let (tx, handle, target, mut out_rx) = orf_setup().await;
+    send_peer_orf(
+        &tx,
+        target,
+        WhenToRefresh::Immediate,
+        vec![orf_permit(
+            1,
+            0,
+            32,
+            Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0),
+        )],
+    )
+    .await;
+    let _ = collect_announced(&mut out_rx, 2).await;
+    let other = peer_v4(Ipv4Addr::new(10, 0, 0, 3));
+    tx.send(registering_peer_up(other, 0)).await.unwrap();
+    // A round trip: everything above is applied before the burst is queued.
+    send_peer_orf(
+        &tx,
+        target,
+        WhenToRefresh::Defer,
+        vec![orf_permit(
+            2,
+            0,
+            32,
+            Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0),
+        )],
+    )
+    .await;
+
+    let routes = |peer: PeerId, announced: Vec<Route>| RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer,
+        announced,
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+        validated_with: None,
+    };
+    let source = Ipv4Addr::new(10, 0, 0, 1);
+    let table = (0..20)
+        .map(|n| make_route(Ipv4Prefix::new(Ipv4Addr::new(172, 16, n, 0), 24), source))
+        .collect();
+    let late = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    // Queued together: a table, the DEFER deny-all, then the small UPDATE.
+    tx.try_send(routes(peer_v4(source), table)).unwrap();
+    tx.try_send(RibUpdate::PeerOrfUpdate {
+        session_id: 0,
+        peer: target,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        when: WhenToRefresh::Defer,
+        groups: vec![vec![
+            AddressPrefixOrf {
+                action: OrfAction::RemoveAll,
+                match_: OrfMatch::Permit,
+                sequence: 0,
+                min_len: 0,
+                max_len: 0,
+                prefix: None,
+            },
+            orf_deny(1, 0, 32, Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0)),
+        ]],
+        reply: oneshot::channel().0,
+    })
+    .unwrap();
+    tx.try_send(routes(
+        other,
+        vec![make_route(late, Ipv4Addr::new(10, 0, 0, 3))],
+    ))
+    .unwrap();
+    drop(tx);
+    handle.await.unwrap();
+
+    let mut announced = Vec::new();
+    while let Ok(update) = out_rx.try_recv().map(delivered) {
+        announced.extend(update.announce.iter().map(|route| route.prefix));
+    }
+    assert_eq!(
+        announced.len(),
+        20,
+        "the table ahead of the filter is exported"
+    );
+    assert!(
+        !announced.contains(&Prefix::V4(late)),
+        "the UPDATE behind the DEFER deny was exported under the old filter"
+    );
+}

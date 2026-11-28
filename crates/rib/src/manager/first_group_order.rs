@@ -279,8 +279,8 @@ impl RibManager {
             return false;
         }
         if self
-            .primary_lookahead
-            .as_ref()
+            .parked
+            .head()
             .is_some_and(|head| matches!(self.first_group_primary_intake(head), Intake::Hold))
         {
             self.seal_first_group_commit_frontier();
