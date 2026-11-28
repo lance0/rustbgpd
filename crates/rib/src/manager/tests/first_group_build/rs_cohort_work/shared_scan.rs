@@ -8,6 +8,7 @@ use rustbgpd_policy::{Policy, PolicyAction, PolicyChain};
 
 use super::*;
 use crate::manager::distribution::rs_control::rs_control_route_tagged;
+use crate::manager::tests::lifecycle::test_session_routes_received;
 use crate::manager::tests::update_groups::deny_statement;
 
 /// Loc-RIB buckets every registration scan has visited on this thread.
@@ -173,6 +174,106 @@ fn a_cohort_resolves_each_page_once_and_every_rider_shares_its_rows() {
     assert!(
         resolved.iter().all(|keys| (ROWS..=2 * ROWS).contains(keys)),
         "{resolved:?}"
+    );
+}
+
+// Proof lookups per rider per shared page. The cohort resolves each page
+// key's universe position once; a rider that takes the page's shared rows
+// reserves, counts and admits them from those positions. Each further rider
+// page therefore costs a constant number of proof key comparisons, not one
+// or more per key, whatever the riders.
+#[test]
+fn a_rider_admits_a_shared_page_without_a_proof_lookup_per_key() {
+    use crate::manager::update_groups::admitted_recovery::KEY_COMPARISONS;
+
+    let mut counts = Vec::new();
+    for joiners in [8_u8, 32] {
+        let Published {
+            mut manager,
+            tx: _tx,
+            ..
+        } = published();
+        let before = KEY_COMPARISONS.with(std::cell::Cell::get);
+        let mut riders: Vec<_> = (1..=joiners)
+            .map(|n| Rider::join(&mut manager, n, 1 << 12))
+            .collect();
+        run(&mut manager, &mut riders, &[], complete);
+        let comparisons = KEY_COMPARISONS.with(std::cell::Cell::get) - before;
+        for rider in &riders {
+            assert!(rider.table == table_from(SOURCE, ROWS), "rider {}", rider.n);
+            assert_eq!(rider.private, 0, "rider {}", rider.n);
+        }
+        let pages: usize = riders.iter().map(|rider| rider.shared).sum();
+        counts.push((comparisons, pages));
+    }
+    let [(small, small_pages), (large, large_pages)] = counts[..] else {
+        unreachable!()
+    };
+    // The marginal cost of a rider page, net of the work done once per
+    // cohort: the universe walk and each page's positions.
+    let per_page = large.saturating_sub(small) / (large_pages - small_pages);
+    eprintln!(
+        "proof key comparisons: {small} for {small_pages} rider pages, \
+         {large} for {large_pages}: {per_page} per further rider page"
+    );
+    // A lookup per key is at least a page of comparisons per rider page.
+    assert!(
+        per_page <= 4,
+        "proof lookups grew with the keys of each rider page: {per_page} per page"
+    );
+    // What is left is paid once per cohort, a few comparisons per table
+    // key: the universe walk and each page's positions over two passes.
+    assert!(
+        large <= 6 * ROWS,
+        "{large} comparisons for {large_pages} rider pages"
+    );
+}
+
+// A rider is the source of some rows of the pages it shares. Transport
+// drops those rows for it, and its admitted counts leave them out: after
+// every page the keys and prefixes it is counted to hold are the rows it
+// was sent.
+#[test]
+fn a_riders_admitted_counts_leave_out_the_shared_rows_it_sourced() {
+    let Published {
+        mut manager,
+        tx: _tx,
+        ..
+    } = published();
+    let mut riders: Vec<_> = (1..=2)
+        .map(|n| Rider::join(&mut manager, n, 1 << 12))
+        .collect();
+    // Rider 1 wins every fifth key before any page goes out.
+    let sourced: Vec<_> = (0..u16::try_from(ROWS).unwrap())
+        .step_by(5)
+        .map(|index| route(prefixes(index)[0], MEMBER(1), 200))
+        .collect();
+    let own = sourced.len();
+    manager.handle_update(test_session_routes_received(receiver(1), 1, sourced));
+    drain_route_chunks(&mut manager);
+    let counted = std::cell::Cell::new(0);
+    run(&mut manager, &mut riders, &[], |manager, riders| {
+        for rider in riders {
+            if let Some(counts) = manager.initial_group_admitted_counts(receiver(rider.n)) {
+                assert_eq!(
+                    [counts[0], counts[4]],
+                    [rider.table.len(); 2],
+                    "rider {}",
+                    rider.n
+                );
+                counted.set(counted.get() + 1);
+            }
+        }
+        complete(manager, riders)
+    });
+    assert!(counted.get() > usize::from(PAGES), "no count was checked");
+    assert_eq!(riders[0].table.len(), ROWS - own);
+    assert_eq!(riders[1].table.len(), ROWS);
+    assert!(
+        riders
+            .iter()
+            .all(|rider| rider.shared >= usize::from(PAGES)),
+        "a rider took no shared page"
     );
 }
 

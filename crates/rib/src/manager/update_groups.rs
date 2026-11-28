@@ -3330,6 +3330,44 @@ impl RibManager {
         }
     }
 
+    /// [`Self::planned_initial_group_admitted_counts`] for a replay page at
+    /// path ID zero that the member holds none of, with nothing withdrawn.
+    /// Each row it does not source is a new key. A grouped unicast identity
+    /// is path ID zero, so it is a new prefix too, and no key needs a
+    /// lookup.
+    pub(super) fn planned_fresh_initial_group_admitted_counts(
+        &self,
+        peer: PeerId,
+        announce: &[Route],
+        source_exclusion: Option<PeerId>,
+    ) -> Option<[usize; 6]> {
+        let mut counts = self.initial_group_admitted_counts(peer)?;
+        #[cfg(test)]
+        if let Some(admitted) = self.initial_group_admitted(peer) {
+            admitted_recovery::uncounted(|| {
+                for route in announce {
+                    assert!(
+                        source_exclusion == Some(route.peer)
+                            || (!admitted.contains(&ExactExportKey::Unicast(route.prefix, 0))
+                                && admitted.unicast_prefix_paths(route.prefix, &mut |_| {}) == 0),
+                        "{peer} already holds {} of a fresh replay page",
+                        route.prefix
+                    );
+                }
+            });
+        }
+        for route in announce {
+            self.replacement_checkpoint(false);
+            if source_exclusion == Some(route.peer) {
+                continue;
+            }
+            let slot = usize::from(matches!(route.prefix, Prefix::V6(_)));
+            counts[slot] = counts[slot].checked_add(1)?;
+            counts[4 + slot] = counts[4 + slot].checked_add(1)?;
+        }
+        Some(counts)
+    }
+
     /// Unique final ANN/WD identities, with ANN winning same-key overlap.
     /// Withdrawals are sorted by the existing proof-commit preparation.
     pub(super) fn planned_initial_group_admitted_counts(

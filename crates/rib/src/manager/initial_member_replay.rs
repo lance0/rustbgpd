@@ -20,7 +20,8 @@ use changes::ReplayChanges;
 use tokio::sync::mpsc;
 
 use super::distribution::{
-    LazyCleanGroupPrior, OutboundCommitBatch, SharedUnicastPrecommit, SharedUnicastProbeCache,
+    FreshUnicast, LazyCleanGroupPrior, OutboundCommitBatch, SharedUnicastPrecommit,
+    SharedUnicastProbeCache,
 };
 use super::update_groups::admitted_recovery::{
     Failure, Key, OnReservationRefusal, ReplayRoom, SnapshotHandle,
@@ -101,6 +102,8 @@ struct SharedPage {
 /// resolves its own slot there.
 struct SharedRows {
     routes: Arc<Vec<Route>>,
+    // Each route's position in the cohort's universe.
+    positions: Arc<Vec<u32>>,
     actions: Arc<Vec<Option<rustbgpd_policy::NextHopAction>>>,
     private: Vec<Prefix>,
     encode: Arc<crate::update::SharedGroupEncode>,
@@ -1349,6 +1352,7 @@ impl RibManager {
         };
         let group = &self.group_ribs[&gid];
         let mut routes = Vec::new();
+        let mut positions = Vec::new();
         let mut actions = Vec::new();
         let mut withdraw = Vec::new();
         let mut prior = FastSet::default();
@@ -1363,8 +1367,7 @@ impl RibManager {
             keys.insert(prefix);
             // Grouped single-best outbound identities use path ID zero,
             // including when the received winner has its own Add-Path ID.
-            let key = ExactExportKey::Unicast(prefix, 0);
-            let sent = admitted.contains(&key);
+            let (position, sent) = admitted.locate_unicast(prefix);
             // A coalesced key reconciles its current row against admission,
             // and so does every key a reconcile visits.
             if reconcile || replay.changes.coalesced(&prefix) {
@@ -1387,6 +1390,7 @@ impl RibManager {
                     rs_control,
                 );
                 routes.push(route);
+                positions.push(position);
                 actions.push(entry.nh.cloned());
             } else if sent {
                 withdraw.push((prefix, 0));
@@ -1394,17 +1398,20 @@ impl RibManager {
                 continue;
             }
             if sent {
-                prior.insert(key);
+                prior.insert(ExactExportKey::Unicast(prefix, 0));
             }
         }
         #[cfg(test)]
         super::slice_timing::record_work("initial_member_replay_units", units);
         if !routes.is_empty() || !withdraw.is_empty() {
+            // A withdrawal is of a held key, so an empty prior means the page
+            // resends and withdraws nothing the member holds.
             let batch = OutboundCommitBatch {
                 slot: operation.slot(),
                 force_unicast_replay: true,
                 unicast_otc_prechecked: true,
                 withdraw,
+                fresh_unicast: FreshUnicast::page(replay.universe, prior.is_empty(), positions),
                 ..OutboundCommitBatch::with_unicast(routes.into(), actions.into())
             };
             if !self.commit_initial_member_batch(peer, batch, prior, None) {
@@ -1907,11 +1914,14 @@ impl RibManager {
             let page = &mut self.initial_member_replays.cohorts[index].log[at];
             page.shared.as_mut().expect("resolved page").rows = Some(rows);
         }
-        let page = &mut self.initial_member_replays.cohorts[index].log[at];
+        let cohort = &mut self.initial_member_replays.cohorts[index];
+        let universe = cohort.handle;
+        let page = &mut cohort.log[at];
         let shared = page.shared.as_mut().expect("resolved page");
         let prefixes = Arc::clone(&shared.prefixes);
         let rows = shared.rows.as_mut().expect("resolved rows");
         let routes = Arc::clone(&rows.routes);
+        let positions = Arc::clone(&rows.positions);
         let actions = Arc::clone(&rows.actions);
         let encode = Arc::clone(&rows.encode);
         let mut probes = std::mem::take(&mut rows.probes);
@@ -1941,6 +1951,11 @@ impl RibManager {
                 // Transport drops the rows this member sourced.
                 announce_source_exclusion: Some(peer),
                 shared_group_encode: Some(Arc::clone(&encode)),
+                // The member holds none of the page's keys.
+                fresh_unicast: Some(FreshUnicast {
+                    universe,
+                    positions,
+                }),
                 ..OutboundCommitBatch::with_unicast(routes, actions)
             };
             let precommit = SharedUnicastPrecommit {
@@ -2016,13 +2031,16 @@ impl RibManager {
         use super::distribution::rs_control::rs_control_route_tagged;
 
         let cohort = &self.initial_member_replays.cohorts[index];
-        let keys = &cohort.log[at].keys;
+        let page = &cohort.log[at];
+        let keys = &page.keys;
+        let resolved = &page.shared.as_ref().expect("resolved page").positions;
         let view = cohort.key.2;
         let group = &self.group_ribs[&gid];
         let mut routes = Vec::with_capacity(keys.len());
+        let mut positions = Vec::with_capacity(keys.len());
         let mut actions = Vec::with_capacity(keys.len());
         let mut private = Vec::new();
-        for prefix in keys {
+        for (prefix, position) in keys.iter().zip(resolved) {
             let Some(entry) = group.replay_winner(prefix) else {
                 continue;
             };
@@ -2043,6 +2061,7 @@ impl RibManager {
                 private.push(*prefix);
             } else {
                 routes.push(entry.route.clone());
+                positions.push(*position);
                 actions.push(entry.nh.cloned());
             }
         }
@@ -2050,6 +2069,7 @@ impl RibManager {
         super::slice_timing::record_work("cohort_page_resolves", keys.len());
         SharedRows {
             routes: routes.into(),
+            positions: positions.into(),
             actions: actions.into(),
             private,
             encode: Arc::default(),
