@@ -2,6 +2,16 @@
 //! bring-up, teardown, context, route, End-of-RIB, refresh and policy
 //! messages leaves the same Loc-RIB, the same Adj-RIB-In sizes and the same
 //! table on every receiver as strict FIFO processing of the same queue.
+//!
+//! It also checks what each stable receiver was sent for each prefix, in
+//! order. Two runs of one queue need not send identical streams even in
+//! strict arrival order, because one distribution window coalesces the
+//! messages it happens to hold and the lane changes which messages share a
+//! window. The reference is therefore the stream of strict arrival order
+//! with one message per window, which shows every state a prefix passes
+//! through. Each run's stream for a prefix must be that reference with some
+//! intermediate states left out: the same order, the same end, and no state
+//! the reference never shows.
 
 use super::exportability::ReusableExactExportEncoder;
 use super::inbound_overtake::{Log, collect, overtakes, prefix, source, wired_fleet};
@@ -42,7 +52,7 @@ fn receiver(index: u16) -> PeerId {
 
 /// The queue for `seed`. A receiver that rejoins gets a new writer, whose
 /// wire log replaces the old one in `wires`.
-fn queue(seed: u64, wires: &mut [Log]) -> Vec<RibUpdate> {
+fn queue(seed: u64, wires: &mut [Log], stable: &mut [bool]) -> Vec<RibUpdate> {
     let mut rng = Rng(seed);
     // The session each source's next message names, and whether it is up.
     let mut sessions: Vec<(u64, bool)> = vec![(0, true); usize::from(SOURCES)];
@@ -127,6 +137,7 @@ fn queue(seed: u64, wires: &mut [Log]) -> Vec<RibUpdate> {
                     }),
                     _ => {
                         // The receiver flaps and rejoins on a new writer.
+                        stable[usize::from(index)] = false;
                         queue.push(RibUpdate::PeerDown {
                             peer,
                             session_id: session,
@@ -163,6 +174,46 @@ fn table(wire: &Log) -> BTreeMap<String, String> {
     table
 }
 
+/// What a receiver was sent for each prefix, in order: `A <source>` or `W`.
+fn sequences(wire: &Log) -> BTreeMap<String, Vec<String>> {
+    let mut sequences: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for event in wire.lock().unwrap().iter() {
+        let (key, state) = if let Some(key) = event.strip_prefix("W ") {
+            (key, "W".to_owned())
+        } else {
+            let (key, from) = event.strip_prefix("A ").unwrap().rsplit_once(' ').unwrap();
+            (key, format!("A {from}"))
+        };
+        sequences.entry(key.to_owned()).or_default().push(state);
+    }
+    sequences
+}
+
+/// Whether `stream` is `reference` with intermediate states left out.
+fn coalesces(stream: &[String], reference: &[String]) -> bool {
+    let mut rest = reference.iter();
+    stream.iter().all(|state| rest.any(|seen| seen == state)) && stream.last() == reference.last()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Mode {
+    /// Strict arrival order, one message per distribution window.
+    Reference,
+    /// Strict arrival order.
+    Fifo,
+    Lane,
+}
+
+thread_local! {
+    static PACED_DEPARTURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn note_paced_departure(manager: &RibManager) {
+    if manager.source_departure.is_some() {
+        PACED_DEPARTURE.set(true);
+    }
+}
+
 #[derive(Debug, PartialEq)]
 struct Outcome {
     loc_rib: BTreeMap<Prefix, PeerId>,
@@ -170,10 +221,31 @@ struct Outcome {
     receivers: Vec<BTreeMap<String, String>>,
 }
 
-async fn outcome(seed: u64, strict: bool) -> (Outcome, f64) {
+/// The outcome, each stable receiver's per-prefix streams and the overtakes.
+/// `capped` gives receiver 0 an outbound prefix limit.
+async fn outcome(
+    seed: u64,
+    mode: Mode,
+    capped: bool,
+) -> (Outcome, Vec<BTreeMap<String, Vec<String>>>, f64) {
     let (tx, mut manager, _log, mut wires) = wired_fleet(SOURCES, RECEIVERS);
-    manager.parked.strict_fifo = strict;
-    for update in queue(seed, &mut wires) {
+    manager.parked.strict_fifo = mode != Mode::Lane;
+    if mode == Mode::Reference {
+        manager.distribution_window_limits.messages = 1;
+    }
+    if capped {
+        use super::outbound_prefix_limits::{apply, limit_config, prepare};
+        prepare(
+            &mut manager,
+            1,
+            limit_config(&[(receiver(0), Some(8), None)], &[]),
+        )
+        .expect("preflight passes");
+        apply(&mut manager, 1, true).expect("activation passes");
+    }
+    manager.actor_turn_check = Some(note_paced_departure);
+    let mut stable = vec![true; usize::from(RECEIVERS)];
+    for update in queue(seed, &mut wires, &mut stable) {
         tx.try_send(update).unwrap();
     }
     let actor = tokio::spawn(manager.run_actor());
@@ -196,26 +268,76 @@ async fn outcome(seed: u64, strict: bool) -> (Outcome, f64) {
             .collect(),
         receivers: wires.iter().map(table).collect(),
     };
-    (outcome, passed)
+    let streams = wires
+        .iter()
+        .zip(&stable)
+        .filter(|(_, stable)| **stable)
+        .map(|(wire, _)| sequences(wire))
+        .collect();
+    (outcome, streams, passed)
 }
 
 #[tokio::test(start_paused = true)]
 async fn the_lane_leaves_the_tables_strict_fifo_leaves() {
     let mut passed = 0.0;
+    let mut compared = 0;
     for seed in SEEDS {
-        let (fifo, none) = Box::pin(outcome(seed, true)).await;
+        // Every eighth seed caps a receiver, which closes the lane.
+        let capped = seed % 8 == 0;
+        let (mut reference, shown, _) = Box::pin(outcome(seed, Mode::Reference, capped)).await;
+        let (mut fifo, fifo_streams, none) = Box::pin(outcome(seed, Mode::Fifo, capped)).await;
         assert!(none == 0.0, "seed {seed}: strict FIFO overtook");
-        let (lane, count) = Box::pin(outcome(seed, false)).await;
+        let (mut lane, lane_streams, count) = Box::pin(outcome(seed, Mode::Lane, capped)).await;
+        if capped {
+            // Which prefixes of one batch take the capped slots follows
+            // table order, which differs between two managers.
+            for outcome in [&mut reference, &mut fifo, &mut lane] {
+                assert!(outcome.receivers[0].len() <= 8, "seed {seed}: over the cap");
+                outcome.receivers[0].clear();
+            }
+        }
         assert_eq!(
             lane, fifo,
             "seed {seed}: {count} overtakes changed the outcome"
         );
+        assert_eq!(fifo, reference, "seed {seed}: the reference run diverged");
         assert!(
-            fifo.receivers.iter().any(|table| !table.is_empty()),
+            fifo.receivers[1..].iter().any(|table| !table.is_empty()),
             "seed {seed}: no receiver holds a route"
         );
+        if capped {
+            assert!(
+                count == 0.0,
+                "seed {seed}: {count} overtakes with a capped receiver"
+            );
+            continue;
+        }
+        for (name, streams) in [("FIFO", &fifo_streams), ("lane", &lane_streams)] {
+            assert_eq!(streams.len(), shown.len(), "seed {seed}");
+            for (at, (stream, reference)) in streams.iter().zip(&shown).enumerate() {
+                assert_eq!(
+                    stream.keys().collect::<Vec<_>>(),
+                    reference.keys().collect::<Vec<_>>(),
+                    "seed {seed}: {name} stable receiver {at} was sent different prefixes"
+                );
+                for (key, sent) in stream {
+                    assert!(
+                        coalesces(sent, &reference[key]),
+                        "seed {seed}: {name} stable receiver {at}, {key}: sent {sent:?}, \
+                         arrival order shows {:?}",
+                        reference[key]
+                    );
+                    compared += 1;
+                }
+            }
+        }
         passed += count;
     }
-    eprintln!("overtakes across {} seeds: {passed}", SEEDS.len());
+    eprintln!(
+        "overtakes across {} seeds: {passed}; {compared} per-receiver prefix streams compared",
+        SEEDS.len()
+    );
     assert!(passed >= 64.0, "the oracle exercised {passed} overtakes");
+    assert!(compared > 1_000, "{compared} streams compared");
+    assert!(PACED_DEPARTURE.get(), "no seed paced a source departure");
 }

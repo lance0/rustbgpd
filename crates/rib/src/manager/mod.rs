@@ -1681,6 +1681,17 @@ const RTC_EOR_HOLD_CAP: std::time::Duration = std::time::Duration::from_secs(60)
 /// routes, as it would at an immediate End-of-RIB.
 const ORF_EOR_HOLD_CAP: std::time::Duration = RTC_EOR_HOLD_CAP;
 
+/// What an intake seam's look at the overtake lane did.
+enum Overtake {
+    /// A parked UPDATE passes the head.
+    Admit(Box<RibUpdate>),
+    /// Nothing passes, but the read-ahead hashed rows or probed tables: the
+    /// seam yields before any other work.
+    Read,
+    /// Nothing passes and nothing was spent: strict FIFO.
+    Keep,
+}
+
 /// Actor work units accounted between a transition's terminal commit poll and
 /// the first general or summary query dispatched afterwards.
 #[derive(Clone, Copy)]
@@ -5393,9 +5404,15 @@ impl RibManager {
         self.rx.len() + self.parked.len()
     }
 
+    /// Whether any receiver, registered or only configured, has an outbound
+    /// prefix limit.
+    fn outbound_limit_configured(&self) -> bool {
+        !self.outbound_prefix_limits.is_empty() || self.outbound_limit_control.configured()
+    }
+
     /// The overtake lane: at an intake seam, remove the first parked small
     /// unicast UPDATE that may pass everything queued ahead of it
-    /// ([`parked_primaries`] has the rules). `None` keeps FIFO.
+    /// ([`parked_primaries`] has the rules).
     ///
     /// The lane is closed, and nothing is read ahead, while any owner
     /// counts or holds queued primaries: an armed expiry cutoff, a captured
@@ -5404,10 +5421,20 @@ impl RibManager {
     /// ORR rebuild, or an admitted route batch that has not finished. At the
     /// drain and receive seams it also stays closed until the head has been
     /// admitted once since the last overtake.
-    fn take_overtake(&mut self, seam: RibInboundOvertakeSeam) -> Option<RibUpdate> {
+    ///
+    /// It is also closed while export depends on more than the route and its
+    /// receiver's policy, because passing a message could then change what a
+    /// receiver is sent:
+    /// - a conditional advertisement is defined: a condition prefix gates
+    ///   another prefix's export, so a session end that removes the
+    ///   condition's last path is not independent of an UPDATE for the gated
+    ///   prefix;
+    /// - an outbound prefix limit is configured: unrelated prefixes compete
+    ///   for a receiver's capped slots in arrival order.
+    fn take_overtake(&mut self, seam: RibInboundOvertakeSeam) -> Overtake {
         #[cfg(test)]
         if self.parked.strict_fifo {
-            return None;
+            return Overtake::Keep;
         }
         if (self.parked.head_owed() && seam != RibInboundOvertakeSeam::Departure)
             || self.expiry_cutoffs.armed()
@@ -5421,11 +5448,21 @@ impl RibManager {
             || self.orr_rebuild_owed_updates > 0
             || self.test_ingest_stall.is_some()
             || !self.pending_route_batches.is_empty()
+            || self.conditional_advertisements.any_defined()
+            || self.outbound_limit_configured()
         {
-            return None;
+            return Overtake::Keep;
         }
-        self.parked.read_ahead(&mut self.rx, &self.ribs);
-        let candidate = self.parked.candidate()?;
+        // A read-ahead that hashed rows or probed tables ends the poll even
+        // without a candidate, so that work never precedes other work in it.
+        let keep = if self.parked.read_ahead(&mut self.rx, &self.ribs) == 0 {
+            Overtake::Keep
+        } else {
+            Overtake::Read
+        };
+        let Some(candidate) = self.parked.candidate() else {
+            return keep;
+        };
         if !matches!(
             self.first_group_primary_intake(candidate),
             first_group_order::Intake::Apply
@@ -5434,13 +5471,15 @@ impl RibManager {
             .as_ref()
             .is_some_and(|work| !work.independent(candidate))
         {
-            return None;
+            return keep;
         }
-        let update = self.parked.take_candidate()?;
+        let Some(update) = self.parked.take_candidate() else {
+            return keep;
+        };
         self.charge_primary_admission();
         self.parked.admitted(true);
         self.metrics.record_rib_inbound_overtake(seam);
-        Some(update)
+        Overtake::Admit(Box::new(update))
     }
 
     /// Apply one queued actor unit before timer or idle-only work. Returning
@@ -5451,9 +5490,12 @@ impl RibManager {
         // while giving operator reads and the executor their ordinary seam.
         if !self.traced_route_chunk() {
             let parked = self.first_group_deferred_intents.len();
+            // This seam yields below whatever it admits, so a read-ahead
+            // that found nothing still shares its poll only with one
+            // admission.
             let update = match self.take_overtake(RibInboundOvertakeSeam::Drain) {
-                Some(update) => Some(update),
-                None => self.try_recv_primary(),
+                Overtake::Admit(update) => Some(*update),
+                Overtake::Read | Overtake::Keep => self.try_recv_primary(),
             };
             if let Some(update) = update {
                 self.traced(PostCommitWork::PrimaryUpdate, |manager| {
@@ -8461,9 +8503,10 @@ impl RibManager {
                 // next unit may cost as much as the longest one so far.
                 let started = source_departure::quiet_clock();
                 let budget = source_departure::QUIET_LOOP_BUDGET.min(self.flush_poll_budget);
+                let mut first = true;
                 loop {
                     let unit = source_departure::quiet_clock();
-                    let departed = self.poll_source_departure_turn();
+                    let departed = self.poll_source_departure_unit(std::mem::take(&mut first));
                     #[cfg(test)]
                     {
                         self.departure_units_this_turn += 1;
@@ -9093,12 +9136,18 @@ impl RibManager {
                 self.drain_queries(QUERY_BUDGET_PER_CHUNK);
                 tokio::task::yield_now().await;
             } else if accept_primary
-                && let Some(update) = self.take_overtake(RibInboundOvertakeSeam::Receive)
+                && let Some(passed) = match self.take_overtake(RibInboundOvertakeSeam::Receive) {
+                    Overtake::Admit(update) => Some(Some(update)),
+                    Overtake::Read => Some(None),
+                    Overtake::Keep => None,
+                }
             {
-                self.traced(PostCommitWork::PrimaryUpdate, |manager| {
-                    manager.handle_update(update);
-                });
-                self.drain_general_queries_if_unfenced();
+                if let Some(update) = passed {
+                    self.traced(PostCommitWork::PrimaryUpdate, |manager| {
+                        manager.handle_update(*update);
+                    });
+                    self.drain_general_queries_if_unfenced();
+                }
                 tokio::task::yield_now().await;
             } else if maintenance_progress {
                 // Do not sleep while validation remains queued, but admit a

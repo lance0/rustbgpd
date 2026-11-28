@@ -332,6 +332,13 @@ pub(super) struct ConditionalAdvertisementTracker {
     status_prefix_visits: std::sync::atomic::AtomicUsize,
 }
 
+impl ConditionalAdvertisementTracker {
+    /// Whether any conditional advertisement is defined, attached or not.
+    pub(super) fn any_defined(&self) -> bool {
+        !self.definitions.is_empty()
+    }
+}
+
 /// Tracker state captured by an install, for generation compensation. The
 /// restore reinstates it instead of evaluating the restored definitions again.
 #[derive(Clone, Debug)]

@@ -4,7 +4,7 @@
 
 use super::distribution::ReleaseDistribution;
 use super::helpers::{LOCAL_PEER, prefix_family, unicast_deferral_exempt};
-use super::{Afi, HashSet, PeerId, Prefix, RibManager, RibUpdate, Safi};
+use super::{Afi, HashSet, Overtake, PeerId, Prefix, RibManager, RibUpdate, Safi};
 use crate::route::{FlowSpecKey, Route};
 use std::collections::hash_set;
 
@@ -121,8 +121,13 @@ pub(super) struct SourceDeparture {
     families: HashSet<(Afi, Safi)>,
     page: Option<Page>,
     primary: PrimaryTurn,
-    /// A parked UPDATE passed the FIFO head at the current key-page seam.
-    overtaken: bool,
+    /// Receiver-keys of the open key page: its keys toward the whole roster.
+    page_rows: usize,
+    /// Receiver-keys of the key pages completed since the departure began or
+    /// last let a parked UPDATE pass. One may pass per
+    /// [`RECEIVER_ROWS_PER_POLL`] of them, so the UPDATEs admitted during a
+    /// departure are bounded by its own work, whatever its page width.
+    progress: usize,
 }
 
 impl SourceDeparture {
@@ -168,6 +173,7 @@ impl SourceDeparture {
                 };
                 let mut page: HashSet<_> =
                     keys.drain(keys.len().saturating_sub(key_limit)..).collect();
+                self.page_rows = page.len() * self.peers.len();
                 let held = page
                     .extract_if(|prefix| self.held.contains(prefix))
                     .collect();
@@ -181,6 +187,7 @@ impl SourceDeparture {
         }
         let width = page_width(self.flowspec.len(), KEYS_PER_PAGE, private_width);
         let keys: HashSet<_> = self.flowspec.by_ref().take(width).collect();
+        self.page_rows = keys.len() * self.peers.len();
         (!keys.is_empty()).then_some(Page::FlowSpec { keys, next: 0 })
     }
 
@@ -406,7 +413,8 @@ impl RibManager {
             families,
             page: None,
             primary,
-            overtaken: false,
+            page_rows: 0,
+            progress: 0,
         });
         // A queued head that cannot commute, such as the next PeerDown, waits
         // for the whole departure. Fence it now so the first page runs quiet.
@@ -491,7 +499,7 @@ impl RibManager {
             work.page = Some(page);
             return;
         }
-        work.overtaken = false;
+        work.progress += std::mem::take(&mut work.page_rows);
         if matches!(work.primary, PrimaryTurn::AfterBatch) {
             work.primary = PrimaryTurn::CheckFrom(0);
         }
@@ -499,7 +507,11 @@ impl RibManager {
 
     /// Run one departure unit or one primary dispatch. Returns `false` when
     /// the turn applied primary work, which ends a quiet run of units.
-    pub(super) fn poll_source_departure_turn(&mut self) -> bool {
+    ///
+    /// `first` says this is the first unit of its actor poll. A parked UPDATE
+    /// passes the head only then, so the read-ahead that finds it and its
+    /// dispatch never follow departure units in one poll.
+    pub(super) fn poll_source_departure_unit(&mut self, first: bool) -> bool {
         // An admitted UPDATE must apply through its final route chunk before
         // another batch can stage. A noncommuting FIFO head stays in place.
         if !self.pending_route_batches.is_empty() {
@@ -537,18 +549,33 @@ impl RibManager {
         }
         // A key-page seam: one parked UPDATE may pass a head that waits for
         // the whole departure, such as the next session end.
-        if self
+        // A key-page seam after enough of the departure's own work: one
+        // parked UPDATE may pass a head that waits for the whole departure,
+        // such as the next session end.
+        let seam = self
             .source_departure
             .as_ref()
-            .is_some_and(|work| work.page.is_none() && !work.overtaken)
-            && let Some(update) =
-                self.take_overtake(rustbgpd_telemetry::metrics::RibInboundOvertakeSeam::Departure)
-        {
-            if let Some(work) = self.source_departure.as_mut() {
-                work.overtaken = true;
+            .is_some_and(|work| work.page.is_none() && work.progress >= RECEIVER_ROWS_PER_POLL);
+        if seam && !first {
+            // Later in a poll the seam only ends the run of units, when
+            // something is queued behind the head: the next poll opens here.
+            if self.primary_backlog() > 1 {
+                return false;
             }
-            self.handle_update(update);
-            return false;
+        } else if seam {
+            use rustbgpd_telemetry::metrics::RibInboundOvertakeSeam::Departure;
+            match self.take_overtake(Departure) {
+                Overtake::Admit(update) => {
+                    if let Some(work) = self.source_departure.as_mut() {
+                        work.progress = 0;
+                    }
+                    self.handle_update(*update);
+                    return false;
+                }
+                // The read-ahead hashed rows: no departure unit joins it.
+                Overtake::Read => return false,
+                Overtake::Keep => {}
+            }
         }
         self.advance_source_departure();
         true
@@ -557,6 +584,11 @@ impl RibManager {
 
 #[cfg(test)]
 impl RibManager {
+    /// One departure unit or primary dispatch at the start of a poll.
+    pub(super) fn poll_source_departure_turn(&mut self) -> bool {
+        self.poll_source_departure_unit(true)
+    }
+
     /// Whether the live departure has a page in progress.
     pub(super) fn departure_page_open(&self) -> bool {
         self.source_departure

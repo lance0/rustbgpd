@@ -30,11 +30,16 @@
 //! applied. So a candidate stays valid until it is admitted. A message that
 //! is not a candidate when parked keeps FIFO.
 //!
-//! Cost per seam: at most [`INSPECT_MESSAGES_PER_SEAM`] newly received
-//! messages are classified, within [`INSPECT_WORK_PER_SEAM`] row hashes and
-//! table lookups (the message that crosses the budget completes), then one
+//! Cost. Receiving and counting a message is a few map operations, and at
+//! most [`INSPECT_MESSAGES_PER_SEAM`] are received per seam. A parked route
+//! message's rows are hashed only when a message that could pass arrives
+//! behind it, at most once, and a seam spends at most
+//! [`INSPECT_WORK_PER_SEAM`] row hashes and table lookups; a message whose
+//! rows do not fit what is left waits for the next seam. Admission is one
 //! binary search and one removal from a deque of at most [`PARK_LIMIT`]
-//! entries. Each message is classified once.
+//! entries. Nothing is read while the head is itself a small UPDATE, so a
+//! stream of small UPDATEs, and a burst of tables with none behind it, pay
+//! no hashing at all.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -55,17 +60,19 @@ pub(super) const OVERTAKE_ROWS: usize = KEYS_PER_PAGE;
 /// 500 bring-up messages, so a small UPDATE behind them is found in one
 /// seam; a session message costs a few map operations.
 pub(super) const INSPECT_MESSAGES_PER_SEAM: usize = 512;
-/// Row hashes plus Adj-RIB-In lookups one seam spends classifying: about a
-/// millisecond, and the tables of 50 rejoining members of 572 routes each.
-/// The message that crosses it completes. A deeper backlog is inspected over
-/// further seams, each of which also admits its head.
+/// Row hashes plus Adj-RIB-In lookups one seam spends: about a millisecond,
+/// and the tables of 50 rejoining members of 572 routes each. A route
+/// message whose rows do not fit what is left of it waits for the next seam;
+/// one with more rows than this is a barrier and is never hashed.
 pub(super) const INSPECT_WORK_PER_SEAM: usize = 32_768;
 /// Messages buffered here beyond the channel's own bound: a quarter of the
 /// default channel capacity, and twice the bring-up backlog of a 50-session
 /// flap. Beyond it the lane sees nothing new until the head drains.
 pub(super) const PARK_LIMIT: usize = 1024;
-/// Unicast rows buffered here at most, which bounds the prefix index: 64
-/// full pages of the largest route chunk.
+/// Unicast rows parked here before reading ahead stops: 64 full pages of
+/// the largest route chunk. The message that crosses it is parked, so at
+/// most one message's rows are buffered beyond it. The prefix index holds a
+/// subset of the parked rows.
 pub(super) const PARK_ROW_LIMIT: usize = 65_536;
 /// Sessions with a parked `PeerUp` or `PeerDown` that a candidate is checked
 /// against, at [`OVERTAKE_ROWS`] lookups each. With more of them parked,
@@ -126,7 +133,6 @@ fn classify(update: &RibUpdate) -> Parked<'_> {
         RibUpdate::PeerUp { peer, .. } | RibUpdate::PeerDown { peer, .. } => Parked::Reset(*peer),
         RibUpdate::PeerAddPathLimits { peer, .. }
         | RibUpdate::PeerFamilySendable { peer, .. }
-        | RibUpdate::PeerOrfUpdate { peer, .. }
         | RibUpdate::PeerSlowState { peer, .. }
         | RibUpdate::SetPeerSessionExportPolicy { peer, .. }
         | RibUpdate::SetPeerSourceContext { peer, .. }
@@ -151,25 +157,59 @@ fn prefixes<'a>(
         .chain(withdrawn.iter().map(|&(prefix, _)| prefix))
 }
 
+/// How far [`Ahead`] has taken a parked entry.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Indexed {
+    /// Not at all: the head returned by [`ParkedPrimaries::put`], or the
+    /// tail, which is counted only when another message arrives behind it.
+    No,
+    /// Its session, kind and row count are counted. Its rows are not hashed.
+    Counted,
+    /// Counted, and its rows are in the prefix index.
+    Hashed,
+    /// Counted, and a route message with more rows than one seam may hash:
+    /// a barrier, its rows are never hashed.
+    Oversized,
+}
+
 struct Entry {
     /// Strictly increasing from head to tail.
     seq: u64,
     update: RibUpdate,
-    /// Whether [`Ahead`] counts this entry.
-    indexed: bool,
+    indexed: Indexed,
 }
 
-/// What the indexed parked messages hold, for the messages behind them.
+/// Unicast rows of a passable route message; zero for any other message.
+fn route_rows(update: &RibUpdate) -> usize {
+    match classify(update) {
+        Parked::Routes {
+            announced,
+            withdrawn,
+            ..
+        } => announced.len() + withdrawn.len(),
+        _ => 0,
+    }
+}
+
+/// What the parked messages hold, for the messages behind them.
+///
+/// Counting a message is a few map operations. Hashing its rows is the
+/// expensive part and is done only when a message that could pass arrives
+/// behind it, so a burst of tables with no small UPDATE behind is never
+/// hashed.
 #[derive(Default)]
 struct Ahead {
-    /// Session and route messages, by session.
+    /// Counted session and route messages, by session.
     sessions: FastMap<PeerId, usize>,
-    /// Rows of route messages, by prefix.
-    prefixes: FastMap<Prefix, usize>,
-    /// `PeerUp` and `PeerDown` messages, by session.
+    /// Counted `PeerUp` and `PeerDown` messages, by session.
     resets: FastMap<PeerId, usize>,
-    rows: usize,
+    /// Counted messages off the allowlist, and oversized route messages.
     barriers: usize,
+    /// Rows of counted route messages.
+    parked_rows: usize,
+    /// Rows of hashed route messages, by prefix.
+    prefixes: FastMap<Prefix, usize>,
+    hashed_rows: usize,
 }
 
 fn forget<K: std::hash::Hash + Eq>(counts: &mut FastMap<K, usize>, key: &K) {
@@ -182,8 +222,7 @@ fn forget<K: std::hash::Hash + Eq>(counts: &mut FastMap<K, usize>, key: &K) {
 }
 
 impl Ahead {
-    /// Count `update`; returns the rows hashed.
-    fn add(&mut self, update: &RibUpdate) -> usize {
+    fn count(&mut self, update: &RibUpdate) {
         match classify(update) {
             Parked::Routes {
                 peer,
@@ -191,12 +230,7 @@ impl Ahead {
                 withdrawn,
             } => {
                 *self.sessions.entry(peer).or_default() += 1;
-                for prefix in prefixes(announced, withdrawn) {
-                    *self.prefixes.entry(prefix).or_default() += 1;
-                }
-                let rows = announced.len() + withdrawn.len();
-                self.rows += rows;
-                return rows;
+                self.parked_rows += announced.len() + withdrawn.len();
             }
             Parked::Reset(peer) => {
                 *self.sessions.entry(peer).or_default() += 1;
@@ -205,10 +239,9 @@ impl Ahead {
             Parked::Session(peer) => *self.sessions.entry(peer).or_default() += 1,
             Parked::Barrier => self.barriers += 1,
         }
-        0
     }
 
-    fn remove(&mut self, update: &RibUpdate) {
+    fn uncount(&mut self, update: &RibUpdate) {
         match classify(update) {
             Parked::Routes {
                 peer,
@@ -216,10 +249,7 @@ impl Ahead {
                 withdrawn,
             } => {
                 forget(&mut self.sessions, &peer);
-                for prefix in prefixes(announced, withdrawn) {
-                    forget(&mut self.prefixes, &prefix);
-                }
-                self.rows -= announced.len() + withdrawn.len();
+                self.parked_rows -= announced.len() + withdrawn.len();
             }
             Parked::Reset(peer) => {
                 forget(&mut self.sessions, &peer);
@@ -230,22 +260,66 @@ impl Ahead {
         }
     }
 
-    /// Whether `update` may pass everything counted here, and the table
-    /// lookups spent deciding.
-    fn passes(&self, update: &RibUpdate, ribs: &HashMap<PeerId, AdjRibIn>) -> (bool, usize) {
+    /// Put a counted route message's rows in the prefix index.
+    fn hash(&mut self, update: &RibUpdate) {
+        if let Parked::Routes {
+            announced,
+            withdrawn,
+            ..
+        } = classify(update)
+        {
+            for prefix in prefixes(announced, withdrawn) {
+                *self.prefixes.entry(prefix).or_default() += 1;
+            }
+            self.hashed_rows += announced.len() + withdrawn.len();
+        }
+    }
+
+    fn unhash(&mut self, update: &RibUpdate) {
+        if let Parked::Routes {
+            announced,
+            withdrawn,
+            ..
+        } = classify(update)
+        {
+            for prefix in prefixes(announced, withdrawn) {
+                forget(&mut self.prefixes, &prefix);
+            }
+            self.hashed_rows -= announced.len() + withdrawn.len();
+        }
+    }
+
+    /// Whether `update` could pass by what is counted alone: its shape, its
+    /// session and the kinds ahead. Decides whether hashing is worth it.
+    fn could_pass(&self, update: &RibUpdate) -> bool {
         let Parked::Routes {
             peer,
             announced,
             withdrawn,
         } = classify(update)
         else {
+            return false;
+        };
+        self.barriers == 0
+            && (1..=OVERTAKE_ROWS).contains(&(announced.len() + withdrawn.len()))
+            && !self.sessions.contains_key(&peer)
+            && self.resets.len() <= RESET_SESSIONS_LIMIT
+    }
+
+    /// Whether `update`, which [`Self::could_pass`], shares no prefix with a
+    /// route message ahead or with the table of a session whose `PeerUp` or
+    /// `PeerDown` is ahead; and the table lookups spent deciding. Every
+    /// route message ahead must be hashed.
+    fn passes(&self, update: &RibUpdate, ribs: &HashMap<PeerId, AdjRibIn>) -> (bool, usize) {
+        let Parked::Routes {
+            announced,
+            withdrawn,
+            ..
+        } = classify(update)
+        else {
             return (false, 0);
         };
-        let rows = announced.len() + withdrawn.len();
         if self.barriers != 0
-            || !(1..=OVERTAKE_ROWS).contains(&rows)
-            || self.sessions.contains_key(&peer)
-            || self.resets.len() > RESET_SESSIONS_LIMIT
             || prefixes(announced, withdrawn).any(|prefix| self.prefixes.contains_key(&prefix))
         {
             return (false, 0);
@@ -256,8 +330,19 @@ impl Ahead {
                     .any(|prefix| rib.iter_prefix(&prefix).next().is_some())
             })
         });
-        (!held, self.resets.len() * rows)
+        (
+            !held,
+            self.resets.len() * (announced.len() + withdrawn.len()),
+        )
     }
+}
+
+fn small_routes(update: &RibUpdate) -> bool {
+    matches!(
+        classify(update),
+        Parked::Routes { announced, withdrawn, .. }
+            if announced.len() + withdrawn.len() <= OVERTAKE_ROWS
+    )
 }
 
 /// The actor's received, unadmitted primary updates.
@@ -265,9 +350,12 @@ pub(super) struct ParkedPrimaries {
     entries: VecDeque<Entry>,
     next_seq: u64,
     /// Entries [`Ahead`] does not count yet: a head parked by an ordinary
-    /// peek or returned by [`Self::put`]. Indexed before the next read-ahead.
-    unindexed: usize,
+    /// peek or returned by [`Self::put`], and the tail.
+    uncounted: usize,
     ahead: Ahead,
+    /// The tail could pass by what is counted, and waits for the route
+    /// messages ahead of it to be hashed before that is decided.
+    tail_pending: bool,
     /// Sequence number of the first parked candidate. Read-ahead stops at
     /// it, so at most one is tracked.
     candidate: Option<u64>,
@@ -286,8 +374,9 @@ impl Default for ParkedPrimaries {
             entries: VecDeque::new(),
             // Leaves room below for returned heads.
             next_seq: 1 << 32,
-            unindexed: 0,
+            uncounted: 0,
             ahead: Ahead::default(),
+            tail_pending: false,
             candidate: None,
             head_owed: false,
             #[cfg(test)]
@@ -332,6 +421,9 @@ impl ParkedPrimaries {
         if self.candidate == Some(entry.seq) {
             self.candidate = None;
         }
+        if self.entries.is_empty() {
+            self.tail_pending = false;
+        }
         Some(self.release(entry))
     }
 
@@ -345,9 +437,9 @@ impl ParkedPrimaries {
         self.entries.push_front(Entry {
             seq,
             update,
-            indexed: false,
+            indexed: Indexed::No,
         });
-        self.unindexed += 1;
+        self.uncounted += 1;
     }
 
     fn take_seq(&mut self) -> u64 {
@@ -355,60 +447,139 @@ impl ParkedPrimaries {
         self.next_seq
     }
 
-    /// Drop a removed entry from the index and return its message.
+    /// Drop a removed entry from the counts and the index, and return its
+    /// message.
     fn release(&mut self, entry: Entry) -> RibUpdate {
-        if entry.indexed {
-            self.ahead.remove(&entry.update);
-        } else {
-            self.unindexed -= 1;
+        match entry.indexed {
+            Indexed::No => self.uncounted -= 1,
+            Indexed::Counted => self.ahead.uncount(&entry.update),
+            Indexed::Hashed => {
+                self.ahead.unhash(&entry.update);
+                self.ahead.uncount(&entry.update);
+            }
+            Indexed::Oversized => {
+                self.ahead.barriers -= 1;
+                self.ahead.uncount(&entry.update);
+            }
         }
         entry.update
     }
 
+    /// Count every parked entry that is not, except the last `keep`.
+    fn count_parked(&mut self, keep: usize) {
+        if self.uncounted <= keep {
+            return;
+        }
+        let end = self.entries.len() - keep;
+        for entry in self.entries.iter_mut().take(end) {
+            if entry.indexed == Indexed::No {
+                self.ahead.count(&entry.update);
+                entry.indexed = Indexed::Counted;
+                self.uncounted -= 1;
+            }
+        }
+    }
+
+    /// Decide the pending tail: hash the route messages ahead of it, within
+    /// the seam's budget, then check its prefixes. Returns `false` when the
+    /// budget ran out first; the next seam resumes.
+    ///
+    /// A route message with more rows than a whole seam may hash is counted
+    /// as a barrier instead, and its rows are never hashed.
+    fn decide_tail(&mut self, ribs: &HashMap<PeerId, AdjRibIn>, work: &mut usize) -> bool {
+        self.count_parked(1);
+        let ahead = self.entries.len() - 1;
+        for entry in self.entries.iter_mut().take(ahead) {
+            if entry.indexed != Indexed::Counted {
+                continue;
+            }
+            let rows = route_rows(&entry.update);
+            if rows == 0 {
+                continue;
+            }
+            if rows > INSPECT_WORK_PER_SEAM {
+                self.ahead.barriers += 1;
+                entry.indexed = Indexed::Oversized;
+            } else if *work > 0 && *work + rows > INSPECT_WORK_PER_SEAM {
+                return false;
+            } else {
+                self.ahead.hash(&entry.update);
+                entry.indexed = Indexed::Hashed;
+                *work += rows;
+            }
+        }
+        self.tail_pending = false;
+        let Some(tail) = self.entries.back() else {
+            return true;
+        };
+        let (passes, lookups) = self.ahead.passes(&tail.update, ribs);
+        *work += lookups;
+        if passes {
+            self.candidate = Some(tail.seq);
+        }
+        true
+    }
+
     /// Receive queued messages behind the parked ones until one is a
     /// candidate, a barrier is parked, a bound is reached or the channel is
-    /// empty. Never waits.
+    /// empty. Never waits. Returns the row hashes and table lookups spent.
+    ///
+    /// That is zero unless a message that could pass arrived: a parked
+    /// message is only counted, and its rows are hashed when a small UPDATE
+    /// from a session with nothing parked arrives behind it. Nothing is read
+    /// while the head is itself a small UPDATE, which is never passed.
     pub(super) fn read_ahead(
         &mut self,
         rx: &mut mpsc::Receiver<RibUpdate>,
         ribs: &HashMap<PeerId, AdjRibIn>,
-    ) {
-        let (mut messages, mut work) = (0, 0);
-        if self.unindexed > 0 {
-            for entry in &mut self.entries {
-                if !entry.indexed {
-                    work += self.ahead.add(&entry.update);
-                    entry.indexed = true;
-                }
-            }
-            self.unindexed = 0;
+    ) -> usize {
+        if self.peek(rx).is_none_or(small_routes) {
+            return 0;
         }
+        let (mut messages, mut work) = (0, 0);
         while self.candidate.is_none()
-            && self.ahead.barriers == 0
-            && self.entries.len() < PARK_LIMIT
-            && self.ahead.rows < PARK_ROW_LIMIT
             && messages < INSPECT_MESSAGES_PER_SEAM
             && work < INSPECT_WORK_PER_SEAM
         {
+            if self.tail_pending {
+                if !self.decide_tail(ribs, &mut work) {
+                    break;
+                }
+                continue;
+            }
+            if self.entries.len() >= PARK_LIMIT || rx.is_empty() {
+                break;
+            }
+            self.count_parked(0);
+            if self.ahead.barriers > 0 || self.ahead.parked_rows >= PARK_ROW_LIMIT {
+                break;
+            }
             let Ok(update) = rx.try_recv() else {
                 break;
             };
             messages += 1;
+            self.tail_pending = self.ahead.could_pass(&update);
             let seq = self.take_seq();
-            if !self.entries.is_empty() {
-                let (passes, lookups) = self.ahead.passes(&update, ribs);
-                work += lookups;
-                if passes {
-                    self.candidate = Some(seq);
-                }
-            }
-            work += self.ahead.add(&update);
             self.entries.push_back(Entry {
                 seq,
                 update,
-                indexed: true,
+                indexed: Indexed::No,
             });
+            self.uncounted += 1;
         }
+        work
+    }
+
+    /// Rows in the prefix index.
+    #[cfg(test)]
+    pub(super) fn indexed_rows(&self) -> usize {
+        self.ahead.hashed_rows
+    }
+
+    /// Rows of the counted route messages.
+    #[cfg(test)]
+    pub(super) fn parked_rows(&self) -> usize {
+        self.ahead.parked_rows
     }
 
     fn candidate_at(&self) -> Option<usize> {
@@ -420,13 +591,10 @@ impl ParkedPrimaries {
         // The head is admitted by the ordinary FIFO path, and a head that is
         // itself a small UPDATE is not worth passing: small UPDATEs keep
         // their arrival order among themselves.
-        let small_head = self.entries.front().is_some_and(|head| {
-            matches!(
-                classify(&head.update),
-                Parked::Routes { announced, withdrawn, .. }
-                    if announced.len() + withdrawn.len() <= OVERTAKE_ROWS
-            )
-        });
+        let small_head = self
+            .entries
+            .front()
+            .is_some_and(|head| small_routes(&head.update));
         (at > 0 && !small_head).then_some(at)
     }
 

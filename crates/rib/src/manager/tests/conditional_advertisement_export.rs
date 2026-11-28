@@ -1476,3 +1476,97 @@ async fn peer_dirtied_by_condition_during_preparation_owns_cleanup() {
     assert!(has(&manager, TARGET, controlled()));
     assert!(manager.dirty_peers.is_empty());
 }
+
+/// With a conditional advertisement defined, a condition prefix gates
+/// another prefix's export, so a session end that removes the condition's
+/// last path is not independent of an UPDATE for the gated prefix. The
+/// queue keeps strict arrival order: nothing passes the session end, and
+/// the attached receiver's UPDATE stream is that of arrival order.
+#[tokio::test(start_paused = true)]
+async fn a_defined_conditional_advertisement_keeps_the_queue_in_arrival_order() {
+    async fn stream(strict: bool) -> (Vec<Wire>, f64) {
+        let (tx, rx) = mpsc::channel(64);
+        let mut manager = manager_with(install_set(
+            definition(prefix_predicate(), ConditionalAdvertiseIf::Present),
+            &[TARGET],
+        ));
+        manager.rx = rx;
+        manager.parked.strict_fifo = strict;
+        announce(
+            &mut manager,
+            SOURCE,
+            vec![route(condition(), SOURCE, 100, false)],
+        );
+        register_test_peer(&mut manager, ip(SOURCE2), 0);
+        register_test_peer(&mut manager, ip(BYSTANDER), 0);
+        let mut target = peer_up(&mut manager, TARGET, Shape::default());
+        elapse(&mut manager, SETTLE).await;
+        let mut stream = vec![drain(&mut target)];
+        let routes = |source: Ipv4Addr, announced: Vec<Route>| RibUpdate::RoutesReceived {
+            peer: ip(source),
+            session_id: 0,
+            announced,
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+            validated_with: None,
+        };
+        let table = (0..20_u8)
+            .map(|n| {
+                route(
+                    Ipv4Prefix::new(Ipv4Addr::new(172, 16, n, 0), 24),
+                    SOURCE2,
+                    100,
+                    false,
+                )
+            })
+            .collect();
+        // A table, the end of the condition's only session, then the
+        // controlled prefix from a bystander.
+        tx.try_send(routes(SOURCE2, table)).unwrap();
+        tx.try_send(RibUpdate::PeerDown {
+            peer: ip(SOURCE),
+            session_id: 0,
+        })
+        .unwrap();
+        tx.try_send(routes(
+            BYSTANDER,
+            vec![route(controlled(), BYSTANDER, 100, false)],
+        ))
+        .unwrap();
+        let actor = tokio::spawn(manager.run_actor());
+        // Each step of the actor's own handling, as the receiver saw it.
+        for _ in 0..8 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let seen = drain(&mut target);
+            if seen != Wire::default() {
+                stream.push(seen);
+            }
+        }
+        tokio::time::sleep(SETTLE * 2).await;
+        stream.push(drain(&mut target));
+        drop(tx);
+        let manager = actor.await.unwrap();
+        let passed = manager
+            .metrics
+            .registry()
+            .gather()
+            .iter()
+            .find(|family| family.name() == "bgp_rib_inbound_overtake_total")
+            .unwrap()
+            .get_metric()
+            .iter()
+            .map(|metric| metric.get_counter().get_value())
+            .sum();
+        (stream, passed)
+    }
+    let (fifo, _) = Box::pin(stream(true)).await;
+    let (lane, passed) = Box::pin(stream(false)).await;
+    assert_eq!(lane, fifo, "the receiver's UPDATE stream changed");
+    assert!(
+        passed == 0.0,
+        "an UPDATE passed the condition holder's session end"
+    );
+}
