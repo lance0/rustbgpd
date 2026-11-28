@@ -228,6 +228,27 @@ table, and hands updates to each session over a bounded channel.
   refresh requests and commands, served in arrival order. One bounded
   channel of 4,096 entries in production (only a test override changes
   it).
+  - **One exception: a small UPDATE may pass queued session work.** When
+    50 members flap at once, their session ends, bring-up messages and
+    tables queue ahead of everyone else's input, and each one fans out to
+    the whole roster. A unicast-only UPDATE of at most 16 routes from
+    another session may be admitted ahead of them, one at each seam: between
+    two key pages of a paced departure, and between two queued messages.
+    `bgp_rib_inbound_overtake_total{seam}` counts them.
+  - **What it may pass:** other sessions' session-up, session-down, session
+    context and unicast route messages. It never passes a message of its own
+    session, a route message that carries one of its prefixes, or the
+    session-up or session-down of a session that holds one of its prefixes.
+    A session's own updates and every prefix's updates therefore keep their
+    arrival order.
+  - **What closes the lane:** End-of-RIB, a refresh, a policy change, an
+    injected route, a query, any other message kind, a due stale-route or
+    hold timer that is draining the input queued before its deadline, and a
+    first-group build. Behind any of these the queue is strict arrival
+    order.
+  - **Bounds:** after each such UPDATE the queue's head is admitted before
+    the next one, so queued work always advances. The actor reads at most
+    1,024 messages and 65,536 routes ahead of the channel.
 - **Query, summary and readiness lanes.** Operator reads have their own
   lanes ([ADR-0132](../adr/0132-operator-read-path.md)). The readiness
   lane is also served at checkpoints inside long turns, so a liveness or

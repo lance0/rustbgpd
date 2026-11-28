@@ -273,11 +273,19 @@ async fn barrier_update_settles_window_before_it_applies() {
         o.peer_up(B, false, true, None, 64).await;
         o.peer_up(C, false, true, None, 64).await;
         o.drain_peer_available(C).await;
+        // A small UPDATE may pass another session's end unless that session
+        // holds one of its prefixes, so behind the session end B announces a
+        // prefix A holds. Behind every other barrier any prefix keeps FIFO.
+        let behind = if label == "peer_down" {
+            pfx(1, 0)
+        } else {
+            pfx(3, 0)
+        };
         o.queue(vec![
             routes(A, vec![ibgp_route(pfx(1, 0), A, 100, vec![])], vec![]),
             routes(A, vec![ibgp_route(pfx(2, 0), A, 100, vec![])], vec![]),
             barrier(),
-            routes(B, vec![ibgp_route(pfx(3, 0), B, 100, vec![])], vec![]),
+            routes(B, vec![ibgp_route(behind, B, 100, vec![])], vec![]),
         ])
         .await;
         let messages = o.drain_peer_available(C).await;
@@ -293,7 +301,7 @@ async fn barrier_update_settles_window_before_it_applies() {
         let last = routed.last().unwrap();
         assert_eq!(
             announced(last),
-            BTreeSet::from([Prefix::V4(pfx(3, 0))]),
+            BTreeSet::from([Prefix::V4(behind)]),
             "{label}: input behind the barrier opens a new window"
         );
         if label == "peer_down" {

@@ -121,6 +121,8 @@ pub(super) struct SourceDeparture {
     families: HashSet<(Afi, Safi)>,
     page: Option<Page>,
     primary: PrimaryTurn,
+    /// A parked UPDATE passed the FIFO head at the current key-page seam.
+    overtaken: bool,
 }
 
 impl SourceDeparture {
@@ -209,6 +211,12 @@ impl SourceDeparture {
         } else {
             PrimaryHead::CheckFrom(end)
         }
+    }
+
+    /// Whether a message of at most one seam's rows commutes with this
+    /// departure: another source, and no key the departure still owes.
+    pub(super) fn independent(&self, update: &RibUpdate) -> bool {
+        matches!(self.classify(update, 0), PrimaryHead::Independent)
     }
 
     fn classify(&self, update: &RibUpdate, offset: usize) -> PrimaryHead {
@@ -398,13 +406,12 @@ impl RibManager {
             families,
             page: None,
             primary,
+            overtaken: false,
         });
         // A queued head that cannot commute, such as the next PeerDown, waits
         // for the whole departure. Fence it now so the first page runs quiet.
-        if self.primary_lookahead.is_none() {
-            self.primary_lookahead = self.rx.try_recv().ok();
-        }
-        if let Some(update) = &self.primary_lookahead
+        self.parked.peek(&mut self.rx);
+        if let Some(update) = self.parked.head()
             && matches!(work.classify(update, 0), PrimaryHead::Fenced)
         {
             work.primary = PrimaryTurn::Fenced;
@@ -482,7 +489,10 @@ impl RibManager {
             .expect("departure remains live through publication");
         if !done {
             work.page = Some(page);
-        } else if matches!(work.primary, PrimaryTurn::AfterBatch) {
+            return;
+        }
+        work.overtaken = false;
+        if matches!(work.primary, PrimaryTurn::AfterBatch) {
             work.primary = PrimaryTurn::CheckFrom(0);
         }
     }
@@ -508,10 +518,8 @@ impl RibManager {
         if let PrimaryTurn::CheckFrom(offset) = work.primary {
             work.primary = PrimaryTurn::AfterBatch;
             debug_assert!(work.page.is_none());
-            if self.primary_lookahead.is_none() {
-                self.primary_lookahead = self.rx.try_recv().ok();
-            }
-            if let Some(update) = &self.primary_lookahead {
+            self.parked.peek(&mut self.rx);
+            if let Some(update) = self.parked.head() {
                 match work.classify(update, offset) {
                     PrimaryHead::CheckFrom(offset) => {
                         work.primary = PrimaryTurn::CheckFrom(offset);
@@ -526,6 +534,21 @@ impl RibManager {
                     }
                 }
             }
+        }
+        // A key-page seam: one parked UPDATE may pass a head that waits for
+        // the whole departure, such as the next session end.
+        if self
+            .source_departure
+            .as_ref()
+            .is_some_and(|work| work.page.is_none() && !work.overtaken)
+            && let Some(update) =
+                self.take_overtake(rustbgpd_telemetry::metrics::RibInboundOvertakeSeam::Departure)
+        {
+            if let Some(work) = self.source_departure.as_mut() {
+                work.overtaken = true;
+            }
+            self.handle_update(update);
+            return false;
         }
         self.advance_source_departure();
         true

@@ -1807,6 +1807,8 @@ mod flowspec_departure_commit;
 mod gr_helper_stale_exempt;
 mod gr_llgr;
 mod hold_release_owed_drain;
+mod inbound_overtake;
+mod inbound_overtake_oracle;
 mod incremental_best;
 mod ingest_budget;
 mod ingest_readiness;

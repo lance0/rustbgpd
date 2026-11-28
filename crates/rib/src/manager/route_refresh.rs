@@ -633,9 +633,7 @@ impl RibManager {
             if self.primary_read_ahead_cutoff_reached() {
                 break;
             }
-            if self.primary_lookahead.is_none() {
-                self.primary_lookahead = self.rx.try_recv().ok();
-            }
+            self.parked.peek(&mut self.rx);
             if !self.first_group_allows_lookahead() {
                 break;
             }
@@ -645,7 +643,7 @@ impl RibManager {
                 afi,
                 safi,
                 ..
-            }) = self.primary_lookahead.as_ref()
+            }) = self.parked.head()
             else {
                 break;
             };
@@ -672,10 +670,7 @@ impl RibManager {
             ) {
                 break;
             }
-            let update = self
-                .primary_lookahead
-                .take()
-                .expect("refresh admitted above");
+            let update = self.parked.take().expect("refresh admitted above");
             self.charge_primary_admission();
             self.advance_route_pages_for_update(&update);
             let RibUpdate::RouteRefreshRequest {

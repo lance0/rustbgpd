@@ -53,14 +53,14 @@ async fn first_group_commit_frontier_counts_select_and_coalesced_admissions_once
     let mut manager = timer_manager(rx, dummy_query_rx());
     manager.distribution_window_limits.elapsed = Duration::from_secs(60);
     let batch = ROUTES_RECEIVED_CHUNK_SIZE + 1;
-    manager.primary_lookahead = Some(routes(source, 0, 1));
+    manager.parked.put(routes(source, 0, 1));
     tx.try_send(routes(source, 1, batch)).unwrap();
     manager.capture_first_group_commit_frontier();
     tx.try_send(routes(source, 1 + batch, 1)).unwrap();
     manager.capture_first_group_commit_frontier();
 
     // Exercise the select receive/admit pair, including a previously peeked head.
-    let update = RibManager::recv_primary(&mut manager.primary_lookahead, &mut manager.rx)
+    let update = RibManager::recv_primary(&mut manager.parked, &mut manager.rx)
         .await
         .unwrap();
     let update = manager.admit_primary(update).unwrap();
@@ -99,7 +99,7 @@ async fn first_group_commit_frontier_can_seal_before_a_held_head() {
     let mut manager = timer_manager(rx, dummy_query_rx());
     manager.handle_update(routes(source, 0, 1));
     let (reply, mut read) = oneshot::channel();
-    manager.primary_lookahead = Some(RibUpdate::QueryLocRibCount { reply });
+    manager.parked.put(RibUpdate::QueryLocRibCount { reply });
     tx.try_send(routes(source, 1, 1)).unwrap();
     manager.capture_first_group_commit_frontier();
     manager.seal_first_group_commit_frontier();

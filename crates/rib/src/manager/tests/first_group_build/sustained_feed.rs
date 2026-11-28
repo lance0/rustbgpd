@@ -117,6 +117,10 @@ impl Counts {
 /// staging turn itself asserts its page bound.
 async fn feed_counts(feed: Feed, messages: u32, rows: u32, joiner: bool) -> Counts {
     let (mut manager, primary, marker) = feed_fixture(feed, messages, rows);
+    // A first-group build keeps the queue in arrival order. The arm without
+    // a joiner is its FIFO reference, so it does not let the marker pass the
+    // feed either.
+    manager.parked.strict_fifo = true;
     let table = manager.loc_rib.len();
     let mut counts = Counts::default();
     let founder = receiver(1);

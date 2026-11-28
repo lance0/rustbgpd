@@ -550,6 +550,31 @@ impl RibActorTurnKind {
     }
 }
 
+/// Closed `seam` vocabulary of `bgp_rib_inbound_overtake_total`: where the
+/// RIB actor admitted a small unicast UPDATE ahead of queued session work.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RibInboundOvertakeSeam {
+    /// Between two key pages of a paced source departure.
+    Departure,
+    /// Between queued updates while paced work is pending.
+    Drain,
+    /// At the ordinary receive, with no paced work pending.
+    Receive,
+}
+
+impl RibInboundOvertakeSeam {
+    pub const ALL: [Self; 3] = [Self::Departure, Self::Drain, Self::Receive];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Departure => "departure",
+            Self::Drain => "drain",
+            Self::Receive => "receive",
+        }
+    }
+}
+
 /// Closed label vocabulary for stale session-scoped RIB messages.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StaleSessionMessageKind {
@@ -820,6 +845,7 @@ struct BgpMetricsInner {
     update_group_recovery_limit_bytes: IntGaugeVec,
     update_group_recovery_fallback: IntCounterVec,
     rib_paced_fallback: IntCounterVec,
+    rib_inbound_overtake: IntCounterVec,
     update_group_runner_up_entries: IntGauge,
     update_group_interned_chains: IntGauge,
     update_group_keys: IntGauge,
@@ -2285,6 +2311,20 @@ impl BgpMetrics {
             for cause in crate::reason_labels::PacedFallbackCause::ALL {
                 rib_paced_fallback.with_label_values(&[job.as_str(), cause.as_str()]);
             }
+        }
+
+        let rib_inbound_overtake = IntCounterVec::new(
+            Opts::new(
+                "bgp_rib_inbound_overtake_total",
+                "Small unicast UPDATEs the RIB admitted ahead of other sessions' \
+                 queued bring-up, teardown and route messages, by the seam that \
+                 admitted them.",
+            ),
+            &["seam"],
+        )
+        .expect("valid metric definition");
+        for seam in RibInboundOvertakeSeam::ALL {
+            rib_inbound_overtake.with_label_values(&[seam.as_str()]);
         }
 
         let update_group_runner_up_entries = IntGauge::new(
@@ -3786,6 +3826,9 @@ impl BgpMetrics {
             .register(Box::new(rib_paced_fallback.clone()))
             .expect("register rib paced fallback");
         registry
+            .register(Box::new(rib_inbound_overtake.clone()))
+            .expect("register rib inbound overtake");
+        registry
             .register(Box::new(update_group_recovery_limit_bytes.clone()))
             .expect("register update group recovery limits");
         registry
@@ -4301,6 +4344,7 @@ impl BgpMetrics {
             update_group_recovery_limit_bytes,
             update_group_recovery_fallback,
             rib_paced_fallback,
+            rib_inbound_overtake,
             update_group_runner_up_entries,
             update_group_interned_chains,
             update_group_keys,
@@ -6161,6 +6205,14 @@ impl BgpMetrics {
         self.0
             .update_group_recovery_fallback
             .with_label_values(&[cause.as_str()])
+            .inc();
+    }
+
+    /// Record one small UPDATE admitted ahead of queued session work.
+    pub fn record_rib_inbound_overtake(&self, seam: RibInboundOvertakeSeam) {
+        self.0
+            .rib_inbound_overtake
+            .with_label_values(&[seam.as_str()])
             .inc();
     }
 
@@ -12694,6 +12746,25 @@ mod tests {
                 0.0
             };
             assert_eq!(metric.get_counter().get_value(), expected);
+        }
+    }
+
+    #[test]
+    fn inbound_overtake_counter_exports_every_seam() {
+        let metrics = BgpMetrics::new();
+        metrics.record_rib_inbound_overtake(RibInboundOvertakeSeam::Departure);
+        let families = metrics.registry().gather();
+        let family = families
+            .iter()
+            .find(|family| family.name() == "bgp_rib_inbound_overtake_total")
+            .unwrap();
+        assert_eq!(family.get_metric().len(), RibInboundOvertakeSeam::ALL.len());
+        for metric in family.get_metric() {
+            let seam = metric.get_label()[0].value();
+            assert_eq!(
+                metric.get_counter().get_value(),
+                f64::from(u8::from(seam == "departure"))
+            );
         }
     }
 

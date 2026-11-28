@@ -348,6 +348,10 @@ async fn departure(shape: Shape, count: u8, rows: u32, arrival: ProbeArrival) ->
     let (tx, rx) = mpsc::channel(16);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     manager.outbound_row_credit_override = None;
+    // These cases bound the page a FIFO head waits for at a departure seam.
+    // The overtake lane would admit the prequeued UPDATE before the
+    // departure starts; `inbound_overtake` covers that path.
+    manager.parked.strict_fifo = true;
     super::distribution_window::untimed_window(&mut manager);
     for source in [SOURCE, OTHER] {
         register_test_peer(&mut manager, peer_v4(source), 0);

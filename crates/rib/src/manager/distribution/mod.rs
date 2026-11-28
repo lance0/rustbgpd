@@ -9276,21 +9276,13 @@ impl RibManager {
         {
             return false;
         }
-        if self.primary_lookahead.is_none() {
-            self.primary_lookahead = self.rx.try_recv().ok();
-        }
+        self.parked.peek(&mut self.rx);
         if !self.first_group_allows_lookahead()
-            || !self
-                .primary_lookahead
-                .as_ref()
-                .is_some_and(DistributionWindow::admits)
+            || !self.parked.head().is_some_and(DistributionWindow::admits)
         {
             return false;
         }
-        let update = self
-            .primary_lookahead
-            .take()
-            .expect("lookahead admitted above");
+        let update = self.parked.take().expect("lookahead admitted above");
         self.charge_primary_admission();
         self.handle_update(update);
         // A stale-session message is dropped without a batch: the window
