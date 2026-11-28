@@ -15,9 +15,11 @@
   any outbound prefix limit is configured, RFC 9117 FlowSpec validation is
   enabled, or a planned restart's selection deferral may still hold a
   family. The trade: in a 50-member simultaneous flap the withdrawals reach
-  surviving members about 1.45 times slower at the median, bounded at about
-  1.5 times by the departure progress rule, and in exchange unrelated
-  updates no longer wait behind the queued departures. See
+  surviving members later at the median, about 1.1 times with ordinary
+  traffic and about 1.6 times while other peers send a steady stream of
+  small UPDATEs, since each one admitted between departures costs a
+  distribution pass. In exchange, unrelated updates no longer wait behind
+  the queued departures. See
   [RIB lifecycle](../docs/reference/rib-lifecycle.md#overview).
   **Operator-visible:** `bgp_rib_inbound_overtake_total{seam}` counts these
   admissions by seam (`departure`, `drain`, `receive`), and
